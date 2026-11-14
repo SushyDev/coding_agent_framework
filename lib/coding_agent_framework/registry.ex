@@ -11,8 +11,9 @@ defmodule CodingAgentFramework.Registry do
       iex> File.mkdir_p!(Path.join(dir, "sessions"))
       iex> File.write!(Path.join(dir, "sessions/7.json"), ~s({"pid": 7, "sessionId": "s7"}))
       iex> me = self()
+      iex> host = CodingAgentFramework.Host.local("laptop", CodingAgentFramework.TestHost.program!(:kill))
       iex> {:ok, reg} = CodingAgentFramework.Registry.start_link(
-      ...>   host: CodingAgentFramework.Host.local("laptop"), account: "work",
+      ...>   programs: CodingAgentFramework.TestHost.programs(host), account: "work",
       ...>   config_dir: dir, db: Path.join(dir, "registry.db"), notify: &send(me, &1))
       iex> CodingAgentFramework.Registry.rows(reg)
       :unread
@@ -35,7 +36,7 @@ defmodule CodingAgentFramework.Registry do
 
   use GenServer
 
-  alias CodingAgentFramework.{Host, Shell}
+  alias CodingAgentFramework.{Programs, Shell}
   alias CodingAgentFramework.Registry.{Liveness, SessionFile, Table}
 
   @timeout 10_000
@@ -53,10 +54,11 @@ defmodule CodingAgentFramework.Registry do
   """
 
   @doc """
-  Starts a `Registry`. Options: `host:` (`Host`), `account:` (its name), `config_dir:` (the
-  account's config directory on the host), `db:` (this instance's SQLite path), and optionally
-  `notify:` (a function of one cue), `ps:` (default `/bin/ps`), `timeout:` (ms per shell run,
-  default 10 s) and `interval:` (ms between reads; without it, reads happen only on `read/2`).
+  Starts a `Registry`. Options: `programs:` (the host's `Programs`, naming its sh, env and ps),
+  `account:` (its name), `config_dir:` (the account's config directory on the host), `db:`
+  (this instance's SQLite path), and optionally `notify:` (a function of one cue), `timeout:`
+  (ms per shell run, default 10 s) and `interval:` (ms between reads; without it, reads happen
+  only on `read/2`). It fails to start with `{:no_program, names}` when a program is missing.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -87,32 +89,32 @@ defmodule CodingAgentFramework.Registry do
 
   @impl true
   def init(opts) do
-    %Host{} = host = Keyword.fetch!(opts, :host)
+    %Programs{host: host} = programs = Keyword.fetch!(opts, :programs)
     account = Keyword.fetch!(opts, :account)
 
-    case Table.open(Keyword.fetch!(opts, :db)) do
-      {:ok, db} ->
-        cache =
-          case Table.rows(db, host.name, account) do
-            :unread -> %{}
-            {:ok, %{rows: rows}} -> Map.new(rows, &{&1.file, Map.take(&1, Table.data_columns())})
-          end
+    with {:ok, paths} <- Programs.take(programs, [:sh, :env, :ps]),
+         {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)) do
+      cache =
+        case Table.rows(db, host.name, account) do
+          :unread -> %{}
+          {:ok, %{rows: rows}} -> Map.new(rows, &{&1.file, Map.take(&1, Table.data_columns())})
+        end
 
-        state = %{
-          host: host,
-          account: account,
-          dir: Keyword.fetch!(opts, :config_dir),
-          db: db,
-          cache: cache,
-          notify: Keyword.get(opts, :notify, fn _ -> :ok end),
-          ps: Keyword.get(opts, :ps, "/bin/ps"),
-          timeout: Keyword.get(opts, :timeout, @timeout),
-          interval: Keyword.get(opts, :interval)
-        }
+      state = %{
+        host: host,
+        account: account,
+        dir: Keyword.fetch!(opts, :config_dir),
+        db: db,
+        cache: cache,
+        notify: Keyword.get(opts, :notify, fn _ -> :ok end),
+        programs: paths,
+        timeout: Keyword.get(opts, :timeout, @timeout),
+        interval: Keyword.get(opts, :interval)
+      }
 
-        if state.interval, do: send(self(), :tick)
-        {:ok, state}
-
+      if state.interval, do: send(self(), :tick)
+      {:ok, state}
+    else
       {:refused, reason} ->
         {:stop, reason}
     end
@@ -135,7 +137,9 @@ defmodule CodingAgentFramework.Registry do
   end
 
   defp read_now(state) do
-    case Shell.run(state.host, "/bin/sh", ["-c", @read, "sh", state.dir], timeout: state.timeout) do
+    case Shell.run(state.host, state.programs.sh, ["-c", @read, "sh", state.dir],
+           timeout: state.timeout
+         ) do
       {:ok, %{status: 0, output: "nodir"}} -> write(state, %{})
       {:ok, %{status: 0, output: "dir" <> rest}} -> write(state, files(rest))
       {:ok, %{status: status, output: out}} -> {{:unknown, {:sh, status, out}}, state}
@@ -159,7 +163,7 @@ defmodule CodingAgentFramework.Registry do
       for {_, {row, _}} <- parsed, is_integer(row.pid), uniq: true, do: {row.pid, row.proc_start}
 
     alive =
-      Liveness.check(state.host, procs, ps: state.ps, timeout: state.timeout)
+      Liveness.check(state.host, procs, Map.to_list(state.programs) ++ [timeout: state.timeout])
 
     rows =
       Map.new(parsed, fn {file, {row, problem}} ->

@@ -164,7 +164,7 @@ defmodule CodingAgentFramework.ControlTest do
 
   defp start(:cli, answer) do
     dir = test_dir()
-    server = CLI.new(host(), {:socket, Path.join(dir, "tmux.sock")}, program!(:tmux))
+    {:ok, server} = CLI.new(programs(), {:socket, Path.join(dir, "tmux.sock")})
     # The test owns this server; it ends it and its socket file whatever the test did.
     on_exit(fn -> Tmux.kill_server(server) end)
     control(:cli, server, dir, answer)

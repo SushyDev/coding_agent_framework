@@ -8,7 +8,7 @@ defmodule CodingAgentFramework.Tmux.Fake do
 
       iex> {:ok, pid} = CodingAgentFramework.Tmux.Fake.start_link(key: {"laptop", "fake"})
       iex> server = CodingAgentFramework.Tmux.Fake.new(pid, {"laptop", "fake"})
-      iex> {:ok, pane} = CodingAgentFramework.Tmux.new_session(server, "alpha", ["/bin/cat"])
+      iex> {:ok, pane} = CodingAgentFramework.Tmux.new_session(server, "alpha", ["/run/bin/cat"])
       iex> CodingAgentFramework.Tmux.write(server, pane, "beta", {:text, "hi"})
       {:refused, {:tagged_for, "alpha"}}
   """

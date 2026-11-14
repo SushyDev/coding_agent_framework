@@ -37,28 +37,14 @@ defmodule CodingAgentFramework.ShellTest do
              await(fn -> if alive?(String.trim(pid)), do: :alive, else: {:ok, :gone} end)
   end
 
-  test "the environment is set and unset per run" do
-    script = ~S(echo "${A-none} ${TMUX-none}")
-    opts = [timeout: 5_000, env: [{"A", "1"}, {"TMUX", "x"}]]
-    assert {:ok, %{output: "1 x\n"}} = Shell.run(host(), program!(:sh), ["-c", script], opts)
+  test "on this machine a program runs as given; over ssh every word is quoted" do
+    assert {:ok, {"/run/x", ["a;b"]}} = Shell.command(host(), "/run/x", ["a;b"])
+    box = Host.ssh("box", "/run/bin/ssh", "agent@box", program!(:kill))
 
-    assert {:ok, {"/bin/sh", _, env}} =
-             Shell.command(host(), "/bin/sh", [], unset: ["TMUX"], unset_prefixes: ["PATH"])
+    assert {:ok, {"/run/bin/ssh", ["-o", "BatchMode=yes", "--", "agent@box", remote]}} =
+             Shell.command(box, "/run/x", ["a;b", "$HOME", "K=v w"])
 
-    assert {~c"TMUX", false} in env
-    assert {~c"PATH", false} in env
-  end
-
-  test "over ssh, every word is quoted for the remote shell" do
-    box = Host.ssh("box", "/usr/bin/ssh", "agent@box")
-
-    assert {:ok, {"/usr/bin/ssh", ["-o", "BatchMode=yes", "--", "agent@box", remote], []}} =
-             Shell.command(box, "/bin/x", ["a;b", "$HOME"], env: [{"K", "v w"}], unset: ["TMUX"])
-
-    assert remote == "'/usr/bin/env' '-u' 'TMUX' 'K=v w' '/bin/x' 'a;b' '$HOME'"
-
-    assert {:refused, {:unset_prefix_over_ssh, ["CLAUDE_CODE_"]}} =
-             Shell.command(box, "/bin/x", [], unset_prefixes: ["CLAUDE_CODE_"])
+    assert remote == "'/run/x' 'a;b' '$HOME' 'K=v w'"
   end
 
   test "programs are found as absolute paths by the host's shell" do

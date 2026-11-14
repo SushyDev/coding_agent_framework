@@ -4,7 +4,7 @@ defmodule CodingAgentFramework.TestHost do
   bounded wait on an announced event.
   """
 
-  alias CodingAgentFramework.{Host, Shell}
+  alias CodingAgentFramework.{Host, Programs, Shell}
 
   @doc "This VM's own directory, named with its OS pid. `test_helper.exs` makes and removes it."
   def vm_dir, do: Path.join(System.tmp_dir!(), "caf-#{System.pid()}")
@@ -16,8 +16,15 @@ defmodule CodingAgentFramework.TestHost do
     dir
   end
 
-  @doc "The local host tests run on."
-  def host, do: Host.local("test")
+  @doc "The local host tests run on, with devenv's kill."
+  def host, do: Host.local("test", program!(:kill))
+
+  @doc "`host`'s `Programs`, each path from devenv; `overrides` replace some of them."
+  def programs(host \\ host(), overrides \\ %{}) do
+    paths = Map.new([:tmux, :dtach, :git, :gh, :sh, :rm, :kill, :env, :ps], &{&1, program!(&1)})
+    {:ok, programs} = Programs.new(host, Map.merge(paths, overrides))
+    programs
+  end
 
   # The programs devenv exports as CAF_<NAME> (devenv.nix) that the tests run.
   @programs [

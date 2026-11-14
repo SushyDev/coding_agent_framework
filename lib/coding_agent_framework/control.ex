@@ -12,7 +12,7 @@ defmodule CodingAgentFramework.Control do
       iex> {:ok, fake} = CodingAgentFramework.Tmux.Fake.start_link(key: {"laptop", "fake"})
       iex> server = CodingAgentFramework.Tmux.Fake.new(fake, {"laptop", "fake"})
       iex> {:ok, control} = CodingAgentFramework.Control.start_link(tmux: server)
-      iex> {:ok, _pane} = CodingAgentFramework.Control.open(control, "alpha", ["/bin/cat"])
+      iex> {:ok, _pane} = CodingAgentFramework.Control.open(control, "alpha", ["/run/bin/cat"])
       iex> CodingAgentFramework.Control.send(control, "alpha", "hello")
       {:ok, :sent}
       iex> CodingAgentFramework.Control.send(control, "beta", "hello")

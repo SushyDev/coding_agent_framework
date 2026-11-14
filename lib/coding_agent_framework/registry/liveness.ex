@@ -24,7 +24,9 @@ defmodule CodingAgentFramework.Registry.Liveness do
 
   @doc """
   Checks `[{pid, proc_start}]` on `host`, and answers each pair's liveness. A pid can appear with
-  several start times (an old file and a new one). Options: `:ps` (default `/bin/ps`), `:timeout` (ms).
+  several start times (an old file and a new one). Options, all required: `:env` and `:ps` (the
+  host's programs; `ps` runs under `env LC_ALL=C TZ=UTC`, the same command on any host) and
+  `:timeout` (ms).
   """
   @spec check(Host.t(), [{pos_integer, String.t() | nil}], keyword) :: %{
           {pos_integer, String.t() | nil} => t
@@ -34,11 +36,11 @@ defmodule CodingAgentFramework.Registry.Liveness do
   def check(%Host{} = host, procs, opts) do
     pids = procs |> Enum.map(&elem(&1, 0)) |> Enum.uniq() |> Enum.join(",")
 
+    ps = Keyword.fetch!(opts, :ps)
+    args = ["LC_ALL=C", "TZ=UTC", ps, "-o", "pid=,lstart=", "-p", pids]
+
     host
-    |> Shell.run(Keyword.get(opts, :ps, "/bin/ps"), ["-o", "pid=,lstart=", "-p", pids],
-      env: [{"LC_ALL", "C"}, {"TZ", "UTC"}],
-      timeout: Keyword.fetch!(opts, :timeout)
-    )
+    |> Shell.run(Keyword.fetch!(opts, :env), args, timeout: Keyword.fetch!(opts, :timeout))
     |> judge(procs)
   end
 
