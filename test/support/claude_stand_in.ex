@@ -16,12 +16,19 @@ defmodule CodingAgentFramework.ClaudeStandIn do
 
   import CodingAgentFramework.TestHost, only: [program!: 1, kill: 1]
 
-  @doc "Writes the stand-in for `mode` into `dir` and answers its path."
+  @doc """
+  Writes the stand-in for `mode` into `dir` and answers its path. The script is written whole
+  under another name and renamed into place, as the stand-in writes its own file: a start may
+  be running the path at that moment, and a script rewritten in place is empty in between, so
+  that start ran nothing and exited at once (F-39).
+  """
   def write!(dir, mode) when mode in [:at_start, :on_go, :never] do
     path = Path.join(dir, "claude-#{mode}")
     File.mkdir_p!(Path.join(dir, "pids"))
-    File.write!(path, script(Path.join(dir, "pids"), mode))
-    File.chmod!(path, 0o755)
+    tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
+    File.write!(tmp, script(Path.join(dir, "pids"), mode))
+    File.chmod!(tmp, 0o755)
+    File.rename!(tmp, path)
     path
   end
 

@@ -121,9 +121,10 @@ defmodule CodingAgentFramework.SessionsTest do
   end
 
   test "new-2: past the deadline, Adopt makes a live socket an orphan, a dead one refused", ctx do
+    # Every stand-in is written before the first start runs one (F-39).
+    {dead_dir, dead_launch} = own_dir(ctx, "dead", :never)
     orphan = start_task(ctx, "orphan", launch(ctx, :never))
-    {dead_dir, launch} = own_dir(ctx, "dead", :never)
-    dead = start_task(ctx, "dead", launch)
+    dead = start_task(ctx, "dead", dead_launch)
     assert {:ok, _} = row_when(ctx, "orphan", &(&1.viewer != nil))
     assert {:ok, _} = row_when(ctx, "dead", &(&1.viewer != nil))
     Process.exit(ctx.sessions, :kill)
