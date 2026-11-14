@@ -232,23 +232,35 @@ reading for delegates:
   one encoder.
 - **Turns are events.** A turn ends with exactly one `result`, whose `user_message_uuids` name
   the messages it took. A message goes in only after its delegate's turn has ended: one written
-  during a turn joins it.
+  during a turn joins it. A delegate can start a turn by itself (a background task that ends
+  wakes it); a message that joins such a turn is accepted, and is still delivered once, by its
+  replay.
 - **Delivered once, seen.** A message carries a uuid of the framework's, and with
   `--replay-user-messages` it comes back with that uuid and `isReplay`. Its sending mark is
   settled by the replay. When the delegate exits, a message with no replay in the log, read to
   its end, is delivered if the transcript holds its uuid and undelivered otherwise; it is never
-  written again blind.
+  written again blind. An undelivered message goes to the resumed process under its same uuid:
+  Claude Code drops a user line whose uuid its transcript holds, so a message that went in after
+  all is not run twice.
+- **A claim needs a reader.** Opening the pipe for writing waits while no process reads it, so
+  the writer starts a claim only for a live delegate, under the write's deadline, and
+  `Recoveries` ends a claim command still waiting past it, by its pid and start time. The
+  wrapper's pipe is made with `mkfifo`, which `Programs` names.
 - **Permissions.** A request is a `control_request` with `subtype` `can_use_tool`, its
   `request_id`, `tool_name`, `input` and `tool_use_id`. Its row is held, then answering, then
   answered when the answer's replay is in the log; a `control_cancel_request` with its id
   cancels it, and the delegate's exit loses it. Unlike a hook, it waits in Claude Code through a
-  restart of the framework, so a held row stays answerable. A delegate's hooks are not needed
-  for its own turns; its events are the log.
+  restart of the framework, so a held row stays answerable, with no deadline of its own: a view
+  flags a request held longer than 10 minutes, and nothing answers it but a person, an agent's
+  `answer`, a cancel or the exit. A delegate's hooks are not needed for its own turns; its
+  events are the log.
 - **Ending.** An `end_session` request ends the session and cuts a running turn, so it goes in
   only after the report is delivered and the turn has ended. `Sessions` sees the exit by the
   pid; one that does not exit within the stop's deadline is ended by `Recoveries`.
 - **Rate limits.** A `rate_limit_event` carries the account's windows, among them
-  `seven_day.utilization` (0 to 1) and `resetsAt`, as the status line does.
+  `seven_day.utilization` (0 to 1) and `resetsAt`, as the status line does. `Usage` reads the
+  latest one of each delegate's log as it reads a status line. The field is marked internal, so
+  the check against each pinned release covers it.
 - **No trust dialog.** A headless session skips the workspace trust dialog.
 - **Its viewer** is a tmux pane that renders the event log as readable text, opened and
   reopened like any viewer. It writes nothing.
@@ -540,9 +552,8 @@ without it.
 - An interactive session in a new directory meets the workspace trust dialog first, and until it
   is trusted Claude Code runs no status line. `Screen` answers that dialog by its label at a
   parent's start, and the settings never set `disableAllHooks`. A headless delegate skips it.
-- A headless session draws no status line. Whether its stream's events carry the account's rate
-  limits is checked when `Stream` is built; until then, `Usage` reads only the status lines of
-  interactive sessions.
+- A headless session draws no status line; its event log's `rate_limit_event` stands in
+  ("Headless delegates").
 
 ## Allowance
 
