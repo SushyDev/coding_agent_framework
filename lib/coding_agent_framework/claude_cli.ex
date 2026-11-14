@@ -87,6 +87,70 @@ defmodule CodingAgentFramework.ClaudeCLI do
 
   def session(_role, _account, _opts), do: {:refused, :no_account_dir}
 
+  # The wrapper of "Headless delegates": stdin is the FIFO opened read-write, so the delegate
+  # holds a writer itself and never reads end of file; `exec` makes claude the held process.
+  @wrapper ~S"""
+  d=$1; shift
+  exec 3<>"$d/in"
+  exec "$@" <&3 3<&- >>"$d/events.jsonl" 2>>"$d/stderr.log"
+  """
+
+  @doc """
+  The argv and environment of a headless delegate on `account`: `-p` with stream-json in and
+  out, `--verbose` (without it `-p` with stream-json output exits at once),
+  `--replay-user-messages` and `--permission-prompts host`, then `--session-id <id>` for a start
+  or `--resume <id>` in its place. No prompt: the first message is a line on stdin.
+
+  Options: `:claude`, `:model`, `:env` as for `session/3`, and exactly one of `:session_id` and
+  `:resume`.
+
+      iex> account = CodingAgentFramework.Accounts.Account.at("work", "/caf/accounts/work/claude")
+      iex> env = %{home: "/h", path: "/bin", term: "dumb", lang: "C.UTF-8"}
+      iex> {:ok, %{argv: argv}} = CodingAgentFramework.ClaudeCLI.headless(account,
+      ...>   claude: "/run/bin/claude", model: "opus", resume: "s1", env: env)
+      iex> Enum.take(argv, -9)
+      ["--input-format", "stream-json", "--output-format", "stream-json",
+       "--replay-user-messages", "--permission-prompts", "host", "--resume", "s1"]
+  """
+  @spec headless(Account.t() | term, keyword) :: {:ok, launch} | {:refused, term}
+  def headless(%Account{config_dir: "/" <> _} = account, opts) do
+    with {:ok, claude} <- path(opts, :claude),
+         {:ok, model} <- word(opts, :model),
+         {:ok, id} <- start_or_resume(opts),
+         {:ok, env} <- env(account, Keyword.get(opts, :env)) do
+      argv =
+        [claude, "-p", "--verbose", "--model", model, "--settings", account.settings.delegate] ++
+          ["--mcp-config", account.mcp_config, "--strict-mcp-config"] ++
+          ["--input-format", "stream-json", "--output-format", "stream-json"] ++
+          ["--replay-user-messages", "--permission-prompts", "host" | id]
+
+      {:ok, %{argv: argv, env: env}}
+    end
+  end
+
+  def headless(_account, _opts), do: {:refused, :no_account_dir}
+
+  @doc """
+  `argv` run by the wrapper that holds a headless delegate's stdin and log in `dir`
+  (`<home>/streams/<session>/`, whose FIFO `in` must exist): the host's `sh` runs it, and dtach
+  holds that. Pure.
+
+      iex> [sh, "-c", _script, "caf-stream", "/h/streams/s1", "/run/bin/claude"] =
+      ...>   CodingAgentFramework.ClaudeCLI.wrapper("/run/bin/sh", "/h/streams/s1", ["/run/bin/claude"])
+      iex> sh
+      "/run/bin/sh"
+  """
+  @spec wrapper(String.t(), String.t(), [String.t()]) :: [String.t()]
+  def wrapper(sh, dir, argv), do: [sh, "-c", @wrapper, "caf-stream", dir | argv]
+
+  defp start_or_resume(opts) do
+    case {Keyword.has_key?(opts, :session_id), Keyword.has_key?(opts, :resume)} do
+      {true, false} -> with {:ok, id} <- word(opts, :session_id), do: {:ok, ["--session-id", id]}
+      {false, true} -> with {:ok, id} <- word(opts, :resume), do: {:ok, ["--resume", id]}
+      _ -> {:refused, :session_id_or_resume}
+    end
+  end
+
   defp path(opts, key) do
     case Keyword.get(opts, key) do
       "/" <> _ = p -> {:ok, p}
