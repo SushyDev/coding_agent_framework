@@ -132,11 +132,32 @@ in
     };
   };
 
-  # The installer (prek) refuses a core.hooksPath set outside this repository, and its failure
-  # would stop every shell entry. Skip it there; `devenv test` still runs the hooks.
-  tasks."devenv:git-hooks:install".status = ''
-    set -- $(${lib.getExe pkgs.git} config --show-scope --get core.hooksPath)
-    case "''${1:-local}" in local | worktree) exit 1 ;; esac
-    echo "git-hooks: not installed; core.hooksPath is set in $1 scope" >&2
+  # The repository's own pre-commit hook, in the common git directory so every worktree shares
+  # it. Git's core.hooksPath may be global, which stops devenv's installer (prek) and makes git
+  # look elsewhere; the global hooks directory hands off to this file. Every path is a store
+  # path, so a plain `git commit` outside the shell needs no PATH. prek reads the same config
+  # git-hooks generates and runs it on the staged files.
+  tasks."devenv:git-hooks:install".status = "exit 0"; # prek must not write this file's place.
+
+  enterShell = let
+    git = lib.getExe pkgs.git;
+    hook = pkgs.writeText "caf-pre-commit" ''
+      #!${lib.getExe pkgs.bash}
+      # caf-repo-hook: written by devenv.nix on shell entry; edits are overwritten.
+      export PATH=${lib.makeBinPath [ pkgs.git ]}
+      exec ${lib.getExe config.git-hooks.package} run --config ${config.git-hooks.configFile} "$@"
+    '';
+  in ''
+    caf_hook="$(${git} rev-parse --path-format=absolute --git-common-dir)/hooks/pre-commit"
+    if [ ! -e "$caf_hook" ] || [ "$(${lib.getExe' pkgs.coreutils "head"} -n 2 "$caf_hook" | ${lib.getExe' pkgs.coreutils "tail"} -n 1)" = "# caf-repo-hook: written by devenv.nix on shell entry; edits are overwritten." ]; then
+      ${lib.getExe' pkgs.coreutils "mkdir"} -p "''${caf_hook%/*}"
+      ${lib.getExe' pkgs.coreutils "install"} -m 755 ${hook} "$caf_hook"
+    else
+      echo "pre-commit hook: $caf_hook exists and this repository did not write it; not replaced." >&2
+    fi
+    case "$(${git} config --show-scope --get core.hooksPath)" in local* | worktree*)
+      echo "pre-commit hook: core.hooksPath is set in this repository; git will not run $caf_hook." >&2 ;;
+    esac
+    unset caf_hook
   '';
 }
