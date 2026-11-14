@@ -52,7 +52,7 @@ defmodule CodingAgentFramework.Tmux.Fake do
   def key(%__MODULE__{key: key}), do: key
 
   @impl true
-  def new_session(%__MODULE__{} = s, session, argv, _opts) do
+  def new_session(%__MODULE__{} = s, session, argv, opts) do
     call(s, fn st ->
       st = if st.up, do: st, else: %{st | up: true, next: 0}
 
@@ -60,7 +60,7 @@ defmodule CodingAgentFramework.Tmux.Fake do
         {{:refused, {:session_exists, session}}, st}
       else
         pane = "%#{st.next}"
-        info = %{session: session, tag: session, argv: argv}
+        info = %{session: session, tag: session, argv: argv, size: opts[:size]}
         {{:ok, pane}, %{st | next: st.next + 1, panes: Map.put(st.panes, pane, info)}}
       end
     end)
@@ -95,6 +95,15 @@ defmodule CodingAgentFramework.Tmux.Fake do
   @impl true
   def respawn_pane(%__MODULE__{} = s, pane, session, argv),
     do: guarded(s, pane, session, :respawned, &put_in(&1, [:panes, pane, :argv], argv))
+
+  @impl true
+  def resize_pane(%__MODULE__{} = s, pane, session, size),
+    do: guarded(s, pane, session, :resized, &put_in(&1, [:panes, pane, :size], size))
+
+  @doc "Test aid: a pane's window size, as it opened or was last resized."
+  @spec size(t, String.t()) :: {pos_integer, pos_integer} | nil
+  def size(%__MODULE__{} = s, pane),
+    do: Agent.get(s.pid, &get_in(&1, [:panes, pane, :size]), s.timeout)
 
   # Checks the pane's tag and acts in one step, as the CLI does in one tmux command.
   defp guarded(s, pane, session, done, act) do

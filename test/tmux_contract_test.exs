@@ -133,6 +133,17 @@ defmodule CodingAgentFramework.TmuxContractTest do
       assert {:ok, ^expected} = read_when(out, expected)
     end
 
+    test "a window opened one row short grows, and keeps no fixed window-size", ctx do
+      {:ok, pane} =
+        Tmux.new_session(ctx.server, "alpha", stand_in(ctx, "alpha"), size: {100, 29})
+
+      assert tmux(ctx, ["display-message", "-p", "-t", pane, "\#{window_height}"]) == "29\n"
+      assert {:ok, :resized} = Tmux.resize_pane(ctx.server, pane, "alpha", {100, 30})
+      assert {:refused, {:tagged_for, "alpha"}} = Tmux.resize_pane(ctx.server, pane, "b", {9, 9})
+      assert tmux(ctx, ["display-message", "-p", "-t", pane, "\#{window_height}"]) == "30\n"
+      assert tmux(ctx, ["show-options", "-w", "-t", pane, "window-size"]) == ""
+    end
+
     test "killing the server removes its socket file", ctx do
       {:ok, _} = Tmux.new_session(ctx.server, "alpha", stand_in(ctx, "alpha"))
       assert File.exists?(ctx.socket)
@@ -140,6 +151,13 @@ defmodule CodingAgentFramework.TmuxContractTest do
       refute File.exists?(ctx.socket)
       assert {:refused, :no_server} = Tmux.kill_server(ctx.server)
     end
+  end
+
+  defp tmux(%{server: server, socket: socket}, args) do
+    {:ok, %{status: 0, output: out}} =
+      Shell.run(server.host, server.tmux, ["-S", socket | args], timeout: 5_000)
+
+    out
   end
 
   defp start(:cli) do
