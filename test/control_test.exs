@@ -21,6 +21,8 @@ defmodule CodingAgentFramework.ControlTest.Probe do
   @impl true
   def respawn_pane(s, pane, session, argv), do: Tmux.respawn_pane(s.inner, pane, session, argv)
   @impl true
+  def resize_pane(s, pane, session, size), do: Tmux.resize_pane(s.inner, pane, session, size)
+  @impl true
   def kill_session(s, session), do: Tmux.kill_session(s.inner, session)
   @impl true
   def kill_server(s), do: Tmux.kill_server(s.inner)

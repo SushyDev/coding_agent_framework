@@ -43,10 +43,18 @@ defmodule CodingAgentFramework.Control do
 
   @doc """
   Opens `session`'s pane running `argv`, tagged with `session` as it opens, and keeps its id.
-  A later open of the same session (after its server restarted) keeps the new id.
+  A later open of the same session (after its server restarted) keeps the new id. Option:
+  `size: {columns, rows}`, the window's size.
   """
   @spec open(GenServer.server(), session, [String.t()], keyword) :: outcome(Tmux.pane())
-  def open(control, session, argv, opts \\ []), do: call(control, {:open, session, argv}, opts)
+  def open(control, session, argv, opts \\ []),
+    do: call(control, {:open, session, argv, Keyword.take(opts, [:size])}, opts)
+
+  @doc "Sets the window of the session's pane to `{columns, rows}`."
+  @spec resize(GenServer.server(), session, {pos_integer, pos_integer}, keyword) ::
+          outcome(:resized)
+  def resize(control, session, size, opts \\ []),
+    do: call(control, {:resize, session, size}, opts)
 
   @doc "Types `text` and then Enter into the session's pane, in one tmux command."
   @spec send(GenServer.server(), session, String.t(), keyword) :: outcome(:sent)
@@ -93,8 +101,8 @@ defmodule CodingAgentFramework.Control do
     end
   end
 
-  defp act({:open, session, argv}, %{tmux: tmux} = state) do
-    case Tmux.new_session(tmux, session, argv) do
+  defp act({:open, session, argv, opts}, %{tmux: tmux} = state) do
+    case Tmux.new_session(tmux, session, argv, opts) do
       {:ok, pane} -> {{:ok, pane}, put_in(state.panes[session], pane)}
       other -> {other, state}
     end
@@ -105,6 +113,9 @@ defmodule CodingAgentFramework.Control do
 
   defp act({:interrupt, session}, state),
     do: on_pane(state, session, &Tmux.write(&1, &2, session, {:keys, ["C-c"]}))
+
+  defp act({:resize, session, size}, state),
+    do: on_pane(state, session, &Tmux.resize_pane(&1, &2, session, size))
 
   defp act({:respawn, session, argv}, state),
     do: on_pane(state, session, &Tmux.respawn_pane(&1, &2, session, argv))

@@ -35,7 +35,8 @@ defmodule CodingAgentFramework.Tmux do
 
   @doc """
   Opens a detached session named `session` whose one pane runs `argv` and is tagged with
-  `session` in the same tmux command. Starts the server when none runs.
+  `session` in the same tmux command. Starts the server when none runs. Option: `size:
+  {columns, rows}`, the window's size.
   """
   @callback new_session(server, session, argv :: [String.t()], opts :: keyword) ::
               {:ok, pane} | {:refused, term} | {:unknown, term}
@@ -64,6 +65,14 @@ defmodule CodingAgentFramework.Tmux do
   @callback respawn_pane(server, pane, session, argv :: [String.t()]) ::
               {:ok, :respawned} | {:refused, term} | {:unknown, term}
 
+  @doc """
+  Sets the window of `pane` to `{columns, rows}` only when its tag names `session`, checked in the
+  same tmux command as a write is, and then unsets the window's `window-size`, which
+  `resize-window` sets and which would keep the window fixed.
+  """
+  @callback resize_pane(server, pane, session, {pos_integer, pos_integer}) ::
+              {:ok, :resized} | {:refused, term} | {:unknown, term}
+
   @doc "Ends one session and its panes."
   @callback kill_session(server, session) :: {:ok, :killed} | {:refused, term} | {:unknown, term}
 
@@ -85,6 +94,7 @@ defmodule CodingAgentFramework.Tmux do
     cond do
       not session?(session) -> {:refused, {:bad_session, session}}
       not argv?(argv) -> {:refused, {:bad_argv, argv}}
+      not size?(Keyword.get(opts, :size, {1, 1})) -> {:refused, {:bad_size, opts[:size]}}
       true -> mod.new_session(server, session, argv, opts)
     end
   end
@@ -130,6 +140,18 @@ defmodule CodingAgentFramework.Tmux do
     end
   end
 
+  @doc "See the `c:resize_pane/4` callback."
+  @spec resize_pane(server, pane, session, {pos_integer, pos_integer}) ::
+          {:ok, :resized} | {:refused, term} | {:unknown, term}
+  def resize_pane(%mod{} = server, pane, session, size) do
+    cond do
+      not pane?(pane) -> {:refused, {:bad_target, pane}}
+      not session?(session) -> {:refused, {:bad_session, session}}
+      not size?(size) -> {:refused, {:bad_size, size}}
+      true -> mod.resize_pane(server, pane, session, size)
+    end
+  end
+
   @doc "See the `c:kill_session/2` callback."
   @spec kill_session(server, session) :: {:ok, :killed} | {:refused, term} | {:unknown, term}
   def kill_session(%mod{} = server, session) do
@@ -144,6 +166,8 @@ defmodule CodingAgentFramework.Tmux do
 
   defp pane?(pane), do: is_binary(pane) and pane =~ @pane
   defp session?(session), do: is_binary(session) and session =~ @session
+  defp size?({c, r}), do: is_integer(c) and c > 0 and is_integer(r) and r > 0
+  defp size?(_), do: false
   defp argv?(argv), do: is_list(argv) and argv != [] and Enum.all?(argv, &is_binary/1)
 
   defp input?({kind, text}) when kind in [:text, :line],

@@ -60,9 +60,16 @@ defmodule CodingAgentFramework.Tmux.CLI do
   def key(%__MODULE__{host: host, server: {_, name}}), do: {host.name, name}
 
   @impl true
-  def new_session(%__MODULE__{tag: tag} = s, session, argv, _opts) do
+  def new_session(%__MODULE__{tag: tag} = s, session, argv, opts) do
+    size =
+      case Keyword.get(opts, :size) do
+        {c, r} -> ["-x", "#{c}", "-y", "#{r}"]
+        nil -> []
+      end
+
     args =
-      ["new-session", "-d", "-s", session, "-P", "-F", "\#{pane_id}", "--"] ++
+      ["new-session", "-d", "-s", session | size] ++
+        ["-P", "-F", "\#{pane_id}", "--"] ++
         Enum.map(argv, &escape/1) ++ [";", "set-option", "-p", "-t", "=#{session}:", tag, session]
 
     case run(s, args) do
@@ -118,6 +125,12 @@ defmodule CodingAgentFramework.Tmux.CLI do
   def respawn_pane(%__MODULE__{} = s, pane, session, argv) do
     command = "respawn-pane -k -t #{pane} -- " <> Enum.map_join(argv, " ", &quote_arg/1)
     guarded(s, pane, session, command, :respawned)
+  end
+
+  @impl true
+  def resize_pane(%__MODULE__{} = s, pane, session, {c, r}) do
+    command = "resize-window -t #{pane} -x #{c} -y #{r} ; set-option -w -u -t #{pane} window-size"
+    guarded(s, pane, session, command, :resized)
   end
 
   # Runs `command` only when the pane at `pane` has that id and its tag names `session`, in one
