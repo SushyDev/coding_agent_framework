@@ -98,3 +98,27 @@ A parent, its delegates, and restarts of the framework. Read it in the order of 
 `wrong` records a report typed where the check must refuse it. `SF_vars`, strong fairness, says a
 step that is possible again and again, not always, happens: the user's prompts may take the
 parent's turn each time a report waits for it.
+
+## `Start.tla`
+
+One host's session starts and stops, with a restart of the framework possible between any two
+steps. Read it in the order of a start:
+
+- `RowWritten` writes the row as `"starting"` before anything acts; the call under way lives in
+  `call`, in memory, and a restart clears it.
+- `Held` is `dtach -n`: a process (`proc`, a pid with its own start time), or a refusal, or an
+  unknown answer with nothing held. `ViewerOpened` then leaves the call waiting.
+- `FileWritten` is Claude Code writing its session file, at any time, perhaps late. `Tick` is the
+  start's deadline passing; it is wall-clock, so it survives a restart.
+- `StartDecided` is the call's own answer: running when the file names the live process,
+  unknown once the deadline has passed.
+- After a restart, `Adopt` takes a `"starting"` row with no call under way: running when the file
+  names the live process; past the deadline, `"orphan"` for a live socket, `"refused"` for a
+  dead one. `ReRead` reads an `"unknown"` row again until it is running or gone.
+- `StopAsked`, `StopSettled`, `StopTimedOut` and `Kill` are a stop, judged by the row's pid and
+  start time. `ForeignStarts` is another program taking a freed pid, which is why the start
+  time counts.
+
+`onTime`, `ends` and `wrongKills` are ghosts: they record what happened, for the invariants, and
+the framework never reads them. `RunningOnlyIfLive` is a step property: the step that writes
+`"running"` writes it only for a live process its file names.

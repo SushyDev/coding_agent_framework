@@ -158,8 +158,8 @@ row. After a restart, a row still stopping is settled by its pid and start time:
 gone, running otherwise. A row whose start answered unknown is read again at each `Registry`
 read until it is running or gone. A start is confirmed by the session file's `name`, which
 `--name` sets; a check against each pinned Claude Code release confirms it, with the Remote
-Control check. `Delegate.tla` leaves the start abstract; it gains the start and its adoption
-before `Delegates` is built.
+Control check. `Start.tla` models the start and its adoption, for every session's start and
+resume; `Delegate.tla` leaves the start abstract and relies on it.
 
 A part that waits on a reader within a call (a start waiting for its session file) reads it
 again at a fixed interval until the call's deadline. That wait is part of the call's answer and
@@ -271,7 +271,10 @@ Specs live in `model/tla/`, checked with TLC:
   by hand, each with its time recorded;
 - each spec's header names the modules it models and what it leaves abstract.
 
-Five specs, in this order:
+Five specs, in this order, and beside them `Start.tla`: every session's start and resume, the
+row written first, the held process, the session file that may come late, and the adoption
+after a restart (no held process without a row; a row ends at most once; a process is ended
+only by its own pid and start time; every starting row settles).
 
 1. **`Agent.tla`**: one host's tmux server, sessions, panes, dtach sockets, Claude Code processes
    and viewers. Events: the server dies and restarts, so pane ids restart at `%0`; a viewer dies
