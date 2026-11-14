@@ -405,15 +405,28 @@ defmodule CodingAgentFramework.Sessions do
     ClaudeCLI.session(role, account, opts)
   end
 
-  # One row short, then grown: Claude Code redraws only when its size changes.
   defp open_viewer(state, name, argv) do
-    {columns, rows} = state.size
-
-    with {:ok, _pane} <- Control.open(state.control, name, argv, size: {columns, rows - 1}),
-         {:ok, :resized} <- Control.resize(state.control, name, {columns, rows}) do
-      "open"
-    else
+    case viewer(state.control, name, argv, state.size) do
+      {:ok, _pane} -> "open"
       failed -> inspect(failed)
+    end
+  end
+
+  @doc """
+  Opens a viewer of held session `name` through `control`: a tmux session of that name running
+  `argv` (`Holder.viewer_argv/2`), tagged as it opens, one row short of `{columns, rows}`, then
+  grown, since Claude Code redraws only when its size changes. tmux starts its server when it is
+  down. `Recoveries` reopens a lost viewer with it. Answers `{:ok, pane}`, or `Control`'s
+  refusal or unknown; a pane that opened and was not grown is `{:unknown, {:resize, pane, why}}`.
+  """
+  @spec viewer(GenServer.server(), String.t(), [String.t()], {pos_integer, pos_integer}) ::
+          outcome(String.t())
+  def viewer(control, name, argv, {columns, rows}) do
+    with {:ok, pane} <- Control.open(control, name, argv, size: {columns, rows - 1}) do
+      case Control.resize(control, name, {columns, rows}) do
+        {:ok, :resized} -> {:ok, pane}
+        failed -> {:unknown, {:resize, pane, failed}}
+      end
     end
   end
 

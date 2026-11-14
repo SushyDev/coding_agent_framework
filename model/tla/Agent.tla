@@ -16,9 +16,18 @@
 (*               of a pane go through the same one-command check, and are  *)
 (*               writes here;                                              *)
 (*   TmuxSampler reads the panes and the held sockets, and reports a held  *)
-(*               agent with no viewer (not built yet);                     *)
-(*   Recoveries  reopens a seen agent's viewer, and with it starts the     *)
-(*               server again (ServerRestarts' fairness; not built yet).   *)
+(*               agent with no viewer (built in F-22). A reading names a   *)
+(*               new loss as SamplerReads says; the code keys a loss by    *)
+(*               the sampler's generation and the sample at which the row  *)
+(*               became unviewed, or Recoveries' last open, if later;      *)
+(*   Recoveries  claims a seen loss in its table, then reopens the agent's *)
+(*               viewer, once per loss across its own restarts, and with   *)
+(*               it starts the server again when it is down (F-23).        *)
+(*                                                                         *)
+(* A restart of Recoveries between its claim and its act leaves that loss  *)
+(* claimed and not acted on: it ends unknown, for a person, and is never   *)
+(* acted on again. So LostViewerReopened is checked with no such restart   *)
+(* (Agent_Viewers), and OneReopenPerLoss with one (Agent_Claims).          *)
 (*                                                                         *)
 (* Left abstract: the text of a write and the screen (whether the input    *)
 (* box is empty); hooks and the registry; the process check for an         *)
@@ -42,6 +51,7 @@ CONSTANTS
     MaxServerDeaths,  \* times the tmux server dies
     MaxViewerDeaths,  \* times a viewer pane dies on its own
     MaxWrites,        \* writes asked
+    MaxRecoveryRestarts, \* times Recoveries restarts, losing what it held in memory
     Break             \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -51,12 +61,13 @@ Breaks == {
     "CleanLiveSocket",      \* starting an agent removes a socket file that is still live
     "TmuxHoldsAgent",       \* the agent runs in its pane, not under dtach
     "NoReopen",             \* a lost viewer is never reopened
-    "SamplerReadsPanesOnly" \* the sampler reads tmux's panes but not the held sockets
+    "SamplerReadsPanesOnly", \* the sampler reads tmux's panes but not the held sockets
+    "ClaimInMemory"         \* Recoveries keeps its claims in memory, not in its table
 }
 
 ASSUME Break \in Breaks
 ASSUME MaxStarts \in Nat /\ MaxServerDeaths \in Nat /\ MaxViewerDeaths \in Nat
-ASSUME MaxWrites \in Nat
+ASSUME MaxWrites \in Nat /\ MaxRecoveryRestarts \in Nat
 
 \* A lookup that found no pane yields an empty target. tmux reads an empty
 \* target as its current pane, so it is a value of its own, never a pane id.
@@ -74,13 +85,23 @@ VARIABLES
     nextPid,       \* processes started so far; also the last pid given
     socketFile,    \* socket -> the pid that bound the file at its path, or NoFile
     unviewed,      \* the sampler's last reading: held agents with no viewer
+    opened,        \* agents Recoveries opened a viewer for since the last reading
+    claimed,       \* Recoveries' table: agents whose current loss it has claimed
+    acting,        \* claims Recoveries holds in memory and has not acted on yet:
+                   \* [agent, old], old once the sampler has read a newer loss
+    reopened,      \* history: agents a viewer was opened for in their current loss
+    twice,         \* history: a viewer was opened twice for one loss
+    recoveryRestarts,
     kept,          \* session -> the pane id a caller kept, and the epoch it was read in
     pending,       \* writes checked but not yet sent (only under CheckThenSend)
     delivered,     \* writes that reached a pane: [session, reached, keptEpoch, epoch]
     serverDeaths, viewerDeaths, writesAsked
 
+\* Recoveries' variables, unchanged by the other steps.
+rec == <<opened, claimed, acting, reopened, twice, recoveryRestarts>>
+
 vars == <<serverUp, epoch, nextPane, panes, procs, nextPid, socketFile, unviewed,
-          kept, pending, delivered, serverDeaths, viewerDeaths, writesAsked>>
+          kept, pending, delivered, serverDeaths, viewerDeaths, writesAsked, rec>>
 
 -----------------------------------------------------------------------------
 (* Reading the state *)
@@ -112,6 +133,12 @@ Init ==
     /\ nextPid = 0
     /\ socketFile = [a \in Agents |-> NoFile]
     /\ unviewed = {}
+    /\ opened = {}
+    /\ claimed = {}
+    /\ acting = {}
+    /\ reopened = {}
+    /\ twice = FALSE
+    /\ recoveryRestarts = 0
     \* Before any lookup the caller holds nothing: an empty target.
     /\ kept = [a \in Agents |-> [pane |-> EmptyTarget, epoch |-> 0]]
     /\ pending = {}
@@ -137,17 +164,18 @@ ServerDies ==
               /\ socketFile' = [a \in Agents |-> NoFile]
          ELSE UNCHANGED <<procs, socketFile>>
     /\ UNCHANGED <<epoch, nextPane, nextPid, unviewed, kept, pending, delivered,
-                   viewerDeaths, writesAsked>>
+                   viewerDeaths, writesAsked, rec>>
 
-\* The framework starts its server again. A new server counts pane ids from %0,
-\* so an id read before this step may name another pane after it.
+\* Another part starts the server again (a start opening its viewer); a
+\* reopen in RecoveryActs does too. A new server counts pane ids from %0, so an
+\* id read before this step may name another pane after it.
 ServerRestarts ==
     /\ ~serverUp
     /\ serverUp' = TRUE
     /\ epoch' = epoch + 1
     /\ nextPane' = 0
     /\ UNCHANGED <<panes, procs, nextPid, socketFile, unviewed, kept, pending,
-                   delivered, serverDeaths, viewerDeaths, writesAsked>>
+                   delivered, serverDeaths, viewerDeaths, writesAsked, rec>>
 
 -----------------------------------------------------------------------------
 (* Held agents (dtach) *)
@@ -165,7 +193,7 @@ AgentStarted(a) ==
     /\ procs' = procs \cup {[pid |-> nextPid + 1, socket |-> a]}
     /\ socketFile' = [socketFile EXCEPT ![a] = nextPid + 1]
     /\ UNCHANGED <<serverUp, epoch, nextPane, panes, unviewed, kept, pending,
-                   delivered, serverDeaths, viewerDeaths, writesAsked>>
+                   delivered, serverDeaths, viewerDeaths, writesAsked, rec>>
 
 \* A process ends with no other on its socket: its viewers' `dtach -a` see the
 \* socket close and exit, and their panes close.
@@ -183,7 +211,7 @@ AgentExits(p) ==
                        ELSE socketFile
     /\ panes' = ViewersAfter(p)
     /\ UNCHANGED <<serverUp, epoch, nextPane, nextPid, unviewed, kept, pending,
-                   delivered, serverDeaths, viewerDeaths, writesAsked>>
+                   delivered, serverDeaths, viewerDeaths, writesAsked, rec>>
 
 \* The dtach holding the agent is killed hard: the process is gone, but the
 \* socket file stays at its path, refusing connections.
@@ -191,7 +219,7 @@ SocketGoesStale(p) ==
     /\ procs' = procs \ {p}
     /\ panes' = ViewersAfter(p)
     /\ UNCHANGED <<serverUp, epoch, nextPane, nextPid, socketFile, unviewed, kept,
-                   pending, delivered, serverDeaths, viewerDeaths, writesAsked>>
+                   pending, delivered, serverDeaths, viewerDeaths, writesAsked, rec>>
 
 -----------------------------------------------------------------------------
 (* Viewers *)
@@ -203,55 +231,101 @@ ViewerDies(id) ==
     /\ panes' = Without(panes, {id})
     /\ viewerDeaths' = viewerDeaths + 1
     /\ UNCHANGED <<serverUp, epoch, nextPane, procs, nextPid, socketFile, unviewed,
-                   kept, pending, delivered, serverDeaths, writesAsked>>
+                   kept, pending, delivered, serverDeaths, writesAsked, rec>>
 
 \* The sampler reads which held agents have no viewer. It must read the held
 \* sockets as well as tmux's panes: an agent whose viewer is gone has no pane
 \* left to read. Under SamplerReadsPanesOnly it sees only agents with a pane.
+\*
+\* A reading names a new loss for an agent that was not unviewed in the last
+\* reading, or that Recoveries opened a viewer for since: that viewer is gone
+\* again. A new loss is not claimed yet, and no viewer was opened for it.
 SamplerReads ==
     LET visible == IF Break = "SamplerReadsPanesOnly"
                      THEN {panes[id] : id \in DOMAIN panes}
                      ELSE Agents
-    IN  /\ unviewed' = {a \in visible : Held(a) /\ ~HasViewer(a)}
+        \* The join calls a held socket unviewed only while it is live.
+        now == {a \in visible : Held(a) /\ SocketLive(a) /\ ~HasViewer(a)}
+        new == {a \in now : a \notin unviewed \/ a \in opened}
+    IN  /\ unviewed' = now
+        /\ opened' = {}
+        /\ claimed' = claimed \ new
+        /\ reopened' = reopened \ new
+        /\ acting' = {[agent |-> c.agent, old |-> c.old \/ c.agent \in new] : c \in acting}
         /\ UNCHANGED <<serverUp, epoch, nextPane, panes, procs, nextPid, socketFile,
-                       kept, pending, delivered, serverDeaths, viewerDeaths, writesAsked>>
+                       kept, pending, delivered, serverDeaths, viewerDeaths, writesAsked,
+                       twice, recoveryRestarts>>
 
-\* A seen agent's viewer is reopened, once for the loss the sampler read. Its
-\* tmux session is named by the agent, so tmux refuses a second one, and the
-\* new pane carries its tag from the command that creates it.
-ViewerReopened(a) ==
+\* Recoveries writes a claim on the loss it read before it acts, and only on a
+\* loss not claimed yet, read after its own last open of that agent's viewer.
+RecoveryClaims(a) ==
     /\ Break # "NoReopen"
     /\ a \in unviewed
-    /\ serverUp
-    /\ SocketLive(a)
-    /\ ~HasViewer(a)
-    /\ panes' = With(panes, nextPane, a)
-    /\ nextPane' = nextPane + 1
-    /\ unviewed' = unviewed \ {a}
-    /\ UNCHANGED <<serverUp, epoch, procs, nextPid, socketFile, kept, pending,
-                   delivered, serverDeaths, viewerDeaths, writesAsked>>
+    /\ a \notin opened
+    /\ a \notin claimed
+    /\ claimed' = claimed \cup {a}
+    /\ acting' = acting \cup {[agent |-> a, old |-> FALSE]}
+    /\ UNCHANGED <<serverUp, epoch, nextPane, panes, procs, nextPid, socketFile, unviewed,
+                   kept, pending, delivered, serverDeaths, viewerDeaths, writesAsked,
+                   opened, reopened, twice, recoveryRestarts>>
 
-\* The reopen finds nothing to do or cannot run: no server, no live socket, or
-\* a viewer already there. The reading is spent; the next one decides again.
-ViewerReopenRefused(a) ==
-    /\ a \in unviewed
-    /\ ~serverUp \/ ~SocketLive(a) \/ HasViewer(a)
-    /\ unviewed' = unviewed \ {a}
-    /\ UNCHANGED <<serverUp, epoch, nextPane, panes, procs, nextPid, socketFile, kept,
-                   pending, delivered, serverDeaths, viewerDeaths, writesAsked>>
+\* Recoveries opens the claimed agent's viewer: `tmux new-session` named by the
+\* agent, its pane tagged as it opens, running `dtach -a`. It starts the server
+\* when it is down, so the new pane is %0 of a new server. tmux refuses a
+\* second session of that name. On a socket that is no longer live, `dtach -a`
+\* exits at once and its pane closes. The outcome is read from a later sample.
+RecoveryActs(c) ==
+    LET a == c.agent IN
+    /\ c \in acting
+    /\ acting' = acting \ {c}
+    /\ IF HasViewer(a)
+         THEN UNCHANGED <<serverUp, epoch, nextPane, panes, opened, reopened, twice>>
+         ELSE /\ opened' = opened \cup {a}
+              /\ IF c.old
+                   THEN UNCHANGED <<reopened, twice>>
+                   ELSE /\ twice' = (twice \/ a \in reopened)
+                        /\ reopened' = reopened \cup {a}
+              /\ IF ~SocketLive(a)
+                   THEN UNCHANGED <<serverUp, epoch, nextPane, panes>>
+                 ELSE IF serverUp
+                   THEN /\ panes' = With(panes, nextPane, a)
+                        /\ nextPane' = nextPane + 1
+                        /\ UNCHANGED <<serverUp, epoch>>
+                   ELSE /\ serverUp' = TRUE
+                        /\ epoch' = epoch + 1
+                        /\ panes' = With(panes, 0, a)
+                        /\ nextPane' = 1
+    /\ UNCHANGED <<procs, nextPid, socketFile, unviewed, kept, pending, delivered,
+                   serverDeaths, viewerDeaths, writesAsked, claimed, recoveryRestarts>>
+
+\* Recoveries restarts and loses what it held in memory: a claim it had not
+\* acted on is never acted on. Its table stays, unless ClaimInMemory.
+RecoveriesRestart ==
+    /\ recoveryRestarts < MaxRecoveryRestarts
+    /\ recoveryRestarts' = recoveryRestarts + 1
+    /\ acting' = {}
+    /\ IF Break = "ClaimInMemory"
+         THEN /\ claimed' = {}
+              /\ opened' = {}
+         ELSE UNCHANGED <<claimed, opened>>
+    /\ UNCHANGED <<serverUp, epoch, nextPane, panes, procs, nextPid, socketFile, unviewed,
+                   kept, pending, delivered, serverDeaths, viewerDeaths, writesAsked,
+                   reopened, twice>>
 
 -----------------------------------------------------------------------------
 (* Writes *)
 
 \* A caller looks up a session's pane and keeps its id for a later write. A
 \* lookup that finds none, or finds no server, yields the empty target.
+\* A lookup after the last write asked is left out: only a write reads it.
 PaneLookedUp(a) ==
+    /\ writesAsked < MaxWrites
     /\ kept' = [kept EXCEPT ![a] =
                   [pane |-> IF HasViewer(a) THEN CHOOSE id \in PanesShowing(a) : TRUE
                                             ELSE EmptyTarget,
                    epoch |-> epoch]]
     /\ UNCHANGED <<serverUp, epoch, nextPane, panes, procs, nextPid, socketFile,
-                   unviewed, pending, delivered, serverDeaths, viewerDeaths, writesAsked>>
+                   unviewed, pending, delivered, serverDeaths, viewerDeaths, writesAsked, rec>>
 
 \* The guards before a write: a target of the form %<n>, a server, a pane at
 \* that id, and the pane's tag naming the write's session.
@@ -280,7 +354,7 @@ WriteAsked(a) ==
          ELSE /\ delivered' = delivered \cup {Reached(a, k.pane, k.epoch)}
               /\ UNCHANGED pending
     /\ UNCHANGED <<serverUp, epoch, nextPane, panes, procs, nextPid, socketFile,
-                   unviewed, kept, serverDeaths, viewerDeaths>>
+                   unviewed, kept, serverDeaths, viewerDeaths, rec>>
 
 \* Under CheckThenSend: the send of a write checked earlier, by pane id alone.
 \* A pane gone or a server down makes tmux fail it, and nothing is sent.
@@ -290,7 +364,7 @@ WriteSent(w) ==
                       THEN delivered \cup {Reached(w.session, w.pane, w.keptEpoch)}
                       ELSE delivered
     /\ UNCHANGED <<serverUp, epoch, nextPane, panes, procs, nextPid, socketFile,
-                   unviewed, kept, serverDeaths, viewerDeaths, writesAsked>>
+                   unviewed, kept, serverDeaths, viewerDeaths, writesAsked, rec>>
 
 -----------------------------------------------------------------------------
 Next ==
@@ -300,17 +374,19 @@ Next ==
     \/ \E p \in procs : AgentExits(p) \/ SocketGoesStale(p)
     \/ \E id \in DOMAIN panes : ViewerDies(id)
     \/ SamplerReads
-    \/ \E a \in Agents : ViewerReopened(a) \/ ViewerReopenRefused(a)
+    \/ \E a \in Agents : RecoveryClaims(a)
+    \/ \E c \in acting : RecoveryActs(c)
+    \/ RecoveriesRestart
     \/ \E a \in Agents : PaneLookedUp(a) \/ WriteAsked(a)
     \/ \E w \in pending : WriteSent(w)
 
-\* The framework's own steps are fair: it restarts its server, samples, and
-\* acts on what it read. The rest (deaths, exits, starts, writes) may or may
-\* not happen.
+\* The framework's own steps are fair: it samples, claims what it read, and
+\* acts on its claims. The rest (deaths, exits, starts, writes, a start of the
+\* server by another part, a restart of Recoveries) may or may not happen.
 Fairness ==
-    /\ WF_vars(ServerRestarts)
     /\ WF_vars(SamplerReads)
-    /\ \A a \in Agents : WF_vars(ViewerReopened(a)) /\ WF_vars(ViewerReopenRefused(a))
+    /\ \A a \in Agents : WF_vars(RecoveryClaims(a))
+    /\ WF_vars(\E c \in acting : RecoveryActs(c))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -324,6 +400,9 @@ TypeOK ==
     /\ \A p \in procs : p.pid \in 1..MaxStarts /\ p.socket \in Agents
     /\ socketFile \in [Agents -> 0..MaxStarts]
     /\ unviewed \subseteq Agents
+    /\ opened \subseteq Agents /\ claimed \subseteq Agents /\ reopened \subseteq Agents
+    /\ acting \subseteq [agent : Agents, old : BOOLEAN] /\ twice \in BOOLEAN
+    /\ recoveryRestarts \in 0..MaxRecoveryRestarts
 
 \* A write reaches only the pane of the session it names.
 WriteReachesItsSession ==
@@ -336,6 +415,10 @@ OldPaneIdNeverReachesAnother ==
 \* No two processes hold one socket.
 OneProcessPerSocket ==
     \A p, q \in procs : p.socket = q.socket => p = q
+
+\* Recoveries opens at most one viewer per loss, across its own restarts.
+OneReopenPerLoss ==
+    ~twice
 
 \* An agent outlives its tmux server: the step in which the server dies ends
 \* no process.

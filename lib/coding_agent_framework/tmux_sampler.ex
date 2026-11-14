@@ -55,7 +55,8 @@ defmodule CodingAgentFramework.TmuxSampler do
 
   @doc """
   The last good sample: `{:ok, %{read_at, age, up, generation, failed_at, problem, rows}}`, or
-  `:unread` before one. `age` is ms since `read_at`; `failed_at` is set when a newer sample failed.
+  `:unread` before one. `read_at` is when its reads began, and `age` is ms since then;
+  `failed_at` is set when a newer sample failed.
   """
   @spec rows(GenServer.server(), keyword) ::
           :unread | {:ok, map} | {:refused, term} | {:unknown, term}
@@ -132,6 +133,9 @@ defmodule CodingAgentFramework.TmuxSampler do
   end
 
   defp sample_now(state) do
+    # Stamped before the reads: a sample stamped after an act was read after it (`Recoveries`).
+    at = now()
+
     panes =
       case Tmux.list_panes(state.server) do
         {:refused, :no_server} -> :no_server
@@ -139,8 +143,8 @@ defmodule CodingAgentFramework.TmuxSampler do
       end
 
     case {panes, Holder.list(state.holder)} do
-      {{:ok, _} = panes, {:ok, held}} -> write(state, Join.join(panes, held, state.last))
-      {:no_server, {:ok, held}} -> write(state, Join.join(:no_server, held, state.last))
+      {{:ok, _} = panes, {:ok, held}} -> write(state, Join.join(panes, held, state.last), at)
+      {:no_server, {:ok, held}} -> write(state, Join.join(:no_server, held, state.last), at)
       {{:ok, _}, failure} -> fail(state, {:holder, failure})
       {:no_server, failure} -> fail(state, {:holder, failure})
       {failure, _} -> fail(state, {:tmux, failure})
@@ -153,12 +157,12 @@ defmodule CodingAgentFramework.TmuxSampler do
     {{:unknown, reason}, %{state | failing: true}}
   end
 
-  defp write(state, join) do
+  defp write(state, join, at) do
     changes =
       for({key, row} <- join.rows, state.cache[key] != row, do: {:put, key, row}) ++
         for key <- Map.keys(state.cache), not Map.has_key?(join.rows, key), do: {:delete, key}
 
-    read = Map.put(Map.take(join, [:up, :generation, :start, :ids]), :read_at, now())
+    read = Map.put(Map.take(join, [:up, :generation, :start, :ids]), :read_at, at)
 
     {:ok, %{ids: ids, first: first}} =
       Table.write(state.db, state.host, state.name, changes, read)
