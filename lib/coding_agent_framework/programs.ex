@@ -6,6 +6,11 @@ defmodule CodingAgentFramework.Programs do
   program up through a `PATH`: a long `PATH` searched on the VM's file server slowed every file
   call. They can also be given outright with `new/2`.
 
+  The library reads no environment: the host app hands the paths in. On this machine they can be
+  the store paths devenv exports as `CAF_TMUX`, `CAF_DTACH`, `CAF_CLAUDE`, `CAF_GIT` and `CAF_GH`
+  (see `devenv.nix`). A remote host has its own programs, so `find/3` looks them up there, with
+  that host's shell, over ssh.
+
       iex> host = CodingAgentFramework.Host.local("laptop")
       iex> {:ok, programs} = CodingAgentFramework.Programs.new(host, %{tmux: "/usr/bin/tmux"})
       iex> CodingAgentFramework.Programs.fetch(programs, :tmux)

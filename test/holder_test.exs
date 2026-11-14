@@ -26,7 +26,7 @@ defmodule CodingAgentFramework.HolderTest do
 
   test "never removes or replaces a live socket", %{holder: h} = ctx do
     {child, _master} = hold!(ctx, "alpha")
-    assert {:refused, {:live, "alpha"}} = Holder.hold(h, "alpha", ["/bin/cat"])
+    assert {:refused, {:live, "alpha"}} = Holder.hold(h, "alpha", [program!(:cat)])
     assert {:refused, {:live, "alpha"}} = Holder.remove_stale(h, "alpha")
     assert {:ok, :live} = Holder.state(h, "alpha")
     assert alive?(child)
@@ -47,11 +47,11 @@ defmodule CodingAgentFramework.HolderTest do
   test "an absent socket, a bad name and a long path are named", %{holder: h} do
     assert {:ok, :absent} = Holder.state(h, "nobody")
     assert {:refused, {:absent, "nobody"}} = Holder.remove_stale(h, "nobody")
-    assert {:refused, {:bad_name, "../x"}} = Holder.hold(h, "../x", ["/bin/cat"])
+    assert {:refused, {:bad_name, "../x"}} = Holder.hold(h, "../x", [program!(:cat)])
     long = String.duplicate("a", 64)
 
     assert {:refused, {:socket_path_too_long, _}} =
-             Holder.hold(%{h | dir: "/" <> long}, long, ["/bin/cat"])
+             Holder.hold(%{h | dir: "/" <> long}, long, [program!(:cat)])
 
     assert {:ok, []} = Holder.list(h)
   end
@@ -72,8 +72,11 @@ defmodule CodingAgentFramework.HolderTest do
   # Holds the stand-in and waits for its pids; ends both when the test ends.
   defp hold!(%{holder: h, dir: dir}, name) do
     pids = Path.join(dir, "#{name}-#{System.unique_integer([:positive])}.pids")
-    script = ~S(echo "$$ $PPID" > "$0.tmp" && mv "$0.tmp" "$0"; exec /bin/cat)
-    assert {:ok, _socket} = Holder.hold(h, name, ["/bin/sh", "-c", script, pids])
+
+    script =
+      ~s(echo "$$ $PPID" > "$0.tmp" && #{program!(:mv)} "$0.tmp" "$0"; exec #{program!(:cat)})
+
+    assert {:ok, _socket} = Holder.hold(h, name, [program!(:sh), "-c", script, pids])
     assert {:ok, text} = await(fn -> File.read(pids) end)
     [child, master] = text |> String.split() |> Enum.map(&String.to_integer/1)
 

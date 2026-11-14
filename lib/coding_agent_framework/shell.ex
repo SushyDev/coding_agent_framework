@@ -7,9 +7,9 @@ defmodule CodingAgentFramework.Shell do
   its pid and the outcome is unknown. A non-zero exit is not a refusal here: the caller reads the
   status, since only it knows what the program's exit means.
 
-      iex> host = CodingAgentFramework.Host.local("laptop")
-      iex> CodingAgentFramework.Shell.run(host, "/bin/echo", ["hi"], timeout: 5_000)
-      {:ok, %{status: 0, output: "hi\\n"}}
+      host = CodingAgentFramework.Host.local("laptop")
+      CodingAgentFramework.Shell.run(host, "/bin/echo", ["hi"], timeout: 5_000)
+      #=> {:ok, %{status: 0, output: "hi\\n"}}
 
   Outcomes:
 

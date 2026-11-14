@@ -6,6 +6,8 @@ defmodule CodingAgentFramework.Model.CheckModelTest do
   """
   use ExUnit.Case, async: true
 
+  import CodingAgentFramework.TestHost
+
   @moduletag :model
   # TLC takes about a minute for every fast configuration; the bound leaves room for a loaded
   # machine and still ends a hung run.
@@ -14,11 +16,10 @@ defmodule CodingAgentFramework.Model.CheckModelTest do
   @root Path.expand("../..", __DIR__)
 
   test "every fast TLC configuration passes" do
-    assert System.find_executable("tlc"),
-           "tlc is not on the PATH; run the tests inside devenv: devenv shell -- mix test"
+    script = Path.join(@root, "bin/check-model")
 
     {output, status} =
-      System.cmd(Path.join(@root, "bin/check-model"), ["all"], cd: @root, stderr_to_stdout: true)
+      System.cmd(program!(:bash), [script, "all"], cd: @root, stderr_to_stdout: true)
 
     assert status == 0, "bin/check-model all exited #{status}:\n#{output}"
   end

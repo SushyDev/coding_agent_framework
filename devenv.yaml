@@ -1,7 +1,13 @@
-# devenv 2.x: the framework's toolchain (see devenv.nix).
+# devenv 2.x: the framework's toolchain (see devenv.nix). devenv.lock pins each input.
 inputs:
   nixpkgs:
     url: github:NixOS/nixpkgs/nixpkgs-unstable
+  # Format and spelling checks before a commit (git-hooks in devenv.nix).
+  git-hooks:
+    url: github:cachix/git-hooks.nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
 # Claude Code is unfree; only it is permitted, not every unfree package.
 nixpkgs:
   permittedUnfreePackages:
