@@ -122,3 +122,22 @@ steps. Read it in the order of a start:
 `onTime`, `ends` and `wrongKills` are ghosts: they record what happened, for the invariants, and
 the framework never reads them. `RunningOnlyIfLive` is a step property: the step that writes
 `"running"` writes it only for a live process its file names.
+
+## `Intake.tla`
+
+Hook events into the framework, and a held `PermissionRequest`. It has two halves that share
+only the restarts.
+
+- Events: `Posted` is Claude Code's post, refused while the framework is down; posting one id
+  twice is a duplicate. `Stored` writes the row (`rows`), then `Acked` answers 200. `AckedFirst`
+  and `StoredLate` are the broken order, under `AckBeforeStore` only.
+- Dialogs, numbered, open one at a time. `DialogOpens` shows the dialog and posts its hook
+  (`hook` is `"waiting"`, and `conn` is the open request). `HoldStored` writes the row `"held"`.
+  `AnswerAsked(m, h)` is an answer meant for dialog `m` taking hold `h`; the design needs
+  `h = m`. `AnswerWritten` is the response on the request, which a waiting hook reads (`heard`).
+  `AnswerMarked` writes `"answered"`. `HoldExpires` is the framework's own deadline.
+- `PersonAnswers` closes a dialog and leaves its hook waiting. `HookTimesOut` is Claude Code's
+  timeout; its guard says the framework's deadline comes first, so in the design it never
+  happens while a hold is open.
+- `FrameworkDies` cuts every open request, and `HoldSettled` then marks a `"held"` row `"lost"`
+  and an `"answering"` one `"unknown"`.

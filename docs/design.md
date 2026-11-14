@@ -236,6 +236,47 @@ agent of the project may read, wait on, write to and fix a service. A service ha
 worktree, a held process and a log. It never holds a Claude Code session; agents are started as
 delegates.
 
+## Intake
+
+Claude Code posts each hook event once and never retries it, and a post that fails loses that
+event (Claude Code 2.1.322; sources in `docs/build-notes/F-24.md`). `Intake.tla` models this
+section.
+
+- **Transport.** Each account's settings name an `http` hook for each event the framework
+  reads: SessionStart, SessionEnd, Stop, StopFailure, SubagentStart, SubagentStop, Notification,
+  UserPromptSubmit, PermissionRequest and PermissionDenied. Each hook posts to
+  `http://127.0.0.1:<port>/hooks/<account>` on the framework's node, with a secret of the
+  instance's in a header, and sets its own `timeout`. No program on the host takes part, so a
+  held hook is one open request. PreToolUse and PostToolUse are not read: they carry every tool
+  input, and `Transcripts` reads those.
+- **Stored, then acknowledged.** `Intake` writes the event's row, then answers 200 with an empty
+  body. A row is keyed by Claude Code's own ids where the event has them (`session_id` with
+  `tool_use_id`, `prompt_id` or the start's `source`), and a second post of one key writes no
+  second row. A part that reads rows moves its own row forward once, as `Delegates` does.
+- **Lost events.** A post while the framework is down is refused and lost. Each event a part
+  needs has a reader that stands in: a Stop by the transcript's last reply, a SessionEnd by the
+  pid, a SessionStart by the session file.
+- **A held `PermissionRequest`.** `Intake` writes its row "held", with the request's id, and
+  keeps the request open. `answer(agent, dialog, label)` names that id. The row says
+  "answering" before the decision goes out as the response (`hookSpecificOutput.decision`:
+  `{"behavior": "allow"}`, with `updatedPermissions` for "don't ask again", or `{"behavior":
+  "deny", "message": …}`), then "answered". An answer to a row that is not "held" is refused. It
+  never goes to another dialog of the agent, and never becomes typed keys.
+- **Its deadline.** The hook's `timeout` is 600 s, and `Intake` answers an empty body, no
+  decision, at 570 s and marks the row "expired". The dialog stays on the screen for a person.
+  So no answer goes to a request Claude Code no longer reads.
+- **A restart.** The open requests end with the node. Claude Code reads an error, and the dialog
+  stays for a person. After the restart a row still "held" is "lost", and one "answering" is
+  "unknown", since its answer may not have gone out; a view shows both. A dialog whose hold is
+  lost is answered by a person, on the screen or through Remote Control.
+- **A person first.** Claude Code shows the dialog while the hook runs, the first answer closes
+  it, and a person's answer does not end the hook. An answer the hook carries after that is
+  dropped. So `answer` returns `{:ok, :sent}`, and whether the dialog took it is read later: the
+  tool ran, or the transcript shows the refusal.
+- The hooks keep `onFailure` at "continue": a framework that is down never refuses a tool call.
+  SessionEnd hooks share a budget of 1.5 s unless a hook's own `timeout` raises it, so that hook
+  sets 10 s.
+
 ## State that never lags or lies
 
 1. **Tables are the truth.** A PubSub message is a cue to re-read rows by id, never the data.
@@ -312,6 +353,10 @@ only by its own pid and start time; every starting row settles).
 5. **`Stack.tla`**: worktrees, branches, a `gh stack` chain, rebases and squash merges.
    - Invariants: a worktree is on one branch; a layer lands only on its own checks; a rebase never
      loses a commit.
+
+`Intake.tla` (F-24) models "Intake": events stored before they are acknowledged, a duplicate
+stored once, and a held `PermissionRequest` answered at most once, by its hook, only on the
+dialog it names, never after Claude Code's timeout and never by typed keys.
 
 Code emits traces where it can, and a trace spec checks them; a trace cannot show a missing
 guard, so the specs are also reviewed against the code.
