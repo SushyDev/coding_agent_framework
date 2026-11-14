@@ -13,8 +13,8 @@ let
   # exported as CAF_<NAME>; nothing in the tests looks a program up through PATH or /usr/bin.
   #   - tmux, dtach, claude, git, gh: what the framework runs on a host. claude-code is unfree;
   #     devenv.yaml permits only it.
-  #   - sh, bash, rm, mv, env, kill, ps, cat, tail, echo, sleep, true: the POSIX tools the tests and
-  #     scripts call.
+  #   - sh, bash, rm, mv, env, kill, ps, cat, tail, mkdir, mkfifo, echo, sleep, true: the POSIX
+  #     tools the tests and scripts call.
   #   - tlc and java: TLA+ checks of model/tla (bin/check-model). Development only.
   programs = {
     TMUX = lib.getExe pkgs.tmux;
@@ -31,6 +31,8 @@ let
     PS = lib.getExe' pkgs.ps "ps";
     CAT = lib.getExe' pkgs.coreutils "cat";
     TAIL = lib.getExe' pkgs.coreutils "tail";
+    MKDIR = lib.getExe' pkgs.coreutils "mkdir";
+    MKFIFO = lib.getExe' pkgs.coreutils "mkfifo";
     ECHO = lib.getExe' pkgs.coreutils "echo";
     SLEEP = lib.getExe' pkgs.coreutils "sleep";
     TRUE = lib.getExe' pkgs.coreutils "true";

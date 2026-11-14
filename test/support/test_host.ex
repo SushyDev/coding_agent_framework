@@ -23,7 +23,7 @@ defmodule CodingAgentFramework.TestHost do
   def programs(host \\ host(), overrides \\ %{}) do
     paths =
       Map.new(
-        [:tmux, :dtach, :git, :gh, :sh, :rm, :kill, :env, :ps, :cat, :tail],
+        [:tmux, :dtach, :git, :gh, :sh, :rm, :kill, :env, :ps, :cat, :tail, :mkdir, :mkfifo],
         &{&1, program!(&1)}
       )
 
@@ -46,6 +46,8 @@ defmodule CodingAgentFramework.TestHost do
     :ps,
     :cat,
     :tail,
+    :mkdir,
+    :mkfifo,
     :echo,
     :sleep,
     true,
