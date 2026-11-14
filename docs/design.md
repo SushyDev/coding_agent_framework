@@ -58,9 +58,9 @@ Each part is one OTP process or one pure module, with one job.
 | `Usage` | each account's allowance; picks the account with the most left |
 | `Tmux` | sessions, panes, tags, keys and viewers on one server; a contract with a CLI and a fake |
 | `TmuxSampler` | samples each server's panes and each host's held sockets, and reports a held agent with no viewer |
-| `Holder` | dtach: hold a process, open a viewer, hang up, list a socket's children |
+| `Holder` | dtach: hold a process in a clean environment, open a viewer, list sockets and whether each lives |
 | `ClaudeCLI` | the command line and environment of a session, per role and account |
-| `Registry` | reads Claude Code's `<config>/sessions/*.json` per account and host |
+| `Registry` | reads Claude Code's `<config>/sessions/*.json` per account and host, and so each held agent's pid |
 | `Transcripts` | a session's transcript tail, its chats and its subagents |
 | `Screen` | Claude Code's screen and dialogs, per Claude Code release, from real fixtures |
 | `Intake` | hook events in; holds `PermissionRequest` hooks until answered |
@@ -212,7 +212,9 @@ delegates.
 8. **Freshness is measured.** Each view shows the age of what it shows, and a check flags a
    reader that falls behind.
 
-Each is an invariant of the model, and a property test over generated event sequences.
+Each is a property test over generated event sequences: cues before, after and without their
+rows, malformed rows, and restarts of readers. The `Tracker`'s fold is a pure function, so no
+spec models it; one is written when a bug shows that an order of events needs it.
 
 ## The model
 
@@ -309,9 +311,15 @@ without it.
 - Unset `window-size` after `resize-window`, or the window stays fixed.
 
 **dtach**
-- Run the agent under `dtach -n`, apart from tmux, with `CLAUDECODE`, `CLAUDE_CODE_*` and `TMUX`
-  removed from its environment. When tmux died with the agents inside it, every agent ended
-  mid-turn with its background commands.
+- Run the agent under `dtach -n`, apart from tmux. When tmux died with the agents inside it,
+  every agent ended mid-turn with its background commands.
+- Build a held process's environment from nothing: `env -i` with an explicit list of what it
+  keeps (such as `HOME`, `PATH`, `LANG`, and the account's settings). The same command works
+  locally and over ssh, and nothing leaks in: an inherited `CLAUDECODE`, `CLAUDE_CODE_*` or
+  `TMUX` made the agent act as if it ran inside another session, and over ssh the remote names
+  cannot be listed ahead to remove one by one.
+- dtach does not report the pid of the process it holds. A held agent's pid comes from its
+  session file, which `Registry` reads; whatever ends an agent by pid gets it there.
 - Open a viewer one row short and then grow it: Claude Code doesn't redraw for a viewer that
   attaches at the same size.
 - Reopen a lost viewer once per loss. A viewer that fails leaves the agent running.
@@ -345,6 +353,9 @@ without it.
   after a restart. The check compares `#{pane_id}` with the target as well as the tag: for a
   pane id that does not exist, `if-shell` still runs, with an empty `#{pane_id}`, so the target
   alone does not prove the pane is there.
+- Every tmux command that acts on a kept pane id, a key, a kill or a respawn, goes through that
+  same one-command check, and a send's text and its Enter go out in one command, so the Enter
+  never reaches a pane the text did not.
 - Every pane the framework writes to is tagged with its session as it opens, in the command that
   opens it. An untagged pane is refused, not checked some other way: a check of the pane's
   process cannot run inside the tmux command that sends.
@@ -407,7 +418,7 @@ without it.
    `{host, server}`, built against the model, with contract tests on a real tmux server per test
    VM.
 3. **One host's agents.** `Registry`, `Control` and the `Tracker`'s core, with the state rules as
-   property tests.
+   property tests. `Control` came first, as its own unit.
 
 Then `Move.tla` and `Mover`, `Delegate.tla` and `Delegates`, `Team.tla` with `Grants`,
 `Mailbox`, `Services` and the agent tools, `Stack.tla` and `Stacks`, the LiveView components,
