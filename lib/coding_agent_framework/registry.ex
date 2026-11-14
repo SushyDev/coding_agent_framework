@@ -42,6 +42,7 @@ defmodule CodingAgentFramework.Registry do
   @timeout 10_000
   @mark "\0caf-file\0"
   # One listing and every file's bytes, each after a marker no JSON text holds (a raw NUL).
+  # `$2` is the host's cat, by its path from `Programs`, so nothing is looked up through PATH.
   @read ~S"""
   d="$1/sessions"
   if [ ! -d "$d" ]; then printf 'nodir'; exit 0; fi
@@ -49,12 +50,12 @@ defmodule CodingAgentFramework.Registry do
   for f in "$d"/*.json; do
     [ -f "$f" ] || continue
     printf '\0caf-file\0%s\0' "${f##*/}"
-    cat -- "$f" 2>/dev/null || printf '\0caf-unreadable'
+    "$2" -- "$f" 2>/dev/null || printf '\0caf-unreadable'
   done
   """
 
   @doc """
-  Starts a `Registry`. Options: `programs:` (the host's `Programs`, naming its sh, env and ps),
+  Starts a `Registry`. Options: `programs:` (the host's `Programs`, naming its sh, env, ps and cat),
   `account:` (its name), `config_dir:` (the account's config directory on the host), `db:`
   (this instance's SQLite path), and optionally `notify:` (a function of one cue), `timeout:`
   (ms per shell run, default 10 s) and `interval:` (ms between reads; without it, reads happen
@@ -92,7 +93,7 @@ defmodule CodingAgentFramework.Registry do
     %Programs{host: host} = programs = Keyword.fetch!(opts, :programs)
     account = Keyword.fetch!(opts, :account)
 
-    with {:ok, paths} <- Programs.take(programs, [:sh, :env, :ps]),
+    with {:ok, paths} <- Programs.take(programs, [:sh, :env, :ps, :cat]),
          {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)) do
       cache =
         case Table.rows(db, host.name, account) do
@@ -137,9 +138,9 @@ defmodule CodingAgentFramework.Registry do
   end
 
   defp read_now(state) do
-    case Shell.run(state.host, state.programs.sh, ["-c", @read, "sh", state.dir],
-           timeout: state.timeout
-         ) do
+    args = ["-c", @read, "sh", state.dir, state.programs.cat]
+
+    case Shell.run(state.host, state.programs.sh, args, timeout: state.timeout) do
       {:ok, %{status: 0, output: "nodir"}} -> write(state, %{})
       {:ok, %{status: 0, output: "dir" <> rest}} -> write(state, files(rest))
       {:ok, %{status: status, output: out}} -> {{:unknown, {:sh, status, out}}, state}

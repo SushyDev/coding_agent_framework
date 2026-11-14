@@ -21,7 +21,9 @@ defmodule CodingAgentFramework.TestHost do
 
   @doc "`host`'s `Programs`, each path from devenv; `overrides` replace some of them."
   def programs(host \\ host(), overrides \\ %{}) do
-    paths = Map.new([:tmux, :dtach, :git, :gh, :sh, :rm, :kill, :env, :ps], &{&1, program!(&1)})
+    paths =
+      Map.new([:tmux, :dtach, :git, :gh, :sh, :rm, :kill, :env, :ps, :cat], &{&1, program!(&1)})
+
     {:ok, programs} = Programs.new(host, Map.merge(paths, overrides))
     programs
   end
