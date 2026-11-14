@@ -196,27 +196,59 @@ and one with no closing event ends after a bound.
 
 ## Headless delegates
 
-A delegate runs `claude -p --input-format stream-json --output-format stream-json
---replay-user-messages --session-id <id>` (Claude Code 2.1.322; each flag checked against each
-pinned release). This removes screen reading for delegates:
+A delegate runs `claude -p --verbose --input-format stream-json --output-format stream-json
+--replay-user-messages --permission-prompts host --session-id <id>`, and a resume names
+`--resume <id>` in place of `--session-id`, which Claude Code refuses beside it (Claude Code
+2.1.322; each flag checked against each pinned release; without `--verbose` it exits at once;
+sources in `docs/build-notes/F-31.md`). `Stream.tla` models this section. This removes screen
+reading for delegates:
 
-- **Held, apart from the framework.** dtach holds a small wrapper that keeps the delegate's
-  stdin pipe open, so the framework's restarts never close it, and appends its stdout to an
-  event log in the framework home. The framework writes messages into the pipe and reads the
-  log from a persisted offset, so the delegate outlives the framework as an interactive agent
-  does.
-- **Writes are messages, not keys.** A report, a message or an answer goes in as one JSON line
-  on stdin, through the host's one writer. No typing, no input box and no Ctrl-C: an interrupt
-  is the stream's own interrupt request.
-- **Turns are events.** A turn ends with the stream's `result` event. A message goes in only
-  after a turn has ended, as any write.
-- **Delivered once, seen.** With `--replay-user-messages`, each message the delegate took comes
-  back on its stdout. The sending mark of "The delegate protocol" is settled from the log: the
-  message is delivered when its replay is there.
-- **Permissions.** With `--permission-prompts host`, a permission request comes as an event and
-  is answered by a line on stdin, by its request id. It is held, answered once and given up as
-  "Intake" says for a hook. A delegate's hooks are not needed for its own turns; its events
-  are the log.
+- **Held, apart from the framework.** Each delegate has a directory
+  `<home>/streams/<session>/` with a FIFO `in`, made with `mkfifo` before the start. dtach holds
+  this wrapper, run by `sh` in the clean environment, with the directory and the command:
+
+  ```sh
+  d=$1; shift
+  exec 3<>"$d/in"
+  exec "$@" <&3 3<&- >>"$d/events.jsonl" 2>>"$d/stderr.log"
+  ```
+
+  The delegate's stdin is the FIFO opened read-write, so it holds a writer itself and its stdin
+  never reaches end of file: the framework's restarts and its writers' exits never end it.
+  `exec` makes `claude` the held process, so its pid is the one its session file names.
+- **Events are read from an offset.** `Stream` reads only whole lines of `events.jsonl` (a line
+  without its newline is still being written), and handles each event and saves the offset in
+  one transaction, so no event is handled twice or skipped across restarts. A resume appends to
+  the same log.
+- **Writes are lines, claimed once.** A message, an answer, an interrupt or an end is one JSON
+  line. Its row is marked first, then the line goes to a spool file `out/<uuid>.json`, and the
+  host's one writer starts `sh -c 'exec 3<"$1" && rm "$1" && exec cat <&3 >"$2"' sh <spool>
+  <fifo>`. Removing the spool is the claim: once it is gone, the line goes in whole, by a process
+  that does not end with the framework; while it is there, nothing of it went in, and after a
+  restart the writer starts it again. So a line is never written twice and never cut, whatever
+  its length. One message line is in flight per delegate at a time, and every other line is kept
+  within the pipe's atomic size (512 bytes on macOS; a deny's message is cut to fit), so lines
+  written together never mix. A line that does not parse ends the session, so each is built by
+  one encoder.
+- **Turns are events.** A turn ends with exactly one `result`, whose `user_message_uuids` name
+  the messages it took. A message goes in only after its delegate's turn has ended: one written
+  during a turn joins it.
+- **Delivered once, seen.** A message carries a uuid of the framework's, and with
+  `--replay-user-messages` it comes back with that uuid and `isReplay`. Its sending mark is
+  settled by the replay. When the delegate exits, a message with no replay in the log, read to
+  its end, is delivered if the transcript holds its uuid and undelivered otherwise; it is never
+  written again blind.
+- **Permissions.** A request is a `control_request` with `subtype` `can_use_tool`, its
+  `request_id`, `tool_name`, `input` and `tool_use_id`. Its row is held, then answering, then
+  answered when the answer's replay is in the log; a `control_cancel_request` with its id
+  cancels it, and the delegate's exit loses it. Unlike a hook, it waits in Claude Code through a
+  restart of the framework, so a held row stays answerable. A delegate's hooks are not needed
+  for its own turns; its events are the log.
+- **Ending.** An `end_session` request ends the session and cuts a running turn, so it goes in
+  only after the report is delivered and the turn has ended. `Sessions` sees the exit by the
+  pid; one that does not exit within the stop's deadline is ended by `Recoveries`.
+- **Rate limits.** A `rate_limit_event` carries the account's windows, among them
+  `seven_day.utilization` (0 to 1) and `resetsAt`, as the status line does.
 - **No trust dialog.** A headless session skips the workspace trust dialog.
 - **Its viewer** is a tmux pane that renders the event log as readable text, opened and
   reopened like any viewer. It writes nothing.
