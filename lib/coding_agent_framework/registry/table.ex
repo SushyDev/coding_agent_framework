@@ -60,18 +60,20 @@ defmodule CodingAgentFramework.Registry.Table do
   """
   @spec rows(db, String.t(), String.t()) :: :unread | {:ok, map}
   def rows(db, host, account) do
+    with {:ok, read} <- last_read(db, host, account) do
+      sql = "SELECT #{cols()} FROM registry_sessions WHERE host = ?1 AND account = ?2 ORDER BY id"
+      {:ok, Map.put(read, :rows, db |> query(sql, [host, account]) |> Enum.map(&to_row/1))}
+    end
+  end
+
+  @doc "When a `{host, account}` was last read and what that read counted; `:unread` before."
+  @spec last_read(db, String.t(), String.t()) :: :unread | {:ok, map}
+  def last_read(db, host, account) do
     reads = "SELECT read_at, files, problems FROM registry_reads WHERE host = ?1 AND account = ?2"
 
     case query(db, reads, [host, account]) do
-      [] ->
-        :unread
-
-      [[read_at, files, problems]] ->
-        sql =
-          "SELECT #{cols()} FROM registry_sessions WHERE host = ?1 AND account = ?2 ORDER BY id"
-
-        rows = db |> query(sql, [host, account]) |> Enum.map(&to_row/1)
-        {:ok, %{read_at: read_at, files: files, problems: problems, rows: rows}}
+      [] -> :unread
+      [[read_at, files, problems]] -> {:ok, %{read_at: read_at, files: files, problems: problems}}
     end
   end
 
@@ -148,8 +150,18 @@ defmodule CodingAgentFramework.Registry.Table do
   defp dump(:alive, alive), do: Atom.to_string(alive)
   defp dump(_, value), do: value
 
-  defp load(:extra, text), do: JSON.decode!(text)
-  defp load(:alive, text), do: String.to_existing_atom(text)
+  # Total over what a column holds: a value this writer did not write (a broken file, an older
+  # or other writer) loads as nil or :unknown, so one such row never stops a read of the others.
+  defp load(:extra, text) when is_binary(text) do
+    case JSON.decode(text) do
+      {:ok, map} when is_map(map) -> map
+      _ -> nil
+    end
+  end
+
+  defp load(:extra, _), do: nil
+  defp load(:alive, text) when text in ~w(live replaced gone unknown), do: String.to_atom(text)
+  defp load(:alive, _), do: :unknown
   defp load(_, value), do: value
 
   # The writer's own statements: an error here is a bug or a broken file, so it raises and the

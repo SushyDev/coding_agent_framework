@@ -157,15 +157,26 @@ defmodule CodingAgentFramework.Shell do
     end
   end
 
+  # A killed program's exit status could arrive after a `Port.close/1`, in the caller's mailbox,
+  # which a GenServer does not expect. So the status of the program just killed is awaited, for
+  # a bounded time, and the port is closed only when it does not come.
   defp close(port) do
-    Port.close(port)
-
     receive do
-      {^port, _} -> :ok
+      {^port, {:exit_status, _}} -> :ok
+    after
+      1_000 -> Port.close(port)
+    end
+
+    drain(port)
+  catch
+    :error, :badarg -> drain(port)
+  end
+
+  defp drain(port) do
+    receive do
+      {^port, _} -> drain(port)
     after
       0 -> :ok
     end
-  catch
-    :error, :badarg -> :ok
   end
 end
