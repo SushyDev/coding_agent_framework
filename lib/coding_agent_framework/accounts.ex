@@ -35,7 +35,7 @@ defmodule CodingAgentFramework.Accounts do
   """
 
   alias CodingAgentFramework.Accounts.Account
-  alias CodingAgentFramework.Programs
+  alias CodingAgentFramework.{Intake, Programs}
 
   @enforce_keys [:home, :names]
   defstruct [:home, :names]
@@ -86,8 +86,10 @@ defmodule CodingAgentFramework.Accounts do
   Creates the account's config directory and writes its framework files from `data`:
   `:settings` (a map of Claude Code settings), `:hooks` (the settings' `hooks` map) and
   `:mcp_servers` (a map of server name to its config) and `:programs` (the host's `Programs`,
-  for the status line command, which needs its sh and cat), each optional. A file is written whole
-  to a temporary name and renamed, so a launch never reads half of one.
+  for the status line command, which needs its sh and cat) and `:intake` (`%{port: port, secret:
+  secret}`: the http hooks of `CodingAgentFramework.Intake.hooks/3`, after any `:hooks` of the
+  same event), each optional. A file is written whole to a temporary name and renamed, so a
+  launch never reads half of one.
 
   Returns `{:ok, account}` (see `ready/2`), or `{:refused, reason}` for an unknown account or
   data that is not JSON, or `{:unknown, {path, reason}}` when a write fails.
@@ -95,7 +97,7 @@ defmodule CodingAgentFramework.Accounts do
   @spec prepare(t, String.t(), map) :: {:ok, Account.t()} | {:refused, term} | {:unknown, term}
   def prepare(%__MODULE__{} = accounts, name, data) when is_map(data) do
     settings = Map.get(data, :settings, %{})
-    hooks = Map.get(data, :hooks)
+    hooks = intake_hooks(Map.get(data, :hooks), name, Map.get(data, :intake))
     settings = if hooks, do: Map.put(settings, "hooks", hooks), else: settings
 
     with {:ok, dir} <- config_dir(accounts, name),
@@ -162,6 +164,13 @@ defmodule CodingAgentFramework.Accounts do
     rescue
       e -> {:refused, {:not_json, Exception.message(e)}}
     end
+  end
+
+  # Intake's http hooks go after any the caller gives for the same event.
+  defp intake_hooks(hooks, _name, nil), do: hooks
+
+  defp intake_hooks(hooks, name, %{port: port, secret: secret}) do
+    Map.merge(hooks || %{}, Intake.hooks(port, name, secret), fn _, own, ours -> own ++ ours end)
   end
 
   defp status_line(_accounts, _name, _dir, nil), do: {:ok, %{settings: %{}, dirs: [], files: []}}
