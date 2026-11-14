@@ -26,7 +26,7 @@ defmodule CodingAgentFramework.Tmux.Fake do
   @spec start_link(keyword) :: Agent.on_start()
   def start_link(opts) do
     Keyword.fetch!(opts, :key)
-    Agent.start_link(fn -> %{up: false, next: 0, panes: %{}, received: %{}} end)
+    Agent.start_link(fn -> %{up: false, next: 0, starts: 0, panes: %{}, received: %{}} end)
   end
 
   @doc "A handle on a started fake."
@@ -54,7 +54,7 @@ defmodule CodingAgentFramework.Tmux.Fake do
   @impl true
   def new_session(%__MODULE__{} = s, session, argv, opts) do
     call(s, fn st ->
-      st = if st.up, do: st, else: %{st | up: true, next: 0}
+      st = if st.up, do: st, else: %{st | up: true, next: 0, starts: st.starts + 1}
 
       if Enum.any?(st.panes, fn {_, p} -> p.session == session end) do
         {{:refused, {:session_exists, session}}, st}
@@ -75,7 +75,7 @@ defmodule CodingAgentFramework.Tmux.Fake do
       st ->
         panes =
           for {pane, p} <- Enum.sort_by(st.panes, fn {id, _} -> pane_number(id) end),
-              do: %{pane: pane, session: p.session, tag: p.tag}
+              do: %{pane: pane, session: p.session, tag: p.tag, start: "fake@#{st.starts}"}
 
         {{:ok, panes}, st}
     end)

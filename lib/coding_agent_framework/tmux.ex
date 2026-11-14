@@ -28,7 +28,9 @@ defmodule CodingAgentFramework.Tmux do
   @type pane :: String.t()
   @type session :: String.t()
   @type input :: {:text, String.t()} | {:line, String.t()} | {:keys, [String.t()]}
-  @type pane_info :: %{pane: pane, session: session, tag: session | nil}
+  @type pane_info ::
+          %{pane: pane, session: session, tag: session | nil, start: String.t()}
+          | {:malformed, String.t()}
 
   @doc "The `{host, server}` that names this server."
   @callback key(server) :: key
@@ -41,7 +43,11 @@ defmodule CodingAgentFramework.Tmux do
   @callback new_session(server, session, argv :: [String.t()], opts :: keyword) ::
               {:ok, pane} | {:refused, term} | {:unknown, term}
 
-  @doc "Every pane on the server, with its session and its tag."
+  @doc """
+  Every pane on the server, with its session, its tag and `start`, which names this start of the
+  server (the CLI's is `<server pid>@<start time>`): a new start is a new set of pane ids. A line
+  that cannot be read is `{:malformed, line}`.
+  """
   @callback list_panes(server) :: {:ok, [pane_info]} | {:refused, term} | {:unknown, term}
 
   @doc """

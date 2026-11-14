@@ -89,7 +89,9 @@ defmodule CodingAgentFramework.Tmux.CLI do
 
   @impl true
   def list_panes(%__MODULE__{tag: tag} = s) do
-    format = Enum.join(["\#{pane_id}", "\#{session_name}", "\#{#{tag}}"], "\t")
+    # The server's pid and start time name this start of it: start_time alone is in seconds.
+    format =
+      Enum.join(["\#{pane_id}", "\#{pid}@\#{start_time}", "\#{session_name}", "\#{#{tag}}"], "\t")
 
     case run(s, ["list-panes", "-a", "-F", format]) do
       {:ok, %{status: 0, output: out}} ->
@@ -206,9 +208,16 @@ defmodule CodingAgentFramework.Tmux.CLI do
   # An argument goes inside tmux single quotes, where nothing is special but the quote itself.
   defp quote_arg(arg), do: "'" <> String.replace(arg, "'", ~S('\'')) <> "'"
 
+  # Total over the line: one tmux could not have printed is kept, whole, as a problem.
   defp pane_info(line) do
-    [pane, session, tag] = String.split(line, "\t", parts: 3)
-    %{pane: pane, session: session, tag: if(tag == "", do: nil, else: tag)}
+    with [pane, start, session, tag] <- String.split(line, "\t", parts: 4),
+         [pid, time] <- String.split(start, "@"),
+         {_, ""} <- Integer.parse(pid),
+         {_, ""} <- Integer.parse(time) do
+      %{pane: pane, session: session, tag: if(tag == "", do: nil, else: tag), start: start}
+    else
+      _ -> {:malformed, line}
+    end
   end
 
   defp remove_socket(%__MODULE__{} = s, path) do
