@@ -35,34 +35,44 @@ defmodule CodingAgentFramework.Usage do
   alias CodingAgentFramework.Usage.{Reading, Table}
 
   @doc """
-  The account among `among` whose current reading has the most allowance left at `now` (Unix
-  seconds): the least share used, and the first name on a tie. An account with no reading, a
-  reading of another shape, or one whose window has reset is not known, so it is never picked;
-  with none known the answer is `{:refused, :none_known}`. Pure and total over `readings`, a
-  map of account to reading as `readings/2` gives it.
+  The account among `among` with the most allowance left at `now` (Unix seconds), judged by
+  `Reading.status/3` with `max_age` seconds (default 6 hours): the least share used among
+  current and assumed readings, a current one before an assumed one at the same share, then the
+  first name. A reading whose window has reset is assumed at 0 %, however old. An account with no
+  reading, one of another shape, or one not reset but older than `max_age` is not known, so it is
+  never picked; with none known the answer is `{:refused, :none_known}`.
+  Pure and total over `readings`, a map of account to reading as `readings/2` gives it.
 
-      iex> readings = %{"a" => %{used: 80.0, resets_at: 200}, "b" => %{used: 30.0, resets_at: 200},
-      ...>              "c" => %{used: 5.0, resets_at: 50}, "d" => :junk}
+      iex> old = 1_000_000
+      iex> readings = %{"a" => %{used: 80.0, resets_at: 200, seen_at: old},
+      ...>              "b" => %{used: 30.0, resets_at: 200, seen_at: old},
+      ...>              "c" => %{used: 5.0, resets_at: 50, seen_at: old}, "d" => :junk}
       iex> CodingAgentFramework.Usage.pick(readings, ["a", "b", "c", "d"], 100)
+      {:ok, "c"}
+      iex> CodingAgentFramework.Usage.pick(readings, ["a", "b", "d"], 100)
       {:ok, "b"}
+      iex> CodingAgentFramework.Usage.pick(readings, ["a", "b"], 100 + 6 * 3600 + 900)
+      {:ok, "a"}
+      iex> later = %{"a" => %{used: 80.0, resets_at: 99_999, seen_at: old}}
+      iex> CodingAgentFramework.Usage.pick(later, ["a"], 100 + 6 * 3600 + 900)
+      {:refused, :none_known}
   """
-  @spec pick(map, [term], integer) :: {:ok, term} | {:refused, :none_known}
-  def pick(readings, among, now \\ System.os_time(:second))
+  @spec pick(map, [term], integer, integer) :: {:ok, term} | {:refused, :none_known}
+  def pick(readings, among, now \\ System.os_time(:second), max_age \\ Reading.max_age())
 
-  def pick(readings, among, now) when is_map(readings) and is_list(among) do
+  def pick(readings, among, now, max_age) when is_map(readings) and is_list(among) do
     known =
       for account <- Enum.uniq(among),
-          reading <- [Map.get(readings, account)],
-          Reading.current?(reading, now),
-          do: {reading.used, account}
+          {kind, used} <- [Reading.status(Map.get(readings, account), now, max_age)],
+          do: {used, if(kind == :current, do: 0, else: 1), account}
 
     case Enum.min(known, fn -> nil end) do
       nil -> {:refused, :none_known}
-      {_, account} -> {:ok, account}
+      {_, _, account} -> {:ok, account}
     end
   end
 
-  def pick(_, _, _), do: {:refused, :none_known}
+  def pick(_, _, _, _), do: {:refused, :none_known}
 
   @doc """
   Starts `Usage`. Options: `accounts:` (an `Accounts`), `host:` (this host's name, for the

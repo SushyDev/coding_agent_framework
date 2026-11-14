@@ -117,7 +117,10 @@ defmodule CodingAgentFramework.TrackerTest do
     if keep, do: s, else: %{s | cues: List.delete(s.cues, cue)}
   end
 
-  defp step({:bogus, cue}, s), do: Tracker.cue(s.tracker, cue) && s
+  defp step({:bogus, cue}, s) do
+    :ok = Tracker.cue(s.tracker, cue)
+    s
+  end
 
   # Cues sent to a stopped Tracker are lost; the new one reads every table in full.
   defp step(:restart_tracker, s) do
