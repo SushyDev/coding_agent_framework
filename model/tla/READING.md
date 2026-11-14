@@ -142,3 +142,33 @@ only the restarts.
   happens while a hold is open.
 - `FrameworkDies` cuts every open request, and `HoldSettled` then marks a `"held"` row `"lost"`
   and an `"answering"` one `"unknown"`.
+
+## `Stream.tla`
+
+A headless delegate's stdin and event log, with restarts of the framework between any two steps.
+It has three actors: Claude Code, the claim commands on disk, and the framework.
+
+- Claude Code reads `pipe`, its stdin, a line at a time. `TakeMsg` takes a whole message line,
+  starts a turn (`turns` is what the transcript holds) and begins writing its replay; `tail` is
+  the event it is writing, and `EventWritten` finishes the line in `log`. `TurnEnds` writes the
+  `result`. `RequestOpens` asks a permission during a turn; `TakeAnswer` settles it and replays
+  the answer, and `DropAnswer` drops an answer to a request no longer pending. `Malformed` is a
+  cut line followed by another: the session ends. `Exit` ends it from outside, and a line it was
+  writing stays `Cut`.
+- A message's write: `Mark` writes the row `"writing"` once the turn has ended (`idle`, set by
+  a handled `result`). `Claim` spools the line and starts its claim command (`spool` is
+  `"claimed"`: the spool file is gone). `CatWrites` is that command writing the whole line; a
+  restart does not stop it. `WriteBegins` and `WriteEnds` are the framework writing a line
+  itself, under `WriteInFramework` only.
+- `Read` handles the next whole event and saves `offset` in one step; the two Offset Breaks
+  split it, with `ReadFinished` as the second half. `Handle` says what each event writes:
+  a replay delivers its message, a `result` sets `idle`, a request is held, an answer's replay
+  answers it, a cancel cancels it.
+- `AnswerAsked(a, h)` is an answer meant for request `a` taking hold `h`; the design needs
+  `h = a`. `AnswerClaimed` writes the answer's line, which fits the pipe's atomic size.
+- `ExitSeen` is the framework finding the pid gone. With the log read to its end, a message
+  still `"writing"` is settled by the transcript, and a held request is lost.
+
+`mine`, `begun`, `wmem` and `reading` are memory, cleared by `FrameworkDies`; the tables and the
+disk stay. `handled`, `written`, `awritten`, `partialRead`, `malformed`, `intoRunning` and
+`wrong` are ghosts for the invariants.
