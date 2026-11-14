@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Checks the TLA+ specs in model/tla with TLC. TLC comes from devenv:
+#
+#   devenv shell -- bin/check-model                every fast configuration, model/tla/*.cfg
+#   devenv shell -- bin/check-model all            the same
+#   devenv shell -- bin/check-model slow           every slow configuration, model/tla/slow/*.cfg
+#   devenv shell -- bin/check-model Agent_TwoAgents       one configuration, by its name
+#   devenv shell -- bin/check-model slow/Agent_Restarts   one slow configuration
+#
+# The fast configurations finish in under 30 s each and run in the test gate. The slow ones are
+# run by hand, and their times go in the build note.
+#
+# A configuration `<Spec>_<Scenario>.cfg` checks `<Spec>.tla`. One named `Break_<Spec>_<Bug>.cfg`
+# sets the spec's `Break` constant to a deliberate bug: it passes only when TLC reports an
+# invariant or a property violated (exit 12 or 13), which shows the check catches that bug. A
+# parse error, a constant left unset, a deadlock or a Java error fails it. Every other
+# configuration passes only when TLC finds no violation.
+#
+# Each prints its states, depth and seconds. TLC's output is in _build/tlc/<name>.out.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+specs="$root/model/tla"
+out="$root/_build/tlc"
+what="${1:-all}"
+
+if ! command -v tlc >/dev/null; then
+  echo "check-model: 'tlc' not found; run it inside devenv: devenv shell -- bin/check-model" >&2
+  exit 2
+fi
+
+configs=()
+case "$what" in
+  all) configs=("$specs"/*.cfg) ;;
+  slow) configs=("$specs"/slow/*.cfg) ;;
+  -h | --help)
+    echo "usage: bin/check-model [all | slow | <configuration> | slow/<configuration>]"
+    exit 0
+    ;;
+  *) configs=("$specs/$what.cfg") ;;
+esac
+
+for cfg in "${configs[@]}"; do
+  if [[ ! -f "$cfg" ]]; then
+    echo "check-model: no configuration $cfg" >&2
+    exit 2
+  fi
+done
+
+mkdir -p "$out"
+failed=0
+
+for cfg in "${configs[@]}"; do
+  name="$(basename "$cfg" .cfg)"
+  # Break_Agent_NoPaneCheck.cfg and Agent_TwoAgents.cfg both check Agent.tla.
+  spec="${name#Break_}"
+  spec="${spec%%_*}"
+  relative="${cfg#"$specs"/}"
+  echo "== $name ($spec.tla)"
+
+  status=0
+  started=$(date +%s)
+  (cd "$specs" &&
+    tlc -workers auto -cleanup -noGenerateSpecTE -metadir "$out/states-$name" \
+      -config "$relative" "$spec.tla") >"$out/$name.out" 2>&1 || status=$?
+  seconds=$(($(date +%s) - started))
+
+  # The counts from TLC's own summary.
+  states=$(grep -Eo '^[0-9,]+ states generated, [0-9,]+ distinct states found' "$out/$name.out" |
+    tail -1 || true)
+  depth=$(grep -Eo 'depth of the complete state graph search is [0-9]+' "$out/$name.out" |
+    grep -Eo '[0-9]+$' || true)
+  echo "   ${states:-no state count}; depth ${depth:-?}; ${seconds} s"
+
+  if [[ "$name" == Break_* ]]; then
+    # TLC's exit status: 12 an invariant or action property violated, 13 a temporal property
+    # violated, 0 none; 11 a deadlock, 150 a parse error, 151 a configuration error, 153 and 255
+    # a Java or TLC error. Only a violation TLC reports is the counterexample.
+    if [[ $status -eq 0 ]]; then
+      echo "   FAILED: a deliberately broken design passed; the check does not catch it"
+      failed=1
+    elif [[ $status -eq 12 || $status -eq 13 ]] &&
+      grep -qE "is violated|were violated" "$out/$name.out"; then
+      grep -E "is violated|were violated" "$out/$name.out" | head -1 | sed 's/^/   /'
+      echo "   ok: TLC found the counterexample (trace in _build/tlc/$name.out)"
+    else
+      echo "   FAILED: TLC exited $status with no violation; see _build/tlc/$name.out"
+      failed=1
+    fi
+  elif [[ $status -ne 0 ]]; then
+    grep -E "Error:|is violated|were violated" "$out/$name.out" | head -3 | sed 's/^/   /' || true
+    echo "   FAILED: TLC exited $status; see _build/tlc/$name.out"
+    failed=1
+  else
+    echo "   ok"
+  fi
+done
+
+exit $failed

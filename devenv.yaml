@@ -1,0 +1,8 @@
+# devenv 2.x: the framework's toolchain (see devenv.nix).
+inputs:
+  nixpkgs:
+    url: github:NixOS/nixpkgs/nixpkgs-unstable
+# Claude Code is unfree; only it is permitted, not every unfree package.
+nixpkgs:
+  permittedUnfreePackages:
+    - claude-code
