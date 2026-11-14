@@ -1,0 +1,196 @@
+defmodule CodingAgentFramework.Usage do
+  @moduledoc """
+  Each account's weekly allowance: the share used and when it resets, and `pick/3`, the account
+  with the most left.
+
+  The framework reads no credential and calls no API for it. Claude Code hands its `statusLine`
+  command a JSON text with the account's rate limits (`CodingAgentFramework.Usage.Reading`), and
+  the command `CodingAgentFramework.Accounts.prepare/3` writes copies that text to
+  `Accounts.usage_file/2`, `<home>/usage/<account>.json`. `Usage` reads those files and writes
+  what it reads to `CodingAgentFramework.Usage.Table`, which it alone writes. A reading is as old
+  as the last session on that account that drew its status line; `seen_at` is the file's change
+  time in ms, so a view shows its age.
+
+  The caller's supervision tree starts one `Usage` per instance, with no name. Each read writes
+  only the rows that changed, in one transaction. A file that cannot be parsed keeps its row's
+  last good reading, if any, and names the problem in `problem`; a file that is gone has its row
+  deleted. After a write that changed rows, or the first read, it calls `notify` with a cue per
+  account, naming the topic and row ids, never the data: `%{topic: "usage:<host>:<account>",
+  ids: ids}`. It must not raise.
+
+      iex> {:ok, accounts} = CodingAgentFramework.Accounts.new(CodingAgentFramework.TestHost.test_dir(), ["work"])
+      iex> db = Path.join(accounts.home, "usage.db")
+      iex> {:ok, usage} = CodingAgentFramework.Usage.start_link(accounts: accounts, host: "laptop", db: db)
+      iex> CodingAgentFramework.Usage.readings(usage)
+      :unread
+      iex> {:ok, _} = CodingAgentFramework.Usage.read(usage)
+      iex> {:ok, %{readings: readings}} = CodingAgentFramework.Usage.readings(usage)
+      iex> CodingAgentFramework.Usage.pick(readings, ["work"])
+      {:refused, :none_known}
+  """
+
+  use GenServer
+
+  alias CodingAgentFramework.Accounts
+  alias CodingAgentFramework.Usage.{Reading, Table}
+
+  @doc """
+  The account among `among` whose current reading has the most allowance left at `now` (Unix
+  seconds): the least share used, and the first name on a tie. An account with no reading, a
+  reading of another shape, or one whose window has reset is not known, so it is never picked;
+  with none known the answer is `{:refused, :none_known}`. Pure and total over `readings`, a
+  map of account to reading as `readings/2` gives it.
+
+      iex> readings = %{"a" => %{used: 80.0, resets_at: 200}, "b" => %{used: 30.0, resets_at: 200},
+      ...>              "c" => %{used: 5.0, resets_at: 50}, "d" => :junk}
+      iex> CodingAgentFramework.Usage.pick(readings, ["a", "b", "c", "d"], 100)
+      {:ok, "b"}
+  """
+  @spec pick(map, [term], integer) :: {:ok, term} | {:refused, :none_known}
+  def pick(readings, among, now \\ System.os_time(:second))
+
+  def pick(readings, among, now) when is_map(readings) and is_list(among) do
+    known =
+      for account <- Enum.uniq(among),
+          reading <- [Map.get(readings, account)],
+          Reading.current?(reading, now),
+          do: {reading.used, account}
+
+    case Enum.min(known, fn -> nil end) do
+      nil -> {:refused, :none_known}
+      {_, account} -> {:ok, account}
+    end
+  end
+
+  def pick(_, _, _), do: {:refused, :none_known}
+
+  @doc """
+  Starts `Usage`. Options: `accounts:` (an `Accounts`), `host:` (this host's name, for the
+  topics), `db:` (this instance's SQLite path), and optionally `notify:` (a function of one cue)
+  and `interval:` (ms between reads; without it, reads happen only on `read/2`).
+  """
+  @spec start_link(keyword) :: GenServer.on_start()
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+  @doc """
+  Reads every account's file now. Returns `{:ok, %{readings: n, problems: n, ids: ids}}`, where
+  `ids` are the `{account, id}` of the rows written.
+  """
+  @spec read(GenServer.server(), keyword) :: {:ok, map} | {:refused, term} | {:unknown, term}
+  def read(usage, opts \\ []), do: call(usage, :read, opts)
+
+  @doc """
+  `:unread` before the first read; then when it last read and each account's reading by name:
+  `used`, `resets_at`, `seen_at` and `problem`. An account with no file has no entry.
+  """
+  @spec readings(GenServer.server(), keyword) ::
+          :unread | {:ok, map} | {:refused, term} | {:unknown, term}
+  def readings(usage, opts \\ []), do: call(usage, :readings, opts)
+
+  defp call(usage, request, opts) do
+    timeout = Keyword.get(opts, :timeout, 10_000)
+
+    try do
+      GenServer.call(usage, request, timeout)
+    catch
+      :exit, {:noproc, _} -> {:refused, :no_usage}
+      :exit, {:timeout, _} -> {:unknown, {:timeout, timeout}}
+      :exit, {reason, _} -> {:unknown, {:exit, reason}}
+    end
+  end
+
+  @impl true
+  def init(opts) do
+    with {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)) do
+      cache =
+        case Table.rows(db) do
+          :unread -> %{}
+          {:ok, %{rows: rows}} -> by_account(rows)
+        end
+
+      state = %{
+        accounts: Keyword.fetch!(opts, :accounts),
+        host: Keyword.fetch!(opts, :host),
+        db: db,
+        cache: cache,
+        notify: Keyword.get(opts, :notify, fn _ -> :ok end),
+        interval: Keyword.get(opts, :interval)
+      }
+
+      if state.interval, do: send(self(), :tick)
+      {:ok, state}
+    else
+      {:refused, reason} -> {:stop, reason}
+    end
+  end
+
+  @impl true
+  def handle_call(:read, _from, state) do
+    {reply, state} = read_now(state)
+    {:reply, reply, state}
+  end
+
+  def handle_call(:readings, _from, state) do
+    reply =
+      with {:ok, %{read_at: at, rows: rows}} <- Table.rows(state.db) do
+        {:ok, %{read_at: at, readings: by_account(rows)}}
+      end
+
+    {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_info(:tick, state) do
+    {_, state} = read_now(state)
+    Process.send_after(self(), :tick, state.interval)
+    {:noreply, state}
+  end
+
+  defp read_now(state) do
+    rows =
+      for name <- state.accounts.names,
+          {:ok, path} <- [Accounts.usage_file(state.accounts, name)],
+          row <- [row(path, state.cache[name])],
+          row != :none,
+          into: %{},
+          do: {name, row}
+
+    changes =
+      for({name, row} <- rows, state.cache[name] != row, do: {:put, name, row}) ++
+        for name <- Map.keys(state.cache), not Map.has_key?(rows, name), do: {:delete, name}
+
+    {:ok, %{ids: ids, first: first}} =
+      Table.write(state.db, changes, System.os_time(:millisecond))
+
+    for name <- state.accounts.names,
+        mine <- [for({^name, id} <- ids, do: id)],
+        mine != [] or first,
+        do: state.notify.(%{topic: "usage:#{state.host}:#{name}", ids: mine})
+
+    problems = Enum.count(rows, fn {_, row} -> row.problem end)
+    {{:ok, %{readings: map_size(rows), problems: problems, ids: ids}}, %{state | cache: rows}}
+  end
+
+  # The file's change time first, then its bytes, so the age shown is never younger than them.
+  # Both calls bypass the VM's file server.
+  defp row(path, cached) do
+    with {:ok, info} <- :prim_file.read_file_info(path, [{:time, :posix}]),
+         {:ok, bytes} <- :prim_file.read_file(path) do
+      case Reading.parse(bytes) do
+        {:ok, reading} ->
+          Map.merge(reading, %{seen_at: File.Stat.from_record(info).mtime * 1000, problem: nil})
+
+        {:malformed, reason} ->
+          %{last_good(cached) | problem: inspect(reason)}
+      end
+    else
+      {:error, :enoent} -> :none
+      {:error, reason} -> %{last_good(cached) | problem: inspect({:unreadable, reason})}
+    end
+  end
+
+  defp last_good(nil), do: %{used: nil, resets_at: nil, seen_at: nil, problem: nil}
+  defp last_good(row), do: row
+
+  defp by_account(rows), do: Map.new(rows, &{&1.account, Map.take(&1, Table.data_columns())})
+end

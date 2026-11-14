@@ -59,7 +59,7 @@ Each part is one OTP process or one pure module, with one job.
 | `Shell` | the only module that starts programs, locally or over ssh |
 | `Programs` | the absolute path of tmux, dtach, claude, git, gh, sh, rm, kill, env, ps and cat on each host; no other part names a fixed path |
 | `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` |
-| `Usage` | each account's allowance; picks the account with the most left |
+| `Usage` | each account's weekly allowance, from what Claude Code hands its status line; picks the account with the most left |
 | `Tmux` | sessions, panes, tags, keys and viewers on one server; a contract with a CLI and a fake |
 | `TmuxSampler` | samples each server's panes and each host's held sockets, and reports a held agent with no viewer |
 | `Holder` | dtach: hold a process in a clean environment, open a viewer, list sockets and whether each lives |
