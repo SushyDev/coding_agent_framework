@@ -1,0 +1,315 @@
+# coding_agent_framework: design
+
+This is the plan the framework is built from. Nothing in it is built yet; each part names the
+order it comes in, at the end.
+
+## What it is
+
+A framework for running and supervising Claude Code agents on one or more machines and Claude
+accounts. It gives a project:
+
+- **parent sessions**: the main chats, one per project, which move from one account to another
+  with one press and keep their name and Remote Control;
+- **delegates**: full Claude Code sessions a parent starts through the framework, on the account
+  with the most allowance left, each in its own git worktree and tmux session, which report back
+  to their parent and may use Claude Code's own subagents to delegate further;
+- **tmux, dtach and git worktrees** working together, with every tmux object keyed by its host
+  and server;
+- **stacked pull requests** (`gh stack`) for the work of a parent and its delegates;
+- **state for LiveView frontends** that never lags, drifts or shows what is not so;
+- **a TLA+ model**, checked with TLC, of how tmux, dtach, Claude Code, worktrees and stacks fit
+  together, written before the code it models.
+
+A project declares itself as data: its repository, trunk, branch pattern, setup commands and the
+checks its stacks must pass. The framework holds no project's policy.
+
+## The words
+
+- **Host**: a machine agents run on, reached locally or over ssh. Each host has one tmux server
+  of the framework's, one dtach directory and one writer.
+- **Server**: a tmux server, `tmux -L <name>`, always named with its host, `{host, server}`.
+  Pane ids are unique only within one server, and a restarted server counts from `%0` again.
+- **Account**: a Claude account, known by its config directory.
+- **Project**: a repository and its trunk, declared as data.
+- **Parent session**: a project's main chat. It has Remote Control, keeps its name, is never
+  archived, and moves between accounts with one press.
+- **Delegate**: a Claude Code session a parent starts through the framework, held by dtach, with
+  Remote Control off, in its own worktree. Inside it, Claude Code's own subagents delegate
+  further; the framework counts them.
+- **Viewer**: the tmux pane that shows a held agent (`dtach -a`). It can die, be reopened or be
+  opened twice; the agent runs on.
+
+## The parts
+
+Each part is one OTP process or one pure module, with one job.
+
+| Part | Job |
+|---|---|
+| `Hosts` | the hosts, how each is reached, and its shell |
+| `Shell` | the only module that starts programs, locally or over ssh |
+| `Programs` | the absolute path of tmux, dtach, claude, git and gh on each host |
+| `Accounts` | the Claude accounts, by config directory |
+| `Usage` | each account's allowance; picks the account with the most left |
+| `Tmux` | sessions, panes, tags, keys and viewers on one server; a contract with a CLI and a fake |
+| `TmuxSampler` | samples each server's panes |
+| `Holder` | dtach: hold a process, open a viewer, hang up, list a socket's children |
+| `ClaudeCLI` | the command line and environment of a session, per role and account |
+| `Registry` | reads Claude Code's `<config>/sessions/*.json` per account and host |
+| `Transcripts` | a session's transcript tail, its chats and its subagents |
+| `Screen` | Claude Code's screen and dialogs, per Claude Code release, from real fixtures |
+| `Intake` | hook events in; holds `PermissionRequest` hooks until answered |
+| `Control` | the one writer per host: send, answer, interrupt, stop, respawn |
+| `Sessions` | start, resume, stop and move sessions; their worktrees |
+| `Mover` | drains a session and moves it between accounts |
+| `Parents` | each project's parent session, and what it holds |
+| `Delegates` | the delegate protocol: start, report, resume, end |
+| `Stacks` | the worktrees and `gh stack` chains of a parent's work |
+| `Tracker` | the state views read: the fold of every reader |
+| `Recoveries` | detect a broken state, act once per state, verify |
+| `MCP` | tools for agents: `ask`, `start_delegate`, `reload` |
+| `Ghostty` | opens or focuses a session's terminal window |
+
+The LiveView side is a library of components over the `Tracker`, with one example app.
+
+## Multiple hosts
+
+Every key carries its host from the first part built:
+
+- one tmux server, one dtach directory, one `Registry` reader and one `Control` per host, under
+  a supervisor per host;
+- a pane is `{host, server, pane_id}`, a held agent `{host, socket}`;
+- a remote host is reached over ssh through `Shell`. The framework's node runs on one host and
+  reads the others; a node per host is not needed for the first version.
+
+## Parent sessions
+
+A parent holds, and a view shows:
+
+- its account, host, tmux session and pane, and whether its MCP tools are connected;
+- its worktrees, its own and each delegate's: branch, ahead and behind its trunk, unpushed
+  commits, uncommitted files, and the pull request and stack each is part of;
+- the statuses of its delegates and their subagents, its open questions and its stack's checks;
+- the command that attaches to its tmux session, and Open in Ghostty.
+
+**Moving it** is one press:
+1. Drain: at 90 % of the weekly allowance, no new delegates or background commands start.
+2. Wait for the turn to end and the input box to be empty.
+3. Copy the transcript to the other account.
+4. End the session, then resume it there with `--resume`, its name and Remote Control on.
+5. Ignore the old process's `SessionEnd` that arrives after the new one started.
+
+Its chat is never archived.
+
+## The delegate protocol
+
+A parent calls `start_delegate(project, branch, model, brief)`. The framework:
+
+1. checks the project, the branch name, the cap of delegates, and any worktree already at the
+   path (reused only when clean, on the branch, and held by no live agent);
+2. picks the account with the most allowance left;
+3. adds the worktree and runs the project's declared setup in it, so a fresh worktree has its
+   dependencies and build state before the first command;
+4. starts `claude` held by dtach, with Remote Control off and the brief as its first prompt,
+   tags its pane with the session, project and unit, and confirms it started;
+5. delivers its last message to the parent when it stops. When a restart lost the stop event,
+   it delivers the transcript's last reply instead, and ends the delegate only after delivery;
+6. resumes it once when it is killed, and reports a second kill instead of retrying.
+
+The answers are explicit: `started{…}` or `refused{reason}`, then `finished`, `killed` or
+`late_report`. A delegate's subagents count for tokens and as work still going for its parent,
+and one with no closing event ends after a bound.
+
+## State that never lags or lies
+
+1. **Tables are the truth.** A PubSub message is a cue to re-read rows by id, never the data.
+2. **One writer.** One process writes each table, and one `Control` per host writes panes.
+3. **Unread is not empty.** A reader that has not read yet answers `:unread`, and a view says so,
+   rather than "nothing runs".
+4. **Total folds.** Sorts and folds take nil timestamps and unknown shapes; one malformed row
+   never crashes the tracker. A tracker that crashes at boot takes every view down with it.
+5. **Liveness from hooks and processes**, never from what a pane shows. A process that left with
+   no `SessionEnd` is found by its pid.
+6. **Topics.** Each message names its topic, and a view reloads only what it reads, at most once a
+   second.
+7. **Offsets persist.** Each reader resumes where it stopped, rather than reading every log again
+   at boot.
+8. **Freshness is measured.** Each view shows the age of what it shows, and a check flags a
+   reader that falls behind.
+
+Each is an invariant of the model, and a property test over generated event sequences.
+
+## The model
+
+Specs live in `model/tla/`, checked with TLC:
+
+- configurations are named `<Spec>_<Scenario>.cfg`;
+- small constant sets and `Max*` counters bound the search;
+- a `Break` constant's every value other than `"none"` is a named deliberate bug, and a `Break_*`
+  configuration must find it (TLC exits 12 or 13), so each check is shown to catch something;
+- `bin/check-model` runs them; the fast configurations run in the test gate, and the slow ones
+  by hand, each with its time recorded;
+- each spec's header names the modules it models and what it leaves abstract.
+
+Four specs, in this order:
+
+1. **`Agent.tla`**: one host's tmux server, sessions, panes, dtach sockets, Claude Code processes
+   and viewers. Events: the server dies and restarts, so pane ids restart at `%0`; a viewer dies
+   or is reopened; a process exits or is killed; a socket goes stale; a write is asked.
+   - Invariants: a write reaches only the pane of the session it names; an agent outlives its tmux
+     server; a pane id kept from before a restart never reaches another agent's pane; no two
+     processes hold one socket.
+   - Liveness: a lost viewer is reopened; a held agent with no viewer is seen.
+2. **`Move.tla`**: two accounts, a parent with background commands and delegates, a limit.
+   Events: drain, turn end, copy, respawn, a late `SessionEnd`, the limit reached.
+   - Invariants: a session runs on one account at a time; nothing that runs is lost; a late
+     `SessionEnd` never ends the moved session.
+   - Liveness: a drained parent moves.
+3. **`Delegate.tla`**: a parent, its delegates and restarts of the framework.
+   - Invariants: each report is delivered once; a delegate ends only after its report is
+     delivered.
+   - Liveness: every finished delegate's report arrives.
+4. **`Stack.tla`**: worktrees, branches, a `gh stack` chain, rebases and squash merges.
+   - Invariants: a worktree is on one branch; a layer lands only on its own checks; a rebase never
+     loses a commit.
+
+Code emits traces where it can, and a trace spec checks them; a trace cannot show a missing
+guard, so the specs are also reviewed against the code.
+
+## Open in Ghostty
+
+It works like a link with a target, and the framework keeps no state for it. It uses Ghostty's
+AppleScript (Ghostty 1.4.0, macOS):
+
+1. Find the session's tmux clients: `tmux -L <server> list-clients -t =<session> -F
+   '#{client_tty}'`.
+2. If a Ghostty terminal has one of those ttys (Ghostty 1.4.0 terminals expose `tty`), `focus` it
+   and `activate`: the press reuses that window.
+3. Otherwise run `new window with configuration`, whose `command` is `tmux -L <server> attach -t
+   =<session>`. This is the first press, or the first after the window closed, since closing it
+   ends that tmux client.
+
+Two other ways don't work:
+- `ghostty +new-window` is not supported on macOS.
+- `open -na Ghostty.app --args -e …` starts a separate Ghostty app, whose windows AppleScript
+  cannot see.
+
+Each failure is its own answer, and none falls back to another way:
+- Automation not granted (Apple Events error -1743): a one-time macOS prompt for the
+  framework's process.
+- More than one Ghostty instance running.
+- The session missing (`has-session` is checked first).
+- A press from a phone, which opens the window on the Mac.
+
+Ghostty's AppleScript is a preview, so the framework pins the Ghostty version it was tested
+with. A session on another host opens as `ssh -t <host> tmux -L <server> attach -t =<session>`.
+
+## Rules learned from running such a system
+
+These come from running agents this way for weeks. Each states the rule and what went wrong
+without it.
+
+**tmux**
+- Use a tmux server of the framework's own on each host, and never write to, kill or respawn on
+  any other. Pane ids repeat between servers, so a stray server's `%3` can reach a real pane.
+- Accept a pane target only in the form `%<n>`. tmux reads an empty target as the current pane:
+  an empty lookup once typed a message into the supervising agent's own input box.
+- Escape every argument: one ending in `;` ends the tmux command, and the next runs as a new one.
+- Remove the socket file after `kill-server`. Name test servers with the test VM's pid, and remove
+  a dead VM's servers by their exact socket path, never by a pattern.
+- Claim per pane, not per session: one session can hold several Claude Code panes.
+- Never find a process by its name. macOS cuts command names to 15 characters, and packagers
+  rename binaries.
+- Unset `window-size` after `resize-window`, or the window stays fixed.
+
+**dtach**
+- Run the agent under `dtach -n`, apart from tmux, with `CLAUDECODE`, `CLAUDE_CODE_*` and `TMUX`
+  removed from its environment. When tmux died with the agents inside it, every agent ended
+  mid-turn with its background commands.
+- Open a viewer one row short and then grow it: Claude Code doesn't redraw for a viewer that
+  attaches at the same size.
+- Reopen a lost viewer once per loss. A viewer that fails leaves the agent running.
+
+**Claude Code**
+- Set each account's config directory, and every per-account setting, explicitly at each launch.
+  Setting `CLAUDE_CONFIG_DIR` to the default directory logs Claude Code out, and Remote Control
+  otherwise follows each account's own default.
+- Answer dialogs through the held `PermissionRequest` hook, not by typing keys. Confirm a typed
+  answer by its label, never by its position in the menu.
+- Keep real screen fixtures for each Claude Code release, and fail with a named reason.
+- Make every reader total over the shapes it reads: a prompt holding an image is a list, not a
+  string.
+- Don't trust `background_tasks`: it listed shells as running a day after they ended.
+- Hooks are not a complete event stream: a refused permission fires no hook, and a hook's `cwd`
+  doesn't follow `cd`.
+- The MCP bridge reads stdin as binary and reconnects by itself: one character above code point
+  255 once killed it silently.
+- Don't use `--bg` sessions: they die with their daemon and fork on resume.
+
+**Writes to panes**
+- Each write ends sent, refused or unknown, and an unknown write is never resent: tmux exits 0
+  for a key that reached nothing.
+- Before a write, check that the pane belongs to the session the write names: its tag, or the
+  session's process in the pane.
+- Type only when the turn has ended and the input box is empty: two Ctrl-C presses exit Claude
+  Code.
+- An answer a hook holds goes to the hook, so a pane check that fails under load never stands in
+  its way.
+
+**Moves and limits**
+- Drain before a limit, not after it: a move after the limit lost eleven background commands.
+- At a hard limit, only the parent's own state counts.
+- Never edit a file Claude Code rewrites from memory: its next write erases the change.
+- Stop background sessions by id with `claude stop`.
+
+**Delegates**
+- A report survives restarts, and a delegate ends only after its report is delivered.
+- Resume a killed delegate once, and report a second kill.
+- Count a parent's delegates as work still going for it.
+- Never kill by pattern. Kill only processes you started, by pid.
+- `git stash` is shared by every worktree of a repository, so delegates never use it.
+- `git worktree add -b` at a taken path fails but leaves the new branch behind.
+
+**State for views**
+- One malformed row (a nil timestamp) once crashed the tracker at every boot and took every
+  view down: folds must be total.
+- Liveness from hooks and pids: an agent waiting two hours on its subagents read idle on its
+  screen.
+
+**Tests**
+- Keep command lookups and file calls off the VM's one file server. Looking up programs through
+  a long `PATH` slowed every file call many times over and caused most suite timeouts under load.
+- Wait on announced events, never fixed sleeps.
+- Give each checkout its own database and each test VM its own temporary directory:
+  `System.unique_integer/1` is unique only inside one VM.
+- Liveness checks fail safe: a `ps` that fails to start under load must not count a live VM as
+  dead.
+- A test of a cleanup cleans only a directory of its own: one that swept the real tmux socket
+  directory with fake liveness ended every other suite's servers.
+- No test reaches the real Claude Code.
+
+**Stacks and queues**
+- Store the landing queue durably.
+- Calibrate load gates on the machine that runs them.
+- Judge each layer of a stack on its own checks, not only the top's.
+- Never run monitoring code on the service's node, and make a restarted step adopt or end the
+  work it started.
+
+**Tokens**
+- Enforce model routing: a large model reading logs is the most common waste.
+- Never block on a question to the user.
+- Find a red run's cause before running it again.
+- Count delegates' tokens; the session cache doesn't include them.
+
+## Order of the first units
+
+1. **The repository and `Agent.tla`.** The project skeleton (Elixir, OTP, SQLite, devenv with
+   tmux, dtach, claude, gh and the TLA+ tools), `bin/check-model`, and `Agent.tla` with its
+   `Break_*` configurations, before any code it models.
+2. **The host layer.** `Shell`, `Programs`, `Tmux` (contract, CLI and fake) and `Holder`, keyed by
+   `{host, server}`, built against the model, with contract tests on a real tmux server per test
+   VM.
+3. **One host's agents.** `Registry`, `Control` and the `Tracker`'s core, with the state rules as
+   property tests.
+
+Then `Move.tla` and `Mover`, `Delegate.tla` and `Delegates`, `Stack.tla` and `Stacks`, the
+LiveView components, and Ghostty.
