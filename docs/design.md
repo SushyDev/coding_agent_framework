@@ -13,6 +13,8 @@ accounts. It gives a project:
 - **delegates**: full Claude Code sessions a parent starts through the framework, on the account
   with the most allowance left, each in its own git worktree and tmux session, which report back
   to their parent and may use Claude Code's own subagents to delegate further;
+- **agents that work together**: any agent of a project can message the others, look at them,
+  unstick them, and start, use and fix services, all through one strict set of tools;
 - **tmux, dtach and git worktrees** working together, with every tmux object keyed by its host
   and server;
 - **stacked pull requests** (`gh stack`) for the work of a parent and its delegates;
@@ -36,6 +38,10 @@ checks its stacks must pass. The framework holds no project's policy.
 - **Delegate**: a Claude Code session a parent starts through the framework, held by dtach, with
   Remote Control off, in its own worktree. Inside it, Claude Code's own subagents delegate
   further; the framework counts them.
+- **Service**: a program an agent starts through the framework and keeps running, such as a
+  dev server or a database, held by dtach and owned by one agent at a time.
+- **Claim**: an agent's hold on another agent or a service in one state, taken before a fix, so
+  that only one fix of that state runs.
 - **Viewer**: the tmux pane that shows a held agent (`dtach -a`). It can die, be reopened or be
   opened twice; the agent runs on.
 
@@ -66,7 +72,10 @@ Each part is one OTP process or one pure module, with one job.
 | `Stacks` | the worktrees and `gh stack` chains of a parent's work |
 | `Tracker` | the state views read: the fold of every reader |
 | `Recoveries` | detect a broken state, act once per state, verify; reopens a lost viewer, and so starts a host's tmux server again after it dies |
-| `MCP` | tools for agents: `ask`, `start_delegate`, `reload` |
+| `Mailbox` | messages between agents: stored, delivered once, in order per sender |
+| `Services` | programs agents start and keep: held, owned, read, written to, restarted |
+| `Grants` | decides whether a caller may act on a target; holds a fix's claim on it |
+| `MCP` | the agent tools ("Agents working together"); each call is checked by `Grants` |
 | `Ghostty` | opens or focuses a session's terminal window |
 
 The LiveView side is a library of components over the `Tracker`, with one example app.
@@ -119,6 +128,73 @@ The answers are explicit: `started{…}` or `refused{reason}`, then `finished`, 
 `late_report`. A delegate's subagents count for tokens and as work still going for its parent,
 and one with no closing event ends after a bound.
 
+## Agents working together
+
+Every agent of a project, parent or delegate, can talk to the others, see how they are doing,
+fix one that is stuck, and run services it needs. It does this only through the framework's
+tools. The tools are strict in how they act and loose in what they let an agent do.
+
+**Strict in how:**
+- A tool names its target by what the framework holds: an agent's name or a service's name.
+  Never a tmux target, a pid, a socket path or a raw command for tmux.
+- Each call acts through the part that owns the action: a key goes through `Control`'s checked
+  write, a held process through `Holder`, a dialog through the hook `Intake` holds.
+- Each call answers `{:ok, …}`, `{:refused, reason}` or `{:unknown, reason}`, with a finite
+  timeout. A tool never retries, and never waits longer than the timeout it was given.
+- The framework knows who calls. Each agent's MCP server starts with that agent's identity, and
+  the agent cannot choose it.
+- Every call is written to a table before it acts and again with its outcome. A view shows the
+  log, and the target's parent sees every action on its agents.
+
+**Loose in what:**
+- Any agent of a project may act on any other agent and any service of the same project. One
+  project's agents never reach another project's.
+- A service is any program, with any arguments, run in the caller's worktree or another
+  worktree of the project.
+
+**Who may act** (`Grants`):
+- Reading (look, transcript, logs, lists) is open within the project.
+- Messages are open within the project.
+- A fix (interrupt, answer, respawn, resume, stop) takes a claim on the target first. The claim
+  is for the target's current state, the way `Recoveries` acts once per state. A second fixer
+  of the same state is refused with `{:claimed, by}`. Two agents never fight over one stuck
+  agent, and a fix that did not help shows as the same state still claimed.
+- No agent may stop or move a parent session. Only a person moves a parent, with one press.
+- An agent may not fix itself. A stuck agent cannot be relied on to see that it is stuck.
+
+**The tools:**
+
+| Tool | What it does |
+|---|---|
+| `agents()` | the project's agents: name, role, parent, state (working, waiting, idle, stuck, gone), and what it waits on |
+| `message(to, text)` | stores a message and delivers it to the target when its turn has ended; answers `queued{id}`, then the sender learns `delivered` |
+| `look(agent)` | the agent's screen as text, its dialog if one is open, and its last transcript lines |
+| `transcript(agent, from)` | the agent's transcript from an offset |
+| `interrupt(agent)` | one `C-c` to the agent's pane, under a claim |
+| `answer(agent, dialog, label)` | answers an open dialog through its held hook, by label, under a claim |
+| `respawn(agent)` / `resume(agent)` | starts a dead or wedged agent again with `--resume`, once per state, under a claim |
+| `stop(agent)` | ends a delegate after its report is delivered, under a claim |
+| `service_start(name, argv, opts)` | holds `argv` by dtach in a worktree, with a viewer in a tmux session (the caller's own or a named one) and its output in a log |
+| `services()` | the project's services: name, owner, state, viewer, restarts |
+| `service_logs(name, from)` | the service's output from an offset |
+| `service_send(name, input)` | text or keys to the service, through `Control`'s checked write |
+| `service_wait(name, until, timeout)` | waits for a line matching a pattern, a port that listens, or an exit; answers which, or `{:unknown, :timeout}` |
+| `service_restart(name)` / `service_stop(name)` | restarts or ends a service, under a claim |
+| `ask(question)` | asks a person, without blocking |
+| `start_delegate(…)` | as in "The delegate protocol" |
+| `reload()` | reloads the caller's own tools |
+
+**Messages** are stored before they are sent, so a restart of the framework does not lose
+them. One goes in as a turn only when the target's turn has ended and its input box is empty,
+the same rule as any write. A message to a busy agent waits in order. A message to a gone agent
+is refused. A message to a delegate that has ended goes to its parent instead, and says so.
+
+**Services** belong to the agent that started them. When the owner ends, its services end too,
+unless it handed them to another agent with `service_start(…, keep: true)` or to its parent. Any
+agent of the project may read, wait on, write to and fix a service. A service has a name, a
+worktree, a held process and a log. It never holds a Claude Code session; agents are started as
+delegates.
+
 ## State that never lags or lies
 
 1. **Tables are the truth.** A PubSub message is a cue to re-read rows by id, never the data.
@@ -152,7 +228,7 @@ Specs live in `model/tla/`, checked with TLC:
   by hand, each with its time recorded;
 - each spec's header names the modules it models and what it leaves abstract.
 
-Four specs, in this order:
+Five specs, in this order:
 
 1. **`Agent.tla`**: one host's tmux server, sessions, panes, dtach sockets, Claude Code processes
    and viewers. Events: the server dies and restarts, so pane ids restart at `%0`; a viewer dies
@@ -170,7 +246,14 @@ Four specs, in this order:
    - Invariants: each report is delivered once; a delegate ends only after its report is
      delivered.
    - Liveness: every finished delegate's report arrives.
-4. **`Stack.tla`**: worktrees, branches, a `gh stack` chain, rebases and squash merges.
+4. **`Team.tla`**: agents of one project, their messages, claims and services, and restarts of
+   the framework. Events: a message is sent, a turn ends, an agent sticks, dies or ends, two
+   agents try to fix one target, a service's owner ends.
+   - Invariants: a message is delivered at most once and in order per sender, and only into an
+     ended turn; at most one claim holds a target's state; no agent fixes itself or stops a
+     parent; no call reaches another project; a service has one owner, or none once it ended.
+   - Liveness: a message to a live agent is delivered; a claim is released or its fix verified.
+5. **`Stack.tla`**: worktrees, branches, a `gh stack` chain, rebases and squash merges.
    - Invariants: a worktree is on one branch; a layer lands only on its own checks; a rebase never
      loses a commit.
 
@@ -326,5 +409,6 @@ without it.
 3. **One host's agents.** `Registry`, `Control` and the `Tracker`'s core, with the state rules as
    property tests.
 
-Then `Move.tla` and `Mover`, `Delegate.tla` and `Delegates`, `Stack.tla` and `Stacks`, the
-LiveView components, and Ghostty.
+Then `Move.tla` and `Mover`, `Delegate.tla` and `Delegates`, `Team.tla` with `Grants`,
+`Mailbox`, `Services` and the agent tools, `Stack.tla` and `Stacks`, the LiveView components,
+and Ghostty.
