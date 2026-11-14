@@ -1,7 +1,7 @@
 defmodule CodingAgentFramework.Programs do
   @moduledoc """
   The absolute path of every program the framework runs on one host: tmux, dtach, claude, git
-  and gh, and the POSIX tools sh, rm, kill, env and ps.
+  and gh, and the POSIX tools sh, rm, kill, env, ps and cat.
 
   The paths are found once, by the host's own shell (`command -v`), so no later call looks a
   program up through a `PATH`: a long `PATH` searched on the VM's file server slowed every file
@@ -28,10 +28,11 @@ defmodule CodingAgentFramework.Programs do
   @enforce_keys [:host, :paths]
   defstruct [:host, :paths]
 
-  @type name :: :tmux | :dtach | :claude | :git | :gh | :sh | :rm | :kill | :env | :ps
+  @type name ::
+          :tmux | :dtach | :claude | :git | :gh | :sh | :rm | :kill | :env | :ps | :cat
   @type t :: %__MODULE__{host: Host.t(), paths: %{name => String.t()}}
 
-  @names [:tmux, :dtach, :claude, :git, :gh, :sh, :rm, :kill, :env, :ps]
+  @names [:tmux, :dtach, :claude, :git, :gh, :sh, :rm, :kill, :env, :ps, :cat]
   # The one fixed path in the library: `find/3` needs a shell to find the rest, sh included.
   @sh "/bin/sh"
   @find ~S"""
