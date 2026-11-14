@@ -7,8 +7,10 @@ defmodule CodingAgentFramework.Tmux.CLI do
   by tests so each owns its server). The server reads `config` when it starts, `/dev/null` by
   default: it is the framework's own, and a user's config could change its indexes or options.
 
-      iex> host = CodingAgentFramework.Host.local("laptop")
-      iex> server = CodingAgentFramework.Tmux.CLI.new(host, {:name, "agents"}, "/usr/bin/tmux")
+      iex> host = CodingAgentFramework.Host.local("laptop", "/run/bin/kill")
+      iex> paths = %{tmux: "/run/bin/tmux", rm: "/run/bin/rm"}
+      iex> {:ok, programs} = CodingAgentFramework.Programs.new(host, paths)
+      iex> {:ok, server} = CodingAgentFramework.Tmux.CLI.new(programs, {:name, "agents"})
       iex> CodingAgentFramework.Tmux.key(server)
       {"laptop", "agents"}
 
@@ -26,24 +28,32 @@ defmodule CodingAgentFramework.Tmux.CLI do
 
   @behaviour CodingAgentFramework.Tmux
 
-  alias CodingAgentFramework.{Host, Shell}
+  alias CodingAgentFramework.{Host, Programs, Shell}
 
-  @enforce_keys [:host, :server, :tmux]
-  defstruct [:host, :server, :tmux, tag: "@caf_session", config: "/dev/null", timeout: 5_000]
+  @enforce_keys [:host, :server, :tmux, :rm]
+  defstruct [:host, :server, :tmux, :rm, tag: "@caf_session", config: "/dev/null", timeout: 5_000]
 
   @type t :: %__MODULE__{
           host: Host.t(),
           server: {:name, String.t()} | {:socket, String.t()},
           tmux: String.t(),
+          rm: String.t(),
           tag: String.t(),
           config: String.t(),
           timeout: pos_integer
         }
 
-  @doc "A server handle. Nothing runs until a call."
-  @spec new(Host.t(), {:name, String.t()} | {:socket, String.t()}, String.t(), keyword) :: t
-  def new(%Host{} = host, server, tmux, opts \\ []) do
-    struct!(__MODULE__, [host: host, server: server, tmux: tmux] ++ opts)
+  @doc """
+  A server handle on the host of `programs`, which must name its tmux and rm (`kill_server/1`
+  removes the socket file with it). Nothing runs until a call. Options: `:tag`, `:config`,
+  `:timeout`.
+  """
+  @spec new(Programs.t(), {:name, String.t()} | {:socket, String.t()}, keyword) ::
+          {:ok, t} | {:refused, {:no_program, list}}
+  def new(%Programs{host: host} = programs, server, opts \\ []) do
+    with {:ok, paths} <- Programs.take(programs, [:tmux, :rm]),
+         do:
+           {:ok, struct!(__MODULE__, [host: host, server: server] ++ Map.to_list(paths) ++ opts)}
   end
 
   @impl true
@@ -189,7 +199,7 @@ defmodule CodingAgentFramework.Tmux.CLI do
   end
 
   defp remove_socket(%__MODULE__{} = s, path) do
-    case Shell.run(s.host, "/bin/rm", ["-f", "--", path], timeout: s.timeout) do
+    case Shell.run(s.host, s.rm, ["-f", "--", path], timeout: s.timeout) do
       {:ok, %{status: 0}} -> {:ok, :killed}
       {:ok, %{status: status, output: out}} -> {:unknown, {:socket_left, path, status, out}}
       other -> other

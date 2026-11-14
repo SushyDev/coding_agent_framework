@@ -1,22 +1,26 @@
 defmodule CodingAgentFramework.Programs do
   @moduledoc """
-  The absolute path of tmux, dtach, claude, git and gh on one host.
+  The absolute path of every program the framework runs on one host: tmux, dtach, claude, git
+  and gh, and the POSIX tools sh, rm, kill, env and ps.
 
   The paths are found once, by the host's own shell (`command -v`), so no later call looks a
   program up through a `PATH`: a long `PATH` searched on the VM's file server slowed every file
-  call. They can also be given outright with `new/2`.
+  call. They can also be given outright with `new/2`. `Holder`, `Tmux.CLI` and `Registry` take
+  the paths they run from here.
 
   The library reads no environment: the host app hands the paths in. On this machine they can be
-  the store paths devenv exports as `CAF_TMUX`, `CAF_DTACH`, `CAF_CLAUDE`, `CAF_GIT` and `CAF_GH`
-  (see `devenv.nix`). A remote host has its own programs, so `find/3` looks them up there, with
-  that host's shell, over ssh.
+  the store paths devenv exports as `CAF_<NAME>`, such as `CAF_TMUX` or `CAF_SH` (see
+  `devenv.nix`). A remote host has its own programs, so `find/3` looks them up there, with that
+  host's shell, over ssh.
 
-      iex> host = CodingAgentFramework.Host.local("laptop")
-      iex> {:ok, programs} = CodingAgentFramework.Programs.new(host, %{tmux: "/usr/bin/tmux"})
+      iex> host = CodingAgentFramework.Host.local("laptop", "/run/bin/kill")
+      iex> {:ok, programs} = CodingAgentFramework.Programs.new(host, %{tmux: "/run/bin/tmux"})
       iex> CodingAgentFramework.Programs.fetch(programs, :tmux)
-      {:ok, "/usr/bin/tmux"}
+      {:ok, "/run/bin/tmux"}
       iex> CodingAgentFramework.Programs.fetch(programs, :gh)
       {:refused, {:no_program, :gh}}
+      iex> CodingAgentFramework.Programs.take(programs, [:tmux, :rm, :sh])
+      {:refused, {:no_program, [:rm, :sh]}}
   """
 
   alias CodingAgentFramework.{Host, Shell}
@@ -24,10 +28,11 @@ defmodule CodingAgentFramework.Programs do
   @enforce_keys [:host, :paths]
   defstruct [:host, :paths]
 
-  @type name :: :tmux | :dtach | :claude | :git | :gh
+  @type name :: :tmux | :dtach | :claude | :git | :gh | :sh | :rm | :kill | :env | :ps
   @type t :: %__MODULE__{host: Host.t(), paths: %{name => String.t()}}
 
-  @names [:tmux, :dtach, :claude, :git, :gh]
+  @names [:tmux, :dtach, :claude, :git, :gh, :sh, :rm, :kill, :env, :ps]
+  # The one fixed path in the library: `find/3` needs a shell to find the rest, sh included.
   @sh "/bin/sh"
   @find ~S"""
   for n do
@@ -52,6 +57,9 @@ defmodule CodingAgentFramework.Programs do
 
   @doc """
   Finds `names` with the host's `/bin/sh`. Every name must resolve to an absolute path.
+
+  `/bin/sh` is the only fixed program path in the library: something must find the rest, and
+  POSIX puts a shell there on every host. Every other module runs the paths found here or given.
 
   Returns `{:refused, {:not_found, names}}` naming each one that did not.
   """
@@ -84,6 +92,17 @@ defmodule CodingAgentFramework.Programs do
     case Map.fetch(paths, name) do
       {:ok, path} -> {:ok, path}
       :error -> {:refused, {:no_program, name}}
+    end
+  end
+
+  @doc """
+  The paths of several programs as a map, or one refusal naming every one that is missing.
+  """
+  @spec take(t, [name]) :: {:ok, %{name => String.t()}} | {:refused, {:no_program, [name]}}
+  def take(%__MODULE__{paths: paths}, names) do
+    case Enum.reject(names, &Map.has_key?(paths, &1)) do
+      [] -> {:ok, Map.take(paths, names)}
+      missing -> {:refused, {:no_program, missing}}
     end
   end
 

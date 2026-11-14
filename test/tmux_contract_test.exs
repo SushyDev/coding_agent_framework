@@ -145,7 +145,7 @@ defmodule CodingAgentFramework.TmuxContractTest do
   defp start(:cli) do
     dir = test_dir()
     socket = Path.join(dir, "tmux.sock")
-    server = CLI.new(host(), {:socket, socket}, program!(:tmux))
+    {:ok, server} = CLI.new(programs(), {:socket, socket})
     # The test owns this server; it ends it and its socket file whatever the test did.
     on_exit(fn -> Tmux.kill_server(server) end)
     {:ok, impl: :cli, server: server, dir: dir, socket: socket}

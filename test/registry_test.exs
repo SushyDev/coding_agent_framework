@@ -17,12 +17,11 @@ defmodule CodingAgentFramework.RegistryTest do
     opts =
       Keyword.merge(
         [
-          host: TestHost.host(),
+          programs: TestHost.programs(),
           account: "a",
           config_dir: dir,
           db: Path.join(dir, "registry.db"),
-          notify: &send(me, {:cue, &1}),
-          ps: TestHost.program!(:ps)
+          notify: &send(me, {:cue, &1})
         ],
         opts
       )
@@ -54,11 +53,10 @@ defmodule CodingAgentFramework.RegistryTest do
 
       {:ok, reg} =
         Registry.start_link(
-          host: TestHost.host(),
+          programs: TestHost.programs(),
           account: "a",
           config_dir: dir,
-          db: Path.join(dir, "r.db"),
-          ps: TestHost.program!(:ps)
+          db: Path.join(dir, "r.db")
         )
 
       assert Registry.rows(reg) == :unread
@@ -105,7 +103,7 @@ defmodule CodingAgentFramework.RegistryTest do
 
       for {ps, n} <- [{failing, 1}, {slow, 2}, {"/no/such/ps", 3}] do
         d = Path.join(dir, "#{n}")
-        reg = start(d, ps: ps, timeout: 300)
+        reg = start(d, programs: TestHost.programs(TestHost.host(), %{ps: ps}), timeout: 300)
         put(d, "1.json", JSON.encode!(%{pid: me, sessionId: "s", procStart: lstart(me)}))
         assert {:ok, %{files: 1}} = Registry.read(reg)
         assert by_file(reg)["1.json"].alive == :unknown
