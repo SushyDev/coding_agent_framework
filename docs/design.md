@@ -57,6 +57,18 @@ checks its stacks must pass. The framework holds no project's policy.
 
 Each part is one OTP process or one pure module, with one job.
 
+The repository is a Mix umbrella with one OTP application per part (or per small set of parts
+that only make sense together), under `apps/`. An app declares only the apps it uses, so a use
+that is not declared does not compile, and the layers stay one way: host (`caf_shell`,
+`caf_tmux`, `caf_holder`), then readers and writers (`caf_registry`, `caf_transcripts`,
+`caf_usage`, `caf_accounts`, `caf_cli`, `caf_control`, `caf_stream`, `caf_intake`,
+`caf_sampler`), then `caf_sessions`, then `caf_tracker` (with each source next to it) and
+`caf_recoveries`, then the parts built later. Shared test aids live in `caf_test`, used only in
+tests. Module names stay `CodingAgentFramework.*`. Each app has its own tests and docs; the
+model (`model/tla/`), `bin/check-model`, devenv and the design stay at the root, and the gates
+run across every app. No app starts a process of its own: the host app's supervision tree
+starts each part.
+
 | Part | Job |
 |---|---|
 | `Hosts` | the hosts, how each is reached, and its shell |
