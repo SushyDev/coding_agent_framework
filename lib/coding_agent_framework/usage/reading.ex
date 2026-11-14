@@ -13,8 +13,6 @@ defmodule CodingAgentFramework.Usage.Reading do
       {:ok, %{used: 41.0, resets_at: 1800000000}}
       iex> Reading.parse(~s({"rate_limits": {"five_hour": {}}}))
       {:malformed, :no_seven_day}
-      iex> Reading.current?(%{used: 41.0, resets_at: 1800000000}, 1700000000)
-      true
   """
 
   @type t :: %{used: float, resets_at: integer}
@@ -35,16 +33,46 @@ defmodule CodingAgentFramework.Usage.Reading do
 
   def parse(_), do: {:malformed, :not_text}
 
-  @doc """
-  Whether `reading` is a reading whose window has not reset at `now` (Unix seconds). After the
-  reset, what was used since is not known, so the reading no longer says how much is left.
-  """
-  @spec current?(term, integer) :: boolean
-  def current?(%{used: used, resets_at: resets_at}, now)
-      when is_number(used) and is_integer(resets_at) and is_integer(now),
-      do: resets_at > now
+  @max_age 6 * 60 * 60
 
-  def current?(_, _), do: false
+  @doc "How long a reading is current, in seconds: 6 hours."
+  @spec max_age() :: pos_integer
+  def max_age, do: @max_age
+
+  @doc """
+  What `reading` says at `now` (Unix seconds), for a reading kept `max_age` seconds (default 6
+  hours) from its `seen_at` (ms):
+
+  - `{:current, used}`: written within `max_age` and its window has not reset;
+  - `{:assumed, 0.0}`: written within `max_age`, but its window has reset, so the week started
+    anew and nothing used since is known;
+  - `:unknown`: older than `max_age`, without a `seen_at`, or not a reading.
+
+  Pure and total. A reading from the future counts as just written.
+
+      iex> alias CodingAgentFramework.Usage.Reading
+      iex> reading = %{used: 41.0, resets_at: 2000, seen_at: 1_000_000}
+      iex> Reading.status(reading, 1500)
+      {:current, 41.0}
+      iex> Reading.status(reading, 2500)
+      {:assumed, 0.0}
+      iex> Reading.status(reading, 1000 + 6 * 3600)
+      :unknown
+  """
+  @spec status(term, integer, integer) :: {:current | :assumed, float} | :unknown
+  def status(reading, now, max_age \\ @max_age)
+
+  def status(%{used: used, resets_at: resets_at, seen_at: seen_at}, now, max_age)
+      when is_number(used) and is_integer(resets_at) and is_integer(seen_at) and is_integer(now) and
+             is_integer(max_age) do
+    cond do
+      seen_at + max_age * 1000 <= now * 1000 -> :unknown
+      resets_at > now -> {:current, used / 1}
+      true -> {:assumed, 0.0}
+    end
+  end
+
+  def status(_, _, _), do: :unknown
 
   defp decode(bytes) do
     case JSON.decode(bytes) do

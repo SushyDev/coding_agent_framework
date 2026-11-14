@@ -57,7 +57,7 @@ defmodule CodingAgentFramework.UsageTest do
     {:ok, %{readings: %{"work" => reading}}} = Usage.readings(usage)
     assert %{used: 41.5, resets_at: @now, problem: nil, seen_at: seen} = reading
     assert is_integer(seen) and seen <= System.os_time(:millisecond)
-    assert Usage.pick(%{"work" => reading}, ["work"], @now - 1) == {:ok, "work"}
+    assert Usage.pick(%{"work" => reading}, ["work"], div(seen, 1000)) == {:ok, "work"}
 
     # A text before the first answer from the API has no weekly window: the reading stays.
     run.(%{"session_id" => "s2", "rate_limits" => %{"five_hour" => %{"used_percentage" => 3}}})
@@ -71,37 +71,85 @@ defmodule CodingAgentFramework.UsageTest do
     {:ok, %{readings: %{"work" => kept}}} = Usage.readings(usage)
     assert %{kept | problem: nil} == reading and kept.problem == ":not_json"
 
-    {:ok, source} = UsageSource.open(db: db, account: "work")
-    assert {:ok, %{rows: [%{account: "work", used: 41.5}]}} = UsageSource.read(source, :all)
+    {:ok, source} = UsageSource.open(db: db, account: "work", clock: fn -> div(seen, 1000) end)
+
+    assert {:ok, %{rows: [%{account: "work", used: 41.5, assumed: false}]}} =
+             UsageSource.read(source, :all)
+
+    # Once its reset has passed, the source marks the reading assumed.
+    File.write!(file, JSON.encode!(week(41.5, 1)))
+    assert {:ok, %{ids: [_]}} = Usage.read(usage)
+    assert {:ok, %{rows: [%{assumed: true}]}} = UsageSource.read(source, :all)
     assert {:ok, %{rows: []}} = UsageSource.read(source, [id + 1])
   end
+
+  @seen 1_000 * @now
 
   defp reading_gen do
     one_of([
       fixed_map(%{
         used: float(min: 0.0, max: 100.0),
-        resets_at: integer((@now - 10)..(@now + 10))
+        resets_at: integer((@now - 10)..(@now + 10)),
+        # Written between 7 hours before and a minute after `@now`, in ms.
+        seen_at: integer((@seen - 7 * 3_600_000)..(@seen + 60_000))
       }),
-      fixed_map(%{used: constant(nil), resets_at: constant(nil)}),
+      fixed_map(%{used: constant(nil), resets_at: constant(nil), seen_at: constant(nil)}),
       map_of(atom(:alphanumeric), term(), max_length: 2),
       term()
     ])
   end
 
-  property "pick answers a current reading with the least used among those given, or none_known" do
-    check all readings <- map(list_of({member_of(~w(a b c d)), reading_gen()}), &Map.new/1),
-              among <- list_of(one_of([member_of(~w(a b c d e)), term()]), max_length: 6) do
-      current = for a <- among, Reading.current?(readings[a], @now), do: a
+  # What `pick` should see, stated apart from `Reading.status/3`.
+  defp expected(%{used: u, resets_at: r, seen_at: s}, max_age)
+       when is_float(u) and is_integer(r) and is_integer(s) do
+    cond do
+      s + max_age * 1000 <= @seen -> :unknown
+      r > @now -> {:current, u}
+      true -> {:assumed, 0.0}
+    end
+  end
 
-      case Usage.pick(readings, among, @now) do
+  defp expected(_, _), do: :unknown
+
+  property "pick answers the most left among current and assumed readings, current first" do
+    check all readings <- map(list_of({member_of(~w(a b c d)), reading_gen()}), &Map.new/1),
+              among <- list_of(one_of([member_of(~w(a b c d e)), term()]), max_length: 6),
+              max_age <- one_of([constant(Reading.max_age()), integer(0..30_000)]) do
+      known =
+        for a <- Enum.uniq(among),
+            {kind, used} <- [expected(readings[a], max_age)],
+            do: {a, kind, used}
+
+      case Usage.pick(readings, among, @now, max_age) do
         {:refused, :none_known} ->
-          assert current == []
+          assert known == []
 
         {:ok, account} ->
-          assert account in current
-          assert Enum.all?(current, &(readings[&1].used >= readings[account].used))
+          {^account, kind, used} = List.keyfind(known, account, 0)
+          assert Enum.all?(known, fn {_, _, u} -> u >= used end)
+          # An assumed pick means no current reading has that share.
+          assert kind == :current or
+                   Enum.all?(known, fn {_, k, u} -> k == :assumed or u > used end)
       end
     end
+  end
+
+  test "the age bound is 6 hours by default, and the caller may pass another" do
+    fresh = %{used: 50.0, resets_at: @now + 100, seen_at: @seen - 6 * 3_600_000 + 1_000}
+    stale = %{fresh | seen_at: @seen - 6 * 3_600_000}
+    assert Usage.pick(%{"a" => fresh}, ["a"], @now) == {:ok, "a"}
+    assert Usage.pick(%{"a" => stale}, ["a"], @now) == {:refused, :none_known}
+    assert Usage.pick(%{"a" => stale}, ["a"], @now, 7 * 3600) == {:ok, "a"}
+    assert Reading.status(%{stale | seen_at: nil}, @now) == :unknown
+  end
+
+  test "an assumed reading counts as 0 used, and a current one wins the same share" do
+    reset = %{used: 90.0, resets_at: @now - 1, seen_at: @seen - 1_000}
+    zero = %{used: 0.0, resets_at: @now + 5, seen_at: @seen}
+    assert Reading.status(reset, @now) == {:assumed, 0.0}
+    assert Usage.pick(%{"a" => reset, "b" => %{zero | used: 10.0}}, ~w(a b), @now) == {:ok, "a"}
+    assert Usage.pick(%{"a" => reset, "b" => zero}, ~w(a b), @now) == {:ok, "b"}
+    assert Usage.pick(%{"a" => zero, "b" => reset}, ~w(b a), @now) == {:ok, "a"}
   end
 
   defp file_gen do
