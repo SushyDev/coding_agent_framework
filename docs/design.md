@@ -39,15 +39,19 @@ checks its stacks must pass. The framework holds no project's policy.
 - **Project**: a repository and its trunk, declared as data.
 - **Parent session**: a project's main chat. It has Remote Control, keeps its name, is never
   archived, and moves between accounts with one press.
-- **Delegate**: a Claude Code session a parent starts through the framework, held by dtach, with
-  Remote Control off, in its own worktree. Inside it, Claude Code's own subagents delegate
-  further; the framework counts them.
+- **Delegate**: a Claude Code session a parent starts through the framework, run headless (see
+  "Headless delegates"), held by dtach, in its own worktree. Inside it, Claude Code's own
+  subagents delegate further; the framework counts them.
+- **Interactive and headless**: a parent runs Claude Code's terminal interface, with Remote
+  Control, because a person works in it. A delegate runs headless: it reads JSON messages on
+  stdin and writes JSON events on stdout, and nothing reads its screen.
 - **Service**: a program an agent starts through the framework and keeps running, such as a
   dev server or a database, held by dtach and owned by one agent at a time.
 - **Claim**: an agent's hold on another agent or a service in one state, taken before a fix, so
   that only one fix of that state runs.
-- **Viewer**: the tmux pane that shows a held agent (`dtach -a`). It can die, be reopened or be
-  opened twice; the agent runs on.
+- **Viewer**: the tmux pane that shows a held agent: a parent's own screen (`dtach -a`), or a
+  readable rendering of a delegate's event log. It can die, be reopened or be opened twice; the
+  agent runs on.
 
 ## The parts
 
@@ -66,7 +70,8 @@ Each part is one OTP process or one pure module, with one job.
 | `ClaudeCLI` | the command line and environment of a session, per role and account |
 | `Registry` | reads Claude Code's `<config>/sessions/*.json` per account and host, and so each held agent's pid |
 | `Transcripts` | a session's transcript tail, its chats and its subagents |
-| `Screen` | Claude Code's screen and dialogs, per Claude Code release, from real fixtures |
+| `Screen` | a parent's screen and dialogs, per Claude Code release, from real fixtures a person captures with a script |
+| `Stream` | a headless delegate's stdin and event log: writes messages, reads events from an offset |
 | `Intake` | hook events in; holds `PermissionRequest` hooks until answered |
 | `Control` | the one writer per host: send, answer, interrupt, stop, respawn |
 | `Sessions` | start, resume and stop held sessions on one host, with their viewers and rows; worktrees are a later part of it |
@@ -145,8 +150,9 @@ A parent calls `start_delegate(project, branch, model, brief)`. The framework:
 2. picks the account with the most allowance left;
 3. adds the worktree and runs the project's declared setup in it, so a fresh worktree has its
    dependencies and build state before the first command;
-4. starts `claude` held by dtach, with Remote Control off and the brief as its first prompt,
-   tags its pane with the session, project and unit, and confirms it started;
+4. starts `claude` headless, held by dtach, with `--session-id` set to an id the framework
+   chose and the brief as its first message, opens a viewer of its event log tagged with the
+   session, project and unit, and confirms the start by its first event naming that id;
 5. delivers its last message to the parent when it stops. When a restart lost the stop event,
    it delivers the transcript's last reply instead, and ends the delegate only after delivery.
    The delegate's row moves from running to finished once, by its Stop event or by its
@@ -187,6 +193,38 @@ its timeout, not a hidden one. Everything else follows the reader's cue.
 The answers are explicit: `started{…}` or `refused{reason}`, then `finished`, `killed` or
 `late_report`. A delegate's subagents count for tokens and as work still going for its parent,
 and one with no closing event ends after a bound.
+
+## Headless delegates
+
+A delegate runs `claude -p --input-format stream-json --output-format stream-json
+--replay-user-messages --session-id <id>` (Claude Code 2.1.322; each flag checked against each
+pinned release). This removes screen reading for delegates:
+
+- **Held, apart from the framework.** dtach holds a small wrapper that keeps the delegate's
+  stdin pipe open, so the framework's restarts never close it, and appends its stdout to an
+  event log in the framework home. The framework writes messages into the pipe and reads the
+  log from a persisted offset, so the delegate outlives the framework as an interactive agent
+  does.
+- **Writes are messages, not keys.** A report, a message or an answer goes in as one JSON line
+  on stdin, through the host's one writer. No typing, no input box and no Ctrl-C: an interrupt
+  is the stream's own interrupt request.
+- **Turns are events.** A turn ends with the stream's `result` event. A message goes in only
+  after a turn has ended, as any write.
+- **Delivered once, seen.** With `--replay-user-messages`, each message the delegate took comes
+  back on its stdout. The sending mark of "The delegate protocol" is settled from the log: the
+  message is delivered when its replay is there.
+- **Permissions.** With `--permission-prompts host`, a permission request comes as an event and
+  is answered by a line on stdin, by its request id. It is held, answered once and given up as
+  "Intake" says for a hook. A delegate's hooks are not needed for its own turns; its events
+  are the log.
+- **No trust dialog.** A headless session skips the workspace trust dialog.
+- **Its viewer** is a tmux pane that renders the event log as readable text, opened and
+  reopened like any viewer. It writes nothing.
+
+A parent stays interactive. `Screen` reads only a parent's screen: whether its input box is
+empty before a write, and its dialogs by label. Its fixtures are captured from a real session
+once per pinned Claude Code release by a script a person runs and reviews, with names and paths
+scrubbed; no test runs the real Claude Code.
 
 ## Agents working together
 
@@ -464,12 +502,15 @@ without it.
   every host. It writes only files of its own that each launch names by flag, never a file
   Claude Code rewrites (`settings.json`, `.claude.json`, credentials). On a remote host it
   writes them through `Shell`.
-- Claude Code has no flag that turns Remote Control off; a delegate's settings file sets
-  `remoteControlAtStartup` to false. A check against each pinned Claude Code release confirms a
-  delegate starts with it off.
-- A session in a new worktree meets the workspace trust dialog first, and until it is trusted
-  Claude Code runs no status line. `Screen` answers that dialog by its label at a start, and the
-  settings never set `disableAllHooks`.
+- Remote Control starts only with an interactive session, so a headless delegate never has it;
+  its settings still set `remoteControlAtStartup` to false, and a check against each pinned
+  Claude Code release confirms a delegate starts with it off.
+- An interactive session in a new directory meets the workspace trust dialog first, and until it
+  is trusted Claude Code runs no status line. `Screen` answers that dialog by its label at a
+  parent's start, and the settings never set `disableAllHooks`. A headless delegate skips it.
+- A headless session draws no status line. Whether its stream's events carry the account's rate
+  limits is checked when `Stream` is built; until then, `Usage` reads only the status lines of
+  interactive sessions.
 
 ## Allowance
 
