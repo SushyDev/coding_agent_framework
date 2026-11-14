@@ -38,6 +38,11 @@ defmodule CodingAgentFramework.Tmux.Fake do
   def set_tag(%__MODULE__{} = s, pane, tag),
     do: Agent.update(s.pid, &put_in(&1, [:panes, pane, :tag], tag), s.timeout)
 
+  @doc "Test aid: the program a pane runs, as it opened or was last respawned."
+  @spec argv(t, String.t()) :: [String.t()] | nil
+  def argv(%__MODULE__{} = s, pane),
+    do: Agent.get(s.pid, &get_in(&1, [:panes, pane, :argv]), s.timeout)
+
   @doc "Test aid: what a pane received, oldest first."
   @spec received(t, String.t()) :: [CodingAgentFramework.Tmux.input()]
   def received(%__MODULE__{} = s, pane),
@@ -78,23 +83,28 @@ defmodule CodingAgentFramework.Tmux.Fake do
 
   @impl true
   def write(%__MODULE__{} = s, pane, session, input) do
+    guarded(s, pane, session, :sent, fn st ->
+      update_in(st.received, &Map.update(&1, pane, [input], fn l -> [input | l] end))
+    end)
+  end
+
+  @impl true
+  def kill_pane(%__MODULE__{} = s, pane, session),
+    do: guarded(s, pane, session, :killed, &%{&1 | panes: Map.delete(&1.panes, pane)})
+
+  @impl true
+  def respawn_pane(%__MODULE__{} = s, pane, session, argv),
+    do: guarded(s, pane, session, :respawned, &put_in(&1, [:panes, pane, :argv], argv))
+
+  # Checks the pane's tag and acts in one step, as the CLI does in one tmux command.
+  defp guarded(s, pane, session, done, act) do
     call(s, fn st ->
-      outcome =
-        case st.panes do
-          _ when not st.up -> {:refused, :no_server}
-          %{^pane => %{tag: ^session}} -> {:ok, :sent}
-          %{^pane => %{tag: nil}} -> {:refused, :untagged}
-          %{^pane => %{tag: other}} -> {:refused, {:tagged_for, other}}
-          _ -> {:refused, :no_pane}
-        end
-
-      case outcome do
-        {:ok, :sent} ->
-          {outcome,
-           update_in(st.received, &Map.update(&1, pane, [input], fn l -> [input | l] end))}
-
-        _ ->
-          {outcome, st}
+      case st.panes do
+        _ when not st.up -> {{:refused, :no_server}, st}
+        %{^pane => %{tag: ^session}} -> {{:ok, done}, act.(st)}
+        %{^pane => %{tag: nil}} -> {{:refused, :untagged}, st}
+        %{^pane => %{tag: other}} -> {{:refused, {:tagged_for, other}}, st}
+        _ -> {{:refused, :no_pane}, st}
       end
     end)
   end

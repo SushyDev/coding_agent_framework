@@ -122,7 +122,14 @@ defmodule CodingAgentFramework.Shell do
         env: env
       ])
 
-    {:os_pid, os_pid} = Port.info(port, :os_pid)
+    # A program that has already exited has closed its port, and the port has no pid left; its
+    # output and exit status are in the mailbox all the same.
+    os_pid =
+      case Port.info(port, :os_pid) do
+        {:os_pid, os_pid} -> os_pid
+        nil -> nil
+      end
+
     deadline = System.monotonic_time(:millisecond) + timeout
     collect(port, os_pid, deadline, timeout, [])
   rescue
@@ -141,7 +148,10 @@ defmodule CodingAgentFramework.Shell do
     after
       left ->
         # The program was started here, so it is killed by its own pid, never by a pattern.
-        System.cmd("/bin/kill", ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
+        if os_pid,
+          do:
+            System.cmd("/bin/kill", ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
+
         close(port)
         {:unknown, {:timeout, timeout}}
     end

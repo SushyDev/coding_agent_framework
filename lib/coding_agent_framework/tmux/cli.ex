@@ -20,7 +20,8 @@ defmodule CodingAgentFramework.Tmux.CLI do
 
   tmux resolves the target, checks that pane's id and tag, and sends to it, all in one command
   on one server, so no restart can come between the check and the send. A missing pane leaves
-  `#{pane_id}` empty and is refused as `:no_pane`.
+  `#{pane_id}` empty and is refused as `:no_pane`. `kill_pane/3` and `respawn_pane/4` run
+  `kill-pane` and `respawn-pane -k` in place of `send-keys`, under the same check.
   """
 
   @behaviour CodingAgentFramework.Tmux
@@ -83,14 +84,50 @@ defmodule CodingAgentFramework.Tmux.CLI do
   end
 
   @impl true
-  def write(%__MODULE__{tag: tag} = s, pane, session, input) do
-    check = "\#{&&:\#{==:\#{pane_id},#{pane}},\#{==:\#{#{tag}},#{session}}}"
-    send = "send-keys -t #{pane} #{keys(input)} ; display-message -p sent"
-    refuse = "display-message -p -t #{pane} 'refused\t\#{pane_id}\t\#{#{tag}}'"
+  def write(%__MODULE__{} = s, pane, session, {:line, text}),
+    do:
+      guarded(
+        s,
+        pane,
+        session,
+        "send-keys -t #{pane} -l -- #{quote_arg(text)} ; send-keys -t #{pane} Enter",
+        :sent
+      )
 
-    case run(s, ["if-shell", "-F", "-t", pane, check, send, refuse]) do
-      {:ok, %{status: 0, output: "sent\n"}} ->
-        {:ok, :sent}
+  def write(%__MODULE__{} = s, pane, session, {:text, text}),
+    do: guarded(s, pane, session, "send-keys -t #{pane} -l -- #{quote_arg(text)}", :sent)
+
+  def write(%__MODULE__{} = s, pane, session, {:keys, keys}),
+    do: guarded(s, pane, session, "send-keys -t #{pane} #{Enum.join(keys, " ")}", :sent)
+
+  @impl true
+  def kill_pane(%__MODULE__{} = s, pane, session),
+    do: guarded(s, pane, session, "kill-pane -t #{pane}", :killed)
+
+  @impl true
+  def respawn_pane(%__MODULE__{} = s, pane, session, argv) do
+    command = "respawn-pane -k -t #{pane} -- " <> Enum.map_join(argv, " ", &quote_arg/1)
+    guarded(s, pane, session, command, :respawned)
+  end
+
+  # Runs `command` only when the pane at `pane` has that id and its tag names `session`, in one
+  # tmux command, and prints `done` after it.
+  defp guarded(%__MODULE__{tag: tag} = s, pane, session, command, done) do
+    check = "\#{&&:\#{==:\#{pane_id},#{pane}},\#{==:\#{#{tag}},#{session}}}"
+    refuse = "display-message -p -t #{pane} 'refused\t\#{pane_id}\t\#{#{tag}}'"
+    expected = "#{done}\n"
+
+    case run(s, [
+           "if-shell",
+           "-F",
+           "-t",
+           pane,
+           check,
+           "#{command} ; display-message -p #{done}",
+           refuse
+         ]) do
+      {:ok, %{status: 0, output: ^expected}} ->
+        {:ok, done}
 
       {:ok, %{status: 0, output: "refused\t" <> rest}} ->
         case String.split(String.trim_trailing(rest, "\n"), "\t") do
@@ -143,9 +180,8 @@ defmodule CodingAgentFramework.Tmux.CLI do
       else: arg
   end
 
-  # Text goes inside tmux single quotes, where nothing is special but the quote itself.
-  defp keys({:text, text}), do: "-l -- '" <> String.replace(text, "'", ~S('\'')) <> "'"
-  defp keys({:keys, keys}), do: Enum.join(keys, " ")
+  # An argument goes inside tmux single quotes, where nothing is special but the quote itself.
+  defp quote_arg(arg), do: "'" <> String.replace(arg, "'", ~S('\'')) <> "'"
 
   defp pane_info(line) do
     [pane, session, tag] = String.split(line, "\t", parts: 3)

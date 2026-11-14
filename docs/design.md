@@ -216,6 +216,8 @@ without it.
 - Accept a pane target only in the form `%<n>`. tmux reads an empty target as the current pane:
   an empty lookup once typed a message into the supervising agent's own input box.
 - Escape every argument: one ending in `;` ends the tmux command, and the next runs as a new one.
+  Put a backslash before an argument's trailing `;`; tmux reads `\;` at the end as `;` and
+  changes nothing else in the argument.
 - Remove the socket file after `kill-server`. Name test servers with the test VM's pid, and remove
   a dead VM's servers by their exact socket path, never by a pattern.
 - Claim per pane, not per session: one session can hold several Claude Code panes.
@@ -230,6 +232,9 @@ without it.
 - Open a viewer one row short and then grow it: Claude Code doesn't redraw for a viewer that
   attaches at the same size.
 - Reopen a lost viewer once per loss. A viewer that fails leaves the agent running.
+- Keep each host's dtach directory short, and bound the length of a session id used as a socket
+  name: macOS cuts a socket path at 104 bytes, and a long temporary directory plus a session id
+  can pass it.
 
 **Claude Code**
 - Set each account's config directory, and every per-account setting, explicitly at each launch.
@@ -251,9 +256,12 @@ without it.
 - Each write ends sent, refused or unknown, and an unknown write is never resent: tmux exits 0
   for a key that reached nothing.
 - A write checks that the pane's tag names the session the write names, and sends, in one tmux
-  command: `if-shell -F -t <pane> '#{==:#{@<tag>},<session>}' 'send-keys …'`. tmux checks the
-  very pane it sends to, and a server that died in between sends nothing; a check followed by a
-  separate send can reach another agent's pane that took the id after a restart.
+  command: `if-shell -F -t <pane> '#{&&:#{==:#{pane_id},<pane>},#{==:#{@<tag>},<session>}}'
+  'send-keys …'`. tmux checks the very pane it sends to, and a server that died in between sends
+  nothing; a check followed by a separate send can reach another agent's pane that took the id
+  after a restart. The check compares `#{pane_id}` with the target as well as the tag: for a
+  pane id that does not exist, `if-shell` still runs, with an empty `#{pane_id}`, so the target
+  alone does not prove the pane is there.
 - Every pane the framework writes to is tagged with its session as it opens, in the command that
   opens it. An untagged pane is refused, not checked some other way: a check of the pane's
   process cannot run inside the tmux command that sends.
