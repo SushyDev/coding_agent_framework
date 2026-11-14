@@ -7,7 +7,7 @@ defmodule CodingAgentFramework.Tmux.CLI do
   by tests so each owns its server). The server reads `config` when it starts, `/dev/null` by
   default: it is the framework's own, and a user's config could change its indexes or options.
 
-      iex> host = CodingAgentFramework.Host.local("laptop", "/run/bin/kill")
+      iex> host = CodingAgentFramework.Host.local("laptop", "/run/bin/sh", "/run/bin/sleep")
       iex> paths = %{tmux: "/run/bin/tmux", rm: "/run/bin/rm"}
       iex> {:ok, programs} = CodingAgentFramework.Programs.new(host, paths)
       iex> {:ok, server} = CodingAgentFramework.Tmux.CLI.new(programs, {:name, "agents"})

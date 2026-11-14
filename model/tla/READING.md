@@ -228,3 +228,21 @@ the restarts.
 `fixed` and `wrong` are ghosts. `MessageDelivered` reads "a message whose recipient's turn ends
 again and again is delivered"; its recipient is the addressee, or the parent once the addressee
 has ended.
+
+## `Shell.tla`
+
+One command `Shell` runs and how its process group ends. The port's `sh` leads the group, with
+the watcher and the command in it.
+
+- `CmdStartsChild` adds a child to the group; it ignores TERM, so only a KILL ends it.
+  `CmdHolds` is `dtach -n`: the held process leaves the group by `setsid`.
+- `PortCloses` stands for a timeout, the owner's death and the VM's death alike: each closes
+  the port's stdin.
+- `WatchTerms` is the watcher reading end of file and sending TERM to the group; `WatchKills`
+  is the KILL after the grace, which ends the watcher too.
+- `ShStandsDown` is the `sh` seeing the command exit on its own: it kills the watcher by its
+  pid and exits.
+- `ForeignTakesId` is another program taking the group's id, possible only once the `sh` is
+  gone and the group is empty.
+
+`hit` is a ghost: the processes a kill reached that it must not reach.

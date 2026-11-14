@@ -11,7 +11,7 @@ defmodule CodingAgentFramework.Registry do
       iex> File.mkdir_p!(Path.join(dir, "sessions"))
       iex> File.write!(Path.join(dir, "sessions/7.json"), ~s({"pid": 7, "sessionId": "s7"}))
       iex> me = self()
-      iex> host = CodingAgentFramework.Host.local("laptop", CodingAgentFramework.TestHost.program!(:kill))
+      iex> host = CodingAgentFramework.Host.local("laptop", CodingAgentFramework.TestHost.program!(:sh), CodingAgentFramework.TestHost.program!(:sleep))
       iex> {:ok, reg} = CodingAgentFramework.Registry.start_link(
       ...>   programs: CodingAgentFramework.TestHost.programs(host), account: "work",
       ...>   config_dir: dir, db: Path.join(dir, "registry.db"), notify: &send(me, &1))

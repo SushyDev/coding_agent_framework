@@ -1,8 +1,8 @@
 defmodule CodingAgentFramework.Programs do
   @moduledoc """
   The absolute path of every program the framework runs on one host: tmux, dtach, claude, git
-  and gh, and the POSIX tools sh, rm, kill, env, ps, cat, tail, mkdir and mkfifo (a headless
-  delegate's stdin is a FIFO).
+  and gh, and the POSIX tools sh, sleep, rm, kill, env, ps, cat, tail, mkdir and mkfifo (a
+  headless delegate's stdin is a FIFO).
 
   The paths are found once, by the host's own shell (`command -v`), so no later call looks a
   program up through a `PATH`: a long `PATH` searched on the VM's file server slowed every file
@@ -14,7 +14,7 @@ defmodule CodingAgentFramework.Programs do
   `devenv.nix`). A remote host has its own programs, so `find/3` looks them up there, with that
   host's shell, over ssh.
 
-      iex> host = CodingAgentFramework.Host.local("laptop", "/run/bin/kill")
+      iex> host = CodingAgentFramework.Host.local("laptop", "/run/bin/sh", "/run/bin/sleep")
       iex> {:ok, programs} = CodingAgentFramework.Programs.new(host, %{tmux: "/run/bin/tmux"})
       iex> CodingAgentFramework.Programs.fetch(programs, :tmux)
       {:ok, "/run/bin/tmux"}
@@ -36,6 +36,7 @@ defmodule CodingAgentFramework.Programs do
           | :git
           | :gh
           | :sh
+          | :sleep
           | :rm
           | :kill
           | :env
@@ -53,6 +54,7 @@ defmodule CodingAgentFramework.Programs do
     :git,
     :gh,
     :sh,
+    :sleep,
     :rm,
     :kill,
     :env,

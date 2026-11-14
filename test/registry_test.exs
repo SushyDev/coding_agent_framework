@@ -2,7 +2,7 @@ defmodule CodingAgentFramework.RegistryTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
-  alias CodingAgentFramework.{Registry, SessionFiles, TestHost}
+  alias CodingAgentFramework.{Registry, SessionFiles, Shell, TestHost}
   alias CodingAgentFramework.Registry.{SessionFile, Table}
 
   doctest CodingAgentFramework.Registry
@@ -68,9 +68,12 @@ defmodule CodingAgentFramework.RegistryTest do
       dir = TestHost.test_dir()
       reg = start(dir)
       me = String.to_integer(System.pid())
-      port = Port.open({:spawn_executable, TestHost.program!(true)}, [:exit_status])
-      {:os_pid, gone} = Port.info(port, :os_pid)
-      assert_receive {^port, {:exit_status, 0}}
+      # A pid that has exited and been reaped once the run returns. A port's own pid could not be
+      # read when the program exited before `Port.info/2`.
+      {:ok, %{status: 0, output: out}} =
+        Shell.run(TestHost.host(), TestHost.program!(:sh), ["-c", "echo $$"], timeout: 5_000)
+
+      gone = String.to_integer(String.trim(out))
 
       put(dir, "1.json", JSON.encode!(%{pid: me, sessionId: "live", procStart: lstart(me)}))
 

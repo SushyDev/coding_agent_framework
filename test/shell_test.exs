@@ -39,7 +39,7 @@ defmodule CodingAgentFramework.ShellTest do
 
   test "on this machine a program runs as given; over ssh every word is quoted" do
     assert {:ok, {"/run/x", ["a;b"]}} = Shell.command(host(), "/run/x", ["a;b"])
-    box = Host.ssh("box", "/run/bin/ssh", "agent@box", program!(:kill))
+    box = Host.ssh("box", "/run/bin/ssh", "agent@box", program!(:sh), program!(:sleep))
 
     assert {:ok, {"/run/bin/ssh", ["-o", "BatchMode=yes", "--", "agent@box", remote]}} =
              Shell.command(box, "/run/x", ["a;b", "$HOME", "K=v w"])

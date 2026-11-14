@@ -28,7 +28,7 @@ defmodule CodingAgentFramework.HolderTest do
   end
 
   test "over ssh, the held command is the same, quoted for the remote shell", %{holder: h} do
-    box = Host.ssh("box", "/run/bin/ssh", "agent@box", program!(:kill))
+    box = Host.ssh("box", "/run/bin/ssh", "agent@box", program!(:sh), program!(:sleep))
     {:ok, [env | args] = argv} = Holder.hold_argv(h, "alpha", ["/run/claude"], [{"HOME", "/h"}])
 
     assert {:ok, {"/run/bin/ssh", [_, _, "--", "agent@box", remote]}} =

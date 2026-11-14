@@ -16,14 +16,14 @@ defmodule CodingAgentFramework.TestHost do
     dir
   end
 
-  @doc "The local host tests run on, with devenv's kill."
-  def host, do: Host.local("test", program!(:kill))
+  @doc "The local host tests run on, with devenv's sh and sleep."
+  def host, do: Host.local("test", program!(:sh), program!(:sleep))
 
   @doc "`host`'s `Programs`, each path from devenv; `overrides` replace some of them."
   def programs(host \\ host(), overrides \\ %{}) do
     paths =
       Map.new(
-        [:tmux, :dtach, :git, :gh, :sh, :rm, :kill, :env, :ps, :cat, :tail, :mkdir, :mkfifo],
+        [:tmux, :dtach, :git, :gh, :sh, :sleep, :rm, :kill, :env, :ps, :cat, :tail, :mkdir, :mkfifo],
         &{&1, program!(&1)}
       )
 
