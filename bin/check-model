@@ -26,10 +26,14 @@ specs="$root/model/tla"
 out="$root/_build/tlc"
 what="${1:-all}"
 
-if ! command -v tlc >/dev/null; then
-  echo "check-model: 'tlc' not found; run it inside devenv: devenv shell -- bin/check-model" >&2
+# Every program comes from devenv's lock: TLC by its path, and the text tools from a PATH that
+# holds only them.
+if [[ -z "${CAF_TLC:-}" || -z "${CAF_TOOLS_PATH:-}" ]]; then
+  echo "check-model: CAF_TLC or CAF_TOOLS_PATH unset; run it inside devenv: devenv shell -- bin/check-model" >&2
   exit 2
 fi
+tlc="$CAF_TLC"
+export PATH="$CAF_TOOLS_PATH"
 
 configs=()
 case "$what" in
@@ -63,7 +67,7 @@ for cfg in "${configs[@]}"; do
   status=0
   started=$(date +%s)
   (cd "$specs" &&
-    tlc -workers "${TLC_WORKERS:-auto}" -cleanup -noGenerateSpecTE -metadir "$out/states-$name" \
+    "$tlc" -workers "${TLC_WORKERS:-auto}" -cleanup -noGenerateSpecTE -metadir "$out/states-$name" \
       -config "$relative" "$spec.tla") >"$out/$name.out" 2>&1 || status=$?
   seconds=$(($(date +%s) - started))
 

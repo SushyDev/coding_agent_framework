@@ -11,10 +11,10 @@ defmodule CodingAgentFramework.ShellTest do
 
   test "a program's status and output come back, a non-zero exit included" do
     assert {:ok, %{status: 0, output: "a b\n"}} =
-             Shell.run(host(), "/bin/echo", ["a b"], timeout: 5_000)
+             Shell.run(host(), program!(:echo), ["a b"], timeout: 5_000)
 
     assert {:ok, %{status: 3, output: "err\n"}} =
-             Shell.run(host(), "/bin/sh", ["-c", "echo err >&2; exit 3"], timeout: 5_000)
+             Shell.run(host(), program!(:sh), ["-c", "echo err >&2; exit 3"], timeout: 5_000)
   end
 
   test "nothing runs from a relative path or a missing one" do
@@ -26,10 +26,10 @@ defmodule CodingAgentFramework.ShellTest do
 
   test "a program past its timeout is killed and its outcome is unknown" do
     pidfile = Path.join(test_dir(), "pid")
-    script = ~S(echo $$ > "$0"; exec /bin/cat)
+    script = ~s(echo $$ > "$0"; exec #{program!(:cat)})
 
     assert {:unknown, {:timeout, 300}} =
-             Shell.run(host(), "/bin/sh", ["-c", script, pidfile], timeout: 300)
+             Shell.run(host(), program!(:sh), ["-c", script, pidfile], timeout: 300)
 
     {:ok, pid} = File.read(pidfile)
 
@@ -40,7 +40,7 @@ defmodule CodingAgentFramework.ShellTest do
   test "the environment is set and unset per run" do
     script = ~S(echo "${A-none} ${TMUX-none}")
     opts = [timeout: 5_000, env: [{"A", "1"}, {"TMUX", "x"}]]
-    assert {:ok, %{output: "1 x\n"}} = Shell.run(host(), "/bin/sh", ["-c", script], opts)
+    assert {:ok, %{output: "1 x\n"}} = Shell.run(host(), program!(:sh), ["-c", script], opts)
 
     assert {:ok, {"/bin/sh", _, env}} =
              Shell.command(host(), "/bin/sh", [], unset: ["TMUX"], unset_prefixes: ["PATH"])

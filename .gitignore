@@ -22,3 +22,6 @@ devenv.local.nix
 
 # Builders' worktrees.
 /.claude/worktrees/
+
+# Written by devenv from git-hooks in devenv.nix.
+/.pre-commit-config.yaml

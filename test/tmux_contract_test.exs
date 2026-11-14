@@ -127,8 +127,8 @@ defmodule CodingAgentFramework.TmuxContractTest do
     test "an argument ending in ; reaches the pane's program whole", ctx do
       out = Path.join(ctx.dir, "argv")
       args = ["x;", "y;z", "a\\;", "p\\", "\#{pane_id}", "$HOME"]
-      script = ~S(printf '%s|' "$@" > "$0"; exec /bin/cat)
-      {:ok, _} = Tmux.new_session(ctx.server, "alpha", ["/bin/sh", "-c", script, out | args])
+      script = ~s(printf '%s|' "$@" > "$0"; exec #{program!(:cat)})
+      {:ok, _} = Tmux.new_session(ctx.server, "alpha", [program!(:sh), "-c", script, out | args])
       expected = Enum.map_join(args, &(&1 <> "|"))
       assert {:ok, ^expected} = read_when(out, expected)
     end
@@ -159,9 +159,14 @@ defmodule CodingAgentFramework.TmuxContractTest do
 
   # The pane's program: it copies its input to a file named for its session.
   defp stand_in(%{impl: :cli, dir: dir}, session),
-    do: ["/bin/sh", "-c", ~S(exec /bin/cat > "$0"), Path.join(dir, session <> ".out")]
+    do: [
+      program!(:sh),
+      "-c",
+      ~s(exec #{program!(:cat)} > "$0"),
+      Path.join(dir, session <> ".out")
+    ]
 
-  defp stand_in(%{impl: :fake}, _session), do: ["/bin/cat"]
+  defp stand_in(%{impl: :fake}, _session), do: [program!(:cat)]
 
   defp received(%{impl: :cli, dir: dir}, _pane, session, expected),
     do: read_when(Path.join(dir, session <> ".out"), expected)

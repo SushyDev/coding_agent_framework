@@ -120,20 +120,20 @@ defmodule CodingAgentFramework.ControlTest do
       assert {:refused, :no_kept_pane} = Control.send(ctx.control, "ghost", "x")
       assert {:refused, :no_kept_pane} = Control.interrupt(ctx.control, "ghost")
       assert {:refused, :no_kept_pane} = Control.stop(ctx.control, "ghost")
-      assert {:refused, :no_kept_pane} = Control.respawn(ctx.control, "ghost", ["/bin/cat"])
+      assert {:refused, :no_kept_pane} = Control.respawn(ctx.control, "ghost", [program!(:cat)])
       refute_received {:write, _, _, _}
     end
 
     test "an interrupt is one C-c" do
       ctx = start!(:fake, nil)
-      {:ok, pane} = Control.open(ctx.control, "alpha", ["/bin/cat"])
+      {:ok, pane} = Control.open(ctx.control, "alpha", [program!(:cat)])
       assert {:ok, :sent} = Control.interrupt(ctx.control, "alpha")
       assert [{:keys, ["C-c"]}] = Fake.received(ctx.server, pane)
     end
 
     test "an unknown write is answered as unknown and not resent" do
       ctx = start!(:fake, {:unknown, :lost})
-      {:ok, _} = Control.open(ctx.control, "alpha", ["/bin/cat"])
+      {:ok, _} = Control.open(ctx.control, "alpha", [program!(:cat)])
       assert {:unknown, :lost} = Control.send(ctx.control, "alpha", "once")
       assert_received {:write, _, _, {:line, "once"}}
 
@@ -145,7 +145,7 @@ defmodule CodingAgentFramework.ControlTest do
 
     test "a call past its timeout is unknown, and goes out neither then nor later" do
       ctx = start!(:fake, nil)
-      {:ok, pane} = Control.open(ctx.control, "alpha", ["/bin/cat"])
+      {:ok, pane} = Control.open(ctx.control, "alpha", [program!(:cat)])
       held = Task.async(fn -> Control.send(ctx.control, "alpha", "hold") end)
       assert_receive {:write, _, 1, {:line, "hold"}}, 5_000
 
@@ -184,9 +184,9 @@ defmodule CodingAgentFramework.ControlTest do
 
   # The pane's program: it copies its input to a file named for `name`.
   defp stand_in(%{impl: :cli, dir: dir}, name),
-    do: ["/bin/sh", "-c", ~S(exec /bin/cat > "$0"), Path.join(dir, name <> ".out")]
+    do: [program!(:sh), "-c", ~s(exec #{program!(:cat)} > "$0"), Path.join(dir, name <> ".out")]
 
-  defp stand_in(%{impl: :fake}, _name), do: ["/bin/cat"]
+  defp stand_in(%{impl: :fake}, _name), do: [program!(:cat)]
 
   defp received(%{impl: :cli, dir: dir}, _pane, name, expected),
     do: read_when(Path.join(dir, name <> ".out"), expected)

@@ -4,7 +4,7 @@ defmodule CodingAgentFramework.TestHost do
   bounded wait on an announced event.
   """
 
-  alias CodingAgentFramework.{Host, Programs, Shell}
+  alias CodingAgentFramework.{Host, Shell}
 
   @doc "This VM's own directory, named with its OS pid. `test_helper.exs` makes and removes it."
   def vm_dir, do: Path.join(System.tmp_dir!(), "caf-#{System.pid()}")
@@ -19,15 +19,73 @@ defmodule CodingAgentFramework.TestHost do
   @doc "The local host tests run on."
   def host, do: Host.local("test")
 
-  @doc "The path of one program from devenv, or a failure that says to run inside devenv."
-  def program!(name) do
-    with {:ok, programs} <- Programs.find(host(), [name]),
-         {:ok, path} <- Programs.fetch(programs, name) do
-      path
-    else
-      other -> raise "#{name} not found (#{inspect(other)}); run: devenv shell -- mix test"
+  # The programs devenv exports as CAF_<NAME> (devenv.nix) that the tests run.
+  @programs [
+    :tmux,
+    :dtach,
+    :git,
+    :gh,
+    :sh,
+    :bash,
+    :rm,
+    :mv,
+    :env,
+    :kill,
+    :ps,
+    :cat,
+    :echo,
+    :sleep,
+    true,
+    :tlc
+  ]
+
+  @doc """
+  The absolute path of one program, from devenv's `CAF_<NAME>` variable, never from `PATH`:
+  `program!(:sh)` reads `CAF_SH`.
+  """
+  def program!(name) when name in @programs do
+    case System.get_env(variable(name)) do
+      "/" <> _ = path -> path
+      other -> raise "#{variable(name)} is #{inspect(other)}; run: devenv shell -- mix test"
     end
   end
+
+  @doc """
+  Checks, before any test runs, that this VM runs the Erlang and Elixir devenv's lock gives and
+  that every program's variable names a file. Returns `:ok` or raises naming each mismatch.
+  """
+  def check_environment! do
+    release = List.to_string(:erlang.system_info(:otp_release))
+    otp = File.read!(Path.join([:code.root_dir(), "releases", release, "OTP_VERSION"]))
+
+    running = [
+      {"CAF_OTP_VERSION", String.trim(otp)},
+      {"CAF_ELIXIR_VERSION", System.version()}
+    ]
+
+    versions =
+      for {variable, version} <- running, System.get_env(variable) != version do
+        "#{variable} is #{inspect(System.get_env(variable))}, but this VM runs #{version}"
+      end
+
+    programs =
+      for name <- @programs,
+          path = System.get_env(variable(name), ""),
+          not (Path.type(path) == :absolute and File.regular?(path)) do
+        "#{variable(name)} is #{inspect(path)}"
+      end
+
+    case versions ++ programs do
+      [] ->
+        :ok
+
+      wrong ->
+        raise "not devenv's environment; run: devenv shell -- mix test\n" <>
+                Enum.join(wrong, "\n")
+    end
+  end
+
+  defp variable(name), do: "CAF_" <> String.upcase(Atom.to_string(name))
 
   @doc """
   Calls `check` until it returns `{:ok, value}` or `timeout` ms pass. The event is what `check`
@@ -60,6 +118,8 @@ defmodule CodingAgentFramework.TestHost do
     await(fn ->
       case File.read(path) do
         {:ok, text} when byte_size(text) >= byte_size(expected) -> {:ok, text}
+        # A short read is not done yet: `await/2` ends on any `{:ok, _}`.
+        {:ok, text} -> {:short, text}
         other -> other
       end
     end)
@@ -67,7 +127,7 @@ defmodule CodingAgentFramework.TestHost do
 
   @doc "Ends a process this test started, by its pid; one already gone is fine."
   def kill(pid, signal \\ "-TERM") do
-    Shell.run(host(), "/bin/kill", [signal, to_string(pid)], timeout: 5_000)
+    Shell.run(host(), program!(:kill), [signal, to_string(pid)], timeout: 5_000)
   end
 
   @doc "Whether a process lives, by its pid (`kill -0`)."
