@@ -31,7 +31,11 @@ checks its stacks must pass. The framework holds no project's policy.
   of the framework's, one dtach directory and one writer.
 - **Server**: a tmux server, `tmux -L <name>`, always named with its host, `{host, server}`.
   Pane ids are unique only within one server, and a restarted server counts from `%0` again.
-- **Account**: a Claude account, known by its config directory.
+- **Account**: a Claude account, known by its own config directory under the framework's home.
+- **Framework home**: one directory per framework instance, given by the host app, that holds
+  everything the framework keeps on a host: each account's Claude config directory, the dtach
+  directory and the SQLite files. The framework never reads or writes `~/.claude` or any config
+  directory outside it.
 - **Project**: a repository and its trunk, declared as data.
 - **Parent session**: a project's main chat. It has Remote Control, keeps its name, is never
   archived, and moves between accounts with one press.
@@ -54,7 +58,7 @@ Each part is one OTP process or one pure module, with one job.
 | `Hosts` | the hosts, how each is reached, and its shell |
 | `Shell` | the only module that starts programs, locally or over ssh |
 | `Programs` | the absolute path of tmux, dtach, claude, git and gh on each host |
-| `Accounts` | the Claude accounts, by config directory |
+| `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` |
 | `Usage` | each account's allowance; picks the account with the most left |
 | `Tmux` | sessions, panes, tags, keys and viewers on one server; a contract with a CLI and a fake |
 | `TmuxSampler` | samples each server's panes and each host's held sockets, and reports a held agent with no viewer |
@@ -344,9 +348,16 @@ without it.
   can pass it.
 
 **Claude Code**
-- Set each account's config directory, and every per-account setting, explicitly at each launch.
-  Setting `CLAUDE_CONFIG_DIR` to the default directory logs Claude Code out, and Remote Control
-  otherwise follows each account's own default.
+- Give each account a config directory of the framework's own, `<home>/accounts/<account>/claude`,
+  and set `CLAUDE_CONFIG_DIR` to it at every launch, with every per-account setting. A session
+  never falls back to `~/.claude`: a launch without an account's directory is refused. The
+  person's own sessions, settings, hooks and plugins in `~/.claude` then never mix with the
+  framework's, and two framework instances never share an account's state. Each account is
+  logged in once in its own directory. Setting `CLAUDE_CONFIG_DIR` to the default directory
+  logs Claude Code out, and Remote Control otherwise follows each account's own default.
+- The framework writes each account's settings, hooks and MCP servers into that account's
+  directory itself, from data, so what an agent runs with is the framework's and is the same on
+  every host.
 - Answer dialogs through the held `PermissionRequest` hook, not by typing keys. Confirm a typed
   answer by its label, never by its position in the menu.
 - Keep real screen fixtures for each Claude Code release, and fail with a named reason.
