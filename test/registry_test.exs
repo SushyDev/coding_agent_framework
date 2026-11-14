@@ -202,7 +202,9 @@ defmodule CodingAgentFramework.RegistryTest do
 
           if ids != [] or first do
             assert_receive {:cue, cue}
-            assert Map.keys(cue) == [:ids, :topic] and cue.ids == ids
+            # A small map's atom keys come in the atoms' creation order, which depends on what
+            # ran before in this VM; compare them sorted.
+            assert Enum.sort(Map.keys(cue)) == [:ids, :topic] and cue.ids == ids
             assert Enum.all?(Table.rows_by_id(db, ids), &(&1.id in ids))
           else
             refute_received {:cue, _}
