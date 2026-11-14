@@ -9,7 +9,7 @@ A framework for running and supervising Claude Code agents on one or more machin
 accounts. It gives a project:
 
 - **parent sessions**: the main chats, one per project, which move from one account to another
-  with one press and keep their name and Remote Control;
+  with one press, or on their own before a limit, and keep their name and Remote Control;
 - **delegates**: full Claude Code sessions a parent starts through the framework, on the account
   with the most allowance left, each in its own git worktree and tmux session, which report back
   to their parent and may use Claude Code's own subagents to delegate further;
@@ -100,12 +100,23 @@ A parent holds, and a view shows:
 - the statuses of its delegates and their subagents, its open questions and its stack's checks;
 - the command that attaches to its tmux session, and Open in Ghostty.
 
-**Moving it** is one press:
-1. Drain: at 90 % of the weekly allowance, no new delegates or background commands start.
-2. Wait for the turn to end and the input box to be empty.
-3. Copy the transcript to the other account.
-4. End the session, then resume it there with `--resume`, its name and Remote Control on.
-5. Ignore the old process's `SessionEnd` that arrives after the new one started.
+**Moving it** starts on its own when the account reaches 90 % of its weekly allowance, or with
+one press at any level. It goes to the account with the most allowance left:
+1. Drain: no new delegates or background commands start.
+2. Wait until no background command runs. This is read after the drain began, so nothing can
+   start after it; a background command is a child of the session's process and ends with it.
+3. End the session through `Control`'s checked write: `/exit`, typed only when the turn has
+   ended and the input box is empty, in the same step as that check, so a prompt that arrives
+   in between is not cut off.
+4. Wait for the old process to exit.
+5. Copy the transcript to the other account. Copying after the exit keeps a turn that a prompt
+   through Remote Control started before the end.
+6. Resume it there with `--resume`, its name and Remote Control on.
+7. Ignore the old process's `SessionEnd` that arrives after the new one started.
+
+Running delegates do not hold a move: each runs in its own process and survives the parent's
+end. A delegate's report is held by the parent's session until a parent process runs whose turn
+has ended, and the hold survives restarts of the framework.
 
 Its chat is never archived.
 
@@ -249,8 +260,9 @@ Five specs, in this order:
      delegates do not hold a move, and their reports wait for a live parent process; a
      `SessionEnd` ends the session only when it names the session's current process.
 3. **`Delegate.tla`**: a parent, its delegates and restarts of the framework.
-   - Invariants: each report is delivered once; a delegate ends only after its report is
-     delivered.
+   - Invariants: each report is delivered once, and only to a running parent process whose
+     turn has ended; a delegate ends only after its report is delivered; a report held while
+     the parent moves survives a restart of the framework.
    - Liveness: every finished delegate's report arrives.
 4. **`Team.tla`**: agents of one project, their messages, claims and services, and restarts of
    the framework. Events: a message is sent, a turn ends, an agent sticks, dies or ends, two
@@ -370,7 +382,8 @@ without it.
 
 **Moves and limits**
 - Drain before a limit, not after it: a move after the limit lost eleven background commands.
-- At a hard limit, only the parent's own state counts.
+- At a hard limit, only the parent's own state counts: its turn and its background commands,
+  not its delegates.
 - Never edit a file Claude Code rewrites from memory: its next write erases the change.
 - Stop background sessions by id with `claude stop`.
 
