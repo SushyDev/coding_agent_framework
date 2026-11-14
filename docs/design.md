@@ -268,6 +268,11 @@ Five specs, in this order:
      turn has ended; a delegate ends only after its report is delivered; a report held while
      the parent moves survives a restart of the framework.
    - Liveness: every finished delegate's report arrives.
+   - The spec settles (F-14): the row says "sending" before the report is typed, and after a
+     restart a "sending" row is settled by reading the parent's transcript, never resent blind;
+     a delegate's row leaves "running" once, by its Stop event or, when a restart lost it, its
+     transcript's last reply; a kill after the last reply is a finish, not a kill; a second
+     kill's report takes the same path as a finished delegate's.
 4. **`Team.tla`**: agents of one project, their messages, claims and services, and restarts of
    the framework. Events: a message is sent, a turn ends, an agent sticks, dies or ends, two
    agents try to fix one target, a service's owner ends.
