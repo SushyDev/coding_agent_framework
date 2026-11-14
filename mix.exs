@@ -28,8 +28,6 @@ defmodule CodingAgentFramework.MixProject do
       {:plug, "~> 1.20"},
       # The library starts no server: the host app runs one. Tests run Bandit with Intake's plug.
       {:bandit, "~> 1.14", only: :test},
-      # Only the evaluation of F-32 runs MuonTrap; `Shell` does not (docs/build-notes/F-32.md).
-      {:muontrap, "~> 2.0", only: :test},
       {:stream_data, "~> 1.4", only: [:dev, :test]}
     ]
   end
