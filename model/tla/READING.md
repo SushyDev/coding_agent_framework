@@ -76,3 +76,25 @@ A parent session moves from account `Home` to the other one. Read it in the orde
 `procs` holds the session's processes as `[pid, account, ending]`; `turn` is the pid whose turn
 runs, or `0`. `NoStartWhileDraining` is a step property, like `AgentOutlivesServer`: no step taken
 while the move runs starts anything. `DelegatesStarted'` is that count after the step.
+
+## `Delegate.tla`
+
+A parent, its delegates, and restarts of the framework. Read it in the order of a report's path:
+
+- `StartAsked` is `start_delegate` in a parent's turn: refused by a check, or by the cap, or
+  started.
+- `DelegateFinishes` ends the delegate's turn with its last reply (`reply`) and fires its Stop
+  hook, which lands in `stops` only while the framework runs. `StopHandled` turns it into a held
+  report; when a restart lost it, `TranscriptRead` reads the last reply instead.
+- `DelegateKilled` then `KillSeen`: the first kill is resumed, the second is the report.
+- `DeliveryAsked` marks the row `"sending"` once the parent's turn has ended. `DeliveryTyped`
+  is `Control`'s checked write, or `DeliveryRefused` holds the report again. `DeliveryMarked`
+  writes `"delivered"`. A restart in between leaves `"sending"` with nothing in memory, and
+  `SendingResolved` reads the parent's transcript (`got`) to settle it.
+- `DelegateEnds` waits for `"delivered"`.
+
+`FrameworkDies` clears what the framework holds in memory (`stops`, `sending`); the tables
+(`status`, `report`, `resumes`) stay. `got` counts the report in the parent's transcript, and
+`wrong` records a report typed where the check must refuse it. `SF_vars`, strong fairness, says a
+step that is possible again and again, not always, happens: the user's prompts may take the
+parent's turn each time a report waits for it.
