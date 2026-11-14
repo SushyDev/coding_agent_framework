@@ -90,9 +90,21 @@ Every key carries its host from the first part built:
 
 - one tmux server, one dtach directory, one `Registry` reader and one `Control` per host, under
   a supervisor per host;
-- a pane is `{host, server, pane_id}`, a held agent `{host, socket}`;
+- a pane is `{host, server, server_start, pane_id}`, a held agent `{host, socket}`; the server's
+  start (its start time and pid) is part of a pane's key, so a pane id never matches across a
+  restart;
 - a remote host is reached over ssh through `Shell`. The framework's node runs on one host and
-  reads the others; a node per host is not needed for the first version.
+  reads the others; a node per host is not needed for the first version;
+- the framework keeps one ssh connection per remote host, and it also forwards that host's
+  `127.0.0.1:<port>` back to the node's `Intake` (a reverse forward), so a remote session's hooks
+  reach the node as a local one's do. While that connection is down, a remote host's hook events
+  are lost, as during a restart, and the readers that stand in for them cover it;
+- a reader of a whole host (held sockets, the `TmuxSampler`) has the `Tracker` scope
+  `{host, :host}`, beside the `{host, account}` of a reader of one account;
+- the `TmuxSampler` reads a host's panes and then its sockets, not in one instant, so a viewer
+  opened between the two reads can show as lost for one sample. A recovery acts on a lost viewer
+  only when two samples in a row agree. A pane with no tag, or one whose tag names another
+  session than its own, is a broken state the sampler reports and `Recoveries` handles.
 
 ## Parent sessions
 
@@ -253,6 +265,9 @@ section.
   body. A row is keyed by Claude Code's own ids where the event has them (`session_id` with
   `tool_use_id`, `prompt_id` or the start's `source`), and a second post of one key writes no
   second row. A part that reads rows moves its own row forward once, as `Delegates` does.
+- **Duplicates.** Stop, Notification and SessionEnd carry no id of their own, so two identical
+  posts read as two rows. No part counts those rows; each moves its own state forward once, so a
+  duplicate is harmless.
 - **Lost events.** A post while the framework is down is refused and lost. Each event a part
   needs has a reader that stands in: a Stop by the transcript's last reply, a SessionEnd by the
   pid, a SessionStart by the session file.
@@ -283,7 +298,8 @@ section.
 2. **One writer.** One process writes each table, and one `Control` per host writes panes.
 3. **Unread is not empty.** A reader that has not read yet answers `:unread`, and a view says so,
    rather than "nothing runs".
-4. **Total folds.** Sorts and folds take nil timestamps and unknown shapes; one malformed row
+4. **Total folds.** A source answers its rows and its problems together, so a read with one bad
+   row still shows the others. Sorts and folds take nil timestamps and unknown shapes; one malformed row
    never crashes the tracker. A tracker that crashes at boot takes every view down with it.
 5. **Liveness from hooks and processes**, never from what a pane shows. A process that left with
    no `SessionEnd` is found by its pid.
