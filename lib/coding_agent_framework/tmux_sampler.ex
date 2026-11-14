@@ -39,9 +39,10 @@ defmodule CodingAgentFramework.TmuxSampler do
 
   @doc """
   Starts a sampler. Options: `server:` (a `Tmux` server), `holder:` (a `Holder` on the same
-  host), `db:` (this instance's SQLite path), and optionally `notify:` (a function of one cue)
-  and `interval:` (ms between samples; without it, samples happen only on `sample/2`). It fails
-  to start with `{:host_mismatch, server_host, holder_host}`.
+  host), `db:` (this instance's SQLite path), and optionally `notify:` (a function of one cue),
+  `interval:` (ms between samples; without it, samples happen only on `sample/2`), and `clock:`
+  (a function answering the time in ms, by default the system's). It fails to start with
+  `{:host_mismatch, server_host, holder_host}`.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -98,7 +99,8 @@ defmodule CodingAgentFramework.TmuxSampler do
         cache: cache,
         failing: is_integer((Table.last_read(db, host, name) || %{})[:failed_at]),
         notify: Keyword.get(opts, :notify, fn _ -> :ok end),
-        interval: Keyword.get(opts, :interval)
+        interval: Keyword.get(opts, :interval),
+        clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end)
       }
 
       if state.interval, do: send(self(), :tick)
@@ -120,7 +122,7 @@ defmodule CodingAgentFramework.TmuxSampler do
   def handle_call(:rows, _from, state) do
     reply =
       with {:ok, read} <- Table.rows(state.db, state.host, state.name),
-           do: {:ok, Map.put(read, :age, max(now() - read.read_at, 0))}
+           do: {:ok, Map.put(read, :age, max(state.clock.() - read.read_at, 0))}
 
     {:reply, reply, state}
   end
@@ -134,7 +136,7 @@ defmodule CodingAgentFramework.TmuxSampler do
 
   defp sample_now(state) do
     # Stamped before the reads: a sample stamped after an act was read after it (`Recoveries`).
-    at = now()
+    at = state.clock.()
 
     panes =
       case Tmux.list_panes(state.server) do
@@ -152,7 +154,7 @@ defmodule CodingAgentFramework.TmuxSampler do
   end
 
   defp fail(state, reason) do
-    :ok = Table.failed(state.db, state.host, state.name, now(), reason)
+    :ok = Table.failed(state.db, state.host, state.name, state.clock.(), reason)
     cue(state, [])
     {{:unknown, reason}, %{state | failing: true}}
   end
@@ -188,6 +190,4 @@ defmodule CodingAgentFramework.TmuxSampler do
 
   defp cue(state, ids),
     do: state.notify.(%{topic: "tmux:#{state.host}:#{state.name}", ids: ids})
-
-  defp now, do: System.os_time(:millisecond)
 end

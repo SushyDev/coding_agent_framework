@@ -3,6 +3,8 @@ defmodule CodingAgentFramework.RecoveriesTest do
   `Recoveries` on a real tmux server and real dtach sockets in this test's own directory, with
   `cat` held as the agent's stand-in. Each sample and each check is a call, so the test reads
   what each event left without waiting on a timer; a process ending is waited on by its pid.
+  The sampler and `Recoveries` share a clock the test moves: it ticks one ms per reading, and
+  the test jumps it forward, so no test sleeps.
   """
   use ExUnit.Case, async: true
 
@@ -23,7 +25,15 @@ defmodule CodingAgentFramework.RecoveriesTest do
     {:ok, holder} = Holder.new(programs(), Path.join(dir, "d"))
     {:ok, control} = Control.start_link(tmux: server)
     db = Path.join(dir, "r.db")
-    {:ok, sampler} = TmuxSampler.start_link(server: server, holder: holder, db: db)
+    time = :counters.new(1, [:atomics])
+    :counters.put(time, 1, 1_000_000)
+
+    clock = fn ->
+      :counters.add(time, 1, 1)
+      :counters.get(time, 1)
+    end
+
+    {:ok, sampler} = TmuxSampler.start_link(server: server, holder: holder, db: db, clock: clock)
     me = self()
 
     opts = [
@@ -33,7 +43,8 @@ defmodule CodingAgentFramework.RecoveriesTest do
       server: server,
       db: db,
       size: {80, 24},
-      notify: &send(me, {:cue, &1})
+      notify: &send(me, {:cue, &1}),
+      clock: clock
     ]
 
     {:ok, recoveries} = Recoveries.start_link(opts)
@@ -46,6 +57,8 @@ defmodule CodingAgentFramework.RecoveriesTest do
      control: control,
      sampler: sampler,
      opts: opts,
+     time: time,
+     clock: clock,
      recoveries: recoveries}
   end
 
@@ -58,8 +71,7 @@ defmodule CodingAgentFramework.RecoveriesTest do
     assert {:ok, %{claimed: [], ended: []}} = Recoveries.check(ctx.recoveries)
 
     assert {:ok, :killed} = Tmux.kill_pane(ctx.server, viewer, "alpha")
-    assert held(ctx, "alpha").status == :unviewed
-    assert {:ok, %{claimed: [id], ended: []}} = Recoveries.check(ctx.recoveries)
+    assert {:ok, id} = agree(ctx, "alpha")
     assert_received {:cue, %{topic: "recoveries:test:" <> _, ids: [^id]}}
     # The same reading again claims nothing: it was read before the open.
     assert {:ok, %{claimed: [], ended: []}} = Recoveries.check(ctx.recoveries)
@@ -72,11 +84,13 @@ defmodule CodingAgentFramework.RecoveriesTest do
     assert [%{status: "recovered", key: "lost_viewer:alpha:" <> _}] = rows(ctx)
     assert alive?(child)
 
-    # A second loss of the same agent is a new state.
+    # A second loss of the same agent is a new state, named from the sample where its row
+    # turned unviewed again: after the reopen.
     assert {:ok, :killed} = Tmux.kill_pane(ctx.server, pane, "alpha")
-    assert held(ctx, "alpha").status == :unviewed
-    assert {:ok, %{claimed: [second]}} = Recoveries.check(ctx.recoveries)
+    assert {:ok, second} = agree(ctx, "alpha")
     assert second != id
+    [first, %{since: since}] = rows(ctx)
+    assert since > first.opened_at
 
     {:ok, tracker} =
       Tracker.start_link(
@@ -88,12 +102,88 @@ defmodule CodingAgentFramework.RecoveriesTest do
     assert %{recoveries: [_, _]} = view[{"test", "tmux:" <> key(ctx)}]
   end
 
+  test "a loss one sample read is not acted on", ctx do
+    hold!(ctx, "alpha")
+    {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
+    # Read lost once, as when a start opens its viewer between the sampler's two reads.
+    assert held(ctx, "alpha").status == :unviewed
+    assert {:ok, %{claimed: []}} = Recoveries.check(ctx.recoveries)
+    {:ok, _} = view(ctx, "alpha")
+    assert held(ctx, "alpha").status == :viewed
+    assert {:ok, %{claimed: []}} = Recoveries.check(ctx.recoveries)
+    assert rows(ctx) == []
+  end
+
+  test "a viewer opened after two samples agree ends the state, and names the next loss", ctx do
+    hold!(ctx, "alpha")
+    {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
+    assert held(ctx, "alpha").status == :unviewed
+    assert {:ok, %{claimed: []}} = Recoveries.check(ctx.recoveries)
+    assert held(ctx, "alpha").status == :unviewed
+    # Another part opens the viewer after the second sample and before the check acts.
+    {:ok, pane} = view(ctx, "alpha")
+    assert {:ok, %{claimed: [id]}} = Recoveries.check(ctx.recoveries)
+    assert [%{id: ^id, status: "unknown", reason: ":session_exists", open: "exists"}] = rows(ctx)
+
+    # Its viewer dies before the next sample: the row still reads the same, yet it is a new loss.
+    assert {:ok, :killed} = Tmux.kill_pane(ctx.server, pane, "alpha")
+    assert {:ok, second} = agree(ctx, "alpha")
+    assert second != id
+    assert [%{opened_at: at}, %{status: "opened", open: "ok", since: at}] = rows(ctx)
+  end
+
+  test "a third loss within the window waits for a person", ctx do
+    hold!(ctx, "alpha")
+    {:ok, pane} = view(ctx, "alpha")
+    {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
+
+    pane = lose_and_reopen(ctx, pane)
+    pane = lose_and_reopen(ctx, pane)
+    # The window passes: the two losses before it do not count.
+    move(ctx, 61_000)
+    pane = lose_and_reopen(ctx, pane)
+    pane = lose_and_reopen(ctx, pane)
+
+    assert {:ok, :killed} = Tmux.kill_pane(ctx.server, pane, "alpha")
+    assert {:ok, id} = agree(ctx, "alpha")
+    assert %{status: "failed", reason: ":repeating", opened_at: nil} = List.last(rows(ctx))
+    assert held(ctx, "alpha").status == :unviewed
+    assert {:ok, %{claimed: [], ended: []}} = Recoveries.check(ctx.recoveries)
+    assert length(rows(ctx)) == 5
+
+    assert {:refused, :not_repeating} = Recoveries.clear(ctx.recoveries, "beta")
+    assert {:ok, [^id]} = Recoveries.clear(ctx.recoveries, "alpha")
+    assert {:ok, sixth} = agree(ctx, "alpha")
+    assert %{id: ^sixth, status: "opened", open: "ok"} = List.last(rows(ctx))
+  end
+
+  test "a sample older than the maximum age is not acted on, and the row says why", ctx do
+    hold!(ctx, "alpha")
+    {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
+    assert held(ctx, "alpha").status == :unviewed
+    assert {:ok, %{claimed: []}} = Recoveries.check(ctx.recoveries)
+    assert held(ctx, "alpha").status == :unviewed
+    # The sampler stops; time passes.
+    move(ctx, 31_000)
+    assert {:refused, {:sample_too_old, age}} = Recoveries.check(ctx.recoveries)
+    assert age > 30_000
+    assert [%{status: "skipped", reason: reason, open: nil}] = rows(ctx)
+    assert reason == inspect({:sample_too_old, age})
+    assert held(ctx, "alpha").status == :unviewed
+
+    # A fresh sample agrees with the last one checked, and its claim takes the row over.
+    assert {:ok, %{claimed: [_]}} = Recoveries.check(ctx.recoveries)
+    assert [%{status: "opened", reason: nil, open: "ok"}] = rows(ctx)
+  end
+
   test "a killed server comes back with the viewer", ctx do
     {child, _} = hold!(ctx, "alpha")
     {:ok, "%0"} = view(ctx, "alpha")
     assert held(ctx, "alpha").status == :viewed
 
     assert {:ok, :killed} = Tmux.kill_server(ctx.server)
+    assert held(ctx, "alpha").status == :no_server
+    assert {:ok, %{claimed: []}} = Recoveries.check(ctx.recoveries)
     assert held(ctx, "alpha").status == :no_server
     assert {:ok, %{claimed: [id]}} = Recoveries.check(ctx.recoveries)
     assert [%{status: "opened", pane: "%0"}] = rows(ctx)
@@ -115,7 +205,7 @@ defmodule CodingAgentFramework.RecoveriesTest do
     [lost] = Recoveries.lost_viewers(read, %{})
     {:ok, db} = Table.open(ctx.db)
     state = Map.merge(lost, %{host: "test", server: key(ctx)})
-    {:ok, id} = Table.claim(db, state, System.os_time(:millisecond))
+    {:ok, id} = Table.claim(db, state, ctx.clock.())
     ref = Process.monitor(ctx.recoveries)
     GenServer.stop(ctx.recoveries)
     assert_receive {:DOWN, ^ref, _, _, _}
@@ -132,11 +222,10 @@ defmodule CodingAgentFramework.RecoveriesTest do
   test "a viewer that fails to open leaves a failed row and the agent running", ctx do
     {child, _} = hold!(ctx, "alpha")
     {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
-    assert held(ctx, "alpha").status == :unviewed
     # The host's writer is gone: the open is refused before it reaches tmux.
     :ok = GenServer.stop(ctx.control)
 
-    assert {:ok, %{claimed: [_]}} = Recoveries.check(ctx.recoveries)
+    assert {:ok, _} = agree(ctx, "alpha")
     assert [%{status: "failed", reason: ":no_control", opened_at: nil}] = rows(ctx)
     assert held(ctx, "alpha").status == :unviewed
     assert {:ok, %{claimed: [], ended: []}} = Recoveries.check(ctx.recoveries)
@@ -156,10 +245,14 @@ defmodule CodingAgentFramework.RecoveriesTest do
 
     assert held(ctx, "alpha").status == :stale
     assert {:ok, %{claimed: []}} = Recoveries.check(ctx.recoveries)
+    assert held(ctx, "alpha").status == :stale
+    assert {:ok, %{claimed: []}} = Recoveries.check(ctx.recoveries)
     assert rows(ctx) == []
   end
 
   defp key(ctx), do: elem(Tmux.key(ctx.server), 1)
+
+  defp move(ctx, ms), do: :counters.add(ctx.time, 1, ms)
 
   defp rows(ctx) do
     {:ok, db} = Table.open(ctx.db)
@@ -170,6 +263,26 @@ defmodule CodingAgentFramework.RecoveriesTest do
     assert {:ok, _} = TmuxSampler.sample(ctx.sampler)
     {:ok, %{rows: rows}} = TmuxSampler.rows(ctx.sampler)
     Enum.find(rows, &(&1.key == "held:" <> name))
+  end
+
+  # Two samples read `name` lost, a check after each: the first claims nothing, the second
+  # claims one state, whose id it answers.
+  defp agree(ctx, name) do
+    assert held(ctx, name).status in [:unviewed, :no_server]
+    assert {:ok, %{claimed: []}} = Recoveries.check(ctx.recoveries)
+    assert held(ctx, name).status in [:unviewed, :no_server]
+    assert {:ok, %{claimed: [id]}} = Recoveries.check(ctx.recoveries)
+    {:ok, id}
+  end
+
+  # Kills the viewer, has it reopened, and verifies it: answers the new viewer's pane.
+  defp lose_and_reopen(ctx, pane) do
+    assert {:ok, :killed} = Tmux.kill_pane(ctx.server, pane, "alpha")
+    assert {:ok, id} = agree(ctx, "alpha")
+    assert held(ctx, "alpha").status == :viewed
+    assert {:ok, %{ended: [^id]}} = Recoveries.check(ctx.recoveries)
+    assert %{id: ^id, status: "recovered", pane: new} = List.last(rows(ctx))
+    new
   end
 
   defp view(ctx, name) do

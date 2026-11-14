@@ -5,9 +5,12 @@ defmodule CodingAgentFramework.Recoveries.Table do
   the row is the claim: it is written before the act, and a second claim of one key is refused.
 
   `Recoveries` is the one writer. Anyone may open the file and read. `status` is `claimed`
-  (written, not yet acted on), `opened` (the act ran; the outcome waits for a later sample), or
-  one of the ends: `recovered`, `failed` and `unknown`, with `reason`. `open` is the act's
-  answer, `ok` when it opened a pane, and `opened_at` when it answered.
+  (written, not yet acted on), `opened` (the act ran; the outcome waits for a later sample), one
+  of the ends: `recovered`, `failed` and `unknown`, with `reason`, or `skipped`: a state read
+  only in a sample too old to act on, which a later claim takes over. `open` is the act's
+  answer, `ok` when it opened a pane and `exists` when tmux refused it because the session
+  exists, and `opened_at` when it answered. `cleared_at` is when a person cleared a row that
+  ended `failed{repeating}`.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "doc.db")
       iex> {:ok, db} = CodingAgentFramework.Recoveries.Table.open(path)
@@ -21,8 +24,9 @@ defmodule CodingAgentFramework.Recoveries.Table do
   alias Exqlite.Sqlite3
 
   @columns ~w(id host server key kind socket generation since status reason pane open
-              claimed_at opened_at ended_at)a
+              claimed_at opened_at ended_at cleared_at)a
   @claim ~w(host server key kind socket generation since)a
+  @repeating "status = 'failed' AND reason = ':repeating' AND cleared_at IS NULL"
 
   @schema """
   PRAGMA journal_mode = WAL;
@@ -30,7 +34,7 @@ defmodule CodingAgentFramework.Recoveries.Table do
     id INTEGER PRIMARY KEY, host TEXT NOT NULL, server TEXT NOT NULL, key TEXT NOT NULL,
     kind TEXT NOT NULL, socket TEXT NOT NULL, generation INTEGER, since INTEGER,
     status TEXT NOT NULL, reason TEXT, pane TEXT, open TEXT,
-    claimed_at INTEGER NOT NULL, opened_at INTEGER, ended_at INTEGER,
+    claimed_at INTEGER NOT NULL, opened_at INTEGER, ended_at INTEGER, cleared_at INTEGER,
     UNIQUE (host, server, key));
   """
 
@@ -51,23 +55,87 @@ defmodule CodingAgentFramework.Recoveries.Table do
 
   @doc """
   Claims a state at `at`: writes its row as `claimed` and returns its id, or
-  `{:refused, :claimed}` when a row of that key exists, whatever its status.
+  `{:refused, :claimed}` when a row of that key exists, unless that row is `skipped`, which the
+  claim takes over.
   """
   @spec claim(db, map, integer) :: {:ok, integer} | {:refused, :claimed}
   def claim(db, state, at) do
-    names = Enum.join(@claim ++ [:status, :claimed_at], ",")
-    values = Enum.map(@claim, &state[&1]) ++ ["claimed", at]
+    insert(
+      db,
+      state,
+      ["claimed", at, nil],
+      "status = 'claimed', reason = NULL, claimed_at = excluded.claimed_at"
+    )
+  end
+
+  @doc """
+  Writes a state read only in a sample too old to act on as `skipped`, with `reason`. A row of
+  that key already `skipped` takes the new reason; any other row is left, `{:refused, :claimed}`.
+  """
+  @spec skip(db, map, integer, term) :: {:ok, integer} | {:refused, :claimed}
+  def skip(db, state, at, reason),
+    do: insert(db, state, ["skipped", at, inspect(reason)], "reason = excluded.reason")
+
+  defp insert(db, state, [status, at, reason], update) do
+    names = Enum.join(@claim ++ [:status, :claimed_at, :reason], ",")
+    values = Enum.map(@claim, &state[&1]) ++ [status, at, reason]
     marks = Enum.map_join(1..length(values), ",", &"?#{&1}")
 
     case query(
            db,
            "INSERT INTO recoveries (#{names}) VALUES (#{marks}) " <>
-             "ON CONFLICT (host, server, key) DO NOTHING RETURNING id",
+             "ON CONFLICT (host, server, key) DO UPDATE SET #{update} " <>
+             "WHERE recoveries.status = 'skipped' RETURNING id",
            values
          ) do
       [[id]] -> {:ok, id}
       [] -> {:refused, :claimed}
     end
+  end
+
+  @doc """
+  How many states of `socket` were claimed at or after `from`, and after a person last cleared
+  it: the losses a new one is counted against.
+  """
+  @spec losses(db, String.t(), String.t(), String.t(), integer) :: non_neg_integer
+  def losses(db, host, server, socket, from) do
+    [[n]] =
+      query(
+        db,
+        "SELECT COUNT(*) FROM recoveries WHERE host = ?1 AND server = ?2 AND socket = ?3 " <>
+          "AND status != 'skipped' AND claimed_at >= ?4 AND claimed_at > COALESCE(" <>
+          "(SELECT MAX(cleared_at) FROM recoveries WHERE host = ?1 AND server = ?2 " <>
+          "AND socket = ?3), -1)",
+        [host, server, socket, from]
+      )
+
+    n
+  end
+
+  @doc "The sockets whose losses repeated and wait for a person: a `failed{repeating}` row left."
+  @spec repeating(db, String.t(), String.t()) :: [String.t()]
+  def repeating(db, host, server) do
+    for [socket] <-
+          query(
+            db,
+            "SELECT DISTINCT socket FROM recoveries WHERE host = ?1 AND server = ?2 " <>
+              "AND #{@repeating}",
+            [host, server]
+          ),
+        do: socket
+  end
+
+  @doc "Marks `socket`'s `failed{repeating}` rows cleared at `at`. Answers their ids."
+  @spec clear(db, String.t(), String.t(), String.t(), integer) :: [integer]
+  def clear(db, host, server, socket, at) do
+    for [id] <-
+          query(
+            db,
+            "UPDATE recoveries SET cleared_at = ?4 WHERE host = ?1 AND server = ?2 " <>
+              "AND socket = ?3 AND #{@repeating} RETURNING id",
+            [host, server, socket, at]
+          ),
+        do: id
   end
 
   @doc "Sets `fields` (status, reason, pane, open, opened_at, ended_at) on row `id`."
@@ -86,15 +154,19 @@ defmodule CodingAgentFramework.Recoveries.Table do
     do: select(db, "host = ?1 AND server = ?2 AND status IN ('claimed','opened')", [host, server])
 
   @doc """
-  Per socket, when the newest open that answered with a pane (`open` is `ok`) answered: a loss
-  read after it is a new one.
+  Per socket, the newest of these: an open that answered with a pane (`open` is `ok`), an open
+  refused because the session exists (`exists`; a viewer existed then), and a person's clear. A
+  loss read after it is a new one.
   """
   @spec last_opened(db, String.t(), String.t()) :: %{String.t() => integer}
   def last_opened(db, host, server) do
     db
     |> query(
-      "SELECT socket, MAX(opened_at) FROM recoveries WHERE host = ?1 AND server = ?2 " <>
-        "AND open = 'ok' GROUP BY socket",
+      "SELECT socket, MAX(at) FROM (" <>
+        "SELECT socket, opened_at AS at FROM recoveries WHERE host = ?1 AND server = ?2 " <>
+        "AND open IN ('ok', 'exists') UNION ALL " <>
+        "SELECT socket, cleared_at FROM recoveries WHERE host = ?1 AND server = ?2 " <>
+        "AND cleared_at IS NOT NULL) GROUP BY socket",
       [host, server]
     )
     |> Map.new(fn [socket, at] -> {socket, at} end)
