@@ -13,7 +13,8 @@
 (*   Holder    dtach -n: a socket holds one process, and refuses a second; *)
 (*   Registry  the session file, matched by the session's name, and a      *)
 (*             process's liveness by its pid and start time;               *)
-(*   Recoveries only as the owner of an orphan row (not built).            *)
+(*   Recoveries only as the owner of an orphan row and of a stop past its  *)
+(*             deadline, which it kills by pid and start time (not built). *)
 (*                                                                         *)
 (* Left abstract: the viewer's own failures (Agent.tla), the worktree and  *)
 (* its removal, which accounts the sessions are on, the text of the        *)
@@ -73,12 +74,13 @@ VARIABLES
     file,        \* s -> the process the session file of that name names, or NoProc
     foreign,     \* processes of other programs
     clock,       \* start times so far: each process has its own
+    late,        \* table: s -> the stop's deadline passed with its process alive
     onTime,      \* ghost: s -> the session file came before the start's deadline
     ends,        \* ghost: s -> times the current start's row ended
     wrongKills   \* ghost: processes killed that were not the session's own
 
 vars == <<up, restarts, row, rowProc, starts, call, past, proc, file, foreign, clock,
-          onTime, ends, wrongKills>>
+          late, onTime, ends, wrongKills>>
 
 LiveProcs == ({proc[t] : t \in S} \ {NoProc}) \cup foreign
 FreePids == Pids \ {q.pid : q \in LiveProcs}
@@ -96,7 +98,7 @@ Init ==
     /\ row = [s \in S |-> "none"] /\ rowProc = [s \in S |-> NoProc]
     /\ starts = [s \in S |-> 0] /\ call = [s \in S |-> "none"]
     /\ past = [s \in S |-> FALSE] /\ proc = [s \in S |-> NoProc]
-    /\ file = [s \in S |-> NoProc] /\ foreign = {} /\ clock = 0
+    /\ file = [s \in S |-> NoProc] /\ foreign = {} /\ clock = 0 /\ late = [s \in S |-> FALSE]
     /\ onTime = [s \in S |-> FALSE] /\ ends = [s \in S |-> 0] /\ wrongKills = {}
 
 \* Writes row s's status; entering an ended status counts as its end.
@@ -111,12 +113,12 @@ FrameworkDies ==
     /\ up /\ restarts < MaxRestarts
     /\ up' = FALSE /\ restarts' = restarts + 1
     /\ call' = [s \in S |-> "none"]
-    /\ UNCHANGED <<row, rowProc, starts, past, proc, file, foreign, clock, onTime, ends,
+    /\ UNCHANGED <<late, row, rowProc, starts, past, proc, file, foreign, clock, onTime, ends,
                    wrongKills>>
 
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
-    /\ UNCHANGED <<restarts, row, rowProc, starts, call, past, proc, file, foreign, clock,
+    /\ UNCHANGED <<late, restarts, row, rowProc, starts, call, past, proc, file, foreign, clock,
                    onTime, ends, wrongKills>>
 
 -----------------------------------------------------------------------------
@@ -124,7 +126,7 @@ FrameworkStarts ==
 
 ProcExits(s) ==
     /\ Live(s) /\ proc' = [proc EXCEPT ![s] = NoProc]
-    /\ UNCHANGED <<up, restarts, row, rowProc, starts, call, past, file, foreign, clock,
+    /\ UNCHANGED <<late, up, restarts, row, rowProc, starts, call, past, file, foreign, clock,
                    onTime, ends, wrongKills>>
 
 \* Another program starts and takes a free pid, perhaps one a session had.
@@ -132,7 +134,7 @@ ForeignStarts ==
     /\ Cardinality(foreign) < MaxForeign
     /\ \E p \in FreePids : foreign' = foreign \cup {[pid |-> p, start |-> clock + 1]}
     /\ clock' = clock + 1
-    /\ UNCHANGED <<up, restarts, row, rowProc, starts, call, past, proc, file, onTime, ends,
+    /\ UNCHANGED <<late, up, restarts, row, rowProc, starts, call, past, proc, file, onTime, ends,
                    wrongKills>>
 
 \* Claude Code writes its session file, with the session's name, perhaps late.
@@ -140,12 +142,12 @@ FileWritten(s) ==
     /\ Live(s) /\ file[s] # proc[s]
     /\ file' = [file EXCEPT ![s] = proc[s]]
     /\ onTime' = [onTime EXCEPT ![s] = ~past[s]]
-    /\ UNCHANGED <<up, restarts, row, rowProc, starts, call, past, proc, foreign, clock, ends,
+    /\ UNCHANGED <<late, up, restarts, row, rowProc, starts, call, past, proc, foreign, clock, ends,
                    wrongKills>>
 
 Tick(s) ==
     /\ row[s] = "starting" /\ ~past[s] /\ past' = [past EXCEPT ![s] = TRUE]
-    /\ UNCHANGED <<up, restarts, row, rowProc, starts, call, proc, file, foreign, clock,
+    /\ UNCHANGED <<late, up, restarts, row, rowProc, starts, call, proc, file, foreign, clock,
                    onTime, ends, wrongKills>>
 
 -----------------------------------------------------------------------------
@@ -161,7 +163,7 @@ RowWritten(s) ==
     /\ past' = [past EXCEPT ![s] = FALSE]
     /\ onTime' = [onTime EXCEPT ![s] = FALSE]
     /\ ends' = [ends EXCEPT ![s] = 0]
-    /\ UNCHANGED <<up, restarts, proc, file, foreign, clock, wrongKills>>
+    /\ UNCHANGED <<late, up, restarts, proc, file, foreign, clock, wrongKills>>
 
 \* dtach -n: the process is held; or the hold is refused, with nothing held;
 \* or it answers unknown, and the start waits for the file either way.
@@ -178,14 +180,14 @@ Held(s) ==
        \/ /\ SetRow(s, "refused")
           /\ call' = [call EXCEPT ![s] = "none"]
           /\ UNCHANGED <<proc, clock>>
-    /\ UNCHANGED <<up, restarts, rowProc, starts, past, file, foreign, onTime, wrongKills>>
+    /\ UNCHANGED <<late, up, restarts, rowProc, starts, past, file, foreign, onTime, wrongKills>>
 
 \* The viewer opens, or fails and leaves the process running (Agent.tla).
 ViewerOpened(s) ==
     /\ up /\ call[s] = "viewer"
     /\ call' = [call EXCEPT ![s] = "wait"]
     /\ row' = IF Break = "HoldFirst" THEN [row EXCEPT ![s] = "starting"] ELSE row
-    /\ UNCHANGED <<up, restarts, rowProc, starts, past, proc, file, foreign, clock, onTime,
+    /\ UNCHANGED <<late, up, restarts, rowProc, starts, past, proc, file, foreign, clock, onTime,
                    ends, wrongKills>>
 
 \* The call reads the Registry until its deadline: running, or unknown.
@@ -196,7 +198,7 @@ StartDecided(s) ==
        \/ /\ ~Confirms(s) /\ past[s]
           /\ SetRow(s, "unknown") /\ UNCHANGED rowProc
     /\ call' = [call EXCEPT ![s] = "none"]
-    /\ UNCHANGED <<up, restarts, starts, past, proc, file, foreign, clock, onTime, wrongKills>>
+    /\ UNCHANGED <<late, up, restarts, starts, past, proc, file, foreign, clock, onTime, wrongKills>>
 
 -----------------------------------------------------------------------------
 (* After a restart: a starting row with no call under way *)
@@ -213,7 +215,7 @@ Adopt(s) ==
                THEN SetRow(s, "orphan")
                ELSE SetRow(s, "refused")
           /\ UNCHANGED rowProc
-    /\ UNCHANGED <<up, restarts, starts, call, past, proc, file, foreign, clock, onTime,
+    /\ UNCHANGED <<late, up, restarts, starts, call, past, proc, file, foreign, clock, onTime,
                    wrongKills>>
 
 \* An unknown row is read again until it is running or gone.
@@ -223,7 +225,7 @@ ReRead(s) ==
           /\ SetRow(s, "running") /\ rowProc' = [rowProc EXCEPT ![s] = file[s]]
        \/ /\ ~Live(s)
           /\ SetRow(s, "stopped") /\ UNCHANGED rowProc
-    /\ UNCHANGED <<up, restarts, starts, call, past, proc, file, foreign, clock, onTime,
+    /\ UNCHANGED <<late, up, restarts, starts, call, past, proc, file, foreign, clock, onTime,
                    wrongKills>>
 
 -----------------------------------------------------------------------------
@@ -234,38 +236,41 @@ StopAsked(s) ==
     /\ up /\ call[s] = "none" /\ row[s] = "running"
     /\ row' = [row EXCEPT ![s] = "stopping"]
     /\ call' = [call EXCEPT ![s] = "stop"]
+    /\ late' = [late EXCEPT ![s] = FALSE]
     /\ UNCHANGED <<up, restarts, rowProc, starts, past, proc, file, foreign, clock, onTime,
                    ends, wrongKills>>
 
 \* By the row's pid and start time: stopped when gone; after a restart, with
-\* no stop under way, running otherwise.
+\* no stop under way, running otherwise, unless the stop's deadline passed:
+\* that row stays stopping for Recoveries.
 StopSettled(s) ==
     /\ up /\ row[s] = "stopping" /\ call[s] \in {"none", "stop"}
     /\ LET alive == IF Break = "SettleByPid" THEN AliveByPid(rowProc[s]) ELSE Alive(rowProc[s])
        IN \/ /\ ~alive /\ SetRow(s, "stopped")
-          \/ /\ alive /\ call[s] = "none" /\ SetRow(s, "running")
+          \/ /\ alive /\ call[s] = "none" /\ ~late[s] /\ SetRow(s, "running")
     /\ call' = [call EXCEPT ![s] = "none"]
-    /\ UNCHANGED <<up, restarts, rowProc, starts, past, proc, file, foreign, clock, onTime,
+    /\ UNCHANGED <<late, up, restarts, rowProc, starts, past, proc, file, foreign, clock, onTime,
                    wrongKills>>
 
-\* The stop's deadline passed with the process alive.
+\* The stop's deadline passed with the process alive: the row stays stopping,
+\* marked late, with no call under way.
 StopTimedOut(s) ==
     /\ up /\ row[s] = "stopping" /\ call[s] = "stop" /\ Alive(rowProc[s])
-    /\ SetRow(s, "unknown")
+    /\ late' = [late EXCEPT ![s] = TRUE]
     /\ call' = [call EXCEPT ![s] = "none"]
-    /\ UNCHANGED <<up, restarts, rowProc, starts, past, proc, file, foreign, clock, onTime,
-                   wrongKills>>
+    /\ UNCHANGED <<up, restarts, row, rowProc, starts, past, proc, file, foreign, clock, onTime,
+                   ends, wrongKills>>
 
-\* A stopping row's process is killed, by its pid and start time.
+\* Recoveries kills a stop past its deadline, by the row's pid and start time.
 Kill(s) ==
-    /\ up /\ row[s] = "stopping"
+    /\ up /\ row[s] = "stopping" /\ late[s]
     /\ \E q \in LiveProcs :
          /\ q.pid = rowProc[s].pid
          /\ q = rowProc[s] \/ Break = "KillByPid"
          /\ proc' = [t \in S |-> IF proc[t] = q THEN NoProc ELSE proc[t]]
          /\ foreign' = foreign \ {q}
          /\ wrongKills' = IF q = proc[s] THEN wrongKills ELSE wrongKills \cup {q}
-    /\ UNCHANGED <<up, restarts, row, rowProc, starts, call, past, file, clock, onTime, ends>>
+    /\ UNCHANGED <<late, up, restarts, row, rowProc, starts, call, past, file, clock, onTime, ends>>
 
 -----------------------------------------------------------------------------
 Next ==
@@ -293,6 +298,7 @@ TypeOK ==
     /\ row \in [S -> {"none", "starting", "running", "stopping", "stopped", "refused",
                       "unknown", "orphan"}]
     /\ call \in [S -> {"none", "hold", "viewer", "wait", "stop"}]
+    /\ late \in [S -> BOOLEAN]
     /\ \A s \in S : proc[s] = NoProc \/ proc[s].pid \in Pids
     /\ \A q \in foreign : q.pid \in Pids
     \* a socket holds one process, and a pid names one live process
