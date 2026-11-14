@@ -43,10 +43,12 @@ defmodule CodingAgentFramework.Usage.Reading do
   What `reading` says at `now` (Unix seconds), for a reading kept `max_age` seconds (default 6
   hours) from its `seen_at` (ms):
 
-  - `{:current, used}`: written within `max_age` and its window has not reset;
-  - `{:assumed, 0.0}`: written within `max_age`, but its window has reset, so the week started
-    anew and nothing used since is known;
-  - `:unknown`: older than `max_age`, without a `seen_at`, or not a reading.
+  - `{:assumed, 0.0}`: its window has reset, so the week started anew and nothing used since is
+    known. The reset wins over the age: an idle account's reading is always old, and it is the
+    account this rule exists for;
+  - `{:current, used}`: its window has not reset and it was written within `max_age`;
+  - `:unknown`: its window has not reset but it is older than `max_age`, or it is not a
+    reading.
 
   Pure and total. A reading from the future counts as just written.
 
@@ -57,6 +59,8 @@ defmodule CodingAgentFramework.Usage.Reading do
       iex> Reading.status(reading, 2500)
       {:assumed, 0.0}
       iex> Reading.status(reading, 1000 + 6 * 3600)
+      {:assumed, 0.0}
+      iex> Reading.status(%{reading | resets_at: 99_999}, 1000 + 6 * 3600)
       :unknown
   """
   @spec status(term, integer, integer) :: {:current | :assumed, float} | :unknown
@@ -66,9 +70,9 @@ defmodule CodingAgentFramework.Usage.Reading do
       when is_number(used) and is_integer(resets_at) and is_integer(seen_at) and is_integer(now) and
              is_integer(max_age) do
     cond do
+      resets_at <= now -> {:assumed, 0.0}
       seen_at + max_age * 1000 <= now * 1000 -> :unknown
-      resets_at > now -> {:current, used / 1}
-      true -> {:assumed, 0.0}
+      true -> {:current, used / 1}
     end
   end
 

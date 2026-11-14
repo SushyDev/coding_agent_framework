@@ -38,8 +38,9 @@ defmodule CodingAgentFramework.Usage do
   The account among `among` with the most allowance left at `now` (Unix seconds), judged by
   `Reading.status/3` with `max_age` seconds (default 6 hours): the least share used among
   current and assumed readings, a current one before an assumed one at the same share, then the
-  first name. An account with no reading, one of another shape, or one older than `max_age` is
-  not known, so it is never picked; with none known the answer is `{:refused, :none_known}`.
+  first name. A reading whose window has reset is assumed at 0 %, however old. An account with no
+  reading, one of another shape, or one not reset but older than `max_age` is not known, so it is
+  never picked; with none known the answer is `{:refused, :none_known}`.
   Pure and total over `readings`, a map of account to reading as `readings/2` gives it.
 
       iex> old = 1_000_000
@@ -51,6 +52,9 @@ defmodule CodingAgentFramework.Usage do
       iex> CodingAgentFramework.Usage.pick(readings, ["a", "b", "d"], 100)
       {:ok, "b"}
       iex> CodingAgentFramework.Usage.pick(readings, ["a", "b"], 100 + 6 * 3600 + 900)
+      {:ok, "a"}
+      iex> later = %{"a" => %{used: 80.0, resets_at: 99_999, seen_at: old}}
+      iex> CodingAgentFramework.Usage.pick(later, ["a"], 100 + 6 * 3600 + 900)
       {:refused, :none_known}
   """
   @spec pick(map, [term], integer, integer) :: {:ok, term} | {:refused, :none_known}

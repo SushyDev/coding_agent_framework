@@ -103,9 +103,9 @@ defmodule CodingAgentFramework.UsageTest do
   defp expected(%{used: u, resets_at: r, seen_at: s}, max_age)
        when is_float(u) and is_integer(r) and is_integer(s) do
     cond do
+      r <= @now -> {:assumed, 0.0}
       s + max_age * 1000 <= @seen -> :unknown
-      r > @now -> {:current, u}
-      true -> {:assumed, 0.0}
+      true -> {:current, u}
     end
   end
 

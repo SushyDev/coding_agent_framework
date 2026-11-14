@@ -407,7 +407,8 @@ command the framework writes into each account's settings (`rate_limits.seven_da
 used and when it resets). It reads no credential and calls no API.
 
 - A reading is current for 6 hours from when it was written. An older one counts as unknown for
-  `pick` and for the move at 90 %, and a view shows its age.
+  `pick` and for the move at 90 %, and a view shows its age. The reset rule below comes first:
+  an idle account's reading is always old.
 - A reading past its `resets_at` counts as 0 % used, marked as assumed, since the week started
   anew. A view shows it as assumed until a session's first answer on that account gives a real
   reading.
