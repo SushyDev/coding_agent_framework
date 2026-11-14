@@ -93,7 +93,7 @@ starts each part.
 | `Stacks` | the worktrees and `gh stack` chains of a parent's work |
 | `Tracker` | the state views read: the fold of every reader |
 | `Recoveries` | detect a broken state, act once per state, verify; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after `/exit` within its stop's deadline, and only by the row's pid and start time (`Sessions` itself never kills) |
-| `Mailbox` | messages between agents: stored, delivered once, in order per sender |
+| `Mailbox` | messages between agents: stored, delivered once, in order per sender and addressee |
 | `Services` | programs agents start and keep: held, owned, read, written to, restarted |
 | `Grants` | decides whether a caller may act on a target; holds a fix's claim on it |
 | `MCP` | the agent tools ("Agents working together"); each call is checked by `Grants` |
@@ -316,9 +316,13 @@ tools. The tools are strict in how they act and loose in what they let an agent 
 - Reading (look, transcript, logs, lists) is open within the project.
 - Messages are open within the project.
 - A fix (interrupt, answer, respawn, resume, stop) takes a claim on the target first. The claim
-  is for the target's current state, the way `Recoveries` acts once per state. A second fixer
-  of the same state is refused with `{:claimed, by}`. Two agents never fight over one stuck
-  agent, and a fix that did not help shows as the same state still claimed.
+  is for the target's current state, the way `Recoveries` acts once per state, and is a row in
+  `Grants`' table, written before the fix acts. A second fixer of the same state is refused
+  with `{:claimed, by}`, so two agents never fight over one stuck agent. The fix acts only
+  while the claimed state is still the target's current one, read again when it acts. A call
+  ends with its fix verified or not; the row keeps that state until the target's state moves,
+  and a fix that did not help goes to a person, not to a second agent. A claim a restart of
+  the framework cut off is closed as interrupted, never retried.
 - No agent may stop or move a parent session. Only a person moves a parent, with one press.
 - An agent may not fix itself. A stuck agent cannot be relied on to see that it is stuck.
 
@@ -328,9 +332,9 @@ tools. The tools are strict in how they act and loose in what they let an agent 
 |---|---|
 | `agents()` | the project's agents: name, role, parent, state (working, waiting, idle, stuck, gone), and what it waits on |
 | `message(to, text)` | stores a message and delivers it to the target when its turn has ended; answers `queued{id}`, then the sender learns `delivered` |
-| `look(agent)` | the agent's screen as text, its dialog if one is open, and its last transcript lines |
+| `look(agent)` | a parent's screen as text, or a delegate's rendered event log; its open dialog or request; its last transcript lines |
 | `transcript(agent, from)` | the agent's transcript from an offset |
-| `interrupt(agent)` | one `C-c` to the agent's pane, under a claim |
+| `interrupt(agent)` | one `C-c` to a parent's pane, or a delegate's stream interrupt, under a claim |
 | `answer(agent, dialog, label)` | answers an open dialog through its held hook, by label, under a claim |
 | `respawn(agent)` / `resume(agent)` | starts a dead or wedged agent again with `--resume`, once per state, under a claim |
 | `stop(agent)` | ends a delegate after its report is delivered, under a claim |
@@ -340,17 +344,23 @@ tools. The tools are strict in how they act and loose in what they let an agent 
 | `service_send(name, input)` | text or keys to the service, through `Control`'s checked write |
 | `service_wait(name, until, timeout)` | waits for a line matching a pattern, a port that listens, or an exit; answers which, or `{:unknown, :timeout}` |
 | `service_restart(name)` / `service_stop(name)` | restarts or ends a service, under a claim |
+| `service_hand(name, to)` | hands a service the caller owns to another agent of the project |
 | `ask(question)` | asks a person, without blocking |
 | `start_delegate(…)` | as in "The delegate protocol" |
 | `reload()` | reloads the caller's own tools |
 
 **Messages** are stored before they are sent, so a restart of the framework does not lose
-them. One goes in as a turn only when the target's turn has ended and its input box is empty,
-the same rule as any write. A message to a busy agent waits in order. A message to a gone agent
-is refused. A message to a delegate that has ended goes to its parent instead, and says so.
+them. One goes in only when the target's turn has ended (and, for a parent, its input box is
+empty), the same rule as any write, with a report's sending mark and settle: marked before the
+write, settled from the target's replay or transcript after a restart, never resent blind.
+Messages wait in order per sender and addressee. A message is refused only when its addressee
+is a name the project does not hold; one to a dead agent waits until it is respawned or ends.
+A message to a delegate that has ended goes to its parent instead, once, and says so; it goes
+on only from a settled row.
 
 **Services** belong to the agent that started them. When the owner ends, its services end too,
-unless it handed them to another agent with `service_start(…, keep: true)` or to its parent. Any
+unless it handed them on with `service_hand`, or started them with `keep: true`, which hands them
+to the owner's parent when the owner ends. Any
 agent of the project may read, wait on, write to and fix a service. A service has a name, a
 worktree, a held process and a log. It never holds a Claude Code session; agents are started as
 delegates.
