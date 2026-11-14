@@ -20,7 +20,24 @@ defmodule CodingAgentFramework.TestHost do
   def host, do: Host.local("test")
 
   # The programs devenv exports as CAF_<NAME> (devenv.nix) that the tests run.
-  @programs [:tmux, :dtach, :git, :gh, :sh, :bash, :rm, :mv, :env, :kill, :ps, :cat, :echo, :tlc]
+  @programs [
+    :tmux,
+    :dtach,
+    :git,
+    :gh,
+    :sh,
+    :bash,
+    :rm,
+    :mv,
+    :env,
+    :kill,
+    :ps,
+    :cat,
+    :echo,
+    :sleep,
+    true,
+    :tlc
+  ]
 
   @doc """
   The absolute path of one program, from devenv's `CAF_<NAME>` variable, never from `PATH`:
@@ -101,6 +118,8 @@ defmodule CodingAgentFramework.TestHost do
     await(fn ->
       case File.read(path) do
         {:ok, text} when byte_size(text) >= byte_size(expected) -> {:ok, text}
+        # A short read is not done yet: `await/2` ends on any `{:ok, _}`.
+        {:ok, text} -> {:short, text}
         other -> other
       end
     end)

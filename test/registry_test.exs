@@ -21,7 +21,8 @@ defmodule CodingAgentFramework.RegistryTest do
           account: "a",
           config_dir: dir,
           db: Path.join(dir, "registry.db"),
-          notify: &send(me, {:cue, &1})
+          notify: &send(me, {:cue, &1}),
+          ps: TestHost.program!(:ps)
         ],
         opts
       )
@@ -35,7 +36,7 @@ defmodule CodingAgentFramework.RegistryTest do
 
   defp lstart(pid) do
     {out, 0} =
-      System.cmd("/bin/ps", ["-o", "lstart=", "-p", "#{pid}"],
+      System.cmd(TestHost.program!(:ps), ["-o", "lstart=", "-p", "#{pid}"],
         env: [{"LC_ALL", "C"}, {"TZ", "UTC"}]
       )
 
@@ -56,7 +57,8 @@ defmodule CodingAgentFramework.RegistryTest do
           host: TestHost.host(),
           account: "a",
           config_dir: dir,
-          db: Path.join(dir, "r.db")
+          db: Path.join(dir, "r.db"),
+          ps: TestHost.program!(:ps)
         )
 
       assert Registry.rows(reg) == :unread
@@ -68,7 +70,7 @@ defmodule CodingAgentFramework.RegistryTest do
       dir = TestHost.test_dir()
       reg = start(dir)
       me = String.to_integer(System.pid())
-      port = Port.open({:spawn_executable, "/usr/bin/true"}, [:exit_status])
+      port = Port.open({:spawn_executable, TestHost.program!(true)}, [:exit_status])
       {:os_pid, gone} = Port.info(port, :os_pid)
       assert_receive {^port, {:exit_status, 0}}
 
@@ -94,9 +96,10 @@ defmodule CodingAgentFramework.RegistryTest do
     test "a ps that fails, or does not answer in time, answers unknown, not gone" do
       dir = TestHost.test_dir()
       failing = Path.join(dir, "ps-fails")
-      File.write!(failing, "#!/bin/sh\necho 'ps: cannot read' >&2\nexit 1\n")
+      sh = TestHost.program!(:sh)
+      File.write!(failing, "#!#{sh}\necho 'ps: cannot read' >&2\nexit 1\n")
       slow = Path.join(dir, "ps-slow")
-      File.write!(slow, "#!/bin/sh\nexec /bin/sleep 5\n")
+      File.write!(slow, "#!#{sh}\nexec #{TestHost.program!(:sleep)} 5\n")
       Enum.each([failing, slow], &File.chmod!(&1, 0o755))
       me = String.to_integer(System.pid())
 
