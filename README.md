@@ -37,9 +37,11 @@ others.
 Mix, Hex, rebar3 and the shell history keep their state in `.devenv/state`, not in your home
 directory. Hex and rebar3 come from the lock, so nothing is downloaded into it.
 
-Git hooks check format and American spelling (`typos`) before a commit. devenv installs them
-when you enter the shell, unless git's `core.hooksPath` is set outside this repository; then
-`devenv test` still runs them.
+Entering the shell writes this repository's own `pre-commit` hook into the common git directory
+(`git rev-parse --git-common-dir`), so every worktree shares it. It checks format and American
+spelling (`typos`) on the staged files, by absolute store paths, so a plain `git commit` outside
+the shell runs it. If `core.hooksPath` points at a global directory, that directory must hand off
+to this file when it exists. A `pre-commit` this repository did not write is never replaced.
 
 ## License
 
