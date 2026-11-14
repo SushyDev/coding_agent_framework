@@ -90,6 +90,26 @@ defmodule CodingAgentFramework.TmuxContractTest do
                  Tmux.new_session(ctx.server, "alpha", stand_in(ctx, "alpha"))
       end
 
+      test "a pane is killed or respawned only for the session its tag names", ctx do
+        {:ok, a} = Tmux.new_session(ctx.server, "alpha", stand_in(ctx, "alpha"))
+        {:ok, _} = Tmux.new_session(ctx.server, "beta", stand_in(ctx, "beta"))
+        argv = stand_in(ctx, "alpha2")
+        assert {:refused, {:tagged_for, "alpha"}} = Tmux.respawn_pane(ctx.server, a, "beta", argv)
+        assert {:refused, {:tagged_for, "alpha"}} = Tmux.kill_pane(ctx.server, a, "beta")
+        assert {:refused, {:bad_argv, []}} = Tmux.respawn_pane(ctx.server, a, "alpha", [])
+
+        # The respawned pane keeps its id and its tag, and runs the new program.
+        assert {:ok, :respawned} = Tmux.respawn_pane(ctx.server, a, "alpha", argv)
+        {:ok, panes} = Tmux.list_panes(ctx.server)
+        assert %{tag: "alpha"} = Enum.find(panes, &(&1.pane == a))
+        assert {:ok, :sent} = Tmux.write(ctx.server, a, "alpha", {:line, "again"})
+        assert {:ok, "again\n"} == received(ctx, a, "alpha2", "again\n")
+
+        assert {:ok, :killed} = Tmux.kill_pane(ctx.server, a, "alpha")
+        assert {:refused, :no_pane} = Tmux.kill_pane(ctx.server, a, "alpha")
+        assert {:ok, [%{session: "beta"}]} = Tmux.list_panes(ctx.server)
+      end
+
       test "a killed session's pane is gone", ctx do
         {:ok, pane} = Tmux.new_session(ctx.server, "alpha", stand_in(ctx, "alpha"))
         {:ok, _} = Tmux.new_session(ctx.server, "beta", stand_in(ctx, "beta"))
@@ -156,6 +176,7 @@ defmodule CodingAgentFramework.TmuxContractTest do
   defp received_list(%{impl: :fake, server: server}, pane), do: Fake.received(server, pane)
 
   defp render({:text, text}), do: text
+  defp render({:line, text}), do: text <> "\n"
   defp render({:keys, ["Enter"]}), do: "\n"
 
   defp assert_only_later_write_arrives(ctx, pane, session) do

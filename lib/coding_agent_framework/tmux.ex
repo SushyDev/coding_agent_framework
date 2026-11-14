@@ -9,7 +9,8 @@ defmodule CodingAgentFramework.Tmux do
   Every pane the framework opens is tagged with its session as it opens (`new_session/4`), and a
   write goes out only to a tagged pane whose tag names the write's session. The check and the
   send are one tmux command, so tmux checks the very pane it sends to, and a server that died in
-  between sends nothing (`model/tla/Agent.tla`, `WriteAsked`).
+  between sends nothing (`model/tla/Agent.tla`, `WriteAsked`). Ending or respawning a pane by its
+  id goes through the same check.
 
   This module checks its arguments, then calls the server's implementation, so both answer the
   same refusals for the same bad input:
@@ -26,7 +27,7 @@ defmodule CodingAgentFramework.Tmux do
   @type key :: {host :: String.t(), server :: String.t()}
   @type pane :: String.t()
   @type session :: String.t()
-  @type input :: {:text, String.t()} | {:keys, [String.t()]}
+  @type input :: {:text, String.t()} | {:line, String.t()} | {:keys, [String.t()]}
   @type pane_info :: %{pane: pane, session: session, tag: session | nil}
 
   @doc "The `{host, server}` that names this server."
@@ -50,6 +51,19 @@ defmodule CodingAgentFramework.Tmux do
   @callback write(server, pane, session, input) ::
               {:ok, :sent} | {:refused, term} | {:unknown, term}
 
+  @doc """
+  Ends `pane` only when its tag names `session`, checked in the same tmux command as a write is.
+  """
+  @callback kill_pane(server, pane, session) ::
+              {:ok, :killed} | {:refused, term} | {:unknown, term}
+
+  @doc """
+  Starts `argv` again in `pane` (ending what ran there) only when its tag names `session`,
+  checked in the same tmux command as a write is. The pane keeps its id and its tag.
+  """
+  @callback respawn_pane(server, pane, session, argv :: [String.t()]) ::
+              {:ok, :respawned} | {:refused, term} | {:unknown, term}
+
   @doc "Ends one session and its panes."
   @callback kill_session(server, session) :: {:ok, :killed} | {:refused, term} | {:unknown, term}
 
@@ -70,7 +84,7 @@ defmodule CodingAgentFramework.Tmux do
   def new_session(%mod{} = server, session, argv, opts \\ []) do
     cond do
       not session?(session) -> {:refused, {:bad_session, session}}
-      argv == [] or not Enum.all?(argv, &is_binary/1) -> {:refused, {:bad_argv, argv}}
+      not argv?(argv) -> {:refused, {:bad_argv, argv}}
       true -> mod.new_session(server, session, argv, opts)
     end
   end
@@ -80,17 +94,39 @@ defmodule CodingAgentFramework.Tmux do
   def list_panes(%mod{} = server), do: mod.list_panes(server)
 
   @doc """
-  See the `c:write/4` callback. Text goes out literally; keys are tmux key names such as
-  `"Enter"` or `"C-c"`.
+  See the `c:write/4` callback. Text goes out literally; a line is text and then Enter in the
+  one command; keys are tmux key names such as `"Enter"` or `"C-c"`.
   """
   @spec write(server, pane, session, input) ::
           {:ok, :sent} | {:refused, term} | {:unknown, term}
   def write(%mod{} = server, pane, session, input) do
     cond do
-      not (is_binary(pane) and pane =~ @pane) -> {:refused, {:bad_target, pane}}
+      not pane?(pane) -> {:refused, {:bad_target, pane}}
       not session?(session) -> {:refused, {:bad_session, session}}
       not input?(input) -> {:refused, {:bad_input, input}}
       true -> mod.write(server, pane, session, input)
+    end
+  end
+
+  @doc "See the `c:kill_pane/3` callback."
+  @spec kill_pane(server, pane, session) :: {:ok, :killed} | {:refused, term} | {:unknown, term}
+  def kill_pane(%mod{} = server, pane, session) do
+    cond do
+      not pane?(pane) -> {:refused, {:bad_target, pane}}
+      not session?(session) -> {:refused, {:bad_session, session}}
+      true -> mod.kill_pane(server, pane, session)
+    end
+  end
+
+  @doc "See the `c:respawn_pane/4` callback."
+  @spec respawn_pane(server, pane, session, [String.t()]) ::
+          {:ok, :respawned} | {:refused, term} | {:unknown, term}
+  def respawn_pane(%mod{} = server, pane, session, argv) do
+    cond do
+      not pane?(pane) -> {:refused, {:bad_target, pane}}
+      not session?(session) -> {:refused, {:bad_session, session}}
+      not argv?(argv) -> {:refused, {:bad_argv, argv}}
+      true -> mod.respawn_pane(server, pane, session, argv)
     end
   end
 
@@ -106,9 +142,12 @@ defmodule CodingAgentFramework.Tmux do
   @spec kill_server(server) :: {:ok, :killed} | {:refused, term} | {:unknown, term}
   def kill_server(%mod{} = server), do: mod.kill_server(server)
 
+  defp pane?(pane), do: is_binary(pane) and pane =~ @pane
   defp session?(session), do: is_binary(session) and session =~ @session
+  defp argv?(argv), do: is_list(argv) and argv != [] and Enum.all?(argv, &is_binary/1)
 
-  defp input?({:text, text}), do: is_binary(text) and text != "" and String.valid?(text)
+  defp input?({kind, text}) when kind in [:text, :line],
+    do: is_binary(text) and text != "" and String.valid?(text)
 
   defp input?({:keys, [_ | _] = keys}),
     do: Enum.all?(keys, &(is_binary(&1) and &1 =~ @key))
