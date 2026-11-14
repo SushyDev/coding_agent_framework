@@ -1,11 +1,11 @@
 defmodule CodingAgentFramework.Programs do
   @moduledoc """
   The absolute path of every program the framework runs on one host: tmux, dtach, claude, git
-  and gh, and the POSIX tools sh, rm, kill, env, ps and cat.
+  and gh, and the POSIX tools sh, rm, kill, env, ps, cat and tail.
 
   The paths are found once, by the host's own shell (`command -v`), so no later call looks a
   program up through a `PATH`: a long `PATH` searched on the VM's file server slowed every file
-  call. They can also be given outright with `new/2`. `Holder`, `Tmux.CLI` and `Registry` take
+  call. They can also be given outright with `new/2`. `Holder`, `Tmux.CLI`, `Registry` and `Transcripts` take
   the paths they run from here.
 
   The library reads no environment: the host app hands the paths in. On this machine they can be
@@ -29,10 +29,10 @@ defmodule CodingAgentFramework.Programs do
   defstruct [:host, :paths]
 
   @type name ::
-          :tmux | :dtach | :claude | :git | :gh | :sh | :rm | :kill | :env | :ps | :cat
+          :tmux | :dtach | :claude | :git | :gh | :sh | :rm | :kill | :env | :ps | :cat | :tail
   @type t :: %__MODULE__{host: Host.t(), paths: %{name => String.t()}}
 
-  @names [:tmux, :dtach, :claude, :git, :gh, :sh, :rm, :kill, :env, :ps, :cat]
+  @names [:tmux, :dtach, :claude, :git, :gh, :sh, :rm, :kill, :env, :ps, :cat, :tail]
   # The one fixed path in the library: `find/3` needs a shell to find the rest, sh included.
   @sh "/bin/sh"
   @find ~S"""
