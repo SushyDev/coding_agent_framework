@@ -109,7 +109,13 @@ Every key carries its host from the first part built:
 - the `TmuxSampler` reads a host's panes and then its sockets, not in one instant, so a viewer
   opened between the two reads can show as lost for one sample. A recovery acts on a lost viewer
   only when two samples in a row agree. A pane with no tag, or one whose tag names another
-  session than its own, is a broken state the sampler reports and `Recoveries` handles.
+  session than its own, is a broken state the sampler reports and `Recoveries` handles;
+- a loss is named by its socket, from the sample where its row took that status, or from
+  `Recoveries`' last open of that socket's viewer (answered with a pane, or refused because the
+  session exists), or a person's clear, whichever is later. A sample older than a maximum age
+  (the caller's, 30 s by default) is not acted on, and the loss's row says why. A third loss of
+  one socket within a window (the caller's, 60 s by default) ends `failed{repeating}`, and that
+  socket is not reopened until a person clears it.
 
 ## Parent sessions
 

@@ -11,13 +11,13 @@ configuration sets, and checks that nothing it lists goes wrong in any state it 
 - `VARIABLES` are the state: like the fields of a GenServer's state, but for the whole system
   (the tmux server, the sockets, the processes), not one process.
 - `Init` says what the variables hold at the start.
-- An **action** is one step, named after the event: `ServerDies`, `ViewerReopened`. It is a
+- An **action** is one step, named after the event: `ServerDies`, `RecoveryActs`. It is a
   formula over the variables now (`panes`) and after the step (`panes'`, read "panes prime"). It
   is like a `handle_info` clause whose guard is its first lines and whose result is the primed
   variables. A step that lists a variable as `UNCHANGED` leaves it as it was.
 - `Next` is every action joined with `\/` (or): any enabled step may come next.
 - `Spec` is `Init`, then any number of `Next` steps, plus **fairness**: the steps the framework
-  itself takes (restarting its server, sampling, reopening) eventually happen when they stay
+  itself takes (sampling, claiming, reopening) eventually happen when they stay
   possible. Events from outside (a server dying, a process exiting) may or may not happen.
 
 ## Notation
@@ -47,7 +47,7 @@ configuration sets, and checks that nothing it lists goes wrong in any state it 
 - `[][A]_vars` says every step satisfies `A`: `AgentOutlivesServer` says the step in which
   the server dies ends no process.
 - `P ~> Q`, "P leads to Q": whenever `P` holds, `Q` holds then or later. `LostViewerReopened`
-  says a held agent with no viewer later has one, or has ended.
+  says a held agent with no viewer later has one, or has ended, or waits for a person.
 
 ## Configurations and `Break`
 
@@ -58,6 +58,32 @@ it shows the check would catch that bug. When TLC finds one, its output in
 `_build/tlc/<name>.out` lists the states, step by step, that lead to it.
 
 Run them with `devenv shell -- bin/check-model` (see its header).
+
+## `Agent.tla`
+
+One host's tmux server, its held agents and their viewers, and the writes to a pane. Read the
+recovery of a lost viewer in the order it happens:
+
+- `AgentStarted` holds an agent under dtach, and the start opens its viewer in the same step,
+  or, up to `MaxLateViewers` times, later in `StartOpensViewer`.
+- `ViewerDies` and `ServerDies` lose a viewer. `Reading` is one sample: the panes, then the
+  sockets. `SamplerReads` is a reading with nothing between its two reads;
+  `SamplerReadsAround(a)` has a start's viewer of `a` open between them, so the reading is wrong
+  for `a`. A reading names a new loss (`new`): an agent not read in the last reading, or one
+  `Recoveries` opened a viewer for since. `agreed` holds the losses the last two readings both
+  read; `fresh` says `Recoveries` restarted since the last reading and holds none.
+- `RecoveryClaims(a)` writes the claim, only on an agreed loss not claimed yet. The third loss
+  since a person cleared the agent (`losses`) goes into `repeating` with no act, until
+  `PersonClears(a)`.
+- `RecoveryActs(c)` opens the viewer, and starts the server when it is down. An act on an agent
+  that has a viewer already is refused by tmux, and still counts as an open (`opened`).
+- `RecoveriesRestart` drops what `Recoveries` holds in memory (`acting`, `agreed`); its table
+  (`claimed`) stays.
+
+`OneReopenPerLoss` says one loss gets at most one reopen. `NoActOnOneWrongReading` says no claim
+rests on a single reading that was wrong (`wrongOnce`). `Agent_Viewers` checks the liveness
+with two agents; `Agent_LateViewers` with one agent, a late viewer and three losses;
+`Agent_Claims` the claims across two restarts of `Recoveries`; `Agent_Writes` the writes.
 
 ## `Move.tla`
 
