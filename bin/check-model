@@ -7,6 +7,8 @@
 #   devenv shell -- bin/check-model Agent_TwoAgents       one configuration, by its name
 #   devenv shell -- bin/check-model slow/Agent_Restarts   one slow configuration
 #
+# TLC uses every core unless TLC_WORKERS names a number: TLC_WORKERS=2 bin/check-model
+#
 # The fast configurations finish in under 30 s each and run in the test gate. The slow ones are
 # run by hand, and their times go in the build note.
 #
@@ -61,7 +63,7 @@ for cfg in "${configs[@]}"; do
   status=0
   started=$(date +%s)
   (cd "$specs" &&
-    tlc -workers auto -cleanup -noGenerateSpecTE -metadir "$out/states-$name" \
+    tlc -workers "${TLC_WORKERS:-auto}" -cleanup -noGenerateSpecTE -metadir "$out/states-$name" \
       -config "$relative" "$spec.tla") >"$out/$name.out" 2>&1 || status=$?
   seconds=$(($(date +%s) - started))
 
