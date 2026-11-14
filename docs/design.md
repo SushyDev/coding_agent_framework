@@ -59,7 +59,7 @@ Each part is one OTP process or one pure module, with one job.
 | `Shell` | the only module that starts programs, locally or over ssh |
 | `Programs` | the absolute path of tmux, dtach, claude, git, gh, sh, rm, kill, env, ps and cat on each host; no other part names a fixed path |
 | `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` |
-| `Usage` | each account's weekly allowance, from what Claude Code hands its status line; picks the account with the most left |
+| `Usage` | each account's weekly allowance, from what Claude Code hands its status line; picks the account with the most left ("Allowance") |
 | `Tmux` | sessions, panes, tags, keys and viewers on one server; a contract with a CLI and a fake |
 | `TmuxSampler` | samples each server's panes and each host's held sockets, and reports a held agent with no viewer |
 | `Holder` | dtach: hold a process in a clean environment, open a viewer, list sockets and whether each lives |
@@ -69,7 +69,7 @@ Each part is one OTP process or one pure module, with one job.
 | `Screen` | Claude Code's screen and dialogs, per Claude Code release, from real fixtures |
 | `Intake` | hook events in; holds `PermissionRequest` hooks until answered |
 | `Control` | the one writer per host: send, answer, interrupt, stop, respawn |
-| `Sessions` | start, resume, stop and move sessions; their worktrees |
+| `Sessions` | start, resume and stop held sessions on one host, with their viewers and rows; worktrees are a later part of it |
 | `Mover` | drains a session and moves it between accounts |
 | `Parents` | each project's parent session, and what it holds |
 | `Delegates` | the delegate protocol: start, report, resume, end |
@@ -151,8 +151,19 @@ A parent calls `start_delegate(project, branch, model, brief)`. The framework:
 A start writes its row first, as starting, with its worktree path and socket name, before it
 acts. After a restart, a row still starting is adopted when its held process lives and its
 session file names it; otherwise its worktree is removed when clean and held by no agent, and
-the start answers `refused{interrupted}`. `Delegate.tla` leaves this step abstract; it is
-modeled with `Delegates`.
+the start answers `refused{interrupted}`. The adoption waits for the start's own deadline
+before it decides, since a held process may only be slow to write its file; one with a live
+socket and still no file then is kept as an orphan row for `Recoveries`, never left without a
+row. After a restart, a row still stopping is settled by its pid and start time: stopped when
+gone, running otherwise. A row whose start answered unknown is read again at each `Registry`
+read until it is running or gone. A start is confirmed by the session file's `name`, which
+`--name` sets; a check against each pinned Claude Code release confirms it, with the Remote
+Control check. `Delegate.tla` leaves the start abstract; it gains the start and its adoption
+before `Delegates` is built.
+
+A part that waits on a reader within a call (a start waiting for its session file) reads it
+again at a fixed interval until the call's deadline. That wait is part of the call's answer and
+its timeout, not a hidden one. Everything else follows the reader's cue.
 
 The answers are explicit: `started{…}` or `refused{reason}`, then `finished`, `killed` or
 `late_report`. A delegate's subagents count for tokens and as work still going for its parent,
@@ -385,6 +396,25 @@ without it.
 - Claude Code has no flag that turns Remote Control off; a delegate's settings file sets
   `remoteControlAtStartup` to false. A check against each pinned Claude Code release confirms a
   delegate starts with it off.
+- A session in a new worktree meets the workspace trust dialog first, and until it is trusted
+  Claude Code runs no status line. `Screen` answers that dialog by its label at a start, and the
+  settings never set `disableAllHooks`.
+
+## Allowance
+
+`Usage` reads each account's weekly allowance from the JSON Claude Code hands the status line
+command the framework writes into each account's settings (`rate_limits.seven_day`: the share
+used and when it resets). It reads no credential and calls no API.
+
+- A reading is current for 6 hours from when it was written. An older one counts as unknown for
+  `pick` and for the move at 90 %, and a view shows its age.
+- A reading past its `resets_at` counts as 0 % used, marked as assumed, since the week started
+  anew. A view shows it as assumed until a session's first answer on that account gives a real
+  reading.
+- `pick` answers the account with the most left among current and assumed readings, preferring a
+  current one at the same share, or `refused{none_known}`. It never guesses past that.
+- A check flags an account whose sessions have run past their first answer with no new reading.
+- On a remote host, the status line's file is read through `Shell`, as `Registry` reads.
 - Answer dialogs through the held `PermissionRequest` hook, not by typing keys. Confirm a typed
   answer by its label, never by its position in the menu.
 - Keep real screen fixtures for each Claude Code release, and fail with a named reason.
