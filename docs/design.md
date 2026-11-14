@@ -1,7 +1,7 @@
 # coding_agent_framework: design
 
-This is the plan the framework is built from. Nothing in it is built yet; each part names the
-order it comes in, at the end.
+This is the plan the framework is built from. The order of its units is at the end; each unit
+built so far has a build note in `docs/build-notes/`.
 
 ## What it is
 
@@ -51,7 +51,7 @@ Each part is one OTP process or one pure module, with one job.
 | `Accounts` | the Claude accounts, by config directory |
 | `Usage` | each account's allowance; picks the account with the most left |
 | `Tmux` | sessions, panes, tags, keys and viewers on one server; a contract with a CLI and a fake |
-| `TmuxSampler` | samples each server's panes |
+| `TmuxSampler` | samples each server's panes and each host's held sockets, and reports a held agent with no viewer |
 | `Holder` | dtach: hold a process, open a viewer, hang up, list a socket's children |
 | `ClaudeCLI` | the command line and environment of a session, per role and account |
 | `Registry` | reads Claude Code's `<config>/sessions/*.json` per account and host |
@@ -65,7 +65,7 @@ Each part is one OTP process or one pure module, with one job.
 | `Delegates` | the delegate protocol: start, report, resume, end |
 | `Stacks` | the worktrees and `gh stack` chains of a parent's work |
 | `Tracker` | the state views read: the fold of every reader |
-| `Recoveries` | detect a broken state, act once per state, verify |
+| `Recoveries` | detect a broken state, act once per state, verify; reopens a lost viewer, and so starts a host's tmux server again after it dies |
 | `MCP` | tools for agents: `ask`, `start_delegate`, `reload` |
 | `Ghostty` | opens or focuses a session's terminal window |
 
@@ -146,6 +146,8 @@ Specs live in `model/tla/`, checked with TLC:
 - small constant sets and `Max*` counters bound the search;
 - a `Break` constant's every value other than `"none"` is a named deliberate bug, and a `Break_*`
   configuration must find it (TLC exits 12 or 13), so each check is shown to catch something;
+- a guard that cannot fail on its own, because another guard refuses the same steps, is defense
+  in depth: it has no `Break` value, and the spec's header names it and the guard behind it;
 - `bin/check-model` runs them; the fast configurations run in the test gate, and the slow ones
   by hand, each with its time recorded;
 - each spec's header names the modules it models and what it leaves abstract.
@@ -248,8 +250,13 @@ without it.
 **Writes to panes**
 - Each write ends sent, refused or unknown, and an unknown write is never resent: tmux exits 0
   for a key that reached nothing.
-- Before a write, check that the pane belongs to the session the write names: its tag, or the
-  session's process in the pane.
+- A write checks that the pane's tag names the session the write names, and sends, in one tmux
+  command: `if-shell -F -t <pane> '#{==:#{@<tag>},<session>}' 'send-keys …'`. tmux checks the
+  very pane it sends to, and a server that died in between sends nothing; a check followed by a
+  separate send can reach another agent's pane that took the id after a restart.
+- Every pane the framework writes to is tagged with its session as it opens, in the command that
+  opens it. An untagged pane is refused, not checked some other way: a check of the pane's
+  process cannot run inside the tmux command that sends.
 - Type only when the turn has ended and the input box is empty: two Ctrl-C presses exit Claude
   Code.
 - An answer a hook holds goes to the hook, so a pane check that fails under load never stands in
