@@ -25,6 +25,9 @@ defmodule CodingAgentFramework.MixProject do
   defp deps do
     [
       {:exqlite, "~> 0.43.0"},
+      {:plug, "~> 1.20"},
+      # The library starts no server: the host app runs one. Tests run Bandit with Intake's plug.
+      {:bandit, "~> 1.14", only: :test},
       {:stream_data, "~> 1.4", only: [:dev, :test]}
     ]
   end
