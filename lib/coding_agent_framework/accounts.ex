@@ -19,7 +19,11 @@ defmodule CodingAgentFramework.Accounts do
     and false for a delegate, since 2.1.322 has a flag to turn Remote Control on but none to
     turn it off;
   - `mcp.json`: the MCP servers, loaded with `--mcp-config` and `--strict-mcp-config`, so no
-    server from `.claude.json` joins them.
+    server from `.claude.json` joins them;
+  - `statusline.sh`, when `prepare/3` is given the host's `Programs`: the settings' `statusLine`
+    command. Claude Code hands it a JSON text with the account's rate limits; it copies a text
+    that has the weekly window to `usage_file/2`, which `CodingAgentFramework.Usage` reads, and
+    prints nothing.
 
   This module works on this machine's file system; see `docs/build-notes/F-15.md`.
 
@@ -31,6 +35,7 @@ defmodule CodingAgentFramework.Accounts do
   """
 
   alias CodingAgentFramework.Accounts.Account
+  alias CodingAgentFramework.Programs
 
   @enforce_keys [:home, :names]
   defstruct [:home, :names]
@@ -68,9 +73,20 @@ defmodule CodingAgentFramework.Accounts do
   end
 
   @doc """
+  The file an account's status line command writes, `<home>/usage/<account>.json`, outside its
+  config directory so that no file there is one Claude Code might write.
+  """
+  @spec usage_file(t, String.t()) :: {:ok, String.t()} | {:refused, {:unknown_account, term}}
+  def usage_file(%__MODULE__{} = accounts, name) do
+    with {:ok, _} <- config_dir(accounts, name),
+         do: {:ok, Path.join([accounts.home, "usage", name <> ".json"])}
+  end
+
+  @doc """
   Creates the account's config directory and writes its framework files from `data`:
   `:settings` (a map of Claude Code settings), `:hooks` (the settings' `hooks` map) and
-  `:mcp_servers` (a map of server name to its config), each optional. A file is written whole
+  `:mcp_servers` (a map of server name to its config) and `:programs` (the host's `Programs`,
+  for the status line command, which needs its sh and cat), each optional. A file is written whole
   to a temporary name and renamed, so a launch never reads half of one.
 
   Returns `{:ok, account}` (see `ready/2`), or `{:refused, reason}` for an unknown account or
@@ -84,9 +100,12 @@ defmodule CodingAgentFramework.Accounts do
 
     with {:ok, dir} <- config_dir(accounts, name),
          account = Account.at(name, dir),
+         {:ok, line} <- status_line(accounts, name, dir, Map.get(data, :programs)),
+         settings = Map.merge(settings, line.settings),
          {:ok, files} <- encode(account, settings, Map.get(data, :mcp_servers, %{})),
          :ok <- mkdir(Path.join(dir, "framework")),
-         :ok <- write_all(files) do
+         :ok <- Enum.reduce_while(line.dirs, :ok, &halt_unless_ok(mkdir(&1), &2)),
+         :ok <- write_all(line.files ++ files) do
       {:ok, account}
     end
   end
@@ -144,6 +163,40 @@ defmodule CodingAgentFramework.Accounts do
       e -> {:refused, {:not_json, Exception.message(e)}}
     end
   end
+
+  defp status_line(_accounts, _name, _dir, nil), do: {:ok, %{settings: %{}, dirs: [], files: []}}
+
+  defp status_line(accounts, name, dir, programs) do
+    with {:ok, %{sh: sh, cat: cat}} <- Programs.take(programs, [:sh, :cat]),
+         {:ok, file} <- usage_file(accounts, name) do
+      script = Path.join([dir, "framework", "statusline.sh"])
+
+      # Kept only when it has the weekly window: a session's text before its first answer from
+      # the API has none, and must not replace a reading. `"seven_day"` with its closing quote
+      # matches no longer key.
+      text = """
+      #!#{sh}
+      # Written by coding_agent_framework for Usage; see CodingAgentFramework.Accounts.
+      t=$(#{sh_word(cat)}) || exit 0
+      case "$t" in *'"seven_day"'*) printf '%s' "$t" > #{sh_word(file)} ;; esac
+      """
+
+      command = %{"type" => "command", "command" => "#{sh_word(sh)} #{sh_word(script)}"}
+
+      {:ok,
+       %{
+         settings: %{"statusLine" => command},
+         dirs: [Path.dirname(file)],
+         files: [{script, text}]
+       }}
+    end
+  end
+
+  # One sh word: single quotes, with each quote inside closed, escaped and opened again.
+  defp sh_word(text), do: "'" <> String.replace(text, "'", ~S('\'')) <> "'"
+
+  defp halt_unless_ok(:ok, :ok), do: {:cont, :ok}
+  defp halt_unless_ok(other, :ok), do: {:halt, other}
 
   defp mkdir(dir) do
     case File.mkdir_p(dir) do
