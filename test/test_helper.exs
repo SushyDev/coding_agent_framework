@@ -5,4 +5,6 @@ CodingAgentFramework.TestHost.check_environment!()
 # when the suite ends. Every tmux server and dtach socket a test makes lives there.
 File.mkdir_p!(CodingAgentFramework.TestHost.vm_dir())
 ExUnit.after_suite(fn _ -> File.rm_rf(CodingAgentFramework.TestHost.vm_dir()) end)
-ExUnit.start()
+# A message a test waits for is announced, but under a heavy load it can take longer than
+# ExUnit's 100 ms default to arrive. A wait still ends on the message, not on the timeout.
+ExUnit.start(assert_receive_timeout: 5_000)
