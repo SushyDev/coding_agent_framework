@@ -136,8 +136,23 @@ A parent calls `start_delegate(project, branch, model, brief)`. The framework:
 4. starts `claude` held by dtach, with Remote Control off and the brief as its first prompt,
    tags its pane with the session, project and unit, and confirms it started;
 5. delivers its last message to the parent when it stops. When a restart lost the stop event,
-   it delivers the transcript's last reply instead, and ends the delegate only after delivery;
-6. resumes it once when it is killed, and reports a second kill instead of retrying.
+   it delivers the transcript's last reply instead, and ends the delegate only after delivery.
+   The delegate's row moves from running to finished once, by its Stop event or by its
+   transcript's last reply, whichever comes first; a later one is ignored. A report is tried at
+   each of the parent's turn ends, through `Control`'s checked write, and a refused write holds
+   it again. The row is marked sending before the write; after a restart, a row still marked
+   sending is settled from the parent's transcript, once the parent's turn that took it has
+   ended: delivered if the report is there, held again if not. Each report carries a mark of
+   its own that the transcript shows;
+6. resumes it once when it is killed before its last reply, and reports a second such kill
+   instead of retrying. That report is held and delivered like a finish. A kill after the last
+   reply is a finish, read from the transcript.
+
+A start writes its row first, as starting, with its worktree path and socket name, before it
+acts. After a restart, a row still starting is adopted when its held process lives and its
+session file names it; otherwise its worktree is removed when clean and held by no agent, and
+the start answers `refused{interrupted}`. `Delegate.tla` leaves this step abstract; it is
+modeled with `Delegates`.
 
 The answers are explicit: `started{…}` or `refused{reason}`, then `finished`, `killed` or
 `late_report`. A delegate's subagents count for tokens and as work still going for its parent,
@@ -358,11 +373,18 @@ without it.
   never falls back to `~/.claude`: a launch without an account's directory is refused. The
   person's own sessions, settings, hooks and plugins in `~/.claude` then never mix with the
   framework's, and two framework instances never share an account's state. Each account is
-  logged in once in its own directory. Setting `CLAUDE_CONFIG_DIR` to the default directory
+  logged in once in its own directory, by a person running `claude` with that directory; the
+  framework shows the command. It never reads a credential, so whether an account is logged in
+  is unknown until a session on it starts or fails. Setting `CLAUDE_CONFIG_DIR` to the default directory
   logs Claude Code out, and Remote Control otherwise follows each account's own default.
 - The framework writes each account's settings, hooks and MCP servers into that account's
   directory itself, from data, so what an agent runs with is the framework's and is the same on
-  every host.
+  every host. It writes only files of its own that each launch names by flag, never a file
+  Claude Code rewrites (`settings.json`, `.claude.json`, credentials). On a remote host it
+  writes them through `Shell`.
+- Claude Code has no flag that turns Remote Control off; a delegate's settings file sets
+  `remoteControlAtStartup` to false. A check against each pinned Claude Code release confirms a
+  delegate starts with it off.
 - Answer dialogs through the held `PermissionRequest` hook, not by typing keys. Confirm a typed
   answer by its label, never by its position in the menu.
 - Keep real screen fixtures for each Claude Code release, and fail with a named reason.
