@@ -72,7 +72,8 @@ starts each part.
 | Part | Job |
 |---|---|
 | `Hosts` | the hosts, how each is reached, and its shell |
-| `Shell` | the only module that starts programs, locally or over ssh, each in a process group of its own that ends with its port |
+| `Shell` | the only module that starts programs, locally or over ssh, each leading a process group of its own, which a timeout ends |
+| `Shell.Reaper` | one per host: ends a running command's group when its caller dies first or the VM dies |
 | `Programs` | the absolute path of tmux, dtach, claude, git, gh, sh, sleep, rm, kill, env, ps, cat and tail on each host; no other part names a fixed path |
 | `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` |
 | `Usage` | each account's weekly allowance, from what Claude Code hands its status line; picks the account with the most left ("Allowance") |
@@ -491,9 +492,9 @@ only by its own pid and start time; every starting row settles).
 stored once, and a held `PermissionRequest` answered at most once, by its hook, only on the
 dialog it names, never after Claude Code's timeout and never by typed keys.
 
-`Shell.tla` (F-35) models how a command's process group ends: the group ends when the port
-closes while the command runs, a held process is never reached, and a kill never reaches a
-reused id.
+`Shell.tla` (F-35) models how a command's process group ends: a timeout, the caller's death
+and the VM's death each end it (the last two with a reaper), a held process is never reached,
+and a kill never reaches a reused id.
 
 Code emits traces where it can, and a trace spec checks them; a trace cannot show a missing
 guard, so the specs are also reviewed against the code.
@@ -562,14 +563,17 @@ without it.
 - Keep each host's dtach directory short, and bound the length of a session id used as a socket
   name: macOS cuts a socket path at 104 bytes, and a long temporary directory plus a session id
   can pass it.
-- Every command `Shell` runs is a process group of its own, and the group ends when its port
-  closes: on a timeout, the caller's death or the VM's (`Shell.tla`). A process that must outlive
-  the framework is held by `dtach -n`, whose `setsid` takes it out of the group. Without the
-  group, a command's own children outlived its timeout and the VM. Never run a hold under
+- Every command `Shell` runs leads a process group of its own (OTP starts each port program with
+  `setsid`). A timeout ends the group; with a `Shell.Reaper`, so do the caller's death and the
+  VM's (`Shell.tla`). No process waits beside each command: the reaper's one watcher serves the
+  whole VM. A process that must outlive the framework is held by `dtach -n`, whose `setsid`
+  takes it out of the group. Without the group, a command's own children outlived its timeout
+  and the VM. A wrapper per command cost 6.5 to 14 ms each (F-35). Never run a hold under
   anything that ends what a program leaves behind more widely than its group, such as a cgroup:
   it would end the held agent.
-- `Shell` signals a group only from inside it, or while one of its members lives, and a pid only
-  while it is the signaler's own unreaped child, so a kill never reaches a reused id.
+- A group is signaled only while the framework holds its command as running: `Shell` until it
+  takes the exit, the reaper until `Shell` drops the group or the reaper's own KILL is sent. So a
+  kill never reaches a reused id.
 
 **Claude Code**
 - Give each account a config directory of the framework's own, `<home>/accounts/<account>/claude`,

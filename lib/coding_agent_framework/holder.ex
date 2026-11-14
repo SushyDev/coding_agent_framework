@@ -16,7 +16,7 @@ defmodule CodingAgentFramework.Holder do
   never removed; a stale one is removed only to hold a new process on its path
   (`model/tla/Agent.tla`, `AgentStarted`).
 
-      iex> host = CodingAgentFramework.Host.local("laptop", "/run/bin/sh", "/run/bin/sleep")
+      iex> host = CodingAgentFramework.Host.local("laptop", "/run/bin/kill")
       iex> paths = %{dtach: "/run/bin/dtach", sh: "/run/bin/sh", env: "/run/bin/env", rm: "/run/bin/rm"}
       iex> {:ok, programs} = CodingAgentFramework.Programs.new(host, paths)
       iex> {:ok, holder} = CodingAgentFramework.Holder.new(programs, "/tmp/agents")

@@ -8,6 +8,7 @@ defmodule CodingAgentFramework.ShellGroupTest do
   import CodingAgentFramework.TestHost
 
   alias CodingAgentFramework.Shell
+  alias CodingAgentFramework.Shell.Reaper
 
   @stand_in ~S"""
   d=$0; sleep=$1; dtach=$2; sh=$3
@@ -36,6 +37,14 @@ defmodule CodingAgentFramework.ShellGroupTest do
 
   defp gone(pid), do: await(fn -> if alive?(pid), do: :alive, else: {:ok, :gone} end)
 
+  defp reaper do
+    start_supervised!({Reaper, programs: programs()})
+  end
+
+  defp held(reaper) do
+    await(fn -> if Reaper.held(reaper) == %{}, do: :none, else: {:ok, :held} end)
+  end
+
   # The group is gone; the held process lives, and is then ended here, by its pid.
   defp assert_group_ended(pids) do
     assert {:ok, :gone} = gone(pids["sh"])
@@ -54,17 +63,52 @@ defmodule CodingAgentFramework.ShellGroupTest do
     assert_group_ended(pids(dir))
   end
 
-  test "the owner's death ends the command's group, and not a held process" do
+  test "with a reaper, the owner's death ends the command's group, and not a held process" do
+    dir = test_dir()
+    reaper = reaper()
+
+    owner =
+      spawn(fn ->
+        Shell.run(host(), program!(:sh), args(dir), timeout: 30_000, reaper: reaper)
+      end)
+
+    pids = pids(dir)
+    assert {:ok, :held} = held(reaper)
+    Process.exit(owner, :kill)
+    assert_group_ended(pids)
+    # It drops the group once its KILL, half a second after the TERM, is sent.
+    assert {:ok, :dropped} =
+             await(fn -> if Reaper.held(reaper) == %{}, do: {:ok, :dropped}, else: :held end)
+  end
+
+  test "without a reaper, the owner's death leaves the command running" do
     dir = test_dir()
     owner = spawn(fn -> Shell.run(host(), program!(:sh), args(dir), timeout: 30_000) end)
     pids = pids(dir)
+    ref = Process.monitor(owner)
     Process.exit(owner, :kill)
+    assert_receive {:DOWN, ^ref, :process, _, _}
+    assert alive?(pids["sh"])
+    # This test started the group: it ends it by its id.
+    Shell.signal(program!(:kill), "KILL", pids["sh"])
     assert_group_ended(pids)
+  end
+
+  test "the reaper drops a command that ended, and a timed-out one" do
+    reaper = reaper()
+
+    assert {:ok, %{status: 0}} =
+             Shell.run(host(), program!(true), [], timeout: 5_000, reaper: reaper)
+
+    assert {:unknown, {:timeout, 100}} =
+             Shell.run(host(), program!(:sleep), ["60"], timeout: 100, reaper: reaper)
+
+    assert Reaper.held(reaper) == %{}
   end
 
   # A VM boots slowly on a loaded machine: its wait is bounded at 45 s, not :peer's 15.
   @tag timeout: 90_000
-  test "the VM's death ends the command's group, and not a held process" do
+  test "with a reaper, the VM's death ends the command's group, and not a held process" do
     dir = test_dir()
     paths = Enum.flat_map(:code.get_path(), &[~c"-pa", &1])
 
@@ -72,9 +116,18 @@ defmodule CodingAgentFramework.ShellGroupTest do
       :peer.start(%{connection: :standard_io, args: paths, wait_boot: 45_000})
 
     vm = :peer.call(peer, :os, :getpid, [], 10_000)
-    :peer.cast(peer, Shell, :run, [host(), program!(:sh), args(dir), [timeout: 30_000]])
+    announce = Path.join(dir, "reaped")
+
+    :peer.cast(peer, CodingAgentFramework.TestHost, :run_reaped, [
+      program!(:sh),
+      args(dir),
+      30_000,
+      announce
+    ])
+
     pids = pids(dir)
-    # A hard death, with no cleanup in the VM: the port's stdin closes as the VM's pipe does.
+    assert {:ok, _} = read_when(announce, "held\n")
+    # A hard death, with no cleanup in the VM: the watcher's stdin closes as the VM's pipe does.
     kill(vm, "-KILL")
     assert_group_ended(pids)
     catch_exit(:peer.stop(peer))

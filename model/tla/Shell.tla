@@ -1,37 +1,52 @@
 ------------------------------- MODULE Shell -------------------------------
 (***************************************************************************)
-(* One command Shell runs, the process group it runs in, and how that      *)
-(* group ends.                                                             *)
+(* One command Shell runs, the process group it leads, and the three ways *)
+(* that group is ended: a timeout, its owner's death and the VM's death.   *)
 (*                                                                         *)
 (* Models these modules of CodingAgentFramework:                           *)
-(*   Shell   its wrapper: the port's sh leads a process group of its own   *)
-(*           (OTP starts every port program with setsid). It starts a      *)
-(*           watcher in that group, then runs the command in it. The       *)
-(*           watcher blocks reading the port's stdin. At end of file it    *)
-(*           sends TERM to the group, waits a grace, then sends KILL. When *)
-(*           the command exits on its own, the sh kills the watcher by its *)
-(*           pid (its own child, not yet reaped) and exits with the        *)
-(*           command's status;                                             *)
-(*   Holder  dtach -n: the held process calls setsid, so it leaves the     *)
-(*           group.                                                        *)
+(*   Shell         runs the program directly. OTP starts every port        *)
+(*                 program with setsid, so the command leads a group whose *)
+(*                 id is its pid. On a timeout it sends TERM to the group, *)
+(*                 waits a grace for the command's exit, and sends KILL to *)
+(*                 the group only if the exit did not come. When it takes  *)
+(*                 the command's exit it drops the group from its reaper;  *)
+(*   Shell.Reaper  one per host, given to Shell.run or not. It holds each  *)
+(*                 running command's group with its owner, monitors the    *)
+(*                 owner, and when the owner dies first it sends TERM to   *)
+(*                 the group, then KILL after the grace. It keeps one sh   *)
+(*                 watcher for the VM, fed each group it holds and each it *)
+(*                 drops; at end of its stdin (the VM died) the watcher    *)
+(*                 sends TERM to every group it still holds, waits the     *)
+(*                 grace, and sends KILL;                                  *)
+(*   Holder        dtach -n: the held process calls setsid, so it leaves   *)
+(*                 the group.                                              *)
 (*                                                                         *)
-(* The port's stdin closes on a timeout (Shell closes the port), when the  *)
-(* port's owner dies, or when the VM dies: the three are one step here,    *)
-(* PortCloses. The command starts one child in the group, which ignores    *)
-(* TERM (the worst case), and may hold one process. Another program may    *)
-(* take the group's id once no process has it: the pid of the sh, which    *)
-(* is the group's id, is free once the sh is reaped and the group is       *)
-(* empty.                                                                  *)
+(* The command may start one child in its group and may hold one process.  *)
+(* Which of the command and its child ignore TERM is chosen at the start:  *)
+(* every case is checked. Another program may take the group's id once     *)
+(* the id is free: the command is gone, the group is empty, and the        *)
+(* framework knows the command ended (known).                              *)
 (*                                                                         *)
-(* Left abstract: output and status (passed through unchanged), the grace's *)
-(* length. The watcher reading end of file and sending TERM is one step:   *)
-(* in the code they are two system calls, and if the command exits on its *)
-(* own between them, the sh kills the watcher first and the group is left *)
-(* as a command that exits on its own leaves it. A command that exits on  *)
-(* its own leaves its children running, as before this unit.              *)
+(* known is the one assumption about time. In the code the command is      *)
+(* reaped by OTP a moment before Shell takes its exit status, and the      *)
+(* reaper's KILL comes a grace after its TERM. A freed pid is not handed   *)
+(* out again within that time: macOS and Linux hand out pids in order and *)
+(* come back to one only after tens of thousands of forks. So the model    *)
+(* frees the id only once the part that kills by it has heard of the end  *)
+(* (Shell took the exit) or finished its kill (the reaper or the watcher). *)
 (*                                                                         *)
-(* Fairness: the watcher's and the sh's steps happen while they stay       *)
-(* possible. The command, its children and other programs act or not.     *)
+(* Left abstract: output and status (passed through unchanged), the       *)
+(* grace's length, and messages. Shell.run registers the group with the   *)
+(* reaper as it starts the command, in one step; the reaper writes each    *)
+(* change to the watcher as it makes it, and the watcher reads all that    *)
+(* was written before its stdin closed, so the reaper and the watcher     *)
+(* hold the same groups: one variable, held. A command that exits on its  *)
+(* own leaves its children running, as before F-35; so does one that a    *)
+(* timeout's TERM ends within the grace, as Shell then sends no KILL.      *)
+(*                                                                         *)
+(* Fairness: Shell's, the reaper's and the watcher's steps happen while    *)
+(* they stay possible. The command, its children, the owner, the VM and    *)
+(* other programs act or not.                                              *)
 (*                                                                         *)
 (* Break: "none" is the design. Every other value removes one guard and    *)
 (* has a Break_Shell_<value>.cfg that TLC must fail.                       *)
@@ -41,46 +56,61 @@ CONSTANTS Break
 
 Breaks == {
     "none",
-    "ProgramOnly",    \* the kill reaches the command by its pid, not its group
+    "ProgramOnly",    \* a kill reaches the command by its pid, not its group
     "HeldStays",      \* the held process does not leave the group
-    "WatchOutside"    \* the watcher is not in the group it kills
+    "KillAfterEnd",   \* Shell does not drop the group when the command ends
+    "NoReaper"        \* Shell.run is given no reaper
 }
 
 ASSUME Break \in Breaks
 
-\* sh: the port's sh and the group's leader; held: what dtach holds; foreign:
-\* another program's process.
-Procs == {"sh", "watch", "cmd", "child", "held", "foreign"}
+\* held: what dtach holds; foreign: another program's process.
+Procs == {"cmd", "child", "held", "foreign"}
 Ours == Procs \ {"foreign"}
 
 VARIABLES
     alive,     \* [Procs -> BOOLEAN]
-    member,    \* [Procs -> BOOLEAN]: in the group whose id is the sh's pid
+    member,    \* [Procs -> BOOLEAN]: in the group whose id is the command's pid
     started,   \* the command's child and held process started (a set)
-    stdin,     \* "open" or "closed": the port's stdin
-    phase,     \* the watcher: "reading", "grace", "done", or "stopped" by the sh
-    ended,     \* how the command ended: "running", "own", "signal"
-    hit        \* the processes a kill reached that it must not reach
+    ignores,   \* the processes that ignore TERM
+    owner,     \* Shell.run in the owner: "waiting", "grace" (TERM sent), "done", "dead"
+    held,      \* the reaper and its watcher hold the group
+    reaper,    \* for this group: "watching", "grace" (TERM sent), "off"
+    vm,        \* "up" or "dead"
+    watcher,   \* "reading", "grace" (TERM sent), "done"
+    known,     \* the framework knows the command ended: its id may be freed
+    killed,    \* a KILL was sent to the group (a ghost)
+    hit        \* the processes a kill reached that it must not reach (a ghost)
 
-vars == <<alive, member, started, stdin, phase, ended, hit>>
+vars == <<alive, member, started, ignores, owner, held, reaper, vm, watcher, known,
+          killed, hit>>
 
 TypeOK ==
     /\ alive \in [Procs -> BOOLEAN]
     /\ member \in [Procs -> BOOLEAN]
     /\ started \subseteq {"child", "held"}
-    /\ stdin \in {"open", "closed"}
-    /\ phase \in {"reading", "grace", "done", "stopped"}
-    /\ ended \in {"running", "own", "signal"}
+    /\ ignores \subseteq {"cmd", "child"}
+    /\ owner \in {"waiting", "grace", "done", "dead"}
+    /\ held \in BOOLEAN
+    /\ reaper \in {"watching", "grace", "off"}
+    /\ vm \in {"up", "dead"}
+    /\ watcher \in {"reading", "grace", "done"}
+    /\ known \in BOOLEAN
+    /\ killed \in BOOLEAN
     /\ hit \subseteq Procs
 
 Init ==
-    /\ alive = [p \in Procs |-> p \in {"sh", "watch", "cmd"}]
-    /\ member = [p \in Procs |->
-                   p \in {"sh", "cmd"} \/ (p = "watch" /\ Break # "WatchOutside")]
+    /\ alive = [p \in Procs |-> p = "cmd"]
+    /\ member = [p \in Procs |-> p = "cmd"]
     /\ started = {}
-    /\ stdin = "open"
-    /\ phase = "reading"
-    /\ ended = "running"
+    /\ ignores \in SUBSET {"cmd", "child"}
+    /\ owner = "waiting"
+    /\ held = (Break # "NoReaper")
+    /\ reaper = "watching"
+    /\ vm = "up"
+    /\ watcher = "reading"
+    /\ known = FALSE
+    /\ killed = FALSE
     /\ hit = {}
 
 \* The group exists while any process is in it.
@@ -95,12 +125,23 @@ Reached ==
 
 Wrong(r) == r \cap {"held", "foreign"}
 
+\* TERM and KILL to the group, as one step each.
+Term ==
+    LET r == Reached \ ignores
+    IN /\ alive' = [p \in Procs |-> alive[p] /\ p \notin r]
+       /\ hit' = hit \cup Wrong(r)
+
+Kill ==
+    /\ alive' = [p \in Procs |-> alive[p] /\ p \notin Reached]
+    /\ hit' = hit \cup Wrong(Reached)
+    /\ killed' = TRUE
+
 CmdStartsChild ==
     /\ alive["cmd"] /\ "child" \notin started
     /\ started' = started \cup {"child"}
     /\ alive' = [alive EXCEPT !["child"] = TRUE]
     /\ member' = [member EXCEPT !["child"] = TRUE]
-    /\ UNCHANGED <<stdin, phase, ended, hit>>
+    /\ UNCHANGED <<ignores, owner, held, reaper, vm, watcher, known, killed, hit>>
 
 \* dtach -n forks, and its master calls setsid: a new session and group.
 CmdHolds ==
@@ -108,85 +149,117 @@ CmdHolds ==
     /\ started' = started \cup {"held"}
     /\ alive' = [alive EXCEPT !["held"] = TRUE]
     /\ member' = [member EXCEPT !["held"] = (Break = "HeldStays")]
-    /\ UNCHANGED <<stdin, phase, ended, hit>>
-
-CmdExits ==
-    /\ alive["cmd"]
-    /\ alive' = [alive EXCEPT !["cmd"] = FALSE]
-    /\ ended' = "own"
-    /\ UNCHANGED <<member, started, stdin, phase, hit>>
+    /\ UNCHANGED <<ignores, owner, held, reaper, vm, watcher, known, killed, hit>>
 
 Exits(p) ==
-    /\ p \in {"child", "held", "foreign"} /\ alive[p]
+    /\ alive[p]
     /\ alive' = [alive EXCEPT ![p] = FALSE]
-    /\ UNCHANGED <<member, started, stdin, phase, ended, hit>>
+    /\ UNCHANGED <<member, started, ignores, owner, held, reaper, vm, watcher, known,
+                   killed, hit>>
 
-\* A timeout, the owner's death or the VM's.
-PortCloses ==
-    /\ stdin = "open"
-    /\ stdin' = "closed"
-    /\ UNCHANGED <<alive, member, started, phase, ended, hit>>
+\* Shell takes the command's exit status and drops the group from its reaper,
+\* in the wait or in a timeout's grace. No KILL follows.
+ShellTakesExit ==
+    /\ owner \in {"waiting", "grace"} /\ ~alive["cmd"]
+    /\ owner' = "done"
+    /\ known' = TRUE
+    /\ held' = IF Break = "KillAfterEnd" THEN held ELSE FALSE
+    /\ UNCHANGED <<alive, member, started, ignores, reaper, vm, watcher, killed, hit>>
 
-\* The sh sees the command end on its own and kills the watcher by its pid.
-\* The watcher is the sh's child and lives (its own KILL would have ended the
-\* sh too), so the pid is not reused.
-ShStandsDown ==
-    /\ alive["sh"] /\ ~alive["cmd"]
-    /\ alive' = [alive EXCEPT !["sh"] = FALSE, !["watch"] = FALSE]
-    /\ phase' = IF phase = "reading" THEN "stopped" ELSE phase
-    /\ UNCHANGED <<member, started, stdin, ended, hit>>
+\* The timeout passed: TERM to the group, then the grace.
+ShellTimesOut ==
+    /\ owner = "waiting"
+    /\ Term
+    /\ owner' = "grace"
+    /\ UNCHANGED <<member, started, ignores, held, reaper, vm, watcher, known, killed>>
 
-\* End of file: TERM to the group. The watcher ignores it; the child is
-\* modeled as ignoring it too, so only the KILL ends it.
-WatchTerms ==
-    /\ alive["watch"] /\ phase = "reading" /\ stdin = "closed"
-    /\ LET r == Reached \ {"watch", "child"}
-       IN /\ alive' = [p \in Procs |-> alive[p] /\ p \notin r]
-          /\ ended' = IF "cmd" \in r THEN "signal" ELSE ended
-          /\ hit' = hit \cup Wrong(r)
-    /\ phase' = "grace"
-    /\ UNCHANGED <<member, started, stdin>>
+\* The grace passed with no exit taken: KILL to the group, then Shell closes
+\* the port, drops the group and answers the timeout.
+ShellKills ==
+    /\ owner = "grace"
+    /\ Kill
+    /\ owner' = "done"
+    /\ known' = TRUE
+    /\ held' = IF Break = "KillAfterEnd" THEN held ELSE FALSE
+    /\ UNCHANGED <<member, started, ignores, reaper, vm, watcher>>
 
-\* After the grace: KILL to the group, which ends the watcher too when it is
-\* a member.
-WatchKills ==
-    /\ alive["watch"] /\ phase = "grace"
-    /\ LET r == Reached \cup {"watch"}
-       IN /\ alive' = [p \in Procs |-> alive[p] /\ p \notin r]
-          /\ hit' = hit \cup Wrong(r)
-          /\ ended' = IF "cmd" \in r /\ ended = "running" THEN "signal" ELSE ended
-    /\ phase' = "done"
-    /\ UNCHANGED <<member, started, stdin>>
+\* The owner dies, in Shell.run or after it. Its port closes; the command
+\* runs on.
+OwnerDies ==
+    /\ owner # "dead" /\ vm = "up"
+    /\ owner' = "dead"
+    /\ UNCHANGED <<alive, member, started, ignores, held, reaper, vm, watcher, known,
+                   killed, hit>>
 
-\* Another program takes the group's id: only once the sh is gone (reaped at
-\* once) and no process is in the group.
+\* The reaper sees the owner's death while it holds the group.
+ReaperTerms ==
+    /\ vm = "up" /\ owner = "dead" /\ held /\ reaper = "watching"
+    /\ Term
+    /\ reaper' = "grace"
+    /\ UNCHANGED <<member, started, ignores, owner, held, vm, watcher, known, killed>>
+
+\* After the grace: KILL to the group, then the reaper drops it.
+ReaperKills ==
+    /\ vm = "up" /\ reaper = "grace"
+    /\ Kill
+    /\ reaper' = "off"
+    /\ held' = FALSE
+    /\ known' = TRUE
+    /\ UNCHANGED <<member, started, ignores, owner, vm, watcher>>
+
+\* The VM dies, the owner and the reaper with it, and the watcher's stdin
+\* closes.
+VmDies ==
+    /\ vm = "up"
+    /\ vm' = "dead"
+    /\ owner' = "dead"
+    /\ UNCHANGED <<alive, member, started, ignores, held, reaper, watcher, known, killed,
+                   hit>>
+
+WatcherTerms ==
+    /\ vm = "dead" /\ watcher = "reading"
+    /\ IF held THEN Term ELSE UNCHANGED <<alive, hit>>
+    /\ watcher' = "grace"
+    /\ UNCHANGED <<member, started, ignores, owner, held, reaper, vm, known, killed>>
+
+WatcherKills ==
+    /\ watcher = "grace"
+    /\ IF held THEN Kill /\ known' = TRUE ELSE UNCHANGED <<alive, hit, killed, known>>
+    /\ watcher' = "done"
+    /\ UNCHANGED <<member, started, ignores, owner, held, reaper, vm>>
+
+\* Another program takes the group's id, once it is free.
 ForeignTakesId ==
-    /\ ~alive["sh"] /\ ~GroupLives /\ ~alive["foreign"]
+    /\ ~alive["cmd"] /\ ~GroupLives /\ known /\ ~alive["foreign"] /\ ~member["foreign"]
     /\ alive' = [alive EXCEPT !["foreign"] = TRUE]
     /\ member' = [member EXCEPT !["foreign"] = TRUE]
-    /\ UNCHANGED <<started, stdin, phase, ended, hit>>
+    /\ UNCHANGED <<started, ignores, owner, held, reaper, vm, watcher, known, killed, hit>>
 
 Next ==
-    \/ CmdStartsChild \/ CmdHolds \/ CmdExits
+    \/ CmdStartsChild \/ CmdHolds
     \/ \E p \in Procs : Exits(p)
-    \/ PortCloses \/ ShStandsDown \/ WatchTerms \/ WatchKills
+    \/ ShellTakesExit \/ ShellTimesOut \/ ShellKills
+    \/ OwnerDies \/ ReaperTerms \/ ReaperKills
+    \/ VmDies \/ WatcherTerms \/ WatcherKills
     \/ ForeignTakesId
 
-Fairness == WF_vars(ShStandsDown) /\ WF_vars(WatchTerms) /\ WF_vars(WatchKills)
+Fairness ==
+    /\ WF_vars(ShellTakesExit) /\ WF_vars(ShellKills)
+    /\ WF_vars(ReaperTerms) /\ WF_vars(ReaperKills)
+    /\ WF_vars(WatcherTerms) /\ WF_vars(WatcherKills)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
 ----------------------------------------------------------------------------
-\* Once the watcher is done, no process of ours is left in the group.
-GroupEnded == phase = "done" => \A p \in Ours : ~(alive[p] /\ member[p])
+\* Once a KILL went to the group, no process of ours is left in it.
+GroupEnded == killed => \A p \in Ours : ~(alive[p] /\ member[p])
 
 \* A kill never reaches a held process or another program's.
 KillsOwnOnly == hit = {}
 
-\* The sh stands the watcher down only after the command exited on its own.
-StoodDownOnlyAfterOwnExit == phase = "stopped" => ended = "own"
+\* Shell answers a command it timed out.
+TimeoutAnswers == owner = "grace" ~> owner \in {"done", "dead"}
 
-\* Once the port closes, the watcher finishes or was stood down, and the
-\* command does not run.
-CloseEnds == stdin = "closed" ~> (phase \in {"done", "stopped"} /\ ~alive["cmd"])
+\* A timeout, the owner's death and the VM's death each end the command.
+Ends == (owner \in {"grace", "dead"}) ~> ~alive["cmd"]
 =============================================================================

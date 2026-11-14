@@ -14,7 +14,7 @@ defmodule CodingAgentFramework.Programs do
   `devenv.nix`). A remote host has its own programs, so `find/3` looks them up there, with that
   host's shell, over ssh.
 
-      iex> host = CodingAgentFramework.Host.local("laptop", "/run/bin/sh", "/run/bin/sleep")
+      iex> host = CodingAgentFramework.Host.local("laptop", "/run/bin/kill")
       iex> {:ok, programs} = CodingAgentFramework.Programs.new(host, %{tmux: "/run/bin/tmux"})
       iex> CodingAgentFramework.Programs.fetch(programs, :tmux)
       {:ok, "/run/bin/tmux"}

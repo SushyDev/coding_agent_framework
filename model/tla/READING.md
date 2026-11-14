@@ -231,18 +231,22 @@ has ended.
 
 ## `Shell.tla`
 
-One command `Shell` runs and how its process group ends. The port's `sh` leads the group, with
-the watcher and the command in it.
+One command `Shell` runs and how its process group ends. The command leads the group, as every
+port program does.
 
-- `CmdStartsChild` adds a child to the group; it ignores TERM, so only a KILL ends it.
-  `CmdHolds` is `dtach -n`: the held process leaves the group by `setsid`.
-- `PortCloses` stands for a timeout, the owner's death and the VM's death alike: each closes
-  the port's stdin.
-- `WatchTerms` is the watcher reading end of file and sending TERM to the group; `WatchKills`
-  is the KILL after the grace, which ends the watcher too.
-- `ShStandsDown` is the `sh` seeing the command exit on its own: it kills the watcher by its
-  pid and exits.
-- `ForeignTakesId` is another program taking the group's id, possible only once the `sh` is
-  gone and the group is empty.
+- `CmdStartsChild` adds a child to the group; `CmdHolds` is `dtach -n`: the held process leaves
+  the group by `setsid`. `ignores` is chosen at the start: which of the command and its child
+  ignore TERM.
+- `ShellTimesOut` sends TERM to the group and starts the grace. `ShellTakesExit` is `Shell`
+  taking the command's exit, in the wait or the grace, and dropping the group from the reaper;
+  `ShellKills` is the KILL when the grace passed with no exit.
+- `OwnerDies` closes the port and leaves the command running. `ReaperTerms` and `ReaperKills`
+  are the reaper's TERM and, after the grace, its KILL, for a group it still holds.
+- `VmDies` ends the owner and the reaper. `WatcherTerms` and `WatcherKills` are the watcher at
+  the end of its stdin, for the group if it still holds it.
+- `held` is the reaper's and the watcher's hold on the group, one variable. `known` says the
+  framework knows the command ended: `ForeignTakesId`, another program taking the group's id,
+  waits for it as well as for the group to empty.
 
-`hit` is a ghost: the processes a kill reached that it must not reach.
+`killed` and `hit` are ghosts: a KILL was sent, and the processes a kill reached that it must
+not reach.
