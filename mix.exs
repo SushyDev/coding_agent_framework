@@ -23,6 +23,9 @@ defmodule CodingAgentFramework.MixProject do
   defp elixirc_paths(_), do: ["lib"]
 
   defp deps do
-    []
+    [
+      {:exqlite, "~> 0.43.0"},
+      {:stream_data, "~> 1.4", only: [:dev, :test]}
+    ]
   end
 end
