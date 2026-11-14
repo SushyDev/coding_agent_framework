@@ -1,0 +1,24 @@
+# Mix build output, and TLC's states and output (bin/check-model writes to _build/tlc).
+/_build/
+/deps/
+/cover/
+/doc/
+erl_crash.dump
+*.ez
+coding_agent_framework-*.tar
+/tmp/
+
+# devenv's state and generated files.
+/.devenv/
+/.devenv.flake.nix
+/.direnv/
+.devenv*
+devenv.local.nix
+
+# TLC's leftovers when it is run by hand outside bin/check-model.
+/model/tla/states/
+/model/tla/*_TTrace_*.tla
+/model/tla/*.bin
+
+# Builders' worktrees.
+/.claude/worktrees/
