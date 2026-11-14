@@ -4,8 +4,10 @@ defmodule CodingAgentFramework.Sessions.Table do
   by `{host, name}`. The name is the session's name, its tmux session's and its dtach socket's.
 
   `Sessions` is the one writer. Anyone may open the file and read. `status` is one of
-  `starting`, `running`, `stopping`, `stopped`, `refused` and `unknown`; `reason` says why a row
-  is refused or unknown.
+  `starting`, `running`, `stopping`, `stopped`, `refused`, `unknown` and `orphan` (a live socket
+  with no session file past the start's deadline, for `Recoveries`); `reason` says why a row is
+  refused, unknown or orphan, or why a stop is late (`no_exit`). `deadline` is the current start's
+  or stop's deadline in wall-clock milliseconds, so a restart does not move it.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "doc.db")
       iex> {:ok, db} = CodingAgentFramework.Sessions.Table.open(path)
@@ -16,7 +18,7 @@ defmodule CodingAgentFramework.Sessions.Table do
   alias Exqlite.Sqlite3
 
   @columns ~w(id host name socket account role cwd resume status reason viewer pid session_id
-              proc_start started_at updated_at)a
+              proc_start started_at updated_at deadline)a
 
   @schema """
   PRAGMA journal_mode = WAL;
@@ -25,8 +27,11 @@ defmodule CodingAgentFramework.Sessions.Table do
     account TEXT NOT NULL, role TEXT NOT NULL, cwd TEXT NOT NULL, resume TEXT,
     status TEXT NOT NULL, reason TEXT, viewer TEXT, pid INTEGER, session_id TEXT,
     proc_start TEXT, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-    UNIQUE (host, name));
+    deadline INTEGER, UNIQUE (host, name));
   """
+
+  # A file made before the deadline column gains it; a newer file already has it.
+  @add_deadline "ALTER TABLE held_sessions ADD COLUMN deadline INTEGER"
 
   @type db :: Sqlite3.db()
   @type row :: %{atom => term}
@@ -36,21 +41,25 @@ defmodule CodingAgentFramework.Sessions.Table do
   def open(path) do
     with {:ok, db} <- Sqlite3.open(path),
          :ok <- Sqlite3.set_busy_timeout(db, 5_000),
-         :ok <- Sqlite3.execute(db, @schema) do
+         :ok <- Sqlite3.execute(db, @schema),
+         :ok <- added(Sqlite3.execute(db, @add_deadline)) do
       {:ok, db}
     else
       {:error, reason} -> {:refused, {:sqlite, reason}}
     end
   end
 
+  defp added({:error, "duplicate column name" <> _}), do: :ok
+  defp added(other), do: other
+
   @doc """
   Writes a new start of `{host, name}` as `starting`, over any row it had before, and returns
-  its id. The caller has checked that the old row, if any, has ended.
+  its id. The caller has checked that the old row, if any, has ended. `start` holds `deadline`.
   """
   @spec starting(db, map) :: integer
   def starting(db, %{} = start) do
     now = System.os_time(:millisecond)
-    keys = ~w(host name socket account role cwd resume)a
+    keys = ~w(host name socket account role cwd resume deadline)a
     values = Enum.map(keys, &start[&1]) ++ ["starting", now, now]
     names = Enum.join(keys ++ [:status, :started_at, :updated_at], ",")
     marks = Enum.map_join(1..length(values), ",", &"?#{&1}")
@@ -72,7 +81,7 @@ defmodule CodingAgentFramework.Sessions.Table do
     id
   end
 
-  @doc "Sets `fields` (status, reason, viewer, pid, session_id, proc_start) on row `id`."
+  @doc "Sets `fields` (status, reason, viewer, pid, session_id, proc_start, deadline) on row `id`."
   @spec update(db, integer, keyword) :: :ok
   def update(db, id, fields) do
     fields = Keyword.put(fields, :updated_at, System.os_time(:millisecond))

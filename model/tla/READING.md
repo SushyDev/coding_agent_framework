@@ -116,8 +116,9 @@ steps. Read it in the order of a start:
   names the live process; past the deadline, `"orphan"` for a live socket, `"refused"` for a
   dead one. `ReRead` reads an `"unknown"` row again until it is running or gone.
 - `StopAsked`, `StopSettled`, `StopTimedOut` and `Kill` are a stop, judged by the row's pid and
-  start time. `ForeignStarts` is another program taking a freed pid, which is why the start
-  time counts.
+  start time. `StopTimedOut` leaves the row `"stopping"` and marks it `late`; a late row is not
+  set back to running after a restart, and only it may be killed (`Kill`, `Recoveries`' step).
+  `ForeignStarts` is another program taking a freed pid, which is why the start time counts.
 
 `onTime`, `ends` and `wrongKills` are ghosts: they record what happened, for the invariants, and
 the framework never reads them. `RunningOnlyIfLive` is a step property: the step that writes

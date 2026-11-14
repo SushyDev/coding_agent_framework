@@ -34,11 +34,23 @@ defmodule CodingAgentFramework.Sessions do
   Each call answers `{:ok, …}`, `{:refused, reason}` or `{:unknown, reason}` within its
   `:timeout` (30 s by default, plus the hold's and the viewer's own bounds). Nothing is retried:
   a start that is not confirmed in time answers `{:unknown, :no_session_file}`, and its row says
-  `unknown` with that reason.
+  `unknown` with that reason. A hold that answers unknown still waits for the file. A stop whose
+  process is alive at its deadline answers `{:unknown, {:no_exit, typed}}` and leaves the row
+  `stopping` with reason `no_exit`: `Recoveries` ends that process by its pid and start time.
+  `Sessions` itself never kills. The row keeps the start's or stop's deadline in wall-clock time
+  (the `clock:` option), so a restart does not move it.
 
-  **After a restart** of `Sessions`, a row still `starting` is adopted (`running`) when its
-  socket is live and its session file names a live pid; otherwise it ends as `refused` with the
-  reason `interrupted`. Nothing else is changed or removed by a restart.
+  **Rows with no call under way** are settled as `model/tla/Start.tla` does, when `Sessions`
+  starts, at a starting row's deadline, and at each `Registry` read that `cue/2` hands it:
+
+  - `starting` (left by a restart): `running` when its file names its live process; past its
+    deadline, `orphan` for a live socket and `refused{interrupted}` for a dead one;
+  - `unknown`: `running` when its file names its live process, `stopped` when its socket is dead;
+  - `stopping`: `stopped` when its process is gone by pid and start time; when it lives,
+    `running` after a restart, but a late stop (`no_exit`) stays for `Recoveries`.
+
+  A read that fails decides nothing; the row waits for the next read. A name whose row is
+  `unknown`, `orphan`, `starting` or `stopping` is refused to a new start: its process may live.
 
   After each write it calls `notify` with `%{topic: "sessions:<host>:<account>", ids: [id]}`, a
   cue that names rows, never their data (`CodingAgentFramework.Tracker.SessionsSource`).
@@ -53,7 +65,8 @@ defmodule CodingAgentFramework.Sessions do
   @timeout 30_000
   # The hold's and the viewer's own bounds, past the confirmation's.
   @slack 25_000
-  @ended ~w(stopped refused unknown)
+  # A name is free only when no process of its row may live: Start.tla's `Ended`.
+  @ended ~w(stopped refused)
   # The held program starts in the session's directory; `$0` is the directory.
   @cd ~S(cd -- "$0" && exec "$@")
 
@@ -63,8 +76,8 @@ defmodule CodingAgentFramework.Sessions do
   Starts a `Sessions` and adopts or ends the rows a previous one left `starting`. Options:
   `programs:` (naming dtach, sh, env, rm and ps), `dir:` (the dtach directory), `control:`,
   `registries:` (account name to its `Registry`), `db:`, and optionally `notify:`, `size:`
-  (the viewer's `{columns, rows}`, default `{200, 50}`) and `poll:` (ms between reads while a
-  call waits, default 200).
+  (the viewer's `{columns, rows}`, default `{200, 50}`), `poll:` (ms between reads while a call
+  waits, default 200) and `clock:` (a function answering wall-clock ms, for the deadlines).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -91,6 +104,18 @@ defmodule CodingAgentFramework.Sessions do
   """
   @spec stop(GenServer.server(), String.t(), atom, keyword) :: outcome(:stopped)
   def stop(sessions, name, turn, opts \\ []), do: request(sessions, {:stop, name, turn}, opts)
+
+  @doc """
+  Hands `Sessions` a `Registry`'s cue (`%{topic: "registry:<host>:<account>", ids: ids}`): the
+  rows of that account with no call under way are read again from the `Registry`'s rows. The
+  host app wires the `Registry`'s `notify` here, for example through PubSub. Answers `:ok` at
+  once; what it settles shows in the rows and their cues.
+
+      Sessions.cue(sessions, %{topic: "registry:laptop:work", ids: [3]})
+      #=> :ok
+  """
+  @spec cue(GenServer.server(), map) :: :ok
+  def cue(sessions, %{topic: topic}), do: GenServer.cast(sessions, {:cue, topic})
 
   defp request(sessions, request, opts) do
     timeout = Keyword.get(opts, :timeout, @timeout)
@@ -121,6 +146,7 @@ defmodule CodingAgentFramework.Sessions do
         notify: Keyword.get(opts, :notify, fn _ -> :ok end),
         size: Keyword.get(opts, :size, {200, 50}),
         poll: Keyword.get(opts, :poll, 200),
+        clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
         pending: %{}
       }
 
@@ -132,19 +158,31 @@ defmodule CodingAgentFramework.Sessions do
 
   @impl true
   def handle_continue(:adopt, state) do
+    settle(state, :all, true)
+
+    # One wake at each starting row's deadline, when Adopt may decide; not a poll.
     for row <- Table.with_status(state.db, state.host.name, "starting") do
-      case confirm(state, row) do
-        {:ok, file} -> running(state, row, file)
-        _ -> write(state, row, status: "refused", reason: "interrupted")
-      end
+      Process.send_after(self(), :deadline, max((row.deadline || 0) - state.clock.(), 0))
     end
 
     {:noreply, state}
   end
 
   @impl true
+  def handle_cast({:cue, "registry:" <> rest}, state) do
+    case String.split(rest, ":", parts: 2) do
+      [host, account] when host == state.host.name -> settle(state, account, false)
+      _ -> :ok
+    end
+
+    {:noreply, state}
+  end
+
+  def handle_cast({:cue, _topic}, state), do: {:noreply, state}
+
+  @impl true
   def handle_call({{:start, name, account, launch, resume}, timeout}, from, state) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = state.clock.() + timeout
 
     with :ok <- free(state, name),
          {:ok, viewer} <- Holder.viewer_argv(state.holder, name),
@@ -153,20 +191,24 @@ defmodule CodingAgentFramework.Sessions do
          {:ok, cli} <- cli(role, account, name, resume, launch) do
       row = %{host: state.host.name, name: name, socket: name, account: account.name}
       row = Map.merge(row, %{role: Atom.to_string(role), cwd: cwd, resume: resume})
+      # RowWritten: the row first, as starting, with the start's wall-clock deadline.
+      row = Map.put(row, :deadline, deadline)
       row = Map.put(row, :id, Table.starting(state.db, row))
-      cue(state, row)
+      announce(state, row)
       argv = [state.holder.sh, "-c", @cd, cwd | cli.argv]
 
+      # Held: held, or unknown (a process may have started), and the start waits for the file
+      # either way; ViewerOpened then leaves the call waiting. Only a refusal ends it here.
       case Holder.hold(state.holder, name, argv, env: cli.env) do
-        {:ok, _socket} ->
+        {:refused, reason} = refused ->
+          write(state, row, status: "refused", reason: reason)
+          {:reply, refused, state}
+
+        _held_or_unknown ->
           write(state, row, viewer: open_viewer(state, name, viewer))
           send(self(), {:check, name})
           pending = %{kind: :start, from: from, row: row, deadline: deadline}
           {:noreply, put_in(state.pending[name], pending)}
-
-        {kind, reason} = failed ->
-          write(state, row, status: Atom.to_string(kind), reason: reason)
-          {:reply, failed, state}
       end
     else
       failed -> {:reply, failed, state}
@@ -174,14 +216,15 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   def handle_call({{:stop, name, turn}, timeout}, from, state) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = state.clock.() + timeout
 
     case Table.get(state.db, state.host.name, name) do
       _ when turn != :ended ->
         {:reply, {:refused, {:turn, turn}}, state}
 
       %{status: "running", pid: pid} = row when is_integer(pid) ->
-        write(state, row, status: "stopping")
+        # StopAsked, with the stop's own deadline in the row.
+        write(state, row, status: "stopping", reason: nil, deadline: deadline)
 
         case Control.send(state.control, name, "/exit") do
           {:refused, _} = refused ->
@@ -211,8 +254,14 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
+  def handle_info(:deadline, state) do
+    settle(state, :all, true)
+    {:noreply, state}
+  end
+
+  # StartDecided: running when the file names the live process, unknown past the deadline.
   defp check(state, name, %{kind: :start, row: row} = pending) do
-    case confirm(state, row) do
+    case confirm(state, row, true) do
       {:ok, file} ->
         running(state, row, file)
         answer = %{name: name, pid: file.pid, session_id: file.session_id}
@@ -226,24 +275,21 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
+  # StopSettled within the call; StopTimedOut leaves the row stopping, late, for Recoveries.
   defp check(state, name, %{kind: :stop, row: row} = pending) do
-    opts = [env: state.ps.env, ps: state.ps.ps, timeout: 5_000]
-    proc = {row.pid, row.proc_start}
-
-    # A pid that `ps` lists with another start time was reused: the held process exited.
-    if Liveness.check(state.host, [proc], opts)[proc] in [:gone, :replaced] do
+    if liveness(state, row) in [:gone, :replaced] do
       write(state, row, status: "stopped")
       done(state, name, pending, {:ok, :stopped})
     else
       wait(state, name, pending, fn ->
-        write(state, row, status: "unknown", reason: {:no_exit, pending.typed})
+        write(state, row, reason: "no_exit")
         {:unknown, {:no_exit, pending.typed}}
       end)
     end
   end
 
   defp wait(state, name, pending, late) do
-    if System.monotonic_time(:millisecond) >= pending.deadline do
+    if state.clock.() >= pending.deadline do
       done(state, name, pending, late.())
     else
       Process.send_after(self(), {:check, name}, state.poll)
@@ -256,23 +302,82 @@ defmodule CodingAgentFramework.Sessions do
     %{state | pending: Map.delete(state.pending, name)}
   end
 
-  # The session file of a live process with the session's name, while its socket is live.
-  defp confirm(state, row) do
-    with {:ok, registry} <- Map.fetch(state.registries, row.account),
-         {:ok, :live} <- Holder.state(state.holder, row.socket),
-         {:ok, _} <- Registry.read(registry),
-         {:ok, %{rows: files}} <- Registry.rows(registry),
-         %{} = file <- Enum.find(files, &(&1.name == row.name and &1.alive == :live)) do
-      {:ok, file}
-    else
-      # `{:ok, :absent}` and the like fall here, never through as a file.
-      other -> {:not_yet, other}
+  # Settles each row of `account` (or `:all`) with no call under way. `read?` reads the
+  # Registry first; on a Registry's cue its rows are already fresh.
+  defp settle(state, account, read?) do
+    for status <- ~w(starting unknown stopping),
+        row <- Table.with_status(state.db, state.host.name, status),
+        account in [:all, row.account],
+        not Map.has_key?(state.pending, row.name),
+        do: settle_row(state, row, read?)
+
+    :ok
+  end
+
+  # Adopt: a starting row waits for its deadline before it is given up, and a failed read
+  # decides nothing.
+  defp settle_row(state, %{status: "starting"} = row, read?) do
+    past? = state.clock.() >= (row.deadline || 0)
+
+    case confirm(state, row, read?) do
+      {:ok, file} -> running(state, row, file)
+      {:live, _} when past? -> write(state, row, status: "orphan", reason: "no_session_file")
+      {:dead, _} when past? -> write(state, row, status: "refused", reason: "interrupted")
+      _unknown_or_early -> :ok
     end
+  end
+
+  # ReRead: an unknown row is running once its file names its live process, stopped once its
+  # socket is dead.
+  defp settle_row(state, %{status: "unknown"} = row, read?) do
+    case confirm(state, row, read?) do
+      {:ok, file} -> running(state, row, file)
+      {:dead, _} -> write(state, row, status: "stopped")
+      _ -> :ok
+    end
+  end
+
+  # StopSettled with no stop under way, by pid and start time. A late stop stays stopping.
+  defp settle_row(state, %{status: "stopping"} = row, _read?) do
+    case liveness(state, row) do
+      gone when gone in [:gone, :replaced] -> write(state, row, status: "stopped")
+      :live when row.reason != "no_exit" -> write(state, row, status: "running")
+      _late_or_unknown -> :ok
+    end
+  end
+
+  # Confirms: the session file of a live process with the session's name, while its socket is
+  # live. `{:dead, _}` only for a socket read as dead; any read that fails is `{:unknown, _}`.
+  defp confirm(state, row, read?) do
+    with {:ok, :live} <- Holder.state(state.holder, row.socket),
+         {:ok, registry} <- Map.fetch(state.registries, row.account),
+         {:ok, _} <- if(read?, do: Registry.read(registry), else: {:ok, :cued}),
+         {:ok, %{rows: files}} <- Registry.rows(registry) do
+      named = Enum.filter(files, &(&1.name == row.name))
+
+      cond do
+        file = Enum.find(named, &(&1.alive == :live)) -> {:ok, file}
+        Enum.any?(named, &(&1.alive == :unknown)) -> {:unknown, :liveness}
+        true -> {:live, :no_session_file}
+      end
+    else
+      {:ok, dead} when dead in [:absent, :stale] -> {:dead, dead}
+      :error -> {:unknown, :no_registry}
+      :unread -> {:unknown, :unread}
+      {_, reason} -> {:unknown, reason}
+    end
+  end
+
+  # A pid that `ps` lists with another start time was reused: the held process exited.
+  defp liveness(state, row) do
+    proc = {row.pid, row.proc_start}
+    opts = [env: state.ps.env, ps: state.ps.ps, timeout: 5_000]
+    Liveness.check(state.host, [proc], opts)[proc]
   end
 
   defp running(state, row, file) do
     fields = [pid: file.pid, session_id: file.session_id, proc_start: file.proc_start]
-    write(state, row, [status: "running"] ++ fields)
+    write(state, row, [status: "running", reason: nil] ++ fields)
   end
 
   defp free(state, name) do
@@ -314,9 +419,9 @@ defmodule CodingAgentFramework.Sessions do
 
   defp write(state, row, fields) do
     Table.update(state.db, row.id, fields)
-    cue(state, row)
+    announce(state, row)
   end
 
-  defp cue(state, row),
+  defp announce(state, row),
     do: state.notify.(%{topic: "sessions:#{state.host.name}:#{row.account}", ids: [row.id]})
 end

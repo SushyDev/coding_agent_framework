@@ -75,7 +75,7 @@ Each part is one OTP process or one pure module, with one job.
 | `Delegates` | the delegate protocol: start, report, resume, end |
 | `Stacks` | the worktrees and `gh stack` chains of a parent's work |
 | `Tracker` | the state views read: the fold of every reader |
-| `Recoveries` | detect a broken state, act once per state, verify; reopens a lost viewer, and so starts a host's tmux server again after it dies |
+| `Recoveries` | detect a broken state, act once per state, verify; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after `/exit` within its stop's deadline, and only by the row's pid and start time (`Sessions` itself never kills) |
 | `Mailbox` | messages between agents: stored, delivered once, in order per sender |
 | `Services` | programs agents start and keep: held, owned, read, written to, restarted |
 | `Grants` | decides whether a caller may act on a target; holds a fix's claim on it |
@@ -166,9 +166,16 @@ session file names it; otherwise its worktree is removed when clean and held by 
 the start answers `refused{interrupted}`. The adoption waits for the start's own deadline
 before it decides, since a held process may only be slow to write its file; one with a live
 socket and still no file then is kept as an orphan row for `Recoveries`, never left without a
-row. After a restart, a row still stopping is settled by its pid and start time: stopped when
-gone, running otherwise. A row whose start answered unknown is read again at each `Registry`
-read until it is running or gone. A start is confirmed by the session file's `name`, which
+row. The row keeps the start's deadline in wall-clock time, so a restart does not move it. A
+read that fails decides nothing: the row stays as it was for the next read, and only a socket
+read as dead makes it refused. A hold that answers unknown waits for the session file like any
+other start. After a restart, a row still stopping is settled by its pid and start time: stopped
+when gone, running otherwise. A stop whose deadline passes with its process alive leaves the row
+stopping, with its deadline, and a restart does not set it back to running. `Recoveries` ends an
+orphan's process, or one that did not exit after `/exit` within its stop's deadline, and only by
+the row's pid and start time; `Sessions` itself never kills. A row whose start answered unknown
+is read again at each `Registry` read until it is running or gone. A name whose row is unknown,
+orphan, starting or stopping is not free for a new start: its process may live. A start is confirmed by the session file's `name`, which
 `--name` sets; a check against each pinned Claude Code release confirms it, with the Remote
 Control check. `Start.tla` models the start and its adoption, for every session's start and
 resume; `Delegate.tla` leaves the start abstract and relies on it.
