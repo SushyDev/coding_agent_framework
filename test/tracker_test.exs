@@ -232,6 +232,7 @@ defmodule CodingAgentFramework.TrackerTest do
         src = [{RegistrySource, db: db, host: "test", account: "a"}]
 
         reg = [
+          programs: TestHost.programs(),
           host: TestHost.host(),
           account: "a",
           config_dir: dir,
