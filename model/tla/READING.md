@@ -58,3 +58,21 @@ it shows the check would catch that bug. When TLC finds one, its output in
 `_build/tlc/<name>.out` lists the states, step by step, that lead to it.
 
 Run them with `devenv shell -- bin/check-model` (see its header).
+
+## `Move.tla`
+
+A parent session moves from account `Home` to the other one. Read it in the order of a move:
+
+- `Drain` (a press, or `UsageRises` to 90 %) sets `phase` to `"draining"`. From then on
+  `BgStarted` and `DelegateStarted` are refused (`Draining`).
+- `Cleared` is the Mover reading that no background command runs. It is a reading, not a lock:
+  only the drain keeps it true until the end.
+- `EndAsked` ends the process once its turn has ended; `ProcessExits` is the process going, with
+  whatever still runs in it, which goes into `lost`. It sends a `SessionEnd`, held in `ends`
+  until `SessionEndArrives` handles it, at any later time.
+- `Copied` then `Resumed` start a new process on `target` from the copied transcript.
+- Delegates outlive the parent's process: `ReportDelivered` waits for a live one.
+
+`procs` holds the session's processes as `[pid, account, ending]`; `turn` is the pid whose turn
+runs, or `0`. `NoStartWhileDraining` is a step property, like `AgentOutlivesServer`: no step taken
+while the move runs starts anything. `DelegatesStarted'` is that count after the step.

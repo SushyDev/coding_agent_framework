@@ -244,6 +244,10 @@ Five specs, in this order:
    - Invariants: a session runs on one account at a time; nothing that runs is lost; a late
      `SessionEnd` never ends the moved session.
    - Liveness: a drained parent moves.
+   - The spec settles (F-5): the move also waits until no background command runs, since they
+     end with the process; the transcript is copied after the old process exited; running
+     delegates do not hold a move, and their reports wait for a live parent process; a
+     `SessionEnd` ends the session only when it names the session's current process.
 3. **`Delegate.tla`**: a parent, its delegates and restarts of the framework.
    - Invariants: each report is delivered once; a delegate ends only after its report is
      delivered.
