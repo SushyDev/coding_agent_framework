@@ -189,15 +189,29 @@ type_line() { tmux send-keys -t "$pane" -l -- "$1" \; send-keys -t "$pane" Enter
 # Keys only the dry run sends: in a real run, the person answers each dialog.
 dry_keys() { if ((dry_run)); then tmux send-keys -t "$pane" "$@"; fi; }
 
-shows() {
-  local dead
-  dead="$(pane_dead)"
-  [[ "$1" == exited && "$dead" == 1 || "$1" != exited && "$dead" == 0 ]] &&
-    [[ "$(tmux capture-pane -p -t "$pane")" == *"[stand-in: $1]"* ]]
+# What the dry run's screen holds for `state` besides the stand-in's name. The stand-in redraws
+# after every key and names its state at the end of each draw, so the name of a state a run of
+# keys builds is there after the first key. Only text-typed is built that way: the whole typed
+# text, in the box, is what defines it.
+screen_holds() {
+  case "$1" in
+    text-typed) printf '│ > %s ' "$typed" ;;
+  esac
 }
 
-# Waits until the pane shows `state`: in a dry run, the stand-in names it, within 10 s; in a
-# real run, the person says so.
+# Whether the pane shows `state`: its name and what defines it, in one capture, and whether the
+# process is running or has exited, as the state is.
+shows() {
+  local state=$1 dead screen
+  dead="$(pane_dead)"
+  [[ "$state" == exited && "$dead" == 1 || "$state" != exited && "$dead" == 0 ]] || return 1
+  screen="$(tmux capture-pane -p -t "$pane")"
+  [[ "$screen" == *"[stand-in: $state]"* && "$screen" == *"$(screen_holds "$state")"* ]]
+}
+
+# Waits until the pane shows `state`: in a dry run, the stand-in names it and the screen holds
+# what defines it, within 10 s, or the script ends naming the state; in a real run, the person
+# says so.
 await_state() {
   local state=$1 answer deadline=$((SECONDS + 10))
   if ((dry_run)); then

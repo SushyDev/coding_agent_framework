@@ -68,6 +68,14 @@ defmodule CodingAgentFramework.CaptureScreenTest do
       end
     end
 
+    # The stand-in redraws after each key and names its state at the end of every draw, so the
+    # name is on the screen after the first key. The capture has to wait for the last one.
+    for ext <- ~w(txt ansi) do
+      assert File.read!(Path.join(dest, "text-typed.#{ext}")) =~
+               "│ > hello from the capture script ",
+             "text-typed.#{ext} was captured before all the typed text was drawn"
+    end
+
     assert String.split(File.read!(Path.join(dest, "trust-dialog.txt")), "\n")
            |> Enum.member?("/work/repo")
 
