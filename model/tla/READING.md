@@ -204,12 +204,25 @@ It has three actors: Claude Code, the claim commands on disk, and the framework.
   answers it, a cancel cancels it.
 - `AnswerAsked(a, h)` is an answer meant for request `a` taking hold `h`; the design needs
   `h = a`. `AnswerClaimed` writes the answer's line, which fits the pipe's atomic size.
-- `ExitSeen` is the framework finding the pid gone. With the log read to its end, a message
-  still `"writing"` is settled by the transcript, and a held request is lost.
+- `ExitSeen` is the framework finding the pid gone, once its own claims ended. With the log read
+  to its end, a message still `"writing"` is settled by the transcript (`heard`, the uuids
+  Claude Code took), and a held request is lost. It needs `seen`: a read, or a write's check,
+  found the current process live.
+- A resume (F-51): `FollowAgain` clears `gone` and `seen` and sets `idle`, and keeps the offset,
+  the messages and the requests; `ProcStarts` is Sessions starting the resumed process on the
+  same FIFO and log. A message found undelivered is marked again first, as a new line `<<m, 2>>`
+  under the same uuid (`gen`, `UuidOf`). `DropMsg` is Claude Code acknowledging a user line whose
+  uuid `heard` holds: its replay, and no turn.
+- Lines are `<<message, gen>>`. A claim command writes a message line in two parts
+  (`CatBegins`, `CatEnds`); a line put between them mixes with it. It writes only while a process
+  reads the FIFO; one left waiting at an exit goes into the next process, or `ClaimTimesOut`.
+- The end: `EndMarked` once the turn ended, the report is delivered (`ReportDelivered`, the
+  parent's part) and no message is under way; `EndClaimed` writes it; `TakeEnd` ends the process.
 
 `mine`, `begun`, `wmem` and `reading` are memory, cleared by `FrameworkDies`; the tables and the
-disk stay. `handled`, `written`, `awritten`, `partialRead`, `malformed`, `intoRunning` and
-`wrong` are ghosts for the invariants.
+disk stay. `handled`, `written`, `awritten`, `partialRead`, `malformed`, `intoRunning`, `wrong`,
+`endCut` and `endEarly` are ghosts for the invariants. `Unseen` names a process that exited
+before any read saw it live, whose exit is never seen (F-51, new-3).
 
 ## `Team.tla`
 
