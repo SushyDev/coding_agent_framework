@@ -132,7 +132,8 @@ defmodule CodingAgentFramework.Stream.Fold do
 
   @doc """
   Whether `line` may be marked now, and why not: a message needs the turn ended (`idle`) and no
-  other message waiting for its replay; an answer needs its request held.
+  other message waiting for its replay; an answer needs its request held; an end needs the turn
+  ended.
   """
   @spec check(t, tuple) :: :ok | {:refused, term}
   def check(%{gone: true}, _line), do: {:refused, :gone}
@@ -160,6 +161,9 @@ defmodule CodingAgentFramework.Stream.Fold do
       %{state: state} -> {:refused, {:request, state}}
     end
   end
+
+  # An end cuts a running turn ("Headless delegates", "Ending").
+  def check(%{idle: false}, {:end_session, _}), do: {:refused, :turn_running}
 
   def check(_fold, _line), do: :ok
 

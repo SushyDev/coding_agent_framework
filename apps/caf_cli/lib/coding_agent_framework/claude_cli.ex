@@ -98,8 +98,11 @@ defmodule CodingAgentFramework.ClaudeCLI do
 
   # The wrapper of "Headless delegates": stdin is the FIFO opened read-write, so the delegate
   # holds a writer itself and never reads end of file; `exec` makes claude the held process.
+  # dtach does not report that pid and a headless session writes no session file with a name
+  # (F-49), so the wrapper records its own pid, which `exec` keeps, before claude starts.
   @wrapper ~S"""
   d=$1; shift
+  printf '%s\n' "$$" > "$d/pid"
   exec 3<>"$d/in"
   exec "$@" <&3 3<&- >>"$d/events.jsonl" 2>>"$d/stderr.log"
   """
@@ -142,7 +145,8 @@ defmodule CodingAgentFramework.ClaudeCLI do
   @doc """
   `argv` run by the wrapper that holds a headless delegate's stdin and log in `dir`
   (`<home>/streams/<session>/`, whose FIFO `in` must exist): the host's `sh` runs it, and dtach
-  holds that. Pure.
+  holds that. It writes its pid to `pid` in `dir` first; `exec` keeps it, so it is the held
+  process's. Pure.
 
       iex> [sh, "-c", _script, "caf-stream", "/h/streams/s1", "/run/bin/claude"] =
       ...>   CodingAgentFramework.ClaudeCLI.wrapper("/run/bin/sh", "/h/streams/s1", ["/run/bin/claude"])

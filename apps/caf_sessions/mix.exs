@@ -25,6 +25,8 @@ defmodule CafSessions.MixProject do
       {:caf_holder, in_umbrella: true},
       {:caf_registry, in_umbrella: true},
       {:caf_shell, in_umbrella: true},
+      {:caf_stream, in_umbrella: true},
+      {:caf_transcripts, in_umbrella: true},
       {:exqlite, "~> 0.43.0"},
       {:caf_accounts, in_umbrella: true, only: :test},
       {:caf_test, in_umbrella: true, only: :test},

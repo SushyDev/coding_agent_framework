@@ -11,9 +11,12 @@ defmodule CodingAgentFramework.Sessions do
       {:ok, sessions} = Sessions.start_link(programs: programs, dir: "/srv/caf/dtach",
         control: control, registries: %{"work" => registry}, db: "/srv/caf/caf.db")
       {:ok, account} = Accounts.ready(accounts, "work")
-      Sessions.start(sessions, "fix-login", account,
-        role: :delegate, cwd: "/src/app", claude: claude, model: "opus", env: env, prompt: brief)
-      #=> {:ok, %{name: "fix-login", pid: 4242, session_id: "…"}}
+      Sessions.start(sessions, "main", account,
+        role: :parent, cwd: "/src/app", claude: claude, model: "opus", env: env)
+      #=> {:ok, %{name: "main", pid: 4242, session_id: "…"}}
+
+  A host that runs delegates also gives it its `Stream` and the framework home (`stream:`,
+  `home:`).
 
   **A start** (`docs/design.md`, "The delegate protocol") writes its row first, as `starting`,
   with the socket name and the session's name, which are one name. Then it holds
@@ -25,27 +28,40 @@ defmodule CodingAgentFramework.Sessions do
   (`--name`) whose pid lives, and the socket is live. The pid comes from that file, since dtach
   does not report it. **A resume** is the same with `--resume <id>`.
 
+  **A delegate** (role `:delegate`) runs headless ("Headless delegates"): after its row, which
+  keeps the session id the framework chose, `Stream.follow/5` makes its directory and FIFO under
+  `<home>/streams/<session id>/`, then `ClaudeCLI.headless/2`'s argv is held inside
+  `ClaudeCLI.wrapper/3`, and its viewer is a pane running `tail -F` of its event log (the
+  renderer is a later unit; `-F` waits for a log the wrapper has not opened yet). Its start is
+  confirmed when `Stream` has read a `system`/`init` naming the session id, the pid the wrapper
+  recorded lives with the start time `ps` gives, and the socket is still live after that `ps`.
+  The init comes after the wrapper wrote the pid, so that pid is this process's. A resume
+  follows the same log again, from the offset `Stream` saved. A delegate's first message is a
+  `Stream` write, not part of the start: `prompt:` is not read.
+
   **A stop** types `/exit` through `Control`'s checked write, then waits until the process the
   row names exits, judged by `{pid, procStart}` (`Registry.Liveness`), never by name. `/exit`
   must be typed only when the turn has ended and the input box is empty. Reading that from the
   screen is `Screen`'s job, which is not built: the caller says the turn has ended, and any
-  other answer is refused.
+  other answer is refused. A delegate's stop writes `end_session` through `Stream` instead, and
+  its turn is `Stream`'s row's, not the caller's: `Stream` refuses the end while a turn runs.
 
   Each call answers `{:ok, …}`, `{:refused, reason}` or `{:unknown, reason}` within its
   `:timeout` (30 s by default, plus the hold's and the viewer's own bounds). Nothing is retried:
-  a start that is not confirmed in time answers `{:unknown, :no_session_file}`, and its row says
-  `unknown` with that reason. A hold that answers unknown still waits for the file. A stop whose
+  a start that is not confirmed in time answers `{:unknown, :no_session_file}` (a delegate's,
+  `{:unknown, :no_first_event}`), and its row says `unknown` with that reason. A hold that answers unknown still waits for the file. A stop whose
   process is alive at its deadline answers `{:unknown, {:no_exit, typed}}` and leaves the row
   `stopping` with reason `no_exit`: `Recoveries` ends that process by its pid and start time.
   `Sessions` itself never kills. The row keeps the start's or stop's deadline in wall-clock time
   (the `clock:` option), so a restart does not move it.
 
   **Rows with no call under way** are settled as `model/tla/Start.tla` does, when `Sessions`
-  starts, at a starting row's deadline, and at each `Registry` read that `cue/2` hands it:
+  starts, at a starting row's deadline, and at each `Registry` or `Stream` read that `cue/2`
+  hands it. "Confirmed" is a delegate's first event and recorded pid, as above:
 
-  - `starting` (left by a restart): `running` when its file names its live process; past its
-    deadline, `orphan` for a live socket and `refused{interrupted}` for a dead one;
-  - `unknown`: `running` when its file names its live process, `stopped` when its socket is dead;
+  - `starting` (left by a restart): `running` when confirmed; past its deadline, `orphan` for a
+    live socket and `refused{interrupted}` for a dead one;
+  - `unknown`: `running` when confirmed, `stopped` when its socket is dead;
   - `stopping`: `stopped` when its process is gone by pid and start time; when it lives,
     `running` after a restart, but a late stop (`no_exit`) stays for `Recoveries`.
 
@@ -58,13 +74,25 @@ defmodule CodingAgentFramework.Sessions do
 
   use GenServer
 
-  alias CodingAgentFramework.{ClaudeCLI, Control, Holder, Programs, Registry}
+  alias CodingAgentFramework.{ClaudeCLI, Control, Holder, Programs, Registry, Shell, Stream}
+  alias CodingAgentFramework.Transcripts
   alias CodingAgentFramework.Registry.Liveness
   alias CodingAgentFramework.Sessions.Table
 
   @timeout 30_000
-  # The hold's and the viewer's own bounds, past the confirmation's.
-  @slack 25_000
+  # The hold's, the follow's and the viewer's own bounds, past the confirmation's.
+  @slack 30_000
+  # Each call to Stream, within a call of Sessions.
+  @stream 5_000
+  # The pid the wrapper recorded ($1) and its start time as Registry.Liveness reads it; ps
+  # exits 1 when the pid is gone.
+  @held ~S"""
+  [ -f "$1" ] || { printf 'nofile'; exit 0; }
+  read -r pid < "$1" || exit 3
+  case $pid in ''|*[!0-9]*) exit 4 ;; esac
+  printf '%s ' "$pid"
+  exec "$2" LC_ALL=C TZ=UTC "$3" -o lstart= -p "$pid"
+  """
   # A name is free only when no process of its row may live: Start.tla's `Ended`.
   @ended ~w(stopped refused)
   # The held program starts in the session's directory; `$0` is the directory.
@@ -74,8 +102,9 @@ defmodule CodingAgentFramework.Sessions do
 
   @doc """
   Starts a `Sessions` and adopts or ends the rows a previous one left `starting`. Options:
-  `programs:` (naming dtach, sh, env, rm and ps), `dir:` (the dtach directory), `control:`,
-  `registries:` (account name to its `Registry`), `db:`, and optionally `notify:`, `size:`
+  `programs:` (naming dtach, sh, env, rm, ps and tail), `dir:` (the dtach directory),
+  `control:`, `registries:` (account name to its `Registry`), `db:`, and optionally `stream:`
+  and `home:` (the host's `Stream` and the framework home, for delegates), `notify:`, `size:`
   (the viewer's `{columns, rows}`, default `{200, 50}`), `poll:` (ms between reads while a call
   waits, default 200) and `clock:` (a function answering wall-clock ms, for the deadlines).
   """
@@ -100,7 +129,9 @@ defmodule CodingAgentFramework.Sessions do
   @doc """
   Ends running session `name` with `/exit` and waits for its process to exit. `turn` is the
   caller's reading of the session's screen: only `:ended` (the turn has ended and the input box
-  is empty) types; any other is refused as `{:turn, turn}`. Option: `:timeout`.
+  is empty) types; any other is refused as `{:turn, turn}`. A delegate's `turn` is not read:
+  `Stream`'s row says whether its turn has ended, and `Stream` refuses the end with
+  `:turn_running` while it runs. Option: `:timeout`.
   """
   @spec stop(GenServer.server(), String.t(), atom, keyword) :: outcome(:stopped)
   def stop(sessions, name, turn, opts \\ []), do: request(sessions, {:stop, name, turn}, opts)
@@ -108,8 +139,9 @@ defmodule CodingAgentFramework.Sessions do
   @doc """
   Hands `Sessions` a `Registry`'s cue (`%{topic: "registry:<host>:<account>", ids: ids}`): the
   rows of that account with no call under way are read again from the `Registry`'s rows. The
-  host app wires the `Registry`'s `notify` here, for example through PubSub. Answers `:ok` at
-  once; what it settles shows in the rows and their cues.
+  host app wires the `Registry`'s `notify` here, for example through PubSub. A `Stream`'s cue
+  (`stream:<host>`) does the same for the host's delegates. Answers `:ok` at once; what it
+  settles shows in the rows and their cues.
 
       Sessions.cue(sessions, %{topic: "registry:laptop:work", ids: [3]})
       #=> :ok
@@ -134,7 +166,7 @@ defmodule CodingAgentFramework.Sessions do
     %Programs{host: host} = programs = Keyword.fetch!(opts, :programs)
 
     with {:ok, holder} <- Holder.new(programs, Keyword.fetch!(opts, :dir)),
-         {:ok, ps} <- Programs.take(programs, [:env, :ps]),
+         {:ok, ps} <- Programs.take(programs, [:env, :ps, :tail]),
          {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)) do
       state = %{
         host: host,
@@ -143,6 +175,8 @@ defmodule CodingAgentFramework.Sessions do
         db: db,
         control: Keyword.fetch!(opts, :control),
         registries: Keyword.fetch!(opts, :registries),
+        stream: Keyword.get(opts, :stream),
+        home: Keyword.get(opts, :home),
         notify: Keyword.get(opts, :notify, fn _ -> :ok end),
         size: Keyword.get(opts, :size, {200, 50}),
         poll: Keyword.get(opts, :poll, 200),
@@ -171,10 +205,15 @@ defmodule CodingAgentFramework.Sessions do
   @impl true
   def handle_cast({:cue, "registry:" <> rest}, state) do
     case String.split(rest, ":", parts: 2) do
-      [host, account] when host == state.host.name -> settle(state, account, false)
+      [host, account] when host == state.host.name -> settle(state, {:account, account}, false)
       _ -> :ok
     end
 
+    {:noreply, state}
+  end
+
+  def handle_cast({:cue, "stream:" <> host}, state) do
+    if host == state.host.name, do: settle(state, :delegates, false)
     {:noreply, state}
   end
 
@@ -188,23 +227,22 @@ defmodule CodingAgentFramework.Sessions do
          {:ok, viewer} <- Holder.viewer_argv(state.holder, name),
          {:ok, cwd} <- cwd(launch),
          {:ok, role} <- Keyword.fetch(launch, :role) |> required(:role),
-         {:ok, cli} <- cli(role, account, name, resume, launch) do
+         {:ok, way} <- way(state, role, account, name, cwd, resume, launch) do
       row = %{host: state.host.name, name: name, socket: name, account: account.name}
       row = Map.merge(row, %{role: Atom.to_string(role), cwd: cwd, resume: resume})
       # RowWritten: the row first, as starting, with the start's wall-clock deadline.
-      row = Map.put(row, :deadline, deadline)
+      row = Map.merge(row, %{deadline: deadline, session_id: way[:session_id]})
       row = Map.put(row, :id, Table.starting(state.db, row))
       announce(state, row)
-      argv = [state.holder.sh, "-c", @cd, cwd | cli.argv]
 
       # Held: held, or unknown (a process may have started), and the start waits for the file
       # either way; ViewerOpened then leaves the call waiting. Only a refusal ends it here.
-      case Holder.hold(state.holder, name, argv, env: cli.env) do
+      case hold(state, way, name, cwd, viewer) do
         {:refused, reason} = refused ->
           write(state, row, status: "refused", reason: reason)
           {:reply, refused, state}
 
-        _held_or_unknown ->
+        {:held, viewer} ->
           write(state, row, viewer: open_viewer(state, name, viewer))
           send(self(), {:check, name})
           pending = %{kind: :start, from: from, row: row, deadline: deadline}
@@ -219,14 +257,14 @@ defmodule CodingAgentFramework.Sessions do
     deadline = state.clock.() + timeout
 
     case Table.get(state.db, state.host.name, name) do
-      _ when turn != :ended ->
+      row when turn != :ended and (row == nil or row.role != "delegate") ->
         {:reply, {:refused, {:turn, turn}}, state}
 
       %{status: "running", pid: pid} = row when is_integer(pid) ->
         # StopAsked, with the stop's own deadline in the row.
         write(state, row, status: "stopping", reason: nil, deadline: deadline)
 
-        case Control.send(state.control, name, "/exit") do
+        case ask_end(state, row) do
           {:refused, _} = refused ->
             write(state, row, status: "running")
             {:reply, refused, state}
@@ -245,6 +283,15 @@ defmodule CodingAgentFramework.Sessions do
         {:reply, {:refused, {:not_running, row.status}}, state}
     end
   end
+
+  # `/exit` through Control's checked write; a delegate's `end_session` line through Stream.
+  defp ask_end(state, %{role: "delegate"} = row) do
+    if state.stream,
+      do: Stream.end_session(state.stream, row.session_id, timeout: @stream),
+      else: {:refused, :no_stream}
+  end
+
+  defp ask_end(state, row), do: Control.send(state.control, row.name, "/exit")
 
   @impl true
   def handle_info({:check, name}, state) do
@@ -269,8 +316,9 @@ defmodule CodingAgentFramework.Sessions do
 
       _ ->
         wait(state, name, pending, fn ->
-          write(state, row, status: "unknown", reason: "no_session_file")
-          {:unknown, :no_session_file}
+          why = unconfirmed(row)
+          write(state, row, status: "unknown", reason: why)
+          {:unknown, why}
         end)
     end
   end
@@ -288,6 +336,9 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
+  defp unconfirmed(%{role: "delegate"}), do: :no_first_event
+  defp unconfirmed(_row), do: :no_session_file
+
   defp wait(state, name, pending, late) do
     if state.clock.() >= pending.deadline do
       done(state, name, pending, late.())
@@ -302,17 +353,19 @@ defmodule CodingAgentFramework.Sessions do
     %{state | pending: Map.delete(state.pending, name)}
   end
 
-  # Settles each row of `account` (or `:all`) with no call under way. `read?` reads the
-  # Registry first; on a Registry's cue its rows are already fresh.
-  defp settle(state, account, read?) do
+  # Settles each row of `which` (`:all`, `{:account, name}` or `:delegates`) with no call under
+  # way. `read?` reads the Registry or Stream first; on a reader's cue its rows are fresh.
+  defp settle(state, which, read?) do
     for status <- ~w(starting unknown stopping),
         row <- Table.with_status(state.db, state.host.name, status),
-        account in [:all, row.account],
+        which in [:all, {:account, row.account}] or (which == :delegates and delegate?(row)),
         not Map.has_key?(state.pending, row.name),
         do: settle_row(state, row, read?)
 
     :ok
   end
+
+  defp delegate?(row), do: row.role == "delegate"
 
   # Adopt: a starting row waits for its deadline before it is given up, and a failed read
   # decides nothing.
@@ -321,7 +374,7 @@ defmodule CodingAgentFramework.Sessions do
 
     case confirm(state, row, read?) do
       {:ok, file} -> running(state, row, file)
-      {:live, _} when past? -> write(state, row, status: "orphan", reason: "no_session_file")
+      {:live, why} when past? -> write(state, row, status: "orphan", reason: why)
       {:dead, _} when past? -> write(state, row, status: "refused", reason: "interrupted")
       _unknown_or_early -> :ok
     end
@@ -343,6 +396,24 @@ defmodule CodingAgentFramework.Sessions do
       gone when gone in [:gone, :replaced] -> write(state, row, status: "stopped")
       :live when row.reason != "no_exit" -> write(state, row, status: "running")
       _late_or_unknown -> :ok
+    end
+  end
+
+  # Confirms a delegate: Stream has read the init naming its session id, and so the wrapper had
+  # recorded its pid before; that pid lives with the start time ps gives, and the socket is
+  # live after that ps, so the pid was not reused in between.
+  defp confirm(state, %{role: "delegate"} = row, read?) do
+    with {:ok, :live} <- Holder.state(state.holder, row.socket),
+         {:ok, followed} <- followed(state, row, read?),
+         true <- followed.session_id == row.session_id or {:live, :no_first_event},
+         {:ok, pid, start} <- held(state, row),
+         {:ok, :live} <- Holder.state(state.holder, row.socket) do
+      {:ok, %{pid: pid, proc_start: start, session_id: row.session_id}}
+    else
+      {:ok, dead} when dead in [:absent, :stale] -> {:dead, dead}
+      {:live, _} = live -> live
+      :unread -> {:unknown, :unread}
+      {_, reason} -> {:unknown, reason}
     end
   end
 
@@ -403,6 +474,97 @@ defmodule CodingAgentFramework.Sessions do
     opts = Keyword.take(launch, [:claude, :model, :env, :prompt]) ++ [name: name]
     opts = if resume, do: opts ++ [resume: resume], else: opts
     ClaudeCLI.session(role, account, opts)
+  end
+
+  # What a start holds, checked before its row is written: an interactive session's own
+  # command, or a headless delegate's with the session id the framework chose ("Headless
+  # delegates"), which a resume keeps.
+  defp way(state, :delegate, account, _name, cwd, resume, launch) do
+    id = resume || Stream.uuid()
+    start = if resume, do: [resume: id], else: [session_id: id]
+
+    # The id names the delegate's directory, so a resume's is a plain id, never a path.
+    with {:ok, stream} <- if(state.stream && state.home, do: {:ok, state.stream}, else: :error),
+         true <- id =~ ~r/\A[A-Za-z0-9_-]{1,64}\z/ or {:refused, {:bad, :session_id}},
+         {:ok, cli} <-
+           ClaudeCLI.headless(account, Keyword.take(launch, [:claude, :model, :env]) ++ start),
+         {:ok, transcript} <- Transcripts.path(account.config_dir, cwd, id) do
+      {:ok, %{stream: stream, session_id: id, cli: cli, transcript: transcript}}
+    else
+      :error -> {:refused, :no_stream}
+      refused -> refused
+    end
+  end
+
+  defp way(_state, role, account, name, _cwd, resume, launch) do
+    with {:ok, cli} <- cli(role, account, name, resume, launch), do: {:ok, %{cli: cli}}
+  end
+
+  # A delegate's directory and FIFO come before its hold: a follow that fails holds nothing.
+  defp hold(state, way, name, cwd, viewer) do
+    with {:ok, argv, viewer} <- prepare(state, way, name, viewer) do
+      argv = [state.holder.sh, "-c", @cd, cwd | argv]
+
+      case Holder.hold(state.holder, name, argv, env: way.cli.env) do
+        {:refused, _} = refused -> refused
+        _held_or_unknown -> {:held, viewer}
+      end
+    end
+  end
+
+  defp prepare(state, %{stream: stream} = way, name, _viewer) do
+    case Stream.follow(stream, way.session_id, name, way.transcript, timeout: @stream) do
+      {:ok, dir} ->
+        log = Path.join(dir, "events.jsonl")
+        {:ok, ClaudeCLI.wrapper(state.holder.sh, dir, way.cli.argv), [state.ps.tail, "-F", log]}
+
+      {_, reason} ->
+        {:refused, {:follow, reason}}
+    end
+  end
+
+  defp prepare(_state, way, _name, viewer), do: {:ok, way.cli.argv, viewer}
+
+  # Stream's row of the delegate, read first when `read?`.
+  defp followed(state, row, read?) do
+    with true <- state.stream != nil or {:unknown, :no_stream},
+         {:ok, _} <-
+           if(read?, do: Stream.read(state.stream, timeout: @stream), else: {:ok, :cued}),
+         {:ok, %{rows: rows}} <- Stream.rows(state.stream, timeout: @stream) do
+      case Enum.find(rows, &(&1.session == row.session_id)) do
+        nil -> {:unknown, :not_followed}
+        followed -> {:ok, followed}
+      end
+    end
+  end
+
+  # The pid the wrapper recorded, and its start time.
+  defp held(state, row) do
+    pid_file = Path.join(Stream.dir(state.home, row.session_id), "pid")
+    args = ["-c", @held, "sh", pid_file, state.ps.env, state.ps.ps]
+
+    case Shell.run(state.host, state.holder.sh, args, timeout: @stream) do
+      {:ok, %{status: 0, output: "nofile"}} ->
+        {:unknown, :no_pid}
+
+      {:ok, %{status: 0, output: out}} ->
+        with [pid, start] <- String.split(out, " ", parts: 2),
+             {pid, ""} <- Integer.parse(pid),
+             start when start != "" <- String.trim(start) do
+          {:ok, pid, start}
+        else
+          _ -> {:unknown, {:held, 0, String.slice(out, 0, 200)}}
+        end
+
+      {:ok, %{status: 1}} ->
+        {:unknown, :exited}
+
+      {:ok, %{status: status, output: out}} ->
+        {:unknown, {:held, status, String.slice(out, 0, 200)}}
+
+      other ->
+        other
+    end
   end
 
   defp open_viewer(state, name, argv) do
