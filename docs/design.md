@@ -194,7 +194,8 @@ socket and still no file then is kept as an orphan row for `Recoveries`, never l
 row. The row keeps the start's deadline in wall-clock time, so a restart does not move it. A
 read that fails decides nothing: the row stays as it was for the next read, and only a socket
 read as dead makes it refused. A hold that answers unknown waits for the session file like any
-other start. After a restart, a row still stopping is settled by its pid and start time: stopped
+other start, and its row keeps the unknown answer's reason, so a refused row tells a hold that
+failed (dtach finding no pty) from a program that exited at once. After a restart, a row still stopping is settled by its pid and start time: stopped
 when gone, running otherwise. A stop whose deadline passes with its process alive leaves the row
 stopping, with its deadline, and a restart does not set it back to running. `Recoveries` ends an
 orphan's process, or one that did not exit after `/exit` within its stop's deadline, and only by
@@ -243,7 +244,7 @@ reading for delegates:
   line. Its row is marked first, then the line goes to a spool file `out/<uuid>.json`, and the
   host's one writer starts `sh -c 'exec 3<"$1" && rm "$1" && exec cat <&3 >"$2"' sh <spool>
   <fifo>`. Removing the spool is the claim: once it is gone, the line goes in whole, by a process
-  that does not end with the framework; while it is there, nothing of it went in, and after a
+  that does not end with the framework (it runs with no reaper); while it is there, nothing of it went in, and after a
   restart the writer starts it again. So a line is never written twice and never cut, whatever
   its length. One message line is in flight per delegate at a time, and every other line is kept
   within the pipe's atomic size (512 bytes on macOS; a deny's message is cut to fit), so lines
@@ -573,7 +574,17 @@ without it.
   it would end the held agent.
 - A group is signaled only while the framework holds its command as running: `Shell` until it
   takes the exit, the reaper until `Shell` drops the group or the reaper's own KILL is sent. So a
-  kill never reaches a reused id.
+  kill never reaches a reused id, with one assumption: within the half second between the
+  reaper's TERM and KILL after a caller's death, the id is not reused. macOS and Linux hand out
+  pids in order, so a reuse takes tens of thousands of forks. On a host with a small `pid_max`,
+  the reaper sends TERM only.
+- A child that ignores TERM and outlives its command (one that exited on its own, or on TERM
+  within the grace) keeps running: once the exit is taken, nothing may signal the group. A
+  program that must not leave such children is held as a service, not run.
+- The host app starts each host's reaper before every process that runs commands with it, under
+  one supervisor that restarts them together: the reaper's death ends every group it holds.
+- A command that must outlive the framework but is not held, such as a delegate's claim
+  ("Headless delegates"), runs with no reaper. Given one, it would end with the VM.
 
 **Claude Code**
 - Give each account a config directory of the framework's own, `<home>/accounts/<account>/claude`,
@@ -682,6 +693,9 @@ used and when it resets). It reads no credential and calls no API.
 - No test reaches the real Claude Code.
 - A stand-in that starts processes writes their pids and sleeps a bounded time, so a failed run
   leaves nothing for long; a test ends what is left by those pids alone.
+- A file a started process may read (a script, a config, a fixture) is written whole and
+  renamed into place, never rewritten in place: a stand-in rewritten while a start ran it was
+  read empty, and the start exited at once.
 
 **Stacks and queues**
 - Store the landing queue durably.
