@@ -84,7 +84,9 @@ Each word below names one thing, and the design, the code and the views use it o
 - **Project**: a repository and its trunk, declared as data.
 - **Trunk**: the project's main branch, such as `main`.
 - **Checkout**: the framework's own clone of a project's repository, on the workstation, at
-  `<home>/checkouts/<project>`, made once from the project's repository. The main session runs
+  `<home>/checkouts/<project>`, made once from the project's repository. A project's
+  repository is the remote its stacks land on (its `origin`), never the person's own clone, so
+  the pull after a landing pulls what landed. The main session runs
   there on trunk, and every worktree of the project is made from it. The framework never runs
   git in the person's own clone.
 - **Worktree**: a git worktree of the project's checkout, on one branch, on the workstation,
@@ -181,14 +183,34 @@ its host, as it has since the first part built, so the workstation is one host a
   it;
 - a job or service runs in a copy of the worktree it names. Before a job or a service starts,
   `Copies` brings the copy in step with the worktree by rsync, over every file git does not
-  ignore, edits not yet committed included; build outputs stay in the copy between runs. Two
-  runs on one copy take turns at the sync, so neither sees half of the other's files. A copy is
-  removed with its worktree;
+  ignore, edits not yet committed included; build outputs stay in the copy between runs. The
+  workstation runs jobs and services in a copy too, under the framework home, so build outputs
+  and a service's files stay apart from the agent's edits on every host, by one path of code.
+  Two runs on one copy take turns at the sync, so neither starts on half of the other's files;
+  a later run's sync does change files under a job or service still running in the copy, as an
+  edit in the worktree changes them under a program on the workstation, so a test can run
+  beside its server. A sync is not a snapshot: a file edited while the sync runs comes in
+  either version. On the host, a sync holds a lock of its copy for its whole life, and the next
+  sync takes that lock under its deadline, so the host's side of a cut sync never writes under
+  the next one. A copy is removed with its worktree;
 - a job is held by dtach on its host, so a dropped ssh connection does not end it; its output
   goes to a log on the host, read back from an offset, and it ends with its exit code or its
-  timeout, which ends its process group;
+  timeout, which ends its process group. When the job's command exits, its wrapper ends what is
+  left of the group before it reaps the command, so the group's id cannot have been reused (the
+  rule `Shell` keeps), and no child of the job writes in the copy during the fetch;
 - a job can bring files back: `run`'s `fetch: [paths]` names paths that rsync copies from the
-  host's copy into the worktree after the job ends. Nothing comes back unless named;
+  host's copy into the worktree after the job ends. Nothing comes back unless named, and nothing
+  is written over blind: the sync records each named path's size, time and hash, and the fetch
+  writes a path only while the worktree's file is still what the sync sent; it answers the
+  others as a conflict and leaves the copy's version on the host;
+- `run` answers `{:ok, %{exit: code, log: tail, fetch: :done | :none | {:conflict, paths} |
+  {:unknown, reason}}}`; `{:unknown, :timeout}` once the host ended the job at its timeout,
+  with the fetch's outcome; `{:unknown, :dropped}` at the call's deadline with the connection
+  down; `{:unknown, :no_exit}` for a dead socket with no exit file; `{:refused, {:sync,
+  reason}}` for a cut sync, when nothing ran. An unknown answer names the job, and once the
+  job's end is read it arrives to the caller as a message, as a delegate's report does after
+  `run_delegate`'s timeout, saying that nothing was fetched; a later `run` fetches nothing for
+  an earlier job;
 - a service on another host is held the same way, and a port it listens on is forwarded to the
   workstation over the host's ssh connection when the service asks for it, so tests on the
   workstation reach it at `127.0.0.1:<port>`;
@@ -1001,7 +1023,10 @@ Then `Delegate.tla` and `Delegates` (its start, finish and kill path are built).
    after a landing, and `start_main`.
 7. **`Team.tla`**, then `Grants`, `Mailbox` and the agent tools, by the tree's edges, with
    `agents()` read from the `Tracker`.
-8. **`Copy.tla`**, then `Copies`, `Jobs` and `Services` on any host, with forwarded ports.
+8. **`Copy.tla`** (F-70), then its second part: the fetch's check against edits made during the
+   job, the host-side lock of a sync, and the wrapper's end of a job's group (F-70's new-2,
+   new-4 and new-7, folded into "Hosts"). Then `Copies`, `Jobs` and `Services` on any host,
+   with forwarded ports.
 9. **`Stack.tla`** and `Stacks`, then the LiveView components, and Ghostty.
 
 The remote agents of the first plan (a session held on another host, its hooks forwarded back
