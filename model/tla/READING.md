@@ -328,3 +328,50 @@ port program does.
 
 `killed` and `hit` are ghosts: a KILL was sent, and the processes a kill reached that it must
 not reach.
+
+## `Copy.tla`
+
+A host's copy of one worktree and the runs in it: jobs (`Jobs`) and service starts (`Svcs`),
+with the ssh connection dropping (`Drop`) and coming back or not (`Reconnect`), and restarts
+of the framework between any two steps. Read it in the order of a job's run:
+
+- `AskJob` is `run` in the agent's turn: the row is `"asked"` and the call `"waiting"`, in
+  memory. `SyncBegins` takes the copy's turn (`turn`, durable) and starts rsync: `whole` is false
+  from then until `SyncCompletes`. A drop marks every command in flight `"cut"` (`cmd`), and
+  `SyncCut` refuses the run and gives the turn back; the copy stays partly synced.
+- `StartSent` writes the row `"starting"` and sends `dtach -n` over ssh. `inflight` says the host
+  may still run it: `Lands` is the host running it, and `NeverLands` a cut command whose deadline
+  passed. `StartReplies` is dtach's answer over a connection that held; after a cut or a restart,
+  `CutCleared` then `SettleStarting` read the host instead, but only once nothing is in flight.
+  Either one gives the turn back. `SettleUnasked` refuses a row before its start whose call
+  ended.
+- On the host: `JobExits` (its wrapper writes the exit file, then the socket goes), `Tick` (the
+  timeout passes) and `HostTimesOut` (the wrapper ends the job's group and writes `"timeout"`),
+  and `WrapperLost` (the wrapper killed before it writes the file).
+- `ReadSocket` then `ReadFile` read the end: the socket dead first, then the file, which was
+  written before the socket went; the row is `"exited"` with its code, `"timedout"` or
+  `"lost"`. `AnswerJob` answers it, or `FetchBegins`, `FetchPath` (one path into the worktree)
+  and `FetchDone` copy the named paths back first; `FetchCut` answers the end with the fetch cut.
+  `GiveUp` is the call's own deadline with the connection down: unknown, or the end it read.
+- Services: `AskService` with `keep` or without, `AskRestart` (the row `"restarting"`, then an
+  end, then `"asked"` again for the turn), `OwnerEnds` and `OwnerSeen` (a kept service goes to
+  the parent, any other is `"ending"`). `EndSent`, `Lands`, `EndReplies` and, after a cut,
+  `EndConfirmed` end the process and confirm it by its socket.
+- `FrameworkDies` clears the memory (`call`, `cmd`, `rd`, `fetchLeft`, `writers`) and the
+  connection; every call under way is answered `"restart"`, as the agent's MCP bridge does. The
+  rows, the turn, the host and what is in flight to it stay.
+
+`fresh`, `cover`, `badStart`, `fetched`, `clobbered`, `under` and `answer` are ghosts. `fresh[r]`
+says a sync that began after `r` asked has completed (`cover` is who had asked when a sync
+began), and `badStart` takes a run whose start landed on a copy not `whole` or not `fresh` for
+it. `StartsOnSyncedCopy` is that set empty. `AnswerIsReal` compares each answer and row with the
+host's exit file. `ConnectionReturns` (`<>[]up`) is the antecedent of `JobSettles` and
+`ServiceEndsWithOwner`: they hold once the connection comes back for good. `RunAnswered` and
+`JobEndsAtTimeout` hold whatever the connection does. `NoChangeUnderRun` and `NoEditLost` are
+the design's open questions (F-70's build note) and are in no configuration.
+
+`Copy_Jobs` checks one job with a fetch, two drops, a restart, an edit and a lost wrapper;
+`Copy_Turns` a job and a service on one copy, with every invariant and `RunAnswered`;
+`Copy_Services` a service, its restart and its owner's end. The slow one, run by hand,
+`slow/Copy_Large`, checks every property with a job that fetches and a service that restarts on
+one copy.

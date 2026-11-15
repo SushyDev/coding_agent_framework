@@ -206,7 +206,26 @@ its host, as it has since the first part built, so the workstation is one host a
   socket is not reopened until a person clears it.
 
 `Copy.tla` models a copy's sync, a job's run and a service's hold on a host, with a dropped
-connection at any step, before `Copies`, `Jobs` and remote `Services` are built.
+connection at any step, before `Copies`, `Jobs` and remote `Services` are built. The spec
+settles (F-70):
+
+- the copy's turn is a row in `Copies`' table, taken before the sync begins and given back only
+  once the run's start is settled: by dtach's reply over the connection that sent it, or, after
+  a drop or a restart cut that reply, by a read of the host once the start's deadline has
+  passed. A start still in flight to the host never lands under the next run's sync;
+- a sync that a drop or a restart cut refuses its run, which never started, and leaves the copy
+  partly synced for the next run's sync;
+- a job's timeout is kept on the host: the wrapper dtach holds ends the job's process group at
+  the timeout, so a job ends on time with the connection down and the framework stopped. The
+  wrapper writes the job's exit code, or that it timed out, to a file before it exits, and the
+  framework reads the job's socket dead first and that file after it. A dead socket with no
+  file is a job whose end is unknown, never an exit code;
+- a run's call has a deadline of its own, the job's timeout, and at it, with the connection down,
+  answers unknown, or the end it read with its fetch as cut. A restart ends every call under
+  way, and the job's row is still settled from the host once the connection is back;
+- the fetch begins only after the job's end was read, and copies only the paths `fetch:` names;
+- a service's end is written to its row before it is sent, and is done only when the service's
+  socket is read dead; a restart of a service is such an end, then a start with its own sync.
 
 ## Main sessions
 
@@ -720,6 +739,13 @@ dialog it names, never after Claude Code's timeout and never by typed keys.
 `Shell.tla` (F-35) models how a command's process group ends: a timeout, the caller's death
 and the VM's death each end it (the last two with a reaper), a held process is never reached,
 and a kill never reaches a reused id.
+
+`Copy.tla` (F-70) models "Hosts"' copies, jobs and services: a job or service starts only on a
+copy whose last sync completed after the run asked and that no sync has written since; a job's
+answer is its real exit code or unknown, never a code it did not have; a fetch writes only the
+paths it names, and only after the job ended; a job never runs past its timeout, and a service
+whose owner ended without `keep` is ended; every call answers, and every job's row gets its end
+from the host once the connection comes back.
 
 Code emits traces where it can, and a trace spec checks them; a trace cannot show a missing
 guard, so the specs are also reviewed against the code.
