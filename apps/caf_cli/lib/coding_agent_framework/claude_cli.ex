@@ -24,9 +24,13 @@ defmodule CodingAgentFramework.ClaudeCLI do
   - `HOME`: where Claude Code and the tools it runs (git, gh, ssh) find a person's own files;
   - `PATH`: how its Bash tool finds the programs a session runs;
   - `TERM`: the terminal type its screen is drawn for, which dtach does not set;
-  - `LANG`: a UTF-8 locale, so text past ASCII is read and drawn as it is.
+  - `LANG`: a UTF-8 locale, so text past ASCII is read and drawn as it is;
+  - `DISABLE_AUTOUPDATER=1`, last and for every role: devenv pins Claude Code, and a session
+    that updates itself runs a version the lock does not name.
 
   Everything else, such as an inherited `CLAUDECODE`, `CLAUDE_CODE_*` or `TMUX`, stays out.
+  `headless/2` has the same environment, and `Holder.hold/4` applies it on a remote host as on
+  this one.
 
       iex> account = CodingAgentFramework.Accounts.Account.at("work", "/caf/accounts/work/claude")
       iex> env = %{home: "/h", path: "/bin", term: "xterm-256color", lang: "C.UTF-8"}
@@ -39,6 +43,8 @@ defmodule CodingAgentFramework.ClaudeCLI do
        "--remote-control", "main"]
       iex> hd(vars)
       {"CLAUDE_CONFIG_DIR", "/caf/accounts/work/claude"}
+      iex> List.last(vars)
+      {"DISABLE_AUTOUPDATER", "1"}
   """
 
   alias CodingAgentFramework.Accounts.Account
@@ -47,6 +53,9 @@ defmodule CodingAgentFramework.ClaudeCLI do
   @type launch :: %{argv: [String.t()], env: [{String.t(), String.t()}]}
 
   @env [home: "HOME", path: "PATH", term: "TERM", lang: "LANG"]
+
+  # Set by the framework, not given by the caller, so no launch can leave it out.
+  @fixed [{"DISABLE_AUTOUPDATER", "1"}]
 
   @doc """
   The argv and environment of a session of `role` on `account` (from
@@ -186,10 +195,8 @@ defmodule CodingAgentFramework.ClaudeCLI do
     case Enum.reject(@env, fn {key, _} -> is_binary(given[key]) and given[key] != "" end) do
       [] ->
         {:ok,
-         [
-           {"CLAUDE_CONFIG_DIR", account.config_dir}
-           | Enum.map(@env, fn {k, v} -> {v, given[k]} end)
-         ]}
+         [{"CLAUDE_CONFIG_DIR", account.config_dir}] ++
+           Enum.map(@env, fn {k, v} -> {v, given[k]} end) ++ @fixed}
 
       missing ->
         {:refused, {:missing, {:env, Keyword.keys(missing)}}}

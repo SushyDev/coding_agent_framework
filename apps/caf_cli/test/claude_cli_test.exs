@@ -43,18 +43,23 @@ defmodule CodingAgentFramework.ClaudeCLITest do
     assert Enum.take(argv, -2) == ["--resume", "s-2"]
   end
 
-  test "the environment is the account's directory and the four a session needs, nothing else" do
+  test "the environment is the account's directory, the four a session needs and the auto-updater off, nothing else" do
+    expected = [
+      {"CLAUDE_CONFIG_DIR", @dir},
+      {"HOME", "/h"},
+      {"PATH", "/bin"},
+      {"TERM", "xterm-256color"},
+      {"LANG", "C.UTF-8"},
+      {"DISABLE_AUTOUPDATER", "1"}
+    ]
+
     for role <- [:parent, :delegate] do
       assert {:ok, %{env: env}} = ClaudeCLI.session(role, account(), opts(prompt: "p"))
-
-      assert env == [
-               {"CLAUDE_CONFIG_DIR", @dir},
-               {"HOME", "/h"},
-               {"PATH", "/bin"},
-               {"TERM", "xterm-256color"},
-               {"LANG", "C.UTF-8"}
-             ]
+      assert env == expected
     end
+
+    assert {:ok, %{env: env}} = ClaudeCLI.headless(account(), opts(resume: "s-1"))
+    assert env == expected
   end
 
   test "a launch with no account directory is refused, never falling back" do
