@@ -34,8 +34,11 @@ defmodule CodingAgentFramework.ClaudeStandIn do
 
   @doc "Ends every stand-in started from `dir`, by the pid each recorded."
   def kill_all(dir) do
-    for pid <- File.ls!(Path.join(dir, "pids")), do: kill(pid)
-    :ok
+    # A test that started no stand-in has no `pids` directory, and nothing to end.
+    case File.ls(Path.join(dir, "pids")) do
+      {:ok, pids} -> Enum.each(pids, &kill/1)
+      {:error, :enoent} -> :ok
+    end
   end
 
   defp script(pids, mode) do
