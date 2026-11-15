@@ -1,16 +1,26 @@
 # coding_agent_framework
 
-Run and supervise Claude Code agents across Claude accounts and machines.
+Run and supervise a tree of Claude Code agents on your workstation, balanced across Claude
+accounts, with jobs and services on any machine.
 
-- **Parent sessions** are a project's main chats. Each moves to another account with one press,
-  keeping its name and its Remote Control.
-- **Delegates** are full Claude Code sessions a parent starts on the account with the most
-  allowance left. Each runs in its own git worktree and tmux session, held by dtach so it outlives
-  its terminal, and reports back to its parent.
-- **Stacked pull requests** (`gh stack`) carry the work of a parent and its delegates.
+- **Main sessions** are the chats you work in, one per project, on its trunk. Each moves to
+  another account with one press, keeping its name and Remote Control, and main sessions of
+  different projects talk to each other.
+- **Delegates** are real Claude Code sessions a main session starts, on the account with the
+  most allowance left, each in its own git worktree. To the main session a delegate acts like a
+  subagent: a brief goes in, a report comes back. Inside it, Claude Code's own **subagents**
+  delegate further, on the delegate's account.
+- **Hosts** run jobs (a test run, a build) and services (a dev server, a database) for agents,
+  on an exact copy of the agent's worktree. Agents themselves run only on the workstation.
+- **The tree talks along its edges**: an agent talks to its parent and its children, and main
+  sessions to each other. Any agent can see the whole tree.
+- **Stacked pull requests** (`gh stack`) carry the delegates' work into trunk, and the main
+  session pulls it.
 - **State for LiveView frontends** follows what really runs, without lag or drift.
-- **A TLA+ model**, checked with TLC, describes how tmux, dtach, Claude Code, worktrees and stacks
-  fit together. It is written before the code it models.
+- **A TLA+ model**, checked with TLC, describes how tmux, dtach, Claude Code, worktrees, stacks,
+  jobs and services fit together. It is written before the code it models.
+
+The words are defined once, in [docs/design.md](docs/design.md#concepts).
 
 ## How it fits together
 
@@ -18,61 +28,78 @@ Run and supervise Claude Code agents across Claude accounts and machines.
 flowchart LR
   person([You])
 
-  subgraph host["One host (local or over ssh)"]
+  subgraph ws["Workstation"]
     direction TB
-    subgraph held["Held by dtach, apart from tmux"]
-      parent["Parent session<br/>interactive Claude Code<br/>with Remote Control"]
+    subgraph tree["Agents, held by dtach apart from tmux"]
+      main["Main session<br/>interactive Claude Code<br/>with Remote Control, on trunk"]
       delegate["Delegates<br/>headless Claude Code<br/>stream-json in and out"]
+      sub["Subagents<br/>Claude Code's own,<br/>on the delegate's account"]
     end
-    tmux["tmux server of the framework's own<br/>one viewer per session"]
+    otherMain["Main sessions<br/>of other projects"]
+    tmux["tmux server of the framework's own<br/>one viewer per agent"]
     worktrees[("git worktrees")]
     configs[("one Claude config dir<br/>per account")]
+
+    subgraph framework["The framework (Elixir and OTP)"]
+      direction TB
+      readers["Readers<br/>Registry · Transcripts · Usage<br/>Stream · Intake · TmuxSampler"]
+      writers["Writers<br/>Control · Sessions · Stream"]
+      tracker["Tracker<br/>one fold of every reader"]
+      recoveries["Recoveries<br/>detect, act once, verify"]
+      db[("SQLite tables<br/>the truth")]
+    end
   end
 
-  subgraph framework["The framework (Elixir and OTP)"]
+  subgraph hosts["Hosts (the workstation, or over ssh)"]
     direction TB
-    readers["Readers<br/>Registry · Transcripts · Usage<br/>Stream · Intake · TmuxSampler"]
-    writers["Writers<br/>Control · Sessions · Stream"]
-    tracker["Tracker<br/>one fold of every reader"]
-    recoveries["Recoveries<br/>detect, act once, verify"]
-    db[("SQLite tables<br/>the truth")]
+    copies[("copies of worktrees<br/>kept in step by rsync")]
+    work["Jobs and services<br/>held by dtach"]
   end
 
   ui["LiveView components"]
 
-  person -->|Remote Control or a viewer| parent
-  parent -->|starts and briefs| delegate
-  delegate -->|reports| parent
-  tmux -.->|views| held
-  held --- worktrees
-  held --- configs
-  held -->|hooks, session files,<br/>transcripts, event logs| readers
-  writers -->|one checked write per host| held
+  person -->|Remote Control or a viewer| main
+  main <-->|messages| otherMain
+  main -->|brief| delegate
+  delegate -->|report| main
+  delegate -->|Claude Code's Agent tool| sub
+  tree -->|run a job, start a service| work
+  worktrees -->|rsync| copies
+  copies --- work
+  tmux -.->|views| tree
+  tree --- worktrees
+  tree --- configs
+  tree -->|hooks, session files,<br/>transcripts, event logs| readers
+  writers -->|one checked write| tree
   readers --> db
   writers --> db
   db --> tracker
   tracker --> recoveries
   recoveries --> writers
   tracker --> ui
-  ui -->|press to move an account,<br/>answer, interrupt| writers
+  tracker -->|"agents(): the tree"| tree
+  ui -->|start a main session, move an account,<br/>answer, interrupt| writers
 ```
 
-- **Held, not hosted.** Every agent runs under `dtach -n`, so it outlives tmux, its terminal and
-  the framework. tmux only shows it.
+- **Held, not hosted.** Every agent runs under `dtach -n` on the workstation, so it outlives
+  tmux, its terminal and the framework. tmux only shows it.
 - **Readers, then one writer.** Each reader turns one source (a hook, a session file, a
-  transcript, an event log, a tmux sample) into rows. Each host has one writer, and each write is
+  transcript, an event log, a tmux sample) into rows. There is one writer, and each write is
   checked against the target pane before it is sent.
-- **Tables are the truth.** Views read the `Tracker`'s fold of those rows, so they never lag or
-  lie. `Recoveries` acts once per broken state and checks that it helped.
+- **Tables are the truth.** Views and the `agents()` tool read the `Tracker`'s fold of those
+  rows, so they never lag or lie. `Recoveries` acts once per broken state and checks that it
+  helped.
 
 ## Status
 
-The host layer, the readers, the writer, `Sessions`, the `Tracker` and `Recoveries` are built,
+The base layer, the readers, the writer, `Sessions`, the `Tracker` and `Recoveries` are built,
 each from a checked model in `model/tla/`. `Delegates` starts a delegate and holds its report
 when its turn's `result` comes, resumes it once after a kill, and reports a second kill;
-delivering a report comes next.
-Then come the moves between accounts, the agent tools and the LiveView components. The plan and the order of the units are
-in [docs/design.md](docs/design.md); each unit's notes are in `docs/build-notes/`.
+delivering a report comes next, once `Screen` reads a main session's screen. Then come moves
+between accounts, main sessions, the agent tools along the tree, jobs and services on hosts,
+stacks and the LiveView components. The plan and the order of the units are in
+[docs/design.md](docs/design.md); each unit's notes are in `docs/build-notes/`.
+
 
 ## The apps
 

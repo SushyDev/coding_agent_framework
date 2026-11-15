@@ -5,53 +5,104 @@ built so far has a build note in `docs/build-notes/`.
 
 ## What it is
 
-A framework for running and supervising Claude Code agents on one or more machines and Claude
-accounts. It gives a project:
+A framework for running and supervising a tree of Claude Code agents on one workstation, spread
+across several Claude accounts, with jobs and services on any number of hosts. It gives each
+project:
 
-- **parent sessions**: the main chats, one per project, which move from one account to another
-  with one press, or on their own before a limit, and keep their name and Remote Control;
-- **delegates**: full Claude Code sessions a parent starts through the framework, on the account
-  with the most allowance left, each in its own git worktree and tmux session, which report back
-  to their parent and may use Claude Code's own subagents to delegate further;
-- **agents that work together**: any agent of a project can message the others, look at them,
-  unstick them, and start, use and fix services, all through one strict set of tools;
-- **tmux, dtach and git worktrees** working together, with every tmux object keyed by its host
-  and server;
-- **stacked pull requests** (`gh stack`) for the work of a parent and its delegates;
+- **a main session**: the chat a person works in, on the project's trunk. It moves from one
+  account to another with one press, or on its own before a limit, and keeps its name and Remote
+  Control. Main sessions of different projects talk to each other, and one can start a main
+  session for a project that has none;
+- **delegates**: real Claude Code sessions a main session starts through the framework, on the
+  account with the most allowance left, each in its own worktree. To the main session a delegate
+  acts like a subagent: a brief goes in, a report comes back. Inside it, Claude Code's own
+  subagents delegate further, on the delegate's account;
+- **a tree that talks along its edges**: an agent talks to its parent and its children, and main
+  sessions to each other, all through one strict set of tools; any agent can see the whole tree
+  and each agent's state;
+- **jobs and services on hosts**: a main session or a delegate runs a test, a build or a kept
+  program on the workstation or on another machine, on an exact copy of its worktree;
+- **tmux, dtach and git worktrees** working together on the workstation;
+- **stacked pull requests** (`gh stack`) for a main session's work, merged into trunk, which the
+  main session then pulls;
 - **state for LiveView frontends** that never lags, drifts or shows what is not so;
-- **a TLA+ model**, checked with TLC, of how tmux, dtach, Claude Code, worktrees and stacks fit
-  together, written before the code it models.
+- **a TLA+ model**, checked with TLC, of how tmux, dtach, Claude Code, worktrees, stacks, jobs
+  and services fit together, written before the code it models.
 
 A project declares itself as data: its repository, trunk, branch pattern, setup commands and the
 checks its stacks must pass. The framework holds no project's policy.
 
-## The words
+## Concepts
 
-- **Host**: a machine agents run on, reached locally or over ssh. Each host has one tmux server
-  of the framework's, one dtach directory and one writer.
-- **Server**: a tmux server, `tmux -L <name>`, always named with its host, `{host, server}`.
-  Pane ids are unique only within one server, and a restarted server counts from `%0` again.
-- **Account**: a Claude account, known by its own config directory under the framework's home.
-- **Framework home**: one directory per framework instance, given by the host app, that holds
-  everything the framework keeps on a host: each account's Claude config directory, the dtach
-  directory and the SQLite files. The framework never reads or writes `~/.claude` or any config
-  directory outside it.
+Each word below names one thing, and the design, the code and the views use it only for that.
+
+**Agents**
+
+- **Agent**: a Claude Code session the framework runs and holds: a main session or a delegate.
+  Every agent runs on the workstation, held by dtach.
+- **Main session**: a project's top agent, one per project. It runs Claude Code's terminal
+  interface with Remote Control, because a person works in it. It sits on the project's trunk
+  and does no work there itself: work happens in worktrees, and once merged, the main session
+  pulls trunk, so it always holds the project's latest trunk. It is never archived.
+- **Delegate**: an agent a main session starts through the framework, on any account, in its
+  own worktree. It runs headless: it reads JSON messages on stdin and writes JSON events on
+  stdout, and nothing reads its screen. It acts like a subagent of its main session: it gets a
+  brief and gives one report.
+- **Subagent**: Claude Code's own subagent, run inside an agent by Claude Code, on that agent's
+  account. The framework does not start subagents; it reads and counts them.
+- **Parent** and **child**: the link between two levels. A main session is the parent of its
+  delegates, and a delegate the parent of its subagents. Neither word names a kind of agent.
+- **The tree**: every project's main session, its delegates and their subagents. Main sessions
+  are its roots.
+- **Brief** and **report**: the first message a delegate is given, and its last reply, which
+  goes to its parent.
+
+**Machines and work**
+
+- **Workstation**: the person's computer. Every agent, the framework, its tmux server, its
+  dtach directory and every worktree are on it.
+- **Host**: a machine that runs jobs and services for agents, reached over ssh, or the
+  workstation itself. No agent ever runs on a host other than the workstation.
+- **Job**: a one-off command an agent runs on a host, on a copy of its worktree, ending with an
+  exit code and a log, such as a test run or a build.
+- **Service**: a program an agent starts on a host and keeps running, such as a dev server or a
+  database, held by dtach, owned by one agent at a time, with a log.
+- **Copy**: a host's copy of one worktree, kept in step by rsync before each job or service
+  starts: every file git does not ignore, edits not yet committed included. Build outputs stay
+  in the copy between runs.
+
+**Accounts**
+
+- **Account**: a Claude account, known by its own config directory under the framework home.
+- **Allowance**: an account's weekly share of use. Agents are balanced across accounts by it: a
+  main session on one account starts a delegate on another. A subagent runs on its agent's
+  account.
+- **Move**: ending a main session on one account and resuming it on another.
+
+**Code**
+
 - **Project**: a repository and its trunk, declared as data.
-- **Parent session**: a project's main chat. It has Remote Control, keeps its name, is never
-  archived, and moves between accounts with one press.
-- **Delegate**: a Claude Code session a parent starts through the framework, run headless (see
-  "Headless delegates"), held by dtach, in its own worktree. Inside it, Claude Code's own
-  subagents delegate further; the framework counts them.
-- **Interactive and headless**: a parent runs Claude Code's terminal interface, with Remote
-  Control, because a person works in it. A delegate runs headless: it reads JSON messages on
-  stdin and writes JSON events on stdout, and nothing reads its screen.
-- **Service**: a program an agent starts through the framework and keeps running, such as a
-  dev server or a database, held by dtach and owned by one agent at a time.
-- **Claim**: an agent's hold on another agent or a service in one state, taken before a fix, so
-  that only one fix of that state runs.
-- **Viewer**: the tmux pane that shows a held agent: a parent's own screen (`dtach -a`), or a
-  readable rendering of a delegate's event log. It can die, be reopened or be opened twice; the
-  agent runs on.
+- **Trunk**: the project's main branch, such as `main`.
+- **Worktree**: a checkout of one branch of the project, on the workstation, under the framework
+  home; each delegate has its own.
+- **Stack**: a chain of branches and pull requests (`gh stack`) that lands into trunk.
+
+**Holding and viewing**
+
+- **Embedding app**: the Elixir application that runs the framework's parts in its supervision
+  tree and hands them their settings. The framework is a set of libraries; it starts nothing of
+  its own.
+- **Framework home**: one directory per framework instance, on the workstation, given by the
+  embedding app. It holds each account's Claude config directory, the dtach directory, the worktrees
+  and the SQLite files. The framework never reads or writes `~/.claude` or any config directory
+  outside it.
+- **Server**: a tmux server, `tmux -L <name>`. Pane ids are unique only within one server, and a
+  restarted server counts from `%0` again.
+- **Viewer**: the tmux pane that shows a held agent: a main session's own screen (`dtach -a`),
+  or a readable rendering of a delegate's event log. It can die, be reopened or be opened twice;
+  the agent runs on.
+- **Claim**: an agent's hold on one of its children, or a service, in one state, taken before a
+  fix, so that only one fix of that state runs.
 
 ## The parts
 
@@ -60,7 +111,7 @@ Each part is one OTP process or one pure module, with one job.
 The repository is a Mix umbrella with one OTP application per part (or per small set of parts
 that only make sense together), under `apps/`. An app declares, directly, every app it uses and only those; `gate-deps` checks it
 (Elixir alone accepts a module from any app in the dependency tree), a use outside the tree does
-not compile, and the layers stay one way: host (`caf_shell`,
+not compile, and the layers stay one way: base (`caf_shell`,
 `caf_tmux`, `caf_holder`), then readers and writers (`caf_registry`, `caf_transcripts`,
 `caf_usage`, `caf_accounts`, `caf_cli`, `caf_control`, `caf_stream`, `caf_intake`,
 `caf_sampler`), then `caf_sessions`, then `caf_tracker` (with each source next to it) and
@@ -70,12 +121,12 @@ used only in tests; setup a part's tests share with a higher app's tests lives i
 has its own tests and docs; a test of a Tracker source, or of two parts together, belongs to the
 higher app; the
 model (`model/tla/`), `bin/check-model`, devenv and the design stay at the root, and the gates
-run across every app. No app starts a process of its own: the host app's supervision tree
+run across every app. No app starts a process of its own: the embedding app's supervision tree
 starts each part.
 
 | Part | Job |
 |---|---|
-| `Hosts` | the hosts, how each is reached, and its shell |
+| `Hosts` | the workstation and the other hosts, how each is reached, and its shell |
 | `Shell` | the only module that starts programs, locally or over ssh, each leading a process group of its own, which a timeout ends |
 | `Shell.Reaper` | one per host: ends a running command's group when its caller dies first or the VM dies |
 | `Programs` | the absolute path of tmux, dtach, claude, git, gh, sh, sleep, rm, kill, env, ps, cat and tail on each host; no other part names a fixed path |
@@ -85,42 +136,56 @@ starts each part.
 | `TmuxSampler` | samples each server's panes and each host's held sockets, reports a held agent with no viewer, and cues `Sessions` when a held socket goes away |
 | `Holder` | dtach: hold a process in a clean environment, open a viewer, list sockets and whether each lives |
 | `ClaudeCLI` | the command line and environment of a session, per role and account |
-| `Registry` | reads Claude Code's `<config>/sessions/*.json` per account and host, and so each held agent's pid |
+| `Registry` | reads Claude Code's `<config>/sessions/*.json` per account, and so each held agent's pid |
 | `Transcripts` | a session's transcript tail, its chats and its subagents |
-| `Screen` | a parent's screen and dialogs, per Claude Code release, from real fixtures a person captures with a script |
+| `Screen` | a main session's screen and dialogs, per Claude Code release, from real fixtures a person captures with a script |
 | `Stream` | a headless delegate's stdin and event log: writes messages, reads events from an offset |
 | `Intake` | hook events in; holds `PermissionRequest` hooks until answered |
 | `Control` | the one writer per host: send, answer, interrupt, stop, respawn |
-| `Sessions` | start, resume and stop held sessions on one host, with their viewers, rows and worktrees |
+| `Sessions` | start, resume and stop held agents on the workstation, with their viewers, rows and worktrees |
 | `Mover` | drains a session and moves it between accounts |
-| `Parents` | each project's parent session, and what it holds |
+| `Mains` | each project's main session, what it holds, and the start of one for a project that has none |
 | `Delegates` | the delegate protocol: start, report, resume, end |
-| `Stacks` | the worktrees and `gh stack` chains of a parent's work |
+| `Stacks` | the worktrees and `gh stack` chains of a main session's work |
+| `Copies` | a host's copy of each worktree, brought in step by rsync before each job or service, and removed with the worktree |
+| `Jobs` | one-off commands on a host, in a copy: held, logged, ended by their exit or their timeout |
 | `Tracker` | the state views read: the fold of every reader |
 | `Recoveries` | detect a broken state, act once per state, verify; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after `/exit` within its stop's deadline, and only by the row's pid and start time (`Sessions` itself never kills) |
-| `Mailbox` | messages between agents: stored, delivered once, in order per sender and addressee |
-| `Services` | programs agents start and keep: held, owned, read, written to, restarted |
-| `Grants` | decides whether a caller may act on a target; holds a fix's claim on it |
+| `Mailbox` | messages along the tree's edges and between main sessions: stored, delivered once, in order per sender and addressee |
+| `Services` | programs agents start and keep on a host, in a copy: held, owned, read, written to, restarted, with ports forwarded to the workstation |
+| `Grants` | decides whether a caller may act on a target, by the tree's edges; holds a fix's claim on it |
 | `MCP` | the agent tools ("Agents working together"); each call is checked by `Grants` |
 | `Ghostty` | opens or focuses a session's terminal window |
 
 The LiveView side is a library of components over the `Tracker`, with one example app.
 
-## Multiple hosts
+## Hosts
 
-Every key carries its host from the first part built:
+Agents run only on the workstation; other hosts run jobs and services, the way an editor that
+edits files over ssh keeps the editor local and runs commands remotely. Every key still carries
+its host, as it has since the first part built, so the workstation is one host among them:
 
-- one tmux server, one dtach directory, one `Registry` reader and one `Control` per host, under
-  a supervisor per host;
-- a pane is `{host, server, server_start, pane_id}`, a held agent `{host, socket}`; the server's
-  start (its start time and pid) is part of a pane's key, so a pane id never matches across a
-  restart;
-- a remote host is reached over ssh through `Shell`. The framework's node runs on one host and
-  reads the others; a node per host is not needed for the first version;
-- the framework keeps one ssh connection per remote host, and it also forwards that host's
-  `127.0.0.1:<port>` back to the node's `Intake` (a reverse forward), so a remote session's hooks
-  reach the node as a local one's do. While that connection is down, a remote host's hook events
-  are lost, as during a restart, and the readers that stand in for them cover it;
+- the workstation has the framework's node, its one tmux server, its dtach directory for agents,
+  one `Registry` reader per account and its `Control`; every agent's row, pane and socket is on
+  it;
+- a pane is `{host, server, server_start, pane_id}`, a held process `{host, socket}`; the
+  server's start (its start time and pid) is part of a pane's key, so a pane id never matches
+  across a restart;
+- another host is reached over ssh through `Shell`, one connection per host, and has a
+  directory of the framework's own (its copies, its dtach directory for services, and its
+  logs). Nothing of Claude Code runs there, so no hook, session file or transcript is read from
+  it;
+- a job or service runs in a copy of the worktree it names. Before a job or a service starts,
+  `Copies` brings the copy in step with the worktree by rsync, over every file git does not
+  ignore, edits not yet committed included; build outputs stay in the copy between runs. Two
+  runs on one copy take turns at the sync, so neither sees half of the other's files. A copy is
+  removed with its worktree;
+- a job is held by dtach on its host, so a dropped ssh connection does not end it; its output
+  goes to a log on the host, read back from an offset, and it ends with its exit code or its
+  timeout, which ends its process group;
+- a service on another host is held the same way, and a port it listens on is forwarded to the
+  workstation over the host's ssh connection when the service asks for it, so tests on the
+  workstation reach it at `127.0.0.1:<port>`;
 - a reader of a whole host (held sockets, the `TmuxSampler`) has the `Tracker` scope
   `{host, :host}`, beside the `{host, account}` of a reader of one account;
 - the `TmuxSampler` reads a host's panes and then its sockets, not in one instant, so a viewer
@@ -134,13 +199,28 @@ Every key carries its host from the first part built:
   one socket within a window (the caller's, 60 s by default) ends `failed{repeating}`, and that
   socket is not reopened until a person clears it.
 
-## Parent sessions
+`Copy.tla` models a copy's sync, a job's run and a service's hold on a host, with a dropped
+connection at any step, before `Copies`, `Jobs` and remote `Services` are built.
 
-A parent holds, and a view shows:
+## Main sessions
 
-- its account, host, tmux session and pane, and whether its MCP tools are connected;
-- its worktrees, its own and each delegate's: branch, ahead and behind its trunk, unpushed
-  commits, uncommitted files, and the pull request and stack each is part of;
+A project has at most one main session. It runs in the project's own checkout, on trunk, and
+changes nothing there: its delegates work in worktrees, their branches land into trunk through
+stacks, and after each landing the framework pulls trunk in that checkout (fast-forward only,
+and only while the checkout is clean; anything else is a state a person sees). So the main
+session always holds the project's latest trunk.
+
+A person starts a main session from the views, and a main session can start one with
+`start_main(project, brief)` for a declared project that has none; a project that has one
+refuses it with `{:refused, {:running, name}}`. The new main session's brief is its first
+message.
+
+A main session holds, and a view shows:
+
+- its account, tmux session and pane, and whether its MCP tools are connected;
+- its checkout: trunk, ahead and behind its remote, and whether it is clean;
+- each delegate's worktree: branch, ahead and behind trunk, unpushed commits, uncommitted
+  files, and the pull request and stack each is part of;
 - the statuses of its delegates and their subagents, its open questions and its stack's checks;
 - the command that attaches to its tmux session, and Open in Ghostty.
 
@@ -158,15 +238,15 @@ one press at any level. It goes to the account with the most allowance left:
 6. Resume it there with `--resume`, its name and Remote Control on.
 7. Ignore the old process's `SessionEnd` that arrives after the new one started.
 
-Running delegates do not hold a move: each runs in its own process and survives the parent's
-end. A delegate's report is held by the parent's session until a parent process runs whose turn
-has ended, and the hold survives restarts of the framework.
+Running delegates, jobs and services do not hold a move: each runs in its own process and
+survives the main session's end. A delegate's report is held by its main session until a
+process of it runs whose turn has ended, and the hold survives restarts of the framework.
 
 Its chat is never archived.
 
 ## The delegate protocol
 
-A parent calls `start_delegate(project, branch, model, brief)`. The framework:
+A main session calls `start_delegate(project, branch, model, brief)`. The framework:
 
 1. checks the project, the branch name, the cap of delegates, and any worktree already at the
    path (reused only when clean, on the branch, and held by no live agent);
@@ -191,13 +271,13 @@ A parent calls `start_delegate(project, branch, model, brief)`. The framework:
 
 **What `Delegates` holds** (`Delegate.tla`; F-59's build note):
 
-- The host app hands `Delegates` its projects as data when it starts it, each as `Sessions`
+- The embedding app hands `Delegates` its projects as data when it starts it, each as `Sessions`
   reads it ("The worktree") with two more fields: `branches`, the pattern a delegate's branch
   must match, and `cap`, how many of one parent's delegates may hold it at once. There is no
   table of projects and no default cap. A delegate holds its parent's cap from its row's
   start until it ends: starting, running, resuming, finished or failed, since a finished one
   still holds its worktree and its report.
-- Until `Parents` exists, the caller names the parent, and the row keeps that name.
+- Until `Mains` exists, the caller names the main session, and the row keeps that name.
 - A delegate's session is named `<project>-<branch>`, each character of the branch other than
   a letter, a digit, `_` or `-` written as `-`, so a later start of the branch finds its
   worktree.
@@ -405,16 +485,16 @@ reading for delegates:
   transcript holds, with a turn cut off at the exit: 2.1.322 may run such a line again
   (F-51's build note, new-4). The framework does not rely on the drop.
 
-A parent stays interactive. `Screen` reads only a parent's screen: whether its input box is
+A main session stays interactive. `Screen` reads only a main session's screen: whether its input box is
 empty before a write, and its dialogs by label. Its fixtures are captured from a real session
 once per pinned Claude Code release by a script a person runs and reviews, with names and paths
 scrubbed; no test runs the real Claude Code.
 
 ## Agents working together
 
-Every agent of a project, parent or delegate, can talk to the others, see how they are doing,
-fix one that is stuck, and run services it needs. It does this only through the framework's
-tools. The tools are strict in how they act and loose in what they let an agent do.
+Agents talk along the tree's edges: an agent talks to its parent and its children, and main
+sessions talk to each other. Any agent can see the whole tree. Each does this only through the
+framework's tools, which are strict in how they act and narrow in whom they reach.
 
 **Strict in how:**
 - A tool names its target by what the framework holds: an agent's name or a service's name.
@@ -426,66 +506,70 @@ tools. The tools are strict in how they act and loose in what they let an agent 
 - The framework knows who calls. Each agent's MCP server starts with that agent's identity, and
   the agent cannot choose it.
 - Every call is written to a table before it acts and again with its outcome. A view shows the
-  log, and the target's parent sees every action on its agents.
-
-**Loose in what:**
-- Any agent of a project may act on any other agent and any service of the same project. One
-  project's agents never reach another project's.
-- A service is any program, with any arguments, run in the caller's worktree or another
-  worktree of the project.
+  log, and an agent's parent sees every action on it.
 
 **Who may act** (`Grants`):
-- Reading (look, transcript, logs, lists) is open within the project.
-- Messages are open within the project.
-- A fix (interrupt, answer, respawn, resume, stop) takes a claim on the target first. The claim
-  is for the target's current state, the way `Recoveries` acts once per state, and is a row in
-  `Grants`' table, written before the fix acts. A second fixer of the same state is refused
-  with `{:claimed, by}`, so two agents never fight over one stuck agent. The fix acts only
-  while the claimed state is still the target's current one, read again when it acts. A call
-  ends with its fix verified or not; the row keeps that state until the target's state moves,
-  and a fix that did not help goes to a person, not to a second agent. A claim a restart of
-  the framework cut off is closed as interrupted, never retried.
-- No agent may stop or move a parent session. Only a person moves a parent, with one press.
+- Reading the tree (`agents()`: every agent of every project, its parent and its state) is open
+  to every agent. Reading one agent closely (`look`, `transcript`) is open to its parent, its
+  children and, for a main session, the other main sessions.
+- Messages go along the edges only: a main session to its delegates and to other main
+  sessions; a delegate to its main session. A delegate has no other agent to message: its
+  children are subagents, which Claude Code runs inside it. Two delegates talk through their
+  main session.
+- A fix (interrupt, answer, resume, stop) is a parent's act on its own child. It takes a claim on
+  the child first. The claim is for the child's current state, the way `Recoveries` acts once
+  per state, and is a row in `Grants`' table, written before the fix acts. A second fix of the
+  same state is refused with `{:claimed, by}`. The fix acts only while the claimed state is
+  still the child's current one, read again when it acts. A call ends with its fix verified or
+  not; the row keeps that state until the child's state moves, and a fix that did not help goes
+  to a person. A claim a restart of the framework cut off is closed as interrupted, never
+  retried.
+- No agent may stop, move or interrupt a main session. Only a person does, a move with one
+  press.
 - An agent may not fix itself. A stuck agent cannot be relied on to see that it is stuck.
+- Jobs and services: a main session and its delegates may run jobs and start services on any
+  host, in a copy of their own worktree (a main session's is its checkout). A service is fixed
+  by its owner, or by the owner's parent.
 
 **The tools:**
 
-| Tool | What it does |
-|---|---|
-| `agents()` | the project's agents: name, role, parent, state (working, waiting, idle, stuck, gone), and what it waits on |
-| `message(to, text)` | stores a message and delivers it to the target when its turn has ended; answers `queued{id}`, then the sender learns `delivered` |
-| `look(agent)` | a parent's screen as text, or a delegate's rendered event log; its open dialog or request; its last transcript lines |
-| `transcript(agent, from)` | the agent's transcript from an offset |
-| `interrupt(agent)` | one `C-c` to a parent's pane, or a delegate's stream interrupt, under a claim |
-| `answer(agent, dialog, label)` | answers an open dialog through its held hook, by label, under a claim |
-| `respawn(agent)` / `resume(agent)` | starts a dead or wedged agent again with `--resume`, once per state, under a claim |
-| `stop(agent)` | ends a delegate after its report is delivered, under a claim |
-| `service_start(name, argv, opts)` | holds `argv` by dtach in a worktree, with a viewer in a tmux session (the caller's own or a named one) and its output in a log |
-| `services()` | the project's services: name, owner, state, viewer, restarts |
-| `service_logs(name, from)` | the service's output from an offset |
-| `service_send(name, input)` | text or keys to the service, through `Control`'s checked write |
-| `service_wait(name, until, timeout)` | waits for a line matching a pattern, a port that listens, or an exit; answers which, or `{:unknown, :timeout}` |
-| `service_restart(name)` / `service_stop(name)` | restarts or ends a service, under a claim |
-| `service_hand(name, to)` | hands a service the caller owns to another agent of the project |
-| `ask(question)` | asks a person, without blocking |
-| `start_delegate(…)` | as in "The delegate protocol" |
-| `reload()` | reloads the caller's own tools |
+| Tool | Who | What it does |
+|---|---|---|
+| `agents()` | any agent | the tree: each agent's name, kind, project, parent, account, state (working, waiting, idle, stuck, gone), what it waits on, and its subagents |
+| `message(to, text)` | along an edge | stores a message and delivers it to the target when its turn has ended; answers `queued{id}`, then the sender learns `delivered` |
+| `look(agent)` | parent, child, main sessions | a main session's screen as text, or a delegate's rendered event log; its open dialog or request; its last transcript lines |
+| `transcript(agent, from)` | parent, child, main sessions | the agent's transcript from an offset |
+| `interrupt(agent)` | parent | a delegate's stream interrupt, under a claim |
+| `answer(agent, dialog, label)` | parent | answers a child's open request through its held hook, by label, under a claim |
+| `resume(agent)` | parent | starts a dead or wedged child again with `--resume`, once per state, under a claim |
+| `stop(agent)` | parent | ends a delegate after its report is delivered, under a claim |
+| `start_delegate(…)` | main session | starts a delegate and answers at once; the report arrives later as a message ("The delegate protocol") |
+| `run_delegate(…, timeout)` | main session | starts a delegate and holds the call for its report, up to `timeout`, for short work; at the timeout it answers `{:unknown, :timeout}` with the delegate's name, and the report then arrives as a message, as `start_delegate`'s does |
+| `start_main(project, brief)` | main session | starts the main session of a project that has none |
+| `run(host, argv, timeout)` | main session, delegate | runs a job in a copy of the caller's worktree on `host`, and answers its exit code and the end of its log, or `{:unknown, :timeout}` once it ended it |
+| `service_start(name, argv, opts)` | main session, delegate | holds `argv` by dtach on a host (`host:`, the workstation by default) in a copy of the caller's worktree, with its output in a log, and a port forwarded to the workstation if `forward:` names one |
+| `services()` | any agent | each service: name, host, owner, state, restarts, forwarded port |
+| `service_logs(name, from)` | any agent | the service's output from an offset |
+| `service_send(name, input)` | owner, owner's parent | text or keys to the service, through `Control`'s checked write |
+| `service_wait(name, until, timeout)` | any agent | until a line matches a pattern, a port listens, or the service exits; answers which, or `{:unknown, :timeout}` |
+| `service_restart(name)` / `service_stop(name)` | owner, owner's parent | restarts or ends a service, under a claim |
+| `service_hand(name, to)` | owner | hands a service to its parent or one of its children |
+| `ask(question)` | any agent | asks a person, without blocking |
+| `reload()` | any agent | reloads the caller's own tools |
 
 **Messages** are stored before they are sent, so a restart of the framework does not lose
-them. One goes in only when the target's turn has ended (and, for a parent, its input box is
-empty), the same rule as any write, with a report's sending mark and settle: marked before the
+them. One goes in only when the target's turn has ended (and, for a main session, its input box
+is empty), the same rule as any write, with a report's sending mark and settle: marked before the
 write, settled from the target's replay or transcript after a restart, never resent blind.
-Messages wait in order per sender and addressee. A message is refused only when its addressee
-is a name the project does not hold; one to a dead agent waits until it is respawned or ends.
-A message to a delegate that has ended goes to its parent instead, once, and says so; it goes
-on only from a settled row.
+Messages are kept in order per sender and addressee. A message is refused when its addressee is
+not along an edge of the sender, or is a name the framework does not hold; one to a dead agent
+is held until it is resumed or ends. A message to a delegate that has ended goes to its main
+session instead, once, and says so; it goes on only from a settled row.
 
 **Services** belong to the agent that started them. When the owner ends, its services end too,
 unless it handed them on with `service_hand`, or started them with `keep: true`, which hands them
-to the owner's parent when the owner ends. Any
-agent of the project may read, wait on, write to and fix a service. A service has a name, a
-worktree, a held process and a log. It never holds a Claude Code session; agents are started as
-delegates.
+to the owner's parent when the owner ends. A service has a name, a host, a copy, a held process
+and a log. It never holds a Claude Code session; agents are started as delegates.
 
 ## Intake
 
@@ -587,22 +671,22 @@ worktree on its branch whose setup finished).
      server; a pane id kept from before a restart never reaches another agent's pane; no two
      processes hold one socket.
    - Liveness: a lost viewer is reopened; a held agent with no viewer is seen.
-2. **`Move.tla`**: two accounts, a parent with background commands and delegates, a limit.
+2. **`Move.tla`**: two accounts, a main session with background commands and delegates, a limit.
    Events: drain, turn end, copy, respawn, a late `SessionEnd`, the limit reached.
    - Invariants: a session runs on one account at a time; nothing that runs is lost; a late
      `SessionEnd` never ends the moved session.
-   - Liveness: a drained parent moves.
+   - Liveness: a drained main session moves.
    - The spec settles (F-5): the move also waits until no background command runs, since they
      end with the process; the transcript is copied after the old process exited; running
-     delegates do not hold a move, and their reports wait for a live parent process; a
+     delegates do not hold a move, and their reports wait for a live process of the main session; a
      `SessionEnd` ends the session only when it names the session's current process.
-3. **`Delegate.tla`**: a parent, its delegates and restarts of the framework.
-   - Invariants: each report is delivered once, and only to a running parent process whose
-     turn has ended; a delegate ends only after its report is delivered; a report held while
-     the parent moves survives a restart of the framework.
+3. **`Delegate.tla`**: a main session, its delegates and restarts of the framework.
+   - Invariants: each report is delivered once, and only to a running process of the main
+     session whose turn has ended; a delegate ends only after its report is delivered; a report
+     held while the main session moves survives a restart of the framework.
    - Liveness: every finished delegate's report arrives.
    - The spec settles (F-14): the row says "sending" before the report is typed, and after a
-     restart a "sending" row is settled by reading the parent's transcript, never resent blind;
+     restart a "sending" row is settled by reading the main session's transcript, never resent blind;
      a delegate's row leaves "running" once, by its Stop event or, when a restart lost it, its
      transcript's last reply; a kill after the last reply is a finish, not a kill; a second
      kill's report takes the same path as a finished delegate's.
@@ -610,12 +694,13 @@ worktree on its branch whose setup finished).
      under way counts against the cap; after a restart a starting or resuming row is settled
      by `Sessions`' row of its call, never while that call runs; a resume is counted before it
      is asked; each process takes one turn's message, under the uuid the row holds.
-4. **`Team.tla`**: agents of one project, their messages, claims and services, and restarts of
-   the framework. Events: a message is sent, a turn ends, an agent sticks, dies or ends, two
-   agents try to fix one target, a service's owner ends.
-   - Invariants: a message is delivered at most once and in order per sender, and only into an
-     ended turn; at most one claim holds a target's state; no agent fixes itself or stops a
-     parent; no call reaches another project; a service has one owner, or none once it ended.
+4. **`Team.tla`**: two main sessions and their delegates, their messages, claims and
+   services, and restarts of the framework. Events: a message is sent, a turn ends, an agent
+   sticks, dies or ends, two fixes of one child, a service's owner ends.
+   - Invariants: a message is delivered at most once and in order per sender, only into an
+     ended turn, and only along an edge of the tree; at most one claim holds a child's state;
+     only a parent fixes, and no agent fixes itself or stops a main session; a service has one
+     owner, or none once it ended.
    - Liveness: a message to a live agent is delivered; a claim is released or its fix verified.
 5. **`Stack.tla`**: worktrees, branches, a `gh stack` chain, rebases and squash merges.
    - Invariants: a worktree is on one branch; a layer lands only on its own checks; a rebase never
@@ -658,7 +743,7 @@ Each failure is its own answer, and none falls back to another way:
 - A press from a phone, which opens the window on the Mac.
 
 Ghostty's AppleScript is a preview, so the framework pins the Ghostty version it was tested
-with. A session on another host opens as `ssh -t <host> tmux -L <server> attach -t =<session>`.
+with. Every agent's session is on the workstation, so a window always attaches locally.
 
 ## Rules learned from running such a system
 
@@ -685,10 +770,10 @@ without it.
   every agent ended mid-turn with its background commands.
 - Build a held process's environment from nothing: `env -i` with an explicit list of what it
   keeps (such as `HOME`, `PATH`, `LANG`, and the account's settings). The same command works
-  locally and over ssh, and nothing leaks in: an inherited `CLAUDECODE`, `CLAUDE_CODE_*` or
-  `TMUX` made the agent act as if it ran inside another session, and over ssh the remote names
-  cannot be listed ahead to remove one by one.
-- dtach does not report the pid of the process it holds. A held parent's pid comes from its
+  for an agent on the workstation and a job or service on any host, and nothing leaks in: an
+  inherited `CLAUDECODE`, `CLAUDE_CODE_*` or `TMUX` made the agent act as if it ran inside
+  another session, and over ssh the remote names cannot be listed ahead to remove one by one.
+- dtach does not report the pid of the process it holds. A held main session's pid comes from its
   session file, which `Registry` reads, and a headless delegate's from the `pid` its wrapper
   writes before `exec`; whatever ends an agent by pid gets it there.
 - Open a viewer one row short and then grow it: Claude Code doesn't redraw for a viewer that
@@ -720,7 +805,7 @@ without it.
 - A child that ignores TERM and outlives its command (one that exited on its own, or on TERM
   within the grace) keeps running: once the exit is taken, nothing may signal the group. A
   program that must not leave such children is held as a service, not run.
-- The host app starts each host's reaper before every process that runs commands with it, under
+- The embedding app starts each host's reaper before every process that runs commands with it, under
   one supervisor that restarts them together: the reaper's death ends every group it holds.
 - A command that must outlive the framework but is not held, such as a delegate's claim
   ("Headless delegates"), runs with no reaper. Given one, it would end with the VM.
@@ -736,16 +821,15 @@ without it.
   is unknown until a session on it starts or fails. Setting `CLAUDE_CONFIG_DIR` to the default directory
   logs Claude Code out, and Remote Control otherwise follows each account's own default.
 - The framework writes each account's settings, hooks and MCP servers into that account's
-  directory itself, from data, so what an agent runs with is the framework's and is the same on
-  every host. It writes only files of its own that each launch names by flag, never a file
-  Claude Code rewrites (`settings.json`, `.claude.json`, credentials). On a remote host it
-  writes them through `Shell`.
+  directory itself, from data, so what an agent runs with is the framework's. It writes only
+  files of its own that each launch names by flag, never a file Claude Code rewrites
+  (`settings.json`, `.claude.json`, credentials).
 - Remote Control starts only with an interactive session, so a headless delegate never has it;
   its settings still set `remoteControlAtStartup` to false, and a check against each pinned
   Claude Code release confirms a delegate starts with it off.
 - An interactive session in a new directory meets the workspace trust dialog first, and until it
   is trusted Claude Code runs no status line. `Screen` answers that dialog by its label at a
-  parent's start, and the settings never set `disableAllHooks`. A headless delegate skips it.
+  main session's start, and the settings never set `disableAllHooks`. A headless delegate skips it.
 - A headless session draws no status line; its event log's `rate_limit_event` stands in
   ("Headless delegates").
 - Every launch sets `DISABLE_AUTOUPDATER=1`, because devenv pins Claude Code and a session that
@@ -766,7 +850,6 @@ used and when it resets). It reads no credential and calls no API.
 - `pick` answers the account with the most left among current and assumed readings, preferring a
   current one at the same share, or `refused{none_known}`. It never guesses past that.
 - A check flags an account whose sessions have run past their first answer with no new reading.
-- On a remote host, the status line's file is read through `Shell`, as `Registry` reads.
 - Answer dialogs through the held `PermissionRequest` hook, not by typing keys. Confirm a typed
   answer by its label, never by its position in the menu.
 - Keep real screen fixtures for each Claude Code release, and fail with a named reason.
@@ -802,7 +885,7 @@ used and when it resets). It reads no credential and calls no API.
 
 **Moves and limits**
 - Drain before a limit, not after it: a move after the limit lost eleven background commands.
-- At a hard limit, only the parent's own state counts: its turn and its background commands,
+- At a hard limit, only the main session's own state counts: its turn and its background commands,
   not its delegates.
 - Never edit a file Claude Code rewrites from memory: its next write erases the change.
 - Stop background sessions by id with `claude stop`.
@@ -810,7 +893,7 @@ used and when it resets). It reads no credential and calls no API.
 **Delegates**
 - A report survives restarts, and a delegate ends only after its report is delivered.
 - Resume a killed delegate once, and report a second kill.
-- Count a parent's delegates as work still going for it.
+- Count a main session's delegates as work still going for it.
 - Never kill by pattern. Kill only processes you started, by pid.
 - `git stash` is shared by every worktree of a repository, so delegates never use it.
 - `git worktree add -b` at a taken path fails but leaves the new branch behind.
@@ -869,12 +952,24 @@ used and when it resets). It reads no credential and calls no API.
 1. **The repository and `Agent.tla`.** The project skeleton (Elixir, OTP, SQLite, devenv with
    tmux, dtach, claude, gh and the TLA+ tools), `bin/check-model`, and `Agent.tla` with its
    `Break_*` configurations, before any code it models.
-2. **The host layer.** `Shell`, `Programs`, `Tmux` (contract, CLI and fake) and `Holder`, keyed by
+2. **The base layer.** `Shell`, `Programs`, `Tmux` (contract, CLI and fake) and `Holder`, keyed by
    `{host, server}`, built against the model, with contract tests on a real tmux server per test
    VM.
-3. **One host's agents.** `Registry`, `Control` and the `Tracker`'s core, with the state rules as
+3. **The workstation's agents.** `Registry`, `Control` and the `Tracker`'s core, with the state rules as
    property tests. `Control` came first, as its own unit.
 
-Then `Move.tla` and `Mover`, `Delegate.tla` and `Delegates`, `Team.tla` with `Grants`,
-`Mailbox`, `Services` and the agent tools, `Stack.tla` and `Stacks`, the LiveView components,
-and Ghostty.
+Then `Delegate.tla` and `Delegates` (its start, finish and kill path are built). What is left:
+
+4. **`Screen`**, from the fixtures a person captures, then `Delegates`' delivery of a report
+   through `Control`'s checked write, and `run_delegate`.
+5. **`Mover`**, against `Move.tla`.
+6. **`Mains`**: one main session per project, on trunk in the project's checkout, the pull
+   after a landing, and `start_main`.
+7. **`Team.tla`**, then `Grants`, `Mailbox` and the agent tools, by the tree's edges, with
+   `agents()` read from the `Tracker`.
+8. **`Copy.tla`**, then `Copies`, `Jobs` and `Services` on any host, with forwarded ports.
+9. **`Stack.tla`** and `Stacks`, then the LiveView components, and Ghostty.
+
+The remote agents of the first plan (a session held on another host, its hooks forwarded back
+over ssh, its session files and status line read there) are not built: agents run only on the
+workstation. What is built stays keyed by host.
