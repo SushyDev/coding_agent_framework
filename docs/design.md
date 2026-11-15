@@ -228,18 +228,25 @@ sources in `docs/build-notes/F-31.md`). `Stream.tla` models this section. This r
 reading for delegates:
 
 - **Held, apart from the framework.** Each delegate has a directory
-  `<home>/streams/<session>/` with a FIFO `in`, made with `mkfifo` before the start. dtach holds
+  `<home>/streams/<session id>/` with a FIFO `in`, made with `mkfifo` before the start. It is
+  named by the session id, which a resume keeps and a new start does not, so a new start of a
+  name that ended never reads the old log. dtach holds
   this wrapper, run by `sh` in the clean environment, with the directory and the command:
 
   ```sh
   d=$1; shift
+  printf '%s\n' "$$" > "$d/pid"
   exec 3<>"$d/in"
   exec "$@" <&3 3<&- >>"$d/events.jsonl" 2>>"$d/stderr.log"
   ```
 
   The delegate's stdin is the FIFO opened read-write, so it holds a writer itself and its stdin
   never reaches end of file: the framework's restarts and its writers' exits never end it.
-  `exec` makes `claude` the held process, so its pid is the one its session file names.
+  `exec` makes `claude` the held process, with the pid the wrapper wrote to `pid`. That file,
+  not a session file, gives a delegate's pid: nothing shows that `-p` writes one, and a headless
+  session has no `--name` to match. `Sessions` reads it only after `Stream` has read the
+  `system`/`init` naming the session id, takes its start time from `ps`, and checks the socket
+  again. That init, with the pid alive, confirms the start.
 - **Events are read from an offset.** `Stream` reads only whole lines of `events.jsonl` (a line
   without its newline is still being written), and handles each event and saves the offset in
   one transaction, so no event is handled twice or skipped across restarts. A resume appends to
@@ -287,7 +294,15 @@ reading for delegates:
   the check against each pinned release covers it.
 - **No trust dialog.** A headless session skips the workspace trust dialog.
 - **Its viewer** is a tmux pane that renders the event log as readable text, opened and
-  reopened like any viewer. It writes nothing.
+  reopened like any viewer, with the command `Sessions` answers for the row. It waits for a log
+  that is not there yet (`tail -F` until the renderer exists). It writes nothing.
+- **A stop ends with the socket.** `ps` stops listing the process a moment before dtach removes
+  its socket, so a stop is done only when the pid is gone and the socket has ended; a resume
+  before that is refused, and the caller resumes after the stop's answer.
+- **Checked against each pinned release**, with the flags: whether `-p` writes a session file
+  (which could stand in for `pid`), and whether `system`/`init` comes before the first line is
+  read. If the init comes only with the first turn, the start writes the brief through `Stream`
+  right after the hold, before it waits for the init.
 
 A parent stays interactive. `Screen` reads only a parent's screen: whether its input box is
 empty before a write, and its dialogs by label. Its fixtures are captured from a real session
@@ -560,8 +575,9 @@ without it.
   locally and over ssh, and nothing leaks in: an inherited `CLAUDECODE`, `CLAUDE_CODE_*` or
   `TMUX` made the agent act as if it ran inside another session, and over ssh the remote names
   cannot be listed ahead to remove one by one.
-- dtach does not report the pid of the process it holds. A held agent's pid comes from its
-  session file, which `Registry` reads; whatever ends an agent by pid gets it there.
+- dtach does not report the pid of the process it holds. A held parent's pid comes from its
+  session file, which `Registry` reads, and a headless delegate's from the `pid` its wrapper
+  writes before `exec`; whatever ends an agent by pid gets it there.
 - Open a viewer one row short and then grow it: Claude Code doesn't redraw for a viewer that
   attaches at the same size.
 - Reopen a lost viewer once per loss. A viewer that fails leaves the agent running.
