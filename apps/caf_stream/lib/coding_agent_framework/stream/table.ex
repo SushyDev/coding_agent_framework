@@ -40,7 +40,8 @@ defmodule CodingAgentFramework.Stream.Table do
 
   @doc """
   A host's rows and when it was last read; `:unread` before. Each row holds its fold's fields
-  beside `id`, `session`, `socket` and `transcript`, the lines' text left out.
+  beside `id`, `session`, `socket` and `transcript`, the lines' text left out, and
+  `load_problems`: what was wrong with the stored fold (`[]` when nothing), as `load/1` says.
   """
   @spec rows(db, String.t()) :: :unread | {:ok, %{read_at: integer, rows: [map]}}
   def rows(db, host) do
@@ -75,7 +76,8 @@ defmodule CodingAgentFramework.Stream.Table do
     sql = "SELECT #{@columns} FROM stream_delegates WHERE host = ?1"
 
     for [_id, session, socket, transcript, fold, _] <- query(db, sql, [host]), into: %{} do
-      {session, %{socket: socket, transcript: transcript, fold: load(fold)}}
+      {fold, _problems} = load(fold)
+      {session, %{socket: socket, transcript: transcript, fold: fold}}
     end
   end
 
@@ -105,22 +107,29 @@ defmodule CodingAgentFramework.Stream.Table do
     ids
   end
 
-  # Total: bytes that are not a fold this writer wrote load as a new fold.
+  # Total, and a row an earlier or later build wrote is never taken for a new one: a field this
+  # build added is filled with its default, so the offset, messages and requests stay; a field
+  # it does not know is dropped and named. Only bytes that are not a map, or that `:safe` refuses
+  # (an atom this build never saw), load as a new fold.
   defp load(bytes) when is_binary(bytes) do
-    fresh = Fold.new()
-
     case :erlang.binary_to_term(bytes, [:safe]) do
-      %{} = fold -> if Map.keys(fold) == Map.keys(fresh), do: fold, else: fresh
-      _ -> fresh
+      %{} = stored ->
+        fresh = Fold.new()
+        unknown = Map.keys(stored) -- Map.keys(fresh)
+        problems = if unknown == [], do: [], else: [{:unknown_fields, Enum.sort(unknown)}]
+        {Map.merge(fresh, Map.take(stored, Map.keys(fresh))), problems}
+
+      _ ->
+        {Fold.new(), [:not_a_map]}
     end
   rescue
-    ArgumentError -> Fold.new()
+    ArgumentError -> {Fold.new(), [:unreadable]}
   end
 
-  defp load(_), do: Fold.new()
+  defp load(_), do: {Fold.new(), [:unreadable]}
 
   defp to_row([id, session, socket, transcript, fold, written_at]) do
-    fold = load(fold)
+    {fold, problems} = load(fold)
     lines = Map.new(fold.lines, fn {k, l} -> {k, Map.delete(l, :line)} end)
 
     row = %{
@@ -128,7 +137,8 @@ defmodule CodingAgentFramework.Stream.Table do
       session: session,
       socket: socket,
       transcript: transcript,
-      written_at: written_at
+      written_at: written_at,
+      load_problems: problems
     }
 
     Map.merge(%{fold | lines: lines}, row)
