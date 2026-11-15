@@ -29,6 +29,7 @@ defmodule CafSessions.MixProject do
       {:caf_transcripts, in_umbrella: true},
       {:exqlite, "~> 0.43.0"},
       {:caf_accounts, in_umbrella: true, only: :test},
+      {:caf_sampler, in_umbrella: true, only: :test},
       {:caf_test, in_umbrella: true, only: :test},
       {:caf_tmux, in_umbrella: true, only: :test}
     ]

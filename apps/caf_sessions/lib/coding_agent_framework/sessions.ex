@@ -56,7 +56,8 @@ defmodule CodingAgentFramework.Sessions do
   on the branch, clean and held by no other row; the row's `worktree` says what was done.
 
   **A stop** types `/exit` through `Control`'s checked write, then waits until the process the
-  row names exits, judged by `{pid, procStart}` (`Registry.Liveness`), never by name. `/exit`
+  row names exits, judged by `{pid, procStart}` (`Registry.Liveness`), never by name, and its
+  socket is dead, so a resume after the answer is never refused `{:live, name}`. `/exit`
   must be typed only when the turn has ended and the input box is empty. Reading that from the
   screen is `Screen`'s job, which is not built: the caller says the turn has ended, and any
   other answer is refused. A delegate's stop writes `end_session` through `Stream` instead, once
@@ -69,18 +70,27 @@ defmodule CodingAgentFramework.Sessions do
   `{:unknown, :no_first_event}`), and its row says `unknown` with that reason. A hold that answers unknown still waits for the file. A stop whose
   process is alive at its deadline answers `{:unknown, {:no_exit, typed}}` and leaves the row
   `stopping` with reason `no_exit`: `Recoveries` ends that process by its pid and start time.
+  One whose process is gone while its socket is still live answers
+  `{:unknown, {:socket_live, typed}}`, and the row, reason `socket_live`, waits for the next
+  settle.
   `Sessions` itself never kills. The row keeps the start's or stop's deadline in wall-clock time
   (the `clock:` option), so a restart does not move it.
 
   **Rows with no call under way** are settled as `model/tla/Start.tla` does, when `Sessions`
-  starts, at a starting row's deadline, and at each `Registry` or `Stream` read that `cue/2`
-  hands it. "Confirmed" is a delegate's first event and recorded pid, as above:
+  starts, at a starting row's deadline, and at each `Registry`, `Stream` or `TmuxSampler` cue
+  that `cue/2` hands it. A socket ends apart from its process: dtach removes it a moment after
+  the process exits, and a dtach killed hard leaves it stale while the process may run on.
+  "Confirmed" is a delegate's first event and recorded pid, as above; "unheld" is a dead socket
+  while the session file (a delegate's recorded pid) names a live process:
 
   - `starting` (left by a restart): `running` when confirmed; past its deadline, `orphan` for a
-    live socket and `refused{interrupted}` for a dead one;
-  - `unknown`: `running` when confirmed, `stopped` when its socket is dead;
-  - `stopping`: `stopped` when its process is gone by pid and start time; when it lives,
-    `running` after a restart, but a late stop (`no_exit`) stays for `Recoveries`;
+    live socket or an unheld process (reason `unheld`, with the file's pid and start time), and
+    `refused{interrupted}` for a dead socket otherwise;
+  - `unknown`: `running` when confirmed, `orphan` when unheld, `stopped` when its socket is
+    dead otherwise;
+  - `stopping`: `stopped` when its process is gone by pid and start time and its socket is
+    dead; when it lives, `running` after a restart, but a late stop (`no_exit`) stays for
+    `Recoveries`;
   - `running` (its process exited by itself, a crash or a kill): `stopped` with reason
     `exited` once its process is gone by pid and start time and its socket is dead, so its
     name can be resumed. A pid another program took counts as gone.
@@ -183,10 +193,14 @@ defmodule CodingAgentFramework.Sessions do
   Hands `Sessions` a `Registry`'s cue (`%{topic: "registry:<host>:<account>", ids: ids}`): the
   rows of that account with no call under way are read again from the `Registry`'s rows. The
   host app wires the `Registry`'s `notify` here, for example through PubSub. A `Stream`'s cue
-  (`stream:<host>`) does the same for the host's delegates. Answers `:ok` at once; what it
-  settles shows in the rows and their cues.
+  (`stream:<host>`) does the same for the host's delegates, and a `TmuxSampler`'s
+  (`tmux:<host>:<server>`, sent when its rows change, as when a held socket goes away) for every
+  row of the host, so a settle that met a socket dtach had not removed yet is taken again. Answers
+  `:ok` at once; what it settles shows in the rows and their cues.
 
       Sessions.cue(sessions, %{topic: "registry:laptop:work", ids: [3]})
+      #=> :ok
+      Sessions.cue(sessions, %{topic: "tmux:laptop:caf", ids: [7]})
       #=> :ok
   """
   @spec cue(GenServer.server(), map) :: :ok
@@ -290,6 +304,16 @@ defmodule CodingAgentFramework.Sessions do
 
   def handle_cast({:cue, "stream:" <> host}, state) do
     if host == state.host.name, do: settle(state, :delegates, false)
+    {:noreply, state}
+  end
+
+  # The sampler's: a held socket went away or went stale, among other changes of its rows.
+  def handle_cast({:cue, "tmux:" <> rest}, state) do
+    case String.split(rest, ":", parts: 2) do
+      [host, _server] when host == state.host.name -> settle(state, :all, false)
+      _ -> :ok
+    end
+
     {:noreply, state}
   end
 
@@ -458,15 +482,21 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
-  # StopSettled within the call; StopTimedOut leaves the row stopping, late, for Recoveries.
+  # StopSettled within the call: stopped once the process is gone and its socket is dead, as
+  # dtach removes it a moment after the exit, so a resume after the answer is not refused
+  # `{:live, name}`. StopTimedOut leaves the row stopping: late (no_exit) for Recoveries when
+  # the process lives; with it gone and the socket not read as dead, for the next settle.
   defp check(state, name, %{kind: :stop, row: row} = pending) do
-    if liveness(state, row) in [:gone, :replaced] do
+    gone? = liveness(state, row) in [:gone, :replaced]
+
+    if gone? and dead?(state, row) do
       write(state, row, status: "stopped")
       done(state, name, pending, {:ok, :stopped})
     else
       wait(state, name, pending, fn ->
-        write(state, row, reason: "no_exit")
-        {:unknown, {:no_exit, pending.typed}}
+        why = if gone?, do: :socket_live, else: :no_exit
+        write(state, row, reason: Atom.to_string(why))
+        {:unknown, {why, pending.typed}}
       end)
     end
   end
@@ -519,6 +549,9 @@ defmodule CodingAgentFramework.Sessions do
       {:live, why} when past? ->
         write(state, row, status: "orphan", reason: why)
 
+      {:unheld, file} when past? ->
+        orphan(state, row, file)
+
       # Remove first: a restart in between leaves the row starting, decided again.
       {:dead, _} when past? ->
         worktree = remove(state, row)
@@ -529,22 +562,29 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
-  # ReRead: an unknown row is running once its file names its live process, stopped once its
-  # socket is dead.
+  # ReRead: an unknown row is running once its file names its live process, an orphan while
+  # that process runs on a dead socket, and stopped once its socket is dead with no such file.
   defp settle_row(state, %{status: "unknown"} = row, read?) do
     case confirm(state, row, read?) do
       {:ok, file} -> running(state, row, file)
+      {:unheld, file} -> orphan(state, row, file)
       {:dead, _} -> write(state, row, status: "stopped")
       _ -> :ok
     end
   end
 
-  # StopSettled with no stop under way, by pid and start time. A late stop stays stopping.
+  # StopSettled with no stop under way: stopped once its process is gone by pid and start time
+  # and its socket is dead; running while it lives, unless the stop was late (no_exit).
   defp settle_row(state, %{status: "stopping"} = row, _read?) do
     case liveness(state, row) do
-      gone when gone in [:gone, :replaced] -> write(state, row, status: "stopped")
-      :live when row.reason != "no_exit" -> write(state, row, status: "running")
-      _late_or_unknown -> :ok
+      gone when gone in [:gone, :replaced] ->
+        if dead?(state, row), do: write(state, row, status: "stopped")
+
+      :live when row.reason != "no_exit" ->
+        write(state, row, status: "running")
+
+      _late_or_unknown ->
+        :ok
     end
   end
 
@@ -552,19 +592,35 @@ defmodule CodingAgentFramework.Sessions do
   # exited, once that process is gone by pid and start time and its socket is read as dead; a
   # pid another program took counts as gone. One ps for every row, and a socket read only for
   # a row whose process is gone. A read that fails, or a socket dtach has not removed yet,
-  # decides nothing: the next cue reads again.
+  # decides nothing: the sampler's cue when the socket goes reads again.
   defp settle_running(state, rows) do
     rows = Enum.filter(rows, &(is_integer(&1.pid) and is_binary(&1.proc_start)))
     alive = alive(state, rows)
 
     for row <- rows,
         alive[{row.pid, row.proc_start}] in [:gone, :replaced],
-        {:ok, dead} <- [Holder.state(state.holder, row.socket)],
-        dead in [:absent, :stale],
+        dead?(state, row),
         do: write(state, row, status: "stopped", reason: "exited")
 
     :ok
   end
+
+  # A socket read as dead: absent, or stale once dtach was killed. A read that fails is not.
+  defp dead?(state, row),
+    do: match?({:ok, dead} when dead in [:absent, :stale], Holder.state(state.holder, row.socket))
+
+  # A process that runs on a dead socket, with the pid and start time of the file that names
+  # it, for Recoveries; a delegate's has none (`unheld/3`).
+  defp orphan(state, row, nil), do: write(state, row, status: "orphan", reason: "unheld")
+
+  defp orphan(state, row, file),
+    do:
+      write(state, row,
+        status: "orphan",
+        reason: "unheld",
+        pid: file.pid,
+        proc_start: file.proc_start
+      )
 
   # Confirms a delegate: Stream has read the init naming its session id, and so the wrapper had
   # recorded its pid before; that pid lives with the start time ps gives, and the socket is
@@ -577,7 +633,7 @@ defmodule CodingAgentFramework.Sessions do
          {:ok, :live} <- Holder.state(state.holder, row.socket) do
       {:ok, %{pid: pid, proc_start: start, session_id: row.session_id}}
     else
-      {:ok, dead} when dead in [:absent, :stale] -> {:dead, dead}
+      {:ok, dead} when dead in [:absent, :stale] -> unheld(state, row, dead)
       {:live, _} = live -> live
       :unread -> {:unknown, :unread}
       {_, reason} -> {:unknown, reason}
@@ -585,24 +641,39 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   # Confirms: the session file of a live process with the session's name, while its socket is
-  # live. `{:dead, _}` only for a socket read as dead; any read that fails is `{:unknown, _}`.
+  # live. A dead socket while that file names a live process is `{:unheld, file}`: its dtach
+  # was killed hard and the process runs on. `{:dead, _}` only for a dead socket with no such
+  # file; any read that fails is `{:unknown, _}`.
   defp confirm(state, row, read?) do
-    with {:ok, :live} <- Holder.state(state.holder, row.socket),
+    with {:ok, socket} <- Holder.state(state.holder, row.socket),
          {:ok, registry} <- Map.fetch(state.registries, row.account),
          {:ok, _} <- if(read?, do: Registry.read(registry), else: {:ok, :cued}),
          {:ok, %{rows: files}} <- Registry.rows(registry) do
       named = Enum.filter(files, &(&1.name == row.name))
+      file = Enum.find(named, &(&1.alive == :live))
 
       cond do
-        file = Enum.find(named, &(&1.alive == :live)) -> {:ok, file}
+        file && socket == :live -> {:ok, file}
+        file -> {:unheld, file}
         Enum.any?(named, &(&1.alive == :unknown)) -> {:unknown, :liveness}
-        true -> {:live, :no_session_file}
+        socket == :live -> {:live, :no_session_file}
+        true -> {:dead, socket}
       end
     else
-      {:ok, dead} when dead in [:absent, :stale] -> {:dead, dead}
       :error -> {:unknown, :no_registry}
       :unread -> {:unknown, :unread}
       {_, reason} -> {:unknown, reason}
+    end
+  end
+
+  # A delegate's dead socket: the pid its wrapper recorded may run on, unheld. That file names
+  # no start time, so a pid ps lists may be another program's: the orphan keeps no pid (F-64's
+  # build note, new-3). No file, or a pid ps does not list, is dead.
+  defp unheld(state, row, dead) do
+    case held(state, row) do
+      {:ok, _pid, _start} -> {:unheld, nil}
+      {:unknown, gone} when gone in [:no_pid, :exited] -> {:dead, dead}
+      other -> other
     end
   end
 

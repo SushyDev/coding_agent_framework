@@ -16,7 +16,9 @@ defmodule CodingAgentFramework.TmuxSampler do
   answers `:unread`. It acts on nothing: reopening a lost viewer is `Recoveries`' job.
 
   After a sample that changed rows, the first one, or a failure, it calls `notify` with
-  `%{topic: "tmux:<host>:<server>", ids: ids}`, as `Registry` does. `notify` must not raise.
+  `%{topic: "tmux:<host>:<server>", ids: ids}`, as `Registry` does. `notify` must not raise. The
+  host app hands the same cue to `Sessions`, which settles its rows again when a held socket goes
+  away or goes stale (`model/tla/Start.tla`, `DtachExits`).
 
       iex> {:ok, pid} = CodingAgentFramework.Tmux.Fake.start_link(key: {"test", "fake"})
       iex> server = CodingAgentFramework.Tmux.Fake.new(pid, {"test", "fake"})

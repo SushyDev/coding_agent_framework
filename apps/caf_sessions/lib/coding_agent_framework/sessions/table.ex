@@ -5,8 +5,10 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   `Sessions` is the one writer. Anyone may open the file and read. `status` is one of
   `starting`, `running`, `stopping`, `stopped`, `refused`, `unknown` and `orphan` (a live socket
-  with no session file past the start's deadline, for `Recoveries`); `reason` says why a row is
-  refused, unknown or orphan, or why a stop is late (`no_exit`). `deadline` is the current start's
+  with no session file past the start's deadline, or a dead socket whose file names a live
+  process, `unheld`, for `Recoveries`); `reason` says why a row is refused, unknown or orphan,
+  or why a stop is late (`no_exit`) or not done at its deadline though its process is gone
+  (`socket_live`). `deadline` is the current start's
   or stop's deadline in wall-clock milliseconds, so a restart does not move it. A start in a
   worktree keeps its project's `repo` and its `branch`, with `cwd` the worktree's path, and
   `worktree` says what the start did with it (`added`, `reused`) and, after a restart, whether
