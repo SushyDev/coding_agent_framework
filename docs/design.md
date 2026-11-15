@@ -458,6 +458,10 @@ section.
 4. **Total folds.** A source answers its rows and its problems together, so a read with one bad
    row still shows the others. Sorts and folds take nil timestamps and unknown shapes; one malformed row
    never crashes the tracker. A tracker that crashes at boot takes every view down with it.
+   A stored row's shape changes across builds: a load fills a field a newer build added with
+   its default and answers a field it does not know as a problem, so a row an earlier build
+   wrote is never taken for a new one (a fold loaded as new would read its log again from the
+   start).
 5. **Liveness from hooks and processes**, never from what a pane shows. A process that left with
    no `SessionEnd` is found by its pid.
 6. **Topics.** Each message names its topic, and a view reloads only what it reads, at most once a
@@ -600,6 +604,12 @@ without it.
 - Open a viewer one row short and then grow it: Claude Code doesn't redraw for a viewer that
   attaches at the same size.
 - Reopen a lost viewer once per loss. A viewer that fails leaves the agent running.
+- Reopen a lost viewer with the command of the part that holds its program, never a plain
+  `dtach -a`: a headless delegate's viewer is a `tail -F` of its log, and attaching to its socket
+  would show the wrong program. `Recoveries` asks `Sessions` (`viewer_argv/3`), and a socket with
+  no row ends `failed{no_session}`. Each part that holds programs answers its own viewers'
+  commands; when `Services` is built, the sampler's held row names the part that owns a socket,
+  and `Recoveries` asks that part.
 - Keep each host's dtach directory short, and bound the length of a session id used as a socket
   name: macOS cuts a socket path at 104 bytes, and a long temporary directory plus a session id
   can pass it.
@@ -737,6 +747,8 @@ used and when it resets). It reads no credential and calls no API.
 - A file a started process may read (a script, a config, a fixture) is written whole and
   renamed into place, never rewritten in place: a stand-in rewritten while a start ran it was
   read empty, and the start exited at once.
+- A test of what a viewer runs reads the pane's start command from its own tmux server: the
+  `Tmux` contract answers what a pane is, not what it runs.
 
 **Stacks and queues**
 - Store the landing queue durably.
