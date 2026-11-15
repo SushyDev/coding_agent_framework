@@ -26,12 +26,12 @@ defmodule CodingAgentFramework.Delegates.TurnTest do
     assert :waiting = Turn.next(@row, fold(%{"b1" => %{state: :delivered}}, false))
 
     assert {:finished, "r"} =
-             Turn.next(@row, fold(%{"b1" => %{state: :delivered}}, true, %{text: "r"}))
+             Turn.next(@row, fold(%{"b1" => %{state: :delivered}}, true, result("r", "b1")))
   end
 
   test "a resumed process waits for its own message: the earlier turn's result does not count" do
     # KillSeen under the resume's uuid: the brief's replay and the follow again's idle are old.
-    fold = fold(%{"b1" => %{state: :delivered}}, true, %{text: "half"})
+    fold = fold(%{"b1" => %{state: :delivered}}, true, result("half", "b1"))
     resumed = %{@row | resume_uuid: "r1"}
     assert {:write, "r1", text} = Turn.next(resumed, fold)
     assert text == Turn.resumed()
@@ -41,7 +41,7 @@ defmodule CodingAgentFramework.Delegates.TurnTest do
              Turn.next(resumed, %{
                fold
                | messages: %{"r1" => %{state: :delivered}},
-                 last_result: %{text: "r"}
+                 last_result: result("r", "r1")
              })
   end
 
@@ -51,9 +51,17 @@ defmodule CodingAgentFramework.Delegates.TurnTest do
     # A turn whose message went in but whose result never came, as a kill leaves it.
     assert :exited = Turn.next(@row, %{fold(%{"b1" => %{state: :delivered}}, false) | gone: true})
     # A finish, then an exit: the result came first.
-    done = %{fold(%{"b1" => %{state: :delivered}}, true, %{}) | gone: true}
+    done = %{fold(%{"b1" => %{state: :delivered}}, true, result(nil, "b1")) | gone: true}
     assert {:finished, ""} = Turn.next(@row, done)
   end
+
+  test "a result that names another message is not this turn's" do
+    # A self-started turn's, or a later message's: the brief still waits for its own.
+    assert :waiting =
+             Turn.next(@row, fold(%{"b1" => %{state: :delivered}}, true, result("x", "m2")))
+  end
+
+  defp result(text, uuid), do: %{text: text, user_message_uuids: [uuid]}
 
   defp fold(messages, idle \\ true, last \\ nil),
     do: %{gone: false, idle: idle, messages: messages, last_result: last}

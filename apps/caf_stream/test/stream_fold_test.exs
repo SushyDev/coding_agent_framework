@@ -27,6 +27,24 @@ defmodule CodingAgentFramework.StreamFoldTest do
     end
   end
 
+  test "a message's outcome: its result only once delivered and named by the last result" do
+    fold = Fold.mark(Fold.new(), {:message, "m1", "hi"}, "", 0)
+    named = fn f, uuids -> Fold.event(f, %{"type" => "result", "user_message_uuids" => uuids}) end
+    assert Fold.outcome(fold, "m2") == :none
+    # A result before the replay: the message is not delivered yet, so no result is its.
+    assert Fold.outcome(named.(fold, ["m1"]), "m1") == :writing
+    fold = Fold.event(fold, %{"type" => "user", "isReplay" => true, "uuid" => "m1"})
+    assert Fold.outcome(named.(fold, ["s1"]), "m1") == :delivered
+    assert Fold.outcome(named.(fold, ["s1", "m1"]), "m1") == {:result, ""}
+    # The next message's result replaces it: a reader reads the first before writing the next.
+    fold = named.(fold, ["m1"]) |> Fold.mark({:message, "m2", "x"}, "", 0)
+    assert Fold.outcome(fold, "m1") == {:result, ""}
+    fold = Fold.event(fold, %{"type" => "user", "isReplay" => true, "uuid" => "m2"})
+    assert Fold.outcome(named.(fold, ["m2"]), "m1") == :delivered
+    gone = Fold.exit_seen(Fold.mark(Fold.new(), {:message, "m1", "hi"}, "", 0), fn _ -> false end)
+    assert Fold.outcome(gone, "m1") == :undelivered
+  end
+
   test "a line that is not text, or not a line, is refused" do
     assert {:refused, :not_utf8} = Line.encode({:message, "u", <<0xFF>>})
     assert {:refused, :bad_line} = Line.encode({:message, "u", 7})
