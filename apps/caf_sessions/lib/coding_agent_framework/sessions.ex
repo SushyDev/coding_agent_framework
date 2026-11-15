@@ -21,20 +21,22 @@ defmodule CodingAgentFramework.Sessions do
   **A start** (`docs/design.md`, "The delegate protocol") writes its row first, as `starting`,
   with the socket name and the session's name, which are one name. Then it holds
   `ClaudeCLI.session/3`'s argv and environment through `Holder.hold/4`, in the given directory,
-  and opens a viewer pane (`dtach -a`) through `Control`, tagged with the session as it opens:
-  one row short, then grown, since Claude Code does not redraw for a viewer that attaches at its
-  own size. A viewer that fails leaves the session running; its row's `viewer` says why. The
-  start is confirmed when the account's `Registry` reads a session file with the session's name
-  (`--name`) whose pid lives, and the socket is live. The pid comes from that file, since dtach
-  does not report it. **A resume** is the same with `--resume <id>`.
+  and opens a viewer pane (`dtach -a`, as `viewer_argv/3` answers) through `Control`, tagged
+  with the session as it opens: one row short, then grown, since Claude Code does not redraw
+  for a viewer that attaches at its own size. A viewer that fails leaves the session running;
+  its row's `viewer` says why. The start is confirmed when the account's `Registry` reads a
+  session file with the session's name (`--name`) whose pid lives, and the socket is live. The
+  pid comes from that file, since dtach does not report it. **A resume** is the same with
+  `--resume <id>`.
 
   **A delegate** (role `:delegate`) runs headless ("Headless delegates"): after its row, which
   keeps the session id the framework chose, `Stream.follow/5` makes its directory and FIFO under
   `<home>/streams/<session id>/`, then `ClaudeCLI.headless/2`'s argv is held inside
   `ClaudeCLI.wrapper/3`, and its viewer is a pane running `tail -F` of its event log (the
-  renderer is a later unit; `-F` waits for a log the wrapper has not opened yet). Its start is
-  confirmed when `Stream` has read a `system`/`init` naming the session id, the pid the wrapper
-  recorded lives with the start time `ps` gives, and the socket is still live after that `ps`.
+  renderer is a later unit; `-F` waits for a log the wrapper has not opened yet; again
+  `viewer_argv/3`'s answer). Its start is confirmed when `Stream` has read a `system`/`init`
+  naming the session id, the pid the wrapper recorded lives with the start time `ps` gives, and
+  the socket is still live after that `ps`.
   The init comes after the wrapper wrote the pid, so that pid is this process's. A resume
   follows the same log again, from the offset `Stream` saved. A delegate's first message is a
   `Stream` write, not part of the start: `prompt:` is not read.
@@ -80,6 +82,8 @@ defmodule CodingAgentFramework.Sessions do
   alias CodingAgentFramework.Sessions.Table
 
   @timeout 30_000
+  # A read of a row, which waits only for a start's own steps ahead of it in the queue.
+  @read 5_000
   # The hold's, the follow's and the viewer's own bounds, past the confirmation's.
   @slack 30_000
   # Each call to Stream, within a call of Sessions.
@@ -149,16 +153,38 @@ defmodule CodingAgentFramework.Sessions do
   @spec cue(GenServer.server(), map) :: :ok
   def cue(sessions, %{topic: topic}), do: GenServer.cast(sessions, {:cue, topic})
 
+  @doc """
+  The command of the viewer of session `name`, from its row: `dtach -a` of its socket
+  (`Holder.viewer_argv/2`) for an interactive session, and `tail -F` of its event log for a
+  headless delegate. `start` opens a viewer with this command, and `Recoveries` reopens a lost
+  one with it, so the two never differ. Answers `{:ok, argv}`, `{:refused, :no_session}` when the
+  host has no row of that name, or the refusal of the row's own command. A read: nothing is
+  opened. Option: `:timeout` (ms, default 5 000).
+
+      Sessions.viewer_argv(sessions, "main")
+      #=> {:ok, ["/usr/bin/dtach", "-a", "/srv/caf/dtach/main.sock", "-E", "-z", "-r", "winch"]}
+      Sessions.viewer_argv(sessions, "reviewer")
+      #=> {:ok, ["/usr/bin/tail", "-F", "/srv/caf/home/streams/6f1c…/events.jsonl"]}
+      Sessions.viewer_argv(sessions, "nobody")
+      #=> {:refused, :no_session}
+  """
+  @spec viewer_argv(GenServer.server(), String.t(), keyword) :: outcome([String.t()])
+  def viewer_argv(sessions, name, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, @read)
+    call(sessions, {:viewer_argv, name}, timeout)
+  end
+
   defp request(sessions, request, opts) do
     timeout = Keyword.get(opts, :timeout, @timeout)
+    call(sessions, {request, timeout}, timeout + @slack)
+  end
 
-    try do
-      GenServer.call(sessions, {request, timeout}, timeout + @slack)
-    catch
-      :exit, {:noproc, _} -> {:refused, :no_sessions}
-      :exit, {:timeout, _} -> {:unknown, {:timeout, timeout + @slack}}
-      :exit, {reason, _} -> {:unknown, {:exit, reason}}
-    end
+  defp call(sessions, message, wait) do
+    GenServer.call(sessions, message, wait)
+  catch
+    :exit, {:noproc, _} -> {:refused, :no_sessions}
+    :exit, {:timeout, _} -> {:unknown, {:timeout, wait}}
+    :exit, {reason, _} -> {:unknown, {:exit, reason}}
   end
 
   @impl true
@@ -224,25 +250,23 @@ defmodule CodingAgentFramework.Sessions do
     deadline = state.clock.() + timeout
 
     with :ok <- free(state, name),
-         {:ok, viewer} <- Holder.viewer_argv(state.holder, name),
          {:ok, cwd} <- cwd(launch),
          {:ok, role} <- Keyword.fetch(launch, :role) |> required(:role),
-         {:ok, way} <- way(state, role, account, name, cwd, resume, launch) do
-      row = %{host: state.host.name, name: name, socket: name, account: account.name}
-      row = Map.merge(row, %{role: Atom.to_string(role), cwd: cwd, resume: resume})
+         {:ok, way} <- way(state, role, account, name, cwd, resume, launch),
+         row = new_row(state, name, account, role, cwd, resume, way, deadline),
+         {:ok, viewer} <- viewer_command(state, row) do
       # RowWritten: the row first, as starting, with the start's wall-clock deadline.
-      row = Map.merge(row, %{deadline: deadline, session_id: way[:session_id]})
       row = Map.put(row, :id, Table.starting(state.db, row))
       announce(state, row)
 
       # Held: held, or unknown (a process may have started), and the start waits for the file
       # either way; ViewerOpened then leaves the call waiting. Only a refusal ends it here.
-      case hold(state, way, name, cwd, viewer) do
+      case hold(state, way, name, cwd) do
         {:refused, reason} = refused ->
           write(state, row, status: "refused", reason: reason)
           {:reply, refused, state}
 
-        {:held, viewer} ->
+        :held ->
           write(state, row, viewer: open_viewer(state, name, viewer))
           send(self(), {:check, name})
           pending = %{kind: :start, from: from, row: row, deadline: deadline}
@@ -251,6 +275,16 @@ defmodule CodingAgentFramework.Sessions do
     else
       failed -> {:reply, failed, state}
     end
+  end
+
+  def handle_call({:viewer_argv, name}, _from, state) do
+    reply =
+      case Table.get(state.db, state.host.name, name) do
+        nil -> {:refused, :no_session}
+        row -> viewer_command(state, row)
+      end
+
+    {:reply, reply, state}
   end
 
   def handle_call({{:stop, name, turn}, timeout}, from, state) do
@@ -500,30 +534,53 @@ defmodule CodingAgentFramework.Sessions do
     with {:ok, cli} <- cli(role, account, name, resume, launch), do: {:ok, %{cli: cli}}
   end
 
+  # The start's row before it has an id.
+  defp new_row(state, name, account, role, cwd, resume, way, deadline) do
+    %{
+      host: state.host.name,
+      name: name,
+      socket: name,
+      account: account.name,
+      role: Atom.to_string(role),
+      cwd: cwd,
+      resume: resume,
+      deadline: deadline,
+      session_id: way[:session_id]
+    }
+  end
+
+  # The command of a row's viewer, the one `viewer_argv/3` answers: a delegate's follows its
+  # event log (`-F`, since the wrapper has not opened it yet when the viewer starts), any other
+  # session's is `dtach -a` of its socket.
+  defp viewer_command(state, %{role: "delegate", session_id: id}) when is_binary(id) do
+    if state.home,
+      do: {:ok, [state.ps.tail, "-F", Path.join(Stream.dir(state.home, id), "events.jsonl")]},
+      else: {:refused, :no_stream}
+  end
+
+  defp viewer_command(_state, %{role: "delegate"}), do: {:refused, {:missing, :session_id}}
+  defp viewer_command(state, %{socket: socket}), do: Holder.viewer_argv(state.holder, socket)
+
   # A delegate's directory and FIFO come before its hold: a follow that fails holds nothing.
-  defp hold(state, way, name, cwd, viewer) do
-    with {:ok, argv, viewer} <- prepare(state, way, name, viewer) do
+  defp hold(state, way, name, cwd) do
+    with {:ok, argv} <- prepare(state, way, name) do
       argv = [state.holder.sh, "-c", @cd, cwd | argv]
 
       case Holder.hold(state.holder, name, argv, env: way.cli.env) do
         {:refused, _} = refused -> refused
-        _held_or_unknown -> {:held, viewer}
+        _held_or_unknown -> :held
       end
     end
   end
 
-  defp prepare(state, %{stream: stream} = way, name, _viewer) do
+  defp prepare(state, %{stream: stream} = way, name) do
     case Stream.follow(stream, way.session_id, name, way.transcript, timeout: @stream) do
-      {:ok, dir} ->
-        log = Path.join(dir, "events.jsonl")
-        {:ok, ClaudeCLI.wrapper(state.holder.sh, dir, way.cli.argv), [state.ps.tail, "-F", log]}
-
-      {_, reason} ->
-        {:refused, {:follow, reason}}
+      {:ok, dir} -> {:ok, ClaudeCLI.wrapper(state.holder.sh, dir, way.cli.argv)}
+      {_, reason} -> {:refused, {:follow, reason}}
     end
   end
 
-  defp prepare(_state, way, _name, viewer), do: {:ok, way.cli.argv, viewer}
+  defp prepare(_state, way, _name), do: {:ok, way.cli.argv}
 
   # Stream's row of the delegate, read first when `read?`.
   defp followed(state, row, read?) do
@@ -576,7 +633,7 @@ defmodule CodingAgentFramework.Sessions do
 
   @doc """
   Opens a viewer of held session `name` through `control`: a tmux session of that name running
-  `argv` (`Holder.viewer_argv/2`), tagged as it opens, one row short of `{columns, rows}`, then
+  `argv` (`viewer_argv/3`'s answer), tagged as it opens, one row short of `{columns, rows}`, then
   grown, since Claude Code redraws only when its size changes. tmux starts its server when it is
   down. `Recoveries` reopens a lost viewer with it. Answers `{:ok, pane}`, or `Control`'s
   refusal or unknown; a pane that opened and was not grown is `{:unknown, {:resize, pane, why}}`.

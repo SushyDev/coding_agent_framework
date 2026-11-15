@@ -152,6 +152,61 @@ defmodule CodingAgentFramework.RecoveriesTest do
     assert alive?(child)
   end
 
+  test "a lost viewer of an interactive session is reopened with dtach -a", ctx do
+    hold!(ctx, "alpha")
+    {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
+
+    assert {:ok, id} = agree(ctx, "alpha")
+    assert [%{status: "opened", open: "ok"}] = rows(ctx)
+    assert {:ok, [dtach, "-a" | _] = argv} = Holder.viewer_argv(ctx.holder, "alpha")
+    assert dtach == program!(:dtach)
+    assert started_with(ctx, "alpha") == Enum.join(argv, " ")
+
+    assert %{status: :viewed} = held(ctx, "alpha")
+    assert {:ok, %{ended: [^id]}} = Recoveries.check(ctx.recoveries)
+    assert [%{status: "recovered"}] = rows(ctx)
+  end
+
+  test "a lost viewer of a delegate is reopened following its event log", ctx do
+    hold!(ctx, "delta", "delegate")
+    log = log(ctx, "delta")
+    File.mkdir_p!(Path.dirname(log))
+    File.write!(log, "an event\n")
+    {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
+
+    assert {:ok, id} = agree(ctx, "delta")
+    assert [%{status: "opened", open: "ok"}] = rows(ctx)
+    assert started_with(ctx, "delta") == Enum.join([program!(:tail), "-F", log], " ")
+    # The viewer shows the log, which `dtach -a` of the held stand-in would not.
+    assert {:ok, _} = await(fn -> if screen(ctx, "delta") =~ "an event", do: {:ok, :shown} end)
+
+    assert %{status: :viewed} = held(ctx, "delta")
+    assert {:ok, %{ended: [^id]}} = Recoveries.check(ctx.recoveries)
+    assert [%{status: "recovered"}] = rows(ctx)
+  end
+
+  test "a lost viewer of a socket Sessions has no row of is not reopened", ctx do
+    {child, _} = hold!(ctx, "alpha", nil)
+    {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
+
+    assert {:ok, _} = agree(ctx, "alpha")
+    assert [%{status: "failed", reason: ":no_session", opened_at: nil}] = rows(ctx)
+    assert held(ctx, "alpha").status == :unviewed
+    assert {:ok, %{claimed: [], ended: []}} = Recoveries.check(ctx.recoveries)
+    assert alive?(child)
+  end
+
+  test "a lost viewer is not reopened when the host's Sessions is gone", ctx do
+    {child, _} = hold!(ctx, "alpha")
+    {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
+    :ok = GenServer.stop(ctx.sessions)
+
+    assert {:ok, _} = agree(ctx, "alpha")
+    assert [%{status: "failed", reason: ":no_sessions", opened_at: nil}] = rows(ctx)
+    assert held(ctx, "alpha").status == :unviewed
+    assert alive?(child)
+  end
+
   test "a stale socket is not reopened", ctx do
     {_, master} = hold!(ctx, "alpha")
     {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
@@ -170,6 +225,18 @@ defmodule CodingAgentFramework.RecoveriesTest do
   end
 
   defp move(ctx, ms), do: :counters.add(ctx.time, 1, ms)
+
+  # The command tmux says the viewer pane of session `name` started with, and what it shows,
+  # from this test's own tmux server.
+  defp started_with(ctx, name),
+    do: tmux!(ctx, ["list-panes", "-t", "=#{name}:", "-F", "\#{pane_start_command}"])
+
+  defp screen(ctx, name), do: tmux!(ctx, ["capture-pane", "-p", "-t", "=#{name}:"])
+
+  defp tmux!(ctx, args) do
+    {out, 0} = System.cmd(program!(:tmux), ["-S", Path.join(ctx.dir, "tmux.sock") | args])
+    String.trim(out)
+  end
 
   # Kills the viewer, has it reopened, and verifies it: answers the new viewer's pane.
   defp lose_and_reopen(ctx, pane) do

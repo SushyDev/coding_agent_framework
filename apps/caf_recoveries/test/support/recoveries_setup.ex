@@ -2,8 +2,9 @@ defmodule CodingAgentFramework.RecoveriesSetup do
   @moduledoc """
   The setup and helpers `RecoveriesTest` and `RecoveriesSourceTest` share: a `Recoveries` on a
   real tmux server and real dtach sockets in the test's own directory, with `cat` held as the
-  agent's stand-in. The sampler and `Recoveries` share a clock the test moves: it ticks one ms
-  per reading.
+  agent's stand-in, and the host's `Sessions`, which answers each viewer's command from the
+  row `hold!/3` leaves. The sampler and `Recoveries` share a clock the test moves: it ticks one
+  ms per reading.
 
   It compiles only for tests. It lives in `caf_recoveries`, not `caf_test`, because it uses
   `Recoveries`, and `caf_test` may not use an app above it.
@@ -31,6 +32,17 @@ defmodule CodingAgentFramework.RecoveriesSetup do
     {:ok, holder} = Holder.new(programs(), Path.join(dir, "d"))
     {:ok, control} = Control.start_link(tmux: server)
     db = Path.join(dir, "r.db")
+
+    {:ok, sessions} =
+      Sessions.start_link(
+        programs: programs(),
+        dir: Path.join(dir, "d"),
+        control: control,
+        registries: %{},
+        home: dir,
+        db: db
+      )
+
     time = :counters.new(1, [:atomics])
     :counters.put(time, 1, 1_000_000)
 
@@ -46,6 +58,7 @@ defmodule CodingAgentFramework.RecoveriesSetup do
       sampler: sampler,
       control: control,
       holder: holder,
+      sessions: sessions,
       server: server,
       db: db,
       size: {80, 24},
@@ -61,6 +74,7 @@ defmodule CodingAgentFramework.RecoveriesSetup do
      server: server,
      holder: holder,
      control: control,
+     sessions: sessions,
      sampler: sampler,
      opts: opts,
      time: time,
@@ -98,15 +112,16 @@ defmodule CodingAgentFramework.RecoveriesSetup do
 
   @doc "Opens a viewer of `name` through the test's `Control`, as `Sessions` does."
   def view(ctx, name) do
-    {:ok, argv} = Holder.viewer_argv(ctx.holder, name)
+    {:ok, argv} = Sessions.viewer_argv(ctx.sessions, name)
     Sessions.viewer(ctx.control, name, argv, {80, 24})
   end
 
   @doc """
   Holds the stand-in and waits for its pids, `{child, master}`; ends it when the test ends, while
-  its socket lives.
+  its socket lives. It leaves the row `Sessions` would: a running session of `role` (`"parent"`,
+  or `"delegate"`, whose event log is `log/2`), or none when `role` is nil.
   """
-  def hold!(%{holder: h, dir: dir}, name) do
+  def hold!(%{holder: h, dir: dir} = ctx, name, role \\ "parent") do
     pids = Path.join(dir, "#{name}.pids")
 
     script =
@@ -115,11 +130,36 @@ defmodule CodingAgentFramework.RecoveriesSetup do
     assert {:ok, _} = Holder.hold(h, name, [program!(:sh), "-c", script, pids])
     assert {:ok, text} = await(fn -> File.read(pids) end)
     [child, master] = text |> String.split() |> Enum.map(&String.to_integer/1)
+    if role, do: row!(ctx, name, role, child)
 
     on_exit(fn ->
       if Holder.state(h, name) == {:ok, :live} and alive?(master), do: kill(child)
     end)
 
     {child, master}
+  end
+
+  @doc "The event log `Sessions` tells a viewer of delegate `name` to follow."
+  def log(%{dir: dir}, name), do: Path.join([dir, "streams", "id-" <> name, "events.jsonl"])
+
+  # The row of a running session, as `Sessions` writes it: its table has `Sessions` alone for a
+  # writer, so the test writes what a start leaves rather than run one.
+  defp row!(ctx, name, role, pid) do
+    {:ok, db} = Sessions.Table.open(ctx.db)
+    id = if role == "delegate", do: "id-" <> name
+
+    row = %{
+      host: "test",
+      name: name,
+      socket: name,
+      account: "work",
+      role: role,
+      cwd: ctx.dir,
+      resume: nil,
+      session_id: id,
+      deadline: nil
+    }
+
+    Sessions.Table.update(db, Sessions.Table.starting(db, row), status: "running", pid: pid)
   end
 end
