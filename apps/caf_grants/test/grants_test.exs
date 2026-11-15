@@ -111,6 +111,15 @@ defmodule CodingAgentFramework.GrantsTest do
     assert Grants.may_fix?(g, "app-main", "app-d1") == :ok
   end
 
+  test "any agent the tree holds may start a service; a kept one goes to the owner's parent" do
+    g = grants([%{name: "app-d1", project: "app", parent: "app-main"}])
+    assert Grants.may_start_service?(g, "app-main") == :ok
+    assert Grants.may_start_service?(g, "app-d1") == :ok
+    assert Grants.may_start_service?(g, "nobody") == {:refused, {:unknown_agent, "nobody"}}
+    assert Grants.parent(g, "app-d1") == {:ok, "app-main"}
+    assert Grants.parent(g, "app-main") == {:refused, :main_has_no_parent}
+  end
+
   test "a delegate named with two parents refuses every check" do
     g =
       grants([
