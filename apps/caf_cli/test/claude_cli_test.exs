@@ -35,6 +35,27 @@ defmodule CodingAgentFramework.ClaudeCLITest do
     refute "--bg" in argv
   end
 
+  test "the agent's own MCP config follows the account's, before the strict flag" do
+    mine = "/caf/mcp/agents/unit-7.json"
+    servers = ["--mcp-config", @dir <> "/framework/mcp.json", mine, "--strict-mcp-config"]
+
+    assert {:ok, %{argv: a}} =
+             ClaudeCLI.session(:delegate, account(), opts(mcp: mine, prompt: "x"))
+
+    assert Enum.chunk_every(a, 4, 1) |> Enum.member?(servers)
+
+    assert {:ok, %{argv: h}} =
+             ClaudeCLI.headless(
+               account(),
+               Keyword.delete(opts(mcp: mine, session_id: "s"), :name)
+             )
+
+    assert Enum.chunk_every(h, 4, 1) |> Enum.member?(servers)
+
+    assert ClaudeCLI.session(:parent, account(), opts(mcp: "agents/x.json")) ==
+             {:refused, {:bad, :mcp}}
+  end
+
   test "a delegate needs a brief unless it resumes" do
     assert ClaudeCLI.session(:delegate, account(), opts([])) ==
              {:refused, :delegate_without_brief}

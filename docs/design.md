@@ -644,6 +644,20 @@ framework's tools, which are strict in how they act and narrow in whom they reac
 | `ask(question)` | any agent | asks a person, without blocking |
 | `reload()` | any agent | reloads the caller's own tools |
 
+**Who calls.** The tools are served over MCP's HTTP transport from the framework's node, at
+`http://127.0.0.1:<port>/mcp`, with no program between. `MCP` makes each agent a token and
+writes, before the agent's launch, a config of the framework's own (`<home>/mcp/agents/<agent>.json`)
+with one `http` server entry that carries the token in a header; `ClaudeCLI` names that file by
+`--mcp-config` next to the account's own, under `--strict-mcp-config`. The endpoint maps the
+header's token to the agent, and no argument of a call names the caller, so nothing the agent
+sends changes who it is. A missing or unknown token is refused before any row is written. The
+endpoint keeps no MCP session: each request stands alone, so a restart of the framework leaves
+an agent nothing to reconnect. This is simpler than a stdio bridge with the token in its
+arguments: there is no program to start per agent, nor one whose stdin could break on a byte,
+nor one that must reconnect by itself, so the bridge rule ("Rules learned") has nothing to
+apply to. A token is only as private as the workstation's user: any process of that user can
+read the files (F-86).
+
 **Messages** are stored before they are sent, so a restart of the framework does not lose
 them. One goes in only when the target's turn has ended (and, for a main session, its input box
 is empty), the same rule as any write, with a report's sending mark and settle: marked before the

@@ -8,7 +8,9 @@ defmodule CodingAgentFramework.ClaudeCLI do
 
   - `--model <model>` and `--name <name>`;
   - `--settings <file>` (the role's settings file) and `--mcp-config <file>` with
-    `--strict-mcp-config`, the files `CodingAgentFramework.Accounts.prepare/3` wrote;
+    `--strict-mcp-config`, the files `CodingAgentFramework.Accounts.prepare/3` wrote, and
+    after the account's file the agent's own (`mcp:`, from `CodingAgentFramework.MCP.issue/2`),
+    which carries who the agent is;
   - `--remote-control <name>` for a main session (role `:parent`) only. A delegate's settings
     file sets `remoteControlAtStartup` to false, since no flag turns Remote Control off;
   - `--resume <id>` when given;
@@ -80,12 +82,14 @@ defmodule CodingAgentFramework.ClaudeCLI do
          {:ok, model} <- word(opts, :model),
          {:ok, name} <- word(opts, :name),
          {:ok, resume} <- optional_word(opts, :resume),
+         {:ok, mcp} <- mcp(account, opts),
          {:ok, prompt} <- prompt(role, opts, resume),
          {:ok, env} <- env(account, Keyword.get(opts, :env)) do
       argv =
         [claude, "--model", model, "--name", name] ++
           ["--settings", account.settings[role]] ++
-          ["--mcp-config", account.mcp_config, "--strict-mcp-config"] ++
+          ["--mcp-config" | mcp] ++
+          ["--strict-mcp-config"] ++
           if(role == :parent, do: ["--remote-control", name], else: []) ++
           if(resume, do: ["--resume", resume], else: []) ++
           if(prompt, do: ["--", prompt], else: [])
@@ -114,8 +118,8 @@ defmodule CodingAgentFramework.ClaudeCLI do
   `--replay-user-messages` and `--permission-prompts host`, then `--session-id <id>` for a start
   or `--resume <id>` in its place. No prompt: the first message is a line on stdin.
 
-  Options: `:claude`, `:model`, `:env` as for `session/3`, and exactly one of `:session_id` and
-  `:resume`.
+  Options: `:claude`, `:model`, `:env` and `:mcp` as for `session/3`, and exactly one of
+  `:session_id` and `:resume`.
 
       iex> account = CodingAgentFramework.Accounts.Account.at("work", "/caf/accounts/work/claude")
       iex> env = %{home: "/h", path: "/bin", term: "dumb", lang: "C.UTF-8"}
@@ -130,11 +134,18 @@ defmodule CodingAgentFramework.ClaudeCLI do
     with {:ok, claude} <- path(opts, :claude),
          {:ok, model} <- word(opts, :model),
          {:ok, id} <- start_or_resume(opts),
+         {:ok, mcp} <- mcp(account, opts),
          {:ok, env} <- env(account, Keyword.get(opts, :env)) do
       argv =
         [claude, "-p", "--verbose", "--model", model, "--settings", account.settings.delegate] ++
-          ["--mcp-config", account.mcp_config, "--strict-mcp-config"] ++
-          ["--input-format", "stream-json", "--output-format", "stream-json"] ++
+          ["--mcp-config" | mcp] ++
+          [
+            "--strict-mcp-config",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json"
+          ] ++
           ["--replay-user-messages", "--permission-prompts", "host" | id]
 
       {:ok, %{argv: argv, env: env}}
@@ -157,6 +168,21 @@ defmodule CodingAgentFramework.ClaudeCLI do
   """
   @spec wrapper(String.t(), String.t(), String.t(), [String.t()]) :: [String.t()]
   def wrapper(sh, dir, fifo, argv), do: [sh, "-c", @wrapper, "caf-stream", dir, fifo | argv]
+
+  # The account's servers, then the agent's own: one value each, before `--strict-mcp-config`
+  # ends the list.
+  defp mcp(account, opts) do
+    case Keyword.get(opts, :mcp) do
+      nil ->
+        {:ok, [account.mcp_config]}
+
+      "/" <> _ = path ->
+        if word?(path), do: {:ok, [account.mcp_config, path]}, else: {:refused, {:bad, :mcp}}
+
+      _ ->
+        {:refused, {:bad, :mcp}}
+    end
+  end
 
   defp start_or_resume(opts) do
     case {Keyword.has_key?(opts, :session_id), Keyword.has_key?(opts, :resume)} do
