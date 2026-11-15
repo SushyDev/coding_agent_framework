@@ -91,7 +91,7 @@ starts each part.
 | `Stream` | a headless delegate's stdin and event log: writes messages, reads events from an offset |
 | `Intake` | hook events in; holds `PermissionRequest` hooks until answered |
 | `Control` | the one writer per host: send, answer, interrupt, stop, respawn |
-| `Sessions` | start, resume and stop held sessions on one host, with their viewers and rows; worktrees are a later part of it |
+| `Sessions` | start, resume and stop held sessions on one host, with their viewers, rows and worktrees |
 | `Mover` | drains a session and moves it between accounts |
 | `Parents` | each project's parent session, and what it holds |
 | `Delegates` | the delegate protocol: start, report, resume, end |
@@ -208,7 +208,39 @@ is read again at each `Registry` read until it is running or gone. A name whose 
 orphan, starting or stopping is not free for a new start: its process may live. A start is confirmed by the session file's `name`, which
 `--name` sets; a check against each pinned Claude Code release confirms it, with the Remote
 Control check. `Start.tla` models the start and its adoption, for every session's start and
-resume; `Delegate.tla` leaves the start abstract and relies on it.
+resume, with its worktree and setup; `Delegate.tla` leaves the start abstract and relies on it.
+
+**The worktree** of a start (`Start.tla` with `Worktrees`; F-55's build note):
+
+- It lives at `<home>/worktrees/<project>/<name>`, by the session's name, under the framework
+  home's physical path (git prints worktree paths with symlinks resolved). The row's `cwd` is
+  that path, with the project's repository and the branch.
+- `Sessions` reads a project as `%{name, repo, trunk, setup, setup_timeout, env}`: the
+  repository's absolute path, the trunk a new branch starts from, the setup as a list of
+  commands (each an argv whose program is an absolute path), one deadline for the whole setup,
+  and the environment that git and the setup run in, built from nothing (`env -i`), so nothing
+  of the framework's own environment, such as a `GIT_DIR`, reaches the repository. The branch
+  pattern and the cap are `Delegates`' checks; `Sessions` checks that the branch is a plain ref
+  name.
+- A path is held by an agent when a row that has not ended has it as its `cwd`. A start whose
+  path another row holds is refused before its row is written.
+- "On the branch" is read from `git worktree list --porcelain` of the repository: the path with
+  `branch refs/heads/<branch>`. Never from whether the branch exists: an add that fails leaves
+  its branch behind. "Clean" is `git status --porcelain --untracked-files=all` listing nothing:
+  no change to a tracked file and no untracked file that is not ignored. Ignored files, such as
+  the build state the setup made, do not count, and `git worktree remove` deletes them.
+- A free path is added with `git worktree add <path> <branch>` when the branch exists, and with
+  `-b <branch> <path> <trunk>` when it does not. A path that holds anything else is refused.
+- Every start runs the setup, in a reused worktree too, so a project's setup must be safe to run
+  again: a setup that failed or passed its deadline leaves the worktree as it is, and the start
+  answers `refused{setup, …}`; the next start of the name reuses it when clean and runs the
+  setup again. The setup runs with the host's `Shell.Reaper`, so a restart of the framework
+  ends it with the call. The row's deadline covers the setup's.
+- A resume takes its name's worktree as it is, changes and all (the work of the delegate that
+  was killed), refuses one that is not there, and runs the setup.
+- After a restart, the worktree of a row refused as interrupted is removed when it is on the
+  branch, clean and held by no other row, with `git worktree remove` without `--force`, which
+  refuses a dirty one itself. The branch stays. An orphan's worktree stays with its process.
 
 A part that waits on a reader within a call (a start waiting for its session file) reads it
 again at a fixed interval until the call's deadline. That wait is part of the call's answer and
@@ -490,9 +522,11 @@ Specs live in `model/tla/`, checked with TLC:
 - each spec's header names the modules it models and what it leaves abstract.
 
 Five specs, in this order, and beside them `Start.tla`: every session's start and resume, the
-row written first, the held process, the session file that may come late, and the adoption
-after a restart (no held process without a row; a row ends at most once; a process is ended
-only by its own pid and start time; every starting row settles).
+row written first, the worktree and its setup, the held process, the session file that may come
+late, and the adoption after a restart (no held process without a row; a row ends at most once;
+a process is ended only by its own pid and start time; every starting row settles; a busy
+worktree is never reused or removed, a removed one was clean, and a process runs only in a
+worktree on its branch whose setup finished).
 
 1. **`Agent.tla`**: one host's tmux server, sessions, panes, dtach sockets, Claude Code processes
    and viewers. Events: the server dies and restarts, so pane ids restart at `%0`; a viewer dies
@@ -724,6 +758,8 @@ used and when it resets). It reads no credential and calls no API.
 - Never kill by pattern. Kill only processes you started, by pid.
 - `git stash` is shared by every worktree of a repository, so delegates never use it.
 - `git worktree add -b` at a taken path fails but leaves the new branch behind.
+- A repository's hook can make `git worktree add` exit non-zero with the worktree added: read
+  the worktree list for what an add did, never its exit status or the branch's existence.
 
 **State for views**
 - One malformed row (a nil timestamp) once crashed the tracker at every boot and took every
