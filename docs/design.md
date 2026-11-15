@@ -205,7 +205,9 @@ A parent calls `start_delegate(project, branch, model, brief)`. The framework:
   before `Sessions` is called. A resume is counted in the row first, as resuming, before
   `Sessions.resume` is asked; when the brief had gone in, the row takes a uuid of its own for
   the resumed process's message. `Stream` refuses a uuid a second time, so a restart never
-  writes a turn's message twice.
+  writes a turn's message twice. The resume is asked only once `Sessions`' row of the killed
+  process has ended (`stopped`, by its settle of a running row whose process is gone), since
+  `Sessions` starts a name only then; until it has, the delegate stays running.
 - A row a restart left starting or resuming is settled by `Sessions`' row of its call (one
   written at or after the call), once that row is settled: running, or refused. With no such
   row by the row's deadline, the call never reached `Sessions`, and the row is refused (a

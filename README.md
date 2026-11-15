@@ -69,7 +69,8 @@ flowchart LR
 
 The host layer, the readers, the writer, `Sessions`, the `Tracker` and `Recoveries` are built,
 each from a checked model in `model/tla/`. `Delegates` starts a delegate and holds its report
-when its turn's `result` comes; a kill and its resume, and delivering a report, come next.
+when its turn's `result` comes, resumes it once after a kill, and reports a second kill;
+delivering a report comes next.
 Then come the moves between accounts, the agent tools and the LiveView components. The plan and the order of the units are
 in [docs/design.md](docs/design.md); each unit's notes are in `docs/build-notes/`.
 
@@ -135,6 +136,7 @@ flowchart BT
   delegates --> usage
   delegates --> stream
   delegates --> sessions
+  delegates --> transcripts
 ```
 
 `caf_test` holds the shared test aids and is used only in tests.

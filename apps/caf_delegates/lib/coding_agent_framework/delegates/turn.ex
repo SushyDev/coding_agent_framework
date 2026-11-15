@@ -2,12 +2,12 @@ defmodule CodingAgentFramework.Delegates.Turn do
   @moduledoc """
   The pure part of `CodingAgentFramework.Delegates`: a start's checks, its session's name, and
   what a running delegate's `Stream` row says of its turn (`model/tla/Delegate.tla`'s
-  `InputWritten` and `StopHandled`, and that its process is gone).
+  `InputWritten`, `StopHandled` and `KillSeen`).
 
       iex> alias CodingAgentFramework.Delegates.Turn
       iex> Turn.name(%{name: "app"}, "unit/f-1.fix")
       "app-unit-f-1-fix"
-      iex> row = %{brief_uuid: "b1", brief: "do it"}
+      iex> row = %{brief_uuid: "b1", resume_uuid: nil, brief: "do it"}
       iex> Turn.next(row, %{gone: false, idle: true, messages: %{}, last_result: nil})
       {:write, "b1", "do it"}
       iex> fold = %{gone: false, idle: true, messages: %{"b1" => %{state: :delivered}},
@@ -17,6 +17,16 @@ defmodule CodingAgentFramework.Delegates.Turn do
   """
 
   @keys [:branches, :cap]
+
+  @doc """
+  A resumed process's message when its brief went in before the kill: it takes no turn of its
+  own (`docs/design.md`, "What `Delegates` holds").
+  """
+  @spec resumed() :: String.t()
+  def resumed,
+    do:
+      "The framework resumed this session after its process was killed. Go on with your brief " <>
+        "from where you stopped, and end with your report."
 
   @doc """
   Checks a start: the project is one `Delegates` was given, with its branch pattern (a
@@ -46,15 +56,28 @@ defmodule CodingAgentFramework.Delegates.Turn do
   def name(project, branch), do: project.name <> "-" <> String.replace(branch, ~r/[^\w-]/, "-")
 
   @doc """
-  What a running delegate's `Stream` row (`fold`) says: `{:finished, text}` once the brief is
-  delivered and a `result` came after it (the brief's mark ended the turn, and only a result
-  begins idle again); `:exited` when its process is gone first; `{:write, uuid, text}` while the
-  brief has not gone in, or went undelivered; `:waiting` otherwise.
+  The uuid and text of the message the current process's turn waits for: the brief, or after a
+  resume whose brief had gone in, `resumed/0` under `resume_uuid`.
+
+      iex> CodingAgentFramework.Delegates.Turn.message(%{brief_uuid: "b1", resume_uuid: nil,
+      ...>   brief: "do it"})
+      {"b1", "do it"}
+  """
+  @spec message(map) :: {String.t(), String.t()}
+  def message(%{resume_uuid: nil} = row), do: {row.brief_uuid, row.brief}
+  def message(row), do: {row.resume_uuid, resumed()}
+
+  @doc """
+  What a running delegate's `Stream` row (`fold`) says: `{:finished, text}` once the turn's
+  message is delivered and a `result` came after it (the message's mark ended the turn, and only
+  a result or a resume's follow begins idle again, and a resume changes the message);
+  `:exited` when its process is gone first; `{:write, uuid, text}` while the message has not
+  gone in, or went undelivered; `:waiting` otherwise.
   """
   @spec next(map, map) ::
           {:finished, String.t()} | :exited | {:write, String.t(), String.t()} | :waiting
   def next(row, fold) do
-    {uuid, text} = {row.brief_uuid, row.brief}
+    {uuid, text} = message(row)
 
     case fold.messages[uuid] do
       %{state: :delivered} when fold.idle and fold.last_result != nil ->

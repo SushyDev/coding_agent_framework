@@ -9,7 +9,8 @@ defmodule CodingAgentFramework.DelegatesTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, Delegates, HeadlessStandIn, SessionsSetup, Stream, Usage}
+  alias CodingAgentFramework.{Accounts, Delegates, HeadlessStandIn, Holder, SessionsSetup, Stream}
+  alias CodingAgentFramework.{Sessions, Transcripts, Usage}
   alias CodingAgentFramework.Delegates.Table
 
   setup {SessionsSetup, :sessions}
@@ -39,6 +40,7 @@ defmodule CodingAgentFramework.DelegatesTest do
     db = Path.join(ctx.dir, "caf.db")
     usage = start_supervised!({Usage, accounts: accounts, host: "test", db: db})
     {:ok, _} = Usage.read(usage)
+    transcripts = start_supervised!({Transcripts, programs: programs(), account: "work", db: db})
     fifo = Path.join(ctx.dir, "setup.fifo")
     {_, 0} = System.cmd(program!(:mkfifo), [fifo])
 
@@ -63,6 +65,7 @@ defmodule CodingAgentFramework.DelegatesTest do
       stream: ctx.stream,
       usage: usage,
       accounts: accounts,
+      transcripts: %{"work" => transcripts},
       launch: launch,
       clock: fn -> Agent.get(ctx.clock, & &1) end,
       projects: %{
@@ -106,21 +109,76 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}"]
   end
 
-  test "an exit before its turn's result leaves the row running, with no report", ctx do
-    # The kill path (the transcript's last reply, one resume) is a later unit: until it is
-    # built, a gone process with no result is neither finished nor failed, and nothing is
-    # written to it again.
+  test "a kill before the last reply is resumed once, after Sessions' row ends, and finishes",
+       ctx do
+    # KillSeen waits for Sessions' row to end (RunningSettled, F-61); then the resume, counted
+    # first, with a message of its own since the brief went in; Called, CallAnswered,
+    # InputWritten under that uuid, StopHandled.
     hold(ctx)
     assert {:ok, %{id: id, brief: {:ok, %{uuid: u}}}} = start(ctx, "app", "unit/one")
     stream_row(ctx, id, &(&1.messages[u].state == :delivered))
-    kill_delegate(ctx, id)
+    kill_delegate(ctx, id, [])
+
+    # Sessions has not settled its row yet: it still says running, so nothing is asked.
+    assert %{status: "running"} = session_row(ctx, "app-unit-one")
     cue(ctx, current(ctx))
+    # A call after the cast: Delegates has handled the cue.
     assert {:ok, []} = Delegates.held(current(ctx), "main")
+    assert %{status: "running", resumes: 0, resume_uuid: nil} = Table.get(ctx.dtable, id)
 
-    assert %{status: "running", report: "none", resumes: 0, resume_uuid: nil} =
-             Table.get(ctx.dtable, id)
+    File.rm!(Path.join(ctx.dir, "hold"))
+    {:ok, _} = resumed(ctx, id)
 
-    assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}"]
+    assert {:ok, %{report: "held", text: text, resumes: 1, resume_uuid: r}} =
+             cue_until(ctx, id, &(&1.status == "finished"))
+
+    assert is_binary(r) and r != u
+    assert text == "done #{r}"
+    assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "message #{r}"]
+  end
+
+  test "a second kill before the last reply is the report, never resumed again", ctx do
+    # KillSeen twice: the first resumed, the second failed with its text held as the report.
+    hold(ctx)
+    assert {:ok, %{id: id, brief: {:ok, %{uuid: u}}}} = start(ctx, "app", "unit/one")
+    stream_row(ctx, id, &(&1.messages[u].state == :delivered))
+    killed = kill_delegate(ctx, id, [])
+    {:ok, %{resume_uuid: r}} = resumed(ctx, id)
+
+    stream_row(ctx, id, &(&1.messages[r].state == :delivered))
+    kill_delegate(ctx, id, killed)
+
+    assert {:ok, %{report: "held", text: text, resumes: 1}} =
+             cue_until(ctx, id, &(&1.status == "failed"))
+
+    assert text =~ "killed twice"
+    assert {:ok, [%{id: ^id, status: "failed"}]} = Delegates.held(current(ctx), "main")
+    assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "message #{r}"]
+  end
+
+  test "a kill after the last reply is a finish, read from the transcript", ctx do
+    # TranscriptRead: no result in the log, and the transcript ends with the reply.
+    hold(ctx)
+    assert {:ok, %{id: id, brief: {:ok, %{uuid: u}}}} = start(ctx, "app", "unit/one")
+    %{transcript: path} = stream_row(ctx, id, &(&1.messages[u].state == :delivered))
+
+    reply = %{
+      "type" => "assistant",
+      "uuid" => "a1",
+      "message" => %{
+        "id" => "m1",
+        "stop_reason" => "end_turn",
+        "content" => [%{"type" => "text", "text" => "all done"}]
+      }
+    }
+
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, JSON.encode!(reply) <> "\n")
+    kill_delegate(ctx, id, [])
+
+    # Sessions' row still runs: a finish does not wait for it.
+    assert {:ok, %{report: "held", text: "all done", resumes: 0}} =
+             cue_until(ctx, id, &(&1.status == "finished"))
   end
 
   test "after a restart, a starting row is settled by Sessions' row of its call", ctx do
@@ -180,13 +238,42 @@ defmodule CodingAgentFramework.DelegatesTest do
   # While the file is there, the stand-in's every turn waits on a permission: it runs on.
   defp hold(ctx), do: File.write!(Path.join(ctx.dir, "hold"), "")
 
-  # Ends the delegate's current process by the pid its row in Sessions names, and lets
-  # Delegates see the exit as the host app would: Stream reads, and its cue comes.
-  defp kill_delegate(ctx, id) do
-    %{pid: pid} = session_row(ctx, Table.get(ctx.dtable, id).name)
+  # Ends the delegate's current process by the pid its stand-in recorded (one not in `killed`),
+  # waits until dtach has removed its socket and Stream has read the exit, and lets Delegates
+  # see it as the host app would: Stream's cue comes. Answers the pids killed so far.
+  defp kill_delegate(ctx, id, killed) do
+    pids = Path.join(ctx.dir, "pids")
+    {:ok, pid} = await(fn -> ok(List.first(File.ls!(pids) -- killed)) end)
     kill(pid)
+    name = Table.get(ctx.dtable, id).name
+    {:ok, _} = await(fn -> if Holder.state(ctx.holder, name) == {:ok, :absent}, do: {:ok, 1} end)
     stream_row(ctx, id, & &1.gone)
     Delegates.cue(current(ctx), %{topic: "stream:test", ids: []})
+    [pid | killed]
+  end
+
+  # Cues Sessions, then Delegates, as the host app's wiring would, until the delegate's row has
+  # counted its resume and runs again. Sessions' row says stopped only until the resume starts,
+  # so the test waits on Delegates' row, not on that. One cue of Sessions may settle nothing
+  # (F-61 new-3; this unit's new-5), so each poll cues again; a read of each after its cue
+  # answers once the cue is handled, so cues never pile up ahead of the resume's call.
+  defp resumed(ctx, id) do
+    name = Table.get(ctx.dtable, id).name
+
+    await(
+      fn ->
+        Sessions.cue(ctx.sessions, %{topic: "stream:test", ids: []})
+        Sessions.viewer_argv(ctx.sessions, name)
+        cue(ctx, current(ctx))
+        Delegates.held(current(ctx), "main")
+        row = Table.get(ctx.dtable, id)
+        # Without a hold the resumed process can finish before this poll reads its row.
+        if row.status in ["running", "finished"] and row.resumes == 1,
+          do: {:ok, row},
+          else: row
+      end,
+      10_000
+    )
   end
 
   defp current(ctx), do: Process.get(:delegates, ctx.delegates)
