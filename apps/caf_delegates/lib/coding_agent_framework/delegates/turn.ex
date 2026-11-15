@@ -10,8 +10,8 @@ defmodule CodingAgentFramework.Delegates.Turn do
       iex> row = %{brief_uuid: "b1", resume_uuid: nil, brief: "do it"}
       iex> Turn.next(row, %{gone: false, idle: true, messages: %{}, last_result: nil})
       {:write, "b1", "do it"}
-      iex> fold = %{gone: false, idle: true, messages: %{"b1" => %{state: :delivered}},
-      ...>   last_result: %{text: "done", user_message_uuids: ["b1"]}}
+      iex> fold = %{gone: false, idle: true, last_result: nil,
+      ...>   messages: %{"b1" => %{state: :delivered, result: %{text: "done"}}}}
       iex> Turn.next(row, fold)
       {:finished, "done"}
   """
@@ -82,7 +82,7 @@ defmodule CodingAgentFramework.Delegates.Turn do
     {uuid, text} = message(row)
 
     case Fold.outcome(fold, uuid) do
-      {:result, report} -> {:finished, report}
+      {:result, %{text: report}} -> {:finished, report}
       _ when fold.gone -> :exited
       outcome when outcome in [:none, :undelivered] -> {:write, uuid, text}
       _ -> :waiting

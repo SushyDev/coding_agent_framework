@@ -17,7 +17,19 @@ defmodule CodingAgentFramework.Mailbox.TableTest do
     assert [%{id: ^id}] = Table.open_rows(db)
   end
 
-  test "a file whose table F-77 made opens with its rows and gains reply_to" do
+  # Team.tla's ReplyOrNotice: one key on the answered message, so the table keeps "never both".
+  test "a notice and a reply to one message: the first in keeps it, either way" do
+    {:ok, db} = Table.open(Path.join(TestHost.test_dir(), "both.db"))
+    notice = Table.reply(db, "framework", "main", "ended", "n1", "m1")
+    assert Table.reply(db, "app-unit-a", "main", "done", "r1", "m1", %{subtype: "success"}) == nil
+    reply = Table.reply(db, "app-unit-a", "main", "done", "r2", "m2", %{is_error: true})
+    assert Table.reply(db, "framework", "main", "ended", "n2", "m2") == nil
+
+    assert [%{id: ^notice, from_agent: "framework", subtype: nil}, %{id: ^reply, is_error: 1}] =
+             Table.open_rows(db)
+  end
+
+  test "a file whose table F-77 made opens with its rows and gains reply_to, subtype and is_error" do
     path = Path.join(TestHost.test_dir(), "old.db")
     {:ok, old} = Sqlite3.open(path)
 
@@ -34,7 +46,7 @@ defmodule CodingAgentFramework.Mailbox.TableTest do
     :ok = Sqlite3.close(old)
     {:ok, db} = Table.open(path)
     assert %{uuid: "m1", reply_to: nil} = Table.get(db, 1)
-    assert [%{id: 1}] = Table.delivered(db, "s1", ["m1", "m2"])
+    assert [%{id: 1}] = Table.unanswered(db, "s1", ["m1", "m2"])
     assert is_integer(Table.reply(db, "app-unit-a", "main", "done", "r1", "m1"))
     # A second open finds the column and the index there.
     assert {:ok, _} = Table.open(path)

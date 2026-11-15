@@ -27,23 +27,62 @@ defmodule CodingAgentFramework.StreamFoldTest do
     end
   end
 
-  test "a message's outcome: its result only once delivered and named by the last result" do
+  @empty %{text: "", subtype: nil, is_error: nil}
+
+  test "a message's outcome: its result only once delivered and named by a result" do
     fold = Fold.mark(Fold.new(), {:message, "m1", "hi"}, "", 0)
-    named = fn f, uuids -> Fold.event(f, %{"type" => "result", "user_message_uuids" => uuids}) end
     assert Fold.outcome(fold, "m2") == :none
     # A result before the replay: the message is not delivered yet, so no result is its.
-    assert Fold.outcome(named.(fold, ["m1"]), "m1") == :writing
+    assert Fold.outcome(named(fold, ["m1"]), "m1") == :writing
     fold = Fold.event(fold, %{"type" => "user", "isReplay" => true, "uuid" => "m1"})
-    assert Fold.outcome(named.(fold, ["s1"]), "m1") == :delivered
-    assert Fold.outcome(named.(fold, ["s1", "m1"]), "m1") == {:result, ""}
-    # The next message's result replaces it: a reader reads the first before writing the next.
-    fold = named.(fold, ["m1"]) |> Fold.mark({:message, "m2", "x"}, "", 0)
-    assert Fold.outcome(fold, "m1") == {:result, ""}
-    fold = Fold.event(fold, %{"type" => "user", "isReplay" => true, "uuid" => "m2"})
-    assert Fold.outcome(named.(fold, ["m2"]), "m1") == :delivered
+    assert Fold.outcome(named(fold, ["s1"]), "m1") == :delivered
+    assert Fold.outcome(named(fold, ["s1", "m1"]), "m1") == {:result, @empty}
     gone = Fold.exit_seen(Fold.mark(Fold.new(), {:message, "m1", "hi"}, "", 0), fn _ -> false end)
     assert Fold.outcome(gone, "m1") == :undelivered
   end
+
+  # Team.tla's ReplyNamesMessage: the fold keeps each result on the messages it names.
+  test "a later result, a self-started turn's or the next message's, never replaces one" do
+    fold =
+      Fold.mark(Fold.new(), {:message, "m1", "hi"}, "", 0)
+      |> Fold.event(%{"type" => "user", "isReplay" => true, "uuid" => "m1"})
+      |> named(["m1"], %{"result" => "yes", "subtype" => "success", "is_error" => false})
+      |> named([], %{"result" => "a turn of its own"})
+      |> named(["m1"], %{"result" => "again"})
+      |> Fold.mark({:message, "m2", "x"}, "", 0)
+      |> Fold.event(%{"type" => "user", "isReplay" => true, "uuid" => "m2"})
+      |> named(["m2"], %{"subtype" => "error_during_execution", "is_error" => true})
+
+    assert Fold.outcome(fold, "m1") ==
+             {:result, %{text: "yes", subtype: "success", is_error: false}}
+
+    assert Fold.outcome(fold, "m2") ==
+             {:result, %{text: "", subtype: "error_during_execution", is_error: true}}
+
+    assert fold.last_result.subtype == "error_during_execution"
+  end
+
+  # Team.tla's fold[i] = "exited": delivered, its turn begun, the process gone with no result.
+  test "a delivered message no result named is exited at the exit; one answered is not" do
+    fold =
+      Fold.mark(Fold.new(), {:message, "m1", "hi"}, "", 0)
+      |> Fold.event(%{"type" => "user", "isReplay" => true, "uuid" => "m1"})
+      |> named(["m1"])
+      |> Fold.mark({:message, "m2", "x"}, "", 0)
+
+    assert Fold.outcome(fold, "m2") == :writing
+    # The transcript holds m2: it went in, and the process ended during its turn.
+    gone = Fold.exit_seen(fold, &(&1 == "m2"))
+    assert {Fold.outcome(gone, "m1"), Fold.outcome(gone, "m2")} == {{:result, @empty}, :exited}
+    # A resume keeps it, and a second settle of the exit changes nothing.
+    again = Fold.again(gone)
+    assert Fold.outcome(again, "m2") == :exited
+    assert Fold.exit_seen(gone, fn _ -> false end).messages == gone.messages
+    assert :ok = Fold.check(again, {:message, "m3", ""})
+  end
+
+  defp named(fold, uuids, fields \\ %{}),
+    do: Fold.event(fold, Map.merge(%{"type" => "result", "user_message_uuids" => uuids}, fields))
 
   test "a line that is not text, or not a line, is refused" do
     assert {:refused, :not_utf8} = Line.encode({:message, "u", <<0xFF>>})

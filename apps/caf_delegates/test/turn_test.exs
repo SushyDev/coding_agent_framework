@@ -3,6 +3,7 @@ defmodule CodingAgentFramework.Delegates.TurnTest do
   use ExUnit.Case, async: true
 
   alias CodingAgentFramework.Delegates.{Table, Turn}
+  alias CodingAgentFramework.Stream.Fold
 
   doctest Turn
   doctest Table
@@ -38,11 +39,14 @@ defmodule CodingAgentFramework.Delegates.TurnTest do
     assert :waiting = Turn.next(resumed, put_in(fold.messages["r1"], %{state: :writing}))
 
     assert {:finished, "r"} =
-             Turn.next(resumed, %{
-               fold
-               | messages: %{"r1" => %{state: :delivered}},
-                 last_result: result("r", "r1")
-             })
+             Turn.next(
+               resumed,
+               Fold.upgrade(%{
+                 fold
+                 | messages: %{"r1" => %{state: :delivered}},
+                   last_result: result("r", "r1")
+               })
+             )
   end
 
   test "a brief found undelivered goes again under its uuid; a gone process with none is exited" do
@@ -63,6 +67,7 @@ defmodule CodingAgentFramework.Delegates.TurnTest do
 
   defp result(text, uuid), do: %{text: text, user_message_uuids: [uuid]}
 
+  # A fold as an earlier build stored it, loaded as `Stream.Table` loads one.
   defp fold(messages, idle \\ true, last \\ nil),
-    do: %{gone: false, idle: idle, messages: messages, last_result: last}
+    do: Fold.upgrade(%{gone: false, idle: idle, messages: messages, last_result: last})
 end

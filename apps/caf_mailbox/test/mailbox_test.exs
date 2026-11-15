@@ -126,6 +126,7 @@ defmodule CodingAgentFramework.MailboxTest do
     assert HeadlessStandIn.taken(ctx.dir) == Enum.map([brief, went, cut], &"message #{&1}")
   end
 
+  # ReplyOnce, ReplyToMain, ReplyNamesMessage.
   test "a reply: a delivered message's result is stored once, to the main session, naming it",
        ctx do
     {_sid, _brief} = started(ctx, "unit/a")
@@ -138,6 +139,7 @@ defmodule CodingAgentFramework.MailboxTest do
     [r] = replies(ctx, u)
     assert %{from_agent: "app-unit-a", to_agent: "main", text: "done " <> ^u} = r
     assert {:ok, %{reply_to: ^u, status: "queued"}} = until(ctx, r.id, & &1.attempt)
+    assert {:ok, %{subtype: "success", is_error: false}} = Mailbox.status(mailbox(ctx), r.id)
     assert {:ok, %{reply_to: nil}} = Mailbox.status(ctx.mailbox, id)
 
     # Once: repeated cues and a restart, which reads each log again, store no second one.
@@ -150,7 +152,8 @@ defmodule CodingAgentFramework.MailboxTest do
     assert same == r.id
   end
 
-  test "a turn with no result stores no reply: the delegate killed mid-turn", ctx do
+  # ReplyOrNotice, ReplyOrNoticeComes, ReplyOnce: the delegate killed mid-turn.
+  test "the notice: a turn the process's end cut gets one notice, never a reply", ctx do
     {sid, _brief} = started(ctx, "unit/a")
     finished(ctx)
     assert {:ok, {:queued, id}} = Mailbox.message(ctx.mailbox, "main", "app-unit-a", "ask it")
@@ -159,11 +162,60 @@ defmodule CodingAgentFramework.MailboxTest do
 
     # The turn waits on a permission; the process ends before any result.
     HeadlessStandIn.kill_all(ctx.dir)
-    {:ok, _} = await(fn -> if fold(ctx, sid).gone, do: {:ok, 1} end, 10_000)
+    {:ok, _} = await(fn -> cue(ctx) && match?([_], replies(ctx, u)) && {:ok, 1} end, 10_000)
+    [n] = replies(ctx, u)
+    assert %{from_agent: "framework", to_agent: "main", subtype: nil} = n
+    assert n.text =~ "ended before it answered"
+    assert {:ok, %{status: "queued", attempt: ":no_delivery"}} = until(ctx, n.id, & &1.attempt)
+
+    # Once, and never a reply too: repeated cues and a restart store nothing more.
+    GenServer.stop(mailbox(ctx))
+    Process.put(:mailbox, restart(ctx.mopts))
     cue(ctx)
     cue(ctx)
-    assert replies(ctx, u) == []
+    assert [%{id: same, from_agent: "framework"}] = replies(ctx, u)
+    assert same == n.id
     assert {:ok, %{status: "delivered"}} = Mailbox.status(mailbox(ctx), id)
+  end
+
+  # ReplyNamesMessage: the fold keeps the message's result, so the turn the delegate starts
+  # right after it neither replaces the reply nor becomes one, nor the report.
+  test "a self-started turn's result is never taken as a reply or a report", ctx do
+    {sid, brief} = started(ctx, "unit/a")
+    finished(ctx)
+    assert {:ok, {:queued, id}} = Mailbox.message(ctx.mailbox, "main", "app-unit-a", "self go")
+    %{uuid: u} = Table.get(ctx.mtable, id)
+
+    # Both results are folded before Mailbox reads a reply: the self-started one is the last.
+    {:ok, _} =
+      await(fn ->
+        f = fold(ctx, sid)
+        # Only a message not yet written needs Mailbox; once written, no cue reads its reply.
+        unless f.messages[u], do: Mailbox.cue(mailbox(ctx), %{topic: "stream:test"})
+        if f.messages[u] && f.last_result.user_message_uuids == [], do: {:ok, f}
+      end)
+
+    {:ok, _} = await(fn -> cue(ctx) && match?([_], replies(ctx, u)) && {:ok, 1} end, 10_000)
+    assert [%{from_agent: "app-unit-a", text: "done " <> ^u}] = replies(ctx, u)
+    assert [%{reply_to: ^u}] = Enum.filter(Table.open_rows(ctx.mtable), & &1.reply_to)
+    assert {:ok, [%{text: "done " <> ^brief}]} = Delegates.held(ctx.delegates, "main")
+  end
+
+  # A reply carries its result's subtype: an interrupted turn is told from an answer.
+  test "a reply's subtype is kept: an interrupted turn's reply says error_during_execution",
+       ctx do
+    {sid, _brief} = started(ctx, "unit/a")
+    finished(ctx)
+    assert {:ok, {:queued, id}} = Mailbox.message(ctx.mailbox, "main", "app-unit-a", "ask it")
+    assert {:ok, %{uuid: u}} = until(ctx, id, &(&1.status == "delivered"))
+    {:ok, _} = await(fn -> fold(ctx, sid).requests |> Map.fetch("req-#{u}") end)
+    {:ok, _} = Stream.interrupt(ctx.stream, sid)
+
+    {:ok, _} = await(fn -> cue(ctx) && match?([_], replies(ctx, u)) && {:ok, 1} end, 10_000)
+    [r] = replies(ctx, u)
+
+    assert {:ok, %{from: "app-unit-a", reply_to: ^u, subtype: "error_during_execution"}} =
+             Mailbox.status(mailbox(ctx), r.id)
   end
 
   defp replies(ctx, uuid), do: Enum.filter(Table.open_rows(ctx.mtable), &(&1.reply_to == uuid))
