@@ -222,13 +222,17 @@ its host, as it has since the first part built, so the workstation is one host a
   temporary name, is compared after that write and before its rename into place, so the only
   window left for an edit to be lost is between that compare and the rename;
 - `run` answers `{:ok, %{exit: code, log: tail, fetch: :done | :none | {:conflict, paths} |
-  {:unknown, reason}}}`; `{:unknown, :timeout}` once the host ended the job at its timeout,
-  with the fetch's outcome; `{:unknown, :dropped}` at the call's deadline with the connection
+  {:unknown, reason}}}`; `{:unknown, {:timeout, %{fetch: f}}}` once the host ended the job at
+  its timeout, with the fetch's outcome; `{:unknown, :dropped}` at the call's deadline with the connection
   down; `{:unknown, :no_exit}` for a dead socket with no exit file; `{:refused, {:sync,
   reason}}` for a cut sync, when nothing ran. An unknown answer names the job, and once the
   job's end is read it arrives to the caller as a message, as a delegate's report does after
   `run_delegate`'s timeout, saying that nothing was fetched; a later `run` fetches nothing for
-  an earlier job;
+  an earlier job. A late end is handed to the embedding app at least once, never lost: a
+  repeat after a crash carries the same job id, so the receiver drops it. A job a restart left
+  before anything was sent to the host is handed on once as interrupted, never retried. A
+  job's row keeps its worktree's path, so a fetch a restart cut leaves no temporary folder past
+  the next start (F-78);
 - a service on another host is held the same way, and a port it listens on is forwarded to the
   workstation over the host's ssh connection when the service asks for it, so tests on the
   workstation reach it at `127.0.0.1:<port>`;

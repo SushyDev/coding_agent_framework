@@ -6,7 +6,8 @@ defmodule CodingAgentFramework.Jobs.Table do
   `state` is `asked`, `starting` (its start is being sent, until `start_until`, wall-clock ms),
   `running`, then the end read from the host: `exited` with its `code`, `timedout`, or `lost`
   (a dead socket with no exit file); or `refused` (nothing ran). `host`, `project` and `name`
-  name the copy it runs in; `deadline` is the call's, wall-clock ms.
+  name the copy it runs in; `deadline` is the call's, wall-clock ms. `late` is `owed` once its
+  call answered unknown or was cut by a restart, and `told` once its end was handed on.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "doc.db")
       iex> {:ok, db} = CodingAgentFramework.Jobs.Table.open(path)
@@ -16,12 +17,13 @@ defmodule CodingAgentFramework.Jobs.Table do
 
   alias Exqlite.Sqlite3
 
-  @columns ~w(id host project name state code start_until deadline)a
+  @columns ~w(id host project name state code start_until deadline late)a
   @schema """
   PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY, host TEXT NOT NULL, project TEXT NOT NULL, name TEXT NOT NULL,
-    state TEXT NOT NULL, code INTEGER, start_until INTEGER, deadline INTEGER);
+    state TEXT NOT NULL, code INTEGER, start_until INTEGER, deadline INTEGER,
+    late TEXT);
   """
 
   @type db :: Sqlite3.db()
@@ -57,7 +59,7 @@ defmodule CodingAgentFramework.Jobs.Table do
   def put(db, row) do
     query(
       db,
-      "INSERT OR REPLACE INTO jobs (#{Enum.join(@columns, ",")}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+      "INSERT OR REPLACE INTO jobs (#{Enum.join(@columns, ",")}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
       Enum.map(@columns, &Map.get(row, &1))
     )
 
