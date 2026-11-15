@@ -5,17 +5,20 @@
 (* and restarts of the framework. A message goes along an edge of the      *)
 (* tree only: a main session to its delegates and to the other main        *)
 (* session, a delegate to its main session. It is stored, then typed once  *)
-(* into an ended turn. A fix is a main session's act on its own delegate,  *)
-(* under a claim on the delegate's current state. A service is owned by    *)
+(* into an ended turn. One to a delegate that ended first is not typed:    *)
+(* its row says so, and the sender reads that in place of delivered. A fix *)
+(* is a main session's act on its own delegate, under a claim on the       *)
+(* delegate's current state. A service is owned by                         *)
 (* one agent, fixed by its owner or the owner's parent, handed to the      *)
 (* owner's parent or a child, and ended or kept when its owner ends.       *)
 (*                                                                         *)
-(* Models these modules of CodingAgentFramework (none built yet):          *)
+(* Models these modules of CodingAgentFramework (only Grants' checks are   *)
+(* built, F-73):                                                           *)
 (*   Grants    the tree's edges, by which it decides whether a caller may  *)
 (*             message, fix or hand to a target; the claims table          *)
 (*             (durable); the fix a claim's call runs (in memory);         *)
-(*   Mailbox   the messages table: each row's sender, addressee, where it  *)
-(*             goes, and queued, sending, delivered (durable); the sends   *)
+(*   Mailbox   the messages table: each row's sender, addressee, and       *)
+(*             queued, sending, delivered or ended (durable); the sends    *)
 (*             under way (in memory). It types through Control's checked   *)
 (*             write, with the same sending mark and settle as a           *)
 (*             delegate's report (Delegate.tla);                           *)
@@ -25,11 +28,11 @@
 (*             service_restart, service_stop and service_hand, each with   *)
 (*             its caller's fixed identity.                                *)
 (*                                                                         *)
-(* Left abstract: the text of a message and the line that says it was      *)
-(* sent on to the main session; the screen and the input box (Control's    *)
-(* write checks them in one step); reading tools, which are open and change*)
-(* nothing; the answer tool (Intake.tla); subagents, which the framework   *)
-(* does not reach, so a delegate has no child here; a service's own        *)
+(* Left abstract: the text of a message, and how its sender reads its row; *)
+(* the screen and the input box (Control's write checks them in one step); *)
+(* reading tools, which change nothing; the answer tool (Intake.tla);      *)
+(* subagents, which the framework does not reach, so a delegate has no     *)
+(* child here; a service's own                                             *)
 (* process, logs, waits and host, and the claim its fix takes, which works *)
 (* as an agent's does (a restart and a stop are one step that may end it); *)
 (* how a stuck agent is seen; a person's acts on a main session (a stop or *)
@@ -57,13 +60,10 @@
 (* parent. SiblingFix, SelfFix and FixMain each widen that relation by one *)
 (* wrong case, as a mistaken check would.                                  *)
 (*                                                                         *)
-(* Defense in depth, with no Break: Redirected's check that the row still  *)
-(* goes to its addressee, behind MainNeverFixed (a main session never ends,*)
-(* so a message sent on to it is never sent on again); FixActs' check of   *)
-(* the target's process for an interrupt or a resume, behind its check of  *)
-(* the claimed state's number (stuck and dead are left only by steps that  *)
-(* move it). For a stop the process check is Control's checked write, as   *)
-(* the /exit of Move.tla.                                                  *)
+(* Defense in depth, with no Break: FixActs' check of the target's process *)
+(* for an interrupt or a resume, behind its check of the claimed state's   *)
+(* number (stuck and dead are left only by steps that move it). For a stop *)
+(* the process check is Control's checked write, as the /exit of Move.tla. *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -80,8 +80,8 @@ Breaks == {
     "none",
     "IntoRunningTurn",       \* a message is typed without checking that the turn has ended
     "RedeliverAfterRestart", \* a send cut off by a restart is queued again unread
-    "RedirectUnsettled",     \* a row cut off while sending is sent on to the main session unsettled
-    "NoRedirect",            \* a message to an ended delegate is never sent on
+    "EndedUnsettled",        \* a row cut off while sending is marked ended, unsettled
+    "NoEndedMark",           \* a message to an ended delegate is never marked ended
     "NoOrder",               \* a message is typed before an earlier one to the same addressee
     "OffEdge",               \* a message is stored without checking that it goes along an edge
     "TwoClaims",             \* a claim does not check for one on the same state
@@ -112,7 +112,7 @@ MaxEpoch == 2 * MaxFaults + 1
 Kinds == {"interrupt", "resume", "stop"}
 Needs == [interrupt |-> "stuck", resume |-> "dead", stop |-> "idle"]
 AnyMain == CHOOSE m \in Mains : TRUE
-NoMsg == [from |-> AnyMain, to |-> AnyMain, dest |-> AnyMain, st |-> "none"]
+NoMsg == [from |-> AnyMain, to |-> AnyMain, st |-> "none"]
 
 \* The tree. A main session is a root; a delegate's parent is its main session.
 Main(a) == CHOOSE m \in Mains : \E P \in Projects : {a, m} \subseteq P
@@ -144,7 +144,7 @@ VARIABLES
     proc,      \* a -> "working", "idle", "stuck", "dead", "ended"
     epoch,     \* a -> the number of a's state
     faults,    \* sticks and deaths so far
-    msgs,      \* table: i -> [from, to (addressee), dest (where it goes), st]
+    msgs,      \* table: i -> [from, to (addressee), st]
     msend,     \* in memory: i -> "none", "asked" (row says sending), "sent" (typed, row not marked)
     inbox,     \* a -> the message ids in a's transcript, in order
     claims,    \* table: the claims, [by, t, ep, kind, n]
@@ -226,7 +226,7 @@ Send(c, t) ==
     /\ Edge(c, t) \/ (Break = "OffEdge" /\ c # t)
     /\ Cardinality(Sent) < MaxMsgs
     /\ LET i == Cardinality(Sent) + 1
-       IN msgs' = [msgs EXCEPT ![i] = [from |-> c, to |-> t, dest |-> t, st |-> "queued"]]
+       IN msgs' = [msgs EXCEPT ![i] = [from |-> c, to |-> t, st |-> "queued"]]
     /\ UNCHANGED <<up, restarts, agentVars, msend, inbox, claimVars, svcVars, wrong>>
 
 Earlier(i) == {j \in 1..(i - 1) : msgs[j].from = msgs[i].from /\ msgs[j].to = msgs[i].to}
@@ -235,7 +235,7 @@ NextInOrder(i) == Break = "NoOrder" \/ \A j \in Earlier(i) : msgs[j].st = "deliv
 \* Once the target's turn has ended, the row says "sending" before the write.
 DeliveryAsked(i) ==
     /\ up /\ msgs[i].st = "queued" /\ msend[i] = "none"
-    /\ proc[msgs[i].dest] = "idle" /\ NextInOrder(i)
+    /\ proc[msgs[i].to] = "idle" /\ NextInOrder(i)
     /\ msgs' = [msgs EXCEPT ![i].st = "sending"] /\ msend' = [msend EXCEPT ![i] = "asked"]
     /\ UNCHANGED <<up, restarts, agentVars, inbox, claimVars, svcVars, wrong>>
 
@@ -244,7 +244,7 @@ Typeable(a) ==
 
 \* Control's checked write: the message is the target's new turn.
 DeliveryTyped(i) ==
-    LET a == msgs[i].dest IN
+    LET a == msgs[i].to IN
     /\ up /\ msend[i] = "asked" /\ Typeable(a)
     /\ msend' = [msend EXCEPT ![i] = "sent"]
     /\ inbox' = [inbox EXCEPT ![a] = Append(@, i)]
@@ -253,7 +253,7 @@ DeliveryTyped(i) ==
     /\ UNCHANGED <<up, restarts, epoch, faults, msgs, claimVars, svcVars>>
 
 DeliveryRefused(i) ==
-    /\ up /\ msend[i] = "asked" /\ ~Typeable(msgs[i].dest)
+    /\ up /\ msend[i] = "asked" /\ ~Typeable(msgs[i].to)
     /\ msend' = [msend EXCEPT ![i] = "none"] /\ msgs' = [msgs EXCEPT ![i].st = "queued"]
     /\ UNCHANGED <<up, restarts, agentVars, inbox, claimVars, svcVars, wrong>>
 
@@ -268,18 +268,18 @@ InTranscript(i, a) == \E k \in DOMAIN inbox[a] : inbox[a][k] = i
 SendingSettled(i) ==
     /\ up /\ msgs[i].st = "sending" /\ msend[i] = "none"
     /\ msgs' = [msgs EXCEPT ![i].st =
-                  IF InTranscript(i, msgs[i].dest) /\ Break # "RedeliverAfterRestart"
+                  IF InTranscript(i, msgs[i].to) /\ Break # "RedeliverAfterRestart"
                     THEN "delivered" ELSE "queued"]
     /\ UNCHANGED <<up, restarts, agentVars, msend, inbox, claimVars, svcVars, wrong>>
 
-\* A message to a delegate that has ended goes to its main session instead,
-\* from a settled row only.
-Redirected(i) ==
-    /\ up /\ Break # "NoRedirect"
-    /\ msgs[i].to \in Delegates /\ proc[msgs[i].to] = "ended" /\ msgs[i].dest = msgs[i].to
+\* A message to a delegate that has ended is not delivered: its row says the
+\* delegate ended before it went in, from a settled row only.
+EndedFirst(i) ==
+    /\ up /\ Break # "NoEndedMark"
+    /\ msgs[i].to \in Delegates /\ proc[msgs[i].to] = "ended"
     /\ \/ msgs[i].st = "queued"
-       \/ (Break = "RedirectUnsettled" /\ msgs[i].st = "sending" /\ msend[i] = "none")
-    /\ msgs' = [msgs EXCEPT ![i].dest = Main(msgs[i].to), ![i].st = "queued"]
+       \/ (Break = "EndedUnsettled" /\ msgs[i].st = "sending" /\ msend[i] = "none")
+    /\ msgs' = [msgs EXCEPT ![i].st = "ended"]
     /\ UNCHANGED <<up, restarts, agentVars, msend, inbox, claimVars, svcVars, wrong>>
 
 -----------------------------------------------------------------------------
@@ -373,7 +373,7 @@ Next ==
     \/ \E a \in Agents : Prompted(a) \/ TurnEnds(a) \/ Faults(a) \/ DelegateEnds(a)
     \/ \E c, t \in Agents : Send(c, t) \/ ClaimTaken(c, t)
     \/ \E i \in Ids : \/ DeliveryAsked(i) \/ DeliveryTyped(i) \/ DeliveryRefused(i)
-                      \/ DeliveryMarked(i) \/ SendingSettled(i) \/ Redirected(i)
+                      \/ DeliveryMarked(i) \/ SendingSettled(i) \/ EndedFirst(i)
     \/ \E r \in claims : FixActs(r) \/ FixRefused(r) \/ ClaimSettled(r)
     \/ \E s \in Services : \/ ServiceOwnerEnded(s)
                            \/ \E a \in Agents : ServiceStarts(a, s) \/ ServiceFixed(a, s)
@@ -385,7 +385,7 @@ Fairness ==
     /\ \A i \in Ids :
          /\ SF_vars(DeliveryAsked(i)) /\ SF_vars(DeliveryTyped(i))
          /\ WF_vars(DeliveryTyped(i) \/ DeliveryRefused(i))
-         /\ WF_vars(DeliveryMarked(i)) /\ WF_vars(SendingSettled(i)) /\ WF_vars(Redirected(i))
+         /\ WF_vars(DeliveryMarked(i)) /\ WF_vars(SendingSettled(i)) /\ WF_vars(EndedFirst(i))
     /\ WF_vars(\E r \in claims : FixActs(r) \/ FixRefused(r))
     /\ WF_vars(\E r \in claims : ClaimSettled(r))
     /\ \A s \in Services : WF_vars(ServiceOwnerEnded(s))
@@ -399,7 +399,7 @@ TypeOK ==
     /\ proc \in [Agents -> {"working", "idle", "stuck", "dead", "ended"}]
     /\ epoch \in [Agents -> 0..MaxEpoch]
     /\ msend \in [Ids -> {"none", "asked", "sent"}]
-    /\ \A i \in Ids : msgs[i].st \in {"none", "queued", "sending", "delivered"}
+    /\ \A i \in Ids : msgs[i].st \in {"none", "queued", "sending", "delivered", "ended"}
     /\ claims \subseteq [by : Agents, t : Agents, ep : 0..MaxEpoch, kind : Kinds, n : 1..2]
     /\ calls \subseteq claims \ done /\ done \subseteq claims
     /\ svc \in [Services -> {"none", "running", "ended"}]
@@ -420,13 +420,14 @@ InOrder ==
         LET m == msgs[inbox[a][k]]  n == msgs[inbox[a][l]] IN
         k < l /\ m.from = n.from /\ m.to = n.to => inbox[a][k] < inbox[a][l]
 
-\* Every delivered message went along an edge, to its addressee or, once
-\* that delegate ended, to the delegate's main session.
+\* Every delivered message went along an edge, to its addressee.
 AlongEdges ==
     \A a \in Agents : \A k \in DOMAIN inbox[a] :
-        LET m == msgs[inbox[a][k]] IN
-        /\ Edge(m.from, m.to)
-        /\ a = m.to \/ (m.to \in Delegates /\ a = Main(m.to))
+        LET m == msgs[inbox[a][k]] IN Edge(m.from, m.to) /\ a = m.to
+
+\* A row that says its delegate ended first is true: the message is in no
+\* transcript, so its sender is not told it was lost when it went in.
+EndedNotDelivered == \A i \in Ids : msgs[i].st = "ended" => Count(i) = 0
 
 \* At most one claim holds a child's state, and a state is fixed at most once.
 OneClaimPerState == \A q, r \in claims : q.t = r.t /\ q.ep = r.ep => q = r
@@ -450,16 +451,18 @@ ServiceFixedByOwnerOrParent == "service fix" \notin wrong
 \* A service is handed only by its owner, to the owner's parent or a child.
 HandedAlongEdge == "hand" \notin wrong
 
-\* The agent a message is for now: its addressee, or the addressee's main
-\* session once the addressee has ended.
-Recipient(i) == IF msgs[i].to \in Delegates /\ proc[msgs[i].to] = "ended"
-                  THEN Main(msgs[i].to) ELSE msgs[i].to
 Waiting(i) == msgs[i].st \in {"queued", "sending"}
 
 \* A message to a live agent, one whose turn ends again and again, is delivered.
 MessageDelivered ==
-    \A i \in Ids : []<>(proc[Recipient(i)] = "idle")
+    \A i \in Ids : []<>(proc[msgs[i].to] = "idle")
                      => [](Waiting(i) => <>(msgs[i].st = "delivered"))
+
+\* A message waiting for a delegate that has ended settles: it went in
+\* before the end, or its row says the delegate ended first.
+EndedMarked ==
+    \A i \in Ids : [](Waiting(i) /\ proc[msgs[i].to] = "ended"
+                      => <>(msgs[i].st \in {"delivered", "ended"}))
 
 \* A claim's call ends: its fix verified, or the claim released.
 \* Claims are bounded and a claim never leaves `done`, so this says each

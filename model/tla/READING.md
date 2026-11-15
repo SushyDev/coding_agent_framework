@@ -295,8 +295,8 @@ delegate to its main session. It has three halves that share the agents and the 
   `Control`'s checked write, which appends the id to the target's transcript (`inbox`), or
   `DeliveryRefused` queues it again. `DeliveryMarked` writes `"delivered"`; after a restart,
   `SendingSettled` reads the transcript instead, as `Delegate.tla` settles a report.
-  `Redirected` sends a settled row whose addressee has ended to that delegate's main session
-  (`dest`).
+  `EndedFirst` marks a settled row whose addressee has ended `"ended"`: it is not delivered,
+  and its sender reads that in place of `"delivered"`.
 - Claims: `ClaimTaken(c, t)` is `Grants`: `MayFix(c, t)`, the caller is the target's main
   session, and no claim yet on the target's state. It writes the row (`claims`) and starts the
   call (`calls`, in memory). A row's `n` is 2 for the caller's second call on the same state,
@@ -311,8 +311,9 @@ delegate to its main session. It has three halves that share the agents and the 
 
 `fixed` and `wrong` are ghosts. `MayFix`, `MayFixService` and `MayHand` are the guards; each
 `Break` that names one widens it by one wrong case. `MessageDelivered` reads "a message whose
-recipient's turn ends again and again is delivered"; its recipient is the addressee, or the
-addressee's main session once the addressee has ended.
+addressee's turn ends again and again is delivered", and `EndedMarked` "a message still waiting
+when its delegate has ended settles, delivered or `"ended"`". `EndedNotDelivered` says an
+`"ended"` row is true: the message is in no transcript.
 
 ## `Shell.tla`
 

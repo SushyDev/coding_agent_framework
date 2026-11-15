@@ -128,6 +128,7 @@ flowchart BT
   recoveries[caf_recoveries]
   tracker[caf_tracker]
   delegates[caf_delegates]
+  grants[caf_grants]
 
   tmux --> shell
   holder --> shell
@@ -166,7 +167,8 @@ flowchart BT
   delegates --> transcripts
 ```
 
-`caf_test` holds the shared test aids and is used only in tests.
+`caf_test` holds the shared test aids and is used only in tests. `caf_grants` uses no other
+app: the embedding app hands it the tree as a function.
 
 ## Development
 

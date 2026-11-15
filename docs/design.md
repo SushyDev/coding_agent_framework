@@ -349,7 +349,9 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
   table of projects and no default cap. A delegate holds its parent's cap from its row's
   start until it ends: starting, running, resuming, finished or failed, since a finished one
   still holds its worktree and its report.
-- Until `Mains` exists, the caller names the main session, and the row keeps that name.
+- Until `Mains` exists, the caller names the main session, and the row keeps that name. Until
+  then `Grants` knows a main session only as a parent a delegate's row names, and refuses every
+  check on a delegate whose rows name two parents (F-73's new-3 and new-4); `Mains` ends both.
 - A delegate's session is named `<project>-<branch>`, each character of the branch other than
   a letter, a digit, `_` or `-` written as `-`, so a later start of the branch finds its
   worktree.
@@ -582,8 +584,8 @@ framework's tools, which are strict in how they act and narrow in whom they reac
 
 **Who may act** (`Grants`):
 - Reading the tree (`agents()`: every agent of every project, its parent and its state) is open
-  to every agent. Reading one agent closely (`look`, `transcript`) is open to its parent, its
-  children and, for a main session, the other main sessions.
+  to every agent. Reading one agent closely (`look`, `transcript`) is open to the agent itself,
+  its parent, its children and, for a main session, the other main sessions.
 - Messages go along the edges only: a main session to its delegates and to other main
   sessions; a delegate to its main session. A delegate has no other agent to message: its
   children are subagents, which Claude Code runs inside it. Two delegates talk through their
@@ -594,7 +596,9 @@ framework's tools, which are strict in how they act and narrow in whom they reac
   same state is refused with `{:claimed, by}`. The fix acts only while the claimed state is
   still the child's current one, read again when it acts. A call ends with its fix verified or
   not; the row keeps that state until the child's state moves, and a fix that did not help goes
-  to a person. A claim a restart of the framework cut off is closed as interrupted, never
+  to a person. Each claim row carries the id of the framework start that wrote it, a value the
+  embedding app makes once per start; a row of an earlier start still claimed is one a restart
+  cut off. A claim a restart of the framework cut off is closed as interrupted, never
   retried.
 - No agent fixes or moves a main session; only a person does, a move with one press.
 - An agent may not fix itself. A stuck agent cannot be relied on to see that it is stuck.
