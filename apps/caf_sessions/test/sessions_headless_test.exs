@@ -168,6 +168,26 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
     assert {:ok, _} = row_when(ctx, "ended", &(&1.status == "stopped"))
   end
 
+  test "a running delegate killed before its last reply is settled stopped, then resumed", ctx do
+    # RunningSettled (F-61): gone by pid and start time, its socket dead; a live one stays.
+    {dir, killed} = own_dir(ctx, "killed", :at_start)
+    assert {:ok, %{session_id: id}} = Sessions.start(ctx.sessions, "killed", ctx.account, killed)
+
+    assert {:ok, %{pid: pid}} =
+             Sessions.start(ctx.sessions, "kept", ctx.account, headless(ctx, :at_start))
+
+    kill_held(ctx, dir, "killed")
+    cue(ctx, ctx.sessions)
+    assert {:ok, %{reason: "exited"}} = row_when(ctx, "killed", &(&1.status == "stopped"))
+    assert %{status: "running"} = Table.get(ctx.table, "test", "kept")
+    assert alive?(pid)
+
+    assert {:ok, %{session_id: ^id}} =
+             Sessions.resume(ctx.sessions, "killed", ctx.account, id, headless(ctx, :at_start))
+
+    assert %{status: "running", resume: ^id} = Table.get(ctx.table, "test", "killed")
+  end
+
   defp start_task(ctx, name, launch),
     do: Task.async(fn -> Sessions.start(ctx.sessions, name, ctx.account, launch) end)
 

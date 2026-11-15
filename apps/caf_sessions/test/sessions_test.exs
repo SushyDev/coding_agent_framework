@@ -177,6 +177,41 @@ defmodule CodingAgentFramework.SessionsTest do
     assert {:ok, _} = row_when(ctx, "deaf", &(&1.status == "stopped"))
   end
 
+  test "F-61: RunningSettled stops a running row whose process was killed; the name resumes",
+       ctx do
+    {dir, crashed} = own_dir(ctx, "crashed", :at_start)
+
+    assert {:ok, %{session_id: id}} =
+             Sessions.start(ctx.sessions, "crashed", ctx.account, crashed)
+
+    assert {:ok, %{pid: kept}} =
+             Sessions.start(ctx.sessions, "kept", ctx.account, launch(ctx, :at_start))
+
+    # The test kills the process by the pid its stand-in recorded; its socket is then absent.
+    kill_held(ctx, dir, "crashed")
+    cue(ctx, ctx.sessions)
+    assert {:ok, %{reason: "exited"}} = row_when(ctx, "crashed", &(&1.status == "stopped"))
+    # The same settle read the live process and kept its row running.
+    assert %{status: "running"} = Table.get(ctx.table, "test", "kept")
+    assert alive?(kept)
+
+    # The socket is read too: a row whose start time reads as another process's stays running
+    # while its socket is live.
+    Table.update(ctx.table, Table.get(ctx.table, "test", "kept").id,
+      proc_start: "Thu Jan  1 1970"
+    )
+
+    cue(ctx, ctx.sessions)
+    :sys.get_state(ctx.sessions)
+    assert %{status: "running"} = Table.get(ctx.table, "test", "kept")
+
+    assert {:ok, %{session_id: ^id}} =
+             Sessions.resume(ctx.sessions, "crashed", ctx.account, id, launch(ctx, :at_start))
+
+    assert %{status: "running", resume: ^id, reason: nil} =
+             Table.get(ctx.table, "test", "crashed")
+  end
+
   defp start_task(ctx, name, launch),
     do: Task.async(fn -> Sessions.start(ctx.sessions, name, ctx.account, launch) end)
 
