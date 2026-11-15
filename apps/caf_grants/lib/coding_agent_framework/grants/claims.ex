@@ -60,7 +60,11 @@ defmodule CodingAgentFramework.Grants.Claims do
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
-  @doc "Writes a row `claimed` if the fix check answers `:ok` and no open claim holds the target's state."
+  @doc """
+  Writes a row `claimed` if the fix check answers `:ok` and no claim, open or closed, has held
+  the target's state: `{:refused, {:claimed, by}}` for an open one, `{:refused,
+  {:already_claimed, by}}` for one settled or interrupted.
+  """
   @spec claim(GenServer.server(), String.t(), target, term, String.t(), keyword) ::
           {:ok, id} | {:refused, term} | {:unknown, term}
   def claim(claims, caller, target, state, start_id, opts \\ []),
@@ -120,7 +124,8 @@ defmodule CodingAgentFramework.Grants.Claims do
         {:ok, insert(s.db, caller, target, state, start_id)}
       else
         {:refused, _} = refused -> refused
-        by when is_binary(by) -> {:refused, {:claimed, by}}
+        {"claimed", by} -> {:refused, {:claimed, by}}
+        {_closed, by} -> {:refused, {:already_claimed, by}}
       end
 
     {:reply, reply, s}
@@ -160,13 +165,14 @@ defmodule CodingAgentFramework.Grants.Claims do
   defp check(grants, caller, target) when is_binary(target),
     do: Grants.may_fix?(grants, caller, target)
 
-  # The caller of an open claim on this target and state, or nil. Compared by equality on the
-  # decoded terms, not on their encodings.
+  # The status and caller of any claim on this target and state, open or closed, or nil: a
+  # fix acts once per state (`Team.tla`, `ClaimTaken`), and one that did not help, or that a
+  # restart cut off, goes to a person. Compared by equality on the decoded terms.
   defp holder(db, target, state) do
     db
-    |> select("status = 'claimed'", [])
+    |> select("1 = 1", [])
     |> Enum.find_value(fn row ->
-      if row.target == target and row.state == state, do: row.caller
+      if row.target == target and row.state == state, do: {row.status, row.caller}
     end)
   end
 

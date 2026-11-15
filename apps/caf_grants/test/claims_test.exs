@@ -42,12 +42,16 @@ defmodule CodingAgentFramework.Grants.ClaimsTest do
     assert length(Enum.uniq([a, b, c])) == 3
   end
 
-  test "ClaimTaken: a settled claim frees its state for a distinct claim of the same caller",
+  test "ClaimTaken: a settled claim keeps its state from a second fix; a new state is free",
        ctx do
     claims = open(ctx, "s1")
     {:ok, first} = Claims.claim(claims, "app-main", "app-a", 1, "s1")
     assert {:ok, :not_verified} = Claims.settle(claims, first, :not_verified)
-    assert {:ok, second} = Claims.claim(claims, "app-main", "app-a", 1, "s1")
+
+    assert {:refused, {:already_claimed, "app-main"}} =
+             Claims.claim(claims, "app-main", "app-a", 1, "s1")
+
+    assert {:ok, second} = Claims.claim(claims, "app-main", "app-a", 2, "s1")
     assert second != first
     assert status(claims, first) == "not_verified"
   end
@@ -86,8 +90,11 @@ defmodule CodingAgentFramework.Grants.ClaimsTest do
     new = open(ctx, "s2")
     assert status(new, open_id) == "interrupted"
     assert status(new, done_id) == "verified"
-    # Interrupted, never retried: the state is free for a new claim, which is a new row.
-    assert {:ok, again} = Claims.claim(new, "app-main", "app-a", 1, "s2")
+    # Interrupted, never retried: the state stays held; its next state is free.
+    assert {:refused, {:already_claimed, "app-main"}} =
+             Claims.claim(new, "app-main", "app-a", 1, "s2")
+
+    assert {:ok, again} = Claims.claim(new, "app-main", "app-a", 2, "s2")
     assert again != open_id
     assert {:refused, {:not_open, :interrupted}} = Claims.settle(new, open_id, :verified)
   end
