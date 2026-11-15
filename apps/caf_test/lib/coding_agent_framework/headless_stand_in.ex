@@ -1,7 +1,7 @@
 defmodule CodingAgentFramework.HeadlessStandIn do
   @moduledoc """
   A stand-in for Claude Code in `-p` stream-json mode, so no test starts the real one. It is a
-  bash script run by `ClaudeCLI.wrapper/3` under dtach. It reads stream-json lines on stdin and
+  bash script run by `ClaudeCLI.wrapper/4` under dtach. It reads stream-json lines on stdin and
   writes events on stdout in the shapes `docs/build-notes/F-31.md` records, with synthetic values:
 
   - `system`/`init` with the `--session-id` or `--resume` id: at its start (mode `:at_start`),

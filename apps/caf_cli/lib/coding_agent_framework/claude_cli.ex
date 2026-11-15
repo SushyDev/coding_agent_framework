@@ -99,11 +99,12 @@ defmodule CodingAgentFramework.ClaudeCLI do
   # The wrapper of "Headless delegates": stdin is the FIFO opened read-write, so the delegate
   # holds a writer itself and never reads end of file; `exec` makes claude the held process.
   # dtach does not report that pid and a headless session writes no session file with a name
-  # (F-49), so the wrapper records its own pid, which `exec` keeps, before claude starts.
+  # (F-49), so the wrapper records its own pid, which `exec` keeps, before claude starts. Each
+  # process reads its own FIFO, so a line left waiting for an earlier one never reaches it.
   @wrapper ~S"""
-  d=$1; shift
+  d=$1 f=$2; shift 2
   printf '%s\n' "$$" > "$d/pid"
-  exec 3<>"$d/in"
+  exec 3<>"$f"
   exec "$@" <&3 3<&- >>"$d/events.jsonl" 2>>"$d/stderr.log"
   """
 
@@ -143,18 +144,19 @@ defmodule CodingAgentFramework.ClaudeCLI do
   def headless(_account, _opts), do: {:refused, :no_account_dir}
 
   @doc """
-  `argv` run by the wrapper that holds a headless delegate's stdin and log in `dir`
-  (`<home>/streams/<session>/`, whose FIFO `in` must exist): the host's `sh` runs it, and dtach
-  holds that. It writes its pid to `pid` in `dir` first; `exec` keeps it, so it is the held
-  process's. Pure.
+  `argv` run by the wrapper that holds a headless delegate's log in `dir`
+  (`<home>/streams/<session>/`) and its stdin on `fifo`, this process's own FIFO, which
+  `Stream.follow/5` made and answered: the host's `sh` runs it, and dtach holds that. It writes
+  its pid to `pid` in `dir` first; `exec` keeps it, so it is the held process's. Pure.
 
-      iex> [sh, "-c", _script, "caf-stream", "/h/streams/s1", "/run/bin/claude"] =
-      ...>   CodingAgentFramework.ClaudeCLI.wrapper("/run/bin/sh", "/h/streams/s1", ["/run/bin/claude"])
+      iex> [sh, "-c", _script, "caf-stream", "/h/streams/s1", "/h/streams/s1/in.0", "/run/bin/claude"] =
+      ...>   CodingAgentFramework.ClaudeCLI.wrapper("/run/bin/sh", "/h/streams/s1",
+      ...>     "/h/streams/s1/in.0", ["/run/bin/claude"])
       iex> sh
       "/run/bin/sh"
   """
-  @spec wrapper(String.t(), String.t(), [String.t()]) :: [String.t()]
-  def wrapper(sh, dir, argv), do: [sh, "-c", @wrapper, "caf-stream", dir | argv]
+  @spec wrapper(String.t(), String.t(), String.t(), [String.t()]) :: [String.t()]
+  def wrapper(sh, dir, fifo, argv), do: [sh, "-c", @wrapper, "caf-stream", dir, fifo | argv]
 
   defp start_or_resume(opts) do
     case {Keyword.has_key?(opts, :session_id), Keyword.has_key?(opts, :resume)} do

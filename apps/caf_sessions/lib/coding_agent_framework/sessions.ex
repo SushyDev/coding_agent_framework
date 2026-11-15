@@ -32,7 +32,8 @@ defmodule CodingAgentFramework.Sessions do
   **A delegate** (role `:delegate`) runs headless ("Headless delegates"): after its row, which
   keeps the session id the framework chose, `Stream.follow/5` makes its directory and FIFO under
   `<home>/streams/<session id>/`, then `ClaudeCLI.headless/2`'s argv is held inside
-  `ClaudeCLI.wrapper/3`, and its viewer is a pane running `tail -F` of its event log (the
+  `ClaudeCLI.wrapper/4` on the FIFO the follow answered, `Stream.held/3` tells `Stream` the
+  process was held, and its viewer is a pane running `tail -F` of its event log (the
   renderer is a later unit; `-F` waits for a log the wrapper has not opened yet; again
   `viewer_argv/3`'s answer). Its start is confirmed when `Stream` has read a `system`/`init`
   naming the session id, the pid the wrapper recorded lives with the start time `ps` gives, and
@@ -45,8 +46,9 @@ defmodule CodingAgentFramework.Sessions do
   row names exits, judged by `{pid, procStart}` (`Registry.Liveness`), never by name. `/exit`
   must be typed only when the turn has ended and the input box is empty. Reading that from the
   screen is `Screen`'s job, which is not built: the caller says the turn has ended, and any
-  other answer is refused. A delegate's stop writes `end_session` through `Stream` instead, and
-  its turn is `Stream`'s row's, not the caller's: `Stream` refuses the end while a turn runs.
+  other answer is refused. A delegate's stop writes `end_session` through `Stream` instead, once
+  the caller says its report is delivered, and its turn is `Stream`'s row's, not the caller's:
+  `Stream` refuses the end while a turn runs or a message has not gone in.
 
   Each call answers `{:ok, …}`, `{:refused, reason}` or `{:unknown, reason}` within its
   `:timeout` (30 s by default, plus the hold's and the viewer's own bounds). Nothing is retried:
@@ -133,9 +135,11 @@ defmodule CodingAgentFramework.Sessions do
   @doc """
   Ends running session `name` with `/exit` and waits for its process to exit. `turn` is the
   caller's reading of the session's screen: only `:ended` (the turn has ended and the input box
-  is empty) types; any other is refused as `{:turn, turn}`. A delegate's `turn` is not read:
-  `Stream`'s row says whether its turn has ended, and `Stream` refuses the end with
-  `:turn_running` while it runs. Option: `:timeout`.
+  is empty) types; any other is refused as `{:turn, turn}`. For a delegate it is the caller's
+  word on its report instead: only `:report_delivered` writes the end, any other is refused as
+  `{:report, turn}`, since the end cuts a turn and drops what has not gone in. `Stream` then
+  refuses the end while its row's turn runs (`:turn_running`) or a message is under way or
+  found undelivered. Option: `:timeout`.
   """
   @spec stop(GenServer.server(), String.t(), atom, keyword) :: outcome(:stopped)
   def stop(sessions, name, turn, opts \\ []), do: request(sessions, {:stop, name, turn}, opts)
@@ -293,6 +297,10 @@ defmodule CodingAgentFramework.Sessions do
     case Table.get(state.db, state.host.name, name) do
       row when turn != :ended and (row == nil or row.role != "delegate") ->
         {:reply, {:refused, {:turn, turn}}, state}
+
+      # The report before the end: the caller's word until `Delegates` holds the parent's row.
+      %{role: "delegate"} when turn != :report_delivered ->
+        {:reply, {:refused, {:report, turn}}, state}
 
       %{status: "running", pid: pid} = row when is_integer(pid) ->
         # StopAsked, with the stop's own deadline in the row.
@@ -567,16 +575,32 @@ defmodule CodingAgentFramework.Sessions do
       argv = [state.holder.sh, "-c", @cd, cwd | argv]
 
       case Holder.hold(state.holder, name, argv, env: way.cli.env) do
-        {:refused, _} = refused -> refused
-        _held_or_unknown -> :held
+        {:refused, _} = refused ->
+          refused
+
+        {:ok, _} ->
+          told(way)
+          :held
+
+        _unknown ->
+          :held
       end
     end
   end
 
+  # HeldTold: a delegate's exit is seen from now on, even before a read finds it live. Only a
+  # hold that answered held tells: after an unknown one, a process may start later, and Stream
+  # waits to see it live. A tell that fails leaves that to the read as well.
+  defp told(%{stream: stream, session_id: id}), do: Stream.held(stream, id, timeout: @stream)
+  defp told(_way), do: :ok
+
   defp prepare(state, %{stream: stream} = way, name) do
     case Stream.follow(stream, way.session_id, name, way.transcript, timeout: @stream) do
-      {:ok, dir} -> {:ok, ClaudeCLI.wrapper(state.holder.sh, dir, way.cli.argv)}
-      {_, reason} -> {:refused, {:follow, reason}}
+      {:ok, %{dir: dir, fifo: fifo}} ->
+        {:ok, ClaudeCLI.wrapper(state.holder.sh, dir, fifo, way.cli.argv)}
+
+      {_, reason} ->
+        {:refused, {:follow, reason}}
     end
   end
 

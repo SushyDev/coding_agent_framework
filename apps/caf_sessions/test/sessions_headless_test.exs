@@ -56,7 +56,8 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
     assert {:ok, _} = row_when(ctx, "gone", &(&1.status == "stopped"))
   end
 
-  test "a stop writes end_session only after the turn ended, and sees the exit by pid", ctx do
+  test "a stop writes end_session only after the report and the turn, and sees the exit by pid",
+       ctx do
     # StopAsked, StopSettled.
     assert {:ok, %{pid: pid, session_id: id}} =
              Sessions.start(ctx.sessions, "d3", ctx.account, headless(ctx, :at_start))
@@ -64,13 +65,15 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
     {:ok, %{uuid: u}} = Stream.write(ctx.stream, id, {:message, "ask first"})
     stream_row(ctx, id, &(&1.requests["req-" <> u].state == :held))
 
-    # The caller's reading of the turn is not read for a delegate; Stream's row is.
-    assert {:refused, :turn_running} = Sessions.stop(ctx.sessions, "d3", :ended)
+    # A delegate's end waits for the caller's word that its report is delivered (new-5); the
+    # caller's reading of the turn is not read, Stream's row is.
+    assert {:refused, {:report, :ended}} = Sessions.stop(ctx.sessions, "d3", :ended)
+    assert {:refused, :turn_running} = Sessions.stop(ctx.sessions, "d3", :report_delivered)
     assert %{status: "running"} = Table.get(ctx.table, "test", "d3")
 
     assert {:ok, _} = Stream.write(ctx.stream, id, {:answer, "req-" <> u, :allow})
     stream_row(ctx, id, & &1.idle)
-    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "d3", :not_read)
+    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "d3", :report_delivered)
     refute alive?(pid)
     assert %{status: "stopped"} = Table.get(ctx.table, "test", "d3")
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "answer req-#{u}", "end"]
@@ -82,7 +85,7 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
 
     {:ok, %{uuid: u1}} = Stream.write(ctx.stream, id, {:message, "before"})
     before = stream_row(ctx, id, &(&1.messages[u1].state == :delivered and &1.idle))
-    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "d4", :ended)
+    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "d4", :report_delivered)
     # The process is gone by pid; its dtach master ends a moment later.
     {:ok, :absent} = await(fn -> absent(Holder.state(ctx.holder, "d4")) end)
 
@@ -100,7 +103,18 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
 
     log = File.read!(Path.join([Stream.dir(ctx.dir, id), "events.jsonl"]))
     assert length(String.split(log, ~s("subtype":"init"))) == 3
+    # Each process read its own FIFO (new-1).
+    fifos = Stream.dir(ctx.dir, id) |> File.ls!() |> Enum.filter(&(&1 =~ "in.")) |> Enum.sort()
+    assert fifos == ["in.0", "in.1"]
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u1}", "end", "message #{u2}"]
+  end
+
+  test "a delegate that exits before any read is seen gone, since its hold was told", ctx do
+    # HeldTold (Stream.tla): no read saw it live, yet Stream sees its exit (new-3).
+    launch = Keyword.put(headless(ctx, :at_start), :claude, program!(true))
+    assert {:unknown, :no_first_event} = unknown_start(ctx, "brief", launch)
+    assert %{session_id: id} = Table.get(ctx.table, "test", "brief")
+    assert %{gone: true} = stream_row(ctx, id, & &1.gone)
   end
 
   test "after a restart, a starting delegate is adopted when its first event comes", ctx do
