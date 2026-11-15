@@ -603,7 +603,9 @@ framework's tools, which are strict in how they act and narrow in whom they reac
   to a person. Each claim row carries the id of the framework start that wrote it, a value the
   embedding app makes once per start; a row of an earlier start still claimed is one a restart
   cut off. A claim a restart of the framework cut off is closed as interrupted, never
-  retried.
+  retried. A state once claimed stays claimed, whatever the claim's end: a second claim of it
+  is refused (`{:already_claimed, by}`), so a fix acts once per state. A caller whose claim was
+  answered unknown reads the claims' rows before it decides anything (F-75).
 - No agent fixes or moves a main session; only a person does, a move with one press.
 - An agent may not fix itself. A stuck agent cannot be relied on to see that it is stuck.
 - Jobs and services: a main session and its delegates may run jobs and start services on any
