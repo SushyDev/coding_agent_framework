@@ -125,7 +125,10 @@ defmodule CodingAgentFramework.RecoveriesSetup do
     pids = Path.join(dir, "#{name}.pids")
 
     script =
-      ~s(echo "$$ $PPID" > "$0.tmp" && #{program!(:mv)} "$0.tmp" "$0"; exec #{program!(:cat)})
+      ~s(echo "$$ $PPID" > "$0.tmp" && #{program!(:mv)} "$0.tmp" "$0"; #{echo_tail!(dir)})
+
+    # Registered before the hold, so a test that fails mid-start ends it too.
+    on_exit(fn -> end_recorded(dir) end)
 
     assert {:ok, _} = Holder.hold(h, name, [program!(:sh), "-c", script, pids])
     assert {:ok, text} = await(fn -> File.read(pids) end)

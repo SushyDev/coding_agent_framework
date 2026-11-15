@@ -175,4 +175,99 @@ defmodule CodingAgentFramework.TestHost do
   def alive?(pid) do
     match?({:ok, %{status: 0}}, kill(pid, "-0"))
   end
+
+  # The longest a test runs is ExUnit's 60 s timeout, and the longest that uses a stand-in took
+  # about 1.2 s (F-66), so 90 s with no input outlasts every test and still ends a stand-in that
+  # every cleanup missed soon after its run.
+  @idle 90
+
+  @doc """
+  How many seconds a stand-in waits with no input before it ends by itself: no stand-in lives
+  past its run for long, even one whose VM was killed before it could end anything.
+  """
+  def stand_in_idle, do: @idle
+
+  @doc """
+  The end of a held stand-in's script, in place of `exec cat`: it records its pid in
+  `<dir>/pids/` and echoes each line it reads until `stand_in_idle/0` seconds pass with none.
+  `$0` names a path under `dir`, so the echo's command line names the test's directory. It
+  exits at once if `end_recorded/2` has already ended `dir`.
+
+      script = ~s(echo $$ > "$0"; ) <> TestHost.echo_tail!(dir)
+      Holder.hold(h, "alpha", [program!(:sh), "-c", script, Path.join(dir, "alpha.pid")])
+  """
+  def echo_tail!(dir) do
+    File.mkdir_p!(Path.join(dir, "pids"))
+
+    ~s(: 2>/dev/null > "#{dir}/pids/$$" || exit 0; exec #{program!(:bash)} -c ) <>
+      ~s('while IFS= read -r -t #{@idle} l; do printf "%s\\n" "$l"; done' "$0")
+  end
+
+  @doc """
+  Ends every process a stand-in recorded under `dir`, at any depth, by its pid alone. A stand-in
+  records `pids/<pid>` beside its script. Each `pids` directory is first renamed, so a stand-in
+  that starts after this cannot record and exits at once, and one that recorded is ended here.
+  A pid is signaled only while its command line names `dir`, so a pid another program reused is
+  never touched. Each gets CONT, since a stopped one acts on nothing else, then TERM; one alive
+  after `wait` ms gets KILL. Answers the pids that were alive.
+
+      iex> CodingAgentFramework.TestHost.end_recorded(CodingAgentFramework.TestHost.test_dir())
+      []
+  """
+  def end_recorded(dir, wait \\ 5_000) do
+    for pids <- Path.wildcard(Path.join(dir, "**/pids")), File.dir?(pids) do
+      File.rename(pids, "#{pids}.ended-#{System.unique_integer([:positive])}")
+    end
+
+    live =
+      for ended <- Path.wildcard(Path.join(dir, "**/pids.ended-*")),
+          {:ok, names} <- [File.ls(ended)],
+          name <- names,
+          {pid, ""} <- [Integer.parse(name)],
+          names?(pid, dir),
+          uniq: true,
+          do: pid
+
+    for signal <- ["-CONT", "-TERM"], pid <- live, do: kill(pid, signal)
+
+    with {:timeout, _} <- await(fn -> all_gone(live) end, wait) do
+      for pid <- live, not gone?(pid), do: kill(pid, "-KILL")
+      await(fn -> all_gone(live) end, wait)
+    end
+
+    live
+  end
+
+  @doc """
+  Ends what this VM's tests left (`end_recorded/2`) and removes its directory. Each
+  `test_helper.exs` calls it when the suite ends. A pid it had to end is printed: a per-test
+  cleanup missed it.
+  """
+  def end_vm do
+    case end_recorded(vm_dir()) do
+      [] -> :ok
+      left -> IO.puts(:stderr, "test VM ended what its tests left: #{Enum.join(left, " ")}")
+    end
+
+    File.rm_rf(vm_dir())
+  end
+
+  defp names?(pid, dir) do
+    case Shell.run(host(), program!(:ps), ["-ww", "-o", "command=", "-p", "#{pid}"],
+           timeout: 5_000
+         ) do
+      {:ok, %{status: 0, output: command}} -> String.contains?(command, dir <> "/")
+      _ -> false
+    end
+  end
+
+  # Gone only when kill says so: a kill that failed to run is no answer.
+  defp gone?(pid), do: match?({:ok, %{status: s}} when s != 0, kill(pid, "-0"))
+
+  defp all_gone(pids) do
+    case Enum.reject(pids, &gone?/1) do
+      [] -> {:ok, :gone}
+      left -> {:alive, left}
+    end
+  end
 end

@@ -66,8 +66,8 @@ defmodule CodingAgentFramework.SessionsSetup do
     ]
 
     {:ok, table} = Table.open(db)
-    on_exit(fn -> ClaudeStandIn.kill_all(dir) end)
-    on_exit(fn -> HeadlessStandIn.kill_all(dir) end)
+    # A start can answer before its stand-in records its pid; the seal makes that one exit.
+    on_exit(fn -> end_recorded(dir) end)
 
     {:ok,
      dir: dir,

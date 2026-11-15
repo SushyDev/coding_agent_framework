@@ -7,14 +7,16 @@ defmodule CodingAgentFramework.ClaudeStandIn do
     synthetic values: its pid, `sessionId` (the `--resume` id, or one made up), `name` (from
     `--name`), `cwd` and `procStart` as `ps` prints it. The file is written whole and renamed,
     and removed when the stand-in exits;
-  - echoes each line of its input, and exits on `/exit`;
-  - records its pid in `<dir>/pids/`, so a test ends what it started by pid (`kill_all/1`).
+  - echoes each line of its input, and exits on `/exit`, or after `idle` seconds with none
+    (`TestHost.stand_in_idle/0` by default), so no run leaves it for long;
+  - records its pid in `<dir>/pids/`, so a test ends what it started by pid (`kill_all/1`,
+    `TestHost.end_recorded/2`), and exits at once if that directory was already ended.
 
   When it writes its file is the `mode`: `:at_start`, `:on_go` (when it reads the line `go`) or
   `:never`.
   """
 
-  import CodingAgentFramework.TestHost, only: [program!: 1, kill: 1]
+  import CodingAgentFramework.TestHost, only: [program!: 1, kill: 1, stand_in_idle: 0]
 
   @doc """
   Writes the stand-in for `mode` into `dir` and answers its path. The script is written whole
@@ -22,11 +24,11 @@ defmodule CodingAgentFramework.ClaudeStandIn do
   be running the path at that moment, and a script rewritten in place is empty in between, so
   that start ran nothing and exited at once (F-39).
   """
-  def write!(dir, mode) when mode in [:at_start, :on_go, :never] do
+  def write!(dir, mode, idle \\ stand_in_idle()) when mode in [:at_start, :on_go, :never] do
     path = Path.join(dir, "claude-#{mode}")
     File.mkdir_p!(Path.join(dir, "pids"))
     tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
-    File.write!(tmp, script(Path.join(dir, "pids"), mode))
+    File.write!(tmp, script(Path.join(dir, "pids"), mode, idle))
     File.chmod!(tmp, 0o755)
     File.rename!(tmp, path)
     path
@@ -41,7 +43,7 @@ defmodule CodingAgentFramework.ClaudeStandIn do
     end
   end
 
-  defp script(pids, mode) do
+  defp script(pids, mode, idle) do
     ~s"""
     #!#{program!(:bash)}
     name='' resume=''
@@ -53,7 +55,7 @@ defmodule CodingAgentFramework.ClaudeStandIn do
         *) shift ;;
       esac
     done
-    : > "#{pids}/$$"
+    : 2>/dev/null > "#{pids}/$$" || exit 0
     file="$CLAUDE_CONFIG_DIR/sessions/$$.json"
     announce() {
       start=$(LC_ALL=C TZ=UTC #{program!(:ps)} -o lstart= -p $$)
@@ -66,7 +68,7 @@ defmodule CodingAgentFramework.ClaudeStandIn do
     trap '#{program!(:rm)} -f "$file"' EXIT
     mode=#{mode}
     [ $mode = at_start ] && announce
-    while IFS= read -r line; do
+    while IFS= read -r -t #{idle} line; do
       printf 'got: %s\\n' "$line"
       case $line in
         /exit) exit 0 ;;
