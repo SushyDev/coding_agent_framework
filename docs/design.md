@@ -758,6 +758,8 @@ used and when it resets). It reads no credential and calls no API.
 - Never kill by pattern. Kill only processes you started, by pid.
 - `git stash` is shared by every worktree of a repository, so delegates never use it.
 - `git worktree add -b` at a taken path fails but leaves the new branch behind.
+- A repository's hook can make `git worktree add` exit non-zero with the worktree added: read
+  the worktree list for what an add did, never its exit status or the branch's existence.
 
 **State for views**
 - One malformed row (a nil timestamp) once crashed the tracker at every boot and took every
