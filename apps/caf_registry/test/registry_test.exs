@@ -173,6 +173,13 @@ defmodule CodingAgentFramework.RegistryTest do
       end
     end
 
+    # Its 15 runs read 3 times each, and a read runs one `ps` through `Shell`. The test took 5 to
+    # 6.5 s on a quiet machine, and 11 to 95 s in 30 runs beside other tests (load average 16 to
+    # 80), five of them past ExUnit's 60 s. Nearly all of it is those 45 reads (11 s of 11.6 s in
+    # one run; the generated files take 0.15 s and the table reads 0.02 s), so a smaller generator
+    # would save nothing and fewer runs would check less. The bound is raised to 5 minutes, three
+    # times the longest run.
+    @tag timeout: 300_000
     property "reads count and name every file, and each cue names only ids it wrote" do
       check all(
               gens <-

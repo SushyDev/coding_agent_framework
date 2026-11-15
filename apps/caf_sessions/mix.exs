@@ -14,6 +14,8 @@ defmodule CafSessions.MixProject do
     ]
   end
 
+  def application, do: [extra_applications: [:logger]]
+
   # The setup its tests share with tests in apps above it compiles only for tests.
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_), do: ["lib"]

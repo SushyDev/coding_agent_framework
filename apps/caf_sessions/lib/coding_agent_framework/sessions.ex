@@ -95,7 +95,10 @@ defmodule CodingAgentFramework.Sessions do
     `exited` once its process is gone by pid and start time and its socket is dead, so its
     name can be resumed. A pid another program took counts as gone.
 
-  A read that fails decides nothing; the row waits for the next read. A name whose row is
+  A read that fails decides nothing; the row waits for the next read. A settle of a `running`
+  row that decides nothing for that reason (the `ps` or the socket read failed, or the socket
+  lives although the process is gone) says so in one `Logger.debug` line naming the row and
+  what it saw, so a row that stays `running` shows why. A name whose row is
   `unknown`, `orphan`, `starting` or `stopping` is refused to a new start: its process may live.
 
   After each write it calls `notify` with `%{topic: "sessions:<host>:<account>", ids: [id]}`, a
@@ -103,6 +106,8 @@ defmodule CodingAgentFramework.Sessions do
   """
 
   use GenServer
+
+  require Logger
 
   alias CodingAgentFramework.{ClaudeCLI, Control, Holder, Programs, Registry, Shell, Stream}
   alias CodingAgentFramework.Transcripts
@@ -592,22 +597,41 @@ defmodule CodingAgentFramework.Sessions do
   # exited, once that process is gone by pid and start time and its socket is read as dead; a
   # pid another program took counts as gone. One ps for every row, and a socket read only for
   # a row whose process is gone. A read that fails, or a socket dtach has not removed yet,
-  # decides nothing: the sampler's cue when the socket goes reads again.
+  # decides nothing: the sampler's cue when the socket goes reads again. A row it decides
+  # nothing for, because a read failed or the socket lives, is said once in a debug line, so a
+  # test (or a person) reads why a row stayed running.
   defp settle_running(state, rows) do
-    rows = Enum.filter(rows, &(is_integer(&1.pid) and is_binary(&1.proc_start)))
+    {rows, unnamed} = Enum.split_with(rows, &(is_integer(&1.pid) and is_binary(&1.proc_start)))
+    Enum.each(unnamed, &undecided(&1, "the row has no pid and start time"))
     alive = alive(state, rows)
 
-    for row <- rows,
-        alive[{row.pid, row.proc_start}] in [:gone, :replaced],
-        dead?(state, row),
-        do: write(state, row, status: "stopped", reason: "exited")
+    for row <- rows do
+      case alive[{row.pid, row.proc_start}] do
+        gone when gone in [:gone, :replaced] ->
+          socket = Holder.state(state.holder, row.socket)
+
+          if dead?(socket),
+            do: write(state, row, status: "stopped", reason: "exited"),
+            else: undecided(row, "process #{gone}, socket #{inspect(socket)}")
+
+        :live ->
+          :ok
+
+        other ->
+          undecided(row, "process #{inspect(other)}")
+      end
+    end
 
     :ok
   end
 
+  defp undecided(row, why),
+    do: Logger.debug("sessions: settle of running #{row.name} decided nothing: #{why}")
+
   # A socket read as dead: absent, or stale once dtach was killed. A read that fails is not.
-  defp dead?(state, row),
-    do: match?({:ok, dead} when dead in [:absent, :stale], Holder.state(state.holder, row.socket))
+  defp dead?(state, row), do: dead?(Holder.state(state.holder, row.socket))
+  defp dead?({:ok, dead}) when dead in [:absent, :stale], do: true
+  defp dead?(_), do: false
 
   # A process that runs on a dead socket, with the pid and start time of the file that names
   # it, for Recoveries; a delegate's has none (`unheld/3`).
