@@ -252,4 +252,75 @@ defmodule CodingAgentFramework.JobsTest do
     assert {:ok, %{state: "exited", code: 4, late: "told"}} = Jobs.settle(jobs, "jr")
     no_second(jobs)
   end
+
+  # A restart ends the fetch's call before it removes its temporary folder; the stand-in for
+  # that is the folder left under the worktree of a row whose job had ended.
+  test "JobSettles: a restart leaves no fetch folder under a row's worktree, and no other", c do
+    assert {:ok, %{exit: 0}} = run(c, "jw", "test", ~w(exit 0))
+    stop_supervised!(Jobs)
+
+    other = Path.join(c.dir, "other-wt")
+    inside = [".caf-fetch-12345/part", ".caf-fetch-7/d/x"]
+    keep = [".caf-fetch-x/y", "sub/.caf-fetch-3/z", "caf-fetch-4/z", "a.txt"]
+
+    for f <- inside ++ keep, do: write_whole_in(c.wt, f)
+    write_whole_in(other, ".caf-fetch-9/z")
+
+    jobs = start_supervised!({Jobs, c.opts})
+    :sys.get_state(jobs)
+
+    assert Path.wildcard(Path.join(c.wt, ".caf-fetch-[0-9]*"), match_dot: true) == []
+    for f <- keep, do: assert(File.exists?(Path.join(c.wt, f)))
+    assert File.exists?(Path.join(other, ".caf-fetch-9/z"))
+  end
+
+  test "JobSettles: a row left asked is handed on once as interrupted, across two restarts", c do
+    stop_supervised!(Jobs)
+    {:ok, db} = Jobs.Table.open(Path.join(c.opts[:dir], "jobs.db"))
+
+    :ok =
+      Jobs.Table.put(db, %{
+        id: "ja",
+        host: "test",
+        project: "p",
+        name: "w",
+        state: "asked",
+        worktree: c.wt
+      })
+
+    jobs = start_supervised!({Jobs, c.opts})
+    assert {:ok, %{job: "ja", end: {:refused, :interrupted}, fetch: :not_fetched}} = late(jobs)
+    assert %{state: "interrupted", late: "told"} = Enum.find(Jobs.rows(jobs), &(&1.id == "ja"))
+    assert File.ls!(Path.join(c.dir, "pids")) == []
+    no_second(jobs)
+
+    stop_supervised!(Jobs)
+    jobs = start_supervised!({Jobs, c.opts})
+    no_second(jobs)
+    assert %{state: "interrupted", late: "told"} = Enum.find(Jobs.rows(jobs), &(&1.id == "ja"))
+  end
+
+  test "JobSettles: a file made before the worktree column gains it on open", c do
+    path = Path.join(c.dir, "old.db")
+    {:ok, db} = Exqlite.Sqlite3.open(path)
+
+    :ok =
+      Exqlite.Sqlite3.execute(db, """
+      CREATE TABLE jobs (id TEXT PRIMARY KEY, host TEXT NOT NULL, project TEXT NOT NULL,
+        name TEXT NOT NULL, state TEXT NOT NULL, code INTEGER, start_until INTEGER,
+        deadline INTEGER, late TEXT);
+      INSERT INTO jobs (id, host, project, name, state) VALUES ('jo', 'h', 'p', 'n', 'exited');
+      """)
+
+    Exqlite.Sqlite3.close(db)
+    {:ok, db} = Jobs.Table.open(path)
+    assert %{id: "jo", worktree: nil} = Jobs.Table.get(db, "jo")
+    assert {:ok, _} = Jobs.Table.open(path)
+  end
+
+  defp write_whole_in(root, file) do
+    path = Path.join(root, file)
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, "x")
+  end
 end
