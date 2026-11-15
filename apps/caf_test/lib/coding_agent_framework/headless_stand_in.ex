@@ -42,10 +42,15 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     end
   end
 
-  @doc "Ends every stand-in started from `dir`, by the pid each recorded."
+  @doc """
+  Ends every stand-in started from `dir`, by the pid each recorded. A test that started none has
+  no `pids` directory, and nothing to end.
+  """
   def kill_all(dir) do
-    for pid <- File.ls!(Path.join(dir, "pids")), do: kill(pid)
-    :ok
+    case File.ls(Path.join(dir, "pids")) do
+      {:ok, pids} -> Enum.each(pids, &kill/1)
+      {:error, :enoent} -> :ok
+    end
   end
 
   defp script(dir, mode) do
