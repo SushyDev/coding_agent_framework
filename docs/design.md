@@ -231,7 +231,12 @@ failed (dtach finding no pty) from a program that exited at once. After a restar
 when gone, running otherwise. A stop whose deadline passes with its process alive leaves the row
 stopping, with its deadline, and a restart does not set it back to running. `Recoveries` ends an
 orphan's process, or one that did not exit after `/exit` within its stop's deadline, and only by
-the row's pid and start time; `Sessions` itself never kills. A row whose start answered unknown
+the row's pid and start time; `Sessions` itself never kills. A running row with no call under
+way whose process exited by itself (a crash, or a kill) is settled stopped, with reason
+`exited`, once its process is gone by pid and start time and its socket is read as dead, so a
+delegate killed before its last reply can be resumed; a pid another program took does not keep
+it running, and a read that fails decides nothing. `Sessions` takes that step at each settle a
+`Registry` or `Stream` cue starts, as it does for the other rows. A row whose start answered unknown
 is read again at each `Registry` read until it is running or gone. A name whose row is unknown,
 orphan, starting or stopping is not free for a new start: its process may live. A start is confirmed by the session file's `name`, which
 `--name` sets; a check against each pinned Claude Code release confirms it, with the Remote
@@ -552,7 +557,8 @@ Specs live in `model/tla/`, checked with TLC:
 Five specs, in this order, and beside them `Start.tla`: every session's start and resume, the
 row written first, the worktree and its setup, the held process, the session file that may come
 late, and the adoption after a restart (no held process without a row; a row ends at most once;
-a process is ended only by its own pid and start time; every starting row settles; a busy
+a process is ended only by its own pid and start time; every starting row settles, and so does
+a running row whose process is gone; a busy
 worktree is never reused or removed, a removed one was clean, and a process runs only in a
 worktree on its branch whose setup finished).
 

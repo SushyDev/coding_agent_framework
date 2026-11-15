@@ -80,7 +80,10 @@ defmodule CodingAgentFramework.Sessions do
     live socket and `refused{interrupted}` for a dead one;
   - `unknown`: `running` when confirmed, `stopped` when its socket is dead;
   - `stopping`: `stopped` when its process is gone by pid and start time; when it lives,
-    `running` after a restart, but a late stop (`no_exit`) stays for `Recoveries`.
+    `running` after a restart, but a late stop (`no_exit`) stays for `Recoveries`;
+  - `running` (its process exited by itself, a crash or a kill): `stopped` with reason
+    `exited` once its process is gone by pid and start time and its socket is dead, so its
+    name can be resumed. A pid another program took counts as gone.
 
   A read that fails decides nothing; the row waits for the next read. A name whose row is
   `unknown`, `orphan`, `starting` or `stopping` is refused to a new start: its process may live.
@@ -489,12 +492,17 @@ defmodule CodingAgentFramework.Sessions do
   # way. `read?` reads the Registry or Stream first; on a reader's cue its rows are fresh.
   defp settle(state, which, read?) do
     for status <- ~w(starting unknown stopping),
-        row <- Table.with_status(state.db, state.host.name, status),
-        which in [:all, {:account, row.account}] or (which == :delegates and delegate?(row)),
-        not Map.has_key?(state.pending, row.name),
+        row <- settling(state, which, status),
         do: settle_row(state, row, read?)
 
-    :ok
+    settle_running(state, settling(state, which, "running"))
+  end
+
+  defp settling(state, which, status) do
+    for row <- Table.with_status(state.db, state.host.name, status),
+        which in [:all, {:account, row.account}] or (which == :delegates and delegate?(row)),
+        not Map.has_key?(state.pending, row.name),
+        do: row
   end
 
   defp delegate?(row), do: row.role == "delegate"
@@ -540,6 +548,24 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
+  # RunningSettled: a running row whose process exited by itself is stopped, with reason
+  # exited, once that process is gone by pid and start time and its socket is read as dead; a
+  # pid another program took counts as gone. One ps for every row, and a socket read only for
+  # a row whose process is gone. A read that fails, or a socket dtach has not removed yet,
+  # decides nothing: the next cue reads again.
+  defp settle_running(state, rows) do
+    rows = Enum.filter(rows, &(is_integer(&1.pid) and is_binary(&1.proc_start)))
+    alive = alive(state, rows)
+
+    for row <- rows,
+        alive[{row.pid, row.proc_start}] in [:gone, :replaced],
+        {:ok, dead} <- [Holder.state(state.holder, row.socket)],
+        dead in [:absent, :stale],
+        do: write(state, row, status: "stopped", reason: "exited")
+
+    :ok
+  end
+
   # Confirms a delegate: Stream has read the init naming its session id, and so the wrapper had
   # recorded its pid before; that pid lives with the start time ps gives, and the socket is
   # live after that ps, so the pid was not reused in between.
@@ -581,10 +607,11 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   # A pid that `ps` lists with another start time was reused: the held process exited.
-  defp liveness(state, row) do
-    proc = {row.pid, row.proc_start}
+  defp liveness(state, row), do: alive(state, [row])[{row.pid, row.proc_start}]
+
+  defp alive(state, rows) do
     opts = [env: state.ps.env, ps: state.ps.ps, timeout: 5_000]
-    Liveness.check(state.host, [proc], opts)[proc]
+    Liveness.check(state.host, Enum.map(rows, &{&1.pid, &1.proc_start}), opts)
   end
 
   defp running(state, row, file) do

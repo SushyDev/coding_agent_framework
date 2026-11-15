@@ -168,6 +168,12 @@ steps. Read it in the order of a start:
   start time. `StopTimedOut` leaves the row `"stopping"` and marks it `late`; a late row is not
   set back to running after a restart, and only it may be killed (`Kill`, `Recoveries`' step).
   `ForeignStarts` is another program taking a freed pid, which is why the start time counts.
+- `ProcExits` is a process ending by itself, at any step. `RunningSettled` (F-61) then takes a
+  `"running"` row with no call under way to `"stopped"` (the row's reason is `exited`) once its
+  process is gone by pid and start time and its socket is dead, so the name can be resumed.
+  `RunningSettles` says it always does; under `SettleRunningByPid` a pid another program took
+  keeps the row running. Here a socket ends with its process, so the socket's half of the check
+  cannot fail on its own: it is defense in depth, named in the header.
 
 With `Worktrees` (F-55), a start runs in a worktree, and three steps come between the row and
 the hold:

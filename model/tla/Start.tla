@@ -6,12 +6,15 @@
 (* viewer, the session file Claude Code writes (perhaps late), the start   *)
 (* confirmed or unknown at its deadline, and after a restart the adoption  *)
 (* of a starting row (with the removal of its worktree), the settling of a *)
-(* stopping row and the reading again of an unknown one.                   *)
+(* stopping row and the reading again of an unknown one, and at any time   *)
+(* the settling of a running row whose process exited by itself.           *)
 (*                                                                         *)
 (* Models these modules of CodingAgentFramework:                           *)
 (*   Sessions  its table (durable) and its calls under way (in memory):    *)
 (*             start, stop, adoption after a restart (built in F-17), and  *)
-(*             a start's worktree and setup (F-55);                        *)
+(*             a start's worktree and setup (F-55), and the settling of a  *)
+(*             running row whose process is gone as stopped, with reason   *)
+(*             exited (F-61);                                              *)
 (*   Sessions.Worktree the checks of a worktree at a start's path: absent, *)
 (*             a worktree on the start's branch, clean or not, or taken;   *)
 (*   git       `worktree list` and `status` (the checks), `worktree add`,  *)
@@ -21,6 +24,7 @@
 (*   Shell.Reaper the setup's process group, which ends with the caller,   *)
 (*             so a restart of the framework ends a setup under way;       *)
 (*   Holder    dtach -n: a socket holds one process, and refuses a second; *)
+(*             a socket read as live or dead (absent or stale);            *)
 (*   Registry  the session file, matched by the session's name, and a      *)
 (*             process's liveness by its pid and start time;               *)
 (*   Recoveries only as the owner of an orphan row and of a stop past its  *)
@@ -69,7 +73,13 @@
 (* removal's check that no other row holds the path, behind the check     *)
 (* RowWritten makes: a row holds its path from its write until it ends.    *)
 (* In the code, git's own refusal to remove a dirty worktree (no --force)  *)
-(* is defense in depth behind the clean check of Adopt.                    *)
+(* is defense in depth behind the clean check of Adopt. The socket's read  *)
+(* in RunningSettled, behind the pid and start time: here a socket ends    *)
+(* with its process, so a running row's process is gone by pid and start   *)
+(* time exactly when its socket is dead, and a Break that settles by the   *)
+(* socket alone, or by the pid and start time alone, has nothing to find.  *)
+(* In the code the socket is read too: dtach removes it just after its     *)
+(* process exits, and a resume held in between would be refused.           *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
@@ -87,20 +97,21 @@ CONSTANTS
 
 Breaks == {
     "none",
-    "DecideEarly",      \* the adoption decides before the start's deadline
-    "DropOrphan",       \* a live socket with no file past the deadline ends refused, not orphan
-    "SettleByPid",      \* a stopping row is settled by its pid alone, without its start time
-    "KillByPid",        \* a kill targets the row's pid alone, without its start time
-    "HoldFirst",        \* the process is held before its row is written
-    "NoReRead",         \* an unknown row is never read again
-    "NoHeldCheck",      \* a start takes a path another row that has not ended holds
-    "ReuseDirty",       \* a start reuses a worktree with changes in it
-    "ReuseOther",       \* a start reuses a path that is not a worktree on its branch
-    "ReuseSkipsSetup",  \* a start that reuses a worktree does not run the setup
-    "BranchAsWorktree", \* a failed add is taken as done because its branch exists
-    "RemoveDirty",      \* the removal after a restart does not check that the tree is clean
-    "RemoveOrphan",     \* the removal also takes an orphan's worktree
-    "SetupOutlives"     \* the setup runs without the reaper, so a restart leaves it running
+    "DecideEarly",        \* the adoption decides before the start's deadline
+    "DropOrphan",         \* a live socket with no file past the deadline ends refused, not orphan
+    "SettleByPid",        \* a stopping row is settled by its pid alone, without its start time
+    "SettleRunningByPid", \* a running row is settled by its pid alone, without its start time
+    "KillByPid",          \* a kill targets the row's pid alone, without its start time
+    "HoldFirst",          \* the process is held before its row is written
+    "NoReRead",           \* an unknown row is never read again
+    "NoHeldCheck",        \* a start takes a path another row that has not ended holds
+    "ReuseDirty",         \* a start reuses a worktree with changes in it
+    "ReuseOther",         \* a start reuses a path that is not a worktree on its branch
+    "ReuseSkipsSetup",    \* a start that reuses a worktree does not run the setup
+    "BranchAsWorktree",   \* a failed add is taken as done because its branch exists
+    "RemoveDirty",        \* the removal after a restart does not check that the tree is clean
+    "RemoveOrphan",       \* the removal also takes an orphan's worktree
+    "SetupOutlives"       \* the setup runs without the reaper, so a restart leaves it running
 }
 
 ASSUME Break \in Breaks
@@ -473,6 +484,20 @@ Kill(s) ==
                    onTime, ends, trees, treeGhosts>>
 
 -----------------------------------------------------------------------------
+(* A running row whose process exited by itself *)
+
+\* With no call under way: stopped (reason exited) once its process is gone by
+\* the row's pid and start time and its socket is dead, so its name can be
+\* resumed. A pid another program took does not keep the row running.
+RunningSettled(s) ==
+    /\ up /\ call[s] = "none" /\ row[s] = "running"
+    /\ ~IF Break = "SettleRunningByPid" THEN AliveByPid(rowProc[s]) ELSE Alive(rowProc[s])
+    /\ ~Live(s)
+    /\ SetRow(s, "stopped")
+    /\ UNCHANGED <<late, up, restarts, rowProc, starts, resume, call, past, proc, file, foreign,
+                   clock, onTime, wrongKills, trees, treeGhosts>>
+
+-----------------------------------------------------------------------------
 Next ==
     \/ FrameworkDies \/ FrameworkStarts \/ ForeignStarts
     \/ \E p \in Paths : PathTaken(p) \/ TreeChanged(p) \/ LeftSetupEnds(p)
@@ -482,6 +507,7 @@ Next ==
          \/ Held(s) \/ ViewerOpened(s) \/ StartDecided(s)
          \/ Adopt(s) \/ ReRead(s)
          \/ StopAsked(s) \/ StopSettled(s) \/ StopTimedOut(s) \/ Kill(s)
+         \/ RunningSettled(s)
 
 Fairness ==
     /\ WF_vars(FrameworkStarts)
@@ -490,7 +516,7 @@ Fairness ==
          /\ WF_vars(SetupStarts(s)) /\ WF_vars(SetupEnds(s))
          /\ WF_vars(Held(s)) /\ WF_vars(ViewerOpened(s))
          /\ WF_vars(StartDecided(s)) /\ WF_vars(Adopt(s)) /\ WF_vars(ReRead(s))
-         /\ WF_vars(StopSettled(s))
+         /\ WF_vars(StopSettled(s)) /\ WF_vars(RunningSettled(s))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -556,5 +582,9 @@ StartingSettles == \A s \in S : row[s] = "starting" ~> row[s] # "starting"
 \* An unknown row whose process is running with its file, or gone, settles.
 UnknownSettles ==
     \A s \in S : row[s] = "unknown" /\ (Confirms(s) \/ ~Live(s)) ~> row[s] # "unknown"
+
+\* A running row whose process is gone, by pid and start time, settles: a
+\* delegate killed before its last reply can be resumed.
+RunningSettles == \A s \in S : row[s] = "running" /\ ~Alive(rowProc[s]) ~> row[s] # "running"
 
 =============================================================================
