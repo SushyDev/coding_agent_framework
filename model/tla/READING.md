@@ -283,7 +283,7 @@ The tree of two projects. `Projects` gives each project's agents, as a set of se
 (`{{p, d1}, {q, e1}}`), and `Mains` its main sessions, one in each; every other agent is a
 delegate. `Main(a)` is the main session of `a`'s project, so a delegate's parent. The tree's
 edges are `Edge(c, t)`: a main session to its delegates and to the other main session, a
-delegate to its main session. It has three halves that share the agents and the restarts.
+delegate to its main session. Its parts share the agents and the restarts.
 
 - Agents: `proc` is each agent's state (`"working"`, `"idle"`, `"stuck"`, `"dead"`, `"ended"`),
   and `epoch` numbers it: it moves when the agent sticks, dies, is fixed or ends, so a claim
@@ -297,6 +297,15 @@ delegate to its main session. It has three halves that share the agents and the 
   `SendingSettled` reads the transcript instead, as `Delegate.tla` settles a report.
   `EndedFirst` marks a settled row whose addressee has ended `"ended"`: it is not delivered,
   and its sender reads that in place of `"delivered"`.
+- Replies, read in the order of one message to a delegate: `DeliveryTyped` starts its turn,
+  `fold[i] = "turn"`. `fold` is `Stream`'s fold of the delegate's log, so a restart keeps it.
+  `Result(a)` ends the turn with a result that names the message (`TurnEnds`, or an interrupt
+  that helps, whose result is `error_during_execution`), `fold[i] = "result"`; a `Faults` that
+  kills the process mid-turn makes it `"exited"`. `ReplyStored(i)` is `Mailbox` storing the
+  reply to the delegate's main session; `NoticeStored(i)` stores the framework's notice for an
+  exited turn. Both need the row `"delivered"` and no answer yet for `i` in `answers`, the
+  table's key on `reply_to`. `SelfStarts(d)`, only when `SelfTurns`, is a turn the delegate
+  starts by itself: its result names no message (`OwnTurn`), so it changes no `fold` entry.
 - Claims: `ClaimTaken(c, t)` is `Grants`: `MayFix(c, t)`, the caller is the target's main
   session, and no claim yet on the target's state. It writes the row (`claims`) and starts the
   call (`calls`, in memory). A row's `n` is 2 for the caller's second call on the same state,
@@ -314,6 +323,14 @@ delegate to its main session. It has three halves that share the agents and the 
 addressee's turn ends again and again is delivered", and `EndedMarked` "a message still waiting
 when its delegate has ended settles, delivered or `"ended"`". `EndedNotDelivered` says an
 `"ended"` row is true: the message is in no transcript.
+
+`ReplyOnce` and `ReplyOrNotice` say a message is answered once, by a reply or a notice, never
+both; `ReplyToMain` that the answer goes to the delegate's main session; `ReplyNamesMessage`
+that a reply's source (`src`) is the result that names its message. `ReplyOrNoticeComes` reads
+"a message to a delegate whose turn ends, with a result or the process's end, is answered".
+`rmem` and `last` are only what the wrong readers of `ReplyInMemory` and `SelfReply` hold; the
+design leaves them empty. `SelfTurns` is off in the configurations that do not check replies:
+`Team_Replies` and `Team_RepliesTwo` check them with it on.
 
 ## `Shell.tla`
 
