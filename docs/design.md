@@ -572,8 +572,7 @@ framework's tools, which are strict in how they act and narrow in whom they reac
   not; the row keeps that state until the child's state moves, and a fix that did not help goes
   to a person. A claim a restart of the framework cut off is closed as interrupted, never
   retried.
-- No agent may stop, move or interrupt a main session. Only a person does, a move with one
-  press.
+- No agent fixes or moves a main session; only a person does, a move with one press.
 - An agent may not fix itself. A stuck agent cannot be relied on to see that it is stuck.
 - Jobs and services: a main session and its delegates may run jobs and start services on any
   host, in a copy of their own worktree (a main session's is its checkout). A service is fixed
@@ -611,13 +610,15 @@ is empty), the same rule as any write, with a report's sending mark and settle: 
 write, settled from the target's replay or transcript after a restart, never resent blind.
 Messages are kept in order per sender and addressee. A message is refused when its addressee is
 not along an edge of the sender, or is a name the framework does not hold; one to a dead agent
-is held until it is resumed or ends. A message to a delegate that has ended goes to its main
-session instead, once, and says so; it goes on only from a settled row.
+is held until it is resumed or ends. A message to a delegate that has ended is not delivered:
+its row says the delegate ended before it went in, and the sender (the delegate's main
+session, its only sender) learns that in place of `delivered`, from a settled row.
 
 **Services** belong to the agent that started them. When the owner ends, its services end too,
 unless it handed them on with `service_hand`, or started them with `keep: true`, which hands them
-to the owner's parent when the owner ends. A service has a name, a host, a copy, a held process
-and a log. It never holds a Claude Code session; agents are started as delegates.
+to the owner's parent when the owner ends. `keep` belongs to the service and stays with it when
+it is handed. A service has a name, a host, a copy, a held process and a log. A claim on a
+service holds its state as its held process (pid and start time) and its restart count. It never holds a Claude Code session; agents are started as delegates.
 
 ## Intake
 
@@ -1021,7 +1022,9 @@ Then `Delegate.tla` and `Delegates` (its start, finish and kill path are built).
 6. **`Mains`**: one main session per project, on trunk in the project's checkout (the clone it
    makes once under the framework home), the pull
    after a landing, and `start_main`.
-7. **`Team.tla`**, then `Grants`, `Mailbox` and the agent tools, by the tree's edges, with
+7. **`Team.tla`** (F-69; its message to an ended delegate becomes an answer to the sender, as
+   "Agents working together" now says, before `Mailbox` is built), then `Grants`, `Mailbox` and
+   the agent tools, by the tree's edges, with
    `agents()` read from the `Tracker`.
 8. **`Copy.tla`** (F-70), then its second part: the fetch's check against edits made during the
    job, the host-side lock of a sync, and the wrapper's end of a job's group (F-70's new-2,
