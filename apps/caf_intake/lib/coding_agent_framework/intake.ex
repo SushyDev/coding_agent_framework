@@ -5,7 +5,7 @@ defmodule CodingAgentFramework.Intake do
   `model/tla/Intake.tla` models it, and comments name the spec's actions where the code does
   them.
 
-  The library starts no process. The host app starts one `Intake` per instance and serves
+  The library starts no process. The embedding app starts one `Intake` per instance and serves
   `CodingAgentFramework.Intake.Plug` on 127.0.0.1 with a server of its choice, such as Bandit:
 
       children = [
@@ -40,7 +40,7 @@ defmodule CodingAgentFramework.Intake do
   @doc """
   Starts an `Intake`. Options: `db:` (this instance's SQLite path), `host:` (the node's host
   name), and optionally `notify:` (a function of one cue), `deadline:` (ms a hold is kept) and
-  `name:` (for the host app's tree; the library looks up no name).
+  `name:` (for the embedding app's tree; the library looks up no name).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))

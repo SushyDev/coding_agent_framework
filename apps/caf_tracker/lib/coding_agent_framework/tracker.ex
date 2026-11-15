@@ -7,7 +7,7 @@ defmodule CodingAgentFramework.Tracker do
   `{Tracker.RegistrySource, db: path, host: "laptop", account: "work"}`. At start it reads
   every source in full, so a restarted `Tracker` comes back from the tables alone.
 
-  A reader's cue (`cue/2`, which a host app wires to the reader's `notify:`) names a topic and
+  A reader's cue (`cue/2`, which an embedding app wires to the reader's `notify:`) names a topic and
   row ids; the `Tracker` re-reads those rows from the table by id. A cue is never the data, so
   cues may come late, twice, out of order or before their rows. A cue for a source still
   `:unread`, or one with no list of ids, re-reads the whole topic; a cue for an unknown topic,

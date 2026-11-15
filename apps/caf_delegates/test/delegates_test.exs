@@ -240,7 +240,7 @@ defmodule CodingAgentFramework.DelegatesTest do
 
   # Ends the delegate's current process by the pid its stand-in recorded (one not in `killed`),
   # waits until dtach has removed its socket and Stream has read the exit, and lets Delegates
-  # see it as the host app would: Stream's cue comes. Answers the pids killed so far.
+  # see it as the embedding app would: Stream's cue comes. Answers the pids killed so far.
   defp kill_delegate(ctx, id, killed) do
     pids = Path.join(ctx.dir, "pids")
     {:ok, pid} = await(fn -> ok(List.first(File.ls!(pids) -- killed)) end)
@@ -252,7 +252,7 @@ defmodule CodingAgentFramework.DelegatesTest do
     [pid | killed]
   end
 
-  # Cues Sessions, then Delegates, as the host app's wiring would, until the delegate's row has
+  # Cues Sessions, then Delegates, as the embedding app's wiring would, until the delegate's row has
   # counted its resume and runs again. Sessions' row says stopped only until the resume starts,
   # so the test waits on Delegates' row, not on that. One cue of Sessions may settle nothing
   # (F-61 new-3; this unit's new-5), so each poll cues again; a read of each after its cue

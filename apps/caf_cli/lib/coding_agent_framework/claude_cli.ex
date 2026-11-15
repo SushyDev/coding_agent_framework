@@ -9,8 +9,8 @@ defmodule CodingAgentFramework.ClaudeCLI do
   - `--model <model>` and `--name <name>`;
   - `--settings <file>` (the role's settings file) and `--mcp-config <file>` with
     `--strict-mcp-config`, the files `CodingAgentFramework.Accounts.prepare/3` wrote;
-  - `--remote-control <name>` for a parent only. A delegate's settings file sets
-    `remoteControlAtStartup` to false, since no flag turns Remote Control off;
+  - `--remote-control <name>` for a main session (role `:parent`) only. A delegate's settings
+    file sets `remoteControlAtStartup` to false, since no flag turns Remote Control off;
   - `--resume <id>` when given;
   - `--` and the first prompt last, so a prompt that starts with `-` is not read as a flag and
     no flag that takes an optional or repeated value (`--remote-control`, `--mcp-config`)

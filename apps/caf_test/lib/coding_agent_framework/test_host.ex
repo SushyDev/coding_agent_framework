@@ -145,7 +145,7 @@ defmodule CodingAgentFramework.TestHost do
 
   @doc """
   Like `await/2` for a part that settles only at a cue. Each poll first calls `cue` (which sends
-  the cue the way the host app wires it), then waits until `server` has handled it, then calls
+  the cue the way the embedding app wires it), then waits until `server` has handled it, then calls
   `check`. A real host's sampler cues at each read, so a settle that decided nothing at one cue
   (a read that failed under load) is taken again at the next; one cue sent once and then waited
   on for the whole `timeout` is not what a host does. The wait on `server` ends at the same

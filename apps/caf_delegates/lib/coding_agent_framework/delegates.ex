@@ -38,7 +38,7 @@ defmodule CodingAgentFramework.Delegates do
 
   Each report is `held` in the table, with a mark of its own, and survives restarts.
 
-  It reads every row again when it starts and at each `cue/2`; the host app wires the cues of
+  It reads every row again when it starts and at each `cue/2`; the embedding app wires the cues of
   `Sessions`, `Stream` and `Transcripts` to it. After each write `notify` gets `%{topic:
   "delegates:<host>", ids: [id]}`.
   """
@@ -65,8 +65,8 @@ defmodule CodingAgentFramework.Delegates do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc """
-  Starts a delegate of `parent` (the parent session's name, which the caller states until
-  `Parents` exists) on `branch` of `project`, with `model`, and writes `brief` as its first
+  Starts a delegate of `parent` (the main session's name, which the caller states until
+  `Mains` exists) on `branch` of `project`, with `model`, and writes `brief` as its first
   message. Answers `{:ok, %{id, name, session_id, account, brief}}`, `brief` being `Stream`'s
   answer to that write; `{:refused, reason}`; or `{:unknown, reason}`, when its row stays
   `starting` for a later read to settle. Option `:timeout`: what the caller waits (default

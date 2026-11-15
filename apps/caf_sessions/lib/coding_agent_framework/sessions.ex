@@ -197,7 +197,7 @@ defmodule CodingAgentFramework.Sessions do
   @doc """
   Hands `Sessions` a `Registry`'s cue (`%{topic: "registry:<host>:<account>", ids: ids}`): the
   rows of that account with no call under way are read again from the `Registry`'s rows. The
-  host app wires the `Registry`'s `notify` here, for example through PubSub. A `Stream`'s cue
+  embedding app wires the `Registry`'s `notify` here, for example through PubSub. A `Stream`'s cue
   (`stream:<host>`) does the same for the host's delegates, and a `TmuxSampler`'s
   (`tmux:<host>:<server>`, sent when its rows change, as when a held socket goes away) for every
   row of the host, so a settle that met a socket dtach had not removed yet is taken again. Answers

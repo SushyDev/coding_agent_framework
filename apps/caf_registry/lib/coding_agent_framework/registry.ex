@@ -30,7 +30,7 @@ defmodule CodingAgentFramework.Registry do
 
   After a write that changed rows, or the first read, it calls `notify` with a cue that names
   the topic and the row ids, never the data: `%{topic: "registry:<host>:<account>", ids: ids}`.
-  The cue is a plain function so the library needs no PubSub; a host app passes, for example,
+  The cue is a plain function so the library needs no PubSub; an embedding app passes, for example,
   `&Phoenix.PubSub.broadcast(MyApp.PubSub, &1.topic, &1)`. It must not raise.
   """
 
