@@ -103,9 +103,13 @@ in
     exit $failed
   '';
 
-  # The four gates, each alone; `devenv test` runs them all.
+  # The five gates, each alone; `devenv test` runs them all.
   scripts.gate-format.exec = "mix format --check-formatted";
   scripts.gate-compile.exec = "mix compile --warnings-as-errors";
+  # Each app declares directly every umbrella app it uses, and uses each one it declares. Elixir
+  # only checks that a module is somewhere in an app's dependency tree. The task lives in
+  # caf_test, which compiles only for tests.
+  scripts.gate-deps.exec = "MIX_ENV=test mix caf.deps";
   # The model test runs TLC; gate-model runs it on its own, so it is left out here.
   scripts.gate-test.exec = "mix test --exclude model";
   scripts.gate-model.exec = ''"$CAF_BASH" "$DEVENV_ROOT/bin/check-model" all'';
@@ -114,6 +118,7 @@ in
     check-versions
     gate-format
     gate-compile
+    gate-deps
     gate-test
     gate-model
   '';
