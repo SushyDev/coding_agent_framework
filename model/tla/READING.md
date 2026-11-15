@@ -192,37 +192,43 @@ It has three actors: Claude Code, the claim commands on disk, and the framework.
   `result`. `RequestOpens` asks a permission during a turn; `TakeAnswer` settles it and replays
   the answer, and `DropAnswer` drops an answer to a request no longer pending. `Malformed` is a
   cut line followed by another: the session ends. `Exit` ends it from outside, and a line it was
-  writing stays `Cut`.
+  writing stays cut at the log's end (`cutEnd`): the next event written joins it.
 - A message's write: `Mark` writes the row `"writing"` once the turn has ended (`idle`, set by
-  a handled `result`). `Claim` spools the line and starts its claim command (`spool` is
-  `"claimed"`: the spool file is gone). `CatWrites` is that command writing the whole line; a
-  restart does not stop it. `WriteBegins` and `WriteEnds` are the framework writing a line
-  itself, under `WriteInFramework` only.
+  a handled `result`), every earlier message is delivered and no end is marked. `Claim` spools
+  the line and starts its claim command (`spool` is `"claimed"`: the spool file is gone), which
+  names the FIFO of the row's resume count (`cfifo`). `WriteBegins` and `WriteEnds` are the
+  framework writing a line itself, under `WriteInFramework` only.
+- Lines are `<<message, gen>>`. A claim command writes a message line in two parts
+  (`CatBegins`, `CatEnds`); a line put between them mixes with it. It writes only while the
+  process that reads its FIFO lives (`Reads`): process `n` reads `in.<n-1>`. One left waiting at
+  an exit never reaches the next process, and `ClaimTimesOut`.
 - `Read` handles the next whole event and saves `offset` in one step; the two Offset Breaks
   split it, with `ReadFinished` as the second half. `Handle` says what each event writes:
   a replay delivers its message, a `result` sets `idle`, a request is held, an answer's replay
-  answers it, a cancel cancels it.
+  answers it, a cancel cancels it, a `"cut"` line writes nothing.
 - `AnswerAsked(a, h)` is an answer meant for request `a` taking hold `h`; the design needs
   `h = a`. `AnswerClaimed` writes the answer's line, which fits the pipe's atomic size.
-- `ExitSeen` is the framework finding the pid gone, once its own claims ended. With the log read
-  to its end, a message still `"writing"` is settled by the transcript (`heard`, the uuids
-  Claude Code took), and a held request is lost. It needs `seen`: a read, or a write's check,
-  found the current process live.
-- A resume (F-51): `FollowAgain` clears `gone` and `seen` and sets `idle`, and keeps the offset,
-  the messages and the requests; `ProcStarts` is Sessions starting the resumed process on the
-  same FIFO and log. A message found undelivered is marked again first, as a new line `<<m, 2>>`
-  under the same uuid (`gen`, `UuidOf`). `DropMsg` is Claude Code acknowledging a user line whose
-  uuid `heard` holds: its replay, and no turn.
-- Lines are `<<message, gen>>`. A claim command writes a message line in two parts
-  (`CatBegins`, `CatEnds`); a line put between them mixes with it. It writes only while a process
-  reads the FIFO; one left waiting at an exit goes into the next process, or `ClaimTimesOut`.
-- The end: `EndMarked` once the turn ended, the report is delivered (`ReportDelivered`, the
-  parent's part) and no message is under way; `EndClaimed` writes it; `TakeEnd` ends the process.
+- `seen` says the framework knows the current process was started: `HeldTold` is Sessions
+  telling Stream once it held the process (`telling` is Sessions' memory of that), `LiveSeen` a
+  read finding the socket live, and `Mark` a write's check. `ExitSeen` is the framework finding
+  the pid gone, once its own claims ended; it needs `seen`. With the log read to its end, a
+  message still `"writing"` is settled by the transcript (`heard`, the uuids Claude Code took),
+  and a held request is lost.
+- A resume (F-51): `FollowAgain` clears `gone` and `seen`, sets `idle`, makes the next FIFO
+  (`resumes`) and ends a cut last line with a newline, as one `"cut"` line in `log`; it keeps the
+  offset, the messages and the requests. `ProcStarts` is Sessions starting the resumed process
+  on the new FIFO and the same log. A message found undelivered is marked again first, as a new
+  line `<<m, 2>>` under the same uuid (`gen`, `UuidOf`). `DropMsg` is Claude Code acknowledging
+  a user line whose uuid `heard` holds: its replay, and no turn.
+- The end: `EndMarked` once the report is delivered (`ReportDelivered`, the parent's part, which
+  Sessions checks), the turn ended and no message is under way or found undelivered;
+  `EndClaimed` writes it; `TakeEnd` ends the process.
 
-`mine`, `begun`, `wmem` and `reading` are memory, cleared by `FrameworkDies`; the tables and the
-disk stay. `handled`, `written`, `awritten`, `partialRead`, `malformed`, `intoRunning`, `wrong`,
-`endCut` and `endEarly` are ghosts for the invariants. `Unseen` names a process that exited
-before any read saw it live, whose exit is never seen (F-51, new-3).
+`mine`, `begun`, `wmem`, `reading` and `telling` are memory, cleared by `FrameworkDies`; the
+tables and the disk stay. `handled`, `written`, `awritten`, `partialRead`, `malformed`,
+`intoRunning`, `wrong`, `endCut`, `endEarly`, `endLost` and `joined` are ghosts for the
+invariants. `Unseen` names a process whose tell a restart cut and that exited before any read
+saw it live: its exit is never seen (F-51, new-3).
 
 ## `Team.tla`
 

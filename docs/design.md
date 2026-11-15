@@ -228,15 +228,16 @@ sources in `docs/build-notes/F-31.md`). `Stream.tla` models this section. This r
 reading for delegates:
 
 - **Held, apart from the framework.** Each delegate has a directory
-  `<home>/streams/<session id>/` with a FIFO `in`, made with `mkfifo` before the start. It is
-  named by the session id, which a resume keeps and a new start does not, so a new start of a
-  name that ended never reads the old log. dtach holds
-  this wrapper, run by `sh` in the clean environment, with the directory and the command:
+  `<home>/streams/<session id>/`. It is named by the session id, which a resume keeps and a new
+  start does not, so a new start of a name that ended never reads the old log. Each process has
+  its own FIFO `in.<n>`, with `n` the row's resume count, made with `mkfifo` by the follow
+  before the process starts; an old one stays, unread. dtach holds this wrapper, run by `sh` in
+  the clean environment, with the directory, the FIFO and the command:
 
   ```sh
-  d=$1; shift
+  d=$1 f=$2; shift 2
   printf '%s\n' "$$" > "$d/pid"
-  exec 3<>"$d/in"
+  exec 3<>"$f"
   exec "$@" <&3 3<&- >>"$d/events.jsonl" 2>>"$d/stderr.log"
   ```
 
@@ -246,18 +247,28 @@ reading for delegates:
   not a session file, gives a delegate's pid: nothing shows that `-p` writes one, and a headless
   session has no `--name` to match. `Sessions` reads it only after `Stream` has read the
   `system`/`init` naming the session id, takes its start time from `ps`, and checks the socket
-  again. That init, with the pid alive, confirms the start.
+  again. That init, with the pid alive, confirms the start. `Stream` sees an exit only of a
+  process it knows was started: `Sessions` tells it once it held the process, and a read or a
+  write's check that finds the socket live tells it too; without that, the socket a resume
+  has not yet replaced would read as the new process's exit.
 - **Events are read from an offset.** `Stream` reads only whole lines of `events.jsonl` (a line
   without its newline is still being written), and handles each event and saves the offset in
   one transaction, so no event is handled twice or skipped across restarts. A resume appends to
-  the same log.
+  the same log. A death can leave a last line without its newline; the follow again ends it with
+  one before the new process starts (the old one is gone, so no one else writes the log), so it
+  is one line that does not parse and the next event is whole. The follow again also sets the
+  turn ended: a process that exited during a turn ran no `result`, and the resumed one starts
+  none of its own.
 - **Writes are lines, claimed once.** A message, an answer, an interrupt or an end is one JSON
   line. Its row is marked first, then the line goes to a spool file `out/<uuid>.json`, and the
   host's one writer starts `sh -c 'exec 3<"$1" && rm "$1" && exec cat <&3 >"$2"' sh <spool>
-  <fifo>`. Removing the spool is the claim: once it is gone, the line goes in whole, by a process
-  that does not end with the framework (it runs with no reaper); while it is there, nothing of it went in, and after a
+  <fifo>`, with the FIFO of the process the write was checked live for. Removing the spool is the
+  claim: once it is gone, the line goes in whole, by a process that does not end with the
+  framework (it runs with no reaper); while it is there, nothing of it went in, and after a
   restart the writer starts it again. So a line is never written twice and never cut, whatever
-  its length. One message line is in flight per delegate at a time, and every other line is kept
+  its length. A claim names one process's FIFO, so a line waiting at that process's exit never
+  reaches the next process beside its resend (F-51's build note, new-1). One message line is in
+  flight per delegate at a time, and every other line is kept
   within the pipe's atomic size (512 bytes on macOS; a deny's message is cut to fit), so lines
   written together never mix. A line that does not parse ends the session, so each is built by
   one encoder.
@@ -270,12 +281,14 @@ reading for delegates:
   `--replay-user-messages` it comes back with that uuid and `isReplay`. Its sending mark is
   settled by the replay. When the delegate exits, a message with no replay in the log, read to
   its end, is delivered if the transcript holds its uuid and undelivered otherwise; it is never
-  written again blind. An undelivered message goes to the resumed process under its same uuid:
-  Claude Code drops a user line whose uuid its transcript holds, so a message that went in after
-  all is not run twice.
+  written again blind. Since no line of an earlier process reaches a later one, "undelivered" is
+  final. It goes to the resumed process again, first, under its same uuid, before any other
+  message. Claude Code drops a user line whose uuid its transcript holds; with a FIFO per process
+  the framework does not rely on that, and the same uuid is defense in depth.
 - **A claim needs a reader.** Opening the pipe for writing waits while no process reads it, so
   the writer starts a claim only for a live delegate, under the write's deadline, and
-  `Recoveries` ends a claim command still waiting past it, by its pid and start time. The
+  `Recoveries` ends a claim command still waiting past it, by its pid and start time. One left
+  waiting at an exit waits on a FIFO no process reads until then. The
   wrapper's pipe is made with `mkfifo`, which `Programs` names.
 - **Permissions.** A request is a `control_request` with `subtype` `can_use_tool`, its
   `request_id`, `tool_name`, `input` and `tool_use_id`. Its row is held, then answering, then
@@ -286,8 +299,12 @@ reading for delegates:
   `answer`, a cancel or the exit. A delegate's hooks are not needed for its own turns; its
   events are the log.
 - **Ending.** An `end_session` request ends the session and cuts a running turn, so it goes in
-  only after the report is delivered and the turn has ended. `Sessions` sees the exit by the
-  pid; one that does not exit within the stop's deadline is ended by `Recoveries`.
+  only after the report is delivered and the turn has ended. `Sessions` checks the report before
+  it asks for the end: against the parent's row once `Delegates` exists, and until then by the
+  caller's statement. `Stream` refuses the end while the turn runs or a message is under way or
+  found undelivered, and refuses a message once an end is marked; behind the report, its turn
+  check is defense in depth. `Sessions` sees the exit by the pid; one that does not exit within
+  the stop's deadline is ended by `Recoveries`.
 - **Rate limits.** A `rate_limit_event` carries the account's windows, among them
   `seven_day.utilization` (0 to 1) and `resetsAt`, as the status line does. `Usage` reads the
   latest one of each delegate's log as it reads a status line. The field is marked internal, so
@@ -302,7 +319,9 @@ reading for delegates:
 - **Checked against each pinned release**, with the flags: whether `-p` writes a session file
   (which could stand in for `pid`), and whether `system`/`init` comes before the first line is
   read. If the init comes only with the first turn, the start writes the brief through `Stream`
-  right after the hold, before it waits for the init.
+  right after the hold, before it waits for the init. And the drop of a user line whose uuid the
+  transcript holds, with a turn cut off at the exit: 2.1.322 may run such a line again
+  (F-51's build note, new-4). The framework does not rely on the drop.
 
 A parent stays interactive. `Screen` reads only a parent's screen: whether its input box is
 empty before a write, and its dialogs by label. Its fixtures are captured from a real session
