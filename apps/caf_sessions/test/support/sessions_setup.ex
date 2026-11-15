@@ -23,7 +23,8 @@ defmodule CodingAgentFramework.SessionsSetup do
 
   @doc """
   An ExUnit setup. Its `opts` start another `Sessions` on the same table; its cues come to the
-  test as `{:cue, cue}`. The test's `clock` is an `Agent` holding ms.
+  test as `{:cue, cue}`. The test's `clock` is an `Agent` holding ms, and `server` its tmux
+  server.
   """
   def sessions(_context) do
     dir = test_dir()
@@ -71,6 +72,7 @@ defmodule CodingAgentFramework.SessionsSetup do
     {:ok,
      dir: dir,
      account: account,
+     server: server,
      control: control,
      holder: holder,
      table: table,

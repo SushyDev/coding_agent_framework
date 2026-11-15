@@ -12,6 +12,7 @@ defmodule CodingAgentFramework.SessionsTest do
   import CodingAgentFramework.TestHost
 
   alias CodingAgentFramework.{ClaudeStandIn, Control, Holder, Registry, Sessions, SessionsSetup}
+  alias CodingAgentFramework.TmuxSampler
   alias CodingAgentFramework.Sessions.Table
 
   setup {SessionsSetup, :sessions}
@@ -93,9 +94,10 @@ defmodule CodingAgentFramework.SessionsTest do
              Sessions.start(ctx.sessions, "reused", ctx.account, launch(ctx, :at_start))
 
     Process.exit(ctx.sessions, :kill)
-    # A restart in the middle of two stops; the second row's pid now names another process.
+    # A restart in the middle of two stops; the second row's pid now names another process, and
+    # its socket has ended (F-64: a stop is done only then).
     Table.update(ctx.table, Table.get(ctx.table, "test", "kept").id, status: "stopping")
-    other = [status: "stopping", proc_start: "Thu Jan  1 00:00:00 1970"]
+    other = [status: "stopping", proc_start: "Thu Jan  1 00:00:00 1970", socket: "gone"]
     Table.update(ctx.table, Table.get(ctx.table, "test", "reused").id, other)
 
     restart(ctx, nil)
@@ -210,6 +212,132 @@ defmodule CodingAgentFramework.SessionsTest do
 
     assert %{status: "running", resume: ^id, reason: nil} =
              Table.get(ctx.table, "test", "crashed")
+  end
+
+  test "F-64: a stop is done only when its socket has ended too; the name then resumes", ctx do
+    {dir, hold, lingers} = linger(ctx, "linger")
+
+    assert {:ok, %{session_id: id}} =
+             Sessions.start(ctx.sessions, "linger", ctx.account, lingers)
+
+    stop = Task.async(fn -> Sessions.stop(ctx.sessions, "linger", :ended) end)
+
+    # The stand-in exits on /exit; its wrapper keeps the socket live, so the stop is not done
+    # by its deadline.
+    assert {:ok, _} =
+             await(fn -> if File.exists?(Path.join(dir, "exited")), do: {:ok, :exited} end)
+
+    advance(ctx)
+    assert {:unknown, {:socket_live, {:ok, :sent}}} = Task.await(stop)
+    assert %{status: "stopping", reason: "socket_live"} = Table.get(ctx.table, "test", "linger")
+    assert {:ok, :live} = Holder.state(ctx.holder, "linger")
+
+    # StopSettled: a cue while the socket lives settles nothing, one after it ended does.
+    cue(ctx, ctx.sessions)
+    :sys.get_state(ctx.sessions)
+    assert %{status: "stopping"} = Table.get(ctx.table, "test", "linger")
+    File.rm!(hold)
+    {:ok, :absent} = await(fn -> absent(Holder.state(ctx.holder, "linger")) end, 10_000)
+    cue(ctx, ctx.sessions)
+    assert {:ok, _} = row_when(ctx, "linger", &(&1.status == "stopped"))
+
+    assert {:ok, %{session_id: ^id}} =
+             Sessions.resume(ctx.sessions, "linger", ctx.account, id, launch(ctx, :at_start))
+  end
+
+  test "F-64: the sampler's cue settles a running row whose first settle met a live socket",
+       ctx do
+    {_dir, hold, lingers} = linger(ctx, "crashed")
+    assert {:ok, %{pid: pid}} = Sessions.start(ctx.sessions, "crashed", ctx.account, lingers)
+
+    # The sampler's cue reaches Sessions as the host app would wire it.
+    sampler =
+      start_supervised!(
+        {TmuxSampler,
+         server: ctx.server,
+         holder: ctx.holder,
+         db: Path.join(ctx.dir, "sampler.db"),
+         notify: &Sessions.cue(ctx.sessions, &1)}
+      )
+
+    assert {:ok, %{held: 1}} = TmuxSampler.sample(sampler)
+
+    # The test kills the stand-in by the pid it recorded; its wrapper keeps the socket live.
+    assert {:ok, %{status: 0}} = kill(pid)
+    assert {:ok, :gone} = await(fn -> if not alive?(pid), do: {:ok, :gone} end)
+    cue(ctx, ctx.sessions)
+    :sys.get_state(ctx.sessions)
+    assert %{status: "running"} = Table.get(ctx.table, "test", "crashed")
+
+    File.rm!(hold)
+    {:ok, :absent} = await(fn -> absent(Holder.state(ctx.holder, "crashed")) end, 10_000)
+    assert {:ok, %{held: 0}} = TmuxSampler.sample(sampler)
+    assert {:ok, %{reason: "exited"}} = row_when(ctx, "crashed", &(&1.status == "stopped"))
+  end
+
+  test "F-64: ReRead and Adopt make an orphan of a dead socket whose file names a live process",
+       ctx do
+    assert {:ok, %{pid: unknown}} =
+             Sessions.start(ctx.sessions, "unheld", ctx.account, launch(ctx, :at_start))
+
+    assert {:ok, %{pid: starting}} =
+             Sessions.start(ctx.sessions, "adopted", ctx.account, launch(ctx, :at_start))
+
+    # As if each dtach had been killed hard: the rows name sockets that are not there, while
+    # the session files name the live processes.
+    Process.exit(ctx.sessions, :kill)
+    lost = [socket: "gone", pid: nil, proc_start: nil]
+
+    Table.update(
+      ctx.table,
+      Table.get(ctx.table, "test", "unheld").id,
+      [status: "unknown"] ++ lost
+    )
+
+    Table.update(
+      ctx.table,
+      Table.get(ctx.table, "test", "adopted").id,
+      [status: "starting"] ++ lost
+    )
+
+    advance(ctx)
+    restart(ctx, nil)
+
+    assert {:ok, %{reason: "unheld", pid: ^unknown}} =
+             row_when(ctx, "unheld", &(&1.status == "orphan"))
+
+    assert {:ok, %{reason: "unheld", pid: ^starting}} =
+             row_when(ctx, "adopted", &(&1.status == "orphan"))
+
+    # Sessions never kills: both run on, for Recoveries.
+    assert alive?(unknown) and alive?(starting)
+  end
+
+  # A stand-in held under a wrapper that outlives it, as dtach holds a socket a moment after its
+  # process exits: when the stand-in exits, the wrapper writes `exited` and keeps the socket live
+  # while the file `hold` is there, for at most 20 s. Both record their pids, and the test's end
+  # ends them by those.
+  defp linger(ctx, name) do
+    dir = Path.join(ctx.dir, name)
+    inner = ClaudeStandIn.write!(dir, :at_start)
+    hold = Path.join(dir, "hold")
+    File.write!(hold, "")
+    path = Path.join(dir, "claude-linger")
+    tmp = "#{path}.tmp"
+
+    File.write!(tmp, """
+    #!#{program!(:sh)}
+    : > "#{dir}/pids/$$"
+    "#{inner}" "$@"
+    : > "#{dir}/exited"
+    n=0
+    while [ -e "#{hold}" ] && [ $n -lt 400 ]; do #{program!(:sleep)} 0.05; n=$((n + 1)); done
+    """)
+
+    File.chmod!(tmp, 0o755)
+    File.rename!(tmp, path)
+    on_exit(fn -> ClaudeStandIn.kill_all(dir) end)
+    {dir, hold, Keyword.put(launch(ctx, :at_start), :claude, path)}
   end
 
   defp start_task(ctx, name, launch),
