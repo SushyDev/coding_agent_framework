@@ -20,6 +20,7 @@ defmodule CafStream.MixProject do
       {:caf_holder, in_umbrella: true},
       {:caf_shell, in_umbrella: true},
       {:exqlite, "~> 0.43.0"},
+      {:caf_accounts, in_umbrella: true, only: :test},
       {:caf_cli, in_umbrella: true, only: :test},
       {:caf_test, in_umbrella: true, only: :test},
       {:stream_data, "~> 1.4", only: :test}

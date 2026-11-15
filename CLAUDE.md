@@ -39,7 +39,9 @@ recommendation.
   the VM's own temporary directory. Tests wait on announced events, never on fixed sleeps. No
   test starts the real Claude Code; a stand-in plays it.
 - **Gates** before a unit is done: `mix format --check-formatted`, `mix compile
-  --warnings-as-errors`, `mix test`, and `bin/check-model` for the fast configurations.
+  --warnings-as-errors`, `mix test`, `MIX_ENV=test mix caf.deps` (each app declares, directly,
+  every umbrella app it uses, and uses every one it declares), and `bin/check-model` for the
+  fast configurations.
 - **Never** kill a process by pattern, use `git stash`, push, or touch a tmux server, dtach socket
   or Claude config directory that is not your own test's.
 
