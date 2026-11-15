@@ -27,6 +27,11 @@ tmux, dtach, Claude Code, git, gh, TLC with its JDK, and the POSIX tools the tes
   `gate-test` leaves out the TLC test; `gate-model` runs it. `mix test` alone runs both.
 - Check the tools against the lock with `check-versions`.
 
+The code is a Mix umbrella: one OTP app per part under `apps/`, such as `caf_shell`, `caf_tmux`,
+`caf_sessions` and `caf_tracker`, with the shared test aids in `caf_test`. Each app declares only
+the apps it uses, so the layers in [docs/design.md](docs/design.md) ("The parts") hold at compile
+time. Run every command from the root; `mix test` there runs each app's tests.
+
 The shell exports each program's store path as `CAF_<NAME>`: `CAF_TMUX`, `CAF_DTACH`,
 `CAF_CLAUDE`, `CAF_GIT`, `CAF_GH`, `CAF_SH`, `CAF_BASH`, `CAF_RM`, `CAF_MV`, `CAF_ENV`,
 `CAF_KILL`, `CAF_PS`, `CAF_CAT`, `CAF_ECHO`, `CAF_TLC` and `CAF_JAVA`. Tests and

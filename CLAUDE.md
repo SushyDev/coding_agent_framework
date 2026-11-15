@@ -12,6 +12,11 @@ recommendation.
   the TLA+ tools with a JDK. Run commands with `devenv shell -- <command>`.
 - Each part is one process or one pure module with one job. A library starts no processes; the
   host app's supervision tree does.
+- The repository is a Mix umbrella with one OTP app per part under `apps/` (`caf_shell`,
+  `caf_tmux`, … `caf_tracker`), and the shared test aids in `caf_test`. A new part is a new app
+  that declares only the apps (`in_umbrella: true`) and Hex packages it uses; what only its tests
+  use is `only: :test`. The model, `bin/check-model`, devenv and `docs/` stay at the root, and
+  the gates run there across every app.
 - No global state: no named singletons and no `Application.get_env` for behavior inside the
   library. Everything is per instance, so two instances run in one app and in one test VM.
 - Every outcome is explicit and pattern-matchable: `{:ok, …}`, `{:refused, reason}`,
