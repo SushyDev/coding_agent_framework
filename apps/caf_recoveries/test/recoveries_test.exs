@@ -10,97 +10,16 @@ defmodule CodingAgentFramework.RecoveriesTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Control, Holder, Recoveries, Sessions, Tmux, TmuxSampler, Tracker}
+  import CodingAgentFramework.RecoveriesSetup
+  import CodingAgentFramework.TestHost
+
+  alias CodingAgentFramework.{Holder, Recoveries, RecoveriesSetup, Tmux, TmuxSampler}
   alias CodingAgentFramework.Recoveries.Table
-  alias CodingAgentFramework.Tmux.CLI
 
   doctest Recoveries
   doctest Table
 
-  setup do
-    dir = test_dir()
-    {:ok, server} = CLI.new(programs(), {:socket, Path.join(dir, "tmux.sock")})
-    on_exit(fn -> Tmux.kill_server(server) end)
-    File.mkdir_p!(Path.join(dir, "d"))
-    {:ok, holder} = Holder.new(programs(), Path.join(dir, "d"))
-    {:ok, control} = Control.start_link(tmux: server)
-    db = Path.join(dir, "r.db")
-    time = :counters.new(1, [:atomics])
-    :counters.put(time, 1, 1_000_000)
-
-    clock = fn ->
-      :counters.add(time, 1, 1)
-      :counters.get(time, 1)
-    end
-
-    {:ok, sampler} = TmuxSampler.start_link(server: server, holder: holder, db: db, clock: clock)
-    me = self()
-
-    opts = [
-      sampler: sampler,
-      control: control,
-      holder: holder,
-      server: server,
-      db: db,
-      size: {80, 24},
-      notify: &send(me, {:cue, &1}),
-      clock: clock
-    ]
-
-    {:ok, recoveries} = Recoveries.start_link(opts)
-
-    {:ok,
-     dir: dir,
-     db: db,
-     server: server,
-     holder: holder,
-     control: control,
-     sampler: sampler,
-     opts: opts,
-     time: time,
-     clock: clock,
-     recoveries: recoveries}
-  end
-
-  test "a killed viewer is reopened once and verified", ctx do
-    {child, _} = hold!(ctx, "alpha")
-    {:ok, viewer} = view(ctx, "alpha")
-    # A pane of another session keeps the server up when the viewer goes.
-    {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
-    assert held(ctx, "alpha").status == :viewed
-    assert {:ok, %{claimed: [], ended: []}} = Recoveries.check(ctx.recoveries)
-
-    assert {:ok, :killed} = Tmux.kill_pane(ctx.server, viewer, "alpha")
-    assert {:ok, id} = agree(ctx, "alpha")
-    assert_received {:cue, %{topic: "recoveries:test:" <> _, ids: [^id]}}
-    # The same reading again claims nothing: it was read before the open.
-    assert {:ok, %{claimed: [], ended: []}} = Recoveries.check(ctx.recoveries)
-    assert [%{status: "opened", open: "ok", pane: pane}] = rows(ctx)
-    assert pane != viewer
-
-    assert held(ctx, "alpha").status == :viewed
-    assert {:ok, %{claimed: [], ended: [^id]}} = Recoveries.check(ctx.recoveries)
-    assert {:ok, %{claimed: [], ended: []}} = Recoveries.check(ctx.recoveries)
-    assert [%{status: "recovered", key: "lost_viewer:alpha:" <> _}] = rows(ctx)
-    assert alive?(child)
-
-    # A second loss of the same agent is a new state, named from the sample where its row
-    # turned unviewed again: after the reopen.
-    assert {:ok, :killed} = Tmux.kill_pane(ctx.server, pane, "alpha")
-    assert {:ok, second} = agree(ctx, "alpha")
-    assert second != id
-    [first, %{since: since}] = rows(ctx)
-    assert since > first.opened_at
-
-    {:ok, tracker} =
-      Tracker.start_link(
-        sources: [{Tracker.RecoveriesSource, db: ctx.db, host: "test", server: key(ctx)}],
-        timer: false
-      )
-
-    {:ok, view} = Tracker.view(tracker)
-    assert %{recoveries: [_, _]} = view[{"test", "tmux:" <> key(ctx)}]
-  end
+  setup {RecoveriesSetup, :recoveries}
 
   test "a loss one sample read is not acted on", ctx do
     hold!(ctx, "alpha")
@@ -250,30 +169,7 @@ defmodule CodingAgentFramework.RecoveriesTest do
     assert rows(ctx) == []
   end
 
-  defp key(ctx), do: elem(Tmux.key(ctx.server), 1)
-
   defp move(ctx, ms), do: :counters.add(ctx.time, 1, ms)
-
-  defp rows(ctx) do
-    {:ok, db} = Table.open(ctx.db)
-    Table.rows(db, "test", key(ctx))
-  end
-
-  defp held(ctx, name) do
-    assert {:ok, _} = TmuxSampler.sample(ctx.sampler)
-    {:ok, %{rows: rows}} = TmuxSampler.rows(ctx.sampler)
-    Enum.find(rows, &(&1.key == "held:" <> name))
-  end
-
-  # Two samples read `name` lost, a check after each: the first claims nothing, the second
-  # claims one state, whose id it answers.
-  defp agree(ctx, name) do
-    assert held(ctx, name).status in [:unviewed, :no_server]
-    assert {:ok, %{claimed: []}} = Recoveries.check(ctx.recoveries)
-    assert held(ctx, name).status in [:unviewed, :no_server]
-    assert {:ok, %{claimed: [id]}} = Recoveries.check(ctx.recoveries)
-    {:ok, id}
-  end
 
   # Kills the viewer, has it reopened, and verifies it: answers the new viewer's pane.
   defp lose_and_reopen(ctx, pane) do
@@ -283,28 +179,5 @@ defmodule CodingAgentFramework.RecoveriesTest do
     assert {:ok, %{ended: [^id]}} = Recoveries.check(ctx.recoveries)
     assert %{id: ^id, status: "recovered", pane: new} = List.last(rows(ctx))
     new
-  end
-
-  defp view(ctx, name) do
-    {:ok, argv} = Holder.viewer_argv(ctx.holder, name)
-    Sessions.viewer(ctx.control, name, argv, {80, 24})
-  end
-
-  # Holds the stand-in and waits for its pids; ends it when the test ends, while its socket lives.
-  defp hold!(%{holder: h, dir: dir}, name) do
-    pids = Path.join(dir, "#{name}.pids")
-
-    script =
-      ~s(echo "$$ $PPID" > "$0.tmp" && #{program!(:mv)} "$0.tmp" "$0"; exec #{program!(:cat)})
-
-    assert {:ok, _} = Holder.hold(h, name, [program!(:sh), "-c", script, pids])
-    assert {:ok, text} = await(fn -> File.read(pids) end)
-    [child, master] = text |> String.split() |> Enum.map(&String.to_integer/1)
-
-    on_exit(fn ->
-      if Holder.state(h, name) == {:ok, :live} and alive?(master), do: kill(child)
-    end)
-
-    {child, master}
   end
 end

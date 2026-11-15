@@ -8,83 +8,13 @@ defmodule CodingAgentFramework.SessionsTest do
   """
   use ExUnit.Case, async: true
 
+  import CodingAgentFramework.SessionsSetup
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, ClaudeStandIn, Control, Holder, Registry, Sessions, Tmux}
+  alias CodingAgentFramework.{ClaudeStandIn, Control, Holder, Registry, Sessions, SessionsSetup}
   alias CodingAgentFramework.Sessions.Table
-  alias CodingAgentFramework.Tmux.CLI
-  alias CodingAgentFramework.Tracker.SessionsSource
 
-  setup do
-    dir = test_dir()
-    {:ok, server} = CLI.new(programs(), {:socket, Path.join(dir, "tmux.sock")})
-    on_exit(fn -> Tmux.kill_server(server) end)
-    control = start_supervised!({Control, tmux: server})
-
-    {:ok, accounts} = Accounts.new(Path.join(dir, "home"), ["work"])
-    {:ok, account} = Accounts.prepare(accounts, "work", %{})
-    File.mkdir_p!(Path.join(account.config_dir, "sessions"))
-    db = Path.join(dir, "caf.db")
-
-    registry =
-      start_supervised!(
-        {Registry, programs: programs(), account: "work", config_dir: account.config_dir, db: db}
-      )
-
-    dtach = Path.join(dir, "d")
-    File.mkdir_p!(dtach)
-    {:ok, holder} = Holder.new(programs(), dtach)
-    me = self()
-    clock = start_supervised!({Agent, fn -> System.os_time(:millisecond) end})
-
-    opts = [
-      programs: programs(),
-      dir: dtach,
-      control: control,
-      registries: %{"work" => registry},
-      db: db,
-      notify: &send(me, {:cue, &1}),
-      poll: 50,
-      clock: fn -> Agent.get(clock, & &1) end
-    ]
-
-    {:ok, table} = Table.open(db)
-    on_exit(fn -> ClaudeStandIn.kill_all(dir) end)
-
-    {:ok,
-     dir: dir,
-     account: account,
-     control: control,
-     holder: holder,
-     table: table,
-     opts: opts,
-     clock: clock,
-     registry: registry,
-     sessions: start_supervised!(Supervisor.child_spec({Sessions, opts}, restart: :temporary))}
-  end
-
-  test "a start is confirmed by the session file naming the held pid, and a stop ends it", ctx do
-    assert {:ok, %{name: "alpha", pid: pid, session_id: id}} =
-             Sessions.start(ctx.sessions, "alpha", ctx.account, launch(ctx, :at_start))
-
-    assert alive?(pid)
-    row = Table.get(ctx.table, "test", "alpha")
-    assert %{status: "running", pid: ^pid, session_id: ^id, viewer: "open", socket: "alpha"} = row
-    assert_received {:cue, %{topic: "sessions:test:work", ids: [_]}}
-
-    {:ok, source} = SessionsSource.open(db: ctx.opts[:db], host: "test", account: "work")
-
-    assert {:ok, %{rows: [%{name: "alpha", status: "running"}]}} =
-             SessionsSource.read(source, :all)
-
-    assert {:refused, {:exists, "running"}} =
-             Sessions.start(ctx.sessions, "alpha", ctx.account, launch(ctx, :at_start))
-
-    assert {:refused, {:turn, :busy}} = Sessions.stop(ctx.sessions, "alpha", :busy)
-    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "alpha", :ended)
-    refute alive?(pid)
-    assert %{status: "stopped"} = Table.get(ctx.table, "test", "alpha")
-  end
+  setup {SessionsSetup, :sessions}
 
   test "a resume holds the stand-in with --resume and its id", ctx do
     assert {:ok, %{session_id: "earlier-1"}} =
@@ -245,12 +175,6 @@ defmodule CodingAgentFramework.SessionsTest do
     assert {:ok, :gone} = await(fn -> if not alive?(pid), do: {:ok, :gone} end)
     cue(ctx, sessions)
     assert {:ok, _} = row_when(ctx, "deaf", &(&1.status == "stopped"))
-  end
-
-  defp launch(ctx, mode) do
-    env = %{home: ctx.dir, path: "/nonexistent", term: "xterm-256color", lang: "C.UTF-8"}
-    claude = ClaudeStandIn.write!(ctx.dir, mode)
-    [role: :delegate, cwd: ctx.dir, claude: claude, model: "opus", env: env, prompt: "brief"]
   end
 
   defp start_task(ctx, name, launch),

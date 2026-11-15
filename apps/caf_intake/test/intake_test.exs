@@ -2,47 +2,19 @@ defmodule CodingAgentFramework.IntakeTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
-  import CodingAgentFramework.TestHost
+  import CodingAgentFramework.IntakeSetup
 
-  alias CodingAgentFramework.{Accounts, Intake}
+  alias CodingAgentFramework.{Intake, IntakeSetup}
   alias CodingAgentFramework.Intake.{Event, Table}
-  alias CodingAgentFramework.Tracker.IntakeSource
 
   doctest Intake
   doctest Event
   doctest Table
   doctest Intake.Plug
 
-  @secret "s3cr3t"
+  @secret IntakeSetup.secret()
 
-  setup do
-    dir = test_dir()
-    me = self()
-    db = Path.join(dir, "intake.db")
-    notify = &send(me, &1)
-    start = &start_supervised!({Intake, [db: db, host: "h", notify: notify] ++ &1})
-    {:ok, db: db, dir: dir, start: start}
-  end
-
-  defp body(event, extra \\ %{}),
-    do: JSON.encode!(Map.merge(%{"hook_event_name" => event, "session_id" => "s1"}, extra))
-
-  defp post(intake, body, opts \\ []) do
-    Plug.Test.conn(
-      Keyword.get(opts, :method, :post),
-      Keyword.get(opts, :path, "/hooks/work"),
-      body
-    )
-    |> Plug.Conn.put_req_header("x-caf-secret", Keyword.get(opts, :secret, @secret))
-    |> Map.put(:remote_ip, Keyword.get(opts, :ip, {127, 0, 0, 1}))
-    |> Intake.Plug.call(Intake.Plug.init(intake: intake, secret: @secret))
-  end
-
-  defp rows(db) do
-    {:ok, db} = Table.open(db)
-    {:ok, %{rows: rows}} = Table.rows(db, "h", "work")
-    rows
-  end
+  setup {IntakeSetup, :intake}
 
   defp hold(intake) do
     task = Task.async(fn -> post(intake, body("PermissionRequest", %{"tool_use_id" => "t1"})) end)
@@ -78,16 +50,6 @@ defmodule CodingAgentFramework.IntakeTest do
 
     assert %{"hookSpecificOutput" => %{"decision" => %{"behavior" => "deny", "message" => "no"}}} =
              JSON.decode!(to_string(answer))
-  end
-
-  test "a second post of one event writes no second row", %{db: db, start: start} do
-    intake = start.([])
-    assert %{status: 200, resp_body: ""} = post(intake, body("SessionStart", %{"source" => "x"}))
-    assert %{status: 200} = post(intake, body("SessionStart", %{"source" => "x"}))
-    assert [%{key: "SessionStart:s1:x"}] = rows(db)
-
-    {:ok, source} = IntakeSource.open(db: db, host: "h", account: "work")
-    assert {:ok, %{rows: [_]}} = IntakeSource.read(source, :all)
   end
 
   test "a wrong secret, path, method or address is refused with no row", %{db: db, start: start} do
@@ -147,24 +109,6 @@ defmodule CodingAgentFramework.IntakeTest do
     assert_receive %{topic: "intake:h:work", ids: ids}, 5_000
     assert Enum.sort(ids) == Enum.sort([id, id2])
     assert [%{hold: "lost"}, %{hold: "unknown"}] = rows(db)
-  end
-
-  test "Accounts writes the http hooks into both role settings", %{dir: dir} do
-    {:ok, accounts} = Accounts.new(dir, ["work"])
-    own = %{"Stop" => [%{"hooks" => [%{"type" => "command", "command" => "true"}]}]}
-
-    {:ok, account} =
-      Accounts.prepare(accounts, "work", %{hooks: own, intake: %{port: 4790, secret: @secret}})
-
-    for role <- [:parent, :delegate] do
-      hooks = JSON.decode!(File.read!(account.settings[role]))["hooks"]
-      assert Map.keys(hooks) == Enum.sort(Event.names())
-      assert [%{"hooks" => [%{"type" => "command"}]}, %{"hooks" => [stop]}] = hooks["Stop"]
-      assert %{"url" => "http://127.0.0.1:4790/hooks/work", "timeout" => 10} = stop
-      assert stop["headers"] == %{"x-caf-secret" => @secret}
-      refute Map.has_key?(stop, "onFailure")
-      assert [%{"hooks" => [%{"timeout" => 600}]}] = hooks["PermissionRequest"]
-    end
   end
 
   describe "the event parser" do

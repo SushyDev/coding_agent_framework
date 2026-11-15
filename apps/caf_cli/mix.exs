@@ -13,8 +13,6 @@ defmodule CafCli.MixProject do
     ]
   end
 
-  # Accounts' test lives here: it holds a stand-in with ClaudeCLI's environment, and caf_cli
-  # uses caf_accounts, so caf_accounts' own tests may not use caf_cli.
   defp deps do
     [
       {:caf_accounts, in_umbrella: true},
