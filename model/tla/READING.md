@@ -343,39 +343,53 @@ with the ssh connection dropping (`Drop`) and coming back or not (`Reconnect`), 
 of the framework between any two steps. Read it in the order of a job's run:
 
 - `AskJob` is `run` in the agent's turn: the row is `"asked"` and the call `"waiting"`, in
-  memory. `SyncBegins` takes the copy's turn (`turn`, durable) and starts rsync: `whole` is false
-  from then until `SyncCompletes`. A drop marks every command in flight `"cut"` (`cmd`), and
-  `SyncCut` refuses the run and gives the turn back; the copy stays partly synced.
+  memory. `SyncBegins` takes the copy's turn (`turn`, durable), records the job's named paths
+  (`stale[j]` empty: from now on a change to one is stale) and starts rsync. Its host side
+  (`hs`) first waits for the copy's lock (`lock`): `HostLocks` takes it and begins writing, so
+  `whole` is false until `SyncCompletes`. `HostGivesUp` is the lock's deadline passing while
+  another sync's host side holds it, and `HostSideEnds` a host side that notices its local side
+  ended and exits, freeing the lock.
+- A drop marks every command in flight `"cut"` (`cmd`). `SyncCut` refuses the run at once and
+  leaves the copy partly synced, but gives the turn back only once the sync's host side can no
+  longer take the lock: it holds it, has exited, or its lock deadline passed. Until then the
+  refused row keeps the turn, and `TurnBack` gives it back later. `SettleUnasked` (a row before
+  its start whose call ended, as after a restart) follows the same rule.
 - `StartSent` writes the row `"starting"` and sends `dtach -n` over ssh. `inflight` says the host
   may still run it: `Lands` is the host running it, and `NeverLands` a cut command whose deadline
   passed. `StartReplies` is dtach's answer over a connection that held; after a cut or a restart,
   `CutCleared` then `SettleStarting` read the host instead, but only once nothing is in flight.
-  Either one gives the turn back. `SettleUnasked` refuses a row before its start whose call
-  ended.
-- On the host: `JobExits` (its wrapper writes the exit file, then the socket goes), `Tick` (the
-  timeout passes) and `HostTimesOut` (the wrapper ends the job's group and writes `"timeout"`),
-  and `WrapperLost` (the wrapper killed before it writes the file).
+  Either one gives the turn back.
+- On the host: `JobExits` (the command exits; its wrapper ends what is left of the job's process
+  group, `grp`, writes the exit file, then the socket goes), `Tick` (the timeout passes) and
+  `HostTimesOut` (the wrapper ends the job's group and writes `"timeout"`), and `WrapperLost`
+  (the wrapper killed before it writes the file, its group with it).
 - `ReadSocket` then `ReadFile` read the end: the socket dead first, then the file, which was
   written before the socket went; the row is `"exited"` with its code, `"timedout"` or
-  `"lost"`. `AnswerJob` answers it, or `FetchBegins`, `FetchPath` (one path into the worktree)
-  and `FetchDone` copy the named paths back first; `FetchCut` answers the end with the fetch cut.
-  `GiveUp` is the call's own deadline with the connection down: unknown, or the end it read.
+  `"lost"`. `AnswerJob` answers it, or `FetchBegins`, `FetchPath` and `FetchDone` copy the named
+  paths back first. `FetchPath` writes one path only if it is not in `stale[j]`, and otherwise
+  adds it to `skipped`, which `FetchDone` answers as a conflict. A path the fetch writes is stale
+  for every other job. `FetchCut` answers the end with the fetch cut. `GiveUp` is the call's own
+  deadline with the connection down: unknown, or the end it read.
+- `Edit` is the agent, or a subagent, editing a path of the worktree at any time: the path is
+  stale for every job's record.
 - Services: `AskService` with `keep` or without, `AskRestart` (the row `"restarting"`, then an
   end, then `"asked"` again for the turn), `OwnerEnds` and `OwnerSeen` (a kept service goes to
   the parent, any other is `"ending"`). `EndSent`, `Lands`, `EndReplies` and, after a cut,
   `EndConfirmed` end the process and confirm it by its socket.
-- `FrameworkDies` clears the memory (`call`, `cmd`, `rd`, `fetchLeft`, `writers`) and the
+- `FrameworkDies` clears the memory (`call`, `cmd`, `rd`, `fetchLeft`, `skipped`) and the
   connection; every call under way is answered `"restart"`, as the agent's MCP bridge does. The
-  rows, the turn, the host and what is in flight to it stay.
+  rows, the turn, the host (a sync's host side among it) and what is in flight to it stay.
 
-`fresh`, `cover`, `badStart`, `fetched`, `clobbered`, `under` and `answer` are ghosts. `fresh[r]`
+`fresh`, `cover`, `badStart`, `fetched`, `since`, `clobbered` and `answer` are ghosts. `fresh[r]`
 says a sync that began after `r` asked has completed (`cover` is who had asked when a sync
 began), and `badStart` takes a run whose start landed on a copy not `whole` or not `fresh` for
-it. `StartsOnSyncedCopy` is that set empty. `AnswerIsReal` compares each answer and row with the
-host's exit file. `ConnectionReturns` (`<>[]up`) is the antecedent of `JobSettles` and
-`ServiceEndsWithOwner`: they hold once the connection comes back for good. `RunAnswered` and
-`JobEndsAtTimeout` hold whatever the connection does. `NoChangeUnderRun` and `NoEditLost` are
-the design's open questions (F-70's build note) and are in no configuration.
+it. `StartsOnSyncedCopy` is that set empty. `OneSyncWrites` counts the host sides writing,
+whatever their local sides did. `AnswerIsReal` compares each answer and row with the host's exit
+file. `since[j]` is the paths the agent edited after `j`'s sync began, and `clobbered` the ones a
+fetch wrote over: `NoEditLost` is that set empty. `JobGoneAtEnd` says no process of a job's group
+is left once its end is read. `ConnectionReturns` (`<>[]up`) is the antecedent of `JobSettles`
+and `ServiceEndsWithOwner`: they hold once the connection comes back for good. `RunAnswered` and
+`JobEndsAtTimeout` hold whatever the connection does.
 
 `Copy_Jobs` checks one job with a fetch, two drops, a restart, an edit and a lost wrapper;
 `Copy_Turns` a job and a service on one copy, with every invariant and `RunAnswered`;

@@ -253,6 +253,18 @@ settles (F-70):
 - a service's end is written to its row before it is sent, and is done only when the service's
   socket is read dead; a restart of a service is such an end, then a start with its own sync.
 
+The spec settles (F-72):
+
+- the sync's record of the named paths is taken before it sends, not once it completes: a record
+  taken after takes an edit made during the sync as sent, and the fetch writes over it;
+- the fetch compares each named path with the record and writes it in one step per path, and a
+  write by one job's fetch makes that path stale for every other job's record;
+- a cut sync answers its refusal at once and keeps the copy's turn until its host side can no
+  longer take the lock; a turn given back at the cut lets that host side take the lock later and
+  write under the next run's sync, which then starts on a copy not whole;
+- a job's end is read only once its group is gone: the wrapper ends the group when the command
+  exits, at the timeout, and when it is itself killed (assumed of the host, not built).
+
 ## Main sessions
 
 A project has at most one main session. It runs in the project's checkout, the framework's own
@@ -772,7 +784,10 @@ copy whose last sync completed after the run asked and that no sync has written 
 answer is its real exit code or unknown, never a code it did not have; a fetch writes only the
 paths it names, and only after the job ended; a job never runs past its timeout, and a service
 whose owner ended without `keep` is ended; every call answers, and every job's row gets its end
-from the host once the connection comes back.
+from the host once the connection comes back. Its second part (F-72) adds the fetch's check
+against edits made during the job, the host side of a sync under the copy's lock, and the
+wrapper's end of a job's group: no edit is lost, one sync writes the copy at a time, and nothing
+of a job writes in the copy once its end is read.
 
 Code emits traces where it can, and a trace spec checks them; a trace cannot show a missing
 guard, so the specs are also reviewed against the code.
