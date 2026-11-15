@@ -192,17 +192,29 @@ its host, as it has since the first part built, so the workstation is one host a
   beside its server. A sync is not a snapshot: a file edited while the sync runs comes in
   either version. On the host, a sync holds a lock of its copy for its whole life, and the next
   sync takes that lock under its deadline, so the host's side of a cut sync never writes under
-  the next one. A copy is removed with its worktree;
+  the next one. A host's side may still be waiting for the lock when its sync is cut, and may
+  take it later, so a cut sync gives the copy's turn back only once its host side can no longer
+  take the lock: it holds it, has exited, or its lock deadline has passed (the rule the turn
+  keeps for a cut start). The refusal is answered at once; only the turn waits. The host side
+  takes the lock before rsync's server starts (the server runs under it, as rsync's
+  `--rsync-path`), since that server deletes files from the file list before any data arrives.
+  A copy is removed with its worktree;
+- a host that restarts ends every held job, sync and lock on it; a job it ended has no exit
+  file, so its end is unknown (`{:unknown, :no_exit}`), never an exit code;
 - a job is held by dtach on its host, so a dropped ssh connection does not end it; its output
   goes to a log on the host, read back from an offset, and it ends with its exit code or its
   timeout, which ends its process group. When the job's command exits, its wrapper ends what is
   left of the group before it reaps the command, so the group's id cannot have been reused (the
-  rule `Shell` keeps), and no child of the job writes in the copy during the fetch;
+  rule `Shell` keeps), and no child of the job writes in the copy during the fetch. The job runs
+  in its wrapper's own process group, so a kill of the group, at the timeout or otherwise, ends
+  the wrapper and the job together, and no group outlives a wrapper that was killed;
 - a job can bring files back: `run`'s `fetch: [paths]` names paths that rsync copies from the
   host's copy into the worktree after the job ends. Nothing comes back unless named, and nothing
   is written over blind: the sync records each named path's size, time and hash, and the fetch
   writes a path only while the worktree's file is still what the sync sent; it answers the
-  others as a conflict and leaves the copy's version on the host;
+  others as a conflict and leaves the copy's version on the host. Each path comes in under a
+  temporary name, is compared after that write and before its rename into place, so the only
+  window left for an edit to be lost is between that compare and the rename;
 - `run` answers `{:ok, %{exit: code, log: tail, fetch: :done | :none | {:conflict, paths} |
   {:unknown, reason}}}`; `{:unknown, :timeout}` once the host ended the job at its timeout,
   with the fetch's outcome; `{:unknown, :dropped}` at the call's deadline with the connection
@@ -248,6 +260,18 @@ settles (F-70):
 - the fetch begins only after the job's end was read, and copies only the paths `fetch:` names;
 - a service's end is written to its row before it is sent, and is done only when the service's
   socket is read dead; a restart of a service is such an end, then a start with its own sync.
+
+The spec settles (F-72):
+
+- the sync's record of the named paths is taken before it sends, not once it completes: a record
+  taken after takes an edit made during the sync as sent, and the fetch writes over it;
+- the fetch compares each named path with the record and writes it in one step per path, and a
+  write by one job's fetch makes that path stale for every other job's record;
+- a cut sync answers its refusal at once and keeps the copy's turn until its host side can no
+  longer take the lock; a turn given back at the cut lets that host side take the lock later and
+  write under the next run's sync, which then starts on a copy not whole;
+- a job's end is read only once its group is gone: the wrapper ends the group when the command
+  exits, at the timeout, and when it is itself killed (assumed of the host, not built).
 
 ## Main sessions
 
@@ -768,7 +792,10 @@ copy whose last sync completed after the run asked and that no sync has written 
 answer is its real exit code or unknown, never a code it did not have; a fetch writes only the
 paths it names, and only after the job ended; a job never runs past its timeout, and a service
 whose owner ended without `keep` is ended; every call answers, and every job's row gets its end
-from the host once the connection comes back.
+from the host once the connection comes back. Its second part (F-72) adds the fetch's check
+against edits made during the job, the host side of a sync under the copy's lock, and the
+wrapper's end of a job's group: no edit is lost, one sync writes the copy at a time, and nothing
+of a job writes in the copy once its end is read.
 
 Code emits traces where it can, and a trace spec checks them; a trace cannot show a missing
 guard, so the specs are also reviewed against the code.
