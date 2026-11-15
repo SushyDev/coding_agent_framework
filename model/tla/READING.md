@@ -162,18 +162,30 @@ steps. Read it in the order of a start:
 - `StartDecided` is the call's own answer: running when the file names the live process,
   unknown once the deadline has passed.
 - After a restart, `Adopt` takes a `"starting"` row with no call under way: running when the file
-  names the live process; past the deadline, `"orphan"` for a live socket, `"refused"` for a
-  dead one. `ReRead` reads an `"unknown"` row again until it is running or gone.
+  names the live process and the socket is live (`Confirms`); past the deadline, `"orphan"` for
+  a live socket, and for a dead one while the file names a live process (`Named`: its dtach was
+  killed), with the file's pid and start time; `"refused"` for the rest. `ReRead` reads an
+  `"unknown"` row again until it is running or gone, and makes the same orphan.
 - `StopAsked`, `StopSettled`, `StopTimedOut` and `Kill` are a stop, judged by the row's pid and
-  start time. `StopTimedOut` leaves the row `"stopping"` and marks it `late`; a late row is not
-  set back to running after a restart, and only it may be killed (`Kill`, `Recoveries`' step).
+  start time and by the socket: stopped only once both are gone. `StopTimedOut` leaves the row
+  `"stopping"`, and marks it `late` when its process is alive; a late row is not set back to
+  running after a restart, and only it may be killed (`Kill`, `Recoveries`' step).
   `ForeignStarts` is another program taking a freed pid, which is why the start time counts.
-- `ProcExits` is a process ending by itself, at any step. `RunningSettled` (F-61) then takes a
+- `ProcExits` is a process ending by itself, at any step. Its socket ends apart (F-64):
+  `DtachExits` is dtach ending once its process has, and `DtachKilled` is dtach killed hard,
+  which leaves `sock` false while the process runs on. `RunningSettled` (F-61) takes a
   `"running"` row with no call under way to `"stopped"` (the row's reason is `exited`) once its
   process is gone by pid and start time and its socket is dead, so the name can be resumed.
   `RunningSettles` says it always does; under `SettleRunningByPid` a pid another program took
-  keeps the row running. Here a socket ends with its process, so the socket's half of the check
-  cannot fail on its own: it is defense in depth, named in the header.
+  keeps the row running. `SettleRunningBySocket` and `SettleRunningByLiveness` each drop one half
+  of the check, and `NoHeldWithoutRow`, which now covers a live socket too, fails for each.
+- Cues (F-64): `cued` is a cue `Sessions` has not handled. `ProcExits` and `Kill` cue for the
+  Registry, `DtachExits` and `DtachKilled` for the sampler, and `FrameworkStarts` for every row.
+  `RunningSettled` and `StopSettled` with no stop under way need one and handle it; `CueIdle`
+  handles one they cannot act on, as a settle that met a live socket. A cue for a row that is
+  neither running nor stopping, or that has a call under way, settles nothing and is dropped
+  (`Cueable`). `RunningSettles` and `StoppingSettles` hold without fairness on a later cue of
+  another kind; under `NoSocketCue` they fail.
 
 With `Worktrees` (F-55), a start runs in a worktree, and three steps come between the row and
 the hold:
@@ -195,7 +207,7 @@ the hold:
 `onTime`, `ends`, `wrongKills`, `touched`, `offTree`, `removedDirty` and `reusedDirty` are ghosts:
 they record what happened, for the invariants, and the framework never reads them.
 `RunningOnlyIfLive` is a step property: the step that writes `"running"` writes it only for a
-live process its file names.
+live process its file names. `cued` is memory, cleared by `FrameworkDies`.
 
 ## `Intake.tla`
 

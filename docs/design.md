@@ -82,7 +82,7 @@ starts each part.
 | `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` |
 | `Usage` | each account's weekly allowance, from what Claude Code hands its status line; picks the account with the most left ("Allowance") |
 | `Tmux` | sessions, panes, tags, keys and viewers on one server; a contract with a CLI and a fake |
-| `TmuxSampler` | samples each server's panes and each host's held sockets, and reports a held agent with no viewer |
+| `TmuxSampler` | samples each server's panes and each host's held sockets, reports a held agent with no viewer, and cues `Sessions` when a held socket goes away |
 | `Holder` | dtach: hold a process in a clean environment, open a viewer, list sockets and whether each lives |
 | `ClaudeCLI` | the command line and environment of a session, per role and account |
 | `Registry` | reads Claude Code's `<config>/sessions/*.json` per account and host, and so each held agent's pid |
@@ -223,21 +223,36 @@ session file names it; otherwise its worktree is removed when clean and held by 
 the start answers `refused{interrupted}`. The adoption waits for the start's own deadline
 before it decides, since a held process may only be slow to write its file; one with a live
 socket and still no file then is kept as an orphan row for `Recoveries`, never left without a
-row. The row keeps the start's deadline in wall-clock time, so a restart does not move it. A
-read that fails decides nothing: the row stays as it was for the next read, and only a socket
-read as dead makes it refused. A hold that answers unknown waits for the session file like any
-other start, and its row keeps the unknown answer's reason, so a refused row tells a hold that
-failed (dtach finding no pty) from a program that exited at once. After a restart, a row still stopping is settled by its pid and start time: stopped
-when gone, running otherwise. A stop whose deadline passes with its process alive leaves the row
-stopping, with its deadline, and a restart does not set it back to running. `Recoveries` ends an
+row. A socket and its process end apart (`Start.tla`, F-64): dtach removes its socket a moment
+after its process exits, and a dtach killed hard leaves a stale socket while its process may run
+on, unheld. So a dead socket whose session file names a live process is an orphan too, at the
+start's deadline, with reason `unheld` and the file's pid and start time, so `Recoveries` can end
+it by them; a headless delegate's `pid` file names no start time, so its orphan keeps no pid
+(F-64's build note, new-3). The row keeps the start's deadline in wall-clock time, so a restart
+does not move it. A read that fails decides nothing: the row stays as it was for the next read,
+and only a socket read as dead, with no file that names a live process, makes it refused. A hold
+that answers unknown waits for the session file like any other start, and its row keeps the
+unknown answer's reason, so a refused row tells a hold that failed (dtach finding no pty) from a
+program that exited at once. A stop is done, and a row still stopping after a restart is settled
+stopped, only when its process is gone by pid and start time and its socket is read as dead, so
+a resume right after the stop's answer never meets a live socket; after a restart, one whose
+process lives is running again. A stop whose deadline passes with its process alive leaves the
+row stopping, with its deadline, and a restart does not set it back to running. One whose
+deadline passes with its process gone and its socket still live answers
+`unknown{socket_live}` and leaves the row stopping for the next settle. `Recoveries` ends an
 orphan's process, or one that did not exit after `/exit` within its stop's deadline, and only by
 the row's pid and start time; `Sessions` itself never kills. A running row with no call under
 way whose process exited by itself (a crash, or a kill) is settled stopped, with reason
 `exited`, once its process is gone by pid and start time and its socket is read as dead, so a
 delegate killed before its last reply can be resumed; a pid another program took does not keep
-it running, and a read that fails decides nothing. `Sessions` takes that step at each settle a
-`Registry` or `Stream` cue starts, as it does for the other rows. A row whose start answered unknown
-is read again at each `Registry` read until it is running or gone. A name whose row is unknown,
+it running, a process whose dtach was killed keeps it running, and a read that fails decides
+nothing. `Sessions` settles running and stopping rows with no call under way only at a cue: a
+`Registry` or `Stream` cue, when a process is gone, and the `TmuxSampler`'s cue
+(`tmux:<host>:<server>`, which it sends when its rows change, as when a held socket goes away
+or goes stale), so a settle that met a socket dtach had not removed yet is taken again when the
+socket goes. A row whose start answered unknown is read again at each `Registry` read until it
+is running or gone, and is an orphan, as above, when its socket is dead while its file names a
+live process. A name whose row is unknown,
 orphan, starting or stopping is not free for a new start: its process may live. A start is confirmed by the session file's `name`, which
 `--name` sets; a check against each pinned Claude Code release confirms it, with the Remote
 Control check. `Start.tla` models the start and its adoption, for every session's start and
@@ -556,9 +571,10 @@ Specs live in `model/tla/`, checked with TLC:
 
 Five specs, in this order, and beside them `Start.tla`: every session's start and resume, the
 row written first, the worktree and its setup, the held process, the session file that may come
-late, and the adoption after a restart (no held process without a row; a row ends at most once;
-a process is ended only by its own pid and start time; every starting row settles, and so does
-a running row whose process is gone; a busy
+late, a socket that ends apart from its process, and the adoption after a restart (no held
+process and no live socket without a row; a row ends at most once; a process is ended only by
+its own pid and start time; every starting row settles, and so do a running or stopping row
+whose process is gone, at the cues of the readers and the sampler; a busy
 worktree is never reused or removed, a removed one was clean, and a process runs only in a
 worktree on its branch whose setup finished).
 
