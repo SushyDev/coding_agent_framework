@@ -12,7 +12,126 @@ Run and supervise Claude Code agents across Claude accounts and machines.
 - **A TLA+ model**, checked with TLC, describes how tmux, dtach, Claude Code, worktrees and stacks
   fit together. It is written before the code it models.
 
-Status: design. Nothing is built yet; the plan is in [docs/design.md](docs/design.md).
+## How it fits together
+
+```mermaid
+flowchart LR
+  person([You])
+
+  subgraph host["One host (local or over ssh)"]
+    direction TB
+    subgraph held["Held by dtach, apart from tmux"]
+      parent["Parent session<br/>interactive Claude Code<br/>with Remote Control"]
+      delegate["Delegates<br/>headless Claude Code<br/>stream-json in and out"]
+    end
+    tmux["tmux server of the framework's own<br/>one viewer per session"]
+    worktrees[("git worktrees")]
+    configs[("one Claude config dir<br/>per account")]
+  end
+
+  subgraph framework["The framework (Elixir and OTP)"]
+    direction TB
+    readers["Readers<br/>Registry · Transcripts · Usage<br/>Stream · Intake · TmuxSampler"]
+    writers["Writers<br/>Control · Sessions · Stream"]
+    tracker["Tracker<br/>one fold of every reader"]
+    recoveries["Recoveries<br/>detect, act once, verify"]
+    db[("SQLite tables<br/>the truth")]
+  end
+
+  ui["LiveView components"]
+
+  person -->|Remote Control or a viewer| parent
+  parent -->|starts and briefs| delegate
+  delegate -->|reports| parent
+  tmux -.->|views| held
+  held --- worktrees
+  held --- configs
+  held -->|hooks, session files,<br/>transcripts, event logs| readers
+  writers -->|one checked write per host| held
+  readers --> db
+  writers --> db
+  db --> tracker
+  tracker --> recoveries
+  recoveries --> writers
+  tracker --> ui
+  ui -->|press to move an account,<br/>answer, interrupt| writers
+```
+
+- **Held, not hosted.** Every agent runs under `dtach -n`, so it outlives tmux, its terminal and
+  the framework. tmux only shows it.
+- **Readers, then one writer.** Each reader turns one source (a hook, a session file, a
+  transcript, an event log, a tmux sample) into rows. Each host has one writer, and each write is
+  checked against the target pane before it is sent.
+- **Tables are the truth.** Views read the `Tracker`'s fold of those rows, so they never lag or
+  lie. `Recoveries` acts once per broken state and checks that it helped.
+
+## Status
+
+The host layer, the readers, the writer, `Sessions`, the `Tracker` and `Recoveries` are built,
+each from a checked model in `model/tla/`. Next are the moves between accounts, the delegate
+protocol, the agent tools and the LiveView components. The plan and the order of the units are
+in [docs/design.md](docs/design.md); each unit's notes are in `docs/build-notes/`.
+
+## The apps
+
+The code is a Mix umbrella, one OTP app per part under `apps/`. An arrow means "uses"; each app
+declares every app it uses, directly, and `gate-deps` checks that.
+
+```mermaid
+flowchart BT
+  subgraph host_layer["Host"]
+    shell[caf_shell]
+    tmux[caf_tmux]
+    holder[caf_holder]
+  end
+  subgraph io["Readers and writers"]
+    registry[caf_registry]
+    transcripts[caf_transcripts]
+    intake[caf_intake]
+    accounts[caf_accounts]
+    usage[caf_usage]
+    cli[caf_cli]
+    control[caf_control]
+    stream[caf_stream]
+    sampler[caf_sampler]
+  end
+  sessions[caf_sessions]
+  recoveries[caf_recoveries]
+  tracker[caf_tracker]
+
+  tmux --> shell
+  holder --> shell
+  registry --> shell
+  transcripts --> shell
+  accounts --> shell
+  accounts --> intake
+  usage --> accounts
+  cli --> accounts
+  control --> tmux
+  stream --> shell
+  stream --> holder
+  sampler --> tmux
+  sampler --> holder
+  sessions --> shell
+  sessions --> holder
+  sessions --> registry
+  sessions --> cli
+  sessions --> control
+  recoveries --> tmux
+  recoveries --> holder
+  recoveries --> sampler
+  recoveries --> sessions
+  tracker --> registry
+  tracker --> transcripts
+  tracker --> intake
+  tracker --> usage
+  tracker --> stream
+  tracker --> sampler
+  tracker --> sessions
+  tracker --> recoveries
+```
+
+`caf_test` holds the shared test aids and is used only in tests.
 
 ## Development
 
@@ -22,15 +141,13 @@ tmux, dtach, Claude Code, git, gh, TLC with its JDK, and the POSIX tools the tes
 - Enter the environment with `devenv shell`, or run one command in it with
   `devenv shell -- <command>`.
 - Run all the gates with `devenv test`. It checks the tools' versions, runs the git hooks on
-  every file, and then runs the four gates.
-- Run one gate alone with `gate-format`, `gate-compile`, `gate-test` or `gate-model`.
+  every file, and then runs the gates.
+- Run one gate alone with `gate-format`, `gate-compile`, `gate-deps`, `gate-test` or
+  `gate-model`. `gate-deps` checks that each app declares, directly, every app it uses.
   `gate-test` leaves out the TLC test; `gate-model` runs it. `mix test` alone runs both.
 - Check the tools against the lock with `check-versions`.
 
-The code is a Mix umbrella: one OTP app per part under `apps/`, such as `caf_shell`, `caf_tmux`,
-`caf_sessions` and `caf_tracker`, with the shared test aids in `caf_test`. Each app declares only
-the apps it uses, so the layers in [docs/design.md](docs/design.md) ("The parts") hold at compile
-time. Run every command from the root; `mix test` there runs each app's tests.
+Run every command from the umbrella root; `mix test` there runs each app's tests.
 
 The shell exports each program's store path as `CAF_<NAME>`: `CAF_TMUX`, `CAF_DTACH`,
 `CAF_CLAUDE`, `CAF_GIT`, `CAF_GH`, `CAF_SH`, `CAF_BASH`, `CAF_RM`, `CAF_MV`, `CAF_ENV`,
