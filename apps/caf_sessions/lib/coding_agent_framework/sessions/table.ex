@@ -7,7 +7,10 @@ defmodule CodingAgentFramework.Sessions.Table do
   `starting`, `running`, `stopping`, `stopped`, `refused`, `unknown` and `orphan` (a live socket
   with no session file past the start's deadline, for `Recoveries`); `reason` says why a row is
   refused, unknown or orphan, or why a stop is late (`no_exit`). `deadline` is the current start's
-  or stop's deadline in wall-clock milliseconds, so a restart does not move it.
+  or stop's deadline in wall-clock milliseconds, so a restart does not move it. A start in a
+  worktree keeps its project's `repo` and its `branch`, with `cwd` the worktree's path, and
+  `worktree` says what the start did with it (`added`, `reused`) and, after a restart, whether
+  it was `removed` or why it was kept.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "doc.db")
       iex> {:ok, db} = CodingAgentFramework.Sessions.Table.open(path)
@@ -18,7 +21,7 @@ defmodule CodingAgentFramework.Sessions.Table do
   alias Exqlite.Sqlite3
 
   @columns ~w(id host name socket account role cwd resume status reason viewer pid session_id
-              proc_start started_at updated_at deadline)a
+              proc_start started_at updated_at deadline repo branch worktree)a
 
   @schema """
   PRAGMA journal_mode = WAL;
@@ -27,11 +30,13 @@ defmodule CodingAgentFramework.Sessions.Table do
     account TEXT NOT NULL, role TEXT NOT NULL, cwd TEXT NOT NULL, resume TEXT,
     status TEXT NOT NULL, reason TEXT, viewer TEXT, pid INTEGER, session_id TEXT,
     proc_start TEXT, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-    deadline INTEGER, UNIQUE (host, name));
+    deadline INTEGER, repo TEXT, branch TEXT, worktree TEXT, UNIQUE (host, name));
   """
 
-  # A file made before the deadline column gains it; a newer file already has it.
-  @add_deadline "ALTER TABLE held_sessions ADD COLUMN deadline INTEGER"
+  # A file made before a column gains it; a newer file already has it.
+  @added ~w(deadline:INTEGER repo:TEXT branch:TEXT worktree:TEXT)
+  # The statuses whose process may live: such a row holds its name and its cwd.
+  @ended ~w(stopped refused)
 
   @type db :: Sqlite3.db()
   @type row :: %{atom => term}
@@ -42,15 +47,24 @@ defmodule CodingAgentFramework.Sessions.Table do
     with {:ok, db} <- Sqlite3.open(path),
          :ok <- Sqlite3.set_busy_timeout(db, 5_000),
          :ok <- Sqlite3.execute(db, @schema),
-         :ok <- added(Sqlite3.execute(db, @add_deadline)) do
+         :ok <- add_columns(db) do
       {:ok, db}
     else
       {:error, reason} -> {:refused, {:sqlite, reason}}
     end
   end
 
-  defp added({:error, "duplicate column name" <> _}), do: :ok
-  defp added(other), do: other
+  defp add_columns(db) do
+    Enum.reduce_while(@added, :ok, fn column, :ok ->
+      [name, type] = String.split(column, ":")
+
+      case Sqlite3.execute(db, "ALTER TABLE held_sessions ADD COLUMN #{name} #{type}") do
+        :ok -> {:cont, :ok}
+        {:error, "duplicate column name" <> _} -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
 
   @doc """
   Writes a new start of `{host, name}` as `starting`, over any row it had before, and returns
@@ -61,11 +75,11 @@ defmodule CodingAgentFramework.Sessions.Table do
   @spec starting(db, map) :: integer
   def starting(db, %{} = start) do
     now = System.os_time(:millisecond)
-    keys = ~w(host name socket account role cwd resume session_id deadline)a
+    keys = ~w(host name socket account role cwd resume session_id deadline repo branch)a
     values = Enum.map(keys, &start[&1]) ++ ["starting", now, now]
     names = Enum.join(keys ++ [:status, :started_at, :updated_at], ",")
     marks = Enum.map_join(1..length(values), ",", &"?#{&1}")
-    reset = "reason = NULL, viewer = NULL, pid = NULL, proc_start = NULL"
+    reset = "reason = NULL, viewer = NULL, pid = NULL, proc_start = NULL, worktree = NULL"
 
     sets =
       Enum.map_join(keys -- [:host, :name], ",", &"#{&1} = excluded.#{&1}") <>
@@ -83,7 +97,10 @@ defmodule CodingAgentFramework.Sessions.Table do
     id
   end
 
-  @doc "Sets `fields` (status, reason, viewer, pid, session_id, proc_start, deadline) on row `id`."
+  @doc """
+  Sets `fields` (status, reason, viewer, pid, session_id, proc_start, deadline, worktree) on row
+  `id`.
+  """
   @spec update(db, integer, keyword) :: :ok
   def update(db, id, fields) do
     fields = Keyword.put(fields, :updated_at, System.os_time(:millisecond))
@@ -109,6 +126,16 @@ defmodule CodingAgentFramework.Sessions.Table do
   @spec with_status(db, String.t(), String.t()) :: [row]
   def with_status(db, host, status),
     do: select(db, "host = ?1 AND status = ?2", [host, status])
+
+  @doc "The host's rows other than `name`'s whose `cwd` is `cwd` and whose process may live."
+  @spec holding(db, String.t(), String.t(), String.t()) :: [row]
+  def holding(db, host, cwd, name) do
+    select(db, "host = ?1 AND cwd = ?2 AND name != ?3 AND status NOT IN (?4, ?5)", [
+      host,
+      cwd,
+      name | @ended
+    ])
+  end
 
   @doc "A `{host, account}`'s rows."
   @spec rows(db, String.t(), String.t()) :: [row]

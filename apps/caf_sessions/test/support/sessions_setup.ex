@@ -2,7 +2,8 @@ defmodule CodingAgentFramework.SessionsSetup do
   @moduledoc """
   The setup `SessionsTest` and `SessionsSourceTest` share: a `Sessions` on a real tmux server
   and real dtach sockets in the test's own directory, with its `Control`, a `Registry` of one
-  prepared account, a `Stream` for its delegates, and a clock the test moves; and the launches
+  prepared account, a `Stream` for its delegates, a `Shell.Reaper` for its worktrees' commands,
+  and a clock the test moves; and the launches
   of stand-ins for Claude Code: interactive (`CodingAgentFramework.ClaudeStandIn`) and headless
   (`CodingAgentFramework.HeadlessStandIn`).
 
@@ -16,7 +17,7 @@ defmodule CodingAgentFramework.SessionsSetup do
   import ExUnit.Callbacks, only: [on_exit: 1, start_supervised!: 1]
 
   alias CodingAgentFramework.{Accounts, ClaudeStandIn, Control, HeadlessStandIn, Holder, Registry}
-  alias CodingAgentFramework.{Sessions, Stream, Tmux}
+  alias CodingAgentFramework.{Sessions, Shell, Stream, Tmux}
   alias CodingAgentFramework.Sessions.Table
   alias CodingAgentFramework.Tmux.CLI
 
@@ -47,8 +48,10 @@ defmodule CodingAgentFramework.SessionsSetup do
     clock = start_supervised!({Agent, fn -> System.os_time(:millisecond) end})
     stream_opts = [programs: programs(), holder: holder, home: dir, db: db]
     stream = start_supervised!(Supervisor.child_spec({Stream, stream_opts}, id: Stream))
+    reaper = start_supervised!({Shell.Reaper, programs: programs()})
 
     opts = [
+      reaper: reaper,
       programs: programs(),
       dir: dtach,
       control: control,
