@@ -198,6 +198,10 @@ its host, as it has since the first part built, so the workstation is one host a
   keeps for a cut start). The refusal is answered at once; only the turn waits. The host side
   takes the lock before rsync's server starts (the server runs under it, as rsync's
   `--rsync-path`), since that server deletes files from the file list before any data arrives.
+  The workstation's sync goes through the same host side, by a local stand-in for ssh, so its
+  copy has the lock too. A sync deletes only what an earlier sync sent and the worktree no
+  longer has, never what was made in the copy, since git's ignore rules cannot tell a build
+  output from a file the worktree removed (F-74).
   A copy is removed with its worktree;
 - a host that restarts ends every held job, sync and lock on it; a job it ended has no exit
   file, so its end is unknown (`{:unknown, :no_exit}`), never an exit code;
