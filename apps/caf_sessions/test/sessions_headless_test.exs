@@ -177,8 +177,10 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
              Sessions.start(ctx.sessions, "kept", ctx.account, headless(ctx, :at_start))
 
     kill_held(ctx, dir, "killed")
-    cue(ctx, ctx.sessions)
-    assert {:ok, %{reason: "exited"}} = row_when(ctx, "killed", &(&1.status == "stopped"))
+
+    assert {:ok, %{reason: "exited"}} =
+             cued_row_when(ctx, ctx.sessions, "killed", &(&1.status == "stopped"))
+
     assert %{status: "running"} = Table.get(ctx.table, "test", "kept")
     assert alive?(pid)
 
@@ -212,7 +214,21 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
   # Stream reads, and its cue reaches Sessions as the host app would wire it.
   defp cue(ctx, sessions) do
     {:ok, _} = Stream.read(ctx.stream)
-    Sessions.cue(sessions, %{topic: "stream:test", ids: []})
+    send_cue(sessions)
+  end
+
+  defp send_cue(sessions), do: Sessions.cue(sessions, %{topic: "stream:test", ids: []})
+
+  # `row_when/3`, with a cue at each poll before the row is read, as a host's sampler cues at
+  # each read: a settle that decided nothing at one cue (a read that failed under load) is taken
+  # again at the next, within the same 10 s. A read that fails is the next poll's to retry.
+  defp cued_row_when(ctx, sessions, name, ready?) do
+    cue = fn ->
+      _ = Stream.read(ctx.stream)
+      send_cue(sessions)
+    end
+
+    await_cued(sessions, cue, fn -> row_ready(ctx, name, ready?) end, 10_000)
   end
 
   # A stand-in in a directory of its own, so the test can end just it, by its pid.
@@ -233,14 +249,11 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
   defp absent({:ok, :absent}), do: {:ok, :absent}
   defp absent(other), do: {:not_yet, other}
 
-  defp row_when(ctx, name, ready?) do
-    await(
-      fn ->
-        row = Table.get(ctx.table, "test", name)
-        if row && ready?.(row), do: {:ok, row}, else: row
-      end,
-      10_000
-    )
+  defp row_when(ctx, name, ready?), do: await(fn -> row_ready(ctx, name, ready?) end, 10_000)
+
+  defp row_ready(ctx, name, ready?) do
+    row = Table.get(ctx.table, "test", name)
+    if row && ready?.(row), do: {:ok, row}, else: row
   end
 
   # Reads until Stream's row of session `id` satisfies `ok?`, and answers it.

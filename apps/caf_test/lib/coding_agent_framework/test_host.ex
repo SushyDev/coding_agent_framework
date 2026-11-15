@@ -143,6 +143,39 @@ defmodule CodingAgentFramework.TestHost do
     end
   end
 
+  @doc """
+  Like `await/2` for a part that settles only at a cue. Each poll first calls `cue` (which sends
+  the cue the way the host app wires it), then waits until `server` has handled it, then calls
+  `check`. A real host's sampler cues at each read, so a settle that decided nothing at one cue
+  (a read that failed under load) is taken again at the next; one cue sent once and then waited
+  on for the whole `timeout` is not what a host does. The wait on `server` ends at the same
+  deadline, so the answer is `{:ok, value}`, or `{:timeout, last}` once `timeout` ms have
+  passed, as `await/2` answers.
+
+      await_cued(sessions, fn -> Sessions.cue(sessions, cue) end, fn -> row_if_stopped() end, 10_000)
+  """
+  def await_cued(server, cue, check, timeout \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    await(
+      fn ->
+        cue.()
+        handled(server, deadline)
+        check.()
+      end,
+      timeout
+    )
+  end
+
+  # The cue is a cast: a call after it is answered once the cast was handled, since a process
+  # reads its mailbox in order. One that passes the deadline is left to the next check.
+  defp handled(server, deadline) do
+    :sys.get_state(server, max(deadline - System.monotonic_time(:millisecond), 1))
+    :ok
+  catch
+    :exit, {:timeout, _} -> :late
+  end
+
   @doc "Reads a file a stand-in writes, once it has `expected`'s length."
   def read_when(path, expected) do
     await(fn ->

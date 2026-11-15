@@ -10,6 +10,7 @@ defmodule CodingAgentFramework.SessionsTest do
 
   import CodingAgentFramework.SessionsSetup
   import CodingAgentFramework.TestHost
+  import ExUnit.CaptureLog
 
   alias CodingAgentFramework.{ClaudeStandIn, Control, Holder, Registry, Sessions, SessionsSetup}
   alias CodingAgentFramework.TmuxSampler
@@ -175,8 +176,7 @@ defmodule CodingAgentFramework.SessionsTest do
 
     assert {:ok, %{status: 0}} = kill(pid, "-CONT")
     assert {:ok, :gone} = await(fn -> if not alive?(pid), do: {:ok, :gone} end)
-    cue(ctx, sessions)
-    assert {:ok, _} = row_when(ctx, "deaf", &(&1.status == "stopped"))
+    assert {:ok, _} = cued_row_when(ctx, sessions, "deaf", &(&1.status == "stopped"))
   end
 
   test "F-61: RunningSettled stops a running row whose process was killed; the name resumes",
@@ -191,9 +191,11 @@ defmodule CodingAgentFramework.SessionsTest do
 
     # The test kills the process by the pid its stand-in recorded; its socket is then absent.
     kill_held(ctx, dir, "crashed")
-    cue(ctx, ctx.sessions)
-    assert {:ok, %{reason: "exited"}} = row_when(ctx, "crashed", &(&1.status == "stopped"))
-    # The same settle read the live process and kept its row running.
+
+    assert {:ok, %{reason: "exited"}} =
+             cued_row_when(ctx, ctx.sessions, "crashed", &(&1.status == "stopped"))
+
+    # Each settle read the live process too, and kept its row running.
     assert %{status: "running"} = Table.get(ctx.table, "test", "kept")
     assert alive?(kept)
 
@@ -212,6 +214,34 @@ defmodule CodingAgentFramework.SessionsTest do
 
     assert %{status: "running", resume: ^id, reason: nil} =
              Table.get(ctx.table, "test", "crashed")
+  end
+
+  test "F-67: a ps that fails decides nothing and the log says why; the next cue settles", ctx do
+    {dir, flaky} = own_dir(ctx, "flaky", :at_start)
+    assert {:ok, _} = Sessions.start(ctx.sessions, "flaky", ctx.account, flaky)
+    kill_held(ctx, dir, "flaky")
+
+    # A Sessions whose ps fails, as one that could not run under load does, while `failing` is
+    # there.
+    failing = Path.join(ctx.dir, "ps-failing")
+    File.write!(failing, "")
+    ps = failing_ps(ctx, failing)
+    sessions = restart(ctx, nil, programs: programs(host(), %{ps: ps}))
+
+    log =
+      capture_log(fn ->
+        cue(ctx, sessions)
+        :sys.get_state(sessions)
+      end)
+
+    assert log =~ "settle of running flaky decided nothing: process :unknown"
+    assert %{status: "running"} = Table.get(ctx.table, "test", "flaky")
+
+    # The ps runs again: the next cue settles the row, as a host's next read does.
+    File.rm!(failing)
+
+    assert {:ok, %{reason: "exited"}} =
+             cued_row_when(ctx, sessions, "flaky", &(&1.status == "stopped"))
   end
 
   test "F-64: a stop is done only when its socket has ended too; the name then resumes", ctx do
@@ -365,7 +395,37 @@ defmodule CodingAgentFramework.SessionsTest do
   # The Registry reads, and its cue reaches Sessions as the host app would wire it.
   defp cue(ctx, sessions) do
     {:ok, _} = Registry.read(ctx.registry)
-    Sessions.cue(sessions, %{topic: "registry:test:work", ids: []})
+    send_cue(sessions)
+  end
+
+  defp send_cue(sessions), do: Sessions.cue(sessions, %{topic: "registry:test:work", ids: []})
+
+  # `row_when/3`, with a cue at each poll before the row is read, as a host's sampler cues at
+  # each read: a settle that decided nothing at one cue (a read that failed under load) is taken
+  # again at the next, within the same 10 s. A read that fails is the next poll's to retry.
+  defp cued_row_when(ctx, sessions, name, ready?) do
+    cue = fn ->
+      _ = Registry.read(ctx.registry)
+      send_cue(sessions)
+    end
+
+    await_cued(sessions, cue, fn -> row_ready(ctx, name, ready?) end, 10_000)
+  end
+
+  # A ps that exits 2 while `failing` exists, and is the real one after.
+  defp failing_ps(ctx, failing) do
+    path = Path.join(ctx.dir, "ps-failing.sh")
+    tmp = "#{path}.tmp"
+
+    File.write!(tmp, """
+    #!#{program!(:sh)}
+    [ -e "#{failing}" ] && exit 2
+    exec "#{program!(:ps)}" "$@"
+    """)
+
+    File.chmod!(tmp, 0o755)
+    File.rename!(tmp, path)
+    path
   end
 
   defp file_written(ctx) do
@@ -390,13 +450,10 @@ defmodule CodingAgentFramework.SessionsTest do
   defp absent({:ok, :absent}), do: {:ok, :absent}
   defp absent(other), do: {:not_yet, other}
 
-  defp row_when(ctx, name, ready?) do
-    await(
-      fn ->
-        row = Table.get(ctx.table, "test", name)
-        if row && ready?.(row), do: {:ok, row}, else: row
-      end,
-      10_000
-    )
+  defp row_when(ctx, name, ready?), do: await(fn -> row_ready(ctx, name, ready?) end, 10_000)
+
+  defp row_ready(ctx, name, ready?) do
+    row = Table.get(ctx.table, "test", name)
+    if row && ready?.(row), do: {:ok, row}, else: row
   end
 end
