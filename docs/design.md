@@ -60,7 +60,7 @@ Each word below names one thing, and the design, the code and the views use it o
 **Machines and work**
 
 - **Workstation**: the person's computer. Every agent, the framework, its tmux server, its
-  dtach directory and every worktree are on it.
+  dtach directory, every checkout and every worktree are on it.
 - **Host**: a machine that runs jobs and services for agents, reached over ssh, or the
   workstation itself. No agent ever runs on a host other than the workstation.
 - **Job**: a one-off command an agent runs on a host, on a copy of its worktree, ending with an
@@ -69,7 +69,7 @@ Each word below names one thing, and the design, the code and the views use it o
   database, held by dtach, owned by one agent at a time, with a log.
 - **Copy**: a host's copy of one worktree, kept in step by rsync before each job or service
   starts: every file git does not ignore, edits not yet committed included. Build outputs stay
-  in the copy between runs.
+  in the copy between runs. Nothing comes back from a copy but the paths a job names to fetch.
 
 **Accounts**
 
@@ -83,8 +83,12 @@ Each word below names one thing, and the design, the code and the views use it o
 
 - **Project**: a repository and its trunk, declared as data.
 - **Trunk**: the project's main branch, such as `main`.
-- **Worktree**: a checkout of one branch of the project, on the workstation, under the framework
-  home; each delegate has its own.
+- **Checkout**: the framework's own clone of a project's repository, on the workstation, at
+  `<home>/checkouts/<project>`, made once from the project's repository. The main session runs
+  there on trunk, and every worktree of the project is made from it. The framework never runs
+  git in the person's own clone.
+- **Worktree**: a git worktree of the project's checkout, on one branch, on the workstation,
+  under the framework home; each delegate has its own.
 - **Stack**: a chain of branches and pull requests (`gh stack`) that lands into trunk.
 
 **Holding and viewing**
@@ -93,8 +97,8 @@ Each word below names one thing, and the design, the code and the views use it o
   tree and hands them their settings. The framework is a set of libraries; it starts nothing of
   its own.
 - **Framework home**: one directory per framework instance, on the workstation, given by the
-  embedding app. It holds each account's Claude config directory, the dtach directory, the worktrees
-  and the SQLite files. The framework never reads or writes `~/.claude` or any config directory
+  embedding app. It holds each account's Claude config directory, the dtach directory, the checkouts,
+  the worktrees and the SQLite files. The framework never reads or writes `~/.claude` or any config directory
   outside it.
 - **Server**: a tmux server, `tmux -L <name>`. Pane ids are unique only within one server, and a
   restarted server counts from `%0` again.
@@ -183,6 +187,8 @@ its host, as it has since the first part built, so the workstation is one host a
 - a job is held by dtach on its host, so a dropped ssh connection does not end it; its output
   goes to a log on the host, read back from an offset, and it ends with its exit code or its
   timeout, which ends its process group;
+- a job can bring files back: `run`'s `fetch: [paths]` names paths that rsync copies from the
+  host's copy into the worktree after the job ends. Nothing comes back unless named;
 - a service on another host is held the same way, and a port it listens on is forwarded to the
   workstation over the host's ssh connection when the service asks for it, so tests on the
   workstation reach it at `127.0.0.1:<port>`;
@@ -204,7 +210,8 @@ connection at any step, before `Copies`, `Jobs` and remote `Services` are built.
 
 ## Main sessions
 
-A project has at most one main session. It runs in the project's own checkout, on trunk, and
+A project has at most one main session. It runs in the project's checkout, the framework's own
+clone under `<home>/checkouts/<project>`, made once from the project's repository, on trunk. It
 changes nothing there: its delegates work in worktrees, their branches land into trunk through
 stacks, and after each landing the framework pulls trunk in that checkout (fast-forward only,
 and only while the checkout is clean; anything else is a state a person sees). So the main
@@ -344,17 +351,17 @@ resume, with its worktree and setup; `Delegate.tla` leaves the start abstract an
 
 - It lives at `<home>/worktrees/<project>/<name>`, by the session's name, under the framework
   home's physical path (git prints worktree paths with symlinks resolved). The row's `cwd` is
-  that path, with the project's repository and the branch.
-- `Sessions` reads a project as `%{name, repo, trunk, setup, setup_timeout, env}`: the
-  repository's absolute path, the trunk a new branch starts from, the setup as a list of
-  commands (each an argv whose program is an absolute path), one deadline for the whole setup,
+  that path, with the project's checkout and the branch.
+- `Sessions` reads a project as `%{name, repo, trunk, setup, setup_timeout, env}`: the absolute
+  path of the project's checkout ("Concepts"), where its worktrees are made and never the
+  person's own clone, the trunk a new branch starts from, the setup as a list of commands (each an argv whose program is an absolute path), one deadline for the whole setup,
   and the environment that git and the setup run in, built from nothing (`env -i`), so nothing
   of the framework's own environment, such as a `GIT_DIR`, reaches the repository. The branch
   pattern and the cap are `Delegates`' checks; `Sessions` checks that the branch is a plain ref
   name.
 - A path is held by an agent when a row that has not ended has it as its `cwd`. A start whose
   path another row holds is refused before its row is written.
-- "On the branch" is read from `git worktree list --porcelain` of the repository: the path with
+- "On the branch" is read from `git worktree list --porcelain` of the checkout: the path with
   `branch refs/heads/<branch>`. Never from whether the branch exists: an add that fails leaves
   its branch behind. "Clean" is `git status --porcelain --untracked-files=all` listing nothing:
   no change to a tracked file and no untracked file that is not ignored. Ignored files, such as
@@ -546,7 +553,7 @@ framework's tools, which are strict in how they act and narrow in whom they reac
 | `start_delegate(…)` | main session | starts a delegate and answers at once; the report arrives later as a message ("The delegate protocol") |
 | `run_delegate(…, timeout)` | main session | starts a delegate and holds the call for its report, up to `timeout`, for short work; at the timeout it answers `{:unknown, :timeout}` with the delegate's name, and the report then arrives as a message, as `start_delegate`'s does |
 | `start_main(project, brief)` | main session | starts the main session of a project that has none |
-| `run(host, argv, timeout)` | main session, delegate | runs a job in a copy of the caller's worktree on `host`, and answers its exit code and the end of its log, or `{:unknown, :timeout}` once it ended it |
+| `run(host, argv, timeout, opts)` | main session, delegate | runs a job in a copy of the caller's worktree on `host`, and answers its exit code and the end of its log, or `{:unknown, :timeout}` once it ended it; after the job ends, the paths `fetch:` names, and only those, are copied by rsync from the copy into the caller's worktree |
 | `service_start(name, argv, opts)` | main session, delegate | holds `argv` by dtach on a host (`host:`, the workstation by default) in a copy of the caller's worktree, with its output in a log, and a port forwarded to the workstation if `forward:` names one |
 | `services()` | any agent | each service: name, host, owner, state, restarts, forwarded port |
 | `service_logs(name, from)` | any agent | the service's output from an offset |
@@ -963,7 +970,8 @@ Then `Delegate.tla` and `Delegates` (its start, finish and kill path are built).
 4. **`Screen`**, from the fixtures a person captures, then `Delegates`' delivery of a report
    through `Control`'s checked write, and `run_delegate`.
 5. **`Mover`**, against `Move.tla`.
-6. **`Mains`**: one main session per project, on trunk in the project's checkout, the pull
+6. **`Mains`**: one main session per project, on trunk in the project's checkout (the clone it
+   makes once under the framework home), the pull
    after a landing, and `start_main`.
 7. **`Team.tla`**, then `Grants`, `Mailbox` and the agent tools, by the tree's edges, with
    `agents()` read from the `Tracker`.
