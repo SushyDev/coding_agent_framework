@@ -835,7 +835,16 @@ used and when it resets). It reads no credential and calls no API.
   directory with fake liveness ended every other suite's servers.
 - No test reaches the real Claude Code.
 - A stand-in that starts processes writes their pids and sleeps a bounded time, so a failed run
-  leaves nothing for long; a test ends what is left by those pids alone.
+  leaves nothing for long; a test ends what is left by those pids alone. Every process a test
+  holds is such a stand-in, never a bare program, whose command line names no test directory.
+  Leftover stand-ins once held every pseudo-terminal on the machine, and every `dtach` start
+  failed in this repository and in other programs.
+- A test's end seals what its stand-ins record before it ends them, so a stand-in that starts
+  later exits at once: a start that answers before its stand-in records otherwise leaves one
+  reading forever. A pid is signaled only while its command line names the directory it was
+  recorded under, since pids wrap within minutes on a busy machine. The VM ends every recorded
+  pid before it removes its directory, and `gate-test` fails, naming each, on any process still
+  naming that directory.
 - A file a started process may read (a script, a config, a fixture) is written whole and
   renamed into place, never rewritten in place: a stand-in rewritten while a start ran it was
   read empty, and the start exited at once.

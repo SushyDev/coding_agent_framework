@@ -16,20 +16,24 @@ defmodule CodingAgentFramework.HeadlessStandIn do
   - `end_session` ends it; a line that is not a JSON object ends it with status 1.
 
   It records each line it takes in `<dir>/taken` (`message <uuid>`, `answer <id>`, `interrupt`,
-  `end`, `invalid`) and its pid in `<dir>/pids/`, so a test ends what it started by pid.
+  `end`, `invalid`) and its pid in `<dir>/pids/`, so a test ends what it started by pid; it
+  exits at once if that directory was already ended (`TestHost.end_recorded/2`). It ends after
+  `idle` seconds with no input (`TestHost.stand_in_idle/0` by default), so no run leaves it for
+  long.
   """
 
-  import CodingAgentFramework.TestHost, only: [program!: 1, kill: 1]
+  import CodingAgentFramework.TestHost, only: [program!: 1, kill: 1, stand_in_idle: 0]
 
   @doc """
   Writes the stand-in for `mode` into `dir` and answers its path. It is written whole under
   another name and renamed into place, since a start may be running the path (F-39).
   """
-  def write!(dir, mode \\ :at_start) when mode in [:at_start, :on_message, :never] do
+  def write!(dir, mode \\ :at_start, idle \\ stand_in_idle())
+      when mode in [:at_start, :on_message, :never] do
     path = Path.join(dir, "headless-#{mode}")
     File.mkdir_p!(Path.join(dir, "pids"))
     tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
-    File.write!(tmp, script(dir, mode))
+    File.write!(tmp, script(dir, mode, idle))
     File.chmod!(tmp, 0o755)
     File.rename!(tmp, path)
     path
@@ -54,14 +58,14 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     end
   end
 
-  defp script(dir, mode) do
+  defp script(dir, mode, idle) do
     ~S"""
     #!BASH
     sid=''
     while [ $# -gt 0 ]; do
       case $1 in --session-id|--resume) sid=$2; shift 2 ;; *) shift ;; esac
     done
-    : > "DIR/pids/$$"
+    : 2>/dev/null > "DIR/pids/$$" || exit 0
     rec() { printf '%s\n' "$1" >> "DIR/taken"; }
     ev() { printf '%s\n' "$1"; }
     field() { [[ $line =~ \"$1\":\"([^\"]*)\" ]] && printf '%s' "${BASH_REMATCH[1]}"; }
@@ -74,7 +78,7 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     mode=MODE
     [ $mode = at_start ] && init
     pending='' asker='' half=''
-    while IFS= read -r line; do
+    while IFS= read -r -t IDLE line; do
       [ -z "$line" ] && continue
       [ $mode = on_message ] && { init; mode=done; }
       case $line in \{*\}) ;; *) rec invalid; exit 1 ;; esac
@@ -112,5 +116,6 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     |> String.replace("BASH", program!(:bash), global: false)
     |> String.replace("DIR", dir)
     |> String.replace("MODE", Atom.to_string(mode))
+    |> String.replace("IDLE", Integer.to_string(idle))
   end
 end

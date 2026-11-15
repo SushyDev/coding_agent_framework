@@ -96,7 +96,10 @@ defmodule CodingAgentFramework.HolderTest do
     pids = Path.join(dir, "#{name}-#{System.unique_integer([:positive])}.pids")
 
     script =
-      ~s(echo "$$ $PPID" > "$0.tmp" && #{program!(:mv)} "$0.tmp" "$0"; exec #{program!(:cat)})
+      ~s(echo "$$ $PPID" > "$0.tmp" && #{program!(:mv)} "$0.tmp" "$0"; #{echo_tail!(dir)})
+
+    # Registered before the hold, so a test that fails mid-start ends it too.
+    on_exit(fn -> end_recorded(dir) end)
 
     assert {:ok, _socket} = Holder.hold(h, name, [program!(:sh), "-c", script, pids])
     assert {:ok, text} = await(fn -> File.read(pids) end)
@@ -158,7 +161,9 @@ defmodule CodingAgentFramework.HolderEnvTest do
 
     script =
       ~s(#{program!(:env)} > "$0.env"; echo "$$ $PPID" > "$0.tmp" && ) <>
-        ~s(#{program!(:mv)} "$0.tmp" "$0"; exec #{program!(:cat)})
+        ~s(#{program!(:mv)} "$0.tmp" "$0"; #{echo_tail!(dir)})
+
+    on_exit(fn -> end_recorded(dir) end)
 
     assert {:ok, _} = Holder.hold(h, "alpha", [program!(:sh), "-c", script, out], env: allowed)
     assert {:ok, pids} = await(fn -> File.read(out) end)

@@ -139,8 +139,35 @@ in
   # only checks that a module is somewhere in an app's dependency tree. The task lives in
   # caf_test, which compiles only for tests.
   scripts.gate-deps.exec = "MIX_ENV=test mix caf.deps";
-  # The model test runs TLC; gate-model runs it on its own, so it is left out here.
-  scripts.gate-test.exec = "mix test --exclude model";
+  # The model test runs TLC; gate-model runs it on its own, so it is left out here. The test VM
+  # works under /tmp/caf-<its pid>/ (TestHost.vm_dir/0), and the subshell execs mix, so its pid
+  # is the VM's. A process whose command line still names that directory after the run is one
+  # the run left: the gate names each and fails. It lists them; it never ends them. A dtach
+  # master exits just after its child, so the list is read again for a few seconds first.
+  scripts.gate-test.exec = ''
+    vm_file=$(mktemp)
+    status=0
+    ( echo "$BASHPID" > "$vm_file"; exec mix test --exclude model ) || status=$?
+    vm=$(<"$vm_file")
+    "$CAF_RM" -f "$vm_file"
+    for ((try = 0; try < 50; try++)); do
+      if ! listing=$("$CAF_PS" -axww -o pid=,command=); then
+        echo "gate-test: ps failed, so what the test VM left is unknown" >&2
+        exit 1
+      fi
+      left=""
+      while read -r pid command; do
+        [[ $command == *"/caf-$vm/"* ]] && left="$left"$'\n'"  $pid $command"
+      done <<< "$listing"
+      [ -z "$left" ] && break
+      "$CAF_SLEEP" 0.1
+    done
+    if [ -n "$left" ]; then
+      echo "gate-test: the test VM $vm left these processes running:$left" >&2
+      status=1
+    fi
+    exit $status
+  '';
   scripts.gate-model.exec = ''"$CAF_BASH" "$DEVENV_ROOT/bin/check-model" all'';
 
   # The last step of `devenv test`: it fails unless every gate passed in this run, so a devenv

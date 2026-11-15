@@ -21,7 +21,7 @@ defmodule CodingAgentFramework.StreamTest do
     dir = test_dir()
     {:ok, holder} = Holder.new(programs(), dir)
     stand_in = HeadlessStandIn.write!(dir)
-    on_exit(fn -> HeadlessStandIn.kill_all(dir) end)
+    on_exit(fn -> end_recorded(dir) end)
     ctx = %{dir: dir, holder: holder, stand_in: stand_in, db: Path.join(dir, "s.db")}
     {:ok, Map.put(ctx, :stream, start!(ctx))}
   end
@@ -136,7 +136,7 @@ defmodule CodingAgentFramework.StreamTest do
        ctx do
     # A process that never reads its stdin: the line waits in its pipe and dies with it, during
     # the turn the write started (new-6).
-    deaf = %{stand_in(ctx, session_id: "r1") | argv: [program!(:sleep), "600"]}
+    deaf = %{stand_in(ctx, session_id: "r1") | argv: [program!(:sleep), "#{stand_in_idle()}"]}
     s = hold!(ctx, "r1", deaf)
     {:ok, %{uuid: u}} = Stream.write(s, "r1", {:message, "lost"})
     kill_held!(ctx, "r1")

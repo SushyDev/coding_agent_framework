@@ -25,7 +25,7 @@ defmodule CodingAgentFramework.ClaudeCLIHeldTest do
     #{program!(:env)} > "#{out}.env"
     for a in "$@"; do printf '%s\\n' "$a"; done > "#{out}.argv"
     echo $$ > "#{out}.tmp" && #{program!(:mv)} "#{out}.tmp" "#{out}"
-    exec #{program!(:cat)}
+    #{echo_tail!(ctx.dir)}
     """)
 
     File.chmod!(stand_in, 0o755)
@@ -48,6 +48,7 @@ defmodule CodingAgentFramework.ClaudeCLIHeldTest do
 
     {:ok, holder} = Holder.new(programs(), Path.join(ctx.dir, "sockets"))
     File.mkdir_p!(holder.dir)
+    on_exit(fn -> end_recorded(ctx.dir) end)
     assert {:ok, _} = Holder.hold(holder, "d1", argv, env: vars)
     assert {:ok, pid} = await(fn -> File.read(out) end)
     on_exit(fn -> if Holder.state(holder, "d1") == {:ok, :live}, do: kill(String.trim(pid)) end)

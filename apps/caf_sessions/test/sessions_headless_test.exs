@@ -219,7 +219,7 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
   defp own_dir(ctx, name, mode) do
     dir = Path.join(ctx.dir, name)
     File.mkdir_p!(dir)
-    on_exit(fn -> HeadlessStandIn.kill_all(dir) end)
+    on_exit(fn -> end_recorded(dir) end)
     {dir, Keyword.put(headless(ctx, mode), :claude, HeadlessStandIn.write!(dir, mode))}
   end
 
