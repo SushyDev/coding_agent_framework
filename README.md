@@ -149,6 +149,14 @@ tmux, dtach, Claude Code, git, gh, TLC with its JDK, and the POSIX tools the tes
 
 Run every command from the umbrella root; `mix test` there runs each app's tests.
 
+`Screen`'s fixtures are a real Claude Code session's screens, captured once per pinned release
+by a person with `devenv shell -- bin/capture-screen <home>/accounts/<account>/claude`. It runs
+Claude Code in a 120x40 pane on a tmux server of its own, types into the box itself, and asks
+you to answer each dialog in a second terminal it attaches to the pane. It scrubs paths and
+names (`--name <text>` adds one), prints each line it changed, and writes the screens with a
+manifest to `apps/caf_screen/test/fixtures/<version>/`; read them before committing them.
+`--dry-run` runs the same steps against a stand-in. No test runs the real Claude Code.
+
 The shell exports each program's store path as `CAF_<NAME>`: `CAF_TMUX`, `CAF_DTACH`,
 `CAF_CLAUDE`, `CAF_GIT`, `CAF_GH`, `CAF_SH`, `CAF_BASH`, `CAF_RM`, `CAF_MV`, `CAF_ENV`,
 `CAF_KILL`, `CAF_PS`, `CAF_CAT`, `CAF_ECHO`, `CAF_TLC` and `CAF_JAVA`. Tests and
