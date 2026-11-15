@@ -158,9 +158,27 @@ steps. Read it in the order of a start:
   set back to running after a restart, and only it may be killed (`Kill`, `Recoveries`' step).
   `ForeignStarts` is another program taking a freed pid, which is why the start time counts.
 
-`onTime`, `ends` and `wrongKills` are ghosts: they record what happened, for the invariants, and
-the framework never reads them. `RunningOnlyIfLive` is a step property: the step that writes
-`"running"` writes it only for a live process its file names.
+With `Worktrees` (F-55), a start runs in a worktree, and three steps come between the row and
+the hold:
+
+- `RowWritten` first checks that no other row that has not ended holds the path (`HeldByOther`).
+  A later start of a name may be a resume (`resume`).
+- `Checked` is `git worktree list` and `git status`: a free path (`wt` is `"none"`) goes on to
+  `Added`; a tree on the branch (`"tree"`) is reused when clean (`dirty` is false) or for a
+  resume; anything else (`"other"`: a directory, or a worktree on another branch) is refused.
+- `Added` is `git worktree add`, with `-b` when the branch does not exist. At a path taken since
+  the check (`PathTaken`) it fails, and `branch` is true afterwards either way.
+- `SetupStarts` and `SetupEnds` are the project's setup: `ready` is false from its start and
+  true only when it finishes; a failed setup refuses the start and leaves the tree. `setupRuns`
+  is the setup's processes, which a restart ends (the reaper), except under `SetupOutlives`.
+- `Adopt`'s refused branch also removes the tree (`Remove`) when it is clean and no other row
+  holds it. `TreeChanged` is anyone changing files in a tree. `Shared` puts every session on one
+  path, to check the held path.
+
+`onTime`, `ends`, `wrongKills`, `touched`, `offTree`, `removedDirty` and `reusedDirty` are ghosts:
+they record what happened, for the invariants, and the framework never reads them.
+`RunningOnlyIfLive` is a step property: the step that writes `"running"` writes it only for a
+live process its file names.
 
 ## `Intake.tla`
 
