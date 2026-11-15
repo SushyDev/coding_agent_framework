@@ -1,0 +1,385 @@
+defmodule CodingAgentFramework.Jobs do
+  @moduledoc """
+  One-off commands on a host, in a copy of a worktree: held by dtach, logged, ended by their
+  exit or their timeout (see "Hosts" in `docs/design.md` and `model/tla/Copy.tla`). One
+  process with no name, started by the embedding app, which owns the `jobs` table
+  (`CodingAgentFramework.Jobs.Table`). A run's call works in the caller's process.
+
+  **A run** (`run/6`) takes the copy's turn and syncs it (`CodingAgentFramework.Copies`), then
+  holds the job on the host under a wrapper, settles the start and gives the turn back, waits
+  for the job's end, and answers:
+
+    * `{:ok, %{exit: code, log: tail}}`: the command exited with `code`;
+    * `{:unknown, :timeout}`: the host ended the job at its timeout;
+    * `{:unknown, :no_exit}`: the socket is dead and there is no exit file;
+    * `{:unknown, :dropped}`: the call's deadline (the job's timeout) passed with the host
+      unread; the row is settled later by `settle/2`;
+    * `{:refused, {:sync, reason}}`: the sync was cut, and nothing ran.
+
+  **The wrapper** runs on the host as dtach's child, so it leads its own process group, and the
+  job runs in that group. At the job's timeout a timer in the group writes `timeout` to the
+  exit file and ends the group. When the command exits, the wrapper writes its code and ends
+  the group, itself included: the group's id is the wrapper's own pid, alive until then, so the
+  kill never reaches a reused id. Whichever comes first wins the exit file, by `mkdir`; the
+  other leaves it to the winner. dtach removes the socket once the wrapper is gone, so a job is
+  read dead first, then its exit file, and nothing of its group is left by then.
+
+      {:ok, jobs} = Jobs.start_link(dir: dir, copies: copies, hosts: %{"box" => %{programs: p, dir: "/srv/caf"}})
+      Jobs.run(jobs, "j7", %{host: "box", project: "web", name: "fix-login"}, worktree,
+        ["/usr/bin/make", "test"], timeout: 600_000)
+      #=> {:ok, %{exit: 0, log: "..."}}
+  """
+
+  use GenServer
+
+  alias CodingAgentFramework.{Copies, Holder, Shell}
+  alias CodingAgentFramework.Jobs.Table
+
+  @call 5_000
+  # How long past the call's deadline a read waits for the host to end the job itself.
+  @grace 5_000
+  # $1..$7: the copy, the log, the exit file, the timeout in seconds, kill, sleep, mkdir; then
+  # the job's argv. `mkdir` of `<exit>.won` picks the one writer of the exit file.
+  @wrapper ~S"""
+  c=$1 l=$2 e=$3 t=$4 k=$5 s=$6 m=$7; shift 7
+  ( "$s" "$t"; "$m" "$e.won" 2>/dev/null || exit 0; echo timeout > "$e"; "$k" -KILL -- "-$$" ) \
+    </dev/null >/dev/null 2>&1 &
+  ( cd "$c" && exec "$@" ) </dev/null >>"$l" 2>&1
+  x=$?
+  "$m" "$e.won" 2>/dev/null || { wait; exit 0; }
+  echo "$x" > "$e"
+  "$k" -KILL -- "-$$"
+  exit "$x"
+  """
+  # $0 dtach; $1 the socket, $2 the exit file, $3 sleep, $4 "wait" to wait while it lives.
+  # The socket is read dead first, then the exit file, in one process.
+  @read ~S"""
+  while [ -e "$1" ]; do
+    if out=$("$0" -p "$1" </dev/null 2>&1); then
+      [ "$4" = wait ] || { echo live; exit 0; }
+      "$3" 0.2; continue
+    fi
+    case $out in *"Connection refused"*) break ;; *) echo "unknown $out"; exit 0 ;; esac
+  done
+  if [ -e "$2" ]; then printf 'end '; cat "$2"; else echo 'end none'; fi
+  """
+
+  @type where :: %{host: String.t(), project: String.t(), name: String.t()}
+
+  @doc """
+  Starts the part. Options: `:dir`, a directory of this machine of its own (the table);
+  `:copies`, the `Copies` server; `:hosts`, each host's name to `%{programs: programs, dir:
+  dir}`, its `Programs` (with `dtach`, `sh`, `env`, `rm`, `kill`, `sleep`, `mkdir`, `tail`)
+  and its framework directory.
+  """
+  @spec start_link(keyword) :: GenServer.on_start()
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+  @doc """
+  Runs `argv` as job `id` (a socket name: letters, digits, `-`, `_`) in the copy `where` names
+  of `worktree`. Options: `:timeout` (ms), the job's, kept on the host and the call's deadline;
+  `:sync_timeout` and `:lock_wait` (ms) for the sync; `:start_timeout` (ms) for dtach's reply;
+  `:env`, the job's whole environment as `{name, value}` pairs; `:reaper`; `:interval` (ms)
+  between reads that failed; `:log_bytes`, the tail's size.
+  """
+  @spec run(GenServer.server(), String.t(), where, String.t(), [String.t()], keyword) ::
+          {:ok, map} | {:refused, term} | {:unknown, term}
+  def run(jobs, id, where, worktree, argv, opts) do
+    timeout = Keyword.fetch!(opts, :timeout)
+    start = Keyword.get(opts, :start_timeout, 5_000)
+
+    with {:ok, ctx} <- context(jobs, id, where, start),
+         :ok <- call(jobs, {:ask, row(id, where)}),
+         {:ok, :taken} <- refuse_on_fail(jobs, id, Copies.take(ctx.copies, ctx.copy, id)),
+         {:ok, _} <- refuse_on_fail(jobs, id, sync(ctx, id, worktree, opts)),
+         :ok <- prepare(ctx, jobs, id),
+         :ok <- Copies.starting(ctx.copies, ctx.copy, id) do
+      now = now()
+      deadline = now + start + timeout
+      put(jobs, id, %{state: "starting", start_until: now + start, deadline: deadline})
+      secs = :erlang.float_to_binary(timeout / 1000, decimals: 3)
+      %{kill: k, sleep: s, mkdir: m, sh: sh} = ctx.programs.paths
+      wrapper = [sh, "-c", @wrapper, "caf-job", ctx.path, ctx.log, ctx.exit, secs, k, s, m]
+      held = Holder.hold(ctx.holder, id, wrapper ++ argv, env: Keyword.get(opts, :env, []))
+
+      with {:ok, :running} <- started(jobs, ctx, id, held, {now + start, deadline}, opts),
+           {:ok, value} <- wait_end(ctx, deadline, Keyword.get(opts, :interval, 200)),
+           :ok <- put(jobs, id, ended(value)) do
+        answer(ctx, ended(value), Keyword.get(opts, :log_bytes, 16_384))
+      end
+    end
+  end
+
+  @doc """
+  Settles job `id`'s row from the host once, as after a restart or a call that answered
+  unknown: a start whose reply was cut, once its deadline passed, is read as running or
+  refused, and its copy's turn is given back; a running job read dead gets its end. Answers
+  the row.
+  """
+  @spec settle(GenServer.server(), String.t()) :: {:ok, map} | {:refused, term} | {:unknown, term}
+  def settle(jobs, id) do
+    with {:ok, row} <- fetch(jobs, id),
+         {:ok, ctx} <- context(jobs, id, row, @call) do
+      case row.state do
+        "starting" ->
+          if now() < row.start_until,
+            do: {:unknown, {:starting_until, row.start_until}},
+            else: settle_start(jobs, ctx, id, read(ctx, :once, @call))
+
+        "running" ->
+          case read(ctx, :once, @call) do
+            {:ok, {:end, value}} -> put(jobs, id, ended(value))
+            {:ok, :live} -> :ok
+            other -> other
+          end
+
+        _ ->
+          :ok
+      end
+      |> case do
+        :ok -> fetch(jobs, id)
+        {:ok, :running} -> fetch(jobs, id)
+        {:refused, {:start, :not_held}} -> fetch(jobs, id)
+        other -> other
+      end
+    end
+  end
+
+  @doc """
+  The job's log from byte `offset`: `{:ok, %{text: text, next: offset}}`, where `next` is the
+  offset to read from next. Options: `:timeout` (ms).
+  """
+  @spec log(GenServer.server(), String.t(), non_neg_integer, keyword) ::
+          {:ok, map} | {:refused, term} | {:unknown, term}
+  def log(jobs, id, offset, opts \\ []) do
+    with {:ok, row} <- fetch(jobs, id),
+         {:ok, ctx} <- context(jobs, id, row, @call),
+         {:ok, text} <- tail(ctx, "+#{offset + 1}", Keyword.get(opts, :timeout, @call)),
+         do: {:ok, %{text: text, next: offset + byte_size(text)}}
+  end
+
+  @doc "Every job's row, for a view or a test."
+  @spec rows(GenServer.server()) :: [map] | {:unknown, term}
+  def rows(jobs), do: call(jobs, :rows)
+
+  defp context(jobs, id, where, start) do
+    with {:ok, %{hosts: hosts, copies: copies}} <- call(jobs, :config),
+         {:ok, %{programs: programs, dir: dir}} <- host(hosts, where.host),
+         copy = %{programs: programs, dir: dir, project: where.project, name: where.name},
+         {:ok, {path, _lock}} <- Copies.place(copy),
+         jobs_dir = Path.join(dir, "jobs"),
+         {:ok, holder} <- Holder.new(programs, jobs_dir, timeout: start) do
+      base = Path.join(jobs_dir, id)
+
+      {:ok,
+       %{
+         copies: copies,
+         copy: copy,
+         programs: programs,
+         holder: holder,
+         path: path,
+         dir: jobs_dir
+       }
+       |> Map.merge(%{socket: base <> ".sock", log: base <> ".log", exit: base <> ".exit"})}
+    end
+  end
+
+  defp host(hosts, name) do
+    case Map.fetch(hosts, name) do
+      {:ok, host} -> {:ok, host}
+      :error -> {:refused, {:no_host, name}}
+    end
+  end
+
+  defp prepare(ctx, jobs, id) do
+    case Shell.run(ctx.programs.host, ctx.programs.paths.mkdir, ["-p", ctx.dir], timeout: @call) do
+      {:ok, %{status: 0}} ->
+        :ok
+
+      other ->
+        Copies.give_back(ctx.copies, ctx.copy, id)
+        refuse_on_fail(jobs, id, {:refused, {:host, other}})
+    end
+  end
+
+  defp sync(ctx, id, worktree, opts) do
+    sync_opts = [
+      timeout: Keyword.get(opts, :sync_timeout, 60_000),
+      lock_wait: Keyword.get(opts, :lock_wait, 30_000),
+      reaper: Keyword.get(opts, :reaper)
+    ]
+
+    Copies.sync(ctx.copies, ctx.copy, id, worktree, Enum.reject(sync_opts, &is_nil(elem(&1, 1))))
+  end
+
+  defp refuse_on_fail(jobs, id, {:refused, _} = refused) do
+    put(jobs, id, %{state: "refused"})
+    refused
+  end
+
+  defp refuse_on_fail(_jobs, _id, other), do: other
+
+  # dtach answered: held, or refused with nothing run. Its reply cut: the host is read once the
+  # start's deadline has passed, since the start may still land until then.
+  defp started(jobs, ctx, id, {:ok, _}, _times, _opts) do
+    put(jobs, id, %{state: "running"})
+    Copies.give_back(ctx.copies, ctx.copy, id)
+    {:ok, :running}
+  end
+
+  defp started(jobs, ctx, id, {:refused, reason}, _times, _opts) do
+    put(jobs, id, %{state: "refused"})
+    Copies.give_back(ctx.copies, ctx.copy, id)
+    {:refused, {:start, reason}}
+  end
+
+  defp started(jobs, ctx, id, {:unknown, _}, {until, deadline}, opts) do
+    pause(until - now())
+
+    retry(deadline, Keyword.get(opts, :interval, 200), fn -> read(ctx, :once, @call) end)
+    |> then(&settle_start(jobs, ctx, id, &1))
+  end
+
+  defp settle_start(jobs, ctx, id, read) do
+    ran =
+      case read do
+        {:ok, :live} -> true
+        {:ok, {:end, "none"}} -> false
+        {:ok, {:end, _}} -> true
+        other -> other
+      end
+
+    if is_boolean(ran) do
+      put(jobs, id, %{state: if(ran, do: "running", else: "refused")})
+      Copies.give_back(ctx.copies, ctx.copy, id)
+      if ran, do: {:ok, :running}, else: {:refused, {:start, :not_held}}
+    else
+      ran
+    end
+  end
+
+  # One read waits on the host while the job lives, until the call's deadline and a grace for
+  # the host's own end of it. A read that fails is tried again until the deadline.
+  defp wait_end(ctx, deadline, interval) do
+    retry(deadline, interval, fn -> read(ctx, :wait, max(deadline - now(), 0) + @grace) end)
+    |> case do
+      {:ok, {:end, value}} -> {:ok, value}
+      {:ok, :live} -> {:unknown, :dropped}
+      other -> other
+    end
+  end
+
+  defp retry(deadline, interval, read) do
+    case read.() do
+      {:ok, _} = ok ->
+        ok
+
+      _ ->
+        if now() >= deadline do
+          {:unknown, :dropped}
+        else
+          pause(min(interval, deadline - now()))
+          retry(deadline, interval, read)
+        end
+    end
+  end
+
+  defp read(ctx, mode, timeout) do
+    %{dtach: dtach, sh: sh, sleep: sleep} = ctx.programs.paths
+    args = ["-c", @read, dtach, ctx.socket, ctx.exit, sleep, Atom.to_string(mode)]
+
+    case Shell.run(ctx.programs.host, sh, args, timeout: timeout) do
+      {:ok, %{status: 0, output: "live\n"}} -> {:ok, :live}
+      {:ok, %{status: 0, output: "end " <> value}} -> {:ok, {:end, String.trim(value)}}
+      other -> {:unknown, {:read, other}}
+    end
+  end
+
+  defp ended("timeout"), do: %{state: "timedout"}
+  defp ended("none"), do: %{state: "lost"}
+  defp ended(code), do: %{state: "exited", code: String.to_integer(code)}
+
+  defp answer(_ctx, %{state: "timedout"}, _), do: {:unknown, :timeout}
+  defp answer(_ctx, %{state: "lost"}, _), do: {:unknown, :no_exit}
+
+  defp answer(ctx, %{state: "exited", code: code}, bytes) do
+    log =
+      case tail(ctx, "#{bytes}", @call) do
+        {:ok, text} -> text
+        other -> other
+      end
+
+    {:ok, %{exit: code, log: log}}
+  end
+
+  defp tail(ctx, from, timeout) do
+    args = ["-c", from, ctx.log]
+
+    case Shell.run(ctx.programs.host, ctx.programs.paths.tail, args, timeout: timeout) do
+      {:ok, %{status: 0, output: text}} -> {:ok, text}
+      other -> {:unknown, {:log, other}}
+    end
+  end
+
+  defp pause(ms) when ms > 0 do
+    receive do
+    after
+      ms -> :ok
+    end
+  end
+
+  defp pause(_), do: :ok
+
+  defp now, do: System.os_time(:millisecond)
+
+  defp row(id, where),
+    do: %{id: id, host: where.host, project: where.project, name: where.name, state: "asked"}
+
+  defp fetch(jobs, id) do
+    case call(jobs, {:get, id}) do
+      nil -> {:refused, {:no_job, id}}
+      %{} = row -> {:ok, row}
+      other -> other
+    end
+  end
+
+  defp put(jobs, id, fields), do: call(jobs, {:put, id, fields})
+
+  defp call(jobs, request) do
+    GenServer.call(jobs, request, @call)
+  catch
+    :exit, reason -> {:unknown, {:jobs, reason}}
+  end
+
+  @impl true
+  def init(opts) do
+    dir = Keyword.fetch!(opts, :dir)
+
+    with :ok <- File.mkdir_p(dir),
+         {:ok, db} <- Table.open(Path.join(dir, "jobs.db")) do
+      config = %{hosts: Keyword.fetch!(opts, :hosts), copies: Keyword.fetch!(opts, :copies)}
+      {:ok, %{db: db, config: config}}
+    else
+      {:error, reason} -> {:stop, {:dir, reason}}
+      refused -> {:stop, refused}
+    end
+  end
+
+  @impl true
+  def handle_call(:config, _from, s), do: {:reply, {:ok, s.config}, s}
+  def handle_call(:rows, _from, s), do: {:reply, Table.all(s.db), s}
+  def handle_call({:get, id}, _from, s), do: {:reply, Table.get(s.db, id), s}
+
+  def handle_call({:ask, %{id: id} = row}, _from, s) do
+    if Table.get(s.db, id),
+      do: {:reply, {:refused, {:job_exists, id}}, s},
+      else: {:reply, Table.put(s.db, row), s}
+  end
+
+  def handle_call({:put, id, fields}, _from, s) do
+    case Table.get(s.db, id) do
+      nil -> {:reply, {:refused, {:no_job, id}}, s}
+      row -> {:reply, Table.put(s.db, Map.merge(row, fields)), s}
+    end
+  end
+end
