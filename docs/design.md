@@ -672,7 +672,17 @@ starts by itself never replaces a reply or a report.
 unless it handed them on with `service_hand`, or started them with `keep: true`, which hands them
 to the owner's parent when the owner ends. `keep` belongs to the service and stays with it when
 it is handed. A service has a name, a host, a copy, a held process and a log. A claim on a
-service holds its state as its held process (pid and start time) and its restart count. It never holds a Claude Code session; agents are started as delegates.
+service holds its state as its held process (pid and start time) and its restart count. It
+never holds a Claude Code session; agents are started as delegates. Any agent the tree holds may
+start one (`Grants.may_start_service?`).
+
+A service's end sends TERM to its process group, while its pid still has its recorded start
+time, and KILL to the group after a grace (the call's timeout), as its own step: the end is
+done only once the socket reads dead. A service runs in the foreground, in its own group: a
+program that daemonizes itself into a new session leaves a process no end reaches, so it is
+started in its foreground mode (a database with its no-daemon flag, say). A start that settles
+after its owner has ended does not stay running: its settle reads the owner's end first, and
+ends the service, or hands it to the owner's parent when it has `keep` (F-83).
 
 ## Intake
 
