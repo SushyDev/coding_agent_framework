@@ -11,10 +11,12 @@ defmodule CodingAgentFramework.Delegates.Turn do
       iex> Turn.next(row, %{gone: false, idle: true, messages: %{}, last_result: nil})
       {:write, "b1", "do it"}
       iex> fold = %{gone: false, idle: true, messages: %{"b1" => %{state: :delivered}},
-      ...>   last_result: %{text: "done"}}
+      ...>   last_result: %{text: "done", user_message_uuids: ["b1"]}}
       iex> Turn.next(row, fold)
       {:finished, "done"}
   """
+
+  alias CodingAgentFramework.Stream.Fold
 
   @keys [:branches, :cap]
 
@@ -68,9 +70,9 @@ defmodule CodingAgentFramework.Delegates.Turn do
   def message(row), do: {row.resume_uuid, resumed()}
 
   @doc """
-  What a running delegate's `Stream` row (`fold`) says: `{:finished, text}` once the turn's
-  message is delivered and a `result` came after it (the message's mark ended the turn, and only
-  a result or a resume's follow begins idle again, and a resume changes the message);
+  What a running delegate's `Stream` row (`fold`) says, read by `Stream.Fold.outcome/2`:
+  `{:finished, text}` once the turn's message is delivered and a `result` names it (an earlier
+  turn's result, as a resume leaves it, names another uuid);
   `:exited` when its process is gone first; `{:write, uuid, text}` while the message has not
   gone in, or went undelivered; `:waiting` otherwise.
   """
@@ -79,18 +81,11 @@ defmodule CodingAgentFramework.Delegates.Turn do
   def next(row, fold) do
     {uuid, text} = message(row)
 
-    case fold.messages[uuid] do
-      %{state: :delivered} when fold.idle and fold.last_result != nil ->
-        {:finished, fold.last_result[:text] || ""}
-
-      _ when fold.gone ->
-        :exited
-
-      m when m == nil or m.state == :undelivered ->
-        {:write, uuid, text}
-
-      _ ->
-        :waiting
+    case Fold.outcome(fold, uuid) do
+      {:result, report} -> {:finished, report}
+      _ when fold.gone -> :exited
+      outcome when outcome in [:none, :undelivered] -> {:write, uuid, text}
+      _ -> :waiting
     end
   end
 end

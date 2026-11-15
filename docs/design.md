@@ -653,8 +653,14 @@ session, its only sender) learns that in place of `delivered`, from a settled ro
 A message into a delegate starts a turn of its own after its report; that turn's `result` is
 the delegate's reply. `Mailbox` stores it as a message from the delegate to its main session,
 and delivers it as it delivers any message, so a reply never goes unread (F-77). A delegate's
-turn has ended once its last turn's `result` is read: its report for the brief, its reply for a
-message.
+turn has ended once the `result` that names its message's uuid is read: its report is the
+result that names the brief's (or a resume's) uuid, its reply the result that names the
+message's (F-79). A reply carries its result's subtype, so the main session can tell a turn
+that failed (`error_during_execution`, `is_error`) from an answer. When the delegate's process
+ends during a message's turn with no result, `Mailbox` stores a notice from the framework to
+the main session in place of the reply: the message went in, and the delegate ended before it
+answered. `Stream`'s fold keeps each result on the messages it names, so a turn the delegate
+starts by itself never replaces a reply or a report.
 
 **Services** belong to the agent that started them. When the owner ends, its services end too,
 unless it handed them on with `service_hand`, or started them with `keep: true`, which hands them
@@ -1070,7 +1076,9 @@ Then `Delegate.tla` and `Delegates` (its start, finish and kill path are built).
 7. **`Team.tla`** (F-69; its message to an ended delegate becomes an answer to the sender, as
    "Agents working together" now says, before `Mailbox` is built), then `Grants`, `Mailbox` and
    the agent tools, by the tree's edges, with
-   `agents()` read from the `Tracker`.
+   `agents()` read from the `Tracker`. Before the reply's next part: `Team.tla` models a
+   delegate's reply and the notice of a turn with no result (F-79's new-1), then the fold's
+   result per message, the reply's subtype and the notice (new-2, new-3, new-5).
 8. **`Copy.tla`** (F-70), then its second part: the fetch's check against edits made during the
    job, the host-side lock of a sync, and the wrapper's end of a job's group (F-70's new-2,
    new-4 and new-7, folded into "Hosts"). Then `Copies`, `Jobs` and `Services` on any host,

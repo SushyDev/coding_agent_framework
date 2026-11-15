@@ -5,7 +5,8 @@ defmodule CodingAgentFramework.Mailbox.Table do
 
   `status` is `queued`, `sending` (marked before the write, with its `session_id`), then
   `delivered` or `ended`, or `queued` again if it did not go in, under the `uuid` it was stored
-  with. `attempt` is why the last delivery did not go in.
+  with. `attempt` is why the last delivery did not go in. A delegate's reply names the uuid of
+  the message it answers in `reply_to`, which is unique, so one message has one reply at most.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "doc.db")
       iex> {:ok, db} = CodingAgentFramework.Mailbox.Table.open(path)
@@ -15,8 +16,8 @@ defmodule CodingAgentFramework.Mailbox.Table do
 
   alias Exqlite.Sqlite3
 
-  @columns ~w(id from_agent to_agent text uuid status session_id attempt created_at
-              updated_at)a
+  @columns ~w(id from_agent to_agent text uuid status session_id attempt reply_to
+              created_at updated_at)a
 
   @schema """
   PRAGMA journal_mode = WAL;
@@ -26,6 +27,9 @@ defmodule CodingAgentFramework.Mailbox.Table do
     attempt TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
   """
 
+  # Added after a file's table may have been made (F-79), so each is added if missing.
+  @reply "CREATE UNIQUE INDEX IF NOT EXISTS messages_reply_to ON messages (reply_to)"
+
   @type db :: Sqlite3.db()
 
   @doc "Opens (and creates) the file at `path`, with the table."
@@ -33,10 +37,19 @@ defmodule CodingAgentFramework.Mailbox.Table do
   def open(path) do
     with {:ok, db} <- Sqlite3.open(path),
          :ok <- Sqlite3.set_busy_timeout(db, 5_000),
-         :ok <- Sqlite3.execute(db, @schema) do
+         :ok <- Sqlite3.execute(db, @schema),
+         :ok <- add_reply_to(db),
+         :ok <- Sqlite3.execute(db, @reply) do
       {:ok, db}
     else
       {:error, reason} -> {:refused, {:sqlite, reason}}
+    end
+  end
+
+  defp add_reply_to(db) do
+    case Sqlite3.execute(db, "ALTER TABLE messages ADD COLUMN reply_to TEXT") do
+      {:error, "duplicate column name" <> _} -> :ok
+      other -> other
     end
   end
 
@@ -49,6 +62,23 @@ defmodule CodingAgentFramework.Mailbox.Table do
     sql = sql <> " VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?5) RETURNING id"
     [[id]] = query(db, sql, [from, to, text, uuid, System.os_time(:millisecond)])
     id
+  end
+
+  @doc """
+  Stores a delegate's reply to the message stored under `reply_to` as `queued`, and returns its
+  id; or nil, storing nothing, when that message has a reply already.
+  """
+  @spec reply(db, String.t(), String.t(), String.t(), String.t(), String.t()) :: integer | nil
+  def reply(db, from, to, text, uuid, reply_to) do
+    sql =
+      "INSERT INTO messages (from_agent, to_agent, text, uuid, status, reply_to, created_at, " <>
+        "updated_at) VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6, ?6) " <>
+        "ON CONFLICT (reply_to) DO NOTHING RETURNING id"
+
+    case query(db, sql, [from, to, text, uuid, reply_to, System.os_time(:millisecond)]) do
+      [[id]] -> id
+      [] -> nil
+    end
   end
 
   @doc "Sets `fields` on row `id`."
@@ -66,6 +96,14 @@ defmodule CodingAgentFramework.Mailbox.Table do
   @doc "The rows still `queued` or `sending`, oldest first."
   @spec open_rows(db) :: [map]
   def open_rows(db), do: select(db, "status IN ('queued', 'sending')", [])
+
+  @doc "The rows `delivered` into session `session_id` under one of `uuids`, oldest first."
+  @spec delivered(db, String.t(), [String.t()]) :: [map]
+  def delivered(db, session_id, uuids) do
+    marks = Enum.map_join(2..(length(uuids) + 1)//1, ",", &"?#{&1}")
+    where = "status = 'delivered' AND session_id = ?1 AND uuid IN (#{marks})"
+    select(db, where, [session_id | uuids])
+  end
 
   @doc "Row `id`, or nil."
   @spec get(db, integer) :: map | nil

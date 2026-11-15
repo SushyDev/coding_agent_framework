@@ -126,6 +126,48 @@ defmodule CodingAgentFramework.MailboxTest do
     assert HeadlessStandIn.taken(ctx.dir) == Enum.map([brief, went, cut], &"message #{&1}")
   end
 
+  test "a reply: a delivered message's result is stored once, to the main session, naming it",
+       ctx do
+    {_sid, _brief} = started(ctx, "unit/a")
+    finished(ctx)
+    assert {:ok, {:queued, id}} = Mailbox.message(ctx.mailbox, "main", "app-unit-a", "why?")
+    assert {:ok, %{uuid: u}} = until(ctx, id, &(&1.status == "delivered"))
+
+    # Its turn's result is the reply; a main session's delivery waits for Screen.
+    {:ok, _} = await(fn -> cue(ctx) && match?([_], replies(ctx, u)) && {:ok, 1} end, 10_000)
+    [r] = replies(ctx, u)
+    assert %{from_agent: "app-unit-a", to_agent: "main", text: "done " <> ^u} = r
+    assert {:ok, %{reply_to: ^u, status: "queued"}} = until(ctx, r.id, & &1.attempt)
+    assert {:ok, %{reply_to: nil}} = Mailbox.status(ctx.mailbox, id)
+
+    # Once: repeated cues and a restart, which reads each log again, store no second one.
+    cue(ctx)
+    GenServer.stop(ctx.mailbox)
+    Process.put(:mailbox, restart(ctx.mopts))
+    cue(ctx)
+    cue(ctx)
+    assert [%{id: same}] = replies(ctx, u)
+    assert same == r.id
+  end
+
+  test "a turn with no result stores no reply: the delegate killed mid-turn", ctx do
+    {sid, _brief} = started(ctx, "unit/a")
+    finished(ctx)
+    assert {:ok, {:queued, id}} = Mailbox.message(ctx.mailbox, "main", "app-unit-a", "ask it")
+    assert {:ok, %{uuid: u}} = until(ctx, id, &(&1.status == "delivered"))
+    {:ok, _} = await(fn -> fold(ctx, sid).requests |> Map.fetch("req-#{u}") end)
+
+    # The turn waits on a permission; the process ends before any result.
+    HeadlessStandIn.kill_all(ctx.dir)
+    {:ok, _} = await(fn -> if fold(ctx, sid).gone, do: {:ok, 1} end, 10_000)
+    cue(ctx)
+    cue(ctx)
+    assert replies(ctx, u) == []
+    assert {:ok, %{status: "delivered"}} = Mailbox.status(mailbox(ctx), id)
+  end
+
+  defp replies(ctx, uuid), do: Enum.filter(Table.open_rows(ctx.mtable), &(&1.reply_to == uuid))
+
   defp restart(mopts) do
     spec = Supervisor.child_spec({Mailbox, mopts}, id: make_ref(), restart: :temporary)
     start_supervised!(spec)

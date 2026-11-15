@@ -22,6 +22,10 @@ defmodule CodingAgentFramework.Mailbox do
   session ended (`end_session` marked, process gone), or whose start was refused, has its
   queued messages settled `ended`.
 
+  **A reply**: a delivered message's turn ends with a `result` that names its uuid; that result's
+  text is stored as a message from the delegate to its main session (its `Delegates` row's
+  `parent`), `reply_to` the answered message's uuid, once. A turn with no result stores none.
+
   **A main session**'s delivery needs `Screen`: its rows stay queued, `attempt` `:no_delivery`.
 
   It reads every open row again at its start and at each `cue/2` (of `Stream` and `Delegates`);
@@ -32,6 +36,7 @@ defmodule CodingAgentFramework.Mailbox do
 
   alias CodingAgentFramework.{Delegates, Grants, Stream}
   alias CodingAgentFramework.Mailbox.Table
+  alias CodingAgentFramework.Stream.Fold
 
   @step 5_000
   @delegates ~w(starting resuming running finished failed refused)
@@ -51,8 +56,9 @@ defmodule CodingAgentFramework.Mailbox do
     do: call(mailbox, {:message, from, to, text}, opts)
 
   @doc """
-  What became of message `id`: `{:ok, %{id, from, to, status, attempt}}`, `status` being
-  `queued`, `sending`, `delivered` or `ended`; or `{:refused, :no_message}`.
+  What became of message `id`: `{:ok, %{id, from, to, status, attempt, reply_to}}`, `status`
+  being `queued`, `sending`, `delivered` or `ended`, and `reply_to` the uuid of the message a
+  delegate's reply answers (nil for any other); or `{:refused, :no_message}`.
   """
   def status(mailbox, id, opts \\ []), do: call(mailbox, {:status, id}, opts)
 
@@ -112,7 +118,14 @@ defmodule CodingAgentFramework.Mailbox do
       with %{} = m <- Table.get(s.db, id) || {:refused, :no_message},
            do:
              {:ok,
-              %{id: id, from: m.from_agent, to: m.to_agent, status: m.status, attempt: m.attempt}}
+              %{
+                id: id,
+                from: m.from_agent,
+                to: m.to_agent,
+                status: m.status,
+                attempt: m.attempt,
+                reply_to: m.reply_to
+              }}
 
     {:reply, reply, s}
   end
@@ -123,6 +136,7 @@ defmodule CodingAgentFramework.Mailbox do
       folds = Map.new(rows, &{&1.session, &1})
       Enum.each(Table.open_rows(s.db), &settle_sending(s, &1, folds))
       agents = Map.new(Delegates.Table.with_status(s.ddb, s.host, @delegates), &{&1.name, &1})
+      replies(s, folds, agents)
 
       Table.open_rows(s.db)
       |> Enum.group_by(& &1.to_agent)
@@ -134,14 +148,28 @@ defmodule CodingAgentFramework.Mailbox do
 
   # DeliveryMarked by the replay; SendingSettled by the exit's settle, or by no mark at all.
   defp settle_sending(s, %{status: "sending"} = m, folds) do
-    case get_in(folds, [m.session_id, :messages, m.uuid]) do
-      %{state: :delivered} -> write(s, m, status: "delivered", attempt: nil)
-      %{state: :writing} -> :ok
-      _ -> write(s, m, status: "queued")
+    case Fold.outcome(folds[m.session_id] || %{messages: %{}}, m.uuid) do
+      :writing -> :ok
+      outcome when outcome in [:none, :undelivered] -> write(s, m, status: "queued")
+      _delivered -> write(s, m, status: "delivered", attempt: nil)
     end
   end
 
   defp settle_sending(_s, _m, _folds), do: :ok
+
+  # A delivered message's turn ended with a result that names it: its text is the delegate's
+  # reply to its main session, stored once under the message's uuid. It is read before the next
+  # message goes in, since that one's result replaces it in the fold.
+  defp replies(s, folds, agents) do
+    for {sid, %{last_result: %{user_message_uuids: [_ | _] = uuids}} = fold} <- folds,
+        m <- Table.delivered(s.db, sid, uuids),
+        {:result, text} <- [Fold.outcome(fold, m.uuid)],
+        %{parent: main} <- [agents[m.to_agent]],
+        do: reply(s, Table.reply(s.db, m.to_agent, main, text, Stream.uuid(), m.uuid))
+  end
+
+  defp reply(_s, nil), do: :ok
+  defp reply(s, id), do: announce(s, id)
 
   # A main session: no delivery until Screen.
   defp deliver(s, rows, nil, _folds) do

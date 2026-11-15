@@ -294,6 +294,42 @@ defmodule CodingAgentFramework.Stream.Fold do
   @spec fifo(t) :: String.t()
   def fifo(fold), do: "in.#{fold.resumes}"
 
+  @doc """
+  What became of the message written under `uuid`, as each reader of a message's outcome reads
+  it (`Delegates`' brief, `Mailbox`'s messages and their replies): `:none` when it was never
+  marked, its state (`:writing`, `:undelivered`, `:delivered`), or `{:result, text}` once it is
+  delivered and the last `result` names it in `user_message_uuids`, its turn ended. `text` is
+  the turn's last message, `""` when it had none. A later result replaces the last one, so a
+  reader reads it before writing the next message.
+
+      iex> alias CodingAgentFramework.Stream.Fold
+      iex> fold = Fold.mark(Fold.new(), {:message, "u1", "hi"}, "", 0)
+      iex> Fold.outcome(fold, "u1")
+      :writing
+      iex> fold = Fold.take(fold, ~s({"type":"user","isReplay":true,"uuid":"u1"}\\n))
+      iex> Fold.outcome(fold, "u1")
+      :delivered
+      iex> fold = Fold.event(fold, %{"type" => "result", "result" => "ok",
+      ...>   "user_message_uuids" => ["u1"]})
+      iex> {Fold.outcome(fold, "u1"), Fold.outcome(fold, "u2")}
+      {{:result, "ok"}, :none}
+  """
+  @spec outcome(t | map, String.t()) ::
+          :none | :writing | :undelivered | :delivered | {:result, String.t()}
+  def outcome(fold, uuid) do
+    case fold.messages[uuid] do
+      nil -> :none
+      %{state: :delivered} -> result(fold.last_result, uuid)
+      %{state: state} -> state
+    end
+  end
+
+  defp result(%{user_message_uuids: uuids} = r, uuid) when is_list(uuids) do
+    if uuid in uuids, do: {:result, r[:text] || ""}, else: :delivered
+  end
+
+  defp result(_last, _uuid), do: :delivered
+
   @doc "Messages still waiting for their replay: the ones the transcript settles at the exit."
   @spec writing(t) :: [String.t()]
   def writing(fold), do: for({u, %{state: :writing}} <- fold.messages, do: u)
