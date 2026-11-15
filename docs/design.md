@@ -613,6 +613,8 @@ without it.
   parent's start, and the settings never set `disableAllHooks`. A headless delegate skips it.
 - A headless session draws no status line; its event log's `rate_limit_event` stands in
   ("Headless delegates").
+- Every launch sets `DISABLE_AUTOUPDATER=1`, because devenv pins Claude Code and a session that
+  updates itself runs a version the lock does not name.
 
 ## Allowance
 
