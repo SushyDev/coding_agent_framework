@@ -279,33 +279,40 @@ saw it live: its exit is never seen (F-51, new-3).
 
 ## `Team.tla`
 
-The agents of one project: `Parent` and its delegates in `Agents`, and `Foreign`, agents of a
-second project that call in and must be refused. It has three halves that share the agents and
-the restarts.
+The tree of two projects. `Projects` gives each project's agents, as a set of sets
+(`{{p, d1}, {q, e1}}`), and `Mains` its main sessions, one in each; every other agent is a
+delegate. `Main(a)` is the main session of `a`'s project, so a delegate's parent. The tree's
+edges are `Edge(c, t)`: a main session to its delegates and to the other main session, a
+delegate to its main session. It has three halves that share the agents and the restarts.
 
 - Agents: `proc` is each agent's state (`"working"`, `"idle"`, `"stuck"`, `"dead"`, `"ended"`),
   and `epoch` numbers it: it moves when the agent sticks, dies, is fixed or ends, so a claim
   names a state as `<<target, epoch>>`. `Faults` sticks or kills an agent; `DelegateEnds` is a
-  delegate's own end once its report is delivered.
-- Messages, read in the order of one message: `Send` stores the row as `"queued"`, refused
-  across projects. `DeliveryAsked` marks it `"sending"` once the target's turn has ended and every
+  delegate's own end once its report is delivered. A main session never ends.
+- Messages, read in the order of one message: `Send` stores the row as `"queued"`, along an
+  edge only. `DeliveryAsked` marks it `"sending"` once the target's turn has ended and every
   earlier message from the same sender to the same addressee is delivered. `DeliveryTyped` is
   `Control`'s checked write, which appends the id to the target's transcript (`inbox`), or
   `DeliveryRefused` queues it again. `DeliveryMarked` writes `"delivered"`; after a restart,
   `SendingSettled` reads the transcript instead, as `Delegate.tla` settles a report.
-  `Redirected` sends a settled row whose addressee has ended to the parent (`dest`).
-- Claims: `ClaimTaken(c, t)` is `Grants`: no self, no stop of the parent, the same project, and
-  no claim yet on the target's state. It writes the row (`claims`) and starts the call (`calls`,
-  in memory). `FixActs` acts only while the claimed state is current, and may not help;
-  `FixRefused` ends the call when it is not. A call cut off by a restart is closed by
-  `ClaimSettled` and never sent again. A row in `done` still holds its state, so a fix that did
-  not help leaves the state claimed.
-- Services: `ServiceStarts` with or without `keep`, `ServiceHanded` to another agent, and
-  `ServiceOwnerEnded`: a kept service goes to the parent, any other ends.
+  `Redirected` sends a settled row whose addressee has ended to that delegate's main session
+  (`dest`).
+- Claims: `ClaimTaken(c, t)` is `Grants`: `MayFix(c, t)`, the caller is the target's main
+  session, and no claim yet on the target's state. It writes the row (`claims`) and starts the
+  call (`calls`, in memory). A row's `n` is 2 for the caller's second call on the same state,
+  which a subagent can make at once; only `Break = "TwoClaims"` lets one in. `FixActs` acts
+  only while the claimed state is current, and may not help; `FixRefused` ends the call when it
+  is not. A call cut off by a restart is closed by `ClaimSettled` and never sent again. A row in
+  `done` still holds its state, so a fix that did not help leaves the state claimed.
+- Services: `ServiceStarts` with or without `keep`; `ServiceFixed(c, s)`, a restart or a stop,
+  by the owner or the owner's parent; `ServiceHanded(c, s, b)`, by the owner `c` to its parent
+  or a child `b`; and `ServiceOwnerEnded`: a kept service goes to the owner's parent, any other
+  ends.
 
-`fixed` and `wrong` are ghosts. `MessageDelivered` reads "a message whose recipient's turn ends
-again and again is delivered"; its recipient is the addressee, or the parent once the addressee
-has ended.
+`fixed` and `wrong` are ghosts. `MayFix`, `MayFixService` and `MayHand` are the guards; each
+`Break` that names one widens it by one wrong case. `MessageDelivered` reads "a message whose
+recipient's turn ends again and again is delivered"; its recipient is the addressee, or the
+addressee's main session once the addressee has ended.
 
 ## `Shell.tla`
 
