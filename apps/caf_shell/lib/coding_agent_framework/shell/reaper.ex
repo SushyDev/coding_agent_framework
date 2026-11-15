@@ -2,7 +2,7 @@ defmodule CodingAgentFramework.Shell.Reaper do
   @moduledoc """
   Ends a `CodingAgentFramework.Shell` command's process group when the process that ran it dies
   first, or when the VM dies (see `model/tla/Shell.tla`). It is one process per host, with no
-  name, started by the host app's supervision tree; `Shell.run/4` uses it when given it as
+  name, started by the embedding app's supervision tree; `Shell.run/4` uses it when given it as
   `:reaper`.
 
   While a command runs, the reaper holds its group with its owner, the process in `Shell.run/4`,

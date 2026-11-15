@@ -1,7 +1,7 @@
 defmodule CodingAgentFramework.Accounts do
   @moduledoc """
   The Claude accounts of one framework instance, each with its own config directory
-  `<home>/accounts/<account>/claude` under the instance's home. The host app gives the home and
+  `<home>/accounts/<account>/claude` under the instance's home. The embedding app gives the home and
   the account names; the library reads no environment, and never reads or writes `~/.claude` or
   anything outside the home.
 
@@ -15,7 +15,7 @@ defmodule CodingAgentFramework.Accounts do
   because each launch names them (`CodingAgentFramework.ClaudeCLI`) and never writes:
 
   - `parent.settings.json` and `delegate.settings.json`: the account's settings and hooks,
-    loaded with `--settings`. They differ only in `remoteControlAtStartup`: true for a parent
+    loaded with `--settings`. They differ only in `remoteControlAtStartup`: true for a main session
     and false for a delegate, since 2.1.322 has a flag to turn Remote Control on but none to
     turn it off;
   - `mcp.json`: the MCP servers, loaded with `--mcp-config` and `--strict-mcp-config`, so no

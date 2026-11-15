@@ -280,7 +280,7 @@ defmodule CodingAgentFramework.SessionsTest do
     {_dir, hold, lingers} = linger(ctx, "crashed")
     assert {:ok, %{pid: pid}} = Sessions.start(ctx.sessions, "crashed", ctx.account, lingers)
 
-    # The sampler's cue reaches Sessions as the host app would wire it.
+    # The sampler's cue reaches Sessions as the embedding app would wire it.
     sampler =
       start_supervised!(
         {TmuxSampler,
@@ -392,7 +392,7 @@ defmodule CodingAgentFramework.SessionsTest do
     start_supervised!(Supervisor.child_spec(child, id: :again, restart: :temporary))
   end
 
-  # The Registry reads, and its cue reaches Sessions as the host app would wire it.
+  # The Registry reads, and its cue reaches Sessions as the embedding app would wire it.
   defp cue(ctx, sessions) do
     {:ok, _} = Registry.read(ctx.registry)
     send_cue(sessions)

@@ -9,7 +9,7 @@ defmodule CodingAgentFramework.Programs do
   call. They can also be given outright with `new/2`. `Holder`, `Tmux.CLI`, `Registry` and `Transcripts` take
   the paths they run from here.
 
-  The library reads no environment: the host app hands the paths in. On this machine they can be
+  The library reads no environment: the embedding app hands the paths in. On this machine they can be
   the store paths devenv exports as `CAF_<NAME>`, such as `CAF_TMUX` or `CAF_SH` (see
   `devenv.nix`). A remote host has its own programs, so `find/3` looks them up there, with that
   host's shell, over ssh.

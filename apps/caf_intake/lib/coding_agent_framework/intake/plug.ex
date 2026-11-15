@@ -1,8 +1,8 @@
 defmodule CodingAgentFramework.Intake.Plug do
   @moduledoc """
   The HTTP endpoint of `CodingAgentFramework.Intake`. Options: `intake:` (the `Intake`, by pid
-  or by the name the host app gave it) and `secret:` (the instance's secret, given by the host
-  app). See `CodingAgentFramework.Intake` for how the host app serves it.
+  or by the name the embedding app gave it) and `secret:` (the instance's secret, given by the
+  embedding app). See `CodingAgentFramework.Intake` for how the embedding app serves it.
 
   It answers only `POST /hooks/<account>` from 127.0.0.1 with the secret in `x-caf-secret`,
   compared in constant time. Anything else is refused with a status and writes no row: 404 for

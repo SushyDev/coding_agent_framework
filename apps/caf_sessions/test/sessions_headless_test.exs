@@ -211,7 +211,7 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
     start_supervised!(Supervisor.child_spec(child, id: :again, restart: :temporary))
   end
 
-  # Stream reads, and its cue reaches Sessions as the host app would wire it.
+  # Stream reads, and its cue reaches Sessions as the embedding app would wire it.
   defp cue(ctx, sessions) do
     {:ok, _} = Stream.read(ctx.stream)
     send_cue(sessions)
