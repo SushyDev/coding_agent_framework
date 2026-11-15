@@ -19,6 +19,7 @@ defmodule CodingAgentFramework.Grants do
   | `may_message?/3` | a main session to its delegates and the other main sessions; a delegate to its parent | `:along_edges` |
   | `may_read?/3` (`look`, `transcript`) | the target itself, its parent, its children, and for a main session the other main sessions | `:close_read_along_edges` |
   | `may_fix?/3` | a parent on its own child | `:no_self_fix`, `:main_never_fixed`, `:only_parent_fixes` |
+  | `may_start_service?/2` | any agent the tree holds: a main session or a delegate | `{:unknown_agent, name}` |
   | `may_fix_service?/3` | the service's owner or the owner's parent | `:service_fixed_by_owner_or_parent` |
   | `may_hand?/4` | the owner, to its parent or a child | `:handed_by_owner`, `:handed_along_edge` |
 
@@ -73,6 +74,21 @@ defmodule CodingAgentFramework.Grants do
         child?(tree, target, caller) -> :ok
         true -> {:refused, :only_parent_fixes}
       end
+    end)
+  end
+
+  @doc "May `caller` start a service? Any agent the tree holds, a main session or a delegate."
+  @spec may_start_service?(t, String.t()) :: answer
+  def may_start_service?(grants, caller), do: check(grants, [caller], fn _ -> :ok end)
+
+  @doc """
+  The parent of `name`, to whom a kept service goes when its owner ends: `{:ok, parent}` for a
+  delegate, `{:refused, :main_has_no_parent}` for a main session.
+  """
+  @spec parent(t, String.t()) :: {:ok, String.t()} | {:refused, term}
+  def parent(grants, name) do
+    check(grants, [name], fn tree ->
+      with :error <- Map.fetch(tree.parents, name), do: {:refused, :main_has_no_parent}
     end)
   end
 
