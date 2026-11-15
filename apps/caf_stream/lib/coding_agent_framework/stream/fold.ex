@@ -8,7 +8,8 @@ defmodule CodingAgentFramework.Stream.Fold do
   waits for the next read. Each event writes what `Stream.tla`'s `Handle` says: a replay
   delivers its message, a `result` ends the turn, a `can_use_tool` request is held, an answer's
   replay answers it, a cancel cancels it. It also keeps the session id of `system`/`init` and the
-  latest `rate_limit_event`. It is total: a line that is not a JSON object is counted as a problem.
+  latest `rate_limit_event`, and the last `result` with its text. It is total: a line that is
+  not a JSON object is counted as a problem.
 
       iex> alias CodingAgentFramework.Stream.Fold
       iex> fold = Fold.mark(Fold.new(), {:message, "u1", "hi"}, ~s({"x":1}\\n), 0)
@@ -93,7 +94,10 @@ defmodule CodingAgentFramework.Stream.Fold do
 
   def event(fold, %{"type" => "result"} = e) do
     uuids = Map.get(e, "user_message_uuids", [])
+    # `text` is the turn's last message, a finished delegate's report (`Delegates`).
+    text = if is_binary(e["result"]), do: e["result"]
     result = %{subtype: e["subtype"], is_error: e["is_error"], user_message_uuids: uuids}
+    result = Map.put(result, :text, text)
     %{fold | idle: true, last_result: result}
   end
 

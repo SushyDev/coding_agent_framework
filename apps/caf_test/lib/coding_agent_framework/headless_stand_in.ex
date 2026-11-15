@@ -7,9 +7,10 @@ defmodule CodingAgentFramework.HeadlessStandIn do
   - `system`/`init` with the `--session-id` or `--resume` id: at its start (mode `:at_start`),
     on the first line it reads (`:on_message`), or never (`:never`);
   - for a user line: its replay (`isReplay` and its uuid), then `assistant`, a
-    `rate_limit_event` and a `result` naming the uuid. A message whose text starts with `ask`
-    first asks a `can_use_tool` permission (`request_id` `req-<uuid>`), and ends its turn when
-    the answer comes; the answer is replayed. `half` ends its turn with half a
+    `rate_limit_event` and a `result` naming the uuid, whose text is `done <uuid>`. A message
+    whose text starts with `ask` first asks a `can_use_tool` permission (`request_id`
+    `req-<uuid>`), and ends its turn when the answer comes; so does every message while a file
+    `<dir>/hold` exists; the answer is replayed. `half` ends its turn with half a
     `rate_limit_event` line, and the next message finishes it;
   - for `interrupt`: a cancel of the request pending, and a `result`;
   - `end_session` ends it; a line that is not a JSON object ends it with status 1.
@@ -67,7 +68,7 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     turn_end() {
       ev '{"type":"assistant","session_id":"'"$sid"'","uuid":"a-'"$1"'","message":{"content":[]}}'
       ev '{"type":"rate_limit_event","session_id":"'"$sid"'","rate_limit_info":{"status":"allowed","unifiedWindows":{"seven_day":{"utilization":0.25,"resetsAt":1900000000}}}}'
-      ev '{"type":"result","subtype":"'"${2:-success}"'","is_error":false,"session_id":"'"$sid"'","user_message_uuids":["'"$1"'"]}'
+      ev '{"type":"result","subtype":"'"${2:-success}"'","is_error":false,"result":"done '"$1"'","session_id":"'"$sid"'","user_message_uuids":["'"$1"'"]}'
     }
     init() { ev '{"type":"system","subtype":"init","session_id":"'"$sid"'","uuid":"init"}'; }
     mode=MODE
@@ -82,6 +83,7 @@ defmodule CodingAgentFramework.HeadlessStandIn do
           u=$(field uuid); rec "message $u"
           if [ -n "$half" ]; then printf '"utilization":0.5}}\n'; half=''; fi
           ev '{"type":"user","isReplay":true,"session_id":"'"$sid"'","uuid":"'"$u"'","message":{"role":"user","content":""}}'
+          [ -e "DIR/hold" ] && line='"content":"ask'
           case $line in
             *'"content":"ask'*)
               pending="req-$u" asker=$u
