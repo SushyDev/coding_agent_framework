@@ -119,21 +119,32 @@ while the move runs starts anything. `DelegatesStarted'` is that count after the
 
 A parent, its delegates, and restarts of the framework. Read it in the order of a report's path:
 
-- `StartAsked` is `start_delegate` in a parent's turn: refused by a check, or by the cap, or
-  started.
+- `StartAsked` is `start_delegate` in a parent's turn: refused by a check, or by the cap
+  (`Counted`, which takes starting rows too), or its row written as `"starting"` with the call
+  of `Sessions` under way (`call`, in memory). `Called` is `Sessions` taking the call and
+  writing its own row (`sess`); `SessionsDecides` holds the process, which waits for its
+  message (`"waiting"`), or refuses. `CallAnswered` moves the row by the answer; after a
+  restart, `Settled` moves it by `sess` once `Sessions` has decided, and refuses it when the
+  call never reached `Sessions`.
+- `InputWritten` is the turn's message through `Stream`, under the uuid the row holds:
+  `marked` is `Stream`'s table, which refuses the uuid again. `pipe` holds the lines the
+  current process has not taken; `InputTaken` starts its turn.
 - `DelegateFinishes` ends the delegate's turn with its last reply (`reply`) and fires its Stop
   hook, which lands in `stops` only while the framework runs. `StopHandled` turns it into a held
   report; when a restart lost it, `TranscriptRead` reads the last reply instead.
-- `DelegateKilled` then `KillSeen`: the first kill is resumed, the second is the report.
+- `DelegateKilled` then `KillSeen`: the first kill is resumed, counted in the row first as
+  `"resuming"`, with a call of `Sessions` like a start's; the second is the report.
 - `DeliveryAsked` marks the row `"sending"` once the parent's turn has ended. `DeliveryTyped`
   is `Control`'s checked write, or `DeliveryRefused` holds the report again. `DeliveryMarked`
   writes `"delivered"`. A restart in between leaves `"sending"` with nothing in memory, and
   `SendingResolved` reads the parent's transcript (`got`) to settle it.
 - `DelegateEnds` waits for `"delivered"`.
 
-`FrameworkDies` clears what the framework holds in memory (`stops`, `sending`); the tables
-(`status`, `report`, `resumes`) stay. `got` counts the report in the parent's transcript, and
-`wrong` records a report typed where the check must refuse it. `SF_vars`, strong fairness, says a
+`FrameworkDies` clears what the framework holds in memory (`stops`, `sending`, `call`); the
+tables (`status`, `report`, `resumes`, `marked`) stay, and so does `Sessions`' row (`sess`),
+since `Sessions` runs on. `got` counts the report in the parent's transcript, `wrong` records a
+report typed where the check must refuse it, and `taken` and `resumed` count the messages the
+delegate's processes took and the resumes `Sessions` made. `SF_vars`, strong fairness, says a
 step that is possible again and again, not always, happens: the user's prompts may take the
 parent's turn each time a report waits for it.
 

@@ -189,6 +189,34 @@ A parent calls `start_delegate(project, branch, model, brief)`. The framework:
    instead of retrying. That report is held and delivered like a finish. A kill after the last
    reply is a finish, read from the transcript.
 
+**What `Delegates` holds** (`Delegate.tla`; F-59's build note):
+
+- The host app hands `Delegates` its projects as data when it starts it, each as `Sessions`
+  reads it ("The worktree") with two more fields: `branches`, the pattern a delegate's branch
+  must match, and `cap`, how many of one parent's delegates may hold it at once. There is no
+  table of projects and no default cap. A delegate holds its parent's cap from its row's
+  start until it ends: starting, running, resuming, finished or failed, since a finished one
+  still holds its worktree and its report.
+- Until `Parents` exists, the caller names the parent, and the row keeps that name.
+- A delegate's session is named `<project>-<branch>`, each character of the branch other than
+  a letter, a digit, `_` or `-` written as `-`, so a later start of the branch finds its
+  worktree.
+- `Delegates`' row is written first, as starting, with the uuid its brief will go in under,
+  before `Sessions` is called. A resume is counted in the row first, as resuming, before
+  `Sessions.resume` is asked; when the brief had gone in, the row takes a uuid of its own for
+  the resumed process's message. `Stream` refuses a uuid a second time, so a restart never
+  writes a turn's message twice.
+- A row a restart left starting or resuming is settled by `Sessions`' row of its call (one
+  written at or after the call), once that row is settled: running, or refused. With no such
+  row by the row's deadline, the call never reached `Sessions`, and the row is refused (a
+  start) or failed (a resume) as interrupted. A call is never made again. A refused resume is
+  failed, and the refusal is its report.
+- A headless delegate's Stop is the `result` that ends the turn its message began, read from
+  its event log; its text is the report. The log's offset persists, so a restart does not lose
+  it; a kill before its line is written does, and the transcript's last reply stands in.
+- A resumed process takes no turn of its own. It is given the brief again, under its uuid, when
+  the brief had not gone in, and otherwise a fixed message to go on with its brief.
+
 A start writes its row first, as starting, with its worktree path and socket name, before it
 acts. After a restart, a row still starting is adopted when its held process lives and its
 session file names it; otherwise its worktree is removed when clean and held by no agent, and
@@ -554,6 +582,10 @@ worktree on its branch whose setup finished).
      a delegate's row leaves "running" once, by its Stop event or, when a restart lost it, its
      transcript's last reply; a kill after the last reply is a finish, not a kill; a second
      kill's report takes the same path as a finished delegate's.
+   - The spec settles (F-59): the row is written before `Sessions` is called, and a start
+     under way counts against the cap; after a restart a starting or resuming row is settled
+     by `Sessions`' row of its call, never while that call runs; a resume is counted before it
+     is asked; each process takes one turn's message, under the uuid the row holds.
 4. **`Team.tla`**: agents of one project, their messages, claims and services, and restarts of
    the framework. Events: a message is sent, a turn ends, an agent sticks, dies or ends, two
    agents try to fix one target, a service's owner ends.
