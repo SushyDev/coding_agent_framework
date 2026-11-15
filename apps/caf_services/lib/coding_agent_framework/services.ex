@@ -34,7 +34,8 @@ defmodule CodingAgentFramework.Services do
 
   use GenServer
 
-  alias CodingAgentFramework.{Copies, Grants, Holder, Shell}
+  alias CodingAgentFramework.{Grants, Holder, Shell}
+  alias CodingAgentFramework.Copies.Held
   alias CodingAgentFramework.Services.Table
 
   @call 5_000
@@ -170,35 +171,33 @@ defmodule CodingAgentFramework.Services do
   # The copy's turn, the sync, then the hold; the turn goes back once the start is settled.
   defp launch(services, row, opts) do
     start = Keyword.get(opts, :start_timeout, 5_000)
-    run = "service:" <> row.name
+    refused = fn _ -> put(services, row.name, %{state: "refused", owner: nil}) end
 
     with {:ok, ctx} <- context(services, row, start),
-         {:ok, :taken} <- refuse_on_fail(services, row, Copies.take(ctx.copies, ctx.copy, run)),
-         {:ok, _} <- refuse_on_fail(services, row, sync(ctx, run, row.worktree, opts)),
-         :ok <- prepare(services, ctx, row, run),
-         :ok <- Copies.starting(ctx.copies, ctx.copy, run),
+         {:ok, _} <- Held.ready(ctx, row.worktree, [clear: [ctx.pid]] ++ opts, refused),
          until = now() + start,
          {:ok, _} <- put(services, row.name, %{state: "starting", start_until: until}) do
-      wrapper = [ctx.programs.paths.sh, "-c", @wrapper, "caf-service", ctx.pid, ctx.log, ctx.path]
-      held = Holder.hold(ctx.holder, row.name, wrapper ++ row.argv, env: row.env)
-      if match?({:unknown, _}, held), do: pause(until - now())
-      settle_start(services, ctx, row.name, held, @call)
+      held =
+        Held.hold(ctx, @wrapper, ["caf-service", ctx.pid, ctx.log, ctx.path], row.argv, row.env)
+
+      # Held or cut, the pid file says whether the wrapper ran.
+      Held.settle(
+        ctx,
+        held,
+        until,
+        fn _ -> read_held(ctx, @call) end,
+        &started(services, row.name, &1)
+      )
     end
   end
 
-  # dtach answered, or its reply was cut and the start's deadline has passed: the pid file
-  # says whether the wrapper ran.
-  defp settle_start(services, ctx, name, held, timeout) do
-    read = if match?({:refused, _}, held), do: held, else: read_held(ctx, timeout)
-
-    with %{} = fields <- start_fields(read) || read,
-         {:ok, row} <- put(services, name, fields),
-         {:ok, :given} <- Copies.give_back(ctx.copies, ctx.copy, "service:" <> name) do
-      case read do
+  defp started(services, name, seen) do
+    with {:ok, row} <- put(services, name, start_fields(seen)) do
+      case seen do
         {:ok, {_, _}} -> {:ok, row}
         {:ok, :gone} -> {:refused, {:start, :exited}}
         {:ok, :none} -> {:refused, {:start, :not_held}}
-        {:refused, reason} -> {:refused, {:start, reason}}
+        {:refused, _} = refused -> refused
       end
     end
   end
@@ -263,60 +262,18 @@ defmodule CodingAgentFramework.Services do
     with {:ok, config} <- call(services, :config), do: context_of(config, row, timeout)
   end
 
-  defp context_of(%{hosts: hosts, copies: copies}, row, timeout) do
-    with {:ok, %{programs: programs, dir: dir}} <- host(hosts, row.host),
-         copy = %{programs: programs, dir: dir, project: row.project, name: row.copy},
-         {:ok, {path, _lock}} <- Copies.place(copy),
-         services_dir = Path.join(dir, "services"),
-         {:ok, holder} <- Holder.new(programs, services_dir, timeout: timeout) do
-      base = Path.join(services_dir, row.name)
+  # An earlier start of this name may have left its pid file: `Held.ready/4` clears it.
+  defp context_of(config, row, timeout) do
+    where = %{host: row.host, project: row.project, copy: row.copy, kind: "services"}
 
-      {:ok,
-       %{copies: copies, copy: copy, programs: programs, holder: holder, path: path}
-       |> Map.merge(%{dir: services_dir, log: base <> ".log", pid: base <> ".pid"})}
-    end
+    with {:ok, %{base: b} = ctx} <-
+           Held.context(
+             config,
+             Map.merge(where, %{name: row.name, run: "service:" <> row.name}),
+             timeout
+           ),
+         do: {:ok, Map.merge(ctx, %{log: b <> ".log", pid: b <> ".pid"})}
   end
-
-  defp host(hosts, name) do
-    case Map.fetch(hosts, name) do
-      {:ok, host} -> {:ok, host}
-      :error -> {:refused, {:no_host, name}}
-    end
-  end
-
-  # The services directory, and no pid file left by an earlier start of this name.
-  defp prepare(services, ctx, row, run) do
-    %{mkdir: mkdir, rm: rm, sh: sh} = ctx.programs.paths
-    args = ["-c", ~S("$0" -p "$2" && "$1" -f "$3"), mkdir, rm, ctx.dir, ctx.pid]
-
-    case Shell.run(ctx.programs.host, sh, args, timeout: @call) do
-      {:ok, %{status: 0}} ->
-        :ok
-
-      other ->
-        Copies.give_back(ctx.copies, ctx.copy, run)
-        refuse_on_fail(services, row, {:refused, {:host, other}})
-    end
-  end
-
-  defp sync(ctx, run, worktree, opts) do
-    copy_opts =
-      [
-        timeout: Keyword.get(opts, :sync_timeout, 60_000),
-        lock_wait: Keyword.get(opts, :lock_wait, 30_000),
-        reaper: Keyword.get(opts, :reaper)
-      ]
-      |> Enum.reject(&is_nil(elem(&1, 1)))
-
-    Copies.sync(ctx.copies, ctx.copy, run, worktree, copy_opts)
-  end
-
-  defp refuse_on_fail(services, row, {:refused, _} = refused) do
-    put(services, row.name, %{state: "refused", owner: nil})
-    refused
-  end
-
-  defp refuse_on_fail(_services, _row, other), do: other
 
   defp pause(ms) when ms > 0 do
     receive do
@@ -423,12 +380,9 @@ defmodule CodingAgentFramework.Services do
   end
 
   defp settle_row(s, ctx, %{state: "starting"} = row) do
-    if now() >= row.start_until do
-      with %{} = fields <- start_fields(read_held(ctx, @settle_read)) do
-        put_row(s, row.name, fields, %{state: "starting"})
-        Copies.give_back(ctx.copies, ctx.copy, "service:" <> row.name)
-      end
-    end
+    Held.settle_cut(ctx, row.start_until, fn :cut -> read_held(ctx, @settle_read) end, fn seen ->
+      put_row(s, row.name, start_fields(seen), %{state: "starting"})
+    end)
   end
 
   defp settle_row(s, ctx, row) do
@@ -437,9 +391,8 @@ defmodule CodingAgentFramework.Services do
          do: put_row(s, row.name, @ended, %{state: "ending"})
   end
 
-  # What a read of the start says the row is; nil while the host is unread.
+  # What a settled start says the row is.
   defp start_fields({:ok, {pid, started}}), do: %{state: "running", pid: pid, started: started}
   defp start_fields({:ok, :gone}), do: @ended
-  defp start_fields({:unknown, _}), do: nil
   defp start_fields(_none_or_refused), do: %{@ended | state: "refused"}
 end
