@@ -13,7 +13,7 @@ defmodule CodingAgentFramework.Model.CheckModelTest do
   # machine and still ends a hung run.
   @moduletag timeout: 300_000
 
-  @root Path.expand("../..", __DIR__)
+  @root Path.expand("../../../..", __DIR__)
 
   test "every fast TLC configuration passes" do
     script = Path.join(@root, "bin/check-model")
