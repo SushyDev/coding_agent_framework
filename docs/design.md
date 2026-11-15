@@ -656,7 +656,10 @@ an agent nothing to reconnect. This is simpler than a stdio bridge with the toke
 arguments: there is no program to start per agent, nor one whose stdin could break on a byte,
 nor one that must reconnect by itself, so the bridge rule ("Rules learned") has nothing to
 apply to. A token is only as private as the workstation's user: any process of that user can
-read the files (F-86).
+read the files (F-86). The rule is kept against a caller named wrongly, by mistake or by a
+tool's argument, not against an agent that sets out to act as another: every agent runs as the
+person's own user, and only an OS user per agent would separate them. The file stays for the
+session's life, since a reload or a resume reads it again.
 
 **Messages** are stored before they are sent, so a restart of the framework does not lose
 them. One goes in only when the target's turn has ended (and, for a main session, its input box
