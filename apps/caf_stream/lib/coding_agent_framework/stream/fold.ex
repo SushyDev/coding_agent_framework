@@ -23,6 +23,8 @@ defmodule CodingAgentFramework.Stream.Fold do
           idle: boolean,
           live_seen: boolean,
           gone: boolean,
+          resumes: non_neg_integer,
+          ending: boolean,
           messages: %{String.t() => map},
           requests: %{String.t() => map},
           lines: %{String.t() => map},
@@ -41,6 +43,8 @@ defmodule CodingAgentFramework.Stream.Fold do
       idle: true,
       live_seen: false,
       gone: false,
+      resumes: 0,
+      ending: false,
       messages: %{},
       requests: %{},
       lines: %{},
@@ -131,26 +135,36 @@ defmodule CodingAgentFramework.Stream.Fold do
   end
 
   @doc """
-  Whether `line` may be marked now, and why not: a message needs the turn ended (`idle`) and no
-  other message waiting for its replay; an answer needs its request held; an end needs the turn
-  ended.
+  Whether `line` may be marked now, and why not (`Mark`, `EndMarked`). A message needs no end
+  marked, the turn ended (`idle`) and every other message delivered: one waiting for its replay
+  refuses it as `:message_waiting`, one found undelivered as `{:undelivered, uuid}`, since that
+  one goes again first, under its own uuid. A uuid already used is refused unless its message
+  was found undelivered. An answer needs its request held. An end needs the turn ended and no
+  message under way or found undelivered; behind `Sessions`' check of the report, this is
+  defense in depth.
+
+      iex> alias CodingAgentFramework.Stream.Fold
+      iex> fold = Fold.mark(Fold.new(), {:message, "u1", "hi"}, "", 0)
+      iex> fold = Fold.exit_seen(fold, fn _ -> false end) |> Fold.again()
+      iex> {Fold.check(fold, {:message, "u2", "x"}), Fold.check(fold, {:message, "u1", "hi"})}
+      {{:refused, {:undelivered, "u1"}}, :ok}
   """
   @spec check(t, tuple) :: :ok | {:refused, term}
   def check(%{gone: true}, _line), do: {:refused, :gone}
 
   def check(fold, {:message, uuid, _}) do
     cond do
-      Map.has_key?(fold.messages, uuid) ->
+      fold.ending ->
+        {:refused, :ending}
+
+      Map.has_key?(fold.messages, uuid) and fold.messages[uuid].state != :undelivered ->
         {:refused, :duplicate_uuid}
 
       not fold.idle ->
         {:refused, :turn_running}
 
-      Enum.any?(fold.messages, fn {_, m} -> m.state == :writing end) ->
-        {:refused, :message_waiting}
-
       true ->
-        :ok
+        others(fold, uuid)
     end
   end
 
@@ -162,23 +176,36 @@ defmodule CodingAgentFramework.Stream.Fold do
     end
   end
 
-  # An end cuts a running turn ("Headless delegates", "Ending").
-  def check(%{idle: false}, {:end_session, _}), do: {:refused, :turn_running}
+  # An end cuts a running turn and drops what has not gone in ("Headless delegates", "Ending").
+  def check(fold, {:end_session, _}) do
+    cond do
+      fold.ending -> {:refused, :ending}
+      not fold.idle -> {:refused, :turn_running}
+      true -> others(fold, nil)
+    end
+  end
 
   def check(_fold, _line), do: :ok
 
+  defp others(fold, uuid) do
+    case Enum.find(fold.messages, fn {u, m} -> u != uuid and m.state != :delivered end) do
+      nil -> :ok
+      {_, %{state: :writing}} -> {:refused, :message_waiting}
+      {u, %{state: :undelivered}} -> {:refused, {:undelivered, u}}
+    end
+  end
+
   @doc """
-  `Mark` (and `AnswerAsked` for an answer): the row says writing before anything is written, and
-  the line waits as `:marked` until it is spooled and claimed. A message clears `idle`.
+  `Mark` (and `AnswerAsked` for an answer, `EndMarked` for an end): the row says writing before
+  anything is written, and the line waits as `:marked` until it is spooled and claimed. The
+  write's check found the socket live, so the process is seen (`live_seen`). A message clears
+  `idle`; an end marks `ending`, which refuses every later message.
   """
   @spec mark(t, tuple, binary, integer) :: t
   def mark(fold, term, line, at) do
     id = elem(term, 1)
-
-    fold = %{
-      fold
-      | lines: Map.put(fold.lines, id, %{kind: elem(term, 0), line: line, phase: :marked})
-    }
+    line = %{kind: elem(term, 0), line: line, phase: :marked}
+    fold = %{fold | live_seen: true, lines: Map.put(fold.lines, id, line)}
 
     case term do
       {:message, uuid, _} ->
@@ -186,6 +213,9 @@ defmodule CodingAgentFramework.Stream.Fold do
 
       {:answer, id, _} ->
         settle(fold, :requests, id, :held, :answering)
+
+      {:end_session, _} ->
+        %{fold | ending: true}
 
       _ ->
         fold
@@ -223,6 +253,42 @@ defmodule CodingAgentFramework.Stream.Fold do
 
     %{fold | gone: true, messages: messages, requests: requests, lines: %{}}
   end
+
+  @doc """
+  `FollowAgain`: the row is followed again for a resume. Its offset, messages and requests stay;
+  the resumed process reads the next FIFO (`fifo/1`), is not yet seen, has no session id read
+  yet and no end marked, and its turn has not begun: a process that exited during a turn ran no
+  `result`, and the resumed one starts none of its own.
+
+      iex> alias CodingAgentFramework.Stream.Fold
+      iex> fold = Fold.again(%{Fold.new() | idle: false, gone: true})
+      iex> {Fold.fifo(fold), fold.idle, fold.gone}
+      {"in.1", true, false}
+  """
+  @spec again(t) :: t
+  def again(fold) do
+    %{
+      fold
+      | resumes: fold.resumes + 1,
+        gone: false,
+        live_seen: false,
+        session_id: nil,
+        idle: true,
+        ending: false
+    }
+  end
+
+  @doc """
+  `HeldTold`: `Sessions` held the process, so a later exit is this process's, whether or not a
+  read saw it live. An exit already seen stays seen.
+  """
+  @spec held(t) :: t
+  def held(%{gone: true} = fold), do: fold
+  def held(fold), do: %{fold | live_seen: true}
+
+  @doc "The name of the current process's FIFO in the delegate's directory: `in.<resumes>`."
+  @spec fifo(t) :: String.t()
+  def fifo(fold), do: "in.#{fold.resumes}"
 
   @doc "Messages still waiting for their replay: the ones the transcript settles at the exit."
   @spec writing(t) :: [String.t()]

@@ -86,6 +86,41 @@ defmodule CodingAgentFramework.StreamFoldTest do
     assert {:refused, {:request, :answered}} = Fold.check(fold, {:answer, "r2", :allow})
   end
 
+  test "a follow again ends the turn, names the next FIFO and clears an end" do
+    fold =
+      Fold.new()
+      |> Fold.mark({:message, "m1", ""}, "x\n", 0)
+      |> Fold.exit_seen(fn _ -> true end)
+
+    # Mark: the write's live check saw the process; the exit left the turn running (new-6).
+    assert %{live_seen: true, idle: false, gone: true} = fold
+    again = Fold.again(fold)
+    assert {Fold.fifo(fold), Fold.fifo(again)} == {"in.0", "in.1"}
+    assert %{idle: true, gone: false, live_seen: false, session_id: nil} = again
+    assert :ok = Fold.check(again, {:message, "m2", ""})
+
+    ended = Fold.mark(again, {:end_session, "e1"}, "x\n", 0)
+    assert {:refused, :ending} = Fold.check(ended, {:message, "m2", ""})
+    assert {:refused, :ending} = Fold.check(ended, {:end_session, "e2"})
+    assert :ok = Fold.check(Fold.again(%{ended | gone: true}), {:message, "m2", ""})
+  end
+
+  test "an end waits for a message under way or found undelivered; a used uuid is refused" do
+    writing = Fold.mark(Fold.new(), {:message, "m1", ""}, "x\n", 0) |> Map.put(:idle, true)
+    assert {:refused, :message_waiting} = Fold.check(writing, {:end_session, "e1"})
+    assert {:refused, :duplicate_uuid} = Fold.check(writing, {:message, "m1", ""})
+
+    lost = writing |> Fold.exit_seen(fn _ -> false end) |> Fold.again()
+    assert {:refused, {:undelivered, "m1"}} = Fold.check(lost, {:end_session, "e1"})
+    resent = Fold.mark(lost, {:message, "m1", ""}, "x\n", 0)
+    assert resent.messages["m1"].state == :writing
+  end
+
+  test "a told hold sees the process, unless its exit is already seen" do
+    assert Fold.held(Fold.new()).live_seen
+    refute Fold.held(%{Fold.new() | gone: true}).live_seen
+  end
+
   # Two messages marked as writing, so replays have rows to settle.
   defp marked do
     Fold.new()

@@ -6,9 +6,9 @@ defmodule CodingAgentFramework.Stream do
   `CodingAgentFramework.Stream.Table`, which it alone writes, and after a write that changed rows
   `notify` gets a cue `%{topic: "stream:<host>", ids: ids}`.
 
-  Each delegate has a directory `<home>/streams/<session>/` with the FIFO `in`, the log
-  `events.jsonl` and spool files `out/<uuid>.json`; `follow/4` makes them before the delegate is
-  held. A write marks its row, spools the line, and starts the claim command
+  Each delegate has a directory `<home>/streams/<session>/` with a FIFO `in.<n>` per process, the
+  log `events.jsonl` and spool files `out/<uuid>.json`; `follow/5` makes them before the
+  delegate is held. A write marks its row, spools the line, and starts the claim command
   `exec 3<spool && rm spool && exec cat <&3 >fifo`, only for a live delegate and under the
   write's deadline. Removing the spool is the claim: a line is never written twice, never cut by
   the framework, and a restart claims again only what no claim took. `read/2` folds the whole
@@ -24,8 +24,14 @@ defmodule CodingAgentFramework.Stream do
   alias CodingAgentFramework.Stream.{Fold, Line, Table}
 
   @timeout 5_000
+  # The process's own FIFO ($4), and a last line a death cut ended with a newline, so the next
+  # process's first event is a line of its own. `$(…)` drops a trailing newline, so it is empty
+  # when the log already ends with one.
   @follow ~S"""
-  "$2" -p "$1/out" && { [ -p "$1/in" ] || "$3" "$1/in"; }
+  "$2" -p "$1/out" && { [ -p "$1/$4" ] || "$3" "$1/$4"; } || exit
+  log="$1/events.jsonl"
+  [ -s "$log" ] || exit 0
+  [ -z "$("$5" -c 1 "$log")" ] || printf '\n' >> "$log"
   """
   @spool ~S"""
   printf '%s' "$2" > "$1"
@@ -59,17 +65,31 @@ defmodule CodingAgentFramework.Stream do
   def dir(home, session), do: Path.join([home, "streams", session])
 
   @doc """
-  Makes `session`'s directory and FIFO and starts following it: its dtach socket is `socket` in
-  the holder, and `transcript` is its transcript's path, read only to settle a message at its
-  exit. Answers `{:ok, dir}`.
+  Makes `session`'s directory and its next process's FIFO and starts following it: its dtach
+  socket is `socket` in the holder, and `transcript` is its transcript's path, read only to
+  settle a message at its exit. Answers `{:ok, %{dir: dir, fifo: fifo}}`; the process reads
+  `fifo` (`ClaudeCLI.wrapper/4`), and every claim from now on names it.
 
   Following a session again, for a resume, keeps its row and offset, so the resumed process's
   events are read from where the last one's ended. An exit not yet seen is seen first, so its
-  messages settle; then the row waits for the new process: its socket seen live, its own
-  `system`/`init`. A session whose socket still lives is refused as `{:live, socket}`.
+  messages settle; a last line the exit cut is ended with a newline; the row's turn is ended
+  and it waits for the new process: `held/3`, or its socket seen live, then its own
+  `system`/`init`. The new FIFO is `in.<n>`, `n` the resumes so far, so a line left waiting
+  for an earlier process never reaches this one. A session whose socket still lives is refused
+  as `{:live, socket}`.
+
+      Stream.follow(stream, "6f1c…", "reviewer", "/…/6f1c….jsonl")
+      #=> {:ok, %{dir: "/srv/caf/home/streams/6f1c…", fifo: "/srv/caf/home/streams/6f1c…/in.0"}}
   """
   def follow(stream, session, socket, transcript, opts \\ []),
     do: call(stream, {:follow, session, socket, transcript}, opts)
+
+  @doc """
+  Tells `Stream` that `Sessions` held `session`'s process: its exit is seen from now on, even if
+  no read finds its socket live first. Answers `{:ok, :seen}`, or `{:refused, :gone}` when its
+  exit was already seen, or `{:refused, :not_followed}`.
+  """
+  def held(stream, session, opts \\ []), do: call(stream, {:held, session}, opts)
 
   @doc """
   Writes one line: `{:message, text}` (or `{:message, uuid, text}` to keep a uuid on a resend),
@@ -77,9 +97,11 @@ defmodule CodingAgentFramework.Stream do
   `:timeout` is the write's deadline (default 5 s).
 
   Answers `{:ok, %{uuid: uuid}}` once the line is in the pipe; `{:refused, reason}` when nothing
-  was marked or written (`:not_live`, `:turn_running`, `:message_waiting`, `:no_request`,
-  `:gone`, …); `{:unknown, reason}` when the row is marked and the line may or may not go in:
-  the replay, a later claim or the exit settles it.
+  was marked or written (`:not_live`, `:turn_running`, `:message_waiting`,
+  `{:undelivered, uuid}`, `:ending`, `:no_request`, `:gone`, …, as `Fold.check/2` says);
+  `{:unknown, reason}` when the row is marked and the line may or may not go in: the replay, a
+  later claim or the exit settles it. A message found undelivered at an exit goes again, first,
+  as `{:message, uuid, text}` with its own uuid.
   """
   def write(stream, session, line, opts \\ []) do
     deadline = Keyword.get(opts, :timeout, @timeout)
@@ -89,7 +111,12 @@ defmodule CodingAgentFramework.Stream do
   @doc "Interrupts the delegate's turn: `write(stream, session, :interrupt, opts)`."
   def interrupt(stream, session, opts \\ []), do: write(stream, session, :interrupt, opts)
 
-  @doc "Ends the session; it cuts a running turn, so it goes in after the turn ended."
+  @doc """
+  Ends the session. It cuts a running turn and drops what has not gone in, so it goes in only
+  after the turn ended with no message under way or found undelivered; once it is marked, a
+  message is refused as `:ending`. The caller (`Sessions`) checks first that the report is
+  delivered.
+  """
   def end_session(stream, session, opts \\ []), do: write(stream, session, :end_session, opts)
 
   @doc """
@@ -139,12 +166,22 @@ defmodule CodingAgentFramework.Stream do
   def handle_call({:follow, session, socket, transcript}, _from, s) do
     d = dir(s.home, session)
 
-    with {:ok, %{status: 0}} <- sh(s, @follow, [d, s.p.mkdir, s.p.mkfifo], s.timeout),
-         {:ok, delegate} <- again(s, session, s.delegates[session]) do
-      {:reply, {:ok, d},
+    # The old process is gone before the log's last line is ended: no one else writes it.
+    with {:ok, delegate} <- again(s, session, s.delegates[session]),
+         fifo = Fold.fifo(delegate.fold),
+         args = [d, s.p.mkdir, s.p.mkfifo, fifo, s.p.tail],
+         {:ok, %{status: 0}} <- sh(s, @follow, args, s.timeout) do
+      {:reply, {:ok, %{dir: d, fifo: Path.join(d, fifo)}},
        save(s, session, Map.merge(delegate, %{socket: socket, transcript: transcript}))}
     else
       other -> {:reply, failed(other), s}
+    end
+  end
+
+  def handle_call({:held, session}, _from, s) do
+    case fetch(s, session) do
+      {:ok, d} -> {:reply, {:ok, :seen}, save(s, session, %{d | fold: Fold.held(d.fold)})}
+      refused -> {:reply, refused, s}
     end
   end
 
@@ -219,12 +256,14 @@ defmodule CodingAgentFramework.Stream do
 
   defp again(_s, _session, nil), do: {:ok, %{fold: Fold.new()}}
 
+  # A row not yet seen gone is read first, whether or not it was seen live: a live socket is
+  # refused, and an exit already seen as such settles its messages.
   defp again(s, session, d) do
-    seen = if d.fold.live_seen and not d.fold.gone, do: read_one(s, session, d), else: {:ok, d}
+    seen = if d.fold.gone, do: {:ok, d}, else: read_one(s, session, d)
 
     case seen do
       {:ok, %{fold: %{live_seen: true, gone: false}}} -> {:refused, {:live, d.socket}}
-      {:ok, d} -> {:ok, %{d | fold: %{d.fold | gone: false, live_seen: false, session_id: nil}}}
+      {:ok, d} -> {:ok, %{d | fold: Fold.again(d.fold)}}
       other -> other
     end
   end
@@ -260,8 +299,10 @@ defmodule CodingAgentFramework.Stream do
     end
   end
 
+  # The claim names the FIFO of the process this write found live; lines are dropped at its
+  # exit, so a line never outlives the process it was marked for.
   defp run_claim(s, session, id, out, ends) do
-    fifo = Path.join(dir(s.home, session), "in")
+    fifo = Path.join(dir(s.home, session), Fold.fifo(s.delegates[session].fold))
 
     case sh(s, @claim, [out, fifo, s.p.rm, s.p.cat], left(ends)) do
       # CatWrites: the line is in the pipe, whole; or an earlier claim took it.
