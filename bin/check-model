@@ -4,8 +4,8 @@
 #   devenv shell -- bin/check-model                every fast configuration, model/tla/*.cfg
 #   devenv shell -- bin/check-model all            the same
 #   devenv shell -- bin/check-model slow           every slow configuration, model/tla/slow/*.cfg
-#   devenv shell -- bin/check-model Agent_TwoAgents       one configuration, by its name
-#   devenv shell -- bin/check-model slow/Agent_Restarts   one slow configuration
+#   devenv shell -- bin/check-model Agent_Viewers               one configuration, by its name
+#   devenv shell -- bin/check-model slow/Agent_RestartsWrites   one slow configuration
 #
 # TLC uses every core unless TLC_WORKERS names a number: TLC_WORKERS=2 bin/check-model
 #
@@ -58,7 +58,7 @@ failed=0
 
 for cfg in "${configs[@]}"; do
   name="$(basename "$cfg" .cfg)"
-  # Break_Agent_NoPaneCheck.cfg and Agent_TwoAgents.cfg both check Agent.tla.
+  # Break_Agent_NoPaneCheck.cfg and Agent_Viewers.cfg both check Agent.tla.
   spec="${name#Break_}"
   spec="${spec%%_*}"
   relative="${cfg#"$specs"/}"

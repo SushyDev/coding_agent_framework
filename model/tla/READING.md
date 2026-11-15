@@ -83,7 +83,10 @@ recovery of a lost viewer in the order it happens:
 `OneReopenPerLoss` says one loss gets at most one reopen. `NoActOnOneWrongReading` says no claim
 rests on a single reading that was wrong (`wrongOnce`). `Agent_Viewers` checks the liveness
 with two agents; `Agent_LateViewers` with one agent, a late viewer and three losses;
-`Agent_Claims` the claims across two restarts of `Recoveries`; `Agent_Writes` the writes.
+`Agent_Claims` the claims across two restarts of `Recoveries`; `Agent_Writes` the writes. The
+slow ones, run by hand, take three starts: `slow/Agent_RestartsWrites` checks the safety over two
+server restarts with one write, `slow/Agent_RestartsLiveness` the liveness there with no writes,
+and `slow/Agent_WritesLarge` two writes over one restart.
 
 ## `Move.tla`
 
