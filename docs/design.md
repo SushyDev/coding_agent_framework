@@ -192,7 +192,11 @@ its host, as it has since the first part built, so the workstation is one host a
   beside its server. A sync is not a snapshot: a file edited while the sync runs comes in
   either version. On the host, a sync holds a lock of its copy for its whole life, and the next
   sync takes that lock under its deadline, so the host's side of a cut sync never writes under
-  the next one. A copy is removed with its worktree;
+  the next one. A host's side may still be waiting for the lock when its sync is cut, and may
+  take it later, so a cut sync gives the copy's turn back only once its host side can no longer
+  take the lock: it holds it, has exited, or its lock deadline has passed (the rule the turn
+  keeps for a cut start). The refusal is answered at once; only the turn waits. A copy is
+  removed with its worktree;
 - a job is held by dtach on its host, so a dropped ssh connection does not end it; its output
   goes to a log on the host, read back from an offset, and it ends with its exit code or its
   timeout, which ends its process group. When the job's command exits, its wrapper ends what is
