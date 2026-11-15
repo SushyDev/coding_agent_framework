@@ -5,8 +5,9 @@ defmodule CodingAgentFramework.Recoveries do
   `PersonClears`). It writes `CodingAgentFramework.Recoveries.Table`, which it alone writes.
 
   The caller's supervision tree starts one per host, with no name, given the host's
-  `TmuxSampler`, `Control`, `Holder` and tmux server (for its key). It reads the sampler's rows,
-  never a pane's screen: by `check/2`, or after `cue/1`, which the sampler's `notify` can call.
+  `TmuxSampler`, `Control`, `Holder`, `Sessions` and tmux server (for its key). It reads the
+  sampler's rows, never a pane's screen: by `check/2`, or after `cue/1`, which the sampler's
+  `notify` can call.
 
   **The first recovery is a lost viewer**: a held socket the sampler reads `:unviewed` or
   `:no_server` (its socket live). A state is keyed by the socket, the sampler's generation, and
@@ -27,9 +28,12 @@ defmodule CodingAgentFramework.Recoveries do
   A state's row is written first (the claim), then acted on, so each state is acted on at most
   once, across restarts of this process: a row left `claimed` by a process that ended before its
   act is never acted on, and ends `unknown{interrupted}` unless the agent is viewed. The act
-  opens the viewer through `Sessions.viewer/4` (`dtach -a`, tagged as it opens, one row short,
-  then grown); tmux starts the server again when it is down. A refused open ends the state
-  `failed`, and the agent runs on; one refused because the session exists (another part opened
+  asks the host's `Sessions` for the viewer's command (`Sessions.viewer_argv/3`: `dtach -a` for
+  an interactive session, the log-following command for a delegate) and opens the viewer with
+  it through `Sessions.viewer/4` (tagged as it opens, one row short, then grown); tmux starts
+  the server again when it is down. A refused open ends the state `failed`, and the agent runs
+  on, as does a command `Sessions` refuses or cannot answer (no row of that name, or no answer
+  in time): nothing was opened. One refused because the session exists (another part opened
   a viewer since the samples) ends `unknown{session_exists}`. Otherwise the first sample whose
   reads began after the act decides: `recovered` when the agent is viewed, `failed{not_viewed}`
   when it is not, and `unknown` when its socket is gone or stale, or the open's answer was
@@ -62,8 +66,9 @@ defmodule CodingAgentFramework.Recoveries do
 
   @doc """
   Starts a `Recoveries`. Options: `sampler:` (the host's `TmuxSampler`), `control:` (its
-  `Control`), `holder:` (its `Holder`), `server:` (its `Tmux` server, for the key), `db:`, and
-  optionally `notify:`, `size:` (a viewer's `{columns, rows}`, default `{200, 50}`), `max_age:`
+  `Control`), `holder:` (its `Holder`), `sessions:` (its `Sessions`, which answers each
+  viewer's command), `server:` (its `Tmux` server, for the key), `db:`, and optionally
+  `notify:`, `size:` (a viewer's `{columns, rows}`, default `{200, 50}`), `max_age:`
   (ms, default 30 000), `window:` (ms, default 60 000) and `clock:` (a function answering the
   time in ms, by default the system's; give the sampler the same one). It fails to start with
   `{:host_mismatch, server_host, holder_host}`.
@@ -147,10 +152,10 @@ defmodule CodingAgentFramework.Recoveries do
        %{
          host: host,
          server: server,
-         holder: holder,
          db: db,
          sampler: Keyword.fetch!(opts, :sampler),
          control: Keyword.fetch!(opts, :control),
+         sessions: Keyword.fetch!(opts, :sessions),
          notify: Keyword.get(opts, :notify, fn _ -> :ok end),
          size: Keyword.get(opts, :size, {200, 50}),
          max_age: Keyword.get(opts, :max_age, 30_000),
@@ -266,8 +271,12 @@ defmodule CodingAgentFramework.Recoveries do
 
   defp act(state, id, %{socket: name}, _prior) do
     answer =
-      with {:ok, argv} <- Holder.viewer_argv(state.holder, name),
-           do: Sessions.viewer(state.control, name, argv, state.size)
+      case Sessions.viewer_argv(state.sessions, name) do
+        {:ok, argv} -> Sessions.viewer(state.control, name, argv, state.size)
+        {:refused, _} = refused -> refused
+        # Asking opens nothing, so an answer that did not come is a state that did not act.
+        {:unknown, why} -> {:refused, {:no_viewer_command, why}}
+      end
 
     at = now(state)
 
