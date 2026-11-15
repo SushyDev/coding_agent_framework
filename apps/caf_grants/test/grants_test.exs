@@ -46,7 +46,8 @@ defmodule CodingAgentFramework.GrantsTest do
       for c <- Map.keys(places), t <- Map.keys(places) do
         want = if edge?(places, c, t), do: :ok, else: :refused
         assert Grants.may_message?(grants(tree), c, t) == ok(want, :along_edges)
-        assert Grants.may_read?(grants(tree), c, t) == ok(want, :close_read_along_edges)
+        read = if c == t, do: :ok, else: want
+        assert Grants.may_read?(grants(tree), c, t) == ok(read, :close_read_along_edges)
       end
     end
   end
