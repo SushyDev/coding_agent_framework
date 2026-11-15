@@ -54,16 +54,18 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   @doc """
   Writes a new start of `{host, name}` as `starting`, over any row it had before, and returns
-  its id. The caller has checked that the old row, if any, has ended. `start` holds `deadline`.
+  its id. The caller has checked that the old row, if any, has ended. `start` holds `deadline`,
+  and a headless delegate's `session_id`, which the framework chose; an interactive session's is
+  nil until its session file names it.
   """
   @spec starting(db, map) :: integer
   def starting(db, %{} = start) do
     now = System.os_time(:millisecond)
-    keys = ~w(host name socket account role cwd resume deadline)a
+    keys = ~w(host name socket account role cwd resume session_id deadline)a
     values = Enum.map(keys, &start[&1]) ++ ["starting", now, now]
     names = Enum.join(keys ++ [:status, :started_at, :updated_at], ",")
     marks = Enum.map_join(1..length(values), ",", &"?#{&1}")
-    reset = "reason = NULL, viewer = NULL, pid = NULL, session_id = NULL, proc_start = NULL"
+    reset = "reason = NULL, viewer = NULL, pid = NULL, proc_start = NULL"
 
     sets =
       Enum.map_join(keys -- [:host, :name], ",", &"#{&1} = excluded.#{&1}") <>

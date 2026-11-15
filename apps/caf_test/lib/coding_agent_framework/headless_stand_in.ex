@@ -4,7 +4,8 @@ defmodule CodingAgentFramework.HeadlessStandIn do
   bash script run by `ClaudeCLI.wrapper/3` under dtach. It reads stream-json lines on stdin and
   writes events on stdout in the shapes `docs/build-notes/F-31.md` records, with synthetic values:
 
-  - at its start, `system`/`init` with the `--session-id` or `--resume` id;
+  - `system`/`init` with the `--session-id` or `--resume` id: at its start (mode `:at_start`),
+    on the first line it reads (`:on_message`), or never (`:never`);
   - for a user line: its replay (`isReplay` and its uuid), then `assistant`, a
     `rate_limit_event` and a `result` naming the uuid. A message whose text starts with `ask`
     first asks a `can_use_tool` permission (`request_id` `req-<uuid>`), and ends its turn when
@@ -19,12 +20,17 @@ defmodule CodingAgentFramework.HeadlessStandIn do
 
   import CodingAgentFramework.TestHost, only: [program!: 1, kill: 1]
 
-  @doc "Writes the stand-in into `dir` and answers its path."
-  def write!(dir) do
-    path = Path.join(dir, "headless")
+  @doc """
+  Writes the stand-in for `mode` into `dir` and answers its path. It is written whole under
+  another name and renamed into place, since a start may be running the path (F-39).
+  """
+  def write!(dir, mode \\ :at_start) when mode in [:at_start, :on_message, :never] do
+    path = Path.join(dir, "headless-#{mode}")
     File.mkdir_p!(Path.join(dir, "pids"))
-    File.write!(path, script(dir))
-    File.chmod!(path, 0o755)
+    tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
+    File.write!(tmp, script(dir, mode))
+    File.chmod!(tmp, 0o755)
+    File.rename!(tmp, path)
     path
   end
 
@@ -42,7 +48,7 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     :ok
   end
 
-  defp script(dir) do
+  defp script(dir, mode) do
     ~S"""
     #!BASH
     sid=''
@@ -58,10 +64,13 @@ defmodule CodingAgentFramework.HeadlessStandIn do
       ev '{"type":"rate_limit_event","session_id":"'"$sid"'","rate_limit_info":{"status":"allowed","unifiedWindows":{"seven_day":{"utilization":0.25,"resetsAt":1900000000}}}}'
       ev '{"type":"result","subtype":"'"${2:-success}"'","is_error":false,"session_id":"'"$sid"'","user_message_uuids":["'"$1"'"]}'
     }
-    ev '{"type":"system","subtype":"init","session_id":"'"$sid"'","uuid":"init"}'
+    init() { ev '{"type":"system","subtype":"init","session_id":"'"$sid"'","uuid":"init"}'; }
+    mode=MODE
+    [ $mode = at_start ] && init
     pending='' asker='' half=''
     while IFS= read -r line; do
       [ -z "$line" ] && continue
+      [ $mode = on_message ] && { init; mode=done; }
       case $line in \{*\}) ;; *) rec invalid; exit 1 ;; esac
       case $line in
         *'"type":"user"'*)
@@ -95,5 +104,6 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     """
     |> String.replace("BASH", program!(:bash), global: false)
     |> String.replace("DIR", dir)
+    |> String.replace("MODE", Atom.to_string(mode))
   end
 end

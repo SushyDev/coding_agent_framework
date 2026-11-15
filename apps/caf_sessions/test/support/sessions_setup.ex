@@ -2,8 +2,9 @@ defmodule CodingAgentFramework.SessionsSetup do
   @moduledoc """
   The setup `SessionsTest` and `SessionsSourceTest` share: a `Sessions` on a real tmux server
   and real dtach sockets in the test's own directory, with its `Control`, a `Registry` of one
-  prepared account, and a clock the test moves; and the launch of a stand-in for Claude Code
-  (`CodingAgentFramework.ClaudeStandIn`).
+  prepared account, a `Stream` for its delegates, and a clock the test moves; and the launches
+  of stand-ins for Claude Code: interactive (`CodingAgentFramework.ClaudeStandIn`) and headless
+  (`CodingAgentFramework.HeadlessStandIn`).
 
   It compiles only for tests. It lives in `caf_sessions`, not `caf_test`, because it uses
   `Sessions`, and `caf_test` may not use an app above it.
@@ -14,7 +15,8 @@ defmodule CodingAgentFramework.SessionsSetup do
   import CodingAgentFramework.TestHost
   import ExUnit.Callbacks, only: [on_exit: 1, start_supervised!: 1]
 
-  alias CodingAgentFramework.{Accounts, ClaudeStandIn, Control, Holder, Registry, Sessions, Tmux}
+  alias CodingAgentFramework.{Accounts, ClaudeStandIn, Control, HeadlessStandIn, Holder, Registry}
+  alias CodingAgentFramework.{Sessions, Stream, Tmux}
   alias CodingAgentFramework.Sessions.Table
   alias CodingAgentFramework.Tmux.CLI
 
@@ -43,12 +45,16 @@ defmodule CodingAgentFramework.SessionsSetup do
     {:ok, holder} = Holder.new(programs(), dtach)
     me = self()
     clock = start_supervised!({Agent, fn -> System.os_time(:millisecond) end})
+    stream_opts = [programs: programs(), holder: holder, home: dir, db: db]
+    stream = start_supervised!(Supervisor.child_spec({Stream, stream_opts}, id: Stream))
 
     opts = [
       programs: programs(),
       dir: dtach,
       control: control,
       registries: %{"work" => registry},
+      stream: stream,
+      home: dir,
       db: db,
       notify: &send(me, {:cue, &1}),
       poll: 50,
@@ -57,6 +63,7 @@ defmodule CodingAgentFramework.SessionsSetup do
 
     {:ok, table} = Table.open(db)
     on_exit(fn -> ClaudeStandIn.kill_all(dir) end)
+    on_exit(fn -> HeadlessStandIn.kill_all(dir) end)
 
     {:ok,
      dir: dir,
@@ -67,13 +74,25 @@ defmodule CodingAgentFramework.SessionsSetup do
      opts: opts,
      clock: clock,
      registry: registry,
+     stream: stream,
      sessions: start_supervised!(Supervisor.child_spec({Sessions, opts}, restart: :temporary))}
   end
 
-  @doc "The launch options of a stand-in in the test's directory that writes its file in `mode`."
+  @doc """
+  The launch options of an interactive stand-in in the test's directory that writes its file in
+  `mode`. It runs as a parent: a delegate is headless (`headless/2`).
+  """
   def launch(ctx, mode) do
-    env = %{home: ctx.dir, path: "/nonexistent", term: "xterm-256color", lang: "C.UTF-8"}
     claude = ClaudeStandIn.write!(ctx.dir, mode)
-    [role: :delegate, cwd: ctx.dir, claude: claude, model: "opus", env: env, prompt: "brief"]
+    [role: :parent, cwd: ctx.dir, claude: claude, model: "opus", env: env(ctx), prompt: "brief"]
   end
+
+  @doc "The launch options of a delegate: a headless stand-in that writes its init in `mode`."
+  def headless(ctx, mode) do
+    claude = HeadlessStandIn.write!(ctx.dir, mode)
+    [role: :delegate, cwd: ctx.dir, claude: claude, model: "opus", env: env(ctx)]
+  end
+
+  defp env(ctx),
+    do: %{home: ctx.dir, path: "/nonexistent", term: "xterm-256color", lang: "C.UTF-8"}
 end

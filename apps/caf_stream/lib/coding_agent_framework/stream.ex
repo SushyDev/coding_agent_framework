@@ -61,7 +61,12 @@ defmodule CodingAgentFramework.Stream do
   @doc """
   Makes `session`'s directory and FIFO and starts following it: its dtach socket is `socket` in
   the holder, and `transcript` is its transcript's path, read only to settle a message at its
-  exit. Answers `{:ok, dir}`. Following a session again keeps its row.
+  exit. Answers `{:ok, dir}`.
+
+  Following a session again, for a resume, keeps its row and offset, so the resumed process's
+  events are read from where the last one's ended. An exit not yet seen is seen first, so its
+  messages settle; then the row waits for the new process: its socket seen live, its own
+  `system`/`init`. A session whose socket still lives is refused as `{:live, socket}`.
   """
   def follow(stream, session, socket, transcript, opts \\ []),
     do: call(stream, {:follow, session, socket, transcript}, opts)
@@ -134,15 +139,12 @@ defmodule CodingAgentFramework.Stream do
   def handle_call({:follow, session, socket, transcript}, _from, s) do
     d = dir(s.home, session)
 
-    case sh(s, @follow, [d, s.p.mkdir, s.p.mkfifo], s.timeout) do
-      {:ok, %{status: 0}} ->
-        delegate = Map.get(s.delegates, session, %{fold: Fold.new()})
-
-        {:reply, {:ok, d},
-         save(s, session, Map.merge(delegate, %{socket: socket, transcript: transcript}))}
-
-      other ->
-        {:reply, failed(other), s}
+    with {:ok, %{status: 0}} <- sh(s, @follow, [d, s.p.mkdir, s.p.mkfifo], s.timeout),
+         {:ok, delegate} <- again(s, session, s.delegates[session]) do
+      {:reply, {:ok, d},
+       save(s, session, Map.merge(delegate, %{socket: socket, transcript: transcript}))}
+    else
+      other -> {:reply, failed(other), s}
     end
   end
 
@@ -212,6 +214,18 @@ defmodule CodingAgentFramework.Stream do
       _ ->
         with {:ok, bytes} <- tail(s, d.transcript, 0),
              do: {:ok, %{d | fold: Fold.exit_seen(d.fold, &String.contains?(bytes, &1))}}
+    end
+  end
+
+  defp again(_s, _session, nil), do: {:ok, %{fold: Fold.new()}}
+
+  defp again(s, session, d) do
+    seen = if d.fold.live_seen and not d.fold.gone, do: read_one(s, session, d), else: {:ok, d}
+
+    case seen do
+      {:ok, %{fold: %{live_seen: true, gone: false}}} -> {:refused, {:live, d.socket}}
+      {:ok, d} -> {:ok, %{d | fold: %{d.fold | gone: false, live_seen: false, session_id: nil}}}
+      other -> other
     end
   end
 
@@ -310,7 +324,9 @@ defmodule CodingAgentFramework.Stream do
 
   defp topic(s), do: "stream:#{s.host.name}"
 
-  defp uuid do
+  @doc "A random (version 4) uuid, as a line's or a session's id."
+  @spec uuid() :: String.t()
+  def uuid do
     <<a::48, _::4, b::12, _::2, c::62>> = :crypto.strong_rand_bytes(16)
     <<u::128>> = <<a::48, 4::4, b::12, 2::2, c::62>>
     hex = u |> Integer.to_string(16) |> String.pad_leading(32, "0") |> String.downcase()
