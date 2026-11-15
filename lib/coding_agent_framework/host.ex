@@ -6,9 +6,9 @@ defmodule CodingAgentFramework.Host do
   host layer starts with its `name`.
 
   It names the programs of this machine that reach it: `ssh` to start a run on a remote host,
-  and `kill` to end a run past its timeout. Each run is a process on this machine (the program
-  itself, or its ssh), so `kill` is this machine's even for a remote host, and comes from this
-  machine's `CodingAgentFramework.Programs` or the caller.
+  and `kill` to end a run's process group past its timeout. Each run is a process on this
+  machine (the program itself, or its ssh), so `kill` is this machine's even for a remote host,
+  and comes from this machine's `CodingAgentFramework.Programs` or the caller.
 
       iex> CodingAgentFramework.Host.local("laptop", "/run/bin/kill")
       %CodingAgentFramework.Host{name: "laptop", reach: :local, kill: "/run/bin/kill"}

@@ -23,7 +23,22 @@ defmodule CodingAgentFramework.TestHost do
   def programs(host \\ host(), overrides \\ %{}) do
     paths =
       Map.new(
-        [:tmux, :dtach, :git, :gh, :sh, :rm, :kill, :env, :ps, :cat, :tail, :mkdir, :mkfifo],
+        [
+          :tmux,
+          :dtach,
+          :git,
+          :gh,
+          :sh,
+          :sleep,
+          :rm,
+          :kill,
+          :env,
+          :ps,
+          :cat,
+          :tail,
+          :mkdir,
+          :mkfifo
+        ],
         &{&1, program!(&1)}
       )
 
@@ -143,6 +158,17 @@ defmodule CodingAgentFramework.TestHost do
   @doc "Ends a process this test started, by its pid; one already gone is fine."
   def kill(pid, signal \\ "-TERM") do
     Shell.run(host(), program!(:kill), [signal, to_string(pid)], timeout: 5_000)
+  end
+
+  @doc """
+  Starts a `Shell.Reaper`, runs `path` with it in a process of its own, and writes `announce`
+  once the reaper holds the command's group. For a `:peer` VM, which has this module's code.
+  """
+  def run_reaped(path, args, timeout, announce) do
+    {:ok, reaper} = Shell.Reaper.start_link(programs: programs())
+    spawn(fn -> Shell.run(host(), path, args, timeout: timeout, reaper: reaper) end)
+    {:ok, _} = await(fn -> if Shell.Reaper.held(reaper) == %{}, do: :none, else: {:ok, :held} end)
+    File.write!(announce, "held\n")
   end
 
   @doc "Whether a process lives, by its pid (`kill -0`)."

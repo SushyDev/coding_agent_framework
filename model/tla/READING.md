@@ -228,3 +228,25 @@ the restarts.
 `fixed` and `wrong` are ghosts. `MessageDelivered` reads "a message whose recipient's turn ends
 again and again is delivered"; its recipient is the addressee, or the parent once the addressee
 has ended.
+
+## `Shell.tla`
+
+One command `Shell` runs and how its process group ends. The command leads the group, as every
+port program does.
+
+- `CmdStartsChild` adds a child to the group; `CmdHolds` is `dtach -n`: the held process leaves
+  the group by `setsid`. `ignores` is chosen at the start: which of the command and its child
+  ignore TERM.
+- `ShellTimesOut` sends TERM to the group and starts the grace. `ShellTakesExit` is `Shell`
+  taking the command's exit, in the wait or the grace, and dropping the group from the reaper;
+  `ShellKills` is the KILL when the grace passed with no exit.
+- `OwnerDies` closes the port and leaves the command running. `ReaperTerms` and `ReaperKills`
+  are the reaper's TERM and, after the grace, its KILL, for a group it still holds.
+- `VmDies` ends the owner and the reaper. `WatcherTerms` and `WatcherKills` are the watcher at
+  the end of its stdin, for the group if it still holds it.
+- `held` is the reaper's and the watcher's hold on the group, one variable. `known` says the
+  framework knows the command ended: `ForeignTakesId`, another program taking the group's id,
+  waits for it as well as for the group to empty.
+
+`killed` and `hit` are ghosts: a KILL was sent, and the processes a kill reached that it must
+not reach.

@@ -3,10 +3,22 @@ defmodule CodingAgentFramework.Shell do
   The only module that starts programs, on this machine or over ssh.
 
   A program is named by its absolute path (see `CodingAgentFramework.Programs`), so no
-  lookup runs through a `PATH`. Each run has a timeout; when it passes, the program is killed by
-  its pid with the host's `kill` (see `CodingAgentFramework.Host`) and the outcome is unknown. A
-  non-zero exit is not a refusal here: the caller reads the status, since only it knows what the
-  program's exit means.
+  lookup runs through a `PATH`. A non-zero exit is not a refusal here: the caller reads the
+  status, since only it knows what the program's exit means.
+
+  Each program leads a process group of its own: OTP starts every port program with `setsid`,
+  so the group's id is the program's pid (see `model/tla/Shell.tla`). When the timeout passes,
+  `Shell` sends TERM to the group with the host's `kill` (see `CodingAgentFramework.Host`),
+  waits half a second for the program's exit, and sends KILL to the group only if the exit did
+  not come. The kills reach the program's children in its group, and never a process held by
+  `dtach -n`, which has left the group by `setsid`. They aim only at the group of a program
+  `Shell` started and still waits on, so they never reach a reused pid. A program that exits on
+  its own, or on the TERM, leaves its children running.
+
+  Given a `:reaper` (`CodingAgentFramework.Shell.Reaper`), a run also ends with its caller and
+  with the VM: the reaper holds the group while the program runs, and ends it when the caller
+  dies first, or when the VM dies. Without one, the caller's death or the VM's leaves the
+  program running, as a plain port does.
 
   `Shell` sets no environment. A caller that needs one runs the host's `env` program, so the
   command is the same on this machine and over ssh (see `CodingAgentFramework.Holder.hold/4`).
@@ -21,24 +33,28 @@ defmodule CodingAgentFramework.Shell do
       into `output`;
     * `{:refused, reason}`: nothing ran (`{:not_absolute, path}`, `{:cannot_start, path,
       reason}`);
-    * `{:unknown, {:timeout, ms}}`: the program did not exit in time and was killed.
+    * `{:unknown, {:timeout, ms}}`: the program did not exit in time, and its group was ended.
   """
 
-  alias CodingAgentFramework.Host
+  alias CodingAgentFramework.{Host, Shell.Reaper}
+
+  # MuonTrap's default wait between TERM and KILL.
+  @grace 500
 
   @type result :: %{status: non_neg_integer, output: binary}
   @type outcome :: {:ok, result} | {:refused, term} | {:unknown, term}
 
   @doc """
   Runs `path` with `args` on `host`. Options: `:timeout` (required), milliseconds before the
-  program is killed.
+  program's group is ended; `:reaper`, a `CodingAgentFramework.Shell.Reaper` that ends the
+  group if the caller or the VM dies first.
   """
   @spec run(Host.t(), String.t(), [String.t()], keyword) :: outcome
   def run(%Host{} = host, path, args, opts) do
     timeout = Keyword.fetch!(opts, :timeout)
 
     case command(host, path, args) do
-      {:ok, {exe, argv}} -> spawn_and_wait(host, exe, argv, timeout)
+      {:ok, {exe, argv}} -> spawn_and_wait(host, exe, argv, timeout, opts[:reaper])
       refused -> refused
     end
   end
@@ -77,7 +93,7 @@ defmodule CodingAgentFramework.Shell do
   @spec shell_quote(String.t()) :: String.t()
   def shell_quote(word), do: "'" <> String.replace(word, "'", "'\\''") <> "'"
 
-  defp spawn_and_wait(host, exe, argv, timeout) do
+  defp spawn_and_wait(host, exe, argv, timeout, reaper) do
     port =
       Port.open({:spawn_executable, exe}, [
         :binary,
@@ -88,37 +104,62 @@ defmodule CodingAgentFramework.Shell do
       ])
 
     # A program that has already exited has closed its port, and the port has no pid left; its
-    # output and exit status are in the mailbox all the same.
-    os_pid =
+    # output and exit status are in the mailbox all the same, and there is no group to hold.
+    pgid =
       case Port.info(port, :os_pid) do
         {:os_pid, os_pid} -> os_pid
         nil -> nil
       end
 
+    if reaper && pgid, do: Reaper.hold(reaper, pgid)
     deadline = System.monotonic_time(:millisecond) + timeout
-    collect(host, port, os_pid, deadline, timeout, [])
+    outcome = collect(host, port, pgid, deadline, timeout, [])
+    # Dropped only once the exit was taken or the KILL sent: the reaper never aims at an ended
+    # command's id.
+    if reaper && pgid, do: Reaper.drop(reaper, pgid)
+    outcome
   rescue
     e in ErlangError -> {:refused, {:cannot_start, exe, e.original}}
   end
 
-  defp collect(host, port, os_pid, deadline, timeout, acc) do
+  defp collect(host, port, pgid, deadline, timeout, acc) do
     left = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {^port, {:data, data}} ->
-        collect(host, port, os_pid, deadline, timeout, [acc | data])
+        collect(host, port, pgid, deadline, timeout, [acc | data])
 
       {^port, {:exit_status, status}} ->
         {:ok, %{status: status, output: IO.iodata_to_binary(acc)}}
     after
       left ->
-        # The program was started here, so it is killed by its own pid, never by a pattern.
-        if os_pid,
-          do: System.cmd(host.kill, ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
-
-        close(port)
+        if pgid, do: end_group(host.kill, port, pgid), else: close(port)
         {:unknown, {:timeout, timeout}}
     end
+  end
+
+  # The port is open and its exit not taken, so the program's pid, the group's id, is still its.
+  # Once the exit comes, no KILL follows: the id may be free.
+  defp end_group(kill, port, pgid) do
+    signal(kill, "TERM", pgid)
+
+    receive do
+      {^port, {:exit_status, _}} ->
+        drain(port)
+    after
+      @grace ->
+        signal(kill, "KILL", pgid)
+        close(port)
+    end
+  end
+
+  @doc false
+  # Also the reaper's: `name` (TERM or KILL) to the group whose id is `pgid`, with this
+  # machine's `kill`.
+  @spec signal(String.t(), String.t(), pos_integer) :: :ok
+  def signal(kill, name, pgid) do
+    System.cmd(kill, ["-s", name, "--", "-#{pgid}"], stderr_to_stdout: true)
+    :ok
   end
 
   # A killed program's exit status could arrive after a `Port.close/1`, in the caller's mailbox,
