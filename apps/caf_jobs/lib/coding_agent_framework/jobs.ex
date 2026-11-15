@@ -55,7 +55,8 @@ defmodule CodingAgentFramework.Jobs do
 
   use GenServer
 
-  alias CodingAgentFramework.{Copies, Holder, Shell}
+  alias CodingAgentFramework.{Copies, Shell}
+  alias CodingAgentFramework.Copies.Held
   alias CodingAgentFramework.Jobs.Table
 
   @call 5_000
@@ -120,21 +121,25 @@ defmodule CodingAgentFramework.Jobs do
     with :ok <- named(paths),
          {:ok, ctx} <- context(jobs, id, where, start),
          :ok <- call(jobs, {:ask, row(id, where, worktree)}),
-         {:ok, :taken} <- refuse_on_fail(jobs, id, Copies.take(ctx.copies, ctx.copy, id)),
-         {:ok, %{record: record}} <- refuse_on_fail(jobs, id, sync(ctx, id, worktree, opts)),
-         :ok <- prepare(ctx, jobs, id),
-         :ok <- Copies.starting(ctx.copies, ctx.copy, id) do
+         refused = fn _ -> put(jobs, id, %{state: "refused"}) end,
+         {:ok, %{record: record}} <- Held.ready(ctx, worktree, opts, refused) do
       now = now()
       deadline = now + start + timeout
       put(jobs, id, %{state: "starting", start_until: now + start, deadline: deadline})
       secs = :erlang.float_to_binary(timeout / 1000, decimals: 3)
-      %{kill: k, sleep: s, mkdir: m, sh: sh} = ctx.programs.paths
-      wrapper = [sh, "-c", @wrapper, "caf-job", ctx.path, ctx.log, ctx.exit, secs, k, s, m]
-      held = Holder.hold(ctx.holder, id, wrapper ++ argv, env: Keyword.get(opts, :env, []))
-
+      %{kill: k, sleep: s, mkdir: m} = ctx.programs.paths
+      args = ["caf-job", ctx.path, ctx.log, ctx.exit, secs, k, s, m]
+      held = Held.hold(ctx, @wrapper, args, argv, Keyword.get(opts, :env, []))
       put = &put(jobs, id, &1)
+      interval = Keyword.get(opts, :interval, 200)
 
-      with {:ok, :running} <- started(put, ctx, id, held, {now + start, deadline}, opts),
+      # dtach's held reply: the job is live. Its reply cut: the host is read until the deadline.
+      read = fn
+        :reply -> {:ok, :live}
+        :cut -> retry(deadline, interval, fn -> read(ctx, :once, @call) end)
+      end
+
+      with {:ok, :running} <- Held.settle(ctx, held, now + start, read, &started(put, &1)),
            {:ok, value} <- wait_end(ctx, deadline, Keyword.get(opts, :interval, 200)),
            :ok <- put.(ended(value)) do
         fetch = fn -> fetch(ctx, worktree, record, opts) end
@@ -191,43 +196,12 @@ defmodule CodingAgentFramework.Jobs do
     with {:ok, config} <- call(jobs, :config), do: context_of(config, id, where, start)
   end
 
-  defp context_of(%{hosts: hosts, copies: copies}, id, where, start) do
-    with {:ok, %{programs: programs, dir: dir}} <- host(hosts, where.host),
-         copy = %{programs: programs, dir: dir, project: where.project, name: where.name},
-         {:ok, {path, _lock}} <- Copies.place(copy),
-         jobs_dir = Path.join(dir, "jobs"),
-         {:ok, holder} <- Holder.new(programs, jobs_dir, timeout: start) do
-      base = Path.join(jobs_dir, id)
+  defp context_of(config, id, where, start) do
+    where = %{host: where.host, project: where.project, copy: where.name}
 
-      {:ok,
-       %{
-         copies: copies,
-         copy: copy,
-         programs: programs,
-         holder: holder,
-         path: path,
-         dir: jobs_dir
-       }
-       |> Map.merge(%{socket: base <> ".sock", log: base <> ".log", exit: base <> ".exit"})}
-    end
-  end
-
-  defp host(hosts, name) do
-    case Map.fetch(hosts, name) do
-      {:ok, host} -> {:ok, host}
-      :error -> {:refused, {:no_host, name}}
-    end
-  end
-
-  defp prepare(ctx, jobs, id) do
-    case Shell.run(ctx.programs.host, ctx.programs.paths.mkdir, ["-p", ctx.dir], timeout: @call) do
-      {:ok, %{status: 0}} ->
-        :ok
-
-      other ->
-        Copies.give_back(ctx.copies, ctx.copy, id)
-        refuse_on_fail(jobs, id, {:refused, {:host, other}})
-    end
+    with {:ok, %{base: b} = ctx} <-
+           Held.context(config, Map.merge(where, %{kind: "jobs", name: id, run: id}), start),
+         do: {:ok, Map.merge(ctx, %{socket: b <> ".sock", log: b <> ".log", exit: b <> ".exit"})}
   end
 
   # Each named path is relative and stays inside the worktree.
@@ -244,24 +218,10 @@ defmodule CodingAgentFramework.Jobs do
 
   defp inside?(_), do: false
 
-  defp sync(ctx, id, worktree, opts) do
-    sync_opts = copy_opts(opts) ++ [fetch: Keyword.get(opts, :fetch, [])]
-    Copies.sync(ctx.copies, ctx.copy, id, worktree, sync_opts)
-  end
-
   defp fetch(_ctx, _worktree, record, _opts) when map_size(record) == 0, do: :none
 
   defp fetch(ctx, worktree, record, opts),
-    do: Copies.fetch(ctx.copies, ctx.copy, worktree, record, copy_opts(opts))
-
-  defp copy_opts(opts) do
-    [
-      timeout: Keyword.get(opts, :sync_timeout, 60_000),
-      lock_wait: Keyword.get(opts, :lock_wait, 30_000),
-      reaper: Keyword.get(opts, :reaper)
-    ]
-    |> Enum.reject(&is_nil(elem(&1, 1)))
-  end
+    do: Copies.fetch(ctx.copies, ctx.copy, worktree, record, Held.copy_opts(opts))
 
   # A call that gave up owes its caller the job's end, once the host is read.
   defp owe({:unknown, :dropped} = dropped, jobs, id) do
@@ -271,41 +231,12 @@ defmodule CodingAgentFramework.Jobs do
 
   defp owe(answer, _jobs, _id), do: answer
 
-  defp refuse_on_fail(jobs, id, {:refused, _} = refused) do
-    put(jobs, id, %{state: "refused"})
-    refused
-  end
-
-  defp refuse_on_fail(_jobs, _id, other), do: other
-
-  # dtach answered: held, or refused with nothing run. Its reply cut: the host is read once the
-  # start's deadline has passed, since the start may still land until then.
-  defp started(put, ctx, id, {:ok, _}, _times, _opts) do
-    put.(%{state: "running"})
-    Copies.give_back(ctx.copies, ctx.copy, id)
-    {:ok, :running}
-  end
-
-  defp started(put, ctx, id, {:refused, reason}, _times, _opts) do
-    put.(%{state: "refused"})
-    Copies.give_back(ctx.copies, ctx.copy, id)
-    {:refused, {:start, reason}}
-  end
-
-  defp started(put, ctx, id, {:unknown, _}, {until, deadline}, opts) do
-    pause(until - now())
-
-    retry(deadline, Keyword.get(opts, :interval, 200), fn -> read(ctx, :once, @call) end)
-    |> then(&settle_start(put, ctx, id, &1))
-  end
-
   # One read of the row's job on the host, as after a restart; `put` writes the row.
   defp settle_row(ctx, row, timeout, put) do
     case row.state do
       "starting" ->
-        if now() < row.start_until,
-          do: {:unknown, {:starting_until, row.start_until}},
-          else: settle_start(put, ctx, row.id, read(ctx, :once, timeout))
+        read = fn :cut -> read(ctx, :once, timeout) end
+        Held.settle_cut(ctx, row.start_until, read, &started(put, &1))
 
       "running" ->
         case read(ctx, :once, timeout) do
@@ -319,22 +250,21 @@ defmodule CodingAgentFramework.Jobs do
     end
   end
 
-  defp settle_start(put, ctx, id, read) do
-    ran =
-      case read do
-        {:ok, :live} -> true
-        {:ok, {:end, "none"}} -> false
-        {:ok, {:end, _}} -> true
-        other -> other
-      end
+  # The row a settled start makes: live, or ended with an exit file, the job ran; dtach's
+  # refusal, or a dead socket with no exit file, nothing ran.
+  defp started(put, {:refused, _} = refused) do
+    put.(%{state: "refused"})
+    refused
+  end
 
-    if is_boolean(ran) do
-      put.(%{state: if(ran, do: "running", else: "refused")})
-      Copies.give_back(ctx.copies, ctx.copy, id)
-      if ran, do: {:ok, :running}, else: {:refused, {:start, :not_held}}
-    else
-      ran
-    end
+  defp started(put, {:ok, {:end, "none"}}) do
+    put.(%{state: "refused"})
+    {:refused, {:start, :not_held}}
+  end
+
+  defp started(put, {:ok, _live_or_ended}) do
+    put.(%{state: "running"})
+    {:ok, :running}
   end
 
   # One read waits on the host while the job lives, until the call's deadline and a grace for
