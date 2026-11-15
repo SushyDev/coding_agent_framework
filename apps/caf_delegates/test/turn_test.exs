@@ -8,7 +8,7 @@ defmodule CodingAgentFramework.Delegates.TurnTest do
   doctest Table
 
   @project %{name: "app", branches: ~r/\Aunit\//, cap: 2}
-  @row %{brief_uuid: "b1", brief: "do it"}
+  @row %{brief_uuid: "b1", resume_uuid: nil, brief: "do it"}
 
   test "a start names a project it was given and a branch its pattern takes" do
     projects = %{"app" => @project, "odd" => %{name: "odd"}, "zero" => %{@project | cap: 0}}
@@ -27,6 +27,22 @@ defmodule CodingAgentFramework.Delegates.TurnTest do
 
     assert {:finished, "r"} =
              Turn.next(@row, fold(%{"b1" => %{state: :delivered}}, true, %{text: "r"}))
+  end
+
+  test "a resumed process waits for its own message: the earlier turn's result does not count" do
+    # KillSeen under the resume's uuid: the brief's replay and the follow again's idle are old.
+    fold = fold(%{"b1" => %{state: :delivered}}, true, %{text: "half"})
+    resumed = %{@row | resume_uuid: "r1"}
+    assert {:write, "r1", text} = Turn.next(resumed, fold)
+    assert text == Turn.resumed()
+    assert :waiting = Turn.next(resumed, put_in(fold.messages["r1"], %{state: :writing}))
+
+    assert {:finished, "r"} =
+             Turn.next(resumed, %{
+               fold
+               | messages: %{"r1" => %{state: :delivered}},
+                 last_result: %{text: "r"}
+             })
   end
 
   test "a brief found undelivered goes again under its uuid; a gone process with none is exited" do

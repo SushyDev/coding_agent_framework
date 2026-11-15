@@ -1,17 +1,17 @@
 defmodule CodingAgentFramework.Delegates do
   @moduledoc """
   The delegate protocol (`docs/design.md`, "The delegate protocol"; `model/tla/Delegate.tla`),
-  up to a held report: a start, the brief, a finish by its turn's `result`, and the report held
+  up to a held report: a start, the brief, a finish or a kill, one resume, and the report held
   durably. Delivering a report into its parent needs `Screen`, which is not built:
-  `deliver/2` is refused as `:no_delivery`. A kill, and its one resume, are a later unit.
+  `deliver/2` is refused as `:no_delivery`.
 
   The caller's supervision tree starts one per host, with no name, and gives it the host's
-  `Sessions` and `Stream`, the instance's `Usage` and `Accounts`, the projects as data, and what
-  every launch shares:
+  `Sessions`, `Stream` and a `Transcripts` per account, the instance's `Usage` and `Accounts`,
+  the projects as data, and what every launch shares:
 
       {:ok, delegates} = Delegates.start_link(host: "laptop", db: db, sessions_db: db,
         sessions: sessions, stream: stream, usage: usage, accounts: accounts,
-        launch: [claude: claude, env: env],
+        transcripts: %{"work" => transcripts}, launch: [claude: claude, env: env],
         projects: %{"app" => %{name: "app", repo: "/src/app", trunk: "main", setup: [],
           setup_timeout: 60_000, env: %{}, branches: ~r/\\Aunit\\//, cap: 3}})
       Delegates.start_delegate(delegates, "main", "app", "unit/review", "opus", "Review it.")
@@ -29,32 +29,37 @@ defmodule CodingAgentFramework.Delegates do
 
   **A running delegate** is read from its `Stream` row at each cue: once the turn's message is
   delivered and a `result` came after it, the row is `finished` with that result's text as its
-  report. A row leaves `running` once. When its process is gone first, the row stays `running`:
-  the kill path (the transcript's last reply, one resume, a second kill) is a later unit.
+  report. When its process is gone first, the transcript says whether it had given its last
+  reply: if so it finished with that reply. Otherwise it is resumed once, after `Sessions`' row
+  of it has ended: the row counts the resume first, as `resuming`, then `Sessions.resume/6`
+  follows it again and the resumed process takes the brief again (when it had not gone in) or
+  `Turn.resumed/0`. A second such kill, or a refused resume, is `failed`, and that is the
+  report. A row leaves `running` once.
 
   Each report is `held` in the table, with a mark of its own, and survives restarts.
 
   It reads every row again when it starts and at each `cue/2`; the host app wires the cues of
-  `Sessions` and `Stream` to it. After each write `notify` gets `%{topic:
+  `Sessions`, `Stream` and `Transcripts` to it. After each write `notify` gets `%{topic:
   "delegates:<host>", ids: [id]}`.
   """
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, Sessions, Stream, Usage}
+  alias CodingAgentFramework.{Accounts, Sessions, Stream, Transcripts, Usage}
   alias CodingAgentFramework.Delegates.{Table, Turn}
 
-  # Sessions' own timeout for a start; its git bounds and slack come on top.
+  # Sessions' own timeout for a start or a resume; its git bounds and slack come on top.
   @call 30_000
   @slack 120_000
   @step 5_000
+  @twice "The delegate was killed twice before its last reply; it is not resumed again."
 
   @doc """
   Starts a `Delegates`. Options: `host:` (the name of the host `sessions:` and `stream:` run
   on), `db:`, `sessions_db:` (the file `Sessions`' table is in), `usage:`, `accounts:`,
-  `projects:` (name to a project as `Sessions.Worktree.project/1` reads it, with `branches:`
-  and `cap:`), `launch:` (`claude:` and `env:` for `ClaudeCLI`), and optionally `notify:` and
-  `clock:` (wall-clock ms).
+  `transcripts:` (account to its `Transcripts`), `projects:` (name to a project as
+  `Sessions.Worktree.project/1` reads it, with `branches:` and `cap:`), `launch:` (`claude:`
+  and `env:` for `ClaudeCLI`), and optionally `notify:` and `clock:` (wall-clock ms).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -96,7 +101,7 @@ defmodule CodingAgentFramework.Delegates do
   def init(opts) do
     with {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)),
          {:ok, sdb} <- Sessions.Table.open(Keyword.fetch!(opts, :sessions_db)) do
-      keys = ~w(host sessions stream usage accounts projects launch)a
+      keys = ~w(host sessions stream usage accounts transcripts projects launch)a
       s = Map.new(keys, &{&1, Keyword.fetch!(opts, &1)})
 
       s =
@@ -117,7 +122,7 @@ defmodule CodingAgentFramework.Delegates do
   @impl true
   def handle_continue(:settle, s) do
     Stream.read(s.stream, timeout: @step)
-    for row <- Table.with_status(s.db, s.host, ~w(starting)), do: wake(s, row)
+    for row <- Table.with_status(s.db, s.host, ~w(starting resuming)), do: wake(s, row)
 
     {:noreply, settle(s)}
   end
@@ -174,13 +179,19 @@ defmodule CodingAgentFramework.Delegates do
     launch = launch ++ s.launch
 
     task =
-      Task.async(fn -> Sessions.start(s.sessions, row.name, account, launch, timeout: @call) end)
+      Task.async(fn ->
+        if row.status == "starting",
+          do: Sessions.start(s.sessions, row.name, account, launch, timeout: @call),
+          else:
+            Sessions.resume(s.sessions, row.name, account, row.session_id, launch, timeout: @call)
+      end)
 
     put_in(s.pending[task.ref], %{id: row.id, from: from})
   end
 
-  # CallAnswered and Settled: a start runs, then its brief goes in; or it is refused. An unknown
-  # answer leaves the row as it is, for Settled to decide.
+  # CallAnswered and Settled: a start or resume runs, then its turn's message goes in; a refused
+  # start is refused; a refused resume is the report. An unknown answer leaves the row as it is,
+  # for Settled to decide.
   defp answered(s, row, {:ok, %{session_id: sid}}) do
     write(s, row, status: "running", session_id: sid, reason: nil)
     row = Table.get(s.db, row.id)
@@ -188,9 +199,14 @@ defmodule CodingAgentFramework.Delegates do
     {{:ok, Map.put(Map.take(row, [:id, :name, :session_id, :account]), :brief, brief)}, s}
   end
 
-  defp answered(s, row, {:refused, why} = refused) do
+  defp answered(s, %{status: "starting"} = row, {:refused, why} = refused) do
     write(s, row, status: "refused", reason: why)
     {refused, s}
+  end
+
+  defp answered(s, row, {:refused, why} = refused) do
+    text = "The delegate was killed before its last reply, and its resume was refused: "
+    {refused, hold(s, row, "failed", text <> inspect(why))}
   end
 
   defp answered(s, row, {:unknown, why} = unknown) do
@@ -203,14 +219,14 @@ defmodule CodingAgentFramework.Delegates do
   defp settle(s) do
     busy = MapSet.new(Map.values(s.pending), & &1.id)
 
-    Table.with_status(s.db, s.host, ~w(starting running))
+    Table.with_status(s.db, s.host, ~w(starting resuming running))
     |> Enum.reject(&MapSet.member?(busy, &1.id))
     |> Enum.reduce(s, &settle_row(&2, &1))
   end
 
   # Settled: by Sessions' row of this call (written at or after the call) once that row is
   # settled; with none past the deadline, the call never reached Sessions and is not made again.
-  defp settle_row(s, %{status: "starting"} = row) do
+  defp settle_row(s, %{status: status} = row) when status in ~w(starting resuming) do
     case Sessions.Table.get(s.sdb, s.host, row.name) do
       %{started_at: at, status: "running"} = srow when at >= row.called_at ->
         elem(answered(s, row, {:ok, srow}), 1)
@@ -231,8 +247,8 @@ defmodule CodingAgentFramework.Delegates do
 
   defp settle_row(s, row), do: elem(running(s, row), 1)
 
-  # What a running row's Stream row says, and what it did: StopHandled, or InputWritten under
-  # the row's uuid (answering Stream's answer).
+  # What a running row's Stream row says, and what it did: StopHandled, InputWritten under the
+  # row's uuid (answering Stream's answer), or the exit.
   defp running(s, row) do
     with {:ok, fold} <- followed(s, row) do
       case Turn.next(row, fold) do
@@ -243,15 +259,51 @@ defmodule CodingAgentFramework.Delegates do
           {Stream.write(s.stream, row.session_id, {:message, uuid, text}), s}
 
         :exited ->
-          # The kill path, a later unit (F-59 new-9, part 3), reads the transcript's last reply
-          # and resumes once. Until then the row stays running and holds no report.
-          {:exited, s}
+          {:exited, exited(s, row, fold)}
 
         :waiting ->
           {:waiting, s}
       end
     else
       unread -> {unread, s}
+    end
+  end
+
+  # Its process is gone with no result of its turn. TranscriptRead: a last reply is a finish.
+  # KillSeen: a second kill is the report; a first is resumed once Sessions' row has ended,
+  # which its settle and cue bring (Sessions refuses to start a name whose row runs). A read
+  # that fails decides nothing.
+  defp exited(s, row, fold) do
+    with {:ok, t} <- Map.fetch(s.transcripts, row.account),
+         {:ok, %{failed: []}} <-
+           Transcripts.read(t, [{row.session_id, fold.transcript}], timeout: @step),
+         {:ok, tr} <- Transcripts.session(t, row.session_id, timeout: @step) do
+      cond do
+        tr.ends_with_reply -> hold(s, row, "finished", tr.last_reply.text)
+        row.resumes > 0 -> hold(s, row, "failed", @twice)
+        ended?(Sessions.Table.get(s.sdb, s.host, row.name)) -> resume(s, row, fold)
+        true -> s
+      end
+    else
+      _ -> s
+    end
+  end
+
+  defp ended?(srow), do: srow == nil or srow.status in ~w(stopped refused)
+
+  # The row counts the resume, with the uuid of the resumed process's message when the brief
+  # had gone in, before Sessions is asked: a restart never asks it twice.
+  defp resume(s, row, fold) do
+    with {:ok, p} <- Map.fetch(s.projects, row.project),
+         {:ok, account} <- Accounts.ready(s.accounts, row.account) do
+      went_in? = match?(%{state: :delivered}, fold.messages[row.brief_uuid])
+      at = System.os_time(:millisecond)
+      fields = [status: "resuming", resumes: 1, called_at: at, deadline: deadline(s, p)]
+      write(s, row, fields ++ [resume_uuid: if(went_in?, do: Stream.uuid())])
+      call_sessions(s, Table.get(s.db, row.id), p, account, nil)
+    else
+      :error -> elem(answered(s, row, {:refused, {:unknown_project, row.project}}), 1)
+      refused -> elem(answered(s, row, refused), 1)
     end
   end
 
