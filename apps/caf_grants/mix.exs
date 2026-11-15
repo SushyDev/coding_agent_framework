@@ -14,6 +14,10 @@ defmodule CafGrants.MixProject do
   end
 
   defp deps do
-    [{:stream_data, "~> 1.4", only: :test}]
+    [
+      {:exqlite, "~> 0.43.0"},
+      {:caf_test, in_umbrella: true, only: :test},
+      {:stream_data, "~> 1.4", only: :test}
+    ]
   end
 end
