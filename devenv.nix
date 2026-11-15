@@ -52,6 +52,35 @@ let
     [ "elixir" "elixir --short-version" elixir.version ]
   ];
   otpVersion = ''{ok, V} = file:read_file(filename:join([code:root_dir(), "releases", erlang:system_info(otp_release), "OTP_VERSION"])), io:put_chars(V), halt().'';
+
+  # What `devenv test` runs, in this order. Each is a script below and a task `caf:<name>`.
+  gates = [ "check-versions" "gate-format" "gate-compile" "gate-deps" "gate-test" "gate-model" ];
+  # A gate task that passes exports this variable. devenv hands a run's task exports to that
+  # run's enterTest, so unlike a mark file it cannot outlive its run.
+  passed = gate: "CAF_PASSED_" + lib.toUpper (lib.replaceStrings [ "-" ] [ "_" ] gate);
+
+  # `devenv test` runs the gates as tasks, one after another, before devenv:enterTest. Under a
+  # coding agent devenv prints only errors, and it hides the enterTest script's output when it
+  # passes; showOutput is the one way to print a passing gate there. A failing gate stops the
+  # gates after it and fails `devenv test`. wantedBy keeps them out of `devenv shell` and every
+  # other task run.
+  gateTasks = lib.listToAttrs (lib.imap0 (i: gate: lib.nameValuePair "caf:${gate}" {
+    description = "Gate: ${gate}";
+    exec = ''
+      ${gate}
+      export ${passed gate}=1
+    '';
+    exports = [ (passed gate) ];
+    cwd = config.devenv.root;
+    showOutput = true;
+    # The first gate waits for the shell's setup and the hooks, whose mix format would otherwise
+    # share _build with gate-compile.
+    after = if i == 0
+      then [ "devenv:enterShell" "devenv:git-hooks:run" ]
+      else [ "caf:${lib.elemAt gates (i - 1)}" ];
+    before = [ "devenv:enterTest" ];
+    wantedBy = [ "devenv:enterTest" ];
+  }) gates);
 in
 {
   # Erlang/OTP 29 and Elixir 1.20 built against it: the newest stable pair in nixpkgs-unstable.
@@ -103,7 +132,7 @@ in
     exit $failed
   '';
 
-  # The five gates, each alone; `devenv test` runs them all.
+  # The five gates, each alone; `devenv test` runs them all, as gateTasks.
   scripts.gate-format.exec = "mix format --check-formatted";
   scripts.gate-compile.exec = "mix compile --warnings-as-errors";
   # Each app declares directly every umbrella app it uses, and uses each one it declares. Elixir
@@ -114,13 +143,19 @@ in
   scripts.gate-test.exec = "mix test --exclude model";
   scripts.gate-model.exec = ''"$CAF_BASH" "$DEVENV_ROOT/bin/check-model" all'';
 
+  # The last step of `devenv test`: it fails unless every gate passed in this run, so a devenv
+  # that stops running these tasks fails the run rather than passing it with nothing checked.
+  # Its lines go to stderr, which devenv prints even under a coding agent.
   enterTest = ''
-    check-versions
-    gate-format
-    gate-compile
-    gate-deps
-    gate-test
-    gate-model
+    missing=""
+    ${lib.concatMapStrings (gate: ''
+      [ -n "''${${passed gate}:-}" ] || missing="$missing ${gate}"
+    '') gates}
+    if [ -n "$missing" ]; then
+      echo "devenv test: these gates did not run:$missing" >&2
+      exit 1
+    fi
+    echo "devenv test: every gate ran: ${lib.concatStringsSep " " gates}" >&2
   '';
 
   # Format and American spelling before each commit; `devenv test` runs them on every file.
@@ -145,7 +180,9 @@ in
   # look elsewhere; the global hooks directory hands off to this file. Every path is a store
   # path, so a plain `git commit` outside the shell needs no PATH. prek reads the same config
   # git-hooks generates and runs it on the staged files.
-  tasks."devenv:git-hooks:install".status = "exit 0"; # prek must not write this file's place.
+  tasks = gateTasks // {
+    "devenv:git-hooks:install".status = "exit 0"; # prek must not write this file's place.
+  };
 
   enterShell = let
     git = lib.getExe pkgs.git;
