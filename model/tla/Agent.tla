@@ -32,9 +32,9 @@
 (*                                                                         *)
 (* A restart of Recoveries between its claim and its act leaves that loss  *)
 (* claimed and not acted on: it ends unknown, for a person, and is never   *)
-(* acted on again. So LostViewerReopened is checked with no such restart   *)
-(* (Agent_Viewers, Agent_LateViewers), and OneReopenPerLoss with one       *)
-(* (Agent_Claims).                                                         *)
+(* acted on again (NoActOnCutOffClaim). So LostViewerReopened is checked   *)
+(* with no such restart (Agent_Viewers, Agent_LateViewers), and            *)
+(* OneReopenPerLoss and NoActOnCutOffClaim with one (Agent_Claims).        *)
 (*                                                                         *)
 (* Two readings in a row can still both read a loss that a start's viewer  *)
 (* ends: the first before the start opens it, the second with the open     *)
@@ -61,7 +61,11 @@
 (*                                                                         *)
 (* Defense in depth, with no Break: the refusal of an empty target in      *)
 (* Passes. The tag check refuses any pane but the session's own, so the    *)
-(* refusal cannot fail on its own; it gives the write a named reason.      *)
+(* refusal cannot fail on its own; it gives the write a named reason. The  *)
+(* same for `a \notin opened` in RecoveryClaims, behind `a \notin claimed` *)
+(* for OneReopenPerLoss: a second claim of one loss needs the first out of *)
+(* `claimed`, and only a reading that names a new loss takes it out, which *)
+(* also clears `reopened`.                                                 *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
@@ -84,6 +88,7 @@ Breaks == {
     "NoReopen",             \* a lost viewer is never reopened
     "SamplerReadsPanesOnly", \* the sampler reads tmux's panes but not the held sockets
     "ClaimInMemory",        \* Recoveries keeps its claims in memory, not in its table
+    "ClaimTwice",           \* Recoveries claims a loss it has claimed, after a restart
     "OneReading"            \* Recoveries acts on a loss after one reading
 }
 
@@ -122,6 +127,8 @@ VARIABLES
                    \* [agent, old], old once the sampler has read a newer loss
     reopened,      \* history: agents a viewer was opened for in their current loss
     twice,         \* history: a viewer was opened twice for one loss
+    cutOff,        \* history: agents whose claim was in `claimed` at a restart of
+                   \* Recoveries, until a reading names a new loss for them
     recoveryRestarts,
     kept,          \* session -> the pane id a caller kept, and the epoch it was read in
     pending,       \* writes checked but not yet sent (only under CheckThenSend)
@@ -129,7 +136,7 @@ VARIABLES
     serverDeaths, viewerDeaths, writesAsked
 
 \* Recoveries' variables, unchanged by the other steps.
-rec == <<opened, claimed, acting, reopened, twice, recoveryRestarts, agreed, fresh,
+rec == <<opened, claimed, acting, reopened, twice, cutOff, recoveryRestarts, agreed, fresh,
          losses, repeating>>
 
 \* The starts' viewers not yet opened.
@@ -183,6 +190,7 @@ Init ==
     /\ acting = {}
     /\ reopened = {}
     /\ twice = FALSE
+    /\ cutOff = {}
     /\ recoveryRestarts = 0
     \* Before any lookup the caller holds nothing: an empty target.
     /\ kept = [a \in Agents |-> [pane |-> EmptyTarget, epoch |-> 0]]
@@ -343,7 +351,9 @@ Reading(paneRead, wrong) ==
         /\ opened' = {}
         /\ claimed' = claimed \ new
         /\ reopened' = reopened \ new
-        /\ acting' = {[agent |-> c.agent, old |-> c.old \/ c.agent \in new] : c \in acting}
+        \* A claim of the new loss is a new claim, not the one a restart cut off.
+        /\ cutOff' = cutOff \ new
+        /\ acting' ={[agent |-> c.agent, old |-> c.old \/ c.agent \in new] : c \in acting}
         /\ UNCHANGED <<procs, nextPid, socketFile, kept, pending, delivered, serverDeaths,
                        viewerDeaths, writesAsked, twice, recoveryRestarts, losses, repeating>>
 
@@ -376,7 +386,7 @@ RecoveryClaims(a) ==
     /\ Break # "NoReopen"
     /\ IF Break = "OneReading" THEN a \in unviewed ELSE a \in agreed
     /\ a \notin opened
-    /\ a \notin claimed
+    /\ Break = "ClaimTwice" \/ a \notin claimed
     /\ a \notin repeating
     /\ claimed' = claimed \cup {a}
     /\ IF losses[a] = 2
@@ -387,7 +397,8 @@ RecoveryClaims(a) ==
               /\ UNCHANGED repeating
     /\ UNCHANGED <<serverUp, epoch, nextPane, panes, procs, nextPid, socketFile, smp,
                    starts, kept, pending, delivered, serverDeaths, viewerDeaths,
-                   writesAsked, opened, reopened, twice, recoveryRestarts, agreed, fresh>>
+                   writesAsked, opened, reopened, twice, cutOff, recoveryRestarts, agreed,
+                   fresh>>
 
 \* Recoveries opens the claimed agent's viewer. The outcome is read from a
 \* later sample. When a viewer opened since the readings (a start's), tmux
@@ -408,8 +419,8 @@ RecoveryActs(c) ==
                         /\ reopened' = reopened \cup {a}
               /\ OpenViewer(a)
     /\ UNCHANGED <<procs, nextPid, socketFile, smp, starts, kept, pending, delivered,
-                   serverDeaths, viewerDeaths, writesAsked, claimed, recoveryRestarts,
-                   agreed, fresh, losses, repeating>>
+                   serverDeaths, viewerDeaths, writesAsked, claimed, cutOff,
+                   recoveryRestarts, agreed, fresh, losses, repeating>>
 
 \* A person clears an agent whose losses repeated (Recoveries.clear/2). A loss
 \* read after the clear is a new loss, as after an open.
@@ -420,15 +431,17 @@ PersonClears(a) ==
     /\ opened' = opened \cup {a}
     /\ UNCHANGED <<serverUp, epoch, nextPane, panes, procs, nextPid, socketFile, smp,
                    starts, kept, pending, delivered, serverDeaths, viewerDeaths,
-                   writesAsked, claimed, acting, reopened, twice, recoveryRestarts,
+                   writesAsked, claimed, acting, reopened, twice, cutOff, recoveryRestarts,
                    agreed, fresh>>
 
 \* Recoveries restarts and loses what it held in memory: a claim it had not
 \* acted on is never acted on, and the last reading it agreed with is gone.
-\* Its table stays, unless ClaimInMemory.
+\* Its table stays, unless ClaimInMemory. `cutOff` records the claims in the
+\* table now, which this restart cuts off.
 RecoveriesRestart ==
     /\ recoveryRestarts < MaxRecoveryRestarts
     /\ recoveryRestarts' = recoveryRestarts + 1
+    /\ cutOff' = cutOff \cup claimed
     /\ acting' = {}
     /\ agreed' = {}
     /\ fresh' = TRUE
@@ -537,6 +550,7 @@ TypeOK ==
     /\ losses \in [Agents -> 0..2] /\ repeating \subseteq Agents
     /\ opened \subseteq Agents /\ claimed \subseteq Agents /\ reopened \subseteq Agents
     /\ acting \subseteq [agent : Agents, old : BOOLEAN] /\ twice \in BOOLEAN
+    /\ cutOff \subseteq Agents
     /\ recoveryRestarts \in 0..MaxRecoveryRestarts
 
 \* A write reaches only the pane of the session it names.
@@ -559,6 +573,12 @@ OneReopenPerLoss ==
 \* reading was wrong: a viewer opened between its two reads.
 NoActOnOneWrongReading ==
     \A c \in acting : ~c.old => c.agent \notin wrongOnce
+
+\* A claim that a restart of Recoveries cut off is never acted on: no step of
+\* RecoveryActs acts on an agent whose claim was in the table at a restart,
+\* until a reading names a new loss for it.
+NoActOnCutOffClaim ==
+    [][\A a \in cutOff : ~(\E c \in acting : c.agent = a /\ RecoveryActs(c))]_vars
 
 \* An agent outlives its tmux server: the step in which the server dies ends
 \* no process.

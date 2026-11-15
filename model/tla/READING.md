@@ -78,9 +78,18 @@ recovery of a lost viewer in the order it happens:
 - `RecoveryActs(c)` opens the viewer, and starts the server when it is down. An act on an agent
   that has a viewer already is refused by tmux, and still counts as an open (`opened`).
 - `RecoveriesRestart` drops what `Recoveries` holds in memory (`acting`, `agreed`); its table
-  (`claimed`) stays.
+  (`claimed`) stays. `cutOff` is a history variable that takes the agents in `claimed` at that
+  restart.
 
-`OneReopenPerLoss` says one loss gets at most one reopen. `NoActOnOneWrongReading` says no claim
+`OneReopenPerLoss` says one loss gets at most one reopen. `NoActOnCutOffClaim` is a step property,
+like `AgentOutlivesServer`: no `RecoveryActs` step acts on an agent in `cutOff`, the agents whose
+claim a restart of `Recoveries` cut off, so that loss is not acted on again. A reading that names
+a new loss takes the agent out of `cutOff`, since a claim of that loss is a new claim.
+`Agent_Claims` checks it, and `Break_Agent_ClaimTwice` drops `a \notin claimed` from
+`RecoveryClaims` and must fail it. `OneReopenPerLoss` does not catch that break: the cut-off claim
+was never acted on, so the act of the second claim is the loss's only reopen. `a \notin opened` in
+`RecoveryClaims` is defense in depth behind `a \notin claimed`, so it has no `Break` value.
+`NoActOnOneWrongReading` says no claim
 rests on a single reading that was wrong (`wrongOnce`). `Agent_Viewers` checks the liveness
 with two agents; `Agent_LateViewers` with one agent, a late viewer and three losses;
 `Agent_Claims` the claims across two restarts of `Recoveries`; `Agent_Writes` the writes. The
