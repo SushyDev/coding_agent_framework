@@ -27,10 +27,16 @@ defmodule CodingAgentFramework.Jobs do
   rows from the host when it starts and at each `cue/2`, and hands each end, once, to the
   embedding app's `:on_late_end` function, in `Jobs`' process:
   `%{job: id, end: {:exit, code} | {:unknown, :timeout} | {:unknown, :no_exit} | {:refused,
-  {:start, :not_held}}, fetch: :not_fetched}`. Nothing is fetched for a late end, and a later
+  {:start, :not_held} | {:refused, :interrupted}}, fetch: :not_fetched}`. Nothing is fetched for a late end, and a later
   run fetches nothing for it. `Jobs` sends no message itself: the embedding app routes the end
   to the job's caller. The row is marked told only after the function returns, so one that
-  raises is handed again at the next start.
+  raises is handed again at the next start. `{:refused, :interrupted}` is for a row a restart
+  left `asked`: nothing reached the host, so it is never run or retried. It and `{:refused,
+  {:start, :not_held}}` are not an end: the job never ran.
+
+  At its start, `Jobs` also removes the temporary folder of a fetch a restart cut
+  (`CodingAgentFramework.Copies.sweep_fetch/1`), under the worktree of each row whose job had
+  ended, and nowhere else.
 
   **The wrapper** runs on the host as dtach's child, so it leads its own process group, and the
   job runs in that group. At the job's timeout a timer in the group writes `timeout` to the
@@ -70,7 +76,7 @@ defmodule CodingAgentFramework.Jobs do
   """
   # How long a read made in `Jobs`' own process (its start, a cue) waits on the host.
   @settle_read 2_000
-  @ended ~w(exited timedout lost refused)
+  @ended ~w(exited timedout lost refused interrupted)
   # $0 dtach; $1 the socket, $2 the exit file, $3 sleep, $4 "wait" to wait while it lives.
   # The socket is read dead first, then the exit file, in one process.
   @read ~S"""
@@ -113,7 +119,7 @@ defmodule CodingAgentFramework.Jobs do
 
     with :ok <- named(paths),
          {:ok, ctx} <- context(jobs, id, where, start),
-         :ok <- call(jobs, {:ask, row(id, where)}),
+         :ok <- call(jobs, {:ask, row(id, where, worktree)}),
          {:ok, :taken} <- refuse_on_fail(jobs, id, Copies.take(ctx.copies, ctx.copy, id)),
          {:ok, %{record: record}} <- refuse_on_fail(jobs, id, sync(ctx, id, worktree, opts)),
          :ok <- prepare(ctx, jobs, id),
@@ -409,8 +415,16 @@ defmodule CodingAgentFramework.Jobs do
 
   defp now, do: System.os_time(:millisecond)
 
-  defp row(id, where),
-    do: %{id: id, host: where.host, project: where.project, name: where.name, state: "asked"}
+  defp row(id, where, worktree) do
+    %{
+      id: id,
+      host: where.host,
+      project: where.project,
+      name: where.name,
+      state: "asked",
+      worktree: worktree
+    }
+  end
 
   defp row_of(jobs, id) do
     case call(jobs, {:get, id}) do
@@ -436,9 +450,21 @@ defmodule CodingAgentFramework.Jobs do
          {:ok, db} <- Table.open(Path.join(dir, "jobs.db")) do
       config = %{hosts: Keyword.fetch!(opts, :hosts), copies: Keyword.fetch!(opts, :copies)}
       # A row whose start or run was under way lost its call with the restart: it is owed.
-      for %{state: state, late: nil} = row <- Table.all(db),
+      rows = Table.all(db)
+
+      for %{state: state, late: nil} = row <- rows,
           state in ~w(starting running),
           do: Table.put(db, %{row | late: "owed"})
+
+      # Nothing of an `asked` row reached the host: it is interrupted, handed on once, never run.
+      for %{state: "asked", late: nil} = row <- rows,
+          do: Table.put(db, %{row | state: "interrupted", late: "owed"})
+
+      # A fetch starts once a job's end is written, so only such a row's worktree can hold the
+      # temporary folder of a fetch the restart cut.
+      for %{state: state, worktree: wt} <- rows,
+          state in ~w(exited timedout) and is_binary(wt),
+          do: Copies.sweep_fetch(wt)
 
       s = %{db: db, config: config, on_late_end: Keyword.fetch!(opts, :on_late_end)}
       {:ok, s, {:continue, :settle}}
@@ -507,4 +533,5 @@ defmodule CodingAgentFramework.Jobs do
   defp late_end(%{state: "timedout"}), do: {:unknown, :timeout}
   defp late_end(%{state: "lost"}), do: {:unknown, :no_exit}
   defp late_end(%{state: "refused"}), do: {:refused, {:start, :not_held}}
+  defp late_end(%{state: "interrupted"}), do: {:refused, :interrupted}
 end

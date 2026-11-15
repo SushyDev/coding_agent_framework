@@ -5,7 +5,8 @@ defmodule CodingAgentFramework.Jobs.Table do
 
   `state` is `asked`, `starting` (its start is being sent, until `start_until`, wall-clock ms),
   `running`, then the end read from the host: `exited` with its `code`, `timedout`, or `lost`
-  (a dead socket with no exit file); or `refused` (nothing ran). `host`, `project` and `name`
+  (a dead socket with no exit file); or `refused` (nothing ran), or `interrupted` (a restart left it `asked`: nothing was sent).
+  `worktree` is the path its fetch writes into. `host`, `project` and `name`
   name the copy it runs in; `deadline` is the call's, wall-clock ms. `late` is `owed` once its
   call answered unknown or was cut by a restart, and `told` once its end was handed on.
 
@@ -17,7 +18,9 @@ defmodule CodingAgentFramework.Jobs.Table do
 
   alias Exqlite.Sqlite3
 
-  @columns ~w(id host project name state code start_until deadline late)a
+  @columns ~w(id host project name state code start_until deadline late worktree)a
+  # A file made before a column gains it; a newer file already has it.
+  @added ["worktree:TEXT"]
   @schema """
   PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS jobs (
@@ -33,11 +36,24 @@ defmodule CodingAgentFramework.Jobs.Table do
   def open(path) do
     with {:ok, db} <- Sqlite3.open(path),
          :ok <- Sqlite3.set_busy_timeout(db, 5_000),
-         :ok <- Sqlite3.execute(db, @schema) do
+         :ok <- Sqlite3.execute(db, @schema),
+         :ok <- add_columns(db) do
       {:ok, db}
     else
       {:error, reason} -> {:refused, {:sqlite, reason}}
     end
+  end
+
+  defp add_columns(db) do
+    Enum.reduce_while(@added, :ok, fn column, :ok ->
+      [name, type] = String.split(column, ":")
+
+      case Sqlite3.execute(db, "ALTER TABLE jobs ADD COLUMN #{name} #{type}") do
+        :ok -> {:cont, :ok}
+        {:error, "duplicate column name" <> _} -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
   end
 
   @doc "The row of `id`, or nil."
@@ -59,7 +75,7 @@ defmodule CodingAgentFramework.Jobs.Table do
   def put(db, row) do
     query(
       db,
-      "INSERT OR REPLACE INTO jobs (#{Enum.join(@columns, ",")}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+      "INSERT OR REPLACE INTO jobs (#{Enum.join(@columns, ",")}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
       Enum.map(@columns, &Map.get(row, &1))
     )
 

@@ -42,6 +42,7 @@ defmodule CodingAgentFramework.Copies do
   alias CodingAgentFramework.Copies.Table
 
   @call 5_000
+  @fetch_prefix ".caf-fetch-"
   @removal "copies:remove"
   # $1..$6: mkdir, flock, rsync, the copy, its lock, the wait in seconds; then rsync's server
   # arguments. The lock is taken before the server starts, since it deletes before data comes.
@@ -145,7 +146,7 @@ defmodule CodingAgentFramework.Copies do
     with {:ok, {path, lock}} <- place(copy),
          {:ok, %{local: local, dir: dir, shim: shim}} <- call(copies, :config) do
       n = System.unique_integer([:positive])
-      temp = Path.join(worktree, ".caf-fetch-#{n}")
+      temp = Path.join(worktree, "#{@fetch_prefix}#{n}")
       files = Path.join(dir, "fetch-#{n}")
       File.write!(files, Enum.join(Map.keys(record), <<0>>))
       side = host_side(copy.programs, path, lock, Keyword.fetch!(opts, :lock_wait))
@@ -171,6 +172,28 @@ defmodule CodingAgentFramework.Copies do
       result
     end
   end
+
+  @doc """
+  Removes the temporary folders a cut fetch left directly under `worktree` (a restart ends the
+  fetch before it removes its own). Only a folder named as `fetch/5` names its own is removed,
+  and only directly under `worktree`. Answers the names removed.
+  """
+  @spec sweep_fetch(String.t()) :: [String.t()]
+  def sweep_fetch(worktree) do
+    case File.ls(worktree) do
+      {:ok, names} ->
+        for name <- names,
+            fetch_name?(name),
+            match?({:ok, _}, File.rm_rf(Path.join(worktree, name))),
+            do: name
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  defp fetch_name?(@fetch_prefix <> n), do: n != "" and String.match?(n, ~r/\A\d+\z/)
+  defp fetch_name?(_), do: false
 
   defp into_place(record, temp, worktree) do
     record
