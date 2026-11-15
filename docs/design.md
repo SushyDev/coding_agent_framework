@@ -650,6 +650,12 @@ is held until it is resumed or ends. A message to a delegate that has ended is n
 its row says the delegate ended before it went in, and the sender (the delegate's main
 session, its only sender) learns that in place of `delivered`, from a settled row.
 
+A message into a delegate starts a turn of its own after its report; that turn's `result` is
+the delegate's reply. `Mailbox` stores it as a message from the delegate to its main session,
+and delivers it as it delivers any message, so a reply never goes unread (F-77). A delegate's
+turn has ended once its last turn's `result` is read: its report for the brief, its reply for a
+message.
+
 **Services** belong to the agent that started them. When the owner ends, its services end too,
 unless it handed them on with `service_hand`, or started them with `keep: true`, which hands them
 to the owner's parent when the owner ends. `keep` belongs to the service and stays with it when
