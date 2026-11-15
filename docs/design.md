@@ -207,11 +207,13 @@ its host, as it has since the first part built, so the workstation is one host a
   file, so its end is unknown (`{:unknown, :no_exit}`), never an exit code;
 - a job is held by dtach on its host, so a dropped ssh connection does not end it; its output
   goes to a log on the host, read back from an offset, and it ends with its exit code or its
-  timeout, which ends its process group. When the job's command exits, its wrapper ends what is
-  left of the group before it reaps the command, so the group's id cannot have been reused (the
-  rule `Shell` keeps), and no child of the job writes in the copy during the fetch. The job runs
-  in its wrapper's own process group, so a kill of the group, at the timeout or otherwise, ends
-  the wrapper and the job together, and no group outlives a wrapper that was killed;
+  timeout, which ends its process group. The job runs in its wrapper's own process group, led
+  by the wrapper, so the group's id stays the wrapper's while it lives and cannot have been
+  reused (the rule `Shell` keeps). When the command exits, or at the timeout, the wrapper writes
+  the exit file, then ends the group with itself in it, so no child of the job is left to write
+  in the copy; the fetch begins only once the job's socket reads dead, after that end. A kill of
+  the group from outside ends the wrapper and the job together, and no group outlives a wrapper
+  that was killed (F-76);
 - a job can bring files back: `run`'s `fetch: [paths]` names paths that rsync copies from the
   host's copy into the worktree after the job ends. Nothing comes back unless named, and nothing
   is written over blind: the sync records each named path's size, time and hash, and the fetch
