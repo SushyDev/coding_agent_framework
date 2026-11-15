@@ -1,7 +1,8 @@
 defmodule CodingAgentFramework.JobsTest do
   # Each test is named for the Copy.tla property it checks. No remote machine: the ssh host's
   # ssh is a stand-in that drops ssh's own arguments and runs the command here, or, while the
-  # test's `down` file exists, exits 255 as a dropped connection does.
+  # test's `down` file exists, exits 255 as a dropped connection does. While `cut-fetch`
+  # exists, it drops the connection under a fetch, once part of the file has come.
   use ExUnit.Case, async: true
 
   doctest CodingAgentFramework.Jobs.Table
@@ -22,12 +23,20 @@ defmodule CodingAgentFramework.JobsTest do
     {_, 0} = System.cmd(program!(:mkfifo), [Path.join(dir, "fifo")])
 
     bash = program!(:bash)
-    # The job: it records its pid, then exits with a code, waits on the fifo, or leaves a child.
+    # The job: it records its pid, then exits with a code, waits on the fifo, leaves a child,
+    # writes files in the copy (and then waits on the fifo), or writes a 4 MB file.
     write_whole(Path.join(dir, "job"), """
     : 2>/dev/null > "#{dir}/pids/$$" || exit 0
     echo "job $1 in $(#{program!(:cat)} a.txt)"
     case $1 in
       exit) exit "$2" ;;
+      write) shift; while [ $# -gt 1 ]; do
+          case $1 in */*) #{program!(:mkdir)} -p "${1%/*}" ;; esac; echo "$2" > "$1"; shift 2; done; exit 0 ;;
+      writewait) echo "$3" > "$2"; set -- wait ;;
+      big) echo 1 > big.bin; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21; do
+          #{program!(:cat)} big.bin big.bin > big.new; #{program!(:mv)} big.new big.bin; done; exit 0 ;;
+    esac
+    case $1 in
       wait) exec #{bash} -c 'read -r -t #{stand_in_idle()} l <> "$1"; exit "${l:-9}"' "$0" "#{dir}/fifo" ;;
       child) #{bash} -c ': > "#{dir}/pids/$$"; echo $$ > "#{dir}/child.new"; #{program!(:mv)} "#{dir}/child.new" "#{dir}/child"; read -r -t #{stand_in_idle()} l <> "#{dir}/fifo"' "$0" &
         wait_for() { [ -e "#{dir}/child" ] || { #{program!(:sleep)} 0.05; wait_for; }; }; wait_for; exit 0 ;;
@@ -39,10 +48,31 @@ defmodule CodingAgentFramework.JobsTest do
     [ -e "#{dir}/down" ] && exit 255
     while :; do case $1 in -o|-l) shift 2 ;; --) shift; break ;; -*) shift ;; *) break ;; esac; done
     shift
-    # A drop cuts a command under way too: its output stops and ssh exits 255.
-    #{program!(:sh)} -c "$*" <&0 & p=$!
+    cmd="$*"
+    # Under `cut-fetch`, the fetch's sender is slowed, and the connection drops once part of
+    # the file has come into the fetch's temporary directory (bounded at 10 s).
+    case $cmd in *--sender*) [ -e "#{dir}/cut-fetch" ] && {
+      cmd=${cmd/--server /--server --bwlimit=1000 }
+      for ((i = 0; i < 500; i++)); do
+        for f in "#{wt}"/.caf-fetch-*/.big.bin.* "#{wt}"/.caf-fetch-*/big.bin; do
+          [ -s "$f" ] && { : > "#{dir}/down"; break 2; }
+        done
+        #{program!(:sleep)} 0.02
+      done & } ;;
+    esac
+    # A drop cuts a command under way too: its output stops, every process of it ends, as a
+    # closed connection ends them, and ssh exits 255. Its tree is walked by parent pid, each
+    # process stopped before its children are read; a process dtach holds has left the tree.
+    end_tree() {
+      kill -STOP "$1" 2>/dev/null
+      for k in $(#{program!(:ps)} -A -o pid=,ppid= | while read -r c pp; do [ "$pp" = "$1" ] && echo "$c"; done); do
+        end_tree "$k"
+      done
+      kill -KILL "$1" 2>/dev/null
+    }
+    #{program!(:sh)} -c "$cmd" <&0 & p=$!
     while kill -0 $p 2>/dev/null; do
-      [ -e "#{dir}/down" ] && { kill -KILL $p; exit 255; }
+      [ -e "#{dir}/down" ] && { end_tree $p; exit 255; }
       #{program!(:sleep)} 0.05
     done
     wait $p
@@ -58,7 +88,9 @@ defmodule CodingAgentFramework.JobsTest do
       "box" => %{programs: remote, dir: Path.join(dir, "box")}
     }
 
-    opts = [dir: Path.join(dir, "jobs"), copies: copies, hosts: hosts]
+    test = self()
+    late = fn late_end -> send(test, {:late, late_end}) end
+    opts = [dir: Path.join(dir, "jobs"), copies: copies, hosts: hosts, on_late_end: late]
     %{dir: dir, wt: wt, jobs: start_supervised!({Jobs, opts}), opts: opts, bash: bash}
   end
 
@@ -82,11 +114,34 @@ defmodule CodingAgentFramework.JobsTest do
     end)
   end
 
+  # A late end, handed on at a cue the way a host's reader cues `Jobs`.
+  defp late(jobs) do
+    cue = fn -> Jobs.cue(jobs, %{topic: :host}) end
+
+    await_cued(
+      jobs,
+      cue,
+      fn -> receive(do: ({:late, e} -> {:ok, e}), after: (0 -> nil)) end,
+      10_000
+    )
+  end
+
+  # Once handed on, a late end is not handed on again at the next cue.
+  defp no_second(jobs) do
+    Jobs.cue(jobs, %{topic: :host})
+    :sys.get_state(jobs)
+    refute_received {:late, _}
+  end
+
+  defp leftovers(c), do: Path.wildcard(Path.join(c.wt, "**/.caf-fetch-*"), match_dot: true)
+
   defp gone(pid), do: await(fn -> if alive?(pid), do: :alive, else: {:ok, :gone} end)
 
   for host <- ["test", "box"] do
     test "AnswerIsReal: a job on #{host} answers its own exit code and its log", c do
-      assert {:ok, %{exit: 0, log: "job exit in one\n"}} = run(c, "j0", unquote(host), ~w(exit 0))
+      assert {:ok, %{exit: 0, log: "job exit in one\n", fetch: :none}} =
+               run(c, "j0", unquote(host), ~w(exit 0))
+
       assert {:ok, %{exit: 3, log: log}} = run(c, "j3", unquote(host), ~w(exit 3))
       assert log =~ "job exit"
       assert {:ok, %{text: "exit in one\n", next: 16}} = Jobs.log(c.jobs, "j3", 4)
@@ -95,8 +150,43 @@ defmodule CodingAgentFramework.JobsTest do
     end
   end
 
+  for host <- ["test", "box"] do
+    test "FetchOnlyNamed: a fetch on #{host} brings back the named paths, and nothing else", c do
+      args = ~w(write a.txt changed d/b.txt two c.txt three)
+      fetch = ["a.txt", "d/b.txt"]
+      assert {:ok, %{exit: 0, fetch: :done}} = run(c, "jf", unquote(host), args, fetch: fetch)
+      assert File.read!(Path.join(c.wt, "a.txt")) == "changed\n"
+      assert File.read!(Path.join(c.wt, "d/b.txt")) == "two\n"
+      refute File.exists?(Path.join(c.wt, "c.txt"))
+      assert leftovers(c) == []
+    end
+  end
+
+  test "NoEditLost: an edit made in the worktree during the job is kept, as a conflict", c do
+    args = ~w(writewait a.txt job)
+    task = Task.async(fn -> run(c, "je", "box", args, fetch: ["a.txt", "n.txt"]) end)
+    {:ok, _} = pid(c, 1)
+    File.write!(Path.join(c.wt, "a.txt"), "edit\n")
+    File.write!(Path.join(c.dir, "fifo"), "0\n")
+    assert {:ok, %{exit: 0, fetch: {:conflict, ["a.txt"]}}} = Task.await(task, 15_000)
+    assert File.read!(Path.join(c.wt, "a.txt")) == "edit\n"
+    assert File.read!(Path.join(c.dir, "box/copies/p/w/a.txt")) == "job\n"
+    assert leftovers(c) == []
+  end
+
+  test "AnswerIsReal: a fetch cut by a drop answers unknown and leaves no temporary file", c do
+    File.write!(Path.join(c.dir, "cut-fetch"), "")
+
+    assert {:ok, %{exit: 0, fetch: {:unknown, {:fetch, {:ok, %{status: _}}}}}} =
+             run(c, "jx", "box", ["big"], fetch: ["big.bin"], sync_timeout: 5_000)
+
+    assert File.exists?(Path.join(c.dir, "down"))
+    refute File.exists?(Path.join(c.wt, "big.bin"))
+    assert leftovers(c) == []
+  end
+
   test "JobEndsAtTimeout: the host ends a job at its timeout", c do
-    assert {:unknown, :timeout} = run(c, "jt", "box", ["wait"], timeout: 500)
+    assert {:unknown, {:timeout, %{fetch: :none}}} = run(c, "jt", "box", ["wait"], timeout: 500)
     {:ok, [pid]} = pid(c, 1)
     assert {:ok, :gone} = gone(pid)
   end
@@ -110,7 +200,9 @@ defmodule CodingAgentFramework.JobsTest do
     assert {:ok, :gone} = gone(pid)
     assert File.read!(Path.join(c.dir, "box/jobs/jd.exit")) == "timeout\n"
     File.rm!(Path.join(c.dir, "down"))
-    assert {:ok, %{state: "timedout"}} = Jobs.settle(c.jobs, "jd")
+    assert {:ok, %{job: "jd", end: {:unknown, :timeout}, fetch: :not_fetched}} = late(c.jobs)
+    assert %{state: "timedout", late: "told"} = Enum.find(Jobs.rows(c.jobs), &(&1.id == "jd"))
+    no_second(c.jobs)
   end
 
   test "JobGoneAtEnd: a child the command left in its group is ended at the command's exit",
@@ -142,7 +234,7 @@ defmodule CodingAgentFramework.JobsTest do
     assert %{state: "refused"} = Enum.find(Jobs.rows(c.jobs), &(&1.id == "js"))
   end
 
-  test "JobSettles: a restart ends the call, and the job's row is still settled from the host",
+  test "JobSettles: a restart ends the call, and the job's row is still settled and handed on",
        c do
     task = Task.async(fn -> run(c, "jr", "box", ["wait"]) end)
     {:ok, _} = pid(c, 1)
@@ -155,13 +247,9 @@ defmodule CodingAgentFramework.JobsTest do
     File.write!(Path.join(c.dir, "fifo"), "4\n")
     {:ok, _} = read_when(Path.join(c.dir, "box/jobs/jr.exit"), "4\n")
     jobs = start_supervised!({Jobs, c.opts})
-    assert %{state: "running"} = Enum.find(Jobs.rows(jobs), &(&1.id == "jr"))
 
-    assert {:ok, %{state: "exited", code: 4}} =
-             await(fn -> Jobs.settle(jobs, "jr") |> exited() end)
+    assert {:ok, %{job: "jr", end: {:exit, 4}, fetch: :not_fetched}} = late(jobs)
+    assert {:ok, %{state: "exited", code: 4, late: "told"}} = Jobs.settle(jobs, "jr")
+    no_second(jobs)
   end
-
-  # The exit file is written before the group ends and the socket goes: settle reads it dead.
-  defp exited({:ok, %{state: "exited"}} = ok), do: ok
-  defp exited(other), do: {:not_yet, other}
 end

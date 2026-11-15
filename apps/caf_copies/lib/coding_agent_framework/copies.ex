@@ -21,7 +21,8 @@ defmodule CodingAgentFramework.Copies do
   --exclude-standard`, so edits not yet committed and untracked files are in it. A path an
   earlier sync sent that is gone from the worktree goes with `--delete-missing-args`; a file the
   copy has that no sync sent, such as a build output, stays. Before it sends, it records each
-  path named in `:fetch` (size, time and hash) and answers the record.
+  path named in `:fetch` (size, time and hash) and answers the record, which `fetch/5` checks
+  each path against when it brings it back.
 
   **The host's lock**: rsync's server runs under `flock` of `<copy>.lock` on the host, as its
   `--rsync-path`, so it holds the lock for its whole life, and the next sync takes it within
@@ -123,6 +124,76 @@ defmodule CodingAgentFramework.Copies do
 
       File.rm(files)
       finish(copies, copy, run, current, record, wait, outcome)
+    end
+  end
+
+  @doc """
+  Brings each path of `record` (a sync's record) back from the copy into `worktree`, after a
+  job's end. One rsync, under the host's lock of the copy, brings the paths into a temporary
+  directory in the worktree; then, path by path, the worktree's file is compared with the
+  record, and the path is renamed into place only if it still matches. Otherwise the path is a
+  conflict: the worktree keeps its edit, and the copy keeps its version. A path the copy does
+  not have is left as it is. The temporary directory is removed whether the rsync completed or
+  was cut. Options: `:timeout` (ms) of the rsync, `:lock_wait` (ms), `:reaper`.
+
+  Answers `:done`, `{:conflict, paths}`, or `{:unknown, reason}`: the rsync was cut, and
+  nothing came in.
+  """
+  @spec fetch(GenServer.server(), copy, String.t(), map, keyword) ::
+          :done | {:conflict, [String.t()]} | {:unknown, term}
+  def fetch(copies, copy, worktree, record, opts) do
+    with {:ok, {path, lock}} <- place(copy),
+         {:ok, %{local: local, dir: dir, shim: shim}} <- call(copies, :config) do
+      n = System.unique_integer([:positive])
+      temp = Path.join(worktree, ".caf-fetch-#{n}")
+      files = Path.join(dir, "fetch-#{n}")
+      File.write!(files, Enum.join(Map.keys(record), <<0>>))
+      side = host_side(copy.programs, path, lock, Keyword.fetch!(opts, :lock_wait))
+      {rsh, dest} = reach(copy.programs.host, shim)
+
+      args =
+        ["-lpt", "--files-from=" <> files, "--from0", "--ignore-missing-args", "-e", rsh] ++
+          ["--rsync-path=" <> side, dest <> ":" <> path <> "/", temp <> "/"]
+
+      outcome =
+        Shell.run(local.host, local.paths.rsync, args, Keyword.take(opts, [:reaper, :timeout]))
+
+      File.rm(files)
+
+      result =
+        case outcome do
+          {:ok, %{status: 0}} -> into_place(record, temp, worktree)
+          other -> {:unknown, {:fetch, other}}
+        end
+
+      # A cut rsync may leave part of a file, or its own temporary files, in there.
+      File.rm_rf(temp)
+      result
+    end
+  end
+
+  defp into_place(record, temp, worktree) do
+    record
+    |> Enum.sort()
+    |> Enum.reduce_while([], fn {p, recorded}, conflicts ->
+      cond do
+        not exists?(Path.join(temp, p)) -> {:cont, conflicts}
+        record(worktree, [p]) != %{p => recorded} -> {:cont, [p | conflicts]}
+        true -> rename(Path.join(temp, p), Path.join(worktree, p), conflicts)
+      end
+    end)
+    |> case do
+      [] -> :done
+      [_ | _] = conflicts -> {:conflict, Enum.reverse(conflicts)}
+      unknown -> unknown
+    end
+  end
+
+  defp rename(from, to, conflicts) do
+    with :ok <- File.mkdir_p(Path.dirname(to)), :ok <- File.rename(from, to) do
+      {:cont, conflicts}
+    else
+      {:error, reason} -> {:halt, {:unknown, {:fetch, {:rename, to, reason}}}}
     end
   end
 
