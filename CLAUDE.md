@@ -11,7 +11,7 @@ recommendation.
 - Tools come from devenv (`devenv.nix`): Erlang, Elixir, tmux, dtach, Claude Code, git, gh, and
   the TLA+ tools with a JDK. Run commands with `devenv shell -- <command>`.
 - Each part is one process or one pure module with one job. A library starts no processes; the
-  host app's supervision tree does.
+  embedding app's supervision tree does.
 - The repository is a Mix umbrella with one OTP app per part under `apps/` (`caf_shell`,
   `caf_tmux`, … `caf_tracker`), and the shared test aids in `caf_test`. A new part is a new app
   that declares only the apps (`in_umbrella: true`) and Hex packages it uses; what only its tests
