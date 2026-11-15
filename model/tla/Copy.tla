@@ -41,9 +41,11 @@
 (* once and restarted up to MaxSvcRestarts times. A run that has asked     *)
 (* waits for the copy's turn, syncs, sends its start, and gives the turn   *)
 (* back once the start is settled: the start's reply, or after a cut the   *)
-(* host's read. `whole` says no sync is writing the copy or was cut while  *)
-(* writing since the last one completed. `fresh[r]` is a ghost: a sync     *)
-(* that began after r asked has completed since.                           *)
+(* host's read. A cut sync is refused at once, and gives the turn back     *)
+(* once its host side can no longer take the lock. `whole` says no sync   *)
+(* is writing the copy or was cut while writing since the last one         *)
+(* completed. `fresh[r]` is a ghost: a sync that began after r asked has   *)
+(* completed since.                                                        *)
 (*                                                                         *)
 (* A command in flight (`cmd` "busy") is cut by a drop ("cut") or ended by *)
 (* a restart ("none"). A start or an end that was sent may land on the     *)
@@ -127,7 +129,8 @@ Breaks == {
     "FetchBlind",           \* the fetch writes a named path without checking the record
     "RecordAfterSync",      \* the record is taken once the sync completes, not before it sends
     "NoHostLock",           \* the host's side of a sync writes without the copy's lock
-    "NoGroupEnd"            \* the wrapper reaps the command and leaves the rest of its group
+    "NoGroupEnd",           \* the wrapper reaps the command and leaves the rest of its group
+    "CutBeforeDeadline"     \* a cut sync gives the turn back while its host side may still lock
 }
 
 ASSUME Break \in Breaks
@@ -260,6 +263,14 @@ Link == up /\ fw = "up"
 \* The turn goes back once the run's start is settled.
 Release(r) == turn' = IF turn = r THEN None ELSE turn
 
+\* A cut sync's host side can no longer take the lock: it holds it, has
+\* exited, or its lock deadline has passed (HostGivesUp). The framework knows
+\* the last by the time; the spec reads `hs` for it.
+LockSettled(r) == hs[r] # "waiting" \/ Break = "CutBeforeDeadline"
+
+\* A cut sync gives the turn back now, or once its host side cannot lock (TurnBack).
+ReleaseCut(r) == IF LockSettled(r) THEN Release(r) ELSE UNCHANGED turn
+
 \* An answer ends the call.
 Answer(r, a) ==
     /\ answer' = [answer EXCEPT ![r] = a]
@@ -390,7 +401,8 @@ SyncCompletes(r) ==
                    held, grp, file, past, drops, restarts, edits, lost, svcRestarts, answer, cover,
                    badStart, fetched, since, clobbered>>
 
-\* rsync exited non-zero: the copy stays partly synced, and nothing ran.
+\* rsync exited non-zero: the copy stays partly synced, and nothing ran. The
+\* refusal is answered at once; only the turn waits for the host's side.
 SyncCut(r) ==
     /\ fw = "up" /\ row[r] = "syncing" /\ cmd[r] = "cut"
     /\ cmd' = [cmd EXCEPT ![r] = None]
@@ -398,7 +410,7 @@ SyncCut(r) ==
        THEN /\ row' = [row EXCEPT ![r] = "synced"]
             /\ UNCHANGED <<turn, call, answer>>
        ELSE /\ row' = [row EXCEPT ![r] = "refused"]
-            /\ Release(r)
+            /\ ReleaseCut(r)
             /\ IF call[r] = "waiting" THEN Answer(r, Say("refused"))
                                       ELSE UNCHANGED <<call, answer>>
     /\ UNCHANGED <<rcode, owner, keep, alive, rd, fetchLeft, skipped, stale, up, fw, inflight, held,
@@ -475,13 +487,23 @@ SettleStarting(r) ==
                    held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, fresh, cover, badStart, fetched, since, clobbered>>
 
-\* A row before its start whose call ended (a restart, or a give-up) is refused.
+\* A row before its start whose call ended (a restart, or a give-up) is
+\* refused; a sync a restart cut gives the turn back as SyncCut does.
 SettleUnasked(r) ==
     /\ fw = "up" /\ call[r] = None /\ cmd[r] = None
     /\ row[r] \in {"asked", "syncing", "synced"}
     /\ row' = [row EXCEPT ![r] = "refused"]
-    /\ Release(r)
+    /\ ReleaseCut(r)
     /\ UNCHANGED <<rcode, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale, up, fw,
+                   inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
+                   svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+
+\* A refused run still holding the turn gives it back once its sync's host
+\* side can no longer take the lock.
+TurnBack(r) ==
+    /\ fw = "up" /\ turn = r /\ row[r] = "refused" /\ hs[r] # "waiting"
+    /\ Release(r)
+    /\ UNCHANGED <<row, rcode, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale, up, fw,
                    inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
 
@@ -804,7 +826,7 @@ Next ==
         \/ SyncBegins(r) \/ SyncSkipped(r) \/ SyncCompletes(r) \/ SyncCut(r)
         \/ HostLocks(r) \/ HostGivesUp(r) \/ HostSideEnds(r)
         \/ StartSent(r) \/ Lands(r) \/ NeverLands(r) \/ StartReplies(r) \/ CutCleared(r)
-        \/ SettleStarting(r) \/ SettleUnasked(r) \/ GiveUp(r)
+        \/ SettleStarting(r) \/ SettleUnasked(r) \/ TurnBack(r) \/ GiveUp(r)
     \/ \E j \in Jobs :
         \/ Tick(j) \/ HostTimesOut(j) \/ FrameworkTimesOut(j) \/ WrapperLost(j)
         \/ \E c \in Codes : JobExits(j, c)
@@ -824,7 +846,8 @@ Fairness ==
          /\ WF_vars(SyncCut(r)) /\ WF_vars(HostLocks(r)) /\ WF_vars(HostGivesUp(r))
          /\ WF_vars(HostSideEnds(r)) /\ WF_vars(StartSent(r)) /\ WF_vars(Lands(r))
          /\ WF_vars(NeverLands(r)) /\ WF_vars(StartReplies(r)) /\ WF_vars(CutCleared(r))
-         /\ WF_vars(SettleStarting(r)) /\ WF_vars(SettleUnasked(r)) /\ WF_vars(GiveUp(r))
+         /\ WF_vars(SettleStarting(r)) /\ WF_vars(SettleUnasked(r)) /\ WF_vars(TurnBack(r))
+         /\ WF_vars(GiveUp(r))
     /\ \A j \in Jobs :
          /\ WF_vars(Tick(j)) /\ WF_vars(HostTimesOut(j)) /\ WF_vars(FrameworkTimesOut(j))
          /\ WF_vars(ReadSocket(j)) /\ WF_vars(ReadFile(j))
