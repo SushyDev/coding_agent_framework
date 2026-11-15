@@ -2,7 +2,8 @@ defmodule CodingAgentFramework.Sessions do
   @moduledoc """
   One host's session lifecycle: starts, resumes and stops Claude Code sessions, each held by
   dtach with a viewer pane, and keeps a row for each in `CodingAgentFramework.Sessions.Table`,
-  which it alone writes. Worktrees are a later unit: a session runs in the directory it is given.
+  which it alone writes. A session runs in the directory it is given, or in a worktree of a
+  project that its start checks, adds and sets up.
 
   The caller's supervision tree starts one `Sessions` per host, with no name, and gives it the
   host's `Programs`, its dtach directory, its `Control`, a `Registry` per account and the SQLite
@@ -41,6 +42,18 @@ defmodule CodingAgentFramework.Sessions do
   The init comes after the wrapper wrote the pid, so that pid is this process's. A resume
   follows the same log again, from the offset `Stream` saved. A delegate's first message is a
   `Stream` write, not part of the start: `prompt:` is not read.
+
+  **A worktree** (`docs/design.md`, "The worktree"; `Start.tla`'s `Checked`, `Added`,
+  `SetupStarts` and `SetupEnds`): a launch with `worktree: %{project: project, branch: branch}`
+  runs at `<home>/worktrees/<project>/<name>`, which its row keeps as `cwd`. A start whose path
+  another row that has not ended holds is refused before its row is written. After the row, a
+  task linked to `Sessions` reads `git worktree list` and `git status` (`Sessions.Worktree`),
+  adds the tree when the path is free, reads the list again (it, not the add's exit status,
+  says what the add did), and runs the project's setup in it, each command through `Shell` with
+  the host's reaper, so `Sessions`' death ends them. Then the start holds and waits as above.
+  The row's deadline covers the setup's. git runs with an empty environment, the setup with the
+  project's. After a restart, a row refused as interrupted has its worktree removed when it is
+  on the branch, clean and held by no other row; the row's `worktree` says what was done.
 
   **A stop** types `/exit` through `Control`'s checked write, then waits until the process the
   row names exits, judged by `{pid, procStart}` (`Registry.Liveness`), never by name. `/exit`
@@ -81,9 +94,15 @@ defmodule CodingAgentFramework.Sessions do
   alias CodingAgentFramework.{ClaudeCLI, Control, Holder, Programs, Registry, Shell, Stream}
   alias CodingAgentFramework.Transcripts
   alias CodingAgentFramework.Registry.Liveness
-  alias CodingAgentFramework.Sessions.Table
+  alias CodingAgentFramework.Sessions.{Table, Worktree}
 
   @timeout 30_000
+  # Each git command of a worktree, and the checks and the add before a setup: three lists or
+  # reads and the add.
+  @git 10_000
+  @tree 4 * @git
+  # The physical path of the worktrees' root, made first; `$2` is mkdir.
+  @root ~S("$2" -p -- "$1" && cd -- "$1" && pwd -P)
   # A read of a row, which waits only for a start's own steps ahead of it in the queue.
   @read 5_000
   # The hold's, the follow's and the viewer's own bounds, past the confirmation's.
@@ -110,7 +129,9 @@ defmodule CodingAgentFramework.Sessions do
   Starts a `Sessions` and adopts or ends the rows a previous one left `starting`. Options:
   `programs:` (naming dtach, sh, env, rm, ps and tail), `dir:` (the dtach directory),
   `control:`, `registries:` (account name to its `Registry`), `db:`, and optionally `stream:`
-  and `home:` (the host's `Stream` and the framework home, for delegates), `notify:`, `size:`
+  and `home:` (the host's `Stream` and the framework home, for delegates and worktrees),
+  `reaper:` (the host's `Shell.Reaper`, for worktrees; `programs:` then names git and mkdir),
+  `notify:`, `size:`
   (the viewer's `{columns, rows}`, default `{200, 50}`), `poll:` (ms between reads while a call
   waits, default 200) and `clock:` (a function answering wall-clock ms, for the deadlines).
   """
@@ -119,14 +140,25 @@ defmodule CodingAgentFramework.Sessions do
 
   @doc """
   Starts session `name` on `account` (from `Accounts.ready/2`). `launch` holds `role:` and
-  `cwd:` (an absolute path), and `ClaudeCLI.session/3`'s `claude:`, `model:`, `env:` and
-  `prompt:`. Option: `:timeout`.
+  `cwd:` (an absolute path) or `worktree:` (`%{project: project, branch: branch}`, with the
+  project as `Sessions.Worktree.project/1` reads it; `cwd:` is then not read), and
+  `ClaudeCLI.session/3`'s `claude:`, `model:`, `env:` and `prompt:`. Option: `:timeout`, to
+  which a worktree's start adds its setup's deadline and its git commands' bounds.
+
+      Sessions.start(sessions, "reviewer", account,
+        role: :delegate, worktree: %{project: project, branch: "unit/review"}, claude: claude)
+      #=> {:ok, %{name: "reviewer", pid: 4243, session_id: "…"}}
+      #=> {:refused, {:worktree, :dirty}}
   """
   @spec start(GenServer.server(), String.t(), struct, keyword, keyword) :: outcome(map)
   def start(sessions, name, account, launch, opts \\ []),
     do: request(sessions, {:start, name, account, launch, nil}, opts)
 
-  @doc "As `start/5`, resuming Claude Code's session `session_id` (`--resume`)."
+  @doc """
+  As `start/5`, resuming Claude Code's session `session_id` (`--resume`). A resume in a
+  worktree takes the name's worktree as it is, changes and all, refuses one that is not there,
+  and runs the setup.
+  """
   @spec resume(GenServer.server(), String.t(), struct, String.t(), keyword, keyword) ::
           outcome(map)
   def resume(sessions, name, account, session_id, launch, opts \\ []),
@@ -180,8 +212,16 @@ defmodule CodingAgentFramework.Sessions do
 
   defp request(sessions, request, opts) do
     timeout = Keyword.get(opts, :timeout, @timeout)
-    call(sessions, {request, timeout}, timeout + @slack)
+
+    budget =
+      with {:start, _, _, launch, _} <- request, do: budget(launch[:worktree]), else: (_ -> 0)
+
+    call(sessions, {request, timeout}, timeout + budget + @slack)
   end
+
+  # A worktree start's time before its hold: its setup's deadline and its git commands' bounds.
+  defp budget(%{project: %{setup_timeout: t}}) when is_integer(t) and t > 0, do: t + @tree
+  defp budget(_), do: 0
 
   defp call(sessions, message, wait) do
     GenServer.call(sessions, message, wait)
@@ -211,6 +251,9 @@ defmodule CodingAgentFramework.Sessions do
         size: Keyword.get(opts, :size, {200, 50}),
         poll: Keyword.get(opts, :poll, 200),
         clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
+        reaper: Keyword.get(opts, :reaper),
+        git: Programs.fetch(programs, :git),
+        worktrees: root(host, holder.sh, programs, Keyword.get(opts, :home)),
         pending: %{}
       }
 
@@ -251,30 +294,39 @@ defmodule CodingAgentFramework.Sessions do
 
   @impl true
   def handle_call({{:start, name, account, launch, resume}, timeout}, from, state) do
-    deadline = state.clock.() + timeout
-
     with :ok <- free(state, name),
-         {:ok, cwd} <- cwd(launch),
+         {:ok, place} <- place(state, name, launch),
          {:ok, role} <- Keyword.fetch(launch, :role) |> required(:role),
-         {:ok, way} <- way(state, role, account, name, cwd, resume, launch),
-         row = new_row(state, name, account, role, cwd, resume, way, deadline),
+         {:ok, way} <- way(state, role, account, name, place.cwd, resume, launch),
+         deadline = state.clock.() + timeout + budget(place.tree),
+         row = new_row(state, name, account, role, place, resume, way, deadline),
          {:ok, viewer} <- viewer_command(state, row) do
       # RowWritten: the row first, as starting, with the start's wall-clock deadline.
       row = Map.put(row, :id, Table.starting(state.db, row))
       announce(state, row)
 
-      # Held: held, or unknown (a process may have started), and the start waits for the file
-      # either way; ViewerOpened then leaves the call waiting. Only a refusal ends it here.
-      case hold(state, way, name, cwd) do
-        {:refused, reason} = refused ->
-          write(state, row, status: "refused", reason: reason)
-          {:reply, refused, state}
+      pending = %{
+        kind: :start,
+        from: from,
+        row: row,
+        deadline: deadline,
+        way: way,
+        viewer: viewer
+      }
 
-        :held ->
-          write(state, row, viewer: open_viewer(state, name, viewer))
-          send(self(), {:check, name})
-          pending = %{kind: :start, from: from, row: row, deadline: deadline}
-          {:noreply, put_in(state.pending[name], pending)}
+      case place.tree do
+        nil ->
+          {:noreply, hold_and_view(state, name, pending)}
+
+        # Checked, Added and the setup, in a task: a setup may take minutes, and other calls
+        # go on meanwhile. The task is linked, so Sessions' death ends it, and the reaper its
+        # commands' groups.
+        tree ->
+          run = runner(state)
+          task = Task.async(fn -> prepare(run, tree, place.cwd, resume != nil) end)
+
+          {:noreply,
+           put_in(state.pending[name], %{pending | kind: :tree} |> Map.put(:task, task.ref))}
       end
     else
       failed -> {:reply, failed, state}
@@ -348,6 +400,44 @@ defmodule CodingAgentFramework.Sessions do
     {:noreply, state}
   end
 
+  # A worktree's task answered: the start goes on to the hold, or is refused with nothing held.
+  def handle_info({ref, prepared}, state) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+
+    case Enum.find(state.pending, fn {_, pending} -> pending[:task] == ref end) do
+      nil ->
+        {:noreply, state}
+
+      {name, pending} ->
+        pending = Map.delete(pending, :task)
+
+        case prepared do
+          {how, :ok} ->
+            write(state, pending.row, worktree: how)
+            {:noreply, hold_and_view(state, name, %{pending | kind: :start})}
+
+          {how, {_, reason}} ->
+            write(state, pending.row, status: "refused", reason: reason, worktree: how)
+            {:noreply, done(state, name, pending, {:refused, reason})}
+        end
+    end
+  end
+
+  # Held: held, or unknown (a process may have started), and the start waits for the file
+  # either way; ViewerOpened then leaves the call waiting. Only a refusal ends it here.
+  defp hold_and_view(state, name, %{row: row} = pending) do
+    case hold(state, pending.way, name, row.cwd) do
+      {:refused, reason} = refused ->
+        write(state, row, status: "refused", reason: reason)
+        done(state, name, pending, refused)
+
+      :held ->
+        write(state, row, viewer: open_viewer(state, name, pending.viewer))
+        send(self(), {:check, name})
+        put_in(state.pending[name], pending)
+    end
+  end
+
   # StartDecided: running when the file names the live process, unknown past the deadline.
   defp check(state, name, %{kind: :start, row: row} = pending) do
     case confirm(state, row, true) do
@@ -415,10 +505,19 @@ defmodule CodingAgentFramework.Sessions do
     past? = state.clock.() >= (row.deadline || 0)
 
     case confirm(state, row, read?) do
-      {:ok, file} -> running(state, row, file)
-      {:live, why} when past? -> write(state, row, status: "orphan", reason: why)
-      {:dead, _} when past? -> write(state, row, status: "refused", reason: "interrupted")
-      _unknown_or_early -> :ok
+      {:ok, file} ->
+        running(state, row, file)
+
+      {:live, why} when past? ->
+        write(state, row, status: "orphan", reason: why)
+
+      # Remove first: a restart in between leaves the row starting, decided again.
+      {:dead, _} when past? ->
+        worktree = remove(state, row)
+        write(state, row, status: "refused", reason: "interrupted", worktree: worktree)
+
+      _unknown_or_early ->
+        :ok
     end
   end
 
@@ -501,6 +600,33 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
+  # Where a start runs: the directory it is given, or its worktree's path, which RowWritten
+  # first checks no other row that has not ended holds.
+  defp place(state, name, launch) do
+    case Keyword.fetch(launch, :worktree) do
+      :error ->
+        with {:ok, cwd} <- cwd(launch), do: {:ok, %{cwd: cwd, tree: nil}}
+
+      {:ok, %{project: project, branch: branch}} ->
+        with {:ok, project} <- Worktree.project(project),
+             :ok <- Worktree.branch(branch),
+             true <- Worktree.name?(name) or {:refused, {:bad, :name}},
+             {:ok, root} <- state.worktrees,
+             {:ok, _} <- state.git,
+             true <- state.reaper != nil or {:refused, :no_reaper},
+             path = Worktree.path(root, project, name),
+             [] <- Table.holding(state.db, state.host.name, path, name) do
+          {:ok, %{cwd: path, tree: %{project: project, branch: branch}}}
+        else
+          [_ | _] = rows -> {:refused, {:held, Enum.map(rows, & &1.name)}}
+          failed -> failed
+        end
+
+      {:ok, _} ->
+        {:refused, {:bad, :worktree}}
+    end
+  end
+
   defp cwd(launch) do
     case Keyword.get(launch, :cwd) do
       "/" <> _ = cwd -> {:ok, cwd}
@@ -543,18 +669,151 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   # The start's row before it has an id.
-  defp new_row(state, name, account, role, cwd, resume, way, deadline) do
+  defp new_row(state, name, account, role, place, resume, way, deadline) do
     %{
       host: state.host.name,
       name: name,
       socket: name,
       account: account.name,
       role: Atom.to_string(role),
-      cwd: cwd,
+      cwd: place.cwd,
       resume: resume,
       deadline: deadline,
-      session_id: way[:session_id]
+      session_id: way[:session_id],
+      repo: place.tree && place.tree.project.repo,
+      branch: place.tree && place.tree.branch
     }
+  end
+
+  # What a worktree's commands run with, handed to its task.
+  defp runner(state) do
+    {:ok, git} = state.git
+    %{host: state.host, env: state.ps.env, git: git, sh: state.holder.sh, reaper: state.reaper}
+  end
+
+  # Checked, Added and the setup (SetupStarts, SetupEnds). Runs in the start's task. Answers
+  # what the start did with the tree (nil before it had one) and the setup's outcome.
+  defp prepare(run, %{project: project, branch: branch}, path, resume?) do
+    with {:ok, list} <- git(run, project, :list),
+         listed = Worktree.listed(list, path),
+         {:ok, status} <- status(run, project, listed, branch, path),
+         how when how in [:add, :reuse] <- Worktree.decide(listed, status, branch, resume?),
+         :ok <- add(run, project, how, path, branch) do
+      {if(how == :add, do: "added", else: "reused"), setup(run, project, path)}
+    else
+      failed -> {nil, failed}
+    end
+  end
+
+  # `git status` only of a tree listed on the branch: nothing else is reused or removed.
+  defp status(run, project, {:branch, branch}, branch, path),
+    do: git(run, project, {:status, path})
+
+  defp status(_run, _project, _listed, _branch, _path), do: {:ok, nil}
+
+  # The list read again, not the add's exit status or the branch, says what the add did: a
+  # failing post-checkout hook makes the add exit 1 with the tree in place, and `-b` at a taken
+  # path fails and still leaves its branch behind.
+  defp add(_run, _project, :reuse, _path, _branch), do: :ok
+
+  defp add(run, project, :add, path, branch) do
+    with {:ok, exists?} <- branch?(run, project, branch) do
+      added = git(run, project, {:add, path, branch, exists?})
+
+      with {:ok, list} <- git(run, project, :list) do
+        cond do
+          Worktree.listed(list, path) == {:branch, branch} -> :ok
+          match?({:ok, _}, added) -> {:refused, {:worktree, :not_listed}}
+          true -> {:refused, {:worktree, {:add, elem(added, 1)}}}
+        end
+      end
+    end
+  end
+
+  defp branch?(run, project, branch) do
+    case shell(run, ["-i", run.git | Worktree.git(project, {:branch?, branch})], @git) do
+      {:ok, %{status: 0}} -> {:ok, true}
+      {:ok, %{status: 1}} -> {:ok, false}
+      {:ok, %{status: status, output: out}} -> {:refused, {:git, :branch?, status, tail(out)}}
+      other -> other
+    end
+  end
+
+  # Each command in the tree, under one deadline for the whole setup; a timeout ends its group.
+  defp setup(run, project, path) do
+    deadline = System.monotonic_time(:millisecond) + project.setup_timeout
+
+    Enum.reduce_while(project.setup, :ok, fn [program | _] = command, :ok ->
+      left = deadline - System.monotonic_time(:millisecond)
+      args = Worktree.env_args(project) ++ [run.sh, "-c", @cd, path | command]
+
+      case left > 0 && shell(run, args, left) do
+        {:ok, %{status: 0}} -> {:cont, :ok}
+        {:ok, %{status: s, output: out}} -> {:halt, {:refused, {:setup, program, s, tail(out)}}}
+        false -> {:halt, {:refused, {:setup, :timeout}}}
+        {:unknown, {:timeout, _}} -> {:halt, {:refused, {:setup, :timeout}}}
+        {_, reason} -> {:halt, {:refused, {:setup, reason}}}
+      end
+    end)
+  end
+
+  # Remove, after a restart: the tree of a row refused as interrupted, when it is listed on the
+  # row's branch, clean and held by no other row. `git worktree remove` without --force refuses
+  # a dirty tree itself. Any read that fails keeps the tree. Answers what the row says of it.
+  defp remove(state, %{branch: branch, repo: repo, cwd: path} = row) when is_binary(branch) do
+    project = %{repo: repo}
+
+    with {:ok, _} <- state.git,
+         run = runner(state),
+         {:ok, list} <- git(run, project, :list),
+         listed = Worktree.listed(list, path),
+         {:ok, status} <- status(run, project, listed, branch, path),
+         held? = Table.holding(state.db, state.host.name, path, row.name) != [],
+         :remove <- Worktree.removal(listed, status, branch, held?),
+         {:ok, _} <- git(run, project, {:remove, path}) do
+      "removed"
+    else
+      {:keep, why} -> "kept: #{why}"
+      {_, reason} -> "kept: " <> inspect(reason)
+    end
+  end
+
+  defp remove(_state, _row), do: nil
+
+  defp git(run, project, command) do
+    case shell(run, ["-i", run.git | Worktree.git(project, command)], @git) do
+      {:ok, %{status: 0, output: out}} ->
+        {:ok, out}
+
+      {:ok, %{status: status, output: out}} ->
+        name = if is_tuple(command), do: elem(command, 0), else: command
+        {:refused, {:git, name, status, tail(out)}}
+
+      other ->
+        other
+    end
+  end
+
+  # Through the host's env, so git and the setup start from an empty environment.
+  defp shell(run, args, timeout),
+    do: Shell.run(run.host, run.env, args, timeout: timeout, reaper: run.reaper)
+
+  defp tail(out), do: String.slice(out, -min(String.length(out), 200), 200)
+
+  # The worktrees' root, made, as a physical path; a failure refuses worktree starts only.
+  defp root(_host, _sh, _programs, nil), do: {:refused, :no_home}
+
+  defp root(host, sh, programs, home) do
+    args = ["-c", @root, "sh", Path.join(home, "worktrees")]
+
+    with {:ok, mkdir} <- Programs.fetch(programs, :mkdir),
+         {:ok, %{status: 0, output: "/" <> _ = out}} <-
+           Shell.run(host, sh, args ++ [mkdir], timeout: @git) do
+      {:ok, String.trim_trailing(out, "\n")}
+    else
+      {:ok, %{status: status, output: out}} -> {:refused, {:worktrees, status, tail(out)}}
+      other -> other
+    end
   end
 
   # The command of a row's viewer, the one `viewer_argv/3` answers: a delegate's follows its
