@@ -135,7 +135,7 @@ starts each part.
 | `Hosts` | the workstation and the other hosts, how each is reached, and its shell |
 | `Shell` | the only module that starts programs, locally or over ssh, each leading a process group of its own, which a timeout ends |
 | `Shell.Reaper` | one per host: ends a running command's group when its caller dies first or the VM dies |
-| `Programs` | the absolute path of tmux, dtach, claude, git, gh, sh, sleep, rm, kill, env, ps, cat and tail on each host; no other part names a fixed path |
+| `Programs` | the absolute path of tmux, dtach, claude, git, gh, rsync, ssh, flock, sh, sleep, rm, kill, env, ps, cat and tail on each host; no other part names a fixed path |
 | `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` |
 | `Usage` | each account's weekly allowance, from what Claude Code hands its status line; picks the account with the most left ("Allowance") |
 | `Tmux` | sessions, panes, tags, keys and viewers on one server; a contract with a CLI and a fake |
@@ -198,6 +198,10 @@ its host, as it has since the first part built, so the workstation is one host a
   keeps for a cut start). The refusal is answered at once; only the turn waits. The host side
   takes the lock before rsync's server starts (the server runs under it, as rsync's
   `--rsync-path`), since that server deletes files from the file list before any data arrives.
+  The workstation's sync goes through the same host side, by a local stand-in for ssh, so its
+  copy has the lock too. A sync deletes only what an earlier sync sent and the worktree no
+  longer has, never what was made in the copy, since git's ignore rules cannot tell a build
+  output from a file the worktree removed (F-74).
   A copy is removed with its worktree;
 - a host that restarts ends every held job, sync and lock on it; a job it ended has no exit
   file, so its end is unknown (`{:unknown, :no_exit}`), never an exit code;

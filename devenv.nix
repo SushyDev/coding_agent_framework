@@ -13,6 +13,7 @@ let
   # exported as CAF_<NAME>; nothing in the tests looks a program up through PATH or /usr/bin.
   #   - tmux, dtach, claude, git, gh: what the framework runs on a host. claude-code is unfree;
   #     devenv.yaml permits only it.
+  #   - rsync, ssh, flock: a copy's sync (Copies): rsync over ssh, its host side under flock.
   #   - sh, bash, rm, mv, env, kill, ps, cat, tail, mkdir, mkfifo, echo, sleep, true: the POSIX
   #     tools the tests and scripts call.
   #   - tlc and java: TLA+ checks of model/tla (bin/check-model). Development only.
@@ -22,6 +23,9 @@ let
     CLAUDE = lib.getExe pkgs.claude-code;
     GIT = lib.getExe pkgs.git;
     GH = lib.getExe pkgs.gh;
+    RSYNC = lib.getExe pkgs.rsync;
+    SSH = lib.getExe' pkgs.openssh "ssh";
+    FLOCK = lib.getExe pkgs.flock;
     SH = lib.getExe' pkgs.bash "sh";
     BASH = lib.getExe pkgs.bash;
     RM = lib.getExe' pkgs.coreutils "rm";
@@ -50,6 +54,9 @@ let
     [ "claude" "$CAF_CLAUDE --version" "${pkgs.claude-code.version} (Claude Code)" ]
     [ "erlang" "erl -noshell -eval ${lib.escapeShellArg otpVersion}" erlang.version ]
     [ "elixir" "elixir --short-version" elixir.version ]
+    [ "rsync" "$CAF_RSYNC --version" "version ${pkgs.rsync.version}" ]
+    [ "ssh" "$CAF_SSH -V" "OpenSSH_${pkgs.openssh.version}" ]
+    [ "flock" "$CAF_FLOCK --version" "flock ${pkgs.flock.version}" ]
   ];
   otpVersion = ''{ok, V} = file:read_file(filename:join([code:root_dir(), "releases", erlang:system_info(otp_release), "OTP_VERSION"])), io:put_chars(V), halt().'';
 
@@ -97,6 +104,9 @@ in
     pkgs.claude-code
     pkgs.git
     pkgs.gh
+    pkgs.rsync
+    pkgs.openssh
+    pkgs.flock
     tlaplus
     jdk
   ];
