@@ -1,0 +1,384 @@
+#!/usr/bin/env bash
+# Captures the screens of a real interactive Claude Code session, the fixtures of `Screen`. A
+# person runs it once per pinned Claude Code release, watches the session, and reviews what it
+# writes before committing it:
+#
+#   devenv shell -- bin/capture-screen <home>/accounts/<account>/claude
+#   devenv shell -- bin/capture-screen --name 'Ada Lovelace' --name ada@example.com <config dir>
+#   devenv shell -- bin/capture-screen --dry-run --out <dir> <config dir>
+#
+# The config directory is a logged-in account's own (CLAUDE_CONFIG_DIR); never ~/.claude.
+# It starts a tmux server of its own under a fresh temporary directory, runs Claude Code in one
+# 120x40 pane in a new scratch git repository there, and prints the command that attaches a
+# second terminal to that pane. Then it goes through each state one at a time: it types into
+# the box itself, the person answers each dialog in the attached pane, and the person presses
+# Enter here once the pane shows the state. Each state is captured twice, with escapes
+# (`<state>.ansi`) and without (`<state>.txt`).
+#
+# Before anything is written, the scratch repository's path, the home directory, the user name,
+# the host name and each `--name` become `/work/repo`, `/home/user`, `user`, `host` and `Person`.
+# Every changed line is printed. A fixture that still holds any of them, in any case or cut
+# across two lines where the screen wraps, is refused and nothing is written. The fixtures go to apps/caf_screen/test/fixtures/<claude version>/
+# (or `--out <dir>/<version>/`) with a manifest.json, and an existing directory is never
+# replaced. Read the files themselves before committing them: only a name the script knows is
+# scrubbed, and the screen can show others, such as an organization's name.
+#
+# The session stays in the account's directory: Claude Code records the scratch folder as
+# trusted and keeps its transcript there.
+#
+# `--dry-run` runs every step against a stand-in that draws a fixed box, not Claude Code, waits
+# for each state on the screen instead of for the person, and writes under a new temporary
+# directory unless `--out` names one. The caf_test app's CaptureScreenTest runs it.
+set -euo pipefail
+
+# Every program is devenv's, by its CAF_* path, under the pinned bash.
+for var in CAF_TMUX CAF_CLAUDE CAF_GIT CAF_BASH CAF_ENV CAF_SLEEP CAF_TOOLS_PATH; do
+  if [[ -z "${!var:-}" ]]; then
+    echo "capture-screen: $var unset; run it inside devenv: devenv shell -- bin/capture-screen" >&2
+    exit 2
+  fi
+done
+if [[ "$BASH" != "$CAF_BASH" ]]; then
+  exec "$CAF_BASH" "$0" "$@"
+fi
+export PATH="$CAF_TOOLS_PATH"
+unset TMUX TMUX_PANE
+
+readonly WIDTH=120 HEIGHT=40 STATES=8
+
+usage() {
+  echo "usage: bin/capture-screen [--dry-run] [--out <dir>] [--name <text>]... <config dir>"
+}
+
+fail() {
+  echo "capture-screen: $*" >&2
+  exit 1
+}
+
+dry_run=0
+out=""
+names=()
+config=""
+while (($#)); do
+  case "$1" in
+    --dry-run) dry_run=1 ;;
+    --out) out="${2:?--out needs a directory}"; shift ;;
+    --name) names+=("${2:?--name needs a text}"); shift ;;
+    -h | --help) usage; exit 0 ;;
+    -*) usage >&2; exit 2 ;;
+    *) [[ -z "$config" ]] || { usage >&2; exit 2; }; config="$1" ;;
+  esac
+  shift
+done
+
+[[ -n "$config" ]] || { usage >&2; exit 2; }
+[[ "$config" == /* && -d "$config" ]] || fail "$config is not an absolute path to a directory"
+config="$(cd "$config" && pwd -P)"
+# Setting CLAUDE_CONFIG_DIR to the default directory logs Claude Code out (docs/design.md).
+[[ "$config" != "$(cd "$HOME" && pwd -P)/.claude" ]] ||
+  fail "$config is the default directory; name an account's own: <home>/accounts/<account>/claude"
+if ((!dry_run)) && [[ ! -t 0 ]]; then
+  fail "the person presses Enter here at each state; run it in a terminal"
+fi
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+# A short directory: macOS cuts a socket path at 104 bytes.
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/cs.XXXXXX")"
+socket="$tmp/tmux"
+if ((${#socket} > 100)); then
+  rm -rf "$tmp"
+  fail "the socket path $socket is too long for macOS; set TMPDIR to a shorter directory"
+fi
+cleanup() {
+  "$CAF_TMUX" -S "$socket" kill-server 2>/dev/null || true
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
+
+tmux() { "$CAF_TMUX" -f /dev/null -S "$socket" "$@"; }
+
+# The stand-in of a dry run: each key moves it from one drawn state to the next, as Claude Code
+# would, and it names the state on its last line so the dry run can wait for it.
+write_stand_in() {
+  cat >"$1" <<'STAND_IN'
+if [[ "${1:-}" == --version ]]; then echo "dry-run (Claude Code stand-in)"; exit 0; fi
+bold=$'\e[1m' dim=$'\e[2m' off=$'\e[0m'
+rule="$(printf '%*s' 98 '' | sed 's/ /─/g')"
+who="$(id -un) on $(uname -n)"
+text=""
+draw() {
+  local state=$1; shift
+  printf '\e[H\e[2J'
+  printf '%s\n' "${bold}Claude Code stand-in${off}" "${dim}cwd: $PWD${off}" \
+    "home: $HOME" "config: $CLAUDE_CONFIG_DIR" "user: $who" "" "$@"
+  printf '\n[stand-in: %s]' "$state"
+}
+box() { printf '╭%s╮\n│ > %-95s│\n╰%s╯' "$rule" "$text" "$rule"; }
+next_key() { IFS= read -rsn1 key || exit 1; }
+draw trust-dialog "Do you trust the files in this folder?" "$PWD" "" "> 1. Yes, proceed" "  2. No, exit"
+next_key
+draw idle-empty "$(box)"
+while next_key; do
+  case "$key" in
+    "")
+      if [[ "$text" == /exit ]]; then
+        text=""; draw exited "Goodbye."; printf '\n'; exit 0
+      elif [[ "$text" == *touch* ]]; then
+        text=""; draw permission-dialog "Bash command" "  touch capture-screen.txt" \
+          "Do you want to proceed?" "> 1. Yes" "  2. No"
+        next_key; draw turn-ended-after-tool "⏺ Created capture-screen.txt." "" "$(box)"
+      elif [[ -n "$text" ]]; then
+        text=""; draw turn-running "${bold}✻ Working…${off} (esc to interrupt)" "" "$(box)"
+        next_key; draw turn-ended "⏺ A reply." "" "$(box)"
+      fi ;;
+    $'\x7f') text="${text%?}"; if [[ -n "$text" ]]; then draw text-typed "$(box)"; else draw idle-empty "$(box)"; fi ;;
+    *) text+="$key"; draw text-typed "$(box)" ;;
+  esac
+done
+STAND_IN
+}
+
+if ((dry_run)); then
+  write_stand_in "$tmp/stand-in"
+  program=("$CAF_BASH" "$tmp/stand-in")
+  [[ -n "$out" ]] || out="$(mktemp -d "${TMPDIR:-/tmp}/capture-screen.XXXXXX")"
+else
+  program=("$CAF_CLAUDE")
+  [[ -n "$out" ]] || out="$root/apps/caf_screen/test/fixtures"
+fi
+
+# What a parent's launch keeps (ClaudeCLI), with the auto-updater off: it would write outside
+# the account's directory, and its notice would be on the screen. A parent's flags (settings,
+# MCP servers, name, Remote Control) are left out; docs/build-notes/F-48.md, new-1.
+launch_env=(
+  "HOME=$HOME"
+  "PATH=$(dirname "$CAF_GIT"):$(dirname "$CAF_BASH"):$CAF_TOOLS_PATH"
+  "TERM=xterm-256color"
+  "LANG=C.UTF-8"
+  "CLAUDE_CONFIG_DIR=$config"
+  "DISABLE_AUTOUPDATER=1"
+)
+
+version_line="$("$CAF_ENV" -i "${launch_env[@]}" "${program[@]}" --version)"
+version="${version_line%% *}"
+[[ "$version" =~ ^[A-Za-z0-9._-]+$ ]] || fail "unexpected version: $version_line"
+dest="$out/$version"
+[[ ! -e "$dest" ]] || fail "$dest exists; remove it first to capture $version again"
+
+repo="$tmp/repo"
+mkdir "$repo"
+"$CAF_GIT" -C "$repo" -c init.defaultBranch=main init -q
+
+# window-size manual keeps the pane at 120x40 whatever size the attached terminal has; with the
+# status line off, the pane is the whole window. remain-on-exit keeps the last screen after
+# /exit, with no "Pane is dead" line drawn into it.
+pane="$(tmux start-server \; set -g status off \; set -g remain-on-exit on \
+  \; set -g remain-on-exit-format '' \; set -g window-size manual \
+  \; new-session -d -s capture -x "$WIDTH" -y "$HEIGHT" -c "$repo" -P -F '#{pane_id}' \
+  -- "$CAF_ENV" -i "${launch_env[@]}" "${program[@]}")"
+[[ "$pane" =~ ^%[0-9]+$ ]] || fail "tmux gave no pane id: $pane"
+
+say() { printf '%s\n' "$@"; }
+
+pane_dead() { tmux display-message -p -t "$pane" '#{pane_dead}'; }
+
+type_text() { tmux send-keys -t "$pane" -l -- "$1"; }
+# The text and its Enter in one tmux command, so the Enter reaches only the pane the text did.
+type_line() { tmux send-keys -t "$pane" -l -- "$1" \; send-keys -t "$pane" Enter; }
+# Keys only the dry run sends: in a real run, the person answers each dialog.
+dry_keys() { if ((dry_run)); then tmux send-keys -t "$pane" "$@"; fi; }
+
+shows() {
+  local dead
+  dead="$(pane_dead)"
+  [[ "$1" == exited && "$dead" == 1 || "$1" != exited && "$dead" == 0 ]] &&
+    [[ "$(tmux capture-pane -p -t "$pane")" == *"[stand-in: $1]"* ]]
+}
+
+# Waits until the pane shows `state`: in a dry run, the stand-in names it, within 10 s; in a
+# real run, the person says so.
+await_state() {
+  local state=$1 answer deadline=$((SECONDS + 10))
+  if ((dry_run)); then
+    until shows "$state"; do
+      ((SECONDS < deadline)) || fail "the stand-in did not reach $state within 10 s"
+      "$CAF_SLEEP" 0.05
+    done
+    return
+  fi
+  while true; do
+    read -r -p "    Press Enter when the pane shows it, or type q and Enter to stop: " answer ||
+      fail "stopped: the terminal closed"
+    [[ "$answer" != q ]] || fail "stopped; nothing written"
+    if [[ "$state" == exited && "$(pane_dead)" != 1 ]]; then
+      say "    Claude Code has not exited yet."
+    elif [[ "$state" != exited && "$(pane_dead)" == 1 ]]; then
+      fail "Claude Code exited before $state; nothing written"
+    else
+      return
+    fi
+  done
+}
+
+raw="$tmp/raw"
+mkdir "$raw"
+entries=()
+n=0
+
+# Says what to do for `state`, waits for it, and captures the pane with and without escapes.
+step() {
+  local state=$1 description=$2 instruction=$3 size at file
+  n=$((n + 1))
+  say "" "[$n/$STATES] $state: $description" "    $instruction"
+  shift 3
+  "$@"
+  await_state "$state"
+  size="$(tmux display-message -p -t "$pane" '#{pane_width}x#{pane_height}')"
+  [[ "$size" == "${WIDTH}x${HEIGHT}" ]] || fail "the pane is $size, not ${WIDTH}x${HEIGHT}"
+  tmux capture-pane -p -t "$pane" >"$raw/$state.txt"
+  tmux capture-pane -p -e -t "$pane" >"$raw/$state.ansi"
+  at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  for file in "$state.txt" "$state.ansi"; do
+    entries+=("{\"file\": \"$file\", \"state\": \"$state\", \"escapes\": $([[ $file == *.ansi ]] && echo true || echo false), \"description\": \"$description\", \"width\": $WIDTH, \"height\": $HEIGHT, \"captured_at\": \"$at\"}")
+  done
+}
+
+typed="hello from the capture script"
+running="Write forty short numbered lines about how a terminal draws text. Use no tools."
+command="Use the Bash tool to run exactly this command and nothing else: touch capture-screen.txt"
+
+say "Capturing $version_line in a ${WIDTH}x${HEIGHT} pane."
+if ((!dry_run)); then
+  say "In a second terminal, at least ${WIDTH}x${HEIGHT}, attach to the pane (no devenv needed):" \
+    "" "    $CAF_TMUX -S $socket attach -t capture" "" \
+    "Answer the dialogs there when asked; this script types everything else."
+fi
+
+step trust-dialog "The workspace trust dialog, at the start in a new folder." \
+  "Wait for the workspace trust dialog." true
+step idle-empty "Idle after the trust dialog, with an empty input box." \
+  "Answer the trust dialog with Yes in the attached pane, and wait for the empty input box." \
+  dry_keys Enter
+step text-typed "Text typed in the input box and not sent." \
+  "The script types \"$typed\" into the box; wait until it shows." \
+  type_text "$typed"
+clear_and_send() { tmux send-keys -t "$pane" -N "${#typed}" BSpace; type_line "$running"; }
+step turn-running "A turn running, with its spinner." \
+  "The script clears the box and sends a prompt; press Enter while the turn still runs." \
+  clear_and_send
+step turn-ended "The turn ended after a reply, with an empty input box." \
+  "Wait until the reply is done and the input box is empty." \
+  dry_keys Enter
+step permission-dialog "A permission dialog for a shell command." \
+  "The script asks for a shell command; wait for its permission dialog, and do not answer it yet. If Claude Code asks in text instead, tell it to go ahead in the attached pane." \
+  type_line "$command"
+step turn-ended-after-tool "The turn ended after the shell command, with an empty input box." \
+  "Answer Yes in the attached pane, and wait until the turn ends and the input box is empty." \
+  dry_keys Enter
+step exited "The last screen after /exit." \
+  "The script types /exit; wait until Claude Code has exited." \
+  type_line "/exit"
+
+# The names to scrub, each with its placeholder, the longest form of each first: the scratch
+# repository's path as macOS resolves it holds the path as given.
+secrets=(
+  "$(cd "$repo" && pwd -P)" "/work/repo"
+  "$repo" "/work/repo"
+  "$(cd "$HOME" && pwd -P)" "/home/user"
+  "$HOME" "/home/user"
+)
+for name in "${names[@]}"; do secrets+=("$name" "Person"); done
+host_name="$(uname -n)"
+secrets+=("$(id -un)" "user" "$host_name" "host" "${host_name%%.*}" "host")
+
+# Sets `scrubbed` to `line` with each name replaced by its placeholder, or with `mark` by a mark
+# that is no name. No subshell, as for `count`.
+scrub() {
+  local mark=${2:-} i
+  scrubbed=$1
+  for ((i = 0; i < ${#secrets[@]}; i += 2)); do
+    [[ -z "${secrets[i]}" ]] ||
+      scrubbed="${scrubbed//"${secrets[i]}"/${mark:-${secrets[i + 1]}}}"
+  done
+}
+
+# Sets `found` to how many times `text` holds `name`, exactly. No subshell: it runs for every
+# line and name.
+count() {
+  local text=$1 name=$2 rest
+  found=0
+  [[ -n "$name" ]] || return 0
+  rest="${text//"$name"/}"
+  found=$(((${#text} - ${#rest}) / ${#name}))
+}
+
+# Whether `left` holds a name in any case. The scrub matches exactly, so a name in another case,
+# such as an account's display name, is refused for the person to pass as --name.
+holds() {
+  local left=$1 where=$2 i found=0
+  shopt -s nocasematch
+  for ((i = 0; i < ${#secrets[@]}; i += 2)); do
+    if [[ -n "${secrets[i]}" && "$left" == *"${secrets[i]}"* ]]; then
+      echo "capture-screen: refused: $where still holds \"${secrets[i]}\"" >&2
+      found=1
+    fi
+  done
+  shopt -u nocasematch
+  ((!found))
+}
+
+say "" "Scrubbing. Each changed line, with escapes shown as \\e:"
+staged="$tmp/staged"
+mkdir "$staged"
+refused=0
+for path in "$raw"/*; do
+  file="${path##*/}"
+  lineno=0
+  here=0
+  # A path the screen wraps is cut across two lines, where no line holds it whole and the scrub
+  # cannot reach it: the lines joined then hold a name more often than the lines one by one.
+  joined=""
+  whole=()
+  : >"$staged/$file"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    lineno=$((lineno + 1))
+    scrub "$line"
+    clean="$scrubbed"
+    printf '%s\n' "$clean" >>"$staged/$file"
+    if [[ "$clean" != "$line" ]]; then
+      say "$file:$lineno" "  - ${line//$'\e'/\\e}" "  + ${clean//$'\e'/\\e}"
+    fi
+    scrub "$line" $'\x01'
+    holds "$scrubbed" "$file:$lineno" || here=1
+    joined+="$line"
+    for ((i = 0; i < ${#secrets[@]}; i += 2)); do
+      count "$line" "${secrets[i]}"
+      whole[i]=$((${whole[i]:-0} + found))
+    done
+  done <"$path"
+  for ((i = 0; i < ${#secrets[@]}; i += 2)); do
+    count "$joined" "${secrets[i]}"
+    if ((found > ${whole[i]:-0})); then
+      echo "capture-screen: refused: $file cuts \"${secrets[i]}\" across two lines" >&2
+      here=1
+    fi
+  done
+  ((!here)) || refused=1
+done
+((!refused)) ||
+  fail "refused: nothing written. Pass each name the screen shows as --name <text>."
+
+{
+  printf '{\n  "claude_version": "%s",\n  "tmux": "%s",\n  "dry_run": %s,\n' \
+    "$version" "$("$CAF_TMUX" -V)" "$( ((dry_run)) && echo true || echo false)"
+  printf '  "pane": {"width": %d, "height": %d},\n  "fixtures": [\n' "$WIDTH" "$HEIGHT"
+  for ((i = 0; i < ${#entries[@]}; i++)); do
+    printf '    %s%s\n' "${entries[i]}" "$( ((i + 1 < ${#entries[@]})) && echo ,)"
+  done
+  printf '  ]\n}\n'
+} >"$staged/manifest.json"
+
+mkdir -p "$out"
+mv "$staged" "$dest"
+say "" "Wrote ${#entries[@]} fixtures and manifest.json to $dest. Read them before committing."
