@@ -8,8 +8,10 @@ defmodule CodingAgentFramework.Stream.Fold do
   waits for the next read. Each event writes what `Stream.tla`'s `Handle` says: a replay
   delivers its message, a `result` ends the turn, a `can_use_tool` request is held, an answer's
   replay answers it, a cancel cancels it. It also keeps the session id of `system`/`init` and the
-  latest `rate_limit_event`, and the last `result` with its text. It is total: a line that is
-  not a JSON object is counted as a problem.
+  latest `rate_limit_event`, and the last `result` with its text. Each result is also kept on the
+  messages it names (`messages[uuid].result`), so a later one, such as a turn the delegate starts
+  by itself, never replaces it. It is total: a line that is not a JSON object is counted as a
+  problem.
 
       iex> alias CodingAgentFramework.Stream.Fold
       iex> fold = Fold.mark(Fold.new(), {:message, "u1", "hi"}, ~s({"x":1}\\n), 0)
@@ -98,7 +100,8 @@ defmodule CodingAgentFramework.Stream.Fold do
     text = if is_binary(e["result"]), do: e["result"]
     result = %{subtype: e["subtype"], is_error: e["is_error"], user_message_uuids: uuids}
     result = Map.put(result, :text, text)
-    %{fold | idle: true, last_result: result}
+    messages = Enum.reduce(uuids, fold.messages, &keep(&2, &1, result))
+    %{fold | idle: true, last_result: result, messages: messages}
   end
 
   def event(fold, %{"type" => "control_request", "request_id" => id, "request" => r})
@@ -127,6 +130,14 @@ defmodule CodingAgentFramework.Stream.Fold do
     do: %{fold | rate_limit: info}
 
   def event(fold, _event), do: fold
+
+  # The first result that names a message is its own; a later one never replaces it.
+  defp keep(messages, uuid, result) do
+    case messages do
+      %{^uuid => %{result: nil} = m} -> %{messages | uuid => %{m | result: result}}
+      _ -> messages
+    end
+  end
 
   defp settle(fold, table, key, from, to) do
     case Map.fetch(Map.fetch!(fold, table), key) do
@@ -213,7 +224,7 @@ defmodule CodingAgentFramework.Stream.Fold do
 
     case term do
       {:message, uuid, _} ->
-        %{fold | idle: false, messages: Map.put(fold.messages, uuid, %{state: :writing, at: at})}
+        %{fold | idle: false, messages: Map.put(fold.messages, uuid, message(at))}
 
       {:answer, id, _} ->
         settle(fold, :requests, id, :held, :answering)
@@ -226,6 +237,8 @@ defmodule CodingAgentFramework.Stream.Fold do
     end
   end
 
+  defp message(at), do: %{state: :writing, at: at, result: nil, exited: false}
+
   @doc "A line moves to `:spooled`, or is dropped from `lines` once `:claimed`."
   @spec phase(t, String.t(), :spooled | :claimed) :: t
   def phase(fold, id, :claimed), do: %{fold | lines: Map.delete(fold.lines, id)}
@@ -235,18 +248,20 @@ defmodule CodingAgentFramework.Stream.Fold do
 
   @doc """
   `ExitSeen`: the delegate is gone and its log read to its end. Each message still writing is
-  delivered when the transcript holds its uuid (`taken?`) and undelivered otherwise; a held or
-  answering request is lost; an unclaimed line is dropped.
+  delivered when the transcript holds its uuid (`taken?`) and undelivered otherwise. A delivered
+  message no result named is marked `exited`: its turn began and the process ended first
+  (`Team.tla`'s `fold[i] = "exited"`). A held or answering request is lost; an unclaimed line is
+  dropped.
   """
   @spec exit_seen(t, (String.t() -> boolean)) :: t
   def exit_seen(fold, taken?) do
     messages =
       Map.new(fold.messages, fn
         {u, %{state: :writing} = m} ->
-          {u, %{m | state: if(taken?.(u), do: :delivered, else: :undelivered)}}
+          {u, cut(%{m | state: if(taken?.(u), do: :delivered, else: :undelivered)})}
 
-        other ->
-          other
+        {u, m} ->
+          {u, cut(m)}
       end)
 
     requests =
@@ -257,6 +272,9 @@ defmodule CodingAgentFramework.Stream.Fold do
 
     %{fold | gone: true, messages: messages, requests: requests, lines: %{}}
   end
+
+  defp cut(%{state: :delivered, result: nil} = m), do: %{m | exited: true}
+  defp cut(m), do: m
 
   @doc """
   `FollowAgain`: the row is followed again for a resume. Its offset, messages and requests stay;
@@ -297,10 +315,11 @@ defmodule CodingAgentFramework.Stream.Fold do
   @doc """
   What became of the message written under `uuid`, as each reader of a message's outcome reads
   it (`Delegates`' brief, `Mailbox`'s messages and their replies): `:none` when it was never
-  marked, its state (`:writing`, `:undelivered`, `:delivered`), or `{:result, text}` once it is
-  delivered and the last `result` names it in `user_message_uuids`, its turn ended. `text` is
-  the turn's last message, `""` when it had none. A later result replaces the last one, so a
-  reader reads it before writing the next message.
+  marked, its state (`:writing`, `:undelivered`, `:delivered`), `{:result, result}` once it is
+  delivered and a `result` named it in `user_message_uuids`, or `:exited` once it was delivered
+  and its process ended with no result naming it. `result` is the turn's last message as `text`
+  (`""` when it had none), its `subtype` and `is_error`. It is kept on the message, so a later
+  result never replaces it.
 
       iex> alias CodingAgentFramework.Stream.Fold
       iex> fold = Fold.mark(Fold.new(), {:message, "u1", "hi"}, "", 0)
@@ -310,25 +329,52 @@ defmodule CodingAgentFramework.Stream.Fold do
       iex> Fold.outcome(fold, "u1")
       :delivered
       iex> fold = Fold.event(fold, %{"type" => "result", "result" => "ok",
-      ...>   "user_message_uuids" => ["u1"]})
+      ...>   "subtype" => "success", "user_message_uuids" => ["u1"]})
+      iex> fold = Fold.event(fold, %{"type" => "result", "result" => "a turn of its own"})
       iex> {Fold.outcome(fold, "u1"), Fold.outcome(fold, "u2")}
-      {{:result, "ok"}, :none}
+      {{:result, %{text: "ok", subtype: "success", is_error: nil}}, :none}
   """
   @spec outcome(t | map, String.t()) ::
-          :none | :writing | :undelivered | :delivered | {:result, String.t()}
+          :none | :writing | :undelivered | :delivered | :exited | {:result, map}
   def outcome(fold, uuid) do
     case fold.messages[uuid] do
       nil -> :none
-      %{state: :delivered} -> result(fold.last_result, uuid)
+      %{state: :delivered, result: %{} = r} -> {:result, result(r)}
+      %{state: :delivered, exited: true} -> :exited
       %{state: state} -> state
     end
   end
 
-  defp result(%{user_message_uuids: uuids} = r, uuid) when is_list(uuids) do
-    if uuid in uuids, do: {:result, r[:text] || ""}, else: :delivered
+  defp result(r), do: %{text: r[:text] || "", subtype: r[:subtype], is_error: r[:is_error]}
+
+  @doc """
+  A message a fold of an earlier build stored has no `result` or `exited`. `Stream.Table` loads
+  such a fold through this (F-63): each is filled, the result from the last one when it names
+  the message, as that build's `outcome/2` read it.
+
+      iex> alias CodingAgentFramework.Stream.Fold
+      iex> old = %{Fold.new() | messages: %{"u1" => %{state: :delivered}},
+      ...>   last_result: %{text: "ok", user_message_uuids: ["u1"]}}
+      iex> Fold.outcome(Fold.upgrade(old), "u1")
+      {:result, %{text: "ok", subtype: nil, is_error: nil}}
+  """
+  @spec upgrade(t) :: t
+  def upgrade(%{messages: messages, last_result: last} = fold) when is_map(messages) do
+    named = if is_map(last) and is_list(last[:user_message_uuids]), do: last.user_message_uuids
+
+    messages =
+      Map.new(messages, fn
+        {u, %{} = m} ->
+          {u, Map.merge(%{result: if(u in (named || []), do: last), exited: false}, m)}
+
+        other ->
+          other
+      end)
+
+    %{fold | messages: messages}
   end
 
-  defp result(_last, _uuid), do: :delivered
+  def upgrade(fold), do: fold
 
   @doc "Messages still waiting for their replay: the ones the transcript settles at the exit."
   @spec writing(t) :: [String.t()]

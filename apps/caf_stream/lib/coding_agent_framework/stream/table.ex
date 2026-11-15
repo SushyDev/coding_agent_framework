@@ -108,7 +108,8 @@ defmodule CodingAgentFramework.Stream.Table do
   end
 
   # Total, and a row an earlier or later build wrote is never taken for a new one: a field this
-  # build added is filled with its default, so the offset, messages and requests stay; a field
+  # build added is filled with its default (a message's too: `Fold.upgrade/1`), so the offset,
+  # messages and requests stay; a field
   # it does not know is dropped and named. Only bytes that are not a map, or that `:safe` refuses
   # (an atom this build never saw), load as a new fold.
   defp load(bytes) when is_binary(bytes) do
@@ -117,7 +118,7 @@ defmodule CodingAgentFramework.Stream.Table do
         fresh = Fold.new()
         unknown = Map.keys(stored) -- Map.keys(fresh)
         problems = if unknown == [], do: [], else: [{:unknown_fields, Enum.sort(unknown)}]
-        {Map.merge(fresh, Map.take(stored, Map.keys(fresh))), problems}
+        {Fold.upgrade(Map.merge(fresh, Map.take(stored, Map.keys(fresh)))), problems}
 
       _ ->
         {Fold.new(), [:not_a_map]}

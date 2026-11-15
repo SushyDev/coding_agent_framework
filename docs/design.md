@@ -663,7 +663,9 @@ message's (F-79). A reply carries its result's subtype, so the main session can 
 that failed (`error_during_execution`, `is_error`) from an answer. When the delegate's process
 ends during a message's turn with no result, `Mailbox` stores a notice from the framework to
 the main session in place of the reply: the message went in, and the delegate ended before it
-answered. `Stream`'s fold keeps each result on the messages it names, so a turn the delegate
+answered. The notice is stored under the reply's key (the answered message), so one of a reply
+or a notice goes in, never both. Its sender is `framework`, a name reserved for the framework
+itself: no agent may hold it (F-81). `Stream`'s fold keeps each result on the messages it names, so a turn the delegate
 starts by itself never replaces a reply or a report.
 
 **Services** belong to the agent that started them. When the owner ends, its services end too,

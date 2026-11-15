@@ -24,7 +24,11 @@ defmodule CodingAgentFramework.Mailbox do
 
   **A reply**: a delivered message's turn ends with a `result` that names its uuid; that result's
   text is stored as a message from the delegate to its main session (its `Delegates` row's
-  `parent`), `reply_to` the answered message's uuid, once. A turn with no result stores none.
+  `parent`), `reply_to` the answered message's uuid, with the result's `subtype` and
+  `is_error`, so a failed turn is told from an answer. **A notice**: when the process ended
+  during the message's turn with no result (`Stream.Fold.outcome/2`'s `:exited`), a message
+  from `"framework"` says so in place of the reply, under the same `reply_to`. The table's
+  unique index on `reply_to` lets in one of them, once.
 
   **A main session**'s delivery needs `Screen`: its rows stay queued, `attempt` `:no_delivery`.
 
@@ -39,6 +43,8 @@ defmodule CodingAgentFramework.Mailbox do
   alias CodingAgentFramework.Stream.Fold
 
   @step 5_000
+  # The sender of a notice; no agent has this name, as an agent's name holds its project's.
+  @framework "framework"
   @delegates ~w(starting resuming running finished failed refused)
 
   @doc """
@@ -56,9 +62,10 @@ defmodule CodingAgentFramework.Mailbox do
     do: call(mailbox, {:message, from, to, text}, opts)
 
   @doc """
-  What became of message `id`: `{:ok, %{id, from, to, status, attempt, reply_to}}`, `status`
-  being `queued`, `sending`, `delivered` or `ended`, and `reply_to` the uuid of the message a
-  delegate's reply answers (nil for any other); or `{:refused, :no_message}`.
+  What became of message `id`: `{:ok, %{id, from, to, status, attempt, reply_to, subtype,
+  is_error}}`, `status` being `queued`, `sending`, `delivered` or `ended`, `reply_to` the uuid
+  of the message a delegate's reply or the framework's notice answers (nil for any other), and
+  `subtype` and `is_error` a reply's result's; or `{:refused, :no_message}`.
   """
   def status(mailbox, id, opts \\ []), do: call(mailbox, {:status, id}, opts)
 
@@ -124,7 +131,9 @@ defmodule CodingAgentFramework.Mailbox do
                 to: m.to_agent,
                 status: m.status,
                 attempt: m.attempt,
-                reply_to: m.reply_to
+                reply_to: m.reply_to,
+                subtype: m.subtype,
+                is_error: %{1 => true, 0 => false}[m.is_error]
               }}
 
     {:reply, reply, s}
@@ -157,19 +166,34 @@ defmodule CodingAgentFramework.Mailbox do
 
   defp settle_sending(_s, _m, _folds), do: :ok
 
-  # A delivered message's turn ended with a result that names it: its text is the delegate's
-  # reply to its main session, stored once under the message's uuid. It is read before the next
-  # message goes in, since that one's result replaces it in the fold.
+  # ReplyStored and NoticeStored: a delivered message's turn ended with a result that names it
+  # (the fold keeps it on the message, so a later turn's never replaces it), or its process
+  # ended with none (`:exited`). Either one row goes to the main session under the message's
+  # uuid, whose unique index lets in one reply or one notice, across restarts and cues.
   defp replies(s, folds, agents) do
-    for {sid, %{last_result: %{user_message_uuids: [_ | _] = uuids}} = fold} <- folds,
-        m <- Table.delivered(s.db, sid, uuids),
-        {:result, text} <- [Fold.outcome(fold, m.uuid)],
+    for {sid, fold} <- folds,
+        ended = for({u, _} <- fold.messages, turn_ended?(Fold.outcome(fold, u)), do: u),
+        m <- Table.unanswered(s.db, sid, ended),
         %{parent: main} <- [agents[m.to_agent]],
-        do: reply(s, Table.reply(s.db, m.to_agent, main, text, Stream.uuid(), m.uuid))
+        do: answer(s, m, main, Fold.outcome(fold, m.uuid))
   end
 
-  defp reply(_s, nil), do: :ok
-  defp reply(s, id), do: announce(s, id)
+  defp turn_ended?({:result, _}), do: true
+  defp turn_ended?(outcome), do: outcome == :exited
+
+  defp answer(s, m, main, {:result, r}),
+    do: stored(s, Table.reply(s.db, m.to_agent, main, r.text, Stream.uuid(), m.uuid, r))
+
+  defp answer(s, m, main, :exited),
+    do: stored(s, Table.reply(s.db, @framework, main, notice(m), Stream.uuid(), m.uuid))
+
+  defp notice(m),
+    do:
+      "Your message #{m.id} went in to #{m.to_agent}, and its process ended before it " <>
+        "answered: no reply will come. Resume it to ask again."
+
+  defp stored(_s, nil), do: :ok
+  defp stored(s, id), do: announce(s, id)
 
   # A main session: no delivery until Screen.
   defp deliver(s, rows, nil, _folds) do

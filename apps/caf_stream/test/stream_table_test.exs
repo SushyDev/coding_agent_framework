@@ -21,7 +21,7 @@ defmodule CodingAgentFramework.StreamTableTest do
         session_id: "s1",
         resumes: 2,
         ending: true,
-        messages: %{"u1" => %{state: :delivered}}
+        messages: %{"u1" => %{state: :delivered, at: 0, result: nil, exited: false}}
     }
 
     delegate = %{socket: "/tmp/s", transcript: "/tmp/t.jsonl", fold: fold}
@@ -55,6 +55,28 @@ defmodule CodingAgentFramework.StreamTableTest do
     assert %{offset: 42, ending: false, resumes: 2, load_problems: []} = row(db)
     assert %{offset: 42, ending: false, session_id: "s1"} = writers_fold(db)
     assert %{"u1" => %{state: :delivered}} = writers_fold(db).messages
+  end
+
+  test "a message an earlier build stored takes its result from the last one", %{db: db} do
+    old = %{
+      Fold.new()
+      | messages: %{"u1" => %{state: :delivered, at: 0}, "u2" => %{state: :delivered, at: 0}},
+        last_result: %{
+          text: "ok",
+          subtype: "success",
+          is_error: false,
+          user_message_uuids: ["u1"]
+        }
+    }
+
+    rewrite(db, :erlang.term_to_binary(old))
+
+    assert %{load_problems: []} = row(db)
+
+    assert Fold.outcome(writers_fold(db), "u1") ==
+             {:result, Map.delete(old.last_result, :user_message_uuids)}
+
+    assert %{result: nil, exited: false} = writers_fold(db).messages["u2"]
   end
 
   test "a fold with an extra field loses it and names it", %{db: db, fold: fold} do

@@ -11,7 +11,8 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     whose text starts with `ask` first asks a `can_use_tool` permission (`request_id`
     `req-<uuid>`), and ends its turn when the answer comes; so does every message while a file
     `<dir>/hold` exists; the answer is replayed. `half` ends its turn with half a
-    `rate_limit_event` line, and the next message finishes it;
+    `rate_limit_event` line, and the next message finishes it; `self` ends its turn, then
+    starts one of its own at once, whose `result` (`on its own`) names no message;
   - for `interrupt`: a cancel of the request pending, and a `result`;
   - `end_session` ends it; a line that is not a JSON object ends it with status 1.
 
@@ -92,6 +93,9 @@ defmodule CodingAgentFramework.HeadlessStandIn do
             *'"content":"ask'*)
               pending="req-$u" asker=$u
               ev '{"type":"control_request","request_id":"'"$pending"'","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"true"},"tool_use_id":"tu-'"$u"'"}}' ;;
+            *'"content":"self'*)
+              turn_end "$u"
+              ev '{"type":"result","subtype":"success","is_error":false,"result":"on its own","session_id":"'"$sid"'","user_message_uuids":[]}' ;;
             *'"content":"half'*)
               turn_end "$u"; half=1
               printf '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed",' ;;
