@@ -6,7 +6,11 @@
 (* tree only: a main session to its delegates and to the other main        *)
 (* session, a delegate to its main session. It is stored, then typed once  *)
 (* into an ended turn. One to a delegate that ended first is not typed:    *)
-(* its row says so, and the sender reads that in place of delivered. A fix *)
+(* its row says so, and the sender reads that in place of delivered. A     *)
+(* message typed into a delegate is a turn of its own: the result that     *)
+(* names it is the delegate's reply, stored once as a message to its main  *)
+(* session; when the delegate's process ends first, with no result, a      *)
+(* notice from the framework goes there in its place (F-79). A fix         *)
 (* is a main session's act on its own delegate, under a claim on the       *)
 (* delegate's current state. A service is owned by                         *)
 (* one agent, fixed by its owner or the owner's parent, handed to the      *)
@@ -22,7 +26,12 @@
 (*             under way (in memory). It writes into a main session        *)
 (*             through Control's checked write, and into a delegate        *)
 (*             through Stream under a uuid, with the same sending mark     *)
-(*             and settle as a delegate's report (Delegate.tla);           *)
+(*             and settle as a delegate's report (Delegate.tla). It stores *)
+(*             each delivered message's reply or notice once, keyed by     *)
+(*             the message (`reply_to`, durable);                          *)
+(*   Stream    the fold of a delegate's log: each message's turn, and the  *)
+(*             result or the exit that ended it, kept on the message the   *)
+(*             result names (read again from the log after a restart);     *)
 (*   Services  each service's owner, its keep flag, its fixes and hand-ons,*)
 (*             and its end with its owner (durable);                       *)
 (*   MCP       the calls: message, interrupt, resume, stop, service_start, *)
@@ -42,7 +51,13 @@
 (* not checked: a call may come from a subagent while the caller's main    *)
 (* turn is stuck, so one caller may make the same call twice at once. A    *)
 (* person prompts a main session only; a delegate's turns come from its    *)
-(* brief, messages and resumes, to keep the state small. A message enters  *)
+(* brief, messages, resumes and, when SelfTurns, turns it starts by itself *)
+(* (off in the configurations that do not check replies, to keep their     *)
+(* state small). A turn's result names its message, or none: the brief's   *)
+(* and a resume's are Delegates' (Delegate.tla), and a delegate is idle    *)
+(* only after its brief's result, so no other result is ever its report.   *)
+(* A reply's text and subtype, and its own delivery to the main session    *)
+(* (that of any message), are left abstract. A message enters              *)
 (* the transcript in the step it is typed. A fix either helps or not, in   *)
 (* the step it acts. The number of each agent's state (`epoch`) stands for *)
 (* what the framework reads of it; it moves when the agent sticks, dies, is*)
@@ -59,7 +74,9 @@
 (* one relation, "the caller is the target's main session": no agent fixes *)
 (* itself and none fixes a main session, because a main session has no    *)
 (* parent. SiblingFix, SelfFix and FixMain each widen that relation by one *)
-(* wrong case, as a mistaken check would.                                  *)
+(* wrong case, as a mistaken check would. `rmem` and `last` are what       *)
+(* ReplyInMemory's and SelfReply's wrong readers hold; the design never    *)
+(* writes them.                                                            *)
 (*                                                                         *)
 (* Defense in depth, with no Break: FixActs' check of the target's process *)
 (* for an interrupt or a resume, behind its check of the claimed state's   *)
@@ -75,6 +92,7 @@ CONSTANTS
     MaxMsgs,      \* messages sent, all senders together
     MaxFaults,    \* times an agent sticks or dies, all agents together
     MaxRestarts,  \* restarts of the framework
+    SelfTurns,    \* a delegate may start a turn by itself
     Break         \* "none", or the guard made wrong (see Breaks)
 
 Breaks == {
@@ -95,7 +113,11 @@ Breaks == {
     "HandToSibling",         \* a service may be handed to a sibling of its owner
     "HandByOther",           \* an agent other than the owner may hand a service on
     "OwnerClearedFirst",     \* an ended owner is cleared before its service ends
-    "NoOwnerWatch"           \* a service whose owner ended is not ended
+    "NoOwnerWatch",          \* a service whose owner ended is not ended
+    "ReplyInMemory",         \* a reply's once-check is a set held in memory, not the table's key
+    "ReplyAndNotice",        \* a notice read from the process's end, not the fold, keyed apart
+    "SelfReply",             \* a reply is the last result since the message, whatever it names
+    "NoNotice"               \* a message whose turn ended with no result gets no notice
 }
 
 Agents == UNION Projects
@@ -105,7 +127,7 @@ ASSUME Break \in Breaks
 ASSUME \A P \in Projects : Cardinality(P \cap Mains) = 1
 ASSUME \A P, Q \in Projects : P # Q => P \cap Q = {}
 ASSUME Mains \subseteq Agents
-ASSUME MaxMsgs \in Nat /\ MaxFaults \in Nat /\ MaxRestarts \in Nat
+ASSUME MaxMsgs \in Nat /\ MaxFaults \in Nat /\ MaxRestarts \in Nat /\ SelfTurns \in BOOLEAN
 
 None == "none"
 Ids == 1..MaxMsgs
@@ -113,6 +135,8 @@ MaxEpoch == 2 * MaxFaults + 1
 Kinds == {"interrupt", "resume", "stop"}
 Needs == [interrupt |-> "stuck", resume |-> "dead", stop |-> "idle"]
 AnyMain == CHOOSE m \in Mains : TRUE
+OwnTurn == 0     \* the name of a result that names no message of Mailbox's
+NoResult == -1   \* no result since the last message was typed
 NoMsg == [from |-> AnyMain, to |-> AnyMain, st |-> "none"]
 
 \* The tree. A main session is a root; a delegate's parent is its main session.
@@ -155,13 +179,18 @@ VARIABLES
     svc,       \* table: s -> "none", "running", "ended"
     owner,     \* table: s -> its owner, or None
     keep,      \* table: s -> kept for the owner's parent when the owner ends
+    fold,      \* the fold (from the log): i -> "none", "turn", "result", "exited"
+    answers,   \* table: replies and notices, [re, kind, to, src]
+    rmem,      \* in memory: the ids replied to, read only when Break = "ReplyInMemory"
+    last,      \* a -> the last result's name since a message was typed (SelfReply only)
     wrong      \* ghost: what a guard should have refused
 
 agentVars == <<proc, epoch, faults>>
 msgVars == <<msgs, msend, inbox>>
+replyVars == <<fold, answers, rmem, last>>
 claimVars == <<claims, done, calls, fixed>>
 svcVars == <<svc, owner, keep>>
-vars == <<up, restarts, agentVars, msgVars, claimVars, svcVars, wrong>>
+vars == <<up, restarts, agentVars, msgVars, claimVars, svcVars, replyVars, wrong>>
 
 Sent == {i \in Ids : msgs[i].st # "none"}
 Live(a) == proc[a] # "ended"
@@ -176,6 +205,8 @@ Init ==
     /\ claims = {} /\ done = {} /\ calls = {} /\ fixed = {}
     /\ svc = [s \in Services |-> "none"] /\ owner = [s \in Services |-> None]
     /\ keep = [s \in Services |-> FALSE]
+    /\ fold = [i \in Ids |-> "none"] /\ answers = {} /\ rmem = {}
+    /\ last = [a \in Agents |-> NoResult]
     /\ wrong = {}
 
 -----------------------------------------------------------------------------
@@ -187,37 +218,62 @@ FrameworkDies ==
     /\ msend' = [i \in Ids |-> "none"]
     /\ calls' = {}
     /\ IF Break = "ClaimInMemory" THEN claims' = {} /\ done' = {} ELSE UNCHANGED <<claims, done>>
-    /\ UNCHANGED <<agentVars, msgs, inbox, fixed, svcVars, wrong>>
+    /\ rmem' = {}
+    /\ UNCHANGED <<agentVars, msgs, inbox, fixed, svcVars, fold, answers, last, wrong>>
 
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
-    /\ UNCHANGED <<restarts, agentVars, msgVars, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<restarts, agentVars, msgVars, claimVars, svcVars, wrong, replyVars>>
 
 -----------------------------------------------------------------------------
 (* The agents: turns, a person's prompt to a main session; sticking, dying, ending *)
 
-\* A delegate starts on its brief; its later turns come from messages and
-\* resumes.
+\* A delegate starts on its brief; its later turns come from messages,
+\* resumes, and turns it starts by itself.
 Prompted(a) ==
     /\ a \in Mains /\ proc[a] = "idle" /\ proc' = [proc EXCEPT ![a] = "working"]
-    /\ UNCHANGED <<up, restarts, epoch, faults, msgVars, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, epoch, faults, msgVars, claimVars, svcVars, wrong, replyVars>>
+
+\* A delegate starts a turn by itself (F-31's new-2): its result names no
+\* message of Mailbox's.
+SelfStarts(d) ==
+    /\ SelfTurns /\ d \in Delegates /\ proc[d] = "idle"
+    /\ proc' = [proc EXCEPT ![d] = "working"]
+    /\ UNCHANGED <<up, restarts, epoch, faults, msgVars, claimVars, svcVars, wrong, replyVars>>
+
+\* The message whose turn `a` is in, if any: typed, with no result yet.
+InTurn(a) == {i \in Ids : msgs[i].to = a /\ fold[i] = "turn"}
+
+\* `a`'s turn ends with a result. It names the message whose turn it is, or
+\* none (OwnTurn): a brief, a resume, a turn the delegate started.
+Result(a) ==
+    /\ fold' = [i \in Ids |-> IF i \in InTurn(a) THEN "result" ELSE fold[i]]
+    /\ last' = IF Break = "SelfReply"
+                 THEN [last EXCEPT ![a] = IF InTurn(a) = {} THEN OwnTurn
+                                                            ELSE CHOOSE i \in InTurn(a) : TRUE]
+                 ELSE last
 
 TurnEnds(a) ==
     /\ proc[a] = "working" /\ proc' = [proc EXCEPT ![a] = "idle"]
-    /\ UNCHANGED <<up, restarts, epoch, faults, msgVars, claimVars, svcVars, wrong>>
+    /\ Result(a)
+    /\ UNCHANGED <<up, restarts, epoch, faults, msgVars, claimVars, svcVars, answers, rmem, wrong>>
 
+\* An agent sticks, or its process ends. A message whose turn it was then
+\* has no result, and never will: the fold reads the exit.
 Faults(a) ==
     /\ faults < MaxFaults
-    /\ \/ (proc[a] = "working" /\ proc' = [proc EXCEPT ![a] = "stuck"])
-       \/ (proc[a] \in {"working", "idle", "stuck"} /\ proc' = [proc EXCEPT ![a] = "dead"])
+    /\ \/ /\ proc[a] = "working" /\ proc' = [proc EXCEPT ![a] = "stuck"]
+          /\ UNCHANGED fold
+       \/ /\ proc[a] \in {"working", "idle", "stuck"} /\ proc' = [proc EXCEPT ![a] = "dead"]
+          /\ fold' = [i \in Ids |-> IF i \in InTurn(a) THEN "exited" ELSE fold[i]]
     /\ epoch' = [epoch EXCEPT ![a] = @ + 1] /\ faults' = faults + 1
-    /\ UNCHANGED <<up, restarts, msgVars, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, msgVars, claimVars, svcVars, answers, rmem, last, wrong>>
 
 \* A delegate ends once its report is delivered (Delegate.tla).
 DelegateEnds(d) ==
     /\ d \in Delegates /\ proc[d] = "idle"
     /\ proc' = [proc EXCEPT ![d] = "ended"] /\ epoch' = [epoch EXCEPT ![d] = @ + 1]
-    /\ UNCHANGED <<up, restarts, faults, msgVars, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, faults, msgVars, claimVars, svcVars, wrong, replyVars>>
 
 -----------------------------------------------------------------------------
 (* Mailbox: a message along an edge, stored, then typed into an ended turn, once *)
@@ -228,7 +284,7 @@ Send(c, t) ==
     /\ Cardinality(Sent) < MaxMsgs
     /\ LET i == Cardinality(Sent) + 1
        IN msgs' = [msgs EXCEPT ![i] = [from |-> c, to |-> t, st |-> "queued"]]
-    /\ UNCHANGED <<up, restarts, agentVars, msend, inbox, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, agentVars, msend, inbox, claimVars, svcVars, wrong, replyVars>>
 
 Earlier(i) == {j \in 1..(i - 1) : msgs[j].from = msgs[i].from /\ msgs[j].to = msgs[i].to}
 NextInOrder(i) == Break = "NoOrder" \/ \A j \in Earlier(i) : msgs[j].st = "delivered"
@@ -238,7 +294,7 @@ DeliveryAsked(i) ==
     /\ up /\ msgs[i].st = "queued" /\ msend[i] = "none"
     /\ proc[msgs[i].to] = "idle" /\ NextInOrder(i)
     /\ msgs' = [msgs EXCEPT ![i].st = "sending"] /\ msend' = [msend EXCEPT ![i] = "asked"]
-    /\ UNCHANGED <<up, restarts, agentVars, inbox, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, agentVars, inbox, claimVars, svcVars, wrong, replyVars>>
 
 Typeable(a) ==
     proc[a] = "idle" \/ (Break = "IntoRunningTurn" /\ proc[a] \in {"working", "stuck"})
@@ -251,17 +307,19 @@ DeliveryTyped(i) ==
     /\ inbox' = [inbox EXCEPT ![a] = Append(@, i)]
     /\ proc' = [proc EXCEPT ![a] = "working"]
     /\ wrong' = wrong \cup (IF proc[a] = "idle" THEN {} ELSE {"running turn"})
-    /\ UNCHANGED <<up, restarts, epoch, faults, msgs, claimVars, svcVars>>
+    /\ fold' = IF a \in Delegates THEN [fold EXCEPT ![i] = "turn"] ELSE fold
+    /\ last' = IF Break = "SelfReply" THEN [last EXCEPT ![a] = NoResult] ELSE last
+    /\ UNCHANGED <<up, restarts, epoch, faults, msgs, claimVars, svcVars, answers, rmem>>
 
 DeliveryRefused(i) ==
     /\ up /\ msend[i] = "asked" /\ ~Typeable(msgs[i].to)
     /\ msend' = [msend EXCEPT ![i] = "none"] /\ msgs' = [msgs EXCEPT ![i].st = "queued"]
-    /\ UNCHANGED <<up, restarts, agentVars, inbox, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, agentVars, inbox, claimVars, svcVars, wrong, replyVars>>
 
 DeliveryMarked(i) ==
     /\ up /\ msend[i] = "sent"
     /\ msend' = [msend EXCEPT ![i] = "none"] /\ msgs' = [msgs EXCEPT ![i].st = "delivered"]
-    /\ UNCHANGED <<up, restarts, agentVars, inbox, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, agentVars, inbox, claimVars, svcVars, wrong, replyVars>>
 
 InTranscript(i, a) == \E k \in DOMAIN inbox[a] : inbox[a][k] = i
 
@@ -271,7 +329,7 @@ SendingSettled(i) ==
     /\ msgs' = [msgs EXCEPT ![i].st =
                   IF InTranscript(i, msgs[i].to) /\ Break # "RedeliverAfterRestart"
                     THEN "delivered" ELSE "queued"]
-    /\ UNCHANGED <<up, restarts, agentVars, msend, inbox, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, agentVars, msend, inbox, claimVars, svcVars, wrong, replyVars>>
 
 \* A message to a delegate that has ended is not delivered: its row says the
 \* delegate ended before it went in, from a settled row only.
@@ -281,7 +339,48 @@ EndedFirst(i) ==
     /\ \/ msgs[i].st = "queued"
        \/ (Break = "EndedUnsettled" /\ msgs[i].st = "sending" /\ msend[i] = "none")
     /\ msgs' = [msgs EXCEPT ![i].st = "ended"]
-    /\ UNCHANGED <<up, restarts, agentVars, msend, inbox, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, agentVars, msend, inbox, claimVars, svcVars, wrong, replyVars>>
+
+-----------------------------------------------------------------------------
+(* Mailbox: a delegate's reply to a delivered message, or the framework's *)
+(* notice that its turn ended with no result; one per message            *)
+
+Answered(i) == {r \in answers : r.re = i}
+
+\* The last message typed into `a`, if any.
+LastTyped(a) == IF inbox[a] = <<>> THEN 0 ELSE inbox[a][Len(inbox[a])]
+
+\* The result Mailbox takes as message i's reply, if one is there: the one
+\* the fold keeps on i. SelfReply reads the last result since i was typed,
+\* whatever it names.
+ReplySource(i) ==
+    IF Break = "SelfReply"
+      THEN IF LastTyped(msgs[i].to) = i THEN last[msgs[i].to] ELSE NoResult
+      ELSE IF fold[i] = "result" THEN i ELSE NoResult
+
+\* The reply is a message from the delegate to its main session, stored once:
+\* the table's key on the answered message refuses a second row.
+ReplyStored(i) ==
+    LET d == msgs[i].to  src == ReplySource(i) IN
+    /\ up /\ d \in Delegates /\ msgs[i].st = "delivered" /\ src # NoResult
+    /\ IF Break = "ReplyInMemory" THEN i \notin rmem ELSE Answered(i) = {}
+    /\ answers' = answers \cup {[re |-> i, kind |-> "reply", to |-> Main(d), src |-> src]}
+    /\ rmem' = IF Break = "ReplyInMemory" THEN rmem \cup {i} ELSE rmem
+    /\ wrong' = wrong \cup (IF \E r \in Answered(i) : r.kind = "reply" THEN {"reply twice"} ELSE {})
+    /\ UNCHANGED <<up, restarts, agentVars, msgVars, claimVars, svcVars, fold, last>>
+
+\* The delegate's process ended during i's turn with no result: a notice from
+\* the framework to the main session, under the same key. ReplyAndNotice reads
+\* the end of the process after i, not the fold, and checks only notices.
+NoticeStored(i) ==
+    LET d == msgs[i].to IN
+    /\ up /\ Break # "NoNotice" /\ d \in Delegates /\ msgs[i].st = "delivered"
+    /\ IF Break = "ReplyAndNotice"
+         THEN /\ proc[d] \in {"dead", "ended"} /\ LastTyped(d) = i /\ fold[i] # "turn"
+              /\ ~\E r \in Answered(i) : r.kind = "notice"
+         ELSE fold[i] = "exited" /\ Answered(i) = {}
+    /\ answers' = answers \cup {[re |-> i, kind |-> "notice", to |-> Main(d), src |-> NoResult]}
+    /\ UNCHANGED <<up, restarts, agentVars, msgVars, claimVars, svcVars, fold, rmem, last, wrong>>
 
 -----------------------------------------------------------------------------
 (* Grants: a parent's fix takes a claim on its child's current state first *)
@@ -301,35 +400,39 @@ ClaimTaken(c, t) ==
     /\ MayFix(c, t)
     /\ (~\E q \in claims : q.t = t /\ q.ep = epoch[t]) \/ Break = "TwoClaims"
     /\ claims' = claims \cup {r} /\ calls' = calls \cup {r}
-    /\ UNCHANGED <<up, restarts, agentVars, msgVars, done, fixed, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, agentVars, msgVars, done, fixed, svcVars, wrong, replyVars>>
 
 CanAct(r) == (epoch[r.t] = r.ep \/ Break = "StaleFix") /\ proc[r.t] = Needs[r.kind]
 
 \* The fix acts on the state it claimed. An interrupt or a resume may not
-\* help; the state is then still claimed.
+\* help; the state is then still claimed. An interrupt that helps ends the
+\* turn with a result (`error_during_execution`) that names its message; a
+\* resume's turn names none; a stop takes an idle agent.
 FixActs(r) ==
     /\ up /\ r \in calls /\ CanAct(r)
     /\ \/ /\ proc' = [proc EXCEPT ![r.t] = CASE r.kind = "interrupt" -> "idle"
                                              [] r.kind = "resume" -> "working"
                                              [] OTHER -> "ended"]
           /\ epoch' = [epoch EXCEPT ![r.t] = @ + 1]
-       \/ (r.kind # "stop" /\ UNCHANGED <<proc, epoch>>)
+          /\ IF r.kind = "interrupt" THEN Result(r.t) ELSE UNCHANGED <<fold, last>>
+       \/ (r.kind # "stop" /\ UNCHANGED <<proc, epoch, fold, last>>)
     /\ calls' = calls \ {r} /\ done' = done \cup {r}
     /\ fixed' = fixed \cup {<<r.t, epoch[r.t]>>}
     /\ wrong' = wrong \cup (IF <<r.t, epoch[r.t]>> \in fixed THEN {"twice"} ELSE {})
                       \cup (IF epoch[r.t] = r.ep THEN {} ELSE {"stale"})
-    /\ UNCHANGED <<up, restarts, faults, msgVars, claims, svcVars>>
+    /\ UNCHANGED <<up, restarts, faults, msgVars, claims, svcVars, answers, rmem>>
 
 FixRefused(r) ==
     /\ up /\ r \in calls /\ ~CanAct(r)
     /\ calls' = calls \ {r} /\ done' = done \cup {r}
-    /\ UNCHANGED <<up, restarts, agentVars, msgVars, claims, fixed, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, agentVars, msgVars, claims, fixed, svcVars, wrong, replyVars>>
 
 \* A restart cut off the call: the claim ends, and its fix is never sent again.
 ClaimSettled(r) ==
     /\ up /\ r \in claims \ done /\ r \notin calls
     /\ done' = done \cup {r}
-    /\ UNCHANGED <<up, restarts, agentVars, msgVars, claims, calls, fixed, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, agentVars, msgVars, claims, calls, fixed, svcVars, replyVars,
+                   wrong>>
 
 -----------------------------------------------------------------------------
 (* Services: one owner; fixed by it or its parent; handed along an edge; *)
@@ -339,7 +442,7 @@ ServiceStarts(a, s) ==
     /\ up /\ svc[s] = "none" /\ Live(a)
     /\ svc' = [svc EXCEPT ![s] = "running"] /\ owner' = [owner EXCEPT ![s] = a]
     /\ keep' \in {[keep EXCEPT ![s] = k] : k \in BOOLEAN}
-    /\ UNCHANGED <<up, restarts, agentVars, msgVars, claimVars, wrong>>
+    /\ UNCHANGED <<up, restarts, agentVars, msgVars, claimVars, wrong, replyVars>>
 
 \* A restart or a stop: a stop ends the service; a restart leaves it running.
 ServiceFixed(c, s) ==
@@ -347,7 +450,7 @@ ServiceFixed(c, s) ==
     /\ \/ svc' = [svc EXCEPT ![s] = "ended"] /\ owner' = [owner EXCEPT ![s] = None]
        \/ UNCHANGED <<svc, owner>>
     /\ wrong' = wrong \cup (IF c = owner[s] \/ IsChild(owner[s], c) THEN {} ELSE {"service fix"})
-    /\ UNCHANGED <<up, restarts, agentVars, msgVars, claimVars, keep>>
+    /\ UNCHANGED <<up, restarts, agentVars, msgVars, claimVars, keep, replyVars>>
 
 ServiceHanded(c, s, b) ==
     LET o == owner[s] IN
@@ -355,7 +458,7 @@ ServiceHanded(c, s, b) ==
     /\ Live(c) /\ Live(o) /\ Live(b) /\ MayHand(c, o, b)
     /\ owner' = [owner EXCEPT ![s] = b]
     /\ wrong' = wrong \cup (IF c = o /\ (IsChild(o, b) \/ IsChild(b, o)) THEN {} ELSE {"hand"})
-    /\ UNCHANGED <<up, restarts, agentVars, msgVars, claimVars, svc, keep>>
+    /\ UNCHANGED <<up, restarts, agentVars, msgVars, claimVars, svc, keep, replyVars>>
 
 \* A kept service goes to its owner's parent; a main session never ends, so
 \* the owner here is a delegate.
@@ -366,15 +469,17 @@ ServiceOwnerEnded(s) ==
          THEN owner' = [owner EXCEPT ![s] = Main(owner[s])] /\ UNCHANGED svc
          ELSE /\ owner' = [owner EXCEPT ![s] = None]
               /\ svc' = IF Break = "OwnerClearedFirst" THEN svc ELSE [svc EXCEPT ![s] = "ended"]
-    /\ UNCHANGED <<up, restarts, agentVars, msgVars, claimVars, keep, wrong>>
+    /\ UNCHANGED <<up, restarts, agentVars, msgVars, claimVars, keep, wrong, replyVars>>
 
 -----------------------------------------------------------------------------
 Next ==
     \/ FrameworkDies \/ FrameworkStarts
-    \/ \E a \in Agents : Prompted(a) \/ TurnEnds(a) \/ Faults(a) \/ DelegateEnds(a)
+    \/ \E a \in Agents : \/ Prompted(a) \/ SelfStarts(a) \/ TurnEnds(a) \/ Faults(a)
+                         \/ DelegateEnds(a)
     \/ \E c, t \in Agents : Send(c, t) \/ ClaimTaken(c, t)
     \/ \E i \in Ids : \/ DeliveryAsked(i) \/ DeliveryTyped(i) \/ DeliveryRefused(i)
                       \/ DeliveryMarked(i) \/ SendingSettled(i) \/ EndedFirst(i)
+                      \/ ReplyStored(i) \/ NoticeStored(i)
     \/ \E r \in claims : FixActs(r) \/ FixRefused(r) \/ ClaimSettled(r)
     \/ \E s \in Services : \/ ServiceOwnerEnded(s)
                            \/ \E a \in Agents : ServiceStarts(a, s) \/ ServiceFixed(a, s)
@@ -387,6 +492,7 @@ Fairness ==
          /\ SF_vars(DeliveryAsked(i)) /\ SF_vars(DeliveryTyped(i))
          /\ WF_vars(DeliveryTyped(i) \/ DeliveryRefused(i))
          /\ WF_vars(DeliveryMarked(i)) /\ WF_vars(SendingSettled(i)) /\ WF_vars(EndedFirst(i))
+         /\ WF_vars(ReplyStored(i)) /\ WF_vars(NoticeStored(i))
     /\ WF_vars(\E r \in claims : FixActs(r) \/ FixRefused(r))
     /\ WF_vars(\E r \in claims : ClaimSettled(r))
     /\ \A s \in Services : WF_vars(ServiceOwnerEnded(s))
@@ -405,6 +511,11 @@ TypeOK ==
     /\ calls \subseteq claims \ done /\ done \subseteq claims
     /\ svc \in [Services -> {"none", "running", "ended"}]
     /\ owner \in [Services -> Agents \cup {None}]
+    /\ fold \in [Ids -> {"none", "turn", "result", "exited"}]
+    /\ answers \subseteq [re : Ids, kind : {"reply", "notice"}, to : Agents,
+                          src : {NoResult, OwnTurn} \cup Ids]
+    /\ rmem \subseteq Ids
+    /\ last \in [Agents -> {NoResult, OwnTurn} \cup Ids]
 
 Count(i) == Cardinality(UNION {{<<a, k>> : k \in {n \in DOMAIN inbox[a] : inbox[a][n] = i}}
                                 : a \in Agents})
@@ -475,5 +586,23 @@ ServiceEndsWithOwner ==
     \A s \in Services :
         (svc[s] = "running" /\ owner[s] \in Agents /\ proc[owner[s]] = "ended" /\ ~keep[s])
             ~> svc[s] = "ended"
+
+\* A message is answered once: a reply is stored at most once, across
+\* restarts, and a message never has both a reply and a notice.
+ReplyOnce == "reply twice" \notin wrong
+ReplyOrNotice == \A i \in Ids : \A r, q \in Answered(i) : r.kind = q.kind
+
+\* A reply or a notice goes from a delegate to its main session only.
+ReplyToMain == \A r \in answers : msgs[r.re].to \in Delegates /\ r.to = Main(msgs[r.re].to)
+
+\* A reply is the result that names its message, never one that names none
+\* (a brief, a resume, a turn the delegate started by itself).
+ReplyNamesMessage == \A r \in answers : r.kind = "reply" => r.src = r.re
+
+\* A delivered message whose turn ends, with a result or with the process's
+\* end, gets its reply or its notice.
+ReplyOrNoticeComes ==
+    \A i \in Ids : (msgs[i].to \in Delegates /\ fold[i] \in {"result", "exited"})
+                       ~> Answered(i) # {}
 
 =============================================================================
