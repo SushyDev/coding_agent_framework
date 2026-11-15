@@ -1,8 +1,8 @@
 defmodule CodingAgentFramework.Programs do
   @moduledoc """
   The absolute path of every program the framework runs on one host: tmux, dtach, claude, git
-  and gh, and the POSIX tools sh, sleep, rm, kill, env, ps, cat, tail, mkdir and mkfifo (a
-  headless delegate's stdin is a FIFO).
+  and gh, rsync, ssh and flock (a copy's sync), and the POSIX tools sh, sleep, rm, kill, env,
+  ps, cat, tail, mkdir and mkfifo (a headless delegate's stdin is a FIFO).
 
   The paths are found once, by the host's own shell (`command -v`), so no later call looks a
   program up through a `PATH`: a long `PATH` searched on the VM's file server slowed every file
@@ -35,6 +35,9 @@ defmodule CodingAgentFramework.Programs do
           | :claude
           | :git
           | :gh
+          | :rsync
+          | :ssh
+          | :flock
           | :sh
           | :sleep
           | :rm
@@ -53,6 +56,9 @@ defmodule CodingAgentFramework.Programs do
     :claude,
     :git,
     :gh,
+    :rsync,
+    :ssh,
+    :flock,
     :sh,
     :sleep,
     :rm,

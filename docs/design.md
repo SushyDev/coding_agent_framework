@@ -135,7 +135,7 @@ starts each part.
 | `Hosts` | the workstation and the other hosts, how each is reached, and its shell |
 | `Shell` | the only module that starts programs, locally or over ssh, each leading a process group of its own, which a timeout ends |
 | `Shell.Reaper` | one per host: ends a running command's group when its caller dies first or the VM dies |
-| `Programs` | the absolute path of tmux, dtach, claude, git, gh, sh, sleep, rm, kill, env, ps, cat and tail on each host; no other part names a fixed path |
+| `Programs` | the absolute path of tmux, dtach, claude, git, gh, rsync, ssh, flock, sh, sleep, rm, kill, env, ps, cat and tail on each host; no other part names a fixed path |
 | `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` |
 | `Usage` | each account's weekly allowance, from what Claude Code hands its status line; picks the account with the most left ("Allowance") |
 | `Tmux` | sessions, panes, tags, keys and viewers on one server; a contract with a CLI and a fake |
