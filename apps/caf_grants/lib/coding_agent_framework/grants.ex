@@ -19,6 +19,7 @@ defmodule CodingAgentFramework.Grants do
   | `may_message?/3` | a main session to its delegates and the other main sessions; a delegate to its parent | `:along_edges` |
   | `may_read?/3` (`look`, `transcript`) | the target itself, its parent, its children, and for a main session the other main sessions | `:close_read_along_edges` |
   | `may_fix?/3` | a parent on its own child | `:no_self_fix`, `:main_never_fixed`, `:only_parent_fixes` |
+  | `may_start_delegate?/2` | a main session | `:main_session_only` |
   | `may_start_service?/2`, `may_use?/2` | any agent the tree holds: a main session or a delegate | `{:unknown_agent, name}` |
   | `may_fix_service?/3` | the service's owner or the owner's parent | `:service_fixed_by_owner_or_parent` |
   | `may_hand?/4` | the owner, to its parent or a child | `:handed_by_owner`, `:handed_along_edge` |
@@ -74,6 +75,17 @@ defmodule CodingAgentFramework.Grants do
         child?(tree, target, caller) -> :ok
         true -> {:refused, :only_parent_fixes}
       end
+    end)
+  end
+
+  @doc """
+  May `caller` start a delegate (`start_delegate`, `run_delegate`)? A main session only. Until
+  `Mains` exists, a main session is known only as a parent the tree names.
+  """
+  @spec may_start_delegate?(t, String.t()) :: answer
+  def may_start_delegate?(grants, caller) do
+    check(grants, [caller], fn tree ->
+      if main?(tree, caller), do: :ok, else: {:refused, :main_session_only}
     end)
   end
 

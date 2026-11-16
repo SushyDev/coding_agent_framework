@@ -36,7 +36,8 @@ defmodule CodingAgentFramework.Delegates do
   `Turn.resumed/0`. A second such kill, or a refused resume, is `failed`, and that is the
   report. A row leaves `running` once.
 
-  Each report is `held` in the table, with a mark of its own, and survives restarts.
+  Each report is `held` in the table, with a mark of its own, and survives restarts. A call that
+  waits on it (`await_report/4`) takes it as it is held, and it is then `answered`, never held.
 
   It reads every row again when it starts and at each `cue/2`; the embedding app wires the cues of
   `Sessions`, `Stream` and `Transcripts` to it. After each write `notify` gets `%{topic:
@@ -79,6 +80,24 @@ defmodule CodingAgentFramework.Delegates do
   def held(delegates, parent, opts \\ []), do: call(delegates, {:held, parent}, opts, @step)
 
   @doc """
+  Waits up to `timeout` ms for the report of `parent`'s delegate `id` and takes it, for a call
+  that answers with it (`run_delegate`). Once the report is held, and only before the deadline,
+  `Delegates` marks it `answered` in the same step, so it is never also delivered as a message.
+  Answers `{:ok, %{id, name, status, text}}`; `{:unknown, :timeout}` at the deadline, the report
+  then held as any other; or `{:refused, reason}`: `{:no_delegate, id}`, `:answered`,
+  `:awaited` (another call waits on it), or `{:refused, reason}` for a start that was refused.
+
+      Delegates.await_report(delegates, "main", 1, 60_000)
+      #=> {:ok, %{id: 1, name: "app-unit-review", status: "finished", text: "Done."}}
+  """
+  def await_report(delegates, parent, id, timeout) when is_integer(timeout) and timeout >= 0 do
+    # The deadline is the caller's, on the node's clock: a request that waits in the queue does
+    # not move it, so the report is never taken after the caller stopped waiting.
+    deadline = System.monotonic_time(:millisecond) + timeout
+    call(delegates, {:await, parent, id, deadline}, [timeout: timeout + @step], @step)
+  end
+
+  @doc """
   Will deliver held report `id`: mark it sending, then type it with its mark through
   `Control`'s checked write once the parent's turn has ended, and settle it from the parent's
   transcript after a restart. Refused until `Screen` is built.
@@ -110,7 +129,8 @@ defmodule CodingAgentFramework.Delegates do
           sdb: sdb,
           notify: Keyword.get(opts, :notify, fn _ -> :ok end),
           clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
-          pending: %{}
+          pending: %{},
+          waiters: %{}
         })
 
       {:ok, s, {:continue, :settle}}
@@ -155,7 +175,28 @@ defmodule CodingAgentFramework.Delegates do
     {:reply, {:ok, Enum.map(Table.held(s.db, s.host, parent), &Map.take(&1, keys))}, s}
   end
 
+  def handle_call({:await, parent, id, deadline}, from, s) do
+    row = Table.get(s.db, id)
+    left = deadline - System.monotonic_time(:millisecond)
+
+    cond do
+      row == nil or row.parent != parent -> {:reply, {:refused, {:no_delegate, id}}, s}
+      row.report == "held" -> {:reply, take(s, row), s}
+      row.report == "answered" -> {:reply, {:refused, :answered}, s}
+      row.status == "refused" -> {:reply, {:refused, {:refused, row.reason}}, s}
+      Map.has_key?(s.waiters, id) -> {:reply, {:refused, :awaited}, s}
+      left <= 0 -> {:reply, {:unknown, :timeout}, s}
+      true -> {:noreply, put_in(s.waiters[id], {from, deadline, waited(id, left)})}
+    end
+  end
+
   @impl true
+  def handle_info({:waited, id}, s) do
+    {waiter, waiters} = Map.pop(s.waiters, id)
+    with {from, _, _} <- waiter, do: GenServer.reply(from, {:unknown, :timeout})
+    {:noreply, %{s | waiters: waiters}}
+  end
+
   def handle_info({ref, answer}, s) when is_reference(ref) do
     Process.demonitor(ref, [:flush])
 
@@ -310,8 +351,32 @@ defmodule CodingAgentFramework.Delegates do
   defp hold(s, row, status, text) do
     mark = "[report #{Stream.uuid()}]"
     write(s, row, status: status, report: "held", text: text, mark: mark)
-    s
+    answer_waiter(s, Table.get(s.db, row.id))
   end
+
+  # A call waits on this report: it takes it now, while its deadline has not passed.
+  defp answer_waiter(s, row) do
+    case Map.pop(s.waiters, row.id) do
+      {nil, _} ->
+        s
+
+      {{from, deadline, timer}, waiters} ->
+        Process.cancel_timer(timer)
+
+        if System.monotonic_time(:millisecond) < deadline,
+          do: GenServer.reply(from, take(s, row)),
+          else: GenServer.reply(from, {:unknown, :timeout})
+
+        %{s | waiters: waiters}
+    end
+  end
+
+  defp take(s, row) do
+    write(s, row, report: "answered")
+    {:ok, Map.take(row, [:id, :name, :status, :text])}
+  end
+
+  defp waited(id, left), do: Process.send_after(self(), {:waited, id}, left)
 
   defp followed(s, row) do
     case Stream.rows(s.stream, timeout: @step) do

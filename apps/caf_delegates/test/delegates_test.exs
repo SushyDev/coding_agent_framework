@@ -226,8 +226,42 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert {:ok, %{reason: "interrupted"}} = row_when(ctx, lost, &(&1.status == "refused"))
   end
 
+  test "a report a waiting call takes is answered, never held; past its deadline it is held",
+       ctx do
+    hold(ctx)
+    assert {:ok, %{id: id, name: name, brief: {:ok, %{uuid: u}}}} = start(ctx, "app", "unit/one")
+    assert {:refused, {:no_delegate, ^id}} = Delegates.await_report(current(ctx), "other", id, 1)
+    assert {:unknown, :timeout} = Delegates.await_report(current(ctx), "main", id, 200)
+
+    # The wait passed while the turn ran: the report is held, for a message.
+    allow(ctx, id, u)
+    File.rm!(Path.join(ctx.dir, "hold"))
+    {:ok, _} = cue_until(ctx, id, &(&1.status == "finished"))
+    assert {:ok, [%{id: ^id}]} = Delegates.held(current(ctx), "main")
+
+    # A second delegate's report, taken by the call that waits on it.
+    # The project's cap is one: the first row is set apart so a second may start.
+    Table.update(ctx.dtable, id, status: "refused")
+    assert {:ok, %{id: two}} = start(ctx, "app", "unit/two")
+    wait = Task.async(fn -> Delegates.await_report(current(ctx), "main", two, 10_000) end)
+    assert {:ok, %{report: "answered"}} = cue_until(ctx, two, &(&1.status == "finished"))
+
+    assert {:ok, %{id: ^two, name: "app-unit-two", status: "finished", text: "done " <> _}} =
+             Task.await(wait)
+
+    assert {:ok, [%{id: ^id, name: ^name}]} = Delegates.held(current(ctx), "main")
+    assert {:refused, :answered} = Delegates.await_report(current(ctx), "main", two, 1)
+  end
+
   defp start(ctx, project, branch),
     do: Delegates.start_delegate(current(ctx), "main", project, branch, "opus", "Review it.")
+
+  # A held turn waits on its permission request: answering it lets the turn end.
+  defp allow(ctx, id, uuid) do
+    %{session_id: sid} = Table.get(ctx.dtable, id)
+    stream_row(ctx, id, &(&1.requests["req-" <> uuid] != nil))
+    {:ok, _} = Stream.write(ctx.stream, sid, {:answer, "req-" <> uuid, :allow})
+  end
 
   defp session_row(ctx, name),
     do: CodingAgentFramework.Sessions.Table.get(ctx.table, "test", name)
