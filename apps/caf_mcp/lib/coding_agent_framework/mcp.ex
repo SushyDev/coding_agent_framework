@@ -36,8 +36,9 @@ defmodule CodingAgentFramework.MCP do
     `notifications/tools/list_changed` first;
   - the service tools, each through the services' own function, which makes its own `Grants`
     check, and answers as it does: `service_start(name, argv, opts)` (`start/5` in the copy
-    `place` names, on `opts`' `host`, the `:workstation` unless named, with its `forward` and
-    `keep`), `service_send(name, input)` (`send/5`), `service_restart(name)` (`restart/4`),
+    `place` names, on `opts`' `host`, the `:workstation` unless named, with its `forward`, the
+    `local` port it is forwarded to (the same port unless named), and `keep`; its `timeout`,
+    capped as `run`'s, bounds the whole start), `service_send(name, input)` (`send/5`), `service_restart(name)` (`restart/4`),
     `service_stop(name)` (`stop/4`), `service_hand(name, to)` (`hand/4`). Those open to any
     agent take `Grants.may_use?/2` first: `services()` (`list/1`, each row's name, host,
     owner, state, restarts and ports), `service_logs(name, from)` (`logs/4`), and
@@ -76,9 +77,8 @@ defmodule CodingAgentFramework.MCP do
   # The most a delegate's start may take of a `run_delegate`'s timeout: `Delegates`' own default.
   @start_wait 300_000
   @start Map.new(~w(project branch model brief)a, &{&1, %{type: "string"}})
-  # A service's name is its socket's and its log's file name.
-  @service ~r/\A[A-Za-z0-9_-]{1,64}\z/
-  @name %{type: "string", pattern: "^[A-Za-z0-9_-]{1,64}$"}
+  # `Services` checks a name's form; the tool only needs a string to call it.
+  @name %{type: "string", description: "1 to 64 letters, digits, - or _"}
   @timeout %{type: "integer", minimum: 1, description: "ms, at most a day"}
   @row ~w(name host owner state restarts port local)a
 
@@ -145,9 +145,17 @@ defmodule CodingAgentFramework.MCP do
             properties: %{
               host: %{type: "string", description: "the workstation unless named"},
               forward: %{type: "integer", minimum: 1, maximum: 65_535},
+              local: %{
+                type: "integer",
+                minimum: 1,
+                maximum: 65_535,
+                description:
+                  "the workstation's port for the forward; the service's port unless named"
+              },
               keep: %{type: "boolean", description: "goes to your parent when you end"}
             }
-          }
+          },
+          timeout: Map.put(@timeout, :description, "ms, at most a day; bounds the whole start")
         },
         required: ["name", "argv"]
       }
@@ -429,14 +437,20 @@ defmodule CodingAgentFramework.MCP do
     opts = Map.get(a, "opts", %{})
     host = Map.get(opts, "host", ctx.workstation)
     forward = Map.get(opts, "forward")
+    local = Map.get(opts, "local")
     keep = Map.get(opts, "keep", false)
+    timeout = Map.get(a, "timeout")
 
-    with :ok <- service_ok(name),
-         true <-
-           (Enum.all?([host | argv], &is_binary/1) and is_boolean(keep) and
-              (is_nil(forward) or forward in 1..65_535)) or {:refused, {:bad, :args}},
+    with true <-
+           (is_binary(name) and Enum.all?([host | argv], &is_binary/1) and is_boolean(keep) and
+              (is_nil(forward) or forward in 1..65_535) and
+              (is_nil(local) or (forward != nil and local in 1..65_535)) and
+              (is_nil(timeout) or (is_integer(timeout) and timeout > 0 and timeout <= ctx.cap))) or
+             {:refused, {:bad, :args}},
          {:ok, %{project: p, name: n, worktree: w}} <- ctx.place.(caller) do
+      forward = if local, do: {forward, local}, else: forward
       where = [host: host, project: p, copy: n, worktree: w, keep: keep, forward: forward]
+      where = if timeout, do: [{:timeout, timeout} | where], else: where
       mod.start(server, caller, name, argv, where)
     end
   end
@@ -528,7 +542,7 @@ defmodule CodingAgentFramework.MCP do
   end
 
   defp service_ok(name) do
-    if is_binary(name) and name =~ @service, do: :ok, else: {:refused, {:bad, :args}}
+    if is_binary(name), do: :ok, else: {:refused, {:bad, :args}}
   end
 
   # A line is looked for from the current start's offset: the tool takes no other.

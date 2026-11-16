@@ -176,7 +176,10 @@ defmodule CodingAgentFramework.MCPServicesTest do
     bash = program!(:bash)
 
     for {t, args} <- [
-          {"service_start", %{"name" => "../db", "argv" => [bash]}},
+          {"service_start", %{"name" => 5, "argv" => [bash]}},
+          {"service_start", %{"name" => "db", "argv" => [bash], "opts" => %{"local" => 5}}},
+          {"service_start", %{"name" => "db", "argv" => [bash], "timeout" => 60_001}},
+          {"service_start", %{"name" => "db", "argv" => [bash], "timeout" => 0}},
           {"service_start", %{"name" => "db", "argv" => []}},
           {"service_start", %{"name" => "db", "argv" => [bash, 1]}},
           {"service_start", %{"name" => "db", "argv" => [bash], "opts" => "x"}},
@@ -187,12 +190,29 @@ defmodule CodingAgentFramework.MCPServicesTest do
           {"service_wait", %{"name" => "db", "until" => %{"line" => 1}, "timeout" => 100}},
           {"service_wait", %{"name" => "db", "until" => "exit", "timeout" => 60_001}},
           {"service_hand", %{"name" => "db"}},
-          {"service_stop", %{"name" => ""}}
+          {"service_stop", %{"name" => 7}}
         ] do
       assert tool(c, "app-fix", t, args) == bad, "#{t} #{inspect(args)}"
     end
 
     assert Services.list(c.services) == []
+  end
+
+  test "a name's form, a local port and a timeout are Services' to answer", c do
+    assert start(c, "app-fix", %{"name" => "../db"}) == %{"refused" => ["name", "../db"]}
+    assert Services.list(c.services) == []
+
+    # The one host is the workstation, which needs no forward: its port is the local one.
+    assert %{"refused" => ["bad_forward", [5000, 5001]]} =
+             start(c, "app-fix", %{"opts" => %{"forward" => 5000, "local" => 5001}})
+
+    assert %{"ok" => %{"state" => "running", "local" => 5000}} =
+             start(c, "app-fix", %{"opts" => %{"forward" => 5000}, "timeout" => 30_000})
+
+    assert %{"refused" => ["local_taken", "db"]} =
+             start(c, "app-fix", %{"name" => "web", "opts" => %{"forward" => 5000}})
+
+    assert [%{name: "db"}] = Services.list(c.services)
   end
 
   test "each answer kind of Services is passed through unchanged", c do
