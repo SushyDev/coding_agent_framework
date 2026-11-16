@@ -22,7 +22,15 @@ defmodule CodingAgentFramework.Services do
   **A restart** (`restart/4`) counts up, ends the service, then starts it with its own sync.
 
   **Input and waits** (`send/5`, `wait/4`): input goes to the terminal by `dtach -p` on the
-  host while the pid still has its start time; a wait polls the log, a port, and the socket.
+  host while the pid still has its start time; a wait polls the log, a port, and the socket. A
+  line is looked for from the log's size at the current start, which the row keeps.
+
+  **A forward** (`start/5`'s `:forward`, for a host reached over ssh): once the service runs,
+  an `ssh -N -L 127.0.0.1:<local>:127.0.0.1:<port>` with `ExitOnForwardFailure` is held by
+  dtach in the workstation's services directory, on a socket named for the service. It is open
+  only when that ssh's own pid listens on the local port (`lsof`); the start answers then, and
+  a forward that fails ends the service. An end ends the forward first. `reopen/4` opens a lost
+  forward again, once per claimed state (see `model/tla/Copy.tla`'s `Fwds`).
 
   **The owner's end** (`owner_ended/3`), which the embedding app calls when an agent ends: each
   running service it owns ends, or, with `keep`, goes to the owner's parent. `keep` stays with
@@ -57,22 +65,44 @@ defmodule CodingAgentFramework.Services do
   @ended %{state: "ended", pid: nil, started: nil, owner: nil}
   # How long a read made in `Services`' own process (its start, a cue) waits on the host.
   @settle_read 2_000
-  # $1 the pid file, $2 the log, $3 the copy; then argv. exec keeps the pid the wrapper wrote,
-  # and the program leads the group dtach's child leads.
+  # $1 the pid file, $2 the log, $3 the copy, $4 wc; then argv. The pid file holds the pid and
+  # the log's size before the program writes, the start's log offset. exec keeps the pid the
+  # wrapper wrote, and the program leads the group dtach's child leads.
   @wrapper ~S"""
-  p=$1 l=$2 c=$3; shift 3
-  echo $$ > "$p"
+  p=$1 l=$2 c=$3 w=$4; shift 4
+  : >>"$l" && f=$("$w" -c <"$l") || exit 1
+  echo $$ $f > "$p"
   cd "$c" && exec "$@" >>"$l" 2>&1
   """
-  # $1 the pid file, $2 sleep, $3 ps, $4 tries 0.1 s apart. Prints `held <pid> <start time>`,
-  # `gone` when the pid no longer runs, or `none` with no pid file.
+  # $1 the pid file, $2 sleep, $3 ps, $4 tries 0.1 s apart. Prints `held <pid> <offset> <start
+  # time>`, `gone` when the pid no longer runs, or `none` with no pid file.
   @held ~S"""
   i=0
   while [ ! -s "$1" ]; do [ "$i" -ge "$4" ] && { echo none; exit 0; }; i=$((i+1)); "$2" 0.1; done
-  read -r p < "$1"; export LC_ALL=C TZ=UTC
+  read -r p f < "$1"; export LC_ALL=C TZ=UTC
   t=$("$3" -o lstart= -p "$p") || { echo gone; exit 0; }
-  echo held "$p" $t
+  echo held "$p" "${f:-0}" $t
   """
+  # On the workstation: $1 the forward's pid file; then the ssh's argv, which keeps the pid.
+  @fwd_wrapper ~S"""
+  echo $$ > "$1"; shift; exec "$@"
+  """
+  # $1 mkdir, $2 rm, $3 the directory, $4 a pid file an earlier forward left.
+  @fwd_clear ~S"""
+  "$1" -p "$3" && "$2" -f -- "$4"
+  """
+  # $1 the forward's pid file, $2 ps, $3 lsof, $4 the local port. Prints `open <pid> <start
+  # time>` when that pid itself listens on the port, `held …` when it runs but does not (another
+  # program's listener reads the same as no listener), `gone`, or `none`.
+  @fwd_read ~S"""
+  [ -s "$1" ] || { echo none; exit 0; }
+  read -r p < "$1"; export LC_ALL=C TZ=UTC
+  t=$("$2" -o lstart= -p "$p") || { echo gone; exit 0; }
+  "$3" -n -P -a -p "$p" -iTCP@127.0.0.1:"$4" -sTCP:LISTEN -t >/dev/null 2>&1 && s=open || s=held
+  echo "$s" "$p" $t
+  """
+  # How long a forward has to open, when no call names it.
+  @fwd_timeout 10_000
   # $1 the pid, $2 its start time, $3 ps, $4 kill, $5 the signal. The check and the signal run
   # in one process, so a pid another program took is never signaled.
   @end_script ~S"""
@@ -100,8 +130,10 @@ defmodule CodingAgentFramework.Services do
   `:copies`, the `Copies` server; `:grants`, a `Grants`; `:ended`, a function of an agent's
   name that answers true once that agent has ended (the embedding app's durable row); `:hosts`, each host's name to
   `%{programs: programs, dir: dir}`, its `Programs` (with `dtach`, `sh`, `env`, `rm`, `kill`,
-  `sleep`, `mkdir`, `ps`, `tail`, `nc` for a port wait, and for the copy `flock` and `rsync`) and its framework
-  directory.
+  `sleep`, `mkdir`, `ps`, `tail`, `wc`, `nc` for a port wait, and for the copy `flock` and `rsync`) and its framework
+  directory, and for a host reached over ssh, `ssh_env`, the environment its forwards' ssh runs
+  in (`{name, value}` pairs, none by default); `:workstation`, the name of the host forwards
+  are held on (its programs also with `lsof`).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -111,37 +143,75 @@ defmodule CodingAgentFramework.Services do
   in the copy the options name. Options: `:host`, `:project`, `:copy` (the worktree's name) and
   `:worktree` (its path), all required; `:keep` (false); `:env`, the program's whole
   environment as `{name, value}` pairs; `:start_timeout` (ms) for dtach's reply;
-  `:sync_timeout`, `:lock_wait` and `:reaper` for the sync. A name is free once its row is
-  `ended` or `refused`. Answers the row, `running`; or, when the owner ended before the start
-  settled, the row handed to the owner's parent (with `keep`) or `{:refused, {:start,
-  :owner_ended}}` once it is ended.
+  `:sync_timeout`, `:lock_wait` and `:reaper` for the sync; `:forward`, a port the service
+  listens on (its host's `127.0.0.1`) to forward to the workstation's same port, or `{port,
+  local}`; `:forward_timeout` (ms, default 10 s) for the forward to open. A name is free once
+  its row is `ended` or `refused`. Answers the row, `running`, with its forward open; or, when
+  the owner ended before the start settled, the row handed to the owner's parent (with `keep`)
+  or `{:refused, {:start, :owner_ended}}` once it is ended; or `{:refused, {:forward, reason}}`
+  once a forward that failed has ended the service.
   """
   @spec start(GenServer.server(), String.t(), String.t(), [String.t()], keyword) ::
           {:ok, map} | {:refused, term} | {:unknown, term}
   def start(services, owner, name, argv, opts) do
-    row = %{
-      name: name,
-      host: Keyword.fetch!(opts, :host),
-      project: Keyword.fetch!(opts, :project),
-      copy: Keyword.fetch!(opts, :copy),
-      worktree: Keyword.fetch!(opts, :worktree),
-      argv: argv,
-      env: Keyword.get(opts, :env, []),
-      owner: owner,
-      keep: Keyword.get(opts, :keep, false),
-      pid: nil,
-      started: nil,
-      restarts: 0,
-      state: "asked",
-      start_until: nil,
-      end_until: nil
-    }
-
-    with {:ok, grants} <- grants(services),
+    with {:ok, row} <- new_row(services, owner, name, argv, opts),
+         {:ok, grants} <- grants(services),
          :ok <- Grants.may_start_service?(grants, owner),
          :ok <- call(services, {:ask, row}),
          do: launch(services, row, opts)
   end
+
+  defp new_row(services, owner, name, argv, opts) do
+    host = Keyword.fetch!(opts, :host)
+
+    with {:ok, config} <- call(services, :config),
+         {:ok, port, local} <- forward_of(config, host, Keyword.get(opts, :forward)) do
+      {:ok,
+       %{
+         name: name,
+         host: host,
+         project: Keyword.fetch!(opts, :project),
+         copy: Keyword.fetch!(opts, :copy),
+         worktree: Keyword.fetch!(opts, :worktree),
+         argv: argv,
+         env: Keyword.get(opts, :env, []),
+         owner: owner,
+         keep: Keyword.get(opts, :keep, false),
+         pid: nil,
+         started: nil,
+         restarts: 0,
+         state: "asked",
+         start_until: nil,
+         end_until: nil,
+         log_from: nil,
+         port: port,
+         local: local,
+         fwd: nil,
+         opens: 0
+       }}
+    end
+  end
+
+  # A host this machine reaches without ssh needs no forward: its port is the local one.
+  defp forward_of(_config, _host, nil), do: {:ok, nil, nil}
+
+  defp forward_of(config, host, port) when is_integer(port),
+    do: forward_of(config, host, {port, port})
+
+  defp forward_of(config, host, {port, local} = forward)
+       when port in 1..65_535 and local in 1..65_535 do
+    if port == local or forwarded?(config, %{host: host, port: port}),
+      do: {:ok, port, local},
+      else: {:refused, {:bad_forward, forward}}
+  end
+
+  defp forward_of(_config, _host, other), do: {:refused, {:bad_forward, other}}
+
+  # A service whose port is forwarded: one asked for, on a host reached over ssh.
+  defp forwarded?(config, %{host: host, port: port}) when is_integer(port),
+    do: match?(%{programs: %{host: %{reach: {:ssh, _, _}}}}, config.hosts[host])
+
+  defp forwarded?(_config, _row), do: false
 
   @doc """
   Ends service `name`, for `caller`, its owner or the owner's parent. Option: `:timeout` (ms,
@@ -247,8 +317,9 @@ defmodule CodingAgentFramework.Services do
   Waits up to `timeout` ms until service `name` meets `until`, for any caller:
 
     * `{:line, pattern}` or `{:line, pattern, from}`: a whole line of the log from byte `from`
-      (default 0) matches `pattern` (a `Regex` or its source); answers `{:ok, {:line, line,
-      next}}`, `next` the offset just after that line;
+      (default the current start's offset, so a line an earlier start wrote never answers)
+      matches `pattern` (a `Regex` or its source); answers `{:ok, {:line, line, next}}`, `next`
+      the offset just after that line;
     * `{:port, port}`: the port listens on the host's `127.0.0.1` (the host's `nc`); answers
       `{:ok, {:port, port}}`;
     * `:exit`.
@@ -269,14 +340,19 @@ defmodule CodingAgentFramework.Services do
          {:ok, row} <- row_of(services, name),
          {:ok, ctx} <- context(services, row, @call),
          {:ok, nc} <- nc(ctx, until) do
-      wait_round(Map.put(ctx, :nc, nc), until, deadline, :timeout)
+      wait_round(Map.put(ctx, :nc, nc), from_start(until, row), deadline, :timeout)
     end
   end
 
-  defp until_ok({:line, pattern}), do: until_ok({:line, pattern, 0})
-  defp until_ok({:line, %Regex{}, from} = until) when from >= 0, do: {:ok, until}
+  defp from_start({:line, regex, :start}, row), do: {:line, regex, row.log_from || 0}
+  defp from_start(until, _row), do: until
 
-  defp until_ok({:line, source, from}) when is_binary(source) and from >= 0 do
+  defguardp from?(from) when from == :start or (is_integer(from) and from >= 0)
+
+  defp until_ok({:line, pattern}), do: until_ok({:line, pattern, :start})
+  defp until_ok({:line, %Regex{}, from} = until) when from?(from), do: {:ok, until}
+
+  defp until_ok({:line, source, from}) when is_binary(source) and from?(from) do
     case Regex.compile(source) do
       {:ok, regex} -> {:ok, {:line, regex, from}}
       {:error, _} -> {:refused, {:bad_pattern, source}}
@@ -414,30 +490,35 @@ defmodule CodingAgentFramework.Services do
     with {:ok, ctx} <- context(services, row, start),
          {:ok, _} <- Held.ready(ctx, row.worktree, [clear: [ctx.pid]] ++ opts, refused),
          until = now() + start,
-         {:ok, _} <- put(services, row.name, %{state: "starting", start_until: until}) do
-      held =
-        Held.hold(ctx, @wrapper, ["caf-service", ctx.pid, ctx.log, ctx.path], row.argv, row.env)
+         fields = %{state: "starting", start_until: until, fwd: nil, opens: 0},
+         {:ok, _} <- put(services, row.name, fields) do
+      args = ["caf-service", ctx.pid, ctx.log, ctx.path, ctx.programs.paths.wc]
+      held = Held.hold(ctx, @wrapper, args, row.argv, row.env)
 
       # Held or cut, the pid file says whether the wrapper ran.
-      Held.settle(
-        ctx,
-        held,
-        until,
-        fn _ -> read_held(ctx, @call) end,
-        &started(services, row.name, &1, opts)
-      )
+      with {:ok, row} <-
+             Held.settle(
+               ctx,
+               held,
+               until,
+               fn _ -> read_held(ctx, @call) end,
+               &started(services, row.name, &1, opts)
+             ),
+           do: forward(services, row, opts)
     end
   end
 
   # A start its owner's end took is ended here, in the start's own call.
   defp started(services, name, seen, opts) do
-    with {:ok, row} <- call(services, {:started, name, seen}) do
+    fwd_until = now() + Keyword.get(opts, :forward_timeout, @fwd_timeout)
+
+    with {:ok, row} <- call(services, {:started, name, seen, fwd_until}) do
       case seen do
         _ when row.state == "ending" ->
           with {:ok, _} <- end_service(services, row, %{state: "ending"}, opts),
                do: {:refused, {:start, :owner_ended}}
 
-        {:ok, {_, _}} ->
+        {:ok, {_, _, _}} ->
           {:ok, row}
 
         {:ok, :gone} ->
@@ -465,18 +546,145 @@ defmodule CodingAgentFramework.Services do
   end
 
   defp held(rest) do
-    [pid, started] = String.split(String.trim(rest), " ", parts: 2)
-    {:ok, {String.to_integer(pid), started}}
+    [pid, from, started] = String.split(String.trim(rest), " ", parts: 3)
+    {:ok, {String.to_integer(pid), String.to_integer(from), started}}
   end
 
-  # The end is written before it is sent, and is done once the socket reads dead: TERM, then
-  # KILL once its grace has passed.
+  # The service runs, and its row says its forward is starting: only now is the forward held
+  # (`ForwardEarly`), and the start answers once it is open. A forward that fails at its start
+  # ends the service (`FailKeepsService`).
+  defp forward(services, %{state: "running", fwd: "starting"} = row, opts) do
+    with {:ok, ctx} <- context(services, row, @call),
+         {:ok, row, held} <- call(services, {:hold_forward, row.name, claim(row), %{}, false}),
+         do: settle_forward(services, ctx, row, held, opts)
+  end
+
+  defp forward(_services, row, _opts), do: {:ok, row}
+
+  @doc """
+  Opens service `name`'s forward again after a loss: its socket read dead while the row said
+  `open`. `Recoveries` calls it with `claim`, `%{pid: pid, started: started, opens: opens}`
+  read from the row with that loss. It acts only while that is still the row's: the service's
+  current start and the forward's open count, so a claim reopens once (`Copy.tla`'s
+  `ForwardReopened`, once per `Key`), and a claim a restart of the service made stale does
+  nothing. Option: `:forward_timeout` (ms, default 10 s). Answers the row with its forward
+  `open`; `{:refused, {:forward, reason}}` once a reopen that failed has left it `failed`,
+  which stays until the service's next start; `{:refused, {:changed, _}}` for a stale claim.
+  """
+  @spec reopen(GenServer.server(), String.t(), map, keyword) ::
+          {:ok, map} | {:refused, term} | {:unknown, term}
+  def reopen(services, name, %{pid: pid, started: started, opens: opens}, opts \\ []) do
+    expect = %{state: "running", fwd: "open", pid: pid, started: started, opens: opens}
+
+    fields = %{
+      fwd: "reopening",
+      start_until: now() + Keyword.get(opts, :forward_timeout, @fwd_timeout)
+    }
+
+    with {:ok, row} <- row_of(services, name),
+         {:ok, %{ws: %{}} = ctx} <- context(services, row, @call),
+         {:ok, row, held} <- call(services, {:hold_forward, name, expect, fields, true}),
+         do: settle_forward(services, ctx, row, held, opts)
+  end
+
+  # The state a forward's settle claims: the row's current start, open count and forward state.
+  defp claim(row), do: Map.take(row, [:state, :pid, :started, :opens, :fwd])
+
+  defp settle_forward(services, ctx, row, held, opts) do
+    deadline = if match?({:refused, _}, held), do: now(), else: row.start_until
+
+    case forward_read(ctx.ws, row, deadline) do
+      :open ->
+        put(services, row.name, %{fwd: "open", opens: row.opens + 1}, claim(row))
+
+      {:failed, reason} when row.fwd == "starting" ->
+        with {:ok, _} <- end_service(services, row, %{state: "ending", fwd: "failed"}, opts),
+             do: {:refused, {:forward, reason}}
+
+      {:failed, reason} ->
+        _ = end_forward(ctx.ws, row)
+
+        with {:ok, _} <- put(services, row.name, %{fwd: "failed"}, claim(row)),
+             do: {:refused, {:forward, reason}}
+    end
+  end
+
+  # Open only when the forward's own ssh listens on the local port (`OpenByPort`); failed once
+  # it is gone, or at the deadline.
+  defp forward_read(ws, row, deadline) do
+    case read_forward(ws, row) do
+      {:open, _, _} ->
+        :open
+
+      :gone ->
+        {:failed, :exited}
+
+      _ ->
+        if now() >= deadline do
+          {:failed, :not_open}
+        else
+          pause(min(@round, deadline - now()))
+          forward_read(ws, row, deadline)
+        end
+    end
+  end
+
+  defp read_forward(ws, row) do
+    args = ["-c", @fwd_read, "caf-forward", fwd_pid(ws, row), ws.programs.paths.ps, ws.lsof]
+
+    case Shell.run(ws.programs.host, ws.programs.paths.sh, args ++ ["#{row.local}"],
+           timeout: @call
+         ) do
+      {:ok, %{status: 0, output: "none\n"}} -> :none
+      {:ok, %{status: 0, output: "gone\n"}} -> :gone
+      {:ok, %{status: 0, output: "open " <> rest}} -> forward_pid(:open, rest)
+      {:ok, %{status: 0, output: "held " <> rest}} -> forward_pid(:held, rest)
+      other -> {:unknown, {:forward, other}}
+    end
+  end
+
+  defp forward_pid(state, rest) do
+    [pid, started] = String.split(String.trim(rest), " ", parts: 2)
+    {state, String.to_integer(pid), started}
+  end
+
+  defp fwd_pid(ws, row), do: Path.join(ws.dir, row.name <> ".fwd.pid")
+
+  # The forward's ssh by the pid its wrapper wrote and that pid's start time; done once its
+  # socket reads dead.
+  defp end_forward(ws, row) do
+    case Holder.state(ws.holder, row.name) do
+      {:ok, dead} when dead in [:absent, :stale] ->
+        :ok
+
+      {:ok, :live} ->
+        with {state, pid, started} when state in [:open, :held] <- read_forward(ws, row),
+             proc = %{name: row.name, pid: pid, started: started},
+             :ok <- send_end(ws, proc, "TERM") do
+          dead_or_kill(ws, proc, now() + @kill_wait)
+        else
+          # Gone, or its wrapper not yet written: the socket says when it ends.
+          _ -> dead(ws, row.name, now() + @kill_wait)
+        end
+
+      other ->
+        {:unknown, {:forward, other}}
+    end
+  end
+
+  defp end_forward_of(%{ws: nil}, _row), do: :ok
+  defp end_forward_of(ctx, row), do: end_forward(ctx.ws, row)
+
+  # The end is written before it is sent, and is done once both sockets read dead: the
+  # forward's first (`ServiceEndFirst`), then the service's, TERM, then KILL once its grace has
+  # passed.
   defp end_service(services, row, fields, opts) do
     until = now() + Keyword.get(opts, :timeout, @grace)
     fields = Map.put(fields, :end_until, until)
 
     with {:ok, ctx} <- context(services, row, @call),
          {:ok, row} <- put(services, row.name, fields, %{state: row.state}),
+         :ok <- end_forward_of(ctx, row),
          :ok <- send_end(ctx, row, "TERM"),
          :ok <- dead_or_kill(ctx, row, until) do
       put(services, row.name, after_end(row))
@@ -534,7 +742,61 @@ defmodule CodingAgentFramework.Services do
              Map.merge(where, %{name: row.name, run: "service:" <> row.name}),
              timeout
            ),
-         do: {:ok, Map.merge(ctx, %{log: b <> ".log", pid: b <> ".pid"})}
+         {:ok, ws} <- if(forwarded?(config, row), do: ws(config), else: {:ok, nil}),
+         do: {:ok, Map.merge(ctx, %{log: b <> ".log", pid: b <> ".pid", ws: ws})}
+  end
+
+  # Where forwards are held: the workstation's services directory, each socket named for its
+  # service.
+  defp ws(config) do
+    with {:ok, %{programs: programs, dir: dir}} <- host_of(config, config.workstation),
+         dir = Path.join(dir, "services"),
+         {:ok, holder} <- Holder.new(programs, dir, timeout: 2_000),
+         {:ok, %{lsof: lsof}} <- Programs.take(programs, [:lsof]),
+         do: {:ok, %{programs: programs, holder: holder, dir: dir, lsof: lsof}}
+  end
+
+  defp host_of(config, name) do
+    case Map.fetch(config.hosts, name) do
+      {:ok, host} -> {:ok, host}
+      :error -> {:refused, {:no_host, name}}
+    end
+  end
+
+  # In this process, so a service's end, written here, comes wholly before the claim's check or
+  # wholly after the hold: an end that reads the forward's socket dead never meets a forward
+  # held after it. A reopen first reads the forward dead: a live one is no loss.
+  defp hold_forward(s, name, expect, fields, dead_first) do
+    with {:ok, ws} <- ws(s.config),
+         :ok <- if(dead_first, do: forward_dead(ws, name), else: :ok),
+         {:ok, row} <- put_row(s, name, fields, expect) do
+      %{sh: sh, mkdir: mkdir, rm: rm} = ws.programs.paths
+      {:ssh, ssh, destination} = s.config.hosts[row.host].programs.host.reach
+      clear = ["-c", @fwd_clear, "caf-forward", mkdir, rm, ws.dir, fwd_pid(ws, row)]
+      spec = "127.0.0.1:#{row.local}:127.0.0.1:#{row.port}"
+      options = ["-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes"]
+      argv = [sh, "-c", @fwd_wrapper, "caf-forward", fwd_pid(ws, row), ssh, "-N" | options]
+      env = Map.get(s.config.hosts[row.host], :ssh_env, [])
+
+      held =
+        case Shell.run(ws.programs.host, sh, clear, timeout: @call) do
+          {:ok, %{status: 0}} ->
+            Holder.hold(ws.holder, name, argv ++ ["-L", spec, "--", destination], env: env)
+
+          other ->
+            {:refused, {:clear, other}}
+        end
+
+      {:ok, row, held}
+    end
+  end
+
+  defp forward_dead(ws, name) do
+    case Holder.state(ws.holder, name) do
+      {:ok, dead} when dead in [:absent, :stale] -> :ok
+      {:ok, :live} -> {:refused, :forward_live}
+      other -> other
+    end
   end
 
   defp pause(ms) when ms > 0 do
@@ -575,7 +837,7 @@ defmodule CodingAgentFramework.Services do
 
     with :ok <- File.mkdir_p(dir),
          {:ok, db} <- Table.open(Path.join(dir, "services.db")) do
-      keys = [:hosts, :copies, :grants, :ended]
+      keys = [:hosts, :copies, :grants, :ended, :workstation]
       config = Map.new(keys, &{&1, Keyword.fetch!(opts, &1)})
       # A start not yet sent lost its call with the restart: nothing runs.
       for %{state: "asked"} = row <- Table.all(db),
@@ -612,7 +874,11 @@ defmodule CodingAgentFramework.Services do
   def handle_call({:put, name, fields, expect}, _from, s),
     do: {:reply, put_row(s, name, fields, expect), s}
 
-  def handle_call({:started, name, seen}, _from, s), do: {:reply, started_row(s, name, seen), s}
+  def handle_call({:started, name, seen, fwd_until}, _from, s),
+    do: {:reply, started_row(s, name, seen, fwd_until), s}
+
+  def handle_call({:hold_forward, name, expect, fields, dead_first}, _from, s),
+    do: {:reply, hold_forward(s, name, expect, fields, dead_first), s}
 
   defp put_row(s, name, fields, expect) do
     case Table.get(s.db, name) do
@@ -631,10 +897,11 @@ defmodule CodingAgentFramework.Services do
   end
 
   # In this process, with short reads: a start a restart cut is settled once its deadline has
-  # passed; then each end (one such a start's owner's end made too) is sent again and done once
-  # the socket reads dead. A row unread waits for the next cue.
+  # passed; then a forward's start or reopen past its deadline; then each end (one such a
+  # start's owner's end made too) is sent again and done once both sockets read dead. A row
+  # unread waits for the next cue.
   defp settle(s) do
-    for states <- [~w(starting), ~w(ending restarting)],
+    for states <- [~w(starting), ~w(running), ~w(ending restarting)],
         row <- Table.all(s.db),
         row.state in states do
       with {:ok, ctx} <- context_of(s.config, row, @settle_read) do
@@ -647,24 +914,56 @@ defmodule CodingAgentFramework.Services do
 
   defp settle_row(s, ctx, %{state: "starting"} = row) do
     Held.settle_cut(ctx, row.start_until, fn :cut -> read_held(ctx, @settle_read) end, fn seen ->
-      started_row(s, row.name, seen)
+      started_row(s, row.name, seen, now())
     end)
   end
+
+  # A forward whose call a restart cut: open if its own ssh holds the port, else failed; a
+  # forward that failed at its start ends the service.
+  defp settle_row(s, %{ws: %{}} = ctx, %{state: "running", fwd: fwd} = row)
+       when fwd in ~w(starting reopening) do
+    if now() >= row.start_until do
+      case forward_read(ctx.ws, row, now()) do
+        :open ->
+          put_row(s, row.name, %{fwd: "open", opens: row.opens + 1}, claim(row))
+
+        {:failed, _} ->
+          _ = end_forward(ctx.ws, row)
+          put_row(s, row.name, failed(row), claim(row))
+      end
+    end
+  end
+
+  defp settle_row(_s, _ctx, %{state: "running"}), do: :ok
 
   # A restart a restart cut is ended, not started again; KILL once the end's grace has passed.
   defp settle_row(s, ctx, row) do
     signal = if now() < (row.end_until || 0), do: "TERM", else: "KILL"
 
-    with :ok <- send_end(ctx, row, signal),
+    with :ok <- end_forward_of(ctx, row),
+         :ok <- send_end(ctx, row, signal),
          :ok <- dead(ctx, row.name, now()),
          do: put_row(s, row.name, @ended, %{state: row.state})
   end
 
+  defp failed(%{fwd: "starting"}),
+    do: %{fwd: "failed", state: "ending", end_until: now() + @grace}
+
+  defp failed(_reopening), do: %{fwd: "failed"}
+
   # A settled start, written; one that lands after its owner's end is taken as that end takes
   # it (`Copy.tla`'s `OwnerSeen`): handed to the owner's parent with `keep`, else ended. Read in
-  # the same call as the write, so the owner's end either sees `running` or is seen here.
-  defp started_row(s, name, seen) do
-    with {:ok, row} <- put_row(s, name, start_fields(seen), %{state: "starting"}) do
+  # the same call as the write, so the owner's end either sees `running` or is seen here. A
+  # forwarded service's row says its forward is starting, until `fwd_until`, in the same write.
+  defp started_row(s, name, seen, fwd_until) do
+    fields = start_fields(seen)
+
+    fields =
+      if fields.state == "running" and forwarded?(s.config, Table.get(s.db, name) || %{}),
+        do: Map.merge(fields, %{fwd: "starting", start_until: fwd_until}),
+        else: fields
+
+    with {:ok, row} <- put_row(s, name, fields, %{state: "starting"}) do
       if row.state == "running" and s.config.ended.(row.owner),
         do: put_row(s, name, taken(s.config.grants, row), %{state: "running"}),
         else: {:ok, row}
@@ -680,7 +979,9 @@ defmodule CodingAgentFramework.Services do
   end
 
   # What a settled start says the row is.
-  defp start_fields({:ok, {pid, started}}), do: %{state: "running", pid: pid, started: started}
+  defp start_fields({:ok, {pid, from, started}}),
+    do: %{state: "running", pid: pid, started: started, log_from: from}
+
   defp start_fields({:ok, :gone}), do: @ended
   defp start_fields(_none_or_refused), do: %{@ended | state: "refused"}
 end
