@@ -49,7 +49,7 @@ Each word below names one thing, and the design, the code and the views use it o
   own worktree. By default it runs headless: it reads JSON messages on stdin and writes JSON
   events on stdout, and nothing reads its screen. Started `interactive: true`, it runs Claude
   Code's terminal interface as a main session does, held the same way, so a person can attach
-  and type, and the framework's writes into it are checked by `Screen`. It acts like a subagent
+  and type, and what the framework hands it goes in as a main session's does. It acts like a subagent
   of its main session: it gets a brief and gives its reports.
 - **Operator**: a person or the app acting on agents from outside the tree (from a view, say).
   It acts through the same checks and claims as a parent, as a parent of every main session and
@@ -155,9 +155,9 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `ClaudeCLI` | the command line and environment of a session, per role and account |
 | `Registry` | reads Claude Code's `<config>/sessions/*.json` per account, and so each held agent's pid |
 | `Transcripts` | a session's transcript tail, its chats and its subagents |
-| `Screen` | a main session's screen and dialogs, per Claude Code release, from real fixtures a person captures with a script |
+| `Screen` | a main session's screen and dialogs, per Claude Code release, from real fixtures captured with a script: the trust dialog, typed commands and their result lines, the box before a typed write |
 | `Stream` | a headless delegate's stdin and event log: writes messages, reads events from an offset |
-| `Intake` | hook events in; holds `PermissionRequest` hooks until answered, and `PreToolUse` hooks until the app decides |
+| `Intake` | hook events in; holds `PermissionRequest` hooks until answered, `PreToolUse` hooks until the app decides, and each main session's waiting Stop hook until something is due for it |
 | `Control` | the one writer per host: send, answer, interrupt, stop, respawn |
 | `Sessions` | start, resume and stop held agents on the workstation, with their viewers, rows and worktrees |
 | `Mover` | drains a session and moves it between accounts |
@@ -167,7 +167,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Copies` | a host's copy of each worktree, brought in step by rsync before each job or service, and removed with the worktree |
 | `Jobs` | one-off commands on a host, in a copy: held, logged, ended by their exit or their timeout |
 | `Tracker` | the state views read: the fold of every reader |
-| `Recoveries` | detect a broken state, act once per state, verify; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after `/exit` within its stop's deadline, and only by the row's pid and start time (`Sessions` itself never kills) |
+| `Recoveries` | detect a broken state, act once per state, verify; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after its end within its stop's deadline, and only by the row's pid and start time (`Sessions` itself never kills) |
 | `Mailbox` | messages along the tree's edges and between main sessions: stored, delivered once, in order per sender and addressee |
 | `Services` | programs agents start and keep on a host, in a copy: held, owned, read, written to, restarted, with ports forwarded to the workstation |
 | `Grants` | decides whether a caller may act on a target, by the tree's edges; holds a fix's claim on it |
@@ -384,9 +384,11 @@ one press at any level. It goes to the account with the most allowance left:
 2. Wait until no background command runs and no `run_delegate` call of the session is under
    way (its report would otherwise be written to a process the move ends). This is read after
    the drain began, so nothing can start after it; a background command is a child of the session's process and ends with it.
-3. End the session through `Control`'s checked write: `/exit`, typed only when the turn has
-   ended and the input box is empty, in the same step as that check, so a prompt that arrives
-   in between is not cut off.
+3. End the session by SIGTERM to its pid, by the row's pid and start time, once its session
+   file says `idle` (F-114). Claude Code's shutdown keeps the transcript and fires SessionEnd
+   with reason `other`. A prompt through Remote Control that starts a turn between the read
+   and the signal is cut off, and what it wrote is kept by the copy in step 5; `Move.tla`
+   models this before `Mover` is built.
 4. Wait for the old process to exit.
 5. Copy the transcript to the other account. Copying after the exit keeps a turn that a prompt
    through Remote Control started before the end.
@@ -414,12 +416,12 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
 5. delivers its last message to the parent when it stops. When a restart lost the stop event,
    it delivers the transcript's last reply instead, and ends the delegate only after delivery.
    The delegate's row moves from running to finished once, by its Stop event or by its
-   transcript's last reply, whichever comes first; a later one is ignored. A report is tried at
-   each of the parent's turn ends, through `Control`'s checked write, and a refused write holds
-   it again. The row is marked sending before the write; after a restart, a row still marked
-   sending is settled from the parent's transcript, once the parent's turn that took it has
-   ended: delivered if the report is there, held again if not. Each report carries a mark of
-   its own that the transcript shows;
+   transcript's last reply, whichever comes first; a later one is ignored. A report goes to
+   the parent's waiting Stop hook ("Delivery into a main session"); with no waiter, it is held
+   until one connects. The row is marked sending before the waiter is answered; after a
+   restart, a row still marked sending is settled from the parent's transcript, once the
+   parent's turn that took it has ended: delivered if the report is there, held again if not.
+   Each report carries a mark of its own that the transcript shows;
 6. resumes it once when it is killed before its last reply, and reports a second such kill
    instead of retrying. That report is held and delivered like a finish. A kill after the last
    reply is a finish, read from the transcript.
@@ -498,7 +500,7 @@ process lives is running again. A stop whose deadline passes with its process al
 row stopping, with its deadline, and a restart does not set it back to running. One whose
 deadline passes with its process gone and its socket still live answers
 `unknown{socket_live}` and leaves the row stopping for the next settle. `Recoveries` ends an
-orphan's process, or one that did not exit after `/exit` within its stop's deadline, and only by
+orphan's process, or one that did not exit after its end within its stop's deadline, and only by
 the row's pid and start time; `Sessions` itself never kills. A running row with no call under
 way whose process exited by itself (a crash, or a kill) is settled stopped, with reason
 `exited`, once its process is gone by pid and start time and its socket is read as dead, so a
@@ -661,10 +663,32 @@ reading for delegates:
   transcript holds, with a turn cut off at the exit: 2.1.322 may run such a line again
   (F-51's build note, new-4). The framework does not rely on the drop.
 
-A main session stays interactive. `Screen` reads only a main session's screen: whether its input box is
-empty before a write, and its dialogs by label. Its fixtures are captured from a real session
-once per pinned Claude Code release by a script a person runs and reviews, with names and paths
-scrubbed; no test runs the real Claude Code.
+A main session stays interactive. `Screen` reads only a main session's screen: its dialogs by
+label, a typed command's result line, and whether its input box is empty before a typed write.
+Its fixtures are captured from a real session once per pinned Claude Code release by a script,
+run and reviewed, with names and paths scrubbed; no test runs the real Claude Code.
+
+**Delivery into a main session** (a report, a reply, a message) types nothing (F-114). Each
+main session's settings name a Stop hook with `asyncRewake: true` and a long `timeout`. Its
+program connects to `Intake` (the same port and secret as the other hooks), names its session,
+and waits. When something is due, `Intake` answers that waiter with the text; the program
+writes it to stderr and exits 2, and Claude Code starts a turn with it, even when the session
+is idle. Each turn's end starts the next waiter, so one waits at a time. The transcript holds
+the text as a user line (`Stop hook blocking error from command "Stop": <text>` in 2.1.322),
+which confirms the delivery. A draft a person left in the box is not touched, so the box need
+not be empty.
+
+A session with no waiter (before its first turn ends, after a waiter's timeout, or after a
+restart cut the waiter's connection) gets nothing that way, and `Intake` knows it, since it
+holds each waiter's connection. What is due is held until a waiter connects; a view shows a
+session idle with no waiter and something due, and the checked write through `Screen` reaches
+it.
+
+**Ending a session** is SIGTERM to its pid, by the row's pid and start time, once its session
+file says `idle`. It replaces a typed `/exit`. Claude Code's shutdown keeps the transcript and
+fires SessionEnd with reason `other`, which `Sessions` and `Recoveries` read as that end. The
+session file's `status` (`busy`, `idle`, `waiting` with `waitingFor`) is not documented; it is
+checked against each pinned release, as the screen fixtures are.
 
 ## Agents working together
 
@@ -1092,9 +1116,10 @@ without it.
 - An app's launch `env` may set Claude Code's own `CLAUDE_CODE_*` names on purpose; only the
   names the framework sets itself (`CLAUDE_CONFIG_DIR`, the MCP timeouts, `CLAUDECODE`, …) are
   refused. What "from nothing" keeps out is what is inherited, not what the app gives.
-- A `Stop` hook cannot deliver to an idle main session: it fires only as a turn ends, so a
-  report that arrives while the session waits would wait for a person. Delivery into a main
-  session goes through `Screen` and `Control`'s checked write (F-107).
+- A blocking `Stop` hook cannot deliver to an idle main session: it fires only as a turn ends
+  (F-107). An `asyncRewake` one can: it runs in the background and its exit 2 starts a turn,
+  measured on 2.1.322 after 12 minutes idle (F-114). Each pinned release's check measures a
+  waiter through a long idle and a compaction.
 - Remote Control starts only with an interactive session, so a headless delegate never has it;
   its settings still set `remoteControlAtStartup` to false, and a check against each pinned
   Claude Code release confirms a delegate starts with it off.
@@ -1232,7 +1257,7 @@ used and when it resets). It reads no credential and calls no API.
 Then `Delegate.tla` and `Delegates` (its start, finish and kill path are built). What is left:
 
 4. **`Screen`**, from the fixtures a person captures, then `Delegates`' delivery of a report
-   through `Control`'s checked write, and `run_delegate`.
+   through the waiting Stop hook (F-114), and `run_delegate`.
 5. **`Mover`**, against `Move.tla`.
 6. **`Mains`**: one main session per project, on trunk in the project's checkout (the clone it
    makes once under the framework home), the pull
@@ -1264,7 +1289,10 @@ code:
 12. **PreToolUse and PostToolUse hooks**: held like `PermissionRequest`, PreToolUse answered by
     an app callback with a short deadline (allow, deny or ask); then a permission policy asked
     before any request waits for a person, its decision recorded as a person's is.
-13. **`Screen`** (item 4), then delivery into a main session, then **interactive delegates**
+13. **`Screen`** (item 4, F-113), then delivery into a main session by the waiting Stop hook,
+    modeled first, and the checked write for a session with no waiter (it records the release
+    each session runs, and never trusts one read for a turn's end: F-113's new-2, new-4); the
+    end by SIGTERM in `Move.tla`; then **interactive delegates**
     (`interactive: true`), then **`Mains`** (item 6, several per project, named by the app; a main session's kept
     services end with it or go to a person, once one can end: F-109's new-4) and
     **`Mover`** (item 5, for delegates as well as main sessions).
