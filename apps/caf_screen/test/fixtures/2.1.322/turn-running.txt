@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.322
+▝▜██████▀  Opus 5.5 · Claude Ultra
+ ▝▝   ▝▝   /work/repo
+
+
+❯ Write forty short numbered lines about how a terminal draws text. Use no tools.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+✳ Ionizing…
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents

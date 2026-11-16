@@ -1,0 +1,40 @@
+  23. Font fallback finds another font when the main font lacks a glyph.
+  24. A rasterizer, such as FreeType or Core Text, turns glyph outlines into bitmaps.
+  25. Antialiasing smooths glyph edges using partial coverage values.
+  26. Rendered glyphs are cached in a texture atlas on the GPU.
+  27. Cell backgrounds are drawn first, as filled rectangles.
+  28. Glyph quads are drawn next, sampling from the atlas.
+  29. Foreground color is applied per glyph using the cell's attributes.
+  30. Underline, strikethrough and undercurl are drawn as extra shapes.
+  31. Box-drawing and block characters are often drawn by the terminal's own code, so they line up exactly.
+  32. Color emoji come from bitmap or color-layer font tables.
+  33. The cursor is drawn last, as a block, bar or underline.
+  34. Selection highlighting inverts or tints the selected cells.
+  35. The finished frame is presented through OpenGL, Metal, Vulkan or a 2D API.
+  36. Resizing the window changes the grid size and sends SIGWINCH to the program.
+  37. The program redraws its output to fit the new dimensions.
+  38. Synchronized-update modes stop a half-drawn frame from flickering.
+  39. Older terminals drew straight to the screen with no GPU.
+  40. Underneath it all, it's still just a stream of bytes turned into a grid.
+
+[38;5;246m✻[39m [38;5;246mSautéed for 11s · done 3:24 PM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse the Bash tool to run exactly this command and nothing else: touch capture-screen.txt[39m
+
+[38;5;246m[49m⏺[39m Creating empty file capture-screen.txt
+[38;5;246m  ⎿  $ touch capture-screen.txt[39m
+
+[38;5;153m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m [1m[38;5;153mBash command[0m
+ [1mTip: auto mode handles these prompts for you — choose "switch to auto mode" below[0m
+ [38;5;246mCreate empty file capture-screen.txt[39m
+[38;5;239m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[39m touch capture-screen.txt
+[38;5;239m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[39m Do you want to proceed?
+ [38;5;153m❯[39m [38;5;246m1. [38;5;153mYes[39m
+   [38;5;246m2. [39mYes, and always allow access to [1m/work/repo[0m from this project
+   [38;5;246m3. [39mYes, and switch to auto mode[38;5;246m · auto mode handles these prompts for you[39m
+   [38;5;246m4. [39mNo
+
+ [38;5;246mEsc to cancel · Tab to amend[39m
