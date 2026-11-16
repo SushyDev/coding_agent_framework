@@ -116,8 +116,11 @@ defmodule CodingAgentFramework.Copies do
       side = host_side(copy.programs, path, lock, wait)
       {rsh, dest} = reach(copy.programs.host, shim)
 
+      # `--modify-window=-1` compares times to the nanosecond: the quick check of size and whole
+      # seconds skips an edit of the same size made in the same second (F-85, new-1).
       args =
-        ["-lpt", "--files-from=" <> files, "--from0", "--delete-missing-args", "-e", rsh] ++
+        ["-lpt", "--modify-window=-1", "--files-from=" <> files, "--from0"] ++
+          ["--delete-missing-args", "-e", rsh] ++
           ["--rsync-path=" <> side, worktree <> "/", dest <> ":" <> path <> "/"]
 
       outcome =
