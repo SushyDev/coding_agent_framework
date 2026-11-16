@@ -6,8 +6,10 @@ defmodule CodingAgentFramework.Grants do
 
   **The tree** is read from what holds it at each check, never kept: `tree` is a function the
   embedding app hands `new/1`, of no arguments, that answers one map per delegate the framework
-  holds, `%{name: String.t(), project: String.t(), parent: String.t()}` (for now, each row of
-  `Delegates`' table). Main sessions are the parents no entry names as a delegate. The checks
+  holds, `%{name: String.t(), project: String.t(), parent: String.t() | nil}` (for now, each
+  row of `Delegates`' table, and each main session the embedding app declares). Main sessions
+  are the entries with no parent (`parent: nil`, a root), and the parents no entry names as a
+  delegate. The checks
   read only `name` and `parent`; a name the tree does not hold is
   `{:refused, {:unknown_agent, name}}`, and one named with two parents is
   `{:refused, {:two_parents, name}}`.
@@ -79,8 +81,12 @@ defmodule CodingAgentFramework.Grants do
   end
 
   @doc """
-  May `caller` start a delegate (`start_delegate`, `run_delegate`)? A main session only. Until
-  `Mains` exists, a main session is known only as a parent the tree names.
+  May `caller` start a delegate (`start_delegate`, `run_delegate`)? A main session only: an
+  entry with no parent, or a parent the tree names.
+
+      iex> grants = CodingAgentFramework.Grants.new(fn -> [%{name: "app-main", project: "app", parent: nil}] end)
+      iex> CodingAgentFramework.Grants.may_start_delegate?(grants, "app-main")
+      :ok
   """
   @spec may_start_delegate?(t, String.t()) :: answer
   def may_start_delegate?(grants, caller) do
@@ -110,7 +116,10 @@ defmodule CodingAgentFramework.Grants do
   @spec parent(t, String.t()) :: {:ok, String.t()} | {:refused, term}
   def parent(grants, name) do
     check(grants, [name], fn tree ->
-      with :error <- Map.fetch(tree.parents, name), do: {:refused, :main_has_no_parent}
+      case Map.fetch(tree.parents, name) do
+        {:ok, parent} when is_binary(parent) -> {:ok, parent}
+        _ -> {:refused, :main_has_no_parent}
+      end
     end)
   end
 
@@ -141,7 +150,10 @@ defmodule CodingAgentFramework.Grants do
     entries = grants.tree.()
     parents = Map.new(entries, &{&1.name, &1.parent})
     two = Enum.find(entries, &(parents[&1.name] != &1.parent))
-    mains = for %{parent: p} <- entries, not Map.has_key?(parents, p), into: MapSet.new(), do: p
+    # A root is a main session; so is a parent no entry names, until every main is declared.
+    roots = for %{name: n, parent: nil} <- entries, do: n
+    named = for %{parent: p} <- entries, is_binary(p), not Map.has_key?(parents, p), do: p
+    mains = MapSet.new(roots ++ named)
     tree = %{parents: parents, mains: mains}
 
     cond do

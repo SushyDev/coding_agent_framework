@@ -391,6 +391,28 @@ defmodule CodingAgentFramework.MCP do
   defp taken({:taken, id, outcome}), do: {outcome, id}
   defp taken(outcome), do: {outcome, nil}
 
+  @doc """
+  The caller of job `job`, as `run` named it (`mcp-<instance>-<call id>`), read from the call
+  log in `dir` (the `:dir` the part was started with). It asks no process, so the embedding
+  app can route a job's late end while `MCP` is not running: `Jobs` hands the ends it owes as
+  it starts, before `MCP`, which is given `Jobs`, has started. Answers `{:ok, agent}`,
+  `{:refused, {:not_ours, job}}` for an id this instance did not make, `{:refused, {:no_call,
+  id}}`, or `{:unknown, reason}`.
+
+      MCP.caller("/srv/caf/parts/mcp", "a", "mcp-a-7")
+      #=> {:ok, "app-unit-review"}
+  """
+  @spec caller(String.t(), String.t(), String.t()) ::
+          {:ok, String.t()} | {:refused, term} | {:unknown, term}
+  def caller(dir, instance, job) do
+    with ["", id] <- String.split(job, "mcp-#{instance}-", parts: 2),
+         {id, ""} <- Integer.parse(id) do
+      Table.caller(Path.join(dir, "mcp.db"), id)
+    else
+      _ -> {:refused, {:not_ours, job}}
+    end
+  end
+
   @doc "Every call's row, oldest first."
   @spec calls(GenServer.server()) :: [map] | {:unknown, term}
   def calls(mcp), do: ask(mcp, :calls)
