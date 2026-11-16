@@ -184,8 +184,16 @@ say() { printf '%s\n' "$@"; }
 pane_dead() { tmux display-message -p -t "$pane" '#{pane_dead}'; }
 
 type_text() { tmux send-keys -t "$pane" -l -- "$1"; }
-# The text and its Enter in one tmux command, so the Enter reaches only the pane the text did.
-type_line() { tmux send-keys -t "$pane" -l -- "$1" \; send-keys -t "$pane" Enter; }
+# The text, then its Enter as a key of its own once the pane shows the text's start (up to 3 s):
+# Claude Code reads text and Enter in one burst as a paste, and the Enter as a newline (F-105).
+type_line() {
+  local start=${1:0:20} deadline=$((SECONDS + 3))
+  tmux send-keys -t "$pane" -l -- "$1"
+  until [[ "$(tmux capture-pane -p -t "$pane")" == *"$start"* ]] || ((SECONDS >= deadline)); do
+    "$CAF_SLEEP" 0.1
+  done
+  tmux send-keys -t "$pane" Enter
+}
 # Keys only the dry run sends: in a real run, the person answers each dialog.
 dry_keys() { if ((dry_run)); then tmux send-keys -t "$pane" "$@"; fi; }
 
