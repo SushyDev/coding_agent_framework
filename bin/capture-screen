@@ -161,7 +161,9 @@ launch_env=(
 )
 # The CA bundle devenv names: without it, Claude Code's TLS to its service fails (the login's
 # UNABLE_TO_GET_ISSUER_CERT_LOCALLY), F-105.
-for var in NODE_EXTRA_CA_CERTS NIX_SSL_CERT_FILE SSL_CERT_FILE; do
+# USER and LOGNAME too: Claude Code reads its login from the macOS Keychain under the user's
+# name, and without them a logged-in account reads as "Not logged in" (F-105).
+for var in NODE_EXTRA_CA_CERTS NIX_SSL_CERT_FILE SSL_CERT_FILE USER LOGNAME; do
   [[ -z "${!var:-}" ]] || launch_env+=("$var=${!var}")
 done
 
