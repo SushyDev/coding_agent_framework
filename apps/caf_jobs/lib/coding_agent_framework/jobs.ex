@@ -55,11 +55,12 @@ defmodule CodingAgentFramework.Jobs do
 
   use GenServer
 
-  alias CodingAgentFramework.{Copies, Shell}
+  alias CodingAgentFramework.{Copies, Programs, Shell}
   alias CodingAgentFramework.Copies.Held
   alias CodingAgentFramework.Jobs.Table
 
   @call 5_000
+  @log_max 16_384
   # How long past the call's deadline a read waits for the host to end the job itself.
   @grace 5_000
   # $1..$7: the copy, the log, the exit file, the timeout in seconds, kill, sleep, mkdir; then
@@ -177,14 +178,17 @@ defmodule CodingAgentFramework.Jobs do
 
   @doc """
   The job's log from byte `offset`: `{:ok, %{text: text, next: offset}}`, where `next` is the
-  offset to read from next. Options: `:timeout` (ms).
+  offset to read from next. The host's `tail | head` takes at most `:max` bytes (default 16 KiB),
+  so a long log does not move through `Shell` whole. Options: `:timeout` (ms), `:max` (bytes).
   """
   @spec log(GenServer.server(), String.t(), non_neg_integer, keyword) ::
           {:ok, map} | {:refused, term} | {:unknown, term}
   def log(jobs, id, offset, opts \\ []) do
+    max = Keyword.get(opts, :max, @log_max)
+
     with {:ok, row} <- row_of(jobs, id),
          {:ok, ctx} <- context(jobs, id, row, @call),
-         {:ok, text} <- tail(ctx, "+#{offset + 1}", Keyword.get(opts, :timeout, @call)),
+         {:ok, text} <- bounded(ctx, offset, max, Keyword.get(opts, :timeout, @call)),
          do: {:ok, %{text: text, next: offset + byte_size(text)}}
   end
 
@@ -325,6 +329,25 @@ defmodule CodingAgentFramework.Jobs do
     {:ok, %{exit: code, log: log, fetch: fetch}}
   end
 
+  # A pipe hides the tail's own status, so a log that cannot be read is refused before it; the
+  # tail's broken-pipe complaint, once head has its bytes, goes to /dev/null, not into the text.
+  @bounded ~S"""
+  [ -r "$1" ] || exit 1
+  "$2" -c "+$3" "$1" 2>/dev/null | "$4" -c "$5"
+  """
+
+  defp bounded(ctx, offset, max, timeout) do
+    with {:ok, p} <- Programs.take(ctx.programs, [:sh, :tail, :head]) do
+      args = ["-c", @bounded, "sh", ctx.log, p.tail, "#{offset + 1}", p.head, "#{max}"]
+
+      case Shell.run(ctx.programs.host, p.sh, args, timeout: timeout) do
+        {:ok, %{status: 0, output: text}} -> {:ok, text}
+        other -> {:unknown, {:log, other}}
+      end
+    end
+  end
+
+  # The last `bytes` of the log (`tail -c N`): already bounded.
   defp tail(ctx, from, timeout) do
     args = ["-c", from, ctx.log]
 

@@ -71,6 +71,8 @@ defmodule CodingAgentFramework.MCP do
   @step 5_000
   # The most bytes of a log or a transcript one answer carries.
   @window 16_384
+  # A read takes one byte past the window, so `lines/2` can tell a longer line from one that fits.
+  @read_max @window + 1
   # The default cap on a `run`'s timeout: a job the caller forgot still ends within a day.
   @day 86_400_000
   @agent ~r/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z/
@@ -472,7 +474,7 @@ defmodule CodingAgentFramework.MCP do
 
     with :ok <- service_ok(name),
          :ok <- Grants.may_use?(ctx.grants, caller),
-         do: mod.logs(server, name, from)
+         do: mod.logs(server, name, from, max: @window)
   end
 
   defp act(ctx, caller, _id, "service_send", %{"name" => name, "input" => input})
@@ -519,7 +521,7 @@ defmodule CodingAgentFramework.MCP do
     with {:ok, a} <- close(ctx, caller, agent, :no_screen),
          {:ok, {tmod, t}} <- transcripts(ctx, a) do
       events = mod.log(server, a.session_id, {:last, @window}, timeout: @step)
-      transcript = tmod.text(t, a.session_id, {:last, @window}, timeout: @step)
+      transcript = tmod.text(t, a.session_id, {:last, @window}, timeout: @step, max: @read_max)
 
       [events, transcript] =
         Enum.map([events, transcript], &with({:ok, l} <- lines(&1, true), do: l.text))
@@ -532,7 +534,7 @@ defmodule CodingAgentFramework.MCP do
        when is_binary(agent) and is_integer(from) and from >= 0 do
     with {:ok, a} <- close(ctx, caller, agent, :no_session),
          {:ok, {mod, t}} <- transcripts(ctx, a),
-         do: lines(mod.text(t, a.session_id, from, timeout: @step), false)
+         do: lines(mod.text(t, a.session_id, from, timeout: @step, max: @read_max), false)
   end
 
   defp act(_ctx, _caller, _id, tool, _args) do

@@ -17,7 +17,7 @@ let
   #   - nc: a service's port wait (Services.wait), `nc -z`.
   #   - wc, lsof: a service's log offset at its start, and whether a forward's own ssh holds its
   #     local port (Services).
-  #   - sh, bash, rm, mv, env, kill, ps, cat, tail, mkdir, mkfifo, echo, sleep, true: the POSIX
+  #   - sh, bash, rm, mv, env, kill, ps, cat, tail, head, mkdir, mkfifo, echo, sleep, true: the POSIX
   #     tools the tests and scripts call.
   #   - tlc and java: TLA+ checks of model/tla (bin/check-model). Development only.
   programs = {
@@ -41,6 +41,7 @@ let
     PS = lib.getExe' pkgs.ps "ps";
     CAT = lib.getExe' pkgs.coreutils "cat";
     TAIL = lib.getExe' pkgs.coreutils "tail";
+    HEAD = lib.getExe' pkgs.coreutils "head";
     MKDIR = lib.getExe' pkgs.coreutils "mkdir";
     MKFIFO = lib.getExe' pkgs.coreutils "mkfifo";
     ECHO = lib.getExe' pkgs.coreutils "echo";

@@ -33,6 +33,7 @@ defmodule CodingAgentFramework.JobsTest do
       write) shift; while [ $# -gt 1 ]; do
           case $1 in */*) #{program!(:mkdir)} -p "${1%/*}" ;; esac; echo "$2" > "$1"; shift 2; done; exit 0 ;;
       writewait) echo "$3" > "$2"; set -- wait ;;
+      chatty) i=0; while [ $i -lt 5000 ]; do echo "line $i of a long log, padded to forty"; i=$((i+1)); done; exit 0 ;;
       big) echo 1 > big.bin; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21; do
           #{program!(:cat)} big.bin big.bin > big.new; #{program!(:mv)} big.new big.bin; done; exit 0 ;;
     esac
@@ -147,6 +148,26 @@ defmodule CodingAgentFramework.JobsTest do
       assert {:ok, %{text: "exit in one\n", next: 16}} = Jobs.log(c.jobs, "j3", 4)
       assert %{state: "exited", code: 3} = Enum.find(Jobs.rows(c.jobs), &(&1.id == "j3"))
       assert {:refused, {:job_exists, "j3"}} = run(c, "j3", unquote(host), ~w(exit 0))
+    end
+  end
+
+  for host <- ["test", "box"] do
+    test "BoundedRead: a log read on #{host} from an offset answers at most the bound", c do
+      assert {:ok, %{exit: 0}} = run(c, "jc", unquote(host), ~w(chatty))
+      # The log is written by dtach's own process, and may still be coming when the exit is known.
+      await(fn ->
+        with {:ok, %{text: <<_>>}} <- Jobs.log(c.jobs, "jc", 150_000, max: 1), do: {:ok, :whole}
+      end)
+
+      assert {:ok, %{text: first, next: 100}} = Jobs.log(c.jobs, "jc", 0, max: 100)
+      assert byte_size(first) == 100
+      assert {:ok, %{text: second, next: 250}} = Jobs.log(c.jobs, "jc", 100, max: 150)
+      assert byte_size(second) == 150
+
+      # The log is over 16 KiB (and over a pipe's buffer), so a read with no bound given stops at the default.
+      assert {:ok, %{text: text, next: 16_484}} = Jobs.log(c.jobs, "jc", 100)
+      assert byte_size(text) == 16_384
+      assert String.starts_with?(first <> second, "job chatty in one\nline 0 of")
     end
   end
 

@@ -147,6 +147,23 @@ defmodule CodingAgentFramework.MCPServicesTest do
     assert %{"refused" => ["unknown_agent", "stray"]} = tool(c, "stray", "services", %{})
   end
 
+  test "service_logs answers at most the window, and the next offset to read from", c do
+    assert %{"ok" => %{"state" => "running"}} = start(c, "app-fix")
+    assert %{"ok" => ["line", "up", 3]} = wait_line(c, "app-fix", "^up$")
+    [log] = Path.wildcard(Path.join(c.dir, "**/services/db.log"))
+    File.write!(log, String.duplicate("0123456789", 100_000), [:append])
+
+    assert %{"ok" => %{"text" => text, "next" => 16_384}} =
+             tool(c, "app-fix", "service_logs", %{"name" => "db", "from" => 0})
+
+    assert byte_size(text) == 16_384
+
+    assert %{"ok" => %{"text" => more, "next" => 32_768}} =
+             tool(c, "app-fix", "service_logs", %{"name" => "db", "from" => 16_384})
+
+    assert byte_size(more) == 16_384
+  end
+
   test "each fix is refused where the tools table says", c do
     assert %{"refused" => ["unknown_agent", "stray"]} = start(c, "stray")
     assert %{"ok" => %{"owner" => "app-fix"}} = start(c, "app-fix")
