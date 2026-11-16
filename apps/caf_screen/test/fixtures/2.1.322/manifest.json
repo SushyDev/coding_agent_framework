@@ -1,0 +1,24 @@
+{
+  "claude_version": "2.1.322",
+  "tmux": "tmux 3.8",
+  "dry_run": false,
+  "pane": {"width": 120, "height": 40},
+  "fixtures": [
+    {"file": "trust-dialog.txt", "state": "trust-dialog", "escapes": false, "description": "The workspace trust dialog, at the start in a new folder.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:23:48Z"},
+    {"file": "trust-dialog.ansi", "state": "trust-dialog", "escapes": true, "description": "The workspace trust dialog, at the start in a new folder.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:23:48Z"},
+    {"file": "idle-empty.txt", "state": "idle-empty", "escapes": false, "description": "Idle after the trust dialog, with an empty input box.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:23:51Z"},
+    {"file": "idle-empty.ansi", "state": "idle-empty", "escapes": true, "description": "Idle after the trust dialog, with an empty input box.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:23:51Z"},
+    {"file": "text-typed.txt", "state": "text-typed", "escapes": false, "description": "Text typed in the input box and not sent.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:23:51Z"},
+    {"file": "text-typed.ansi", "state": "text-typed", "escapes": true, "description": "Text typed in the input box and not sent.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:23:51Z"},
+    {"file": "turn-running.txt", "state": "turn-running", "escapes": false, "description": "A turn running, with its spinner.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:23:52Z"},
+    {"file": "turn-running.ansi", "state": "turn-running", "escapes": true, "description": "A turn running, with its spinner.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:23:52Z"},
+    {"file": "turn-ended.txt", "state": "turn-ended", "escapes": false, "description": "The turn ended after a reply, with an empty input box.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:24:04Z"},
+    {"file": "turn-ended.ansi", "state": "turn-ended", "escapes": true, "description": "The turn ended after a reply, with an empty input box.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:24:04Z"},
+    {"file": "permission-dialog.txt", "state": "permission-dialog", "escapes": false, "description": "A permission dialog for a shell command.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:24:06Z"},
+    {"file": "permission-dialog.ansi", "state": "permission-dialog", "escapes": true, "description": "A permission dialog for a shell command.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:24:06Z"},
+    {"file": "turn-ended-after-tool.txt", "state": "turn-ended-after-tool", "escapes": false, "description": "The turn ended after the shell command, with an empty input box.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:24:09Z"},
+    {"file": "turn-ended-after-tool.ansi", "state": "turn-ended-after-tool", "escapes": true, "description": "The turn ended after the shell command, with an empty input box.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:24:09Z"},
+    {"file": "exited.txt", "state": "exited", "escapes": false, "description": "The last screen after /exit.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:24:10Z"},
+    {"file": "exited.ansi", "state": "exited", "escapes": true, "description": "The last screen after /exit.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:24:10Z"}
+  ]
+}

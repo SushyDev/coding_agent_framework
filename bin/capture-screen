@@ -159,6 +159,23 @@ launch_env=(
   "CLAUDE_CONFIG_DIR=$config"
   "DISABLE_AUTOUPDATER=1"
 )
+# The CA bundle devenv names: without it, Claude Code's TLS to its service fails (the login's
+# UNABLE_TO_GET_ISSUER_CERT_LOCALLY), F-105.
+# USER and LOGNAME too: Claude Code reads its login from the macOS Keychain under the user's
+# name, and without them a logged-in account reads as "Not logged in" (F-105).
+for var in NODE_EXTRA_CA_CERTS NIX_SSL_CERT_FILE SSL_CERT_FILE USER LOGNAME; do
+  [[ -z "${!var:-}" ]] || launch_env+=("$var=${!var}")
+done
+# Claude Code reads that login by running macOS's `security`, by name: a folder of the script's
+# own holds only it, at the end of PATH, so nothing else of /usr/bin comes in (F-105).
+if [[ -x /usr/bin/security ]]; then
+  keychain_bin="$tmp/bin"
+  mkdir "$keychain_bin"
+  ln -s /usr/bin/security "$keychain_bin/security"
+  for i in "${!launch_env[@]}"; do
+    [[ "${launch_env[i]}" != PATH=* ]] || launch_env[i]="${launch_env[i]}:$keychain_bin"
+  done
+fi
 
 version_line="$("$CAF_ENV" -i "${launch_env[@]}" "${program[@]}" --version)"
 version="${version_line%% *}"
@@ -184,8 +201,16 @@ say() { printf '%s\n' "$@"; }
 pane_dead() { tmux display-message -p -t "$pane" '#{pane_dead}'; }
 
 type_text() { tmux send-keys -t "$pane" -l -- "$1"; }
-# The text and its Enter in one tmux command, so the Enter reaches only the pane the text did.
-type_line() { tmux send-keys -t "$pane" -l -- "$1" \; send-keys -t "$pane" Enter; }
+# The text, then its Enter as a key of its own once the pane shows the text's start (up to 3 s):
+# Claude Code reads text and Enter in one burst as a paste, and the Enter as a newline (F-105).
+type_line() {
+  local start=${1:0:20} deadline=$((SECONDS + 3))
+  tmux send-keys -t "$pane" -l -- "$1"
+  until [[ "$(tmux capture-pane -p -t "$pane")" == *"$start"* ]] || ((SECONDS >= deadline)); do
+    "$CAF_SLEEP" 0.1
+  done
+  tmux send-keys -t "$pane" Enter
+}
 # Keys only the dry run sends: in a real run, the person answers each dialog.
 dry_keys() { if ((dry_run)); then tmux send-keys -t "$pane" "$@"; fi; }
 
@@ -222,15 +247,22 @@ await_state() {
     return
   fi
   while true; do
-    read -r -p "    Press Enter when the pane shows it, or type q and Enter to stop: " answer ||
+    read -r -p "    Press Enter when the pane shows it, s if this release does not show it, or q to stop: " answer ||
       fail "stopped: the terminal closed"
     [[ "$answer" != q ]] || fail "stopped; nothing written"
+    # A state the pinned release never draws (its trust dialog, say) is recorded as not shown.
+    if [[ "$answer" == s ]]; then
+      shown=false
+      return 0
+    fi
     if [[ "$state" == exited && "$(pane_dead)" != 1 ]]; then
       say "    Claude Code has not exited yet."
     elif [[ "$state" != exited && "$(pane_dead)" == 1 ]]; then
       fail "Claude Code exited before $state; nothing written"
     else
-      return
+      # 0 by name: a bare return gives the last test's status, the elif's false, and under
+      # set -e the script ended at every Enter of a real run (F-105).
+      return 0
     fi
   done
 }
@@ -247,7 +279,12 @@ step() {
   say "" "[$n/$STATES] $state: $description" "    $instruction"
   shift 3
   "$@"
+  shown=true
   await_state "$state"
+  if [[ "$shown" == false ]]; then
+    entries+=("{\"state\": \"$state\", \"shown\": false, \"description\": \"$description\"}")
+    return
+  fi
   size="$(tmux display-message -p -t "$pane" '#{pane_width}x#{pane_height}')"
   [[ "$size" == "${WIDTH}x${HEIGHT}" ]] || fail "the pane is $size, not ${WIDTH}x${HEIGHT}"
   tmux capture-pane -p -t "$pane" >"$raw/$state.txt"

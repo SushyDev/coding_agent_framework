@@ -1,0 +1,40 @@
+  8. The terminal keeps a grid of cells, each with a character and its attributes.
+  9. Printable characters go into the cell under the cursor.
+  10. The cursor then moves right by the character's width.
+  11. Wide characters, like many CJK glyphs, take up two cells.
+  12. Zero-width combining marks attach to the cell before them.
+  13. Grapheme clustering keeps emoji sequences together in one cell group.
+  14. When the cursor passes the right margin, the line wraps, if autowrap is on.
+  15. Lines that scroll off the top go into the scrollback buffer.
+  16. Full-screen apps often switch to the alternate screen buffer.
+  17. Changed cells are marked dirty so they will be redrawn.
+  18. Redraws are batched and usually synced to the display's refresh rate.
+  19. The renderer goes through the dirty rows of the grid.
+  20. Neighbouring cells with the same style are grouped into runs.
+  21. Each run is sent through a text shaper, such as HarfBuzz.
+  22. Shaping turns code points into glyph IDs and handles ligatures.
+  23. Font fallback finds another font when the main font lacks a glyph.
+  24. A rasterizer, such as FreeType or Core Text, turns glyph outlines into bitmaps.
+  25. Antialiasing smooths glyph edges using partial coverage values.
+  26. Rendered glyphs are cached in a texture atlas on the GPU.
+  27. Cell backgrounds are drawn first, as filled rectangles.
+  28. Glyph quads are drawn next, sampling from the atlas.
+  29. Foreground color is applied per glyph using the cell's attributes.
+  30. Underline, strikethrough and undercurl are drawn as extra shapes.
+  31. Box-drawing and block characters are often drawn by the terminal's own code, so they line up exactly.
+  32. Color emoji come from bitmap or color-layer font tables.
+  33. The cursor is drawn last, as a block, bar or underline.
+  34. Selection highlighting inverts or tints the selected cells.
+  35. The finished frame is presented through OpenGL, Metal, Vulkan or a 2D API.
+  36. Resizing the window changes the grid size and sends SIGWINCH to the program.
+  37. The program redraws its output to fit the new dimensions.
+  38. Synchronized-update modes stop a half-drawn frame from flickering.
+  39. Older terminals drew straight to the screen with no GPU.
+  40. Underneath it all, it's still just a stream of bytes turned into a grid.
+
+[38;5;246m✻[39m [38;5;246mSautéed for 11s · done 3:24 PM[39m
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m❯ 
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;246m⏸ manual mode on · ? for shortcuts[39m
