@@ -439,6 +439,45 @@ defmodule CodingAgentFramework.ServicesTest do
     :gen_tcp.close(other)
   end
 
+  test "a name is a file name on the host: 1 to 64 letters, digits, - or _, checked before anything starts",
+       c do
+    for name <- ["", "../db", "a b", "db.x", String.duplicate("a", 65), 5] do
+      assert {:refused, {:name, ^name}} = start(c, "web-a", name, "test")
+    end
+
+    assert Services.list(c.services) == []
+    assert {:ok, %{state: "running"}} = start(c, "web-a", String.duplicate("a", 64), "test")
+  end
+
+  test "a local port another live forward holds is refused, naming its service, before anything starts",
+       c do
+    assert {{:ok, _}, _port, local} = start_forwarded(c)
+    other = free_port()
+
+    assert {:refused, {:local_taken, "db"}} =
+             start(c, "web-a", "web", "box", forward: {other, local})
+
+    assert row(c, "web") == nil
+    assert {:ok, %{state: "ended"}} = Services.stop(c.services, "web-a", "db")
+    assert {:ok, %{local: ^local}} = start(c, "web-a", "web", "box", forward: {other, local})
+  end
+
+  test "a timeout bounds the whole start, the forward's wait included", c do
+    File.write!(Path.join(c.dir, "no-forward"), "")
+    {port, local} = {free_port(), free_port()}
+    from = System.monotonic_time(:millisecond)
+
+    assert {:refused, {:forward, :not_open}} =
+             start(c, "web-a", "db", "box",
+               forward: {port, local},
+               forward_timeout: 60_000,
+               timeout: 4_000
+             )
+
+    assert System.monotonic_time(:millisecond) - from < 15_000
+    assert %{state: "ended", fwd: "failed"} = row(c, "db")
+  end
+
   test "ServiceEndFirst: an end ends the forward first, and is done once both sockets read dead",
        c do
     {port, local} = {free_port(), free_port()}

@@ -149,8 +149,12 @@ defmodule CodingAgentFramework.Services do
   environment as `{name, value}` pairs; `:start_timeout` (ms) for dtach's reply;
   `:sync_timeout`, `:lock_wait` and `:reaper` for the sync; `:forward`, a port the service
   listens on (its host's `127.0.0.1`) to forward to the workstation's same port, or `{port,
-  local}`; `:forward_timeout` (ms, default 10 s) for the forward to open. A name is free once
-  its row is `ended` or `refused`. Answers the row, `running`, with its forward open; or, when
+  local}`; `:forward_timeout` (ms, default 10 s) for the forward to open. `:timeout` (ms) is
+  the deadline of the whole start: each step's own timeout, the forward's too, is cut to what
+  is left of it; without it each step has its own. A name is free once its row is `ended` or
+  `refused`. A name other than 1 to 64 letters, digits, `-` or `_` is `{:refused, {:name,
+  name}}`; a local port another live service's forward holds is `{:refused, {:local_taken,
+  holder}}`, both before anything starts. Answers the row, `running`, with its forward open; or, when
   the owner ended before the start settled, the row handed to the owner's parent (with `keep`)
   or `{:refused, {:start, :owner_ended}}` once it is ended; or `{:refused, {:forward, reason}}`
   once a forward that failed has ended the service.
@@ -158,11 +162,33 @@ defmodule CodingAgentFramework.Services do
   @spec start(GenServer.server(), String.t(), String.t(), [String.t()], keyword) ::
           {:ok, map} | {:refused, term} | {:unknown, term}
   def start(services, owner, name, argv, opts) do
-    with {:ok, row} <- new_row(services, owner, name, argv, opts),
+    deadline = if t = Keyword.get(opts, :timeout), do: now() + t
+    # `:timeout` is also the grace of an end, which a failed start makes: keep it apart.
+    opts = opts |> Keyword.delete(:timeout) |> Keyword.put(:deadline, deadline)
+
+    with :ok <- check_name(name),
+         {:ok, row} <- new_row(services, owner, name, argv, opts),
          {:ok, grants} <- grants(services),
          :ok <- Grants.may_start_service?(grants, owner),
          :ok <- call(services, {:ask, row}),
          do: launch(services, row, opts)
+  end
+
+  # The name is a file and socket name on the host.
+  defp check_name(name) do
+    if is_binary(name) and name =~ ~r/\A[A-Za-z0-9_-]{1,64}\z/,
+      do: :ok,
+      else: {:refused, {:name, name}}
+  end
+
+  # A step's timeout, cut to what is left of the start's deadline (none: as it is).
+  defp within(opts, key, default) do
+    t = Keyword.get(opts, key, default)
+
+    case Keyword.get(opts, :deadline) do
+      nil -> t
+      deadline -> max(0, min(t, deadline - now()))
+    end
   end
 
   defp new_row(services, owner, name, argv, opts) do
@@ -488,12 +514,16 @@ defmodule CodingAgentFramework.Services do
 
   # The copy's turn, the sync, then the hold; the turn goes back once the start is settled.
   defp launch(services, row, opts) do
-    start = Keyword.get(opts, :start_timeout, 5_000)
     refused = fn _ -> put(services, row.name, %{state: "refused", owner: nil}) end
 
-    with {:ok, ctx} <- context(services, row, start),
-         {:ok, _} <- Held.ready(ctx, row.worktree, [clear: [ctx.pid]] ++ opts, refused),
-         until = now() + start,
+    with {:ok, ctx} <- context(services, row, within(opts, :start_timeout, 5_000)),
+         ready = [
+           clear: [ctx.pid],
+           sync_timeout: within(opts, :sync_timeout, 60_000),
+           lock_wait: within(opts, :lock_wait, 30_000)
+         ],
+         {:ok, _} <- Held.ready(ctx, row.worktree, ready ++ opts, refused),
+         until = now() + within(opts, :start_timeout, 5_000),
          fields = %{state: "starting", start_until: until, fwd: nil, opens: 0},
          {:ok, _} <- put(services, row.name, fields) do
       args = ["caf-service", ctx.pid, ctx.log, ctx.path, ctx.programs.paths.wc]
@@ -514,7 +544,7 @@ defmodule CodingAgentFramework.Services do
 
   # A start its owner's end took is ended here, in the start's own call.
   defp started(services, name, seen, opts) do
-    fwd_until = now() + Keyword.get(opts, :forward_timeout, @fwd_timeout)
+    fwd_until = now() + within(opts, :forward_timeout, @fwd_timeout)
 
     with {:ok, row} <- call(services, {:started, name, seen, fwd_until}) do
       case seen do
@@ -876,7 +906,10 @@ defmodule CodingAgentFramework.Services do
         {:reply, {:refused, {:service_exists, name}}, s}
 
       _ ->
-        {:reply, Table.put(s.db, row), s}
+        case local_holder(s.db, row) do
+          nil -> {:reply, Table.put(s.db, row), s}
+          holder -> {:reply, {:refused, {:local_taken, holder}}, s}
+        end
     end
   end
 
@@ -888,6 +921,15 @@ defmodule CodingAgentFramework.Services do
 
   def handle_call({:hold_forward, name, expect, fields, dead_first}, _from, s),
     do: {:reply, hold_forward(s, name, expect, fields, dead_first), s}
+
+  # The live service whose forward holds the local port the new row asks for.
+  defp local_holder(_db, %{local: nil}), do: nil
+
+  defp local_holder(db, %{local: local, name: name}) do
+    Enum.find_value(Table.all(db), fn r ->
+      if r.local == local and r.name != name and r.state not in ~w(ended refused), do: r.name
+    end)
+  end
 
   defp put_row(s, name, fields, expect) do
     case Table.get(s.db, name) do
