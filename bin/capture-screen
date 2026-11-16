@@ -222,9 +222,14 @@ await_state() {
     return
   fi
   while true; do
-    read -r -p "    Press Enter when the pane shows it, or type q and Enter to stop: " answer ||
+    read -r -p "    Press Enter when the pane shows it, s if this release does not show it, or q to stop: " answer ||
       fail "stopped: the terminal closed"
     [[ "$answer" != q ]] || fail "stopped; nothing written"
+    # A state the pinned release never draws (its trust dialog, say) is recorded as not shown.
+    if [[ "$answer" == s ]]; then
+      shown=false
+      return
+    fi
     if [[ "$state" == exited && "$(pane_dead)" != 1 ]]; then
       say "    Claude Code has not exited yet."
     elif [[ "$state" != exited && "$(pane_dead)" == 1 ]]; then
@@ -247,7 +252,12 @@ step() {
   say "" "[$n/$STATES] $state: $description" "    $instruction"
   shift 3
   "$@"
+  shown=true
   await_state "$state"
+  if [[ "$shown" == false ]]; then
+    entries+=("{\"state\": \"$state\", \"shown\": false, \"description\": \"$description\"}")
+    return
+  fi
   size="$(tmux display-message -p -t "$pane" '#{pane_width}x#{pane_height}')"
   [[ "$size" == "${WIDTH}x${HEIGHT}" ]] || fail "the pane is $size, not ${WIDTH}x${HEIGHT}"
   tmux capture-pane -p -t "$pane" >"$raw/$state.txt"
