@@ -688,6 +688,10 @@ framework's tools, which are strict in how they act and narrow in whom they reac
 - Reading the tree (`agents()`: every agent of every project, its parent and its state) is open
   to every agent. Reading one agent closely (`look`, `transcript`) is open to the agent itself,
   its parent, its children and, for a main session, the other main sessions.
+- A start gives a delegate at most its parent's launch: through the agent tools it may add
+  deny rules and disallowed tools, and a start that asks for an allow rule, an allowed tool, a
+  folder or an environment variable its parent's launch lacks is refused with
+  `{:wider_than_parent, what}` (`Grants`). The app's own code starts an agent with any launch.
 - Messages go along the edges only: a main session to its delegates and to other main
   sessions; a delegate to its main session. A delegate has no other agent to message: its
   children are subagents, which Claude Code runs inside it. Two delegates talk through their
@@ -776,6 +780,14 @@ answered. The notice is stored under the reply's key (the answered message), so 
 or a notice goes in, never both. Its sender is `framework`, a name reserved for the framework
 itself: no agent may hold it (F-81). `Stream`'s fold keeps each result on the messages it names, so a turn the delegate
 starts by itself never replaces a reply or a report.
+
+**The operator** acts through these same tools and checks, as the parent of every main session
+(F-109). No agent messages the operator: it is no agent's addressee, and an agent reaches a
+person through `ask`. A reply to the operator's message, or the notice in its place, is stored
+addressed to the operator and never delivered: the app reads it by the message's id
+(`Mailbox.reply/2`). The operator's `run_delegate` hands the report to the operator, who
+waited for it. Either way the main session sees the act as it sees any act on its child: in the
+log, not as a message.
 
 **Services** belong to the agent that started them. When the owner ends, its services end too,
 unless it handed them on with `service_hand`, or started them with `keep: true`, which hands them
@@ -1067,7 +1079,22 @@ without it.
 - The framework writes each account's settings, hooks and MCP servers into that account's
   directory itself, from data, so what an agent runs with is the framework's. It writes only
   files of its own that each launch names by flag, never a file Claude Code rewrites
-  (`settings.json`, `.claude.json`, credentials).
+  (`settings.json`, `.claude.json`, credentials). An agent's settings are one file: its launch
+  options' overlay merged over its account's settings, since `--settings` takes one value
+  (F-110).
+- Check against each pinned Claude Code release what the help leaves open: which settings a
+  launch reads, whether `--append-system-prompt` has a file form, and how a tool pattern with a
+  comma or a space inside its rule is split (F-110). Until the file form is confirmed, the
+  appended prompt goes as one argument, bounded in size.
+- An agent's appended system prompt is fixed at its first start: Claude Code records the system
+  prompt at a conversation's first request and sends it as it was on every resume. A resume
+  gives the same options again; an app cannot change the prompt by resuming with others.
+- An app's launch `env` may set Claude Code's own `CLAUDE_CODE_*` names on purpose; only the
+  names the framework sets itself (`CLAUDE_CONFIG_DIR`, the MCP timeouts, `CLAUDECODE`, …) are
+  refused. What "from nothing" keeps out is what is inherited, not what the app gives.
+- A `Stop` hook cannot deliver to an idle main session: it fires only as a turn ends, so a
+  report that arrives while the session waits would wait for a person. Delivery into a main
+  session goes through `Screen` and `Control`'s checked write (F-107).
 - Remote Control starts only with an interactive session, so a headless delegate never has it;
   its settings still set `remoteControlAtStartup` to false, and a check against each pinned
   Claude Code release confirms a delegate starts with it off.
@@ -1227,15 +1254,19 @@ list of gaps (F-108), comes in this order, blockers first; each protocol is mode
 code:
 
 10. **The operator**: a person or the app acting through `Grants` and claims as a parent of every
-    main session, recorded as the actor; messages from it through `Mailbox`.
+    main session, recorded as the actor; messages from it through `Mailbox` (F-109). Then a
+    reply to its message kept for it (`Mailbox.reply/2`) and its `run_delegate`'s report, as
+    "Agents working together" says.
 11. **Launch options per agent**: a settings overlay (permission deny rules), extra environment,
     `--add-dir`, `--append-system-prompt`, allowed and disallowed tools, each checked and kept
-    on the agent's row.
+    on the agent's row (F-110). Then the narrow-only check of a delegate's launch against its
+    parent's, in `Grants`.
 12. **PreToolUse and PostToolUse hooks**: held like `PermissionRequest`, PreToolUse answered by
     an app callback with a short deadline (allow, deny or ask); then a permission policy asked
     before any request waits for a person, its decision recorded as a person's is.
 13. **`Screen`** (item 4), then delivery into a main session, then **interactive delegates**
-    (`interactive: true`), then **`Mains`** (item 6, several per project, named by the app) and
+    (`interactive: true`), then **`Mains`** (item 6, several per project, named by the app; a main session's kept
+    services end with it or go to a person, once one can end: F-109's new-4) and
     **`Mover`** (item 5, for delegates as well as main sessions).
 14. **Packaging and toolchain**: one `coding_agent_framework` package; `Programs` looked up and
     checked at start, with a Homebrew setup documented; the Elixir and OTP floor tested; a
