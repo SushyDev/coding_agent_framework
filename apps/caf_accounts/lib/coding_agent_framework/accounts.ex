@@ -91,8 +91,8 @@ defmodule CodingAgentFramework.Accounts do
   `:settings` (a map of Claude Code settings), `:hooks` (the settings' `hooks` map) and
   `:mcp_servers` (a map of server name to its config) and `:programs` (the host's `Programs`,
   for the status line command, which needs its sh and cat) and `:intake` (`%{port: port, secret:
-  secret}`: the http hooks of `CodingAgentFramework.Intake.hooks/3`, after any `:hooks` of the
-  same event), each optional. A file is written whole to a temporary name and renamed, so a
+  secret}`, and `tools:`, the tool callbacks the app gives `Intake`: the http hooks of
+  `CodingAgentFramework.Intake.hooks/4`, after any `:hooks` of the same event), each optional. A file is written whole to a temporary name and renamed, so a
   launch never reads half of one.
 
   Returns `{:ok, account}` (see `ready/2`), or `{:refused, reason}` for an unknown account or
@@ -211,8 +211,9 @@ defmodule CodingAgentFramework.Accounts do
   # Intake's http hooks go after any the caller gives for the same event.
   defp intake_hooks(hooks, _name, nil), do: hooks
 
-  defp intake_hooks(hooks, name, %{port: port, secret: secret}) do
-    Map.merge(hooks || %{}, Intake.hooks(port, name, secret), fn _, own, ours -> own ++ ours end)
+  defp intake_hooks(hooks, name, %{port: port, secret: secret} = intake) do
+    ours = Intake.hooks(port, name, secret, Map.get(intake, :tools, []))
+    Map.merge(hooks || %{}, ours, fn _, own, ours -> own ++ ours end)
   end
 
   defp status_line(_accounts, _name, _dir, nil), do: {:ok, %{settings: %{}, dirs: [], files: []}}

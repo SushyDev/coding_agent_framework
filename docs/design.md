@@ -157,7 +157,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Transcripts` | a session's transcript tail, its chats and its subagents |
 | `Screen` | a main session's screen and dialogs, per Claude Code release, from real fixtures a person captures with a script |
 | `Stream` | a headless delegate's stdin and event log: writes messages, reads events from an offset |
-| `Intake` | hook events in; holds `PermissionRequest` hooks until answered |
+| `Intake` | hook events in; holds `PermissionRequest` hooks until answered, and `PreToolUse` hooks until the app decides |
 | `Control` | the one writer per host: send, answer, interrupt, stop, respawn |
 | `Sessions` | start, resume and stop held agents on the workstation, with their viewers, rows and worktrees |
 | `Mover` | drains a session and moves it between accounts |
@@ -804,8 +804,18 @@ section.
   UserPromptSubmit, PermissionRequest and PermissionDenied. Each hook posts to
   `http://127.0.0.1:<port>/hooks/<account>` on the framework's node, with a secret of the
   instance's in a header, and sets its own `timeout`. No program on the host takes part, so a
-  held hook is one open request. PreToolUse and PostToolUse are not read: they carry every tool
-  input, and `Transcripts` reads those.
+  held hook is one open request. PreToolUse and PostToolUse are written only when the app gives
+  `Intake` a callback for them, and are not stored as they come: they carry every tool input,
+  and `Transcripts` reads those.
+- **A held `PreToolUse`** (F-111). `Intake` asks the app's callback, in a process of its own,
+  with a deadline of 5 s under the hook's 10 s timeout, and gives exactly one response: the
+  decision (`hookSpecificOutput.permissionDecision` `allow`, `deny` or `ask`, with
+  `permissionDecisionReason` beside a deny), or an empty body for a pass, a crash or the
+  deadline, so Claude Code goes on as without the hook. A later decision is dropped. A decision
+  writes its row, keyed by `session_id` and `tool_use_id`, with the actor `app`, before the
+  response, and a second post of the key answers the row's decision. A pass writes no row,
+  since every tool call posts this hook. A PostToolUse is answered at once and handed to its
+  callback, with no row.
 - **Stored, then acknowledged.** `Intake` writes the event's row, then answers 200 with an empty
   body. A row is keyed by Claude Code's own ids where the event has them (`session_id` with
   `tool_use_id`, `prompt_id` or the start's `source`), and a second post of one key writes no
@@ -930,7 +940,9 @@ worktree on its branch whose setup finished).
 
 `Intake.tla` (F-24) models "Intake": events stored before they are acknowledged, a duplicate
 stored once, and a held `PermissionRequest` answered at most once, by its hook, only on the
-dialog it names, never after Claude Code's timeout and never by typed keys.
+dialog it names, never after Claude Code's timeout and never by typed keys; and (F-111) a held
+`PreToolUse` given exactly one response, the app's decision or an empty body at the deadline,
+with a late decision dropped.
 
 `Shell.tla` (F-35) models how a command's process group ends: a timeout, the caller's death
 and the VM's death each end it (the last two with a reaper), a held process is never reached,

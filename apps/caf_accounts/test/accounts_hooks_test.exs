@@ -26,4 +26,21 @@ defmodule CodingAgentFramework.AccountsHooksTest do
       assert [%{"hooks" => [%{"timeout" => 600}]}] = hooks["PermissionRequest"]
     end
   end
+
+  test "a tool hook is written only for a callback the app gives Intake" do
+    {:ok, accounts} = Accounts.new(test_dir(), ["work"])
+
+    for tools <- [[], [:pre_tool_use], [:post_tool_use], [:pre_tool_use, :post_tool_use]] do
+      intake = %{port: 4790, secret: @secret, tools: tools}
+      {:ok, account} = Accounts.prepare(accounts, "work", %{intake: intake})
+      hooks = JSON.decode!(File.read!(account.settings[:parent]))["hooks"]
+      named = Enum.map(tools, &%{pre_tool_use: "PreToolUse", post_tool_use: "PostToolUse"}[&1])
+      assert Map.keys(hooks) == Enum.sort(Event.names() ++ named)
+
+      for event <- named do
+        assert [%{"hooks" => [%{"type" => "http", "timeout" => 10} = hook]}] = hooks[event]
+        refute Map.has_key?(hook, "onFailure")
+      end
+    end
+  end
 end

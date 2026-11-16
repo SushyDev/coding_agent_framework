@@ -34,13 +34,25 @@
 (* Defense in depth, with no Break: SentAtMostOnce. AnswerAsked takes only *)
 (* a "held" row, and AnswerWritten closes the request; each alone keeps a  *)
 (* second answer off one hook.                                             *)
+(*                                                                         *)
+(* PreToolUse (F-111): each tool call posts once and is held while the     *)
+(* app's callback, in a process of its own, is asked. Intake hands the     *)
+(* plug exactly one response: the callback's decision (its row written     *)
+(* first) or an empty body, for a pass or at Intake's deadline, which     *)
+(* comes before the hook's timeout. A decision after that is dropped. A   *)
+(* restart cuts the request, and Claude Code goes on with no decision.    *)
+(* Left abstract: which decision (allow, deny, ask are one "decision"),    *)
+(* and a second post of one call, which the code answers from the row.    *)
+(* Defense in depth, with no Break: DecidedHasRow, since Intake writes the *)
+(* row in the step that hands the decision out.                            *)
 (***************************************************************************)
-EXTENDS Integers, FiniteSets
+EXTENDS Integers, FiniteSets, Sequences
 
 CONSTANTS
     Events,       \* hook events other than PermissionRequest, by id
     MaxPosts,     \* posts of one event: more than one is a duplicate
     MaxDialogs,   \* permission dialogs of the session, 1..MaxDialogs, in order
+    MaxCalls,     \* tool calls of the session, each with its PreToolUse hook
     MaxRestarts,  \* restarts of the framework
     Break         \* "none", or the guard removed (see Breaks)
 
@@ -52,13 +64,16 @@ Breaks == {
     "NoOwnDeadline",    \* the framework keeps a hold past Claude Code's timeout
     "NoExpiry",         \* the framework never releases a hold no one answers
     "TrustAnswering",   \* after a restart, a row still "answering" is taken as answered
-    "TypeWhenNoHold"    \* a dialog whose hold is gone is answered by typed keys
+    "TypeWhenNoHold",   \* a dialog whose hold is gone is answered by typed keys
+    "TwoResponses",     \* the tool deadline fires after the decision was handed out
+    "LateSent"          \* a decision after the tool deadline is still handed out
 }
 
 ASSUME Break \in Breaks
-ASSUME MaxPosts \in Nat /\ MaxDialogs \in Nat /\ MaxRestarts \in Nat
+ASSUME MaxPosts \in Nat /\ MaxDialogs \in Nat /\ MaxCalls \in Nat /\ MaxRestarts \in Nat
 
 Dialogs == 1..MaxDialogs
+Calls == 1..MaxCalls
 
 VARIABLES
     up,        \* the framework runs
@@ -79,11 +94,19 @@ VARIABLES
     sent,      \* p -> answers written on p's request
     heard,     \* p -> the answer was read by a hook still waiting for it
     typed,     \* dialogs answered by typed keys
-    wrong      \* answers that took another dialog's hold: [meant, got]
+    wrong,     \* answers that took another dialog's hold: [meant, got]
+    call,      \* c -> "none", "waiting", "decided", "passed", "failed": what c's
+               \*      PreToolUse hook read
+    tconn,     \* in memory: c -> the plug holds c's request open
+    entry,     \* in memory: c -> "none", "open" (asking), "done", "gone" (a restart)
+    cb,        \* c -> "none", "asked", "decision", "pass", "used": the callback
+    trow,      \* table: c -> its decision's row is written
+    handed     \* c -> what Intake handed the plug for c: "decision" or "empty"
 
 eventVars == <<posts, inflight, toStore, toAck, rows, acked>>
 dialogVars == <<dialog, outcome, hook, conn, hold, written, sent, heard, typed, wrong>>
-vars == <<up, restarts, eventVars, dialogVars>>
+toolVars == <<call, tconn, entry, cb, trow, handed>>
+vars == <<up, restarts, eventVars, dialogVars, toolVars>>
 
 Settled == {"none", "answered", "expired", "lost", "unknown"}
 
@@ -106,6 +129,12 @@ Init ==
     /\ heard = [p \in Dialogs |-> FALSE]
     /\ typed = {}
     /\ wrong = {}
+    /\ call = [c \in Calls |-> "none"]
+    /\ tconn = [c \in Calls |-> FALSE]
+    /\ entry = [c \in Calls |-> "none"]
+    /\ cb = [c \in Calls |-> "none"]
+    /\ trow = [c \in Calls |-> FALSE]
+    /\ handed = [c \in Calls |-> <<>>]
 
 -----------------------------------------------------------------------------
 (* The framework: its tables survive a restart; open requests do not *)
@@ -121,10 +150,15 @@ FrameworkDies ==
     /\ conn' = [p \in Dialogs |-> FALSE]
     /\ hook' = [p \in Dialogs |-> IF conn[p] /\ hook[p] = "waiting" THEN "failed" ELSE hook[p]]
     /\ written' = {}
+    /\ tconn' = [c \in Calls |-> FALSE]
+    /\ call' = [c \in Calls |-> IF tconn[c] /\ call[c] = "waiting" THEN "failed" ELSE call[c]]
+    /\ entry' = [c \in Calls |-> IF entry[c] = "open" THEN "gone" ELSE entry[c]]
     /\ UNCHANGED <<posts, rows, acked, dialog, outcome, hold, sent, heard, typed, wrong>>
+    /\ UNCHANGED <<cb, trow, handed>>
 
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
+    /\ UNCHANGED toolVars
     /\ UNCHANGED <<restarts, eventVars, dialogVars>>
 
 -----------------------------------------------------------------------------
@@ -136,6 +170,7 @@ Posted(e) ==
     /\ posts[e] < MaxPosts
     /\ posts' = [posts EXCEPT ![e] = @ + 1]
     /\ inflight' = IF up THEN [inflight EXCEPT ![e] = @ + 1] ELSE inflight
+    /\ UNCHANGED toolVars
     /\ UNCHANGED <<up, restarts, toStore, toAck, rows, acked, dialogVars>>
 
 \* The row is written once per event: a second post of it finds the row.
@@ -144,12 +179,14 @@ Stored(e) ==
     /\ inflight' = [inflight EXCEPT ![e] = @ - 1]
     /\ toAck' = [toAck EXCEPT ![e] = @ + 1]
     /\ rows' = [rows EXCEPT ![e] = IF @ = 0 \/ Break = "NoDedupe" THEN @ + 1 ELSE @]
+    /\ UNCHANGED toolVars
     /\ UNCHANGED <<up, restarts, posts, toStore, acked, dialogVars>>
 
 Acked(e) ==
     /\ up /\ toAck[e] > 0
     /\ toAck' = [toAck EXCEPT ![e] = @ - 1]
     /\ acked' = [acked EXCEPT ![e] = @ + 1]
+    /\ UNCHANGED toolVars
     /\ UNCHANGED <<up, restarts, posts, inflight, toStore, rows, dialogVars>>
 
 \* Under AckBeforeStore: the 200 goes out first, the row after.
@@ -158,12 +195,14 @@ AckedFirst(e) ==
     /\ inflight' = [inflight EXCEPT ![e] = @ - 1]
     /\ toStore' = [toStore EXCEPT ![e] = @ + 1]
     /\ acked' = [acked EXCEPT ![e] = @ + 1]
+    /\ UNCHANGED toolVars
     /\ UNCHANGED <<up, restarts, posts, toAck, rows, dialogVars>>
 
 StoredLate(e) ==
     /\ up /\ toStore[e] > 0
     /\ toStore' = [toStore EXCEPT ![e] = @ - 1]
     /\ rows' = [rows EXCEPT ![e] = IF @ = 0 THEN @ + 1 ELSE @]
+    /\ UNCHANGED toolVars
     /\ UNCHANGED <<up, restarts, posts, inflight, toAck, acked, dialogVars>>
 
 -----------------------------------------------------------------------------
@@ -176,6 +215,7 @@ DialogOpens(p) ==
     /\ dialog' = [dialog EXCEPT ![p] = "open"]
     /\ hook' = [hook EXCEPT ![p] = IF up THEN "waiting" ELSE "failed"]
     /\ conn' = [conn EXCEPT ![p] = up]
+    /\ UNCHANGED toolVars
     /\ UNCHANGED <<up, restarts, eventVars, outcome, hold, written, sent, heard, typed, wrong>>
 
 \* A person answers on the screen or by Remote Control. The hook goes on
@@ -184,6 +224,7 @@ PersonAnswers(p) ==
     /\ dialog[p] = "open"
     /\ dialog' = [dialog EXCEPT ![p] = "closed"]
     /\ outcome' = [outcome EXCEPT ![p] = "person"]
+    /\ UNCHANGED toolVars
     /\ UNCHANGED <<up, restarts, eventVars, hook, conn, hold, written, sent, heard, typed, wrong>>
 
 \* Claude Code stops waiting. The framework's deadline comes first, so this
@@ -192,6 +233,7 @@ HookTimesOut(p) ==
     /\ hook[p] = "waiting"
     /\ hold[p] \notin {"none", "held", "answering"} \/ Break \in {"NoOwnDeadline", "NoExpiry"}
     /\ hook' = [hook EXCEPT ![p] = "timedout"]
+    /\ UNCHANGED toolVars
     /\ UNCHANGED <<up, restarts, eventVars, dialog, outcome, conn, hold, written, sent, heard,
                    typed, wrong>>
 
@@ -201,6 +243,7 @@ HookTimesOut(p) ==
 HoldStored(p) ==
     /\ up /\ conn[p] /\ hold[p] = "none"
     /\ hold' = [hold EXCEPT ![p] = "held"]
+    /\ UNCHANGED toolVars
     /\ UNCHANGED <<up, restarts, eventVars, dialog, outcome, hook, conn, written, sent, heard,
                    typed, wrong>>
 
@@ -211,6 +254,7 @@ AnswerAsked(m, h) ==
     /\ h = m \/ (Break = "ByAgent" /\ hold[m] # "held")
     /\ hold' = [hold EXCEPT ![h] = "answering"]
     /\ wrong' = IF h # m THEN wrong \cup {[meant |-> m, got |-> h]} ELSE wrong
+    /\ UNCHANGED toolVars
     /\ UNCHANGED <<up, restarts, eventVars, dialog, outcome, hook, conn, written, sent, heard,
                    typed>>
 
@@ -227,12 +271,14 @@ AnswerWritten(p) ==
          THEN /\ dialog' = [dialog EXCEPT ![p] = "closed"]
               /\ outcome' = [outcome EXCEPT ![p] = "hook"]
          ELSE UNCHANGED <<dialog, outcome>>
+    /\ UNCHANGED toolVars
     /\ UNCHANGED <<up, restarts, eventVars, hold, typed, wrong>>
 
 AnswerMarked(p) ==
     /\ up /\ p \in written
     /\ written' = written \ {p}
     /\ hold' = [hold EXCEPT ![p] = "answered"]
+    /\ UNCHANGED toolVars
     /\ UNCHANGED <<up, restarts, eventVars, dialog, outcome, hook, conn, sent, heard, typed,
                    wrong>>
 
@@ -243,6 +289,7 @@ HoldExpires(p) ==
     /\ hold' = [hold EXCEPT ![p] = "expired"]
     /\ conn' = [conn EXCEPT ![p] = FALSE]
     /\ hook' = [hook EXCEPT ![p] = IF @ = "waiting" THEN "released" ELSE @]
+    /\ UNCHANGED toolVars
     /\ UNCHANGED <<up, restarts, eventVars, dialog, outcome, written, sent, heard, typed, wrong>>
 
 \* After a restart a request is gone with its process: a held row is lost,
@@ -252,6 +299,7 @@ HoldSettled(p) ==
     /\ hold' = [hold EXCEPT ![p] = IF @ = "held" THEN "lost"
                                    ELSE IF Break = "TrustAnswering" THEN "answered"
                                    ELSE "unknown"]
+    /\ UNCHANGED toolVars
     /\ UNCHANGED <<up, restarts, eventVars, dialog, outcome, hook, conn, written, sent, heard,
                    typed, wrong>>
 
@@ -261,11 +309,77 @@ AnswerTyped(p) ==
     /\ dialog' = [dialog EXCEPT ![p] = "closed"]
     /\ outcome' = [outcome EXCEPT ![p] = "keys"]
     /\ typed' = typed \cup {p}
+    /\ UNCHANGED toolVars
     /\ UNCHANGED <<up, restarts, eventVars, hook, conn, hold, written, sent, heard, wrong>>
+
+-----------------------------------------------------------------------------
+(* PreToolUse: one response per request, the callback's decision or none *)
+
+\* Claude Code posts c's hook and waits. With the framework down the post
+\* fails, and the tool call goes on with no decision (onFailure continue).
+ToolPosted(c) ==
+    /\ call[c] = "none"
+    /\ call' = [call EXCEPT ![c] = IF up THEN "waiting" ELSE "failed"]
+    /\ tconn' = [tconn EXCEPT ![c] = up]
+    /\ UNCHANGED <<up, restarts, eventVars, dialogVars, entry, cb, trow, handed>>
+
+\* Intake keeps an entry for the request, starts its deadline, and asks the
+\* callback in a process of its own.
+ToolHeld(c) ==
+    /\ up /\ tconn[c] /\ entry[c] = "none"
+    /\ entry' = [entry EXCEPT ![c] = "open"]
+    /\ cb' = [cb EXCEPT ![c] = "asked"]
+    /\ UNCHANGED <<up, restarts, eventVars, dialogVars, call, tconn, trow, handed>>
+
+\* The callback answers whenever it does, or never: its process outlives
+\* a deadline, and its answer may come after a restart.
+CallbackAnswers(c) ==
+    /\ cb[c] = "asked"
+    /\ \E a \in {"decision", "pass"} : cb' = [cb EXCEPT ![c] = a]
+    /\ UNCHANGED <<up, restarts, eventVars, dialogVars, call, tconn, entry, trow, handed>>
+
+\* A decision on an open entry: its row, then the decision handed out, in
+\* one step of Intake. Under LateSent a decision after the deadline is too.
+DecisionHanded(c) ==
+    /\ up /\ cb[c] = "decision"
+    /\ entry[c] = "open" \/ (Break = "LateSent" /\ entry[c] = "done")
+    /\ cb' = [cb EXCEPT ![c] = "used"]
+    /\ trow' = [trow EXCEPT ![c] = TRUE]
+    /\ entry' = [entry EXCEPT ![c] = "done"]
+    /\ handed' = [handed EXCEPT ![c] = Append(@, "decision")]
+    /\ UNCHANGED <<up, restarts, eventVars, dialogVars, call, tconn>>
+
+\* A pass: an empty body, and no row.
+PassHanded(c) ==
+    /\ up /\ cb[c] = "pass" /\ entry[c] = "open"
+    /\ cb' = [cb EXCEPT ![c] = "used"]
+    /\ entry' = [entry EXCEPT ![c] = "done"]
+    /\ handed' = [handed EXCEPT ![c] = Append(@, "empty")]
+    /\ UNCHANGED <<up, restarts, eventVars, dialogVars, call, tconn, trow>>
+
+\* Intake's deadline: an empty body, and no row. Under TwoResponses it fires
+\* on an entry already answered.
+ToolDeadline(c) ==
+    /\ up
+    /\ entry[c] = "open" \/ (Break = "TwoResponses" /\ entry[c] = "done" /\ Len(handed[c]) = 1)
+    /\ entry' = [entry EXCEPT ![c] = "done"]
+    /\ handed' = [handed EXCEPT ![c] = Append(@, "empty")]
+    /\ UNCHANGED <<up, restarts, eventVars, dialogVars, call, tconn, cb, trow>>
+
+\* The plug writes what it was handed first as the response; the request
+\* closes, and Claude Code reads it.
+ToolAnswered(c) ==
+    /\ up /\ tconn[c] /\ handed[c] # <<>>
+    /\ tconn' = [tconn EXCEPT ![c] = FALSE]
+    /\ call' = [call EXCEPT ![c] = IF Head(handed[c]) = "decision" THEN "decided" ELSE "passed"]
+    /\ UNCHANGED <<up, restarts, eventVars, dialogVars, entry, cb, trow, handed>>
 
 -----------------------------------------------------------------------------
 Next ==
     \/ FrameworkDies \/ FrameworkStarts
+    \/ \E c \in Calls :
+         \/ ToolPosted(c) \/ ToolHeld(c) \/ CallbackAnswers(c) \/ DecisionHanded(c)
+         \/ PassHanded(c) \/ ToolDeadline(c) \/ ToolAnswered(c)
     \/ \E e \in Events : Posted(e) \/ Stored(e) \/ Acked(e) \/ AckedFirst(e) \/ StoredLate(e)
     \/ \E p \in Dialogs :
          \/ DialogOpens(p) \/ PersonAnswers(p) \/ HookTimesOut(p) \/ HoldStored(p)
@@ -280,6 +394,8 @@ Fairness ==
     /\ \A p \in Dialogs : WF_vars(HookTimesOut(p)) /\ WF_vars(HoldStored(p))
                           /\ WF_vars(AnswerWritten(p)) /\ WF_vars(AnswerMarked(p))
                           /\ WF_vars(HoldExpires(p)) /\ WF_vars(HoldSettled(p))
+    /\ \A c \in Calls : WF_vars(ToolHeld(c)) /\ WF_vars(ToolDeadline(c))
+                        /\ WF_vars(ToolAnswered(c))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -297,6 +413,11 @@ TypeOK ==
     /\ conn \in [Dialogs -> BOOLEAN] /\ written \subseteq Dialogs /\ typed \subseteq Dialogs
     /\ \A p \in Dialogs : conn[p] => up
     /\ \A p \in Dialogs : (outcome[p] = "none") = (dialog[p] # "closed")
+    /\ call \in [Calls -> {"none", "waiting", "decided", "passed", "failed"}]
+    /\ tconn \in [Calls -> BOOLEAN] /\ trow \in [Calls -> BOOLEAN]
+    /\ entry \in [Calls -> {"none", "open", "done", "gone"}]
+    /\ cb \in [Calls -> {"none", "asked", "decision", "pass", "used"}]
+    /\ \A c \in Calls : tconn[c] => up
 
 \* A 200 goes back only for an event whose row is written.
 AckedIsStored == \A e \in Events : acked[e] > 0 => rows[e] > 0
@@ -322,5 +443,17 @@ RequestsEnd == \A e \in Events : inflight[e] + toAck[e] + toStore[e] > 0
 
 \* Every hold ends: answered, expired, or settled after a restart.
 HoldSettles == \A p \in Dialogs : hold[p] \in {"held", "answering"} ~> hold[p] \in Settled
+
+\* Intake hands one response for each tool call's request.
+OneResponse == \A c \in Calls : Len(handed[c]) <= 1
+
+\* A decision goes out only before the deadline's empty body: a late one is dropped.
+LateDropped == \A c \in Calls : \A i \in 1..Len(handed[c]) : handed[c][i] = "decision" => i = 1
+
+\* A decision Claude Code read has its row.
+DecidedHasRow == \A c \in Calls : call[c] = "decided" => trow[c]
+
+\* Every held tool call's request ends, with or without a decision.
+ToolRequestsEnd == \A c \in Calls : tconn[c] ~> ~tconn[c]
 
 =============================================================================
