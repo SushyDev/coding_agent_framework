@@ -345,9 +345,10 @@ A main session holds, and a view shows:
 
 **Moving it** starts on its own when the account reaches 90 % of its weekly allowance, or with
 one press at any level. It goes to the account with the most allowance left:
-1. Drain: no new delegates or background commands start.
-2. Wait until no background command runs. This is read after the drain began, so nothing can
-   start after it; a background command is a child of the session's process and ends with it.
+1. Drain: no new delegates, background commands or tool calls start.
+2. Wait until no background command runs and no `run_delegate` call of the session is under
+   way (its report would otherwise be written to a process the move ends). This is read after
+   the drain began, so nothing can start after it; a background command is a child of the session's process and ends with it.
 3. End the session through `Control`'s checked write: `/exit`, typed only when the turn has
    ended and the input box is empty, in the same step as that check, so a prompt that arrives
    in between is not cut off.
@@ -431,6 +432,11 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
   idle one for a call with no progress (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`, 300 s unless set),
   which `ClaudeCLI` sets at launch from one tool timeout (F-92's new-2, F-95's new-2). A report a
   client dropped anyway stays in its row and in the call log, where the read tools find it.
+  The client also goes when the main session's process ends during the call, by a move or an
+  exit, and a write to it can still succeed (F-97's new-1). So the report is `answered` only if
+  the process that made the call (by pid and start time, as `Sessions` holds it) still runs
+  after the write; otherwise it is held again and delivered as a message. A move's drain waits
+  for no `run_delegate` call of the session to be under way.
 - A resumed process takes no turn of its own. It is given the brief again, under its uuid, when
   the brief had not gone in, and otherwise a fixed message to go on with its brief.
 
