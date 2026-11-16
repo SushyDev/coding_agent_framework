@@ -37,6 +37,20 @@ defmodule CodingAgentFramework.ServicesTest do
     exec #{bash} -c 'read -r -t #{stand_in_idle()} l; exit 0' "$0"
     """)
 
+    # A service that echoes each line it reads, prefixed; and one that listens on the port its
+    # argument names until one connection ends (nc stays a child, so the recorded pid's command
+    # line names this test's directory).
+    File.write!(Path.join(dir, "echo"), """
+    : 2>/dev/null > "#{dir}/pids/$$" || exit 0
+    echo up
+    exec #{bash} -c 'while IFS= read -r -t #{stand_in_idle()} l; do echo "got $l"; done' "$0"
+    """)
+
+    File.write!(Path.join(dir, "listen"), """
+    : 2>/dev/null > "#{dir}/pids/$$" || exit 0
+    exec #{bash} -c '"$1" -l 127.0.0.1 "$2"; exit 0' "$0" #{program!(:nc)} "$1"
+    """)
+
     File.write!(Path.join(dir, "ssh"), """
     #!#{bash}
     [ -e "#{dir}/down" ] && exit 255
@@ -73,7 +87,8 @@ defmodule CodingAgentFramework.ServicesTest do
   defp start(c, owner, name, host, opts \\ []) do
     where = [host: host, project: "web", copy: "w", worktree: c.wt, start_timeout: 2_000]
     {script, opts} = Keyword.pop(opts, :script, "svc")
-    argv = [c.bash, Path.join(c.dir, script)]
+    {args, opts} = Keyword.pop(opts, :args, [])
+    argv = [c.bash, Path.join(c.dir, script) | args]
     Services.start(c.services, owner, name, argv, Keyword.merge(where, opts))
   end
 
@@ -234,5 +249,63 @@ defmodule CodingAgentFramework.ServicesTest do
 
     assert {:ok, %{state: "running", owner: "web-main", keep: true}} =
              start(c, "web-a", "web", "box", keep: true)
+  end
+
+  # Send and wait are not in the models: a send's pid check is the end's, and a wait only reads.
+  for host <- ["test", "box"] do
+    test "Send, Wait: on #{host}, input from the owner or its parent reaches the terminal, and a wait finds its line",
+         c do
+      assert {:ok, _} = start(c, "web-a", "repl", unquote(host), script: "echo")
+      assert {:ok, {:line, "up", 3}} = Services.wait(c.services, "repl", {:line, "^up$"}, 5_000)
+      assert {:ok, :sent} = Services.send(c.services, "web-a", "repl", "one\n")
+      assert {:ok, :sent} = Services.send(c.services, "web-main", "repl", "it's two\n")
+
+      assert {:refused, :service_fixed_by_owner_or_parent} =
+               Services.send(c.services, "web-b", "repl", "x\n")
+
+      assert {:ok, {:line, "got it's two", 24}} =
+               Services.wait(c.services, "repl", {:line, ~r/two/, 3}, 5_000)
+
+      assert {:unknown, :timeout} = Services.wait(c.services, "repl", {:line, "three", 24}, 300)
+      assert {:ok, _} = Services.stop(c.services, "web-a", "repl")
+      assert {:refused, {:state, "ended"}} = Services.send(c.services, "web-a", "repl", "x\n")
+    end
+  end
+
+  test "Send, Wait: the exit ends a wait, after a last read of the log; a program not the row's gets no input",
+       c do
+    assert {:ok, %{pid: pid}} = start(c, "web-a", "db", "box")
+    # The stand-in reads one line, then exits.
+    assert {:ok, :sent} = Services.send(c.services, "web-a", "db", "\n")
+    assert {:ok, :exited} = Services.wait(c.services, "db", :exit, 5_000)
+    assert {:ok, :exited} = Services.wait(c.services, "db", {:line, "never"}, 5_000)
+    assert {:ok, {:line, "up in one", 10}} = Services.wait(c.services, "db", {:line, "up"}, 5_000)
+    assert {:ok, :gone} = gone(pid)
+    assert {:refused, :not_held} = Services.send(c.services, "web-a", "db", "x\n")
+  end
+
+  test "Send, Wait: a drop answers a send unknown and a wait dropped; bad input is refused", c do
+    assert {:ok, _} = start(c, "web-a", "repl", "box", script: "echo")
+    assert {:refused, :bad_input} = Services.send(c.services, "web-a", "repl", "a\0b")
+
+    assert {:refused, {:bad_until, {:port, 0}}} =
+             Services.wait(c.services, "repl", {:port, 0}, 100)
+
+    assert {:refused, {:bad_pattern, "("}} = Services.wait(c.services, "repl", {:line, "("}, 100)
+    File.write!(Path.join(c.dir, "down"), "")
+    assert {:unknown, {:send, _}} = Services.send(c.services, "web-a", "repl", "x\n")
+    assert {:unknown, :dropped} = Services.wait(c.services, "repl", {:line, "up"}, 300)
+    File.rm!(Path.join(c.dir, "down"))
+    assert {:ok, _} = Services.stop(c.services, "web-a", "repl")
+  end
+
+  test "Wait: a port that listens on the host ends a port wait", c do
+    # A port free a moment ago; the service takes it.
+    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
+    {:ok, port} = :inet.port(socket)
+    :gen_tcp.close(socket)
+    assert {:ok, _} = start(c, "web-a", "web", "box", script: "listen", args: ["#{port}"])
+    assert {:ok, {:port, ^port}} = Services.wait(c.services, "web", {:port, port}, 5_000)
+    assert {:ok, _} = Services.stop(c.services, "web-a", "web")
   end
 end

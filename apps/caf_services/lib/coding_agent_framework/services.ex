@@ -21,6 +21,9 @@ defmodule CodingAgentFramework.Services do
 
   **A restart** (`restart/4`) counts up, ends the service, then starts it with its own sync.
 
+  **Input and waits** (`send/5`, `wait/4`): input goes to the terminal by `dtach -p` on the
+  host while the pid still has its start time; a wait polls the log, a port, and the socket.
+
   **The owner's end** (`owner_ended/3`), which the embedding app calls when an agent ends: each
   running service it owns ends, or, with `keep`, goes to the owner's parent. `keep` stays with
   the service when it is handed (`hand/4`). A start that settles after its owner's end reads
@@ -41,7 +44,7 @@ defmodule CodingAgentFramework.Services do
 
   use GenServer
 
-  alias CodingAgentFramework.{Grants, Holder, Shell}
+  alias CodingAgentFramework.{Grants, Holder, Programs, Shell}
   alias CodingAgentFramework.Copies.Held
   alias CodingAgentFramework.Services.Table
 
@@ -78,13 +81,26 @@ defmodule CodingAgentFramework.Services do
   [ "$(echo $t)" = "$2" ] || { echo gone; exit 0; }
   "$4" -"$5" -- "-$1" && echo sent
   """
+  # $1 the pid, $2 its start time, $3 ps, $4 dtach, $5 the socket, $6 the input. The same check
+  # as an end's, in the process that pushes, so input never reaches a program put in its place.
+  @send_script ~S"""
+  export LC_ALL=C TZ=UTC
+  t=$("$3" -o lstart= -p "$1") || { echo gone; exit 0; }
+  [ "$(echo $t)" = "$2" ] || { echo gone; exit 0; }
+  out=$(printf '%s' "$6" | "$4" -p "$5" 2>&1) && { echo sent; exit 0; }
+  case $out in *"Connection refused"*|*"No such file"*) echo gone ;; *) echo "unknown $out" ;; esac
+  """
+  # An argument carries no NUL, and a remote command line has a bounded length.
+  @max_input 65_536
+  # The pause between a wait's rounds of reads.
+  @round 100
 
   @doc """
   Starts the part. Options: `:dir`, a directory of this machine of its own (the table);
   `:copies`, the `Copies` server; `:grants`, a `Grants`; `:ended`, a function of an agent's
   name that answers true once that agent has ended (the embedding app's durable row); `:hosts`, each host's name to
   `%{programs: programs, dir: dir}`, its `Programs` (with `dtach`, `sh`, `env`, `rm`, `kill`,
-  `sleep`, `mkdir`, `ps`, `tail`, and for the copy `flock` and `rsync`) and its framework
+  `sleep`, `mkdir`, `ps`, `tail`, `nc` for a port wait, and for the copy `flock` and `rsync`) and its framework
   directory.
   """
   @spec start_link(keyword) :: GenServer.on_start()
@@ -187,6 +203,162 @@ defmodule CodingAgentFramework.Services do
         other -> {:unknown, {:log, other}}
       end
     end
+  end
+
+  @doc """
+  Sends `input` to running service `name`'s terminal, for `caller`, its owner or the owner's
+  parent: `dtach -p` on its host, only while its pid still has the recorded start time. The
+  input is bytes as typed: `"\\n"` is Enter, `"\\x03"` ctrl-C. Option: `:timeout` (ms, default 5
+  s). Answers `{:ok, :sent}`; `{:refused, :not_held}` when the held program is not the row's
+  and nothing went in; `{:unknown, _}` when some of it may have. Never resent.
+
+      Services.send(services, "web-a", "repl", "1 + 1\\n")
+      #=> {:ok, :sent}
+  """
+  @spec send(GenServer.server(), String.t(), String.t(), String.t(), keyword) ::
+          {:ok, :sent} | {:refused, term} | {:unknown, term}
+  def send(services, caller, name, input, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, @call)
+
+    with :ok <- input_ok(input),
+         {:ok, row} <- fixable(services, caller, name, ~w(running)),
+         {:ok, ctx} <- context(services, row, timeout) do
+      %{sh: sh, ps: ps} = ctx.programs.paths
+      socket = Path.join(ctx.dir, name <> ".sock")
+      args = ["-c", @send_script, "caf-send", "#{row.pid}", row.started, ps, ctx.holder.dtach]
+
+      case Shell.run(ctx.programs.host, sh, args ++ [socket, input], timeout: timeout) do
+        {:ok, %{status: 0, output: "sent\n"}} -> {:ok, :sent}
+        {:ok, %{status: 0, output: "gone\n"}} -> {:refused, :not_held}
+        other -> {:unknown, {:send, other}}
+      end
+    end
+  end
+
+  defp input_ok(input) do
+    cond do
+      not is_binary(input) or String.contains?(input, <<0>>) -> {:refused, :bad_input}
+      byte_size(input) > @max_input -> {:refused, {:input_too_long, @max_input}}
+      true -> :ok
+    end
+  end
+
+  @doc """
+  Waits up to `timeout` ms until service `name` meets `until`, for any caller:
+
+    * `{:line, pattern}` or `{:line, pattern, from}`: a whole line of the log from byte `from`
+      (default 0) matches `pattern` (a `Regex` or its source); answers `{:ok, {:line, line,
+      next}}`, `next` the offset just after that line;
+    * `{:port, port}`: the port listens on the host's `127.0.0.1` (the host's `nc`); answers
+      `{:ok, {:port, port}}`;
+    * `:exit`.
+
+  The service's exit, its socket read dead, ends every wait with `{:ok, :exited}`; the log is
+  read once more after that read. At the timeout: `{:unknown, :timeout}`, or `{:unknown,
+  :dropped}` when the last read failed. A failed read is no answer: the next round reads again.
+
+      Services.wait(services, "db", {:line, ~r/ready to accept/}, 30_000)
+      #=> {:ok, {:line, "LOG: ready to accept connections", 412}}
+  """
+  @spec wait(GenServer.server(), String.t(), term, pos_integer) ::
+          {:ok, term} | {:refused, term} | {:unknown, term}
+  def wait(services, name, until, timeout) do
+    deadline = now() + timeout
+
+    with {:ok, until} <- until_ok(until),
+         {:ok, row} <- row_of(services, name),
+         {:ok, ctx} <- context(services, row, @call),
+         {:ok, nc} <- nc(ctx, until) do
+      wait_round(Map.put(ctx, :nc, nc), until, deadline, :timeout)
+    end
+  end
+
+  defp until_ok({:line, pattern}), do: until_ok({:line, pattern, 0})
+  defp until_ok({:line, %Regex{}, from} = until) when from >= 0, do: {:ok, until}
+
+  defp until_ok({:line, source, from}) when is_binary(source) and from >= 0 do
+    case Regex.compile(source) do
+      {:ok, regex} -> {:ok, {:line, regex, from}}
+      {:error, _} -> {:refused, {:bad_pattern, source}}
+    end
+  end
+
+  defp until_ok({:port, port} = until) when port in 1..65_535, do: {:ok, until}
+  defp until_ok(:exit), do: {:ok, :exit}
+  defp until_ok(other), do: {:refused, {:bad_until, other}}
+
+  defp nc(ctx, {:port, _}) do
+    with {:ok, %{nc: nc}} <- Programs.take(ctx.programs, [:nc]), do: {:ok, nc}
+  end
+
+  defp nc(_ctx, _until), do: {:ok, nil}
+
+  # One round: the socket, then the condition, so a line written before the exit is found.
+  # `last` is how the wait ends at its deadline: dropped while the last round's reads failed.
+  # A read the deadline itself cut keeps the round before's.
+  defp wait_round(ctx, until, deadline, last) do
+    timeout = max(min(deadline - now(), @call), 1)
+    state = Holder.state(%{ctx.holder | timeout: timeout}, ctx.name)
+
+    case {met(ctx, until, timeout), state} do
+      {{:ok, _} = answer, _} ->
+        answer
+
+      {{:no, _}, {:ok, dead}} when dead in [:absent, :stale] ->
+        {:ok, :exited}
+
+      {{read, until}, state} ->
+        cut = read == :cut or match?({:unknown, {:timeout, _}}, state)
+
+        last =
+          cond do
+            read == :no and match?({:ok, _}, state) -> :timeout
+            cut and now() >= deadline -> last
+            true -> :dropped
+          end
+
+        if now() >= deadline do
+          {:unknown, last}
+        else
+          pause(min(@round, deadline - now()))
+          wait_round(ctx, until, deadline, last)
+        end
+    end
+  end
+
+  # `{:ok, answer}`, `{:no, until}` with a line wait's offset moved past the lines read,
+  # `{:cut, until}` for a read its timeout cut, or `{:failed, until}`.
+  defp met(_ctx, :exit, _timeout), do: {:no, :exit}
+
+  defp met(ctx, {:port, port} = until, timeout) do
+    case Shell.run(ctx.programs.host, ctx.nc, ["-z", "127.0.0.1", "#{port}"], timeout: timeout) do
+      {:ok, %{status: 0}} -> {:ok, {:port, port}}
+      {:ok, %{status: 1}} -> {:no, until}
+      other -> failed(other, until)
+    end
+  end
+
+  defp met(ctx, {:line, regex, from} = until, timeout) do
+    args = ["-c", "+#{from + 1}", ctx.log]
+
+    case Shell.run(ctx.programs.host, ctx.programs.paths.tail, args, timeout: timeout) do
+      {:ok, %{status: 0, output: text}} -> line(regex, from, String.split(text, "\n"))
+      other -> failed(other, until)
+    end
+  end
+
+  defp failed({:unknown, {:timeout, _}}, until), do: {:cut, until}
+  defp failed(_other, until), do: {:failed, until}
+
+  # The last piece has no newline yet: it is read again from its start at the next round.
+  defp line(regex, from, [_last]), do: {:no, {:line, regex, from}}
+
+  defp line(regex, from, [line | rest]) do
+    next = from + byte_size(line) + 1
+
+    if Regex.match?(regex, line),
+      do: {:ok, {:line, line, next}},
+      else: line(regex, next, rest)
   end
 
   @doc """
