@@ -28,6 +28,7 @@ defmodule CafMcp.MixProject do
       {:caf_transcripts, in_umbrella: true, only: :test},
       {:caf_usage, in_umbrella: true, only: :test},
       {:caf_jobs, in_umbrella: true, only: :test},
+      {:caf_services, in_umbrella: true, only: :test},
       {:caf_test, in_umbrella: true, only: :test},
       {:bandit, "~> 1.14", only: :test}
     ]

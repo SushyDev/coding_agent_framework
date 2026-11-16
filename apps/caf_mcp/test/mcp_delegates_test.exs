@@ -67,6 +67,8 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
          mailbox: {__MODULE__, :unused},
          jobs: {__MODULE__, :unused},
          delegates: {Delegates, delegates},
+         services: {__MODULE__, :unused},
+         workstation: "ws",
          place: fn _ -> {:refused, :none} end,
          instance: "d",
          tool_timeout: 600_000,
