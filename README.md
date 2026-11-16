@@ -24,6 +24,10 @@ The words are defined once, in [docs/design.md](docs/design.md#concepts).
 
 ## How it fits together
 
+The chart shows the shape the code is being remodeled into (units R1 to R12 in
+[docs/design.md](docs/design.md#order-of-the-first-units)): each mechanism once, in the part
+that owns it.
+
 ```mermaid
 flowchart LR
   person([You])
@@ -42,13 +46,17 @@ flowchart LR
 
     subgraph framework["The framework (Elixir and OTP)"]
       direction TB
-      readers["Readers<br/>Registry · Transcripts · Usage<br/>Stream · Intake · TmuxSampler · Screen"]
-      writers["Writers<br/>Control · Sessions · Stream"]
-      tools["The tree's tools, over MCP<br/>Grants · Mailbox · Delegates"]
-      waiter["The waiting Stop hook<br/>reports and messages into<br/>an idle main session"]
+      readers["Readers, one loop on Store<br/>Registry · Transcripts · Usage · Sampler<br/>over every account"]
+      sessions["Sessions<br/>the agent row and the tree"]
+      intake["Intake<br/>hook events; one hold:<br/>permission · tool · stop · waiter"]
+      mailbox["Mailbox<br/>every delivery, one mark<br/>stream · waiter · typed · call"]
+      inlet["Inlet<br/>the checked typed write"]
+      stream["Stream<br/>a headless session's transport"]
+      tools["The tree's tools, over MCP<br/>Grants · Delegates"]
+      acts["Acts<br/>one ledger of claims,<br/>recoveries and faults"]
       tracker["Tracker<br/>one fold of every reader"]
       recoveries["Recoveries<br/>detect, act once, verify"]
-      db[("SQLite tables<br/>the truth")]
+      db[("SQLite tables<br/>the truth, one writer each")]
     end
   end
 
@@ -71,28 +79,41 @@ flowchart LR
   tmux -.->|views| tree
   tree --- worktrees
   tree --- configs
-  tree -->|hooks, session files,<br/>transcripts, event logs, screens| readers
-  writers -->|one checked write| tree
+  tree -->|session files, transcripts,<br/>tmux samples| readers
+  tree -->|hooks| intake
   tree -->|"run_delegate, message,<br/>agents()"| tools
-  tools --> writers
-  tools --> db
-  waiter -->|wakes a turn| main
-  db --> waiter
+  tools --> sessions
+  tools --> mailbox
+  tools --> acts
+  mailbox -->|line| stream
+  mailbox -->|due text| intake
+  mailbox -->|no waiter| inlet
+  stream --> delegate
+  intake -->|wakes a turn| main
+  inlet -->|one checked write| main
   readers --> db
-  writers --> db
+  sessions --> db
+  mailbox --> db
+  acts --> db
   db --> tracker
   tracker --> recoveries
-  recoveries --> writers
+  recoveries --> acts
+  recoveries --> sessions
   tracker --> ui
   tracker -->|"agents(): the tree"| tree
-  ui -->|start a main session, move an account,<br/>answer, interrupt| writers
+  ui -->|start a main session, move an account,<br/>answer, interrupt| tools
 ```
 
 - **Held, not hosted.** Every agent runs under `dtach -n` on the workstation, so it outlives
   tmux, its terminal and the framework. tmux only shows it.
-- **Readers, then one writer.** Each reader turns one source (a hook, a session file, a
-  transcript, an event log, a tmux sample, a screen) into rows. There is one writer, and each
-  write is checked against the target pane before it is sent.
+- **Readers, then one writer per table.** Each reader turns one source (a hook, a session file,
+  a transcript, an event log, a tmux sample, a screen) into rows, with one shared loop. Each
+  table has one writer, and a part reads another's state only through that part's functions.
+  The one typed write is checked against the target pane before it is sent.
+- **Each mechanism once.** Everything handed to an agent is one row in `Mailbox`, with one mark
+  and settle whatever the transport; every hook that waits is one hold in `Intake`; every claim,
+  recovery and fault is one row in `Acts`; every agent, main session or delegate, is one row in
+  `Sessions`, and the tree is a function of those rows.
 - **Nothing typed to deliver.** A report or a message reaches a main session through its
   waiting Stop hook, which wakes the idle session with the text, so a draft in its box is never
   touched. A session ends by SIGTERM once its session file says it is idle.
@@ -114,18 +135,25 @@ Built, each from a checked model in `model/tla/`:
 - `PreToolUse` held while the app decides, and `PostToolUse` handed on;
 - `Screen`, reading a main session's screen from a real release's fixtures.
 
-Next, in order: delivery into a main session by its waiting Stop hook; the move between
-accounts, modeled with the end by SIGTERM and a message in flight; interactive delegates; main
-sessions; `Mover`; then the mechanisms an app's policies stand on (an idle delegate's watchdog,
-admission by load, `Stop` held for the app, a fault ledger, clone copies, an idempotent start),
-packaging, and stacks with the LiveView components. The plan and the order of the units are in
+Next, the remodel, in order (F-115, taken in F-116): a shared SQLite store (R1); one reader
+loop, with one `Registry` and one `Transcripts` over every account (R2); one held-process record
+and the end by SIGTERM (R3); `Claim` and `Hold` in the model (R4); one hold in `Intake`, with the
+waiting Stop hook (R5); `Delivery` in the model, and the move rewritten with a message in flight
+(R6); `Mailbox` delivering everything, reports included (R7); the `Inlet`, the checked typed
+write (R8); the agent row and the tree in `Sessions` (R9); `Acts`, one ledger of claims,
+recoveries and faults (R10); `Cues`, the library's own routing (R11); and `Mover` (R12). Then
+interactive delegates and main sessions, the mechanisms an app's policies stand on (an idle
+delegate's watchdog, admission by load, `Stop` held for the app, clone copies, an idempotent
+start), packaging, and stacks with the LiveView components. The plan and the order of the units are in
 [docs/design.md](docs/design.md); each unit's notes are in `docs/build-notes/`.
 
 
 ## The apps
 
 The code is a Mix umbrella, one OTP app per part under `apps/`. An arrow means "uses"; each app
-declares every app it uses, directly, and `gate-deps` checks that.
+declares every app it uses, directly, and `gate-deps` checks that. The chart shows the apps as
+built; the remodel changes it as R1 to R12 land (`caf_store` and `caf_cues` added, `caf_control`
+becoming `caf_inlet`).
 
 ```mermaid
 flowchart BT
