@@ -40,14 +40,20 @@ Each word below names one thing, and the design, the code and the views use it o
 
 - **Agent**: a Claude Code session the framework runs and holds: a main session or a delegate.
   Every agent runs on the workstation, held by dtach.
-- **Main session**: a project's top agent, one per project. It runs Claude Code's terminal
+- **Main session**: a top agent of a project, named by the app that starts it; a project may
+  have several, one per piece of work the app runs (an epic, say). It runs Claude Code's terminal
   interface with Remote Control, because a person works in it. It sits on the project's trunk
   and does no work there itself: work happens in worktrees, and once merged, the main session
   pulls trunk, so it always holds the project's latest trunk. It is never archived.
 - **Delegate**: an agent a main session starts through the framework, on any account, in its
-  own worktree. It runs headless: it reads JSON messages on stdin and writes JSON events on
-  stdout, and nothing reads its screen. It acts like a subagent of its main session: it gets a
-  brief and gives one report.
+  own worktree. By default it runs headless: it reads JSON messages on stdin and writes JSON
+  events on stdout, and nothing reads its screen. Started `interactive: true`, it runs Claude
+  Code's terminal interface as a main session does, held the same way, so a person can attach
+  and type, and the framework's writes into it are checked by `Screen`. It acts like a subagent
+  of its main session: it gets a brief and gives its reports.
+- **Operator**: a person or the app acting on agents from outside the tree (from a view, say).
+  It acts through the same checks and claims as a parent, as a parent of every main session and
+  so of every agent, and every act names it as the actor.
 - **Subagent**: Claude Code's own subagent, run inside an agent by Claude Code, on that agent's
   account. The framework does not start subagents; it reads and counts them.
 - **Parent** and **child**: the link between two levels. A main session is the parent of its
@@ -130,12 +136,17 @@ model (`model/tla/`), `bin/check-model`, devenv and the design stay at the root,
 run across every app. No app starts a process of its own: the embedding app's supervision tree
 starts each part.
 
+The umbrella is how the framework is developed: each part's app declares what it uses, and the
+gates keep the layers one way. It is used as one package, `coding_agent_framework`: one Mix
+project that compiles every part as one OTP app, by a git tag first and from Hex later. It runs
+on the Elixir and OTP versions it declares and tests; a version it needs is named with why.
+
 | Part | Job |
 |---|---|
 | `Hosts` | the workstation and the other hosts, how each is reached, and its shell |
 | `Shell` | the only module that starts programs, locally or over ssh, each leading a process group of its own, which a timeout ends |
 | `Shell.Reaper` | one per host: ends a running command's group when its caller dies first or the VM dies |
-| `Programs` | the absolute path of tmux, dtach, claude, git, gh, rsync, ssh, flock, sh, sleep, rm, kill, env, ps, cat and tail on each host; no other part names a fixed path |
+| `Programs` | the absolute path of tmux, dtach, claude, git, gh, rsync, ssh, flock, sh, sleep, rm, kill, env, ps, cat and tail on each host, given (from devenv, as the framework's own development and gates use) or looked up on the host's `PATH`, each checked against its supported versions at start with a clear error per one missing or out of range; no other part names a fixed path |
 | `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` |
 | `Usage` | each account's weekly allowance, from what Claude Code hands its status line; picks the account with the most left ("Allowance") |
 | `Tmux` | sessions, panes, tags, keys and viewers on one server; a contract with a CLI and a fake |
@@ -342,17 +353,21 @@ The spec settles (F-72):
 
 ## Main sessions
 
-A project has at most one main session. It runs in the project's checkout, the framework's own
+A project may have several main sessions, each named by the app, with the project as one of
+its fields. Each runs in the project's checkout, the framework's own
 clone under `<home>/checkouts/<project>`, made once from the project's repository, on trunk. It
 changes nothing there: its delegates work in worktrees, their branches land into trunk through
 stacks, and after each landing the framework pulls trunk in that checkout (fast-forward only,
-and only while the checkout is clean; anything else is a state a person sees). So the main
-session always holds the project's latest trunk.
+and only while the checkout is clean; anything else is a state a person sees). So each main
+session always holds the project's latest trunk. Several main sessions of one project share the
+checkout and change nothing in it; each delegate's parent says whose work it is. Two main
+sessions can still brief work on the same files: their briefs keep apart, and stacks and reviews
+catch what does not.
 
-A person starts a main session from the views, and a main session can start one with
-`start_main(project, brief)` for a declared project that has none; a project that has one
-refuses it with `{:refused, {:running, name}}`. The new main session's brief is its first
-message.
+A person or the app starts a main session, and a main session can start one with
+`start_main(project, name, brief)` for a declared project; a name in use is refused with
+`{:refused, {:running, name}}`, as is the reserved name `framework`. The new main session's
+brief is its first message.
 
 A main session holds, and a view shows:
 
@@ -709,7 +724,7 @@ framework's tools, which are strict in how they act and narrow in whom they reac
 | `stop(agent)` | parent | ends a delegate after its report is delivered, under a claim |
 | `start_delegate(…)` | main session | starts a delegate and answers at once; the report arrives later as a message ("The delegate protocol") |
 | `run_delegate(…, timeout)` | main session | starts a delegate and holds the call for its report, up to `timeout`, for short work; at the timeout it answers `{:unknown, :timeout}` with the delegate's name, and the report then arrives as a message, as `start_delegate`'s does |
-| `start_main(project, brief)` | main session | starts the main session of a project that has none |
+| `start_main(project, name, brief)` | main session | starts a main session of a project under a name not in use |
 | `run(host, argv, timeout, opts)` | main session, delegate | runs a job in a copy of the caller's worktree on `host`, and answers its exit code and the end of its log, or `{:unknown, :timeout}` once it ended it; after the job ends, the paths `fetch:` names, and only those, are copied by rsync from the copy into the caller's worktree |
 | `service_start(name, argv, opts)` | main session, delegate | holds `argv` by dtach on a host (`host:`, the workstation by default) in a copy of the caller's worktree, with its output in a log, and a port forwarded to the workstation if `forward:` names one (to the same port unless `local:` names another); `timeout` bounds the whole start, sync and forward included |
 | `services()` | any agent | each service: name, host, owner, state, restarts, forwarded port |
@@ -1194,6 +1209,34 @@ Then `Delegate.tla` and `Delegates` (its start, finish and kill path are built).
    new-4 and new-7, folded into "Hosts"). Then `Copies`, `Jobs` and `Services` on any host,
    with forwarded ports.
 9. **`Stack.tla`** and `Stacks`, then the LiveView components, and Ghostty.
+
+Items 7 and 8 are built (F-69 to F-104). What an app built on the framework needs, by its own
+list of gaps (F-108), comes in this order, blockers first; each protocol is modeled before its
+code:
+
+10. **The operator**: a person or the app acting through `Grants` and claims as a parent of every
+    main session, recorded as the actor; messages from it through `Mailbox`.
+11. **Launch options per agent**: a settings overlay (permission deny rules), extra environment,
+    `--add-dir`, `--append-system-prompt`, allowed and disallowed tools, each checked and kept
+    on the agent's row.
+12. **PreToolUse and PostToolUse hooks**: held like `PermissionRequest`, PreToolUse answered by
+    an app callback with a short deadline (allow, deny or ask); then a permission policy asked
+    before any request waits for a person, its decision recorded as a person's is.
+13. **`Screen`** (item 4), then delivery into a main session, then **interactive delegates**
+    (`interactive: true`), then **`Mains`** (item 6, several per project, named by the app) and
+    **`Mover`** (item 5, for delegates as well as main sessions).
+14. **Packaging and toolchain**: one `coding_agent_framework` package; `Programs` looked up and
+    checked at start, with a Homebrew setup documented; the Elixir and OTP floor tested; a
+    library supervisor from a config struct, out of `caf_example`; accounts: how to log one in,
+    and Keychain reads for held processes (`USER`, and `security` on the launch's `PATH`).
+15. **What the app reads and drives**: structured reports with a schema and several per
+    delegate; app metadata and names on agents; status with the last activity, cost and tokens,
+    and a needs-input state; one activity feed per agent; an urgent message (interrupt, then
+    message, as one checked step); one-off headless turns; the agent's identity for the app's own
+    MCP servers; worktree base, reuse and removal; the source checkout's path for setup; a stable
+    read API by id and name; a PubSub adapter for cues; a readable rendering of a delegate's log.
+16. **`Stacks`**, the LiveView components (unstyled, with class hooks), and Ghostty (with other
+    terminals by a callback).
 
 The remote agents of the first plan (a session held on another host, its hooks forwarded back
 over ssh, its session files and status line read there) are not built: agents run only on the
