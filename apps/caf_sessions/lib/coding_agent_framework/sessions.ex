@@ -161,7 +161,7 @@ defmodule CodingAgentFramework.Sessions do
   Starts session `name` on `account` (from `Accounts.ready/2`). `launch` holds `role:` and
   `cwd:` (an absolute path) or `worktree:` (`%{project: project, branch: branch}`, with the
   project as `Sessions.Worktree.project/1` reads it; `cwd:` is then not read), and
-  `ClaudeCLI.session/3`'s `claude:`, `model:`, `env:`, `tool_timeout:` and `prompt:`. Option:
+  `ClaudeCLI.session/3`'s `claude:`, `model:`, `env:`, `tool_timeout:`, `prompt:` and `mcp:` (the agent's own MCP config). Option:
   `:timeout`, to which a worktree's start adds its setup's deadline and its git commands'
   bounds.
 
@@ -763,7 +763,8 @@ defmodule CodingAgentFramework.Sessions do
   defp required(ok, _key), do: ok
 
   defp cli(role, account, name, resume, launch) do
-    opts = Keyword.take(launch, [:claude, :model, :env, :tool_timeout, :prompt]) ++ [name: name]
+    opts = Keyword.take(launch, [:claude, :model, :env, :tool_timeout, :prompt, :mcp])
+    opts = opts ++ [name: name]
     opts = if resume, do: opts ++ [resume: resume], else: opts
     ClaudeCLI.session(role, account, opts)
   end
@@ -781,7 +782,7 @@ defmodule CodingAgentFramework.Sessions do
          {:ok, cli} <-
            ClaudeCLI.headless(
              account,
-             Keyword.take(launch, [:claude, :model, :env, :tool_timeout]) ++ start
+             Keyword.take(launch, [:claude, :model, :env, :tool_timeout, :mcp]) ++ start
            ),
          {:ok, transcript} <- Transcripts.path(account.config_dir, cwd, id) do
       {:ok, %{stream: stream, session_id: id, cli: cli, transcript: transcript}}

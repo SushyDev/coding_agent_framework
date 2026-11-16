@@ -70,8 +70,11 @@ defmodule CodingAgentFramework.Delegates do
   on), `db:`, `sessions_db:` (the file `Sessions`' table is in), `usage:`, `accounts:`,
   `transcripts:` (account to its `Transcripts`), `projects:` (name to a project as
   `Sessions.Worktree.project/1` reads it, with `branches:` and `cap:`), `launch:` (`claude:`,
-  `env:` and `tool_timeout:` for `ClaudeCLI`), and optionally `notify:` and `clock:`
-  (wall-clock ms).
+  `env:` and `tool_timeout:` for `ClaudeCLI`), and optionally `notify:`, `clock:` (wall-clock
+  ms) and `mcp:`, a function of the delegate's name that answers `{:ok, path}`, its own MCP
+  config (the embedding app gives `MCP.issue/2`), or a refusal. Each start and resume calls it
+  just before its launch and adds the path as `ClaudeCLI`'s `mcp:`; its refusal refuses the
+  start, and with no `mcp:` a delegate runs without the framework's tools.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -192,6 +195,7 @@ defmodule CodingAgentFramework.Delegates do
           sdb: sdb,
           notify: Keyword.get(opts, :notify, fn _ -> :ok end),
           clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
+          mcp: Keyword.get(opts, :mcp, fn _ -> {:ok, nil} end),
           pending: %{},
           waiters: %{},
           # The monitor of each process that took a report, to the report's id.
@@ -332,12 +336,19 @@ defmodule CodingAgentFramework.Delegates do
     launch = [role: :delegate, worktree: %{project: p, branch: row.branch}, model: row.model]
     launch = launch ++ s.launch
 
+    # The config is made in the task: the embedding app's `issue` may call a part that waits.
     task =
       Task.async(fn ->
-        if row.status == "starting",
-          do: Sessions.start(s.sessions, row.name, account, launch, timeout: @call),
-          else:
-            Sessions.resume(s.sessions, row.name, account, row.session_id, launch, timeout: @call)
+        with {:ok, mcp} <- s.mcp.(row.name) do
+          launch = if mcp, do: launch ++ [mcp: mcp], else: launch
+
+          if row.status == "starting",
+            do: Sessions.start(s.sessions, row.name, account, launch, timeout: @call),
+            else:
+              Sessions.resume(s.sessions, row.name, account, row.session_id, launch,
+                timeout: @call
+              )
+        end
       end)
 
     put_in(s.pending[task.ref], %{id: row.id, from: from})

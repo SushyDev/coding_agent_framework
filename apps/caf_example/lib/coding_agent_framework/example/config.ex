@@ -16,6 +16,8 @@ defmodule CodingAgentFramework.Example.Config do
   - `accounts`: the Claude accounts' names;
   - `projects`: name to the project as `Sessions` and `Delegates` read it: `repo`, `trunk`,
     `setup`, `setup_timeout`, `env`, `branches` and `cap` (the name is filled in);
+  - `mains`: each project's main session, project to its name; the tree holds each as a root
+    (no parent), so it can start its first delegate. None by default;
   - `ports`: `%{intake: port, mcp: port}` on 127.0.0.1;
   - `claude` and `env`: what every agent's launch shares (`CodingAgentFramework.ClaudeCLI`);
     `tool_timeout` and `margin`, Claude Code's MCP tool timeout and what `run_delegate` keeps
@@ -43,6 +45,7 @@ defmodule CodingAgentFramework.Example.Config do
     workstation: "ws",
     hosts: %{},
     projects: %{},
+    mains: %{},
     tool_timeout: 3_600_000,
     margin: 60_000,
     interval: 2_000

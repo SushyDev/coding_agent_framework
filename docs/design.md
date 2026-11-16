@@ -173,10 +173,17 @@ parts that read that topic. What it wires that the parts did not yet offer (F-10
 until `Mains`, it declares each project's main session, and `Grants`' tree answers it as a root
 (no parent), so a main session can start its first delegate; `Delegates` launches each delegate
 with its own MCP config, from a function of the agent's name the app gives it (`MCP.issue/2`);
-a job's late end goes to its caller through `Mailbox` as a message from `framework`, the caller
-read from `MCP`'s call log by the job's id; `Stream` and `Transcripts` are read on an interval,
+a job's late end goes to its caller through `Mailbox` as a message from `framework`, once per
+job, the caller read from `MCP`'s call log by the job's id (from the file: `Jobs` hands the ends
+it owes as it starts, before `MCP`); `Stream` and `Transcripts` are read on an interval,
 as `Registry` is, so a delegate's `result` is read without waiting for another cue; and when a
-delegate's end is seen, the app calls `Services.owner_ended/3` from a process of its own.
+delegate's end is seen, the app calls `Services.owner_ended/3` from a process of its own (F-103;
+until a delegate's end after its report is built, an end is a refused start or `failed`). A
+delegate ended after its report (by `stop`) is written `ended` in `Delegates`' row, so the cue
+shows it and its services end (F-103's new-2). `on_late_end` answers `:ok` or `{:unknown,
+reason}`, and on the second the job stays owed for the next cue: keeping an end never needs a
+crash (new-1). A delegate's reply to a message from `framework` goes to its main session, as
+any reply does (new-4).
 
 ## Hosts
 

@@ -62,9 +62,23 @@ defmodule CodingAgentFramework.Mailbox do
     do: call(mailbox, {:message, from, to, text}, opts)
 
   @doc """
+  Stores `text` as a message from `framework` to agent `to`, delivered as any message is: the
+  embedding app's word to an agent, such as a job's late end. `to` must be an agent the tree
+  holds (`Grants.may_use?/2`). Option `:key`: a message stored under the same key before is
+  not stored again, so a repeat of one event (a late end handed twice) is dropped. Answers
+  `{:ok, {:queued, id}}`, `{:ok, :stored_before}`, or `{:refused, reason}` with no row.
+
+      Mailbox.notify(mailbox, "app-main", "Job mcp-a-7 ended: exit 0.", key: "job:mcp-a-7")
+      #=> {:ok, {:queued, 9}}
+  """
+  def notify(mailbox, to, text, opts \\ []),
+    do: call(mailbox, {:notify, to, text, Keyword.get(opts, :key)}, opts)
+
+  @doc """
   What became of message `id`: `{:ok, %{id, from, to, status, attempt, reply_to, subtype,
   is_error}}`, `status` being `queued`, `sending`, `delivered` or `ended`, `reply_to` the uuid
-  of the message a delegate's reply or the framework's notice answers (nil for any other), and
+  of the message a delegate's reply or the framework's notice answers (`key:<key>` for a
+  `notify/4` stored under a key, nil for any other), and
   `subtype` and `is_error` a reply's result's; or `{:refused, :no_message}`.
   """
   def status(mailbox, id, opts \\ []), do: call(mailbox, {:status, id}, opts)
@@ -115,6 +129,26 @@ defmodule CodingAgentFramework.Mailbox do
       id = Table.queued(s.db, from, to, text, Stream.uuid())
       announce(s, id)
       {:reply, {:ok, {:queued, id}}, s, {:continue, :settle}}
+    else
+      refused -> {:reply, refused, s}
+    end
+  end
+
+  # The key goes in `reply_to`, whose unique index takes one row per key; a key is never a
+  # message's uuid, since it carries its own prefix.
+  def handle_call({:notify, to, text, key}, _from, s) do
+    with true <-
+           (Enum.all?([to, text], &(is_binary(&1) and &1 != "")) and
+              (is_nil(key) or is_binary(key))) or {:refused, {:bad, :message}},
+         :ok <- Grants.may_use?(s.grants, to) do
+      case Table.reply(s.db, @framework, to, text, Stream.uuid(), key && "key:" <> key) do
+        nil ->
+          {:reply, {:ok, :stored_before}, s}
+
+        id ->
+          announce(s, id)
+          {:reply, {:ok, {:queued, id}}, s, {:continue, :settle}}
+      end
     else
       refused -> {:reply, refused, s}
     end

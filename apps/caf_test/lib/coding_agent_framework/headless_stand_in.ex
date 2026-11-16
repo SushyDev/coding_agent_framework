@@ -17,7 +17,7 @@ defmodule CodingAgentFramework.HeadlessStandIn do
   - `end_session` ends it; a line that is not a JSON object ends it with status 1.
 
   It records each line it takes in `<dir>/taken` (`message <uuid>`, `answer <id>`, `interrupt`,
-  `end`, `invalid`) and its pid in `<dir>/pids/`, so a test ends what it started by pid; it
+  `end`, `invalid`), its arguments in `<dir>/argv/<session id>`, and its pid in `<dir>/pids/`, so a test ends what it started by pid; it
   exits at once if that directory was already ended (`TestHost.end_recorded/2`). It ends after
   `idle` seconds with no input (`TestHost.stand_in_idle/0` by default), so no run leaves it for
   long.
@@ -33,11 +33,20 @@ defmodule CodingAgentFramework.HeadlessStandIn do
       when mode in [:at_start, :on_message, :never] do
     path = Path.join(dir, "headless-#{mode}")
     File.mkdir_p!(Path.join(dir, "pids"))
+    File.mkdir_p!(Path.join(dir, "argv"))
     tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
     File.write!(tmp, script(dir, mode, idle))
     File.chmod!(tmp, 0o755)
     File.rename!(tmp, path)
     path
+  end
+
+  @doc "The arguments the stand-in for session `session_id` was started with, or nil."
+  def argv(dir, session_id) do
+    case File.read(Path.join([dir, "argv", session_id])) do
+      {:ok, text} -> String.split(text, "\n", trim: true)
+      _ -> nil
+    end
   end
 
   @doc "The lines the stand-in started from `dir` took, in order."
@@ -62,11 +71,12 @@ defmodule CodingAgentFramework.HeadlessStandIn do
   defp script(dir, mode, idle) do
     ~S"""
     #!BASH
-    sid=''
+    sid='' args=("$@")
     while [ $# -gt 0 ]; do
       case $1 in --session-id|--resume) sid=$2; shift 2 ;; *) shift ;; esac
     done
     : 2>/dev/null > "DIR/pids/$$" || exit 0
+    [ -n "$sid" ] && printf '%s\n' "${args[@]}" > "DIR/argv/$sid"
     rec() { printf '%s\n' "$1" >> "DIR/taken"; }
     ev() { printf '%s\n' "$1"; }
     field() { [[ $line =~ \"$1\":\"([^\"]*)\" ]] && printf '%s' "${BASH_REMATCH[1]}"; }

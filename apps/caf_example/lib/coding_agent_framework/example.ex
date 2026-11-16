@@ -32,7 +32,7 @@ defmodule CodingAgentFramework.Example do
   alias CodingAgentFramework.{Jobs, Mailbox, MCP, Programs, Recoveries, Registry, Services}
   alias CodingAgentFramework.{Sessions, Shell, Stream, Tmux, TmuxSampler, Tracker, Transcripts}
   alias CodingAgentFramework.{Usage}
-  alias CodingAgentFramework.Example.{Config, Ticker}
+  alias CodingAgentFramework.Example.{Config, Ends, Ticker}
 
   require Logger
 
@@ -43,7 +43,7 @@ defmodule CodingAgentFramework.Example do
     "tmux" => [:sessions, :recoveries],
     "sessions" => [:delegates],
     "transcripts" => [:delegates],
-    "delegates" => [:mailbox]
+    "delegates" => [:mailbox, :ends]
   }
   # A delegate that holds its parent's cap, and so is in the tree `Grants` reads.
   @tree ~w(starting running resuming finished failed)
@@ -185,6 +185,7 @@ defmodule CodingAgentFramework.Example do
             transcripts: accounts.(pid, :transcripts),
             launch: [claude: c.claude, env: c.env, tool_timeout: c.tool_timeout],
             projects: c.projects,
+            mcp: &issue(pid.(:mcp), &1),
             notify: notify}
          end},
         {:claims,
@@ -209,7 +210,7 @@ defmodule CodingAgentFramework.Example do
             dir: Config.path(c, "parts/jobs"),
             copies: pid.(:copies),
             hosts: hosts,
-            on_late_end: &late_end/1}
+            on_late_end: &late_end(c, pid, &1)}
          end},
         {:services,
          fn pid ->
@@ -247,7 +248,11 @@ defmodule CodingAgentFramework.Example do
            plug = {MCP.Plug, mcp: pid.(:mcp)}
            {Bandit, plug: plug, ip: @local, port: c.ports.mcp, startup_log: false}
          end},
-        {:ticker, fn pid -> {Ticker, interval: every, tick: fn -> tick(c, pid) end} end}
+        {:ticker, fn pid -> {Ticker, interval: every, tick: fn -> tick(c, pid) end} end},
+        {:ends,
+         fn pid ->
+           {Ends, ended: ended_ids(w), act: &owner_ended(pid.(:services), &1)}
+         end}
       ]
   end
 
@@ -281,9 +286,12 @@ defmodule CodingAgentFramework.Example do
       ]
   end
 
-  # Until `Mains`, the tree is `Delegates`' rows; a main session is a parent they name.
-  defp tree(%{ddb: ddb, c: c}),
-    do: fn -> Delegates.Table.with_status(ddb, c.workstation, @tree) end
+  # Until `Mains`, the tree is each main session the config declares, as a root, and
+  # `Delegates`' rows.
+  defp tree(%{ddb: ddb, c: c}) do
+    mains = for {project, name} <- c.mains, do: %{name: name, project: project, parent: nil}
+    fn -> mains ++ Delegates.Table.with_status(ddb, c.workstation, @tree) end
+  end
 
   # The copy an agent's jobs and services run in: its project, its name, and its worktree, the
   # cwd of its `Sessions` row. A main session has none until `Mains`.
@@ -305,12 +313,49 @@ defmodule CodingAgentFramework.Example do
       match?(%{status: s} when s in ~w(refused failed), latest(ddb, c.workstation, agent))
     end
 
+  # The delegates that have ended, by `ended`'s rule, among `ids` (or all), each once.
+  defp ended_ids(%{ddb: ddb, c: c}) do
+    fn ids ->
+      rows = Delegates.Table.rows(ddb, c.workstation)
+      latest = Map.new(rows, &{&1.name, &1})
+
+      for {name, %{id: id, status: s}} <- latest,
+          s in ~w(refused failed) and (ids == :all or id in ids),
+          do: name
+    end
+  end
+
   defp latest(ddb, host, agent),
     do: ddb |> Delegates.Table.rows(host) |> Enum.filter(&(&1.name == agent)) |> List.last()
 
-  # A job's end that its call did not wait for. Routing it to the caller as a message needs a
-  # way to store a message from the framework (F-102's note, new-2); until then it is logged.
-  defp late_end(late), do: Logger.warning("caf: a job ended after its call: #{inspect(late)}")
+  defp issue(nil, _agent), do: {:refused, :no_mcp}
+  defp issue(mcp, agent), do: MCP.issue(mcp, agent)
+
+  defp owner_ended(services, owner) do
+    case Services.owner_ended(services, owner) do
+      {:ok, _} -> :ok
+      other -> Logger.warning("caf: services of #{owner}, who ended: #{inspect(other)}")
+    end
+  end
+
+  # A job's end that its call did not wait for goes to the job's caller as a message from
+  # `framework`, once per job. It runs in `Jobs`' process, which may be starting before `MCP`,
+  # so the caller is read from `MCP`'s call log on disk. An end that cannot be stored raises:
+  # `Jobs` then hands it again at its next start; one with no caller is logged.
+  defp late_end(c, pid, %{job: job, end: e}) do
+    text = "Your job #{job} ended after its call answered: #{inspect(e)}. Nothing was fetched."
+
+    with {:ok, agent} <- MCP.caller(Config.path(c, "parts/mcp"), c.instance, job),
+         {:ok, _} <- Mailbox.notify(pid.(:mailbox), agent, text, key: "job:" <> job) do
+      :ok
+    else
+      {:refused, reason} when reason != :no_mailbox ->
+        Logger.warning("caf: job #{job}'s late end has no caller: #{inspect(reason)}")
+
+      other ->
+        raise "caf: job #{job}'s late end was not stored: #{inspect(other)}"
+    end
+  end
 
   defp route(tab, %{topic: topic} = cue) do
     [kind | _] = String.split(topic, ":")
@@ -322,6 +367,7 @@ defmodule CodingAgentFramework.Example do
         :sessions -> Sessions.cue(pid, cue)
         :delegates -> Delegates.cue(pid, cue)
         :mailbox -> Mailbox.cue(pid, cue)
+        :ends -> Ends.cue(pid, cue)
       end
     end
 
