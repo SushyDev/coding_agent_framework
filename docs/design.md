@@ -1292,21 +1292,40 @@ code:
 13. **`Screen`** (item 4, F-113), then delivery into a main session by the waiting Stop hook,
     modeled first, and the checked write for a session with no waiter (it records the release
     each session runs, and never trusts one read for a turn's end: F-113's new-2, new-4); the
-    end by SIGTERM in `Move.tla`; then **interactive delegates**
+    end by SIGTERM in `Move.tla`, with `Mailbox`'s delivery folded in: a message that falls due
+    during a move across accounts is held while no waiter is connected, delivered only to the
+    session on the new account, and once, settled against the copied transcript. Agents are
+    addressed by their name in the framework's tables, never by a pid or a socket, and found
+    through `Registry` across every account the framework holds, so a move never hides one;
+    then **interactive delegates**
     (`interactive: true`), then **`Mains`** (item 6, several per project, named by the app; a main session's kept
     services end with it or go to a person, once one can end: F-109's new-4) and
     **`Mover`** (item 5, for delegates as well as main sessions).
-14. **Packaging and toolchain**: one `coding_agent_framework` package; `Programs` looked up and
+14. **Mechanisms an app's policies stand on**, in this order:
+    - a delegate idle with no report, which `Delegates` tells its parent, in `Delegate.tla`;
+    - admission by measured load and memory for delegate starts and `Jobs`, whose refusal is
+      `{:refused, {:load, …}}`, never a failed run;
+    - `Stop` held for an app callback, as `PreToolUse` is, so an app's own check before a turn
+      ends answers it;
+    - one fault ledger: every recovery, kill, resume, start and raised error as a row, with a
+      subscription;
+    - copies by the file system's clone where it has one;
+    - a start idempotent per branch: a second start answers the running delegate only while its
+      session is live, and a row with no report whose session is gone does not count as running.
+
+    Which tests to rerun on a red, a re-entry brief after a reset, a reviewer and its acceptance
+    list, which edits to guard, and a replay suite are an app's policies, not the framework's.
+15. **Packaging and toolchain**: one `coding_agent_framework` package; `Programs` looked up and
     checked at start, with a Homebrew setup documented; the Elixir and OTP floor tested; a
     library supervisor from a config struct, out of `caf_example`; accounts: how to log one in,
     and Keychain reads for held processes (`USER`, and `security` on the launch's `PATH`).
-15. **What the app reads and drives**: structured reports with a schema and several per
+16. **What the app reads and drives**: structured reports with a schema and several per
     delegate; app metadata and names on agents; status with the last activity, cost and tokens,
     and a needs-input state; one activity feed per agent; an urgent message (interrupt, then
     message, as one checked step); one-off headless turns; the agent's identity for the app's own
     MCP servers; worktree base, reuse and removal; the source checkout's path for setup; a stable
     read API by id and name; a PubSub adapter for cues; a readable rendering of a delegate's log.
-16. **`Stacks`**, the LiveView components (unstyled, with class hooks), and Ghostty (with other
+17. **`Stacks`**, the LiveView components (unstyled, with class hooks), and Ghostty (with other
     terminals by a callback).
 
 The remote agents of the first plan (a session held on another host, its hooks forwarded back
