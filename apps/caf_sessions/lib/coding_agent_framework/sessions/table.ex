@@ -12,7 +12,8 @@ defmodule CodingAgentFramework.Sessions.Table do
   or stop's deadline in wall-clock milliseconds, so a restart does not move it. A start in a
   worktree keeps its project's `repo` and its `branch`, with `cwd` the worktree's path, and
   `worktree` says what the start did with it (`added`, `reused`) and, after a restart, whether
-  it was `removed` or why it was kept.
+  it was `removed` or why it was kept. `options` is the agent's own launch options as JSON
+  (`ClaudeCLI.Options.encode/1`), or NULL for none.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "doc.db")
       iex> {:ok, db} = CodingAgentFramework.Sessions.Table.open(path)
@@ -23,7 +24,7 @@ defmodule CodingAgentFramework.Sessions.Table do
   alias Exqlite.Sqlite3
 
   @columns ~w(id host name socket account role cwd resume status reason viewer pid session_id
-              proc_start started_at updated_at deadline repo branch worktree)a
+              proc_start started_at updated_at deadline repo branch worktree options)a
 
   @schema """
   PRAGMA journal_mode = WAL;
@@ -32,11 +33,11 @@ defmodule CodingAgentFramework.Sessions.Table do
     account TEXT NOT NULL, role TEXT NOT NULL, cwd TEXT NOT NULL, resume TEXT,
     status TEXT NOT NULL, reason TEXT, viewer TEXT, pid INTEGER, session_id TEXT,
     proc_start TEXT, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-    deadline INTEGER, repo TEXT, branch TEXT, worktree TEXT, UNIQUE (host, name));
+    deadline INTEGER, repo TEXT, branch TEXT, worktree TEXT, options TEXT, UNIQUE (host, name));
   """
 
   # A file made before a column gains it; a newer file already has it.
-  @added ~w(deadline:INTEGER repo:TEXT branch:TEXT worktree:TEXT)
+  @added ~w(deadline:INTEGER repo:TEXT branch:TEXT worktree:TEXT options:TEXT)
   # The statuses whose process may live: such a row holds its name and its cwd.
   @ended ~w(stopped refused)
 
@@ -77,7 +78,7 @@ defmodule CodingAgentFramework.Sessions.Table do
   @spec starting(db, map) :: integer
   def starting(db, %{} = start) do
     now = System.os_time(:millisecond)
-    keys = ~w(host name socket account role cwd resume session_id deadline repo branch)a
+    keys = ~w(host name socket account role cwd resume session_id deadline repo branch options)a
     values = Enum.map(keys, &start[&1]) ++ ["starting", now, now]
     names = Enum.join(keys ++ [:status, :started_at, :updated_at], ",")
     marks = Enum.map_join(1..length(values), ",", &"?#{&1}")

@@ -20,6 +20,7 @@ defmodule CodingAgentFramework.Accounts do
     turn it off;
   - `mcp.json`: the MCP servers, loaded with `--mcp-config` and `--strict-mcp-config`, so no
     server from `.claude.json` joins them;
+  - `agents/<agent>.settings.json`: an agent's own settings over the account's (`overlay/4`);
   - `statusline.sh`, when `prepare/3` is given the host's `Programs`: the settings' `statusLine`
     command. Claude Code hands it a JSON text with the account's rate limits; it copies a text
     that has the weekly window to `usage_file/2`, which `CodingAgentFramework.Usage` reads, and
@@ -43,6 +44,9 @@ defmodule CodingAgentFramework.Accounts do
   @type t :: %__MODULE__{home: String.t(), names: [String.t()]}
 
   @name ~r/\A[a-z0-9][a-z0-9_-]{0,31}\z/
+  # An agent's name, as a file name.
+  @agent ~r/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z/
+  @rules ~w(allow deny ask additionalDirectories)
 
   @doc """
   The accounts `names` under `home`, an absolute path. Nothing is written.
@@ -127,6 +131,44 @@ defmodule CodingAgentFramework.Accounts do
         else: {:refused, {:not_prepared, name}}
     end
   end
+
+  @doc """
+  Writes agent `name`'s own settings file, `<config>/framework/agents/<name>.settings.json`:
+  the account's `role` settings with `settings` (checked by `ClaudeCLI.Options`) over them. The
+  `permissions` rule lists (`allow`, `deny`, `ask`, `additionalDirectories`) add to the
+  account's; any other key replaces it. Answers `{:ok, path}`, `{:refused, {:bad, :name}}`,
+  `{:refused, {:not_prepared, account}}` or `{:unknown, {path, reason}}`.
+  """
+  @spec overlay(Account.t(), :parent | :delegate, String.t(), map) ::
+          {:ok, String.t()} | {:refused, term} | {:unknown, term}
+  def overlay(%Account{} = account, role, name, settings)
+      when role in [:parent, :delegate] and is_map(settings) do
+    dir = Path.join([account.config_dir, "framework", "agents"])
+
+    with true <- (is_binary(name) and name =~ @agent) or {:refused, {:bad, :name}},
+         path = Path.join(dir, name <> ".settings.json"),
+         {:ok, text} <- File.read(account.settings[role]),
+         {:ok, %{} = base} <- JSON.decode(text),
+         :ok <- mkdir(dir),
+         :ok <- write_all([{path, JSON.encode!(Map.merge(base, settings, &merge/3))}]) do
+      {:ok, path}
+    else
+      {:error, :enoent} -> {:refused, {:not_prepared, account.name}}
+      {outcome, _} = failed when outcome in [:refused, :unknown] -> failed
+      other -> {:unknown, {account.settings[role], other}}
+    end
+  end
+
+  def overlay(_account, _role, _name, _settings), do: {:refused, {:bad, :overlay}}
+
+  defp merge("permissions", %{} = account, %{} = own) do
+    Map.merge(account, own, fn
+      key, a, b when key in @rules and is_list(a) and is_list(b) -> Enum.uniq(a ++ b)
+      _key, _a, b -> b
+    end)
+  end
+
+  defp merge(_key, _account, own), do: own
 
   @doc """
   Whether the account looks logged in, read from which files exist. No file is opened.

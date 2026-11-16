@@ -11,6 +11,8 @@ defmodule CodingAgentFramework.ClaudeCLI do
     `--strict-mcp-config`, the files `CodingAgentFramework.Accounts.prepare/3` wrote, and
     after the account's file the agent's own (`mcp:`, from `CodingAgentFramework.MCP.issue/2`),
     which carries who the agent is;
+  - the agent's own `:options` (`CodingAgentFramework.ClaudeCLI.Options.argv/1`), and its own
+    `:settings` file in the account's place when it has a settings overlay;
   - `--remote-control <name>` for a main session (role `:parent`) only. A delegate's settings
     file sets `remoteControlAtStartup` to false, since no flag turns Remote Control off;
   - `--resume <id>` when given;
@@ -34,6 +36,7 @@ defmodule CodingAgentFramework.ClaudeCLI do
     silence and its HTTP request 60 seconds. `CodingAgentFramework.MCP` keeps a
     `run_delegate`'s wait under the same value, less a margin, so the client never gives up
     first;
+  - the `env` of the agent's own options, sorted by name;
   - `DISABLE_AUTOUPDATER=1`, last and for every role: devenv pins Claude Code, and a session
     that updates itself runs a version the lock does not name.
 
@@ -58,6 +61,7 @@ defmodule CodingAgentFramework.ClaudeCLI do
   """
 
   alias CodingAgentFramework.Accounts.Account
+  alias CodingAgentFramework.ClaudeCLI.Options
 
   @type role :: :parent | :delegate
   @type launch :: %{argv: [String.t()], env: [{String.t(), String.t()}]}
@@ -73,12 +77,12 @@ defmodule CodingAgentFramework.ClaudeCLI do
 
   Options: `:claude` (its absolute path, from `Programs`), `:model`, `:name`, `:env` (a map of
   `:home`, `:path`, `:term` and `:lang`), `:tool_timeout` (ms, 1 000 to 2 147 483 647: the MCP
-  tool timeout), and optionally `:resume` (a session id) and `:prompt` (the first prompt). A
-  delegate needs its brief as `:prompt` unless it resumes.
+  tool timeout), and optionally `:resume` (a session id), `:prompt` (the first prompt),
+  `:options` and `:settings`. A delegate needs its brief as `:prompt` unless it resumes.
 
   Returns `{:ok, %{argv: argv, env: env}}` or `{:refused, reason}`: `:no_account_dir` when
   `account` is not an account with a config directory, `{:missing, option}`, `{:bad, option}`,
-  `{:bad_role, role}` or `:delegate_without_brief`.
+  `{:bad_role, role}`, `:delegate_without_brief` or `{:bad_option, option, why}`.
   """
   @spec session(role, Account.t() | term, keyword) :: {:ok, launch} | {:refused, term}
   def session(role, account, opts)
@@ -93,10 +97,11 @@ defmodule CodingAgentFramework.ClaudeCLI do
          {:ok, resume} <- optional_word(opts, :resume),
          {:ok, mcp} <- mcp(account, opts),
          {:ok, prompt} <- prompt(role, opts, resume),
-         {:ok, env} <- env(account, opts) do
+         {:ok, own} <- own(account.settings[role], opts),
+         {:ok, env} <- env(account, opts, own.options) do
       argv =
         [claude, "--model", model, "--name", name] ++
-          ["--settings", account.settings[role]] ++
+          own.argv ++
           ["--mcp-config" | mcp] ++
           ["--strict-mcp-config"] ++
           if(role == :parent, do: ["--remote-control", name], else: []) ++
@@ -128,7 +133,7 @@ defmodule CodingAgentFramework.ClaudeCLI do
   or `--resume <id>` in its place. No prompt: the first message is a line on stdin.
 
   Options: `:claude`, `:model`, `:env`, `:tool_timeout` and `:mcp` as for `session/3`, and
-  exactly one of `:session_id` and `:resume`.
+  exactly one of `:session_id` and `:resume`; `:options` and `:settings` as well.
 
       iex> account = CodingAgentFramework.Accounts.Account.at("work", "/caf/accounts/work/claude")
       iex> env = %{home: "/h", path: "/bin", term: "dumb", lang: "C.UTF-8"}
@@ -145,9 +150,11 @@ defmodule CodingAgentFramework.ClaudeCLI do
          {:ok, model} <- word(opts, :model),
          {:ok, id} <- start_or_resume(opts),
          {:ok, mcp} <- mcp(account, opts),
-         {:ok, env} <- env(account, opts) do
+         {:ok, own} <- own(account.settings.delegate, opts),
+         {:ok, env} <- env(account, opts, own.options) do
       argv =
-        [claude, "-p", "--verbose", "--model", model, "--settings", account.settings.delegate] ++
+        [claude, "-p", "--verbose", "--model", model] ++
+          own.argv ++
           ["--mcp-config" | mcp] ++
           [
             "--strict-mcp-config",
@@ -233,14 +240,24 @@ defmodule CodingAgentFramework.ClaudeCLI do
     end
   end
 
-  defp env(account, opts) do
+  # An overlay's file holds the account's settings too: `--settings` takes one (F-110, new-1).
+  defp own(account_settings, opts) do
+    with {:ok, options} <- Options.check(Keyword.get(opts, :options)),
+         file = Keyword.get(opts, :settings, !options[:settings] && account_settings),
+         true <- file != false or {:refused, {:missing, :settings}},
+         true <- match?("/" <> _, file) or {:refused, {:bad, :settings}},
+         do: {:ok, %{options: options, argv: ["--settings", file] ++ Options.argv(options)}}
+  end
+
+  defp env(account, opts, options) do
     with {:ok, given} <- given_env(Keyword.get(opts, :env)),
          {:ok, ms} <- tool_timeout(Keyword.get(opts, :tool_timeout)) do
       timeouts = [{"MCP_TOOL_TIMEOUT", ms}, {"CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", ms}]
 
       {:ok,
        [{"CLAUDE_CONFIG_DIR", account.config_dir}] ++
-         Enum.map(@env, fn {k, v} -> {v, given[k]} end) ++ timeouts ++ @fixed}
+         Enum.map(@env, fn {k, v} -> {v, given[k]} end) ++
+         timeouts ++ Enum.sort(Map.get(options, :env, %{})) ++ @fixed}
     end
   end
 

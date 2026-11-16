@@ -61,6 +61,7 @@ defmodule CodingAgentFramework.Delegates do
   use GenServer
 
   alias CodingAgentFramework.{Accounts, Sessions, Stream, Transcripts, Usage}
+  alias CodingAgentFramework.ClaudeCLI.Options
   alias CodingAgentFramework.Delegates.{Table, Turn}
 
   # Sessions' own timeout for a start or a resume; its git bounds and slack come on top.
@@ -88,11 +89,14 @@ defmodule CodingAgentFramework.Delegates do
   `Mains` exists) on `branch` of `project`, with `model`, and writes `brief` as its first
   message. Answers `{:ok, %{id, name, session_id, account, brief}}`, `brief` being `Stream`'s
   answer to that write; `{:refused, reason}`; or `{:unknown, reason}`, when its row stays
-  `starting` for a later read to settle. Option `:timeout`: what the caller waits (default
-  300 000 ms); the start goes on past it.
+  `starting` for a later read to settle. Options: `:timeout`, what the caller waits (default
+  300 000 ms; the start goes on past it), and `:options` (`ClaudeCLI.Options`), checked before
+  the row, kept on it, and given to `Sessions` at the start and the resume.
   """
-  def start_delegate(delegates, parent, project, branch, model, brief, opts \\ []),
-    do: call(delegates, {:start, parent, project, branch, model, brief}, opts, 300_000)
+  def start_delegate(delegates, parent, project, branch, model, brief, opts \\ []) do
+    start = {:start, parent, project, branch, model, brief, Keyword.get(opts, :options)}
+    call(delegates, start, opts, 300_000)
+  end
 
   @doc "The reports `parent` holds: `{:ok, [%{id, name, branch, status, text, mark}]}`."
   def held(delegates, parent, opts \\ []), do: call(delegates, {:held, parent}, opts, @step)
@@ -226,10 +230,11 @@ defmodule CodingAgentFramework.Delegates do
   def handle_cast(:cue, s), do: {:noreply, settle(s)}
 
   @impl true
-  def handle_call({:start, parent, project, branch, model, brief}, from, s) do
+  def handle_call({:start, parent, project, branch, model, brief, options}, from, s) do
     with true <-
            Enum.all?([parent, model, brief], &(is_binary(&1) and &1 != "")) or
              {:refused, {:bad, :start}},
+         {:ok, options} <- Options.check(options),
          {:ok, p} <- Turn.check(s.projects, project, branch),
          true <- Table.active(s.db, s.host, parent) < p.cap or {:refused, {:cap, p.cap}},
          {:ok, account} <- pick(s) do
@@ -237,6 +242,7 @@ defmodule CodingAgentFramework.Delegates do
       row = %{host: s.host, parent: parent, project: project, branch: branch, model: model}
       row = Map.merge(row, %{name: Turn.name(p, branch), account: account.name, brief: brief})
       row = Map.merge(row, %{brief_uuid: Stream.uuid(), deadline: deadline(s, p)})
+      row = Map.put(row, :options, Options.encode(options))
       id = Table.starting(s.db, row)
       announce(s, id)
       {:noreply, call_sessions(s, Table.get(s.db, id), p, account, from)}
@@ -341,9 +347,12 @@ defmodule CodingAgentFramework.Delegates do
     launch = launch ++ s.launch
 
     # The config is made in the task: the embedding app's `issue` may call a part that waits.
+    # The row's options are given again on a resume.
     task =
       Task.async(fn ->
-        with {:ok, mcp} <- s.mcp.(row.name) do
+        with {:ok, options} <- Options.decode(row.options),
+             launch = launch ++ [options: options],
+             {:ok, mcp} <- s.mcp.(row.name) do
           launch = if mcp, do: launch ++ [mcp: mcp], else: launch
 
           if row.status == "starting",

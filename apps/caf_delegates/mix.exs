@@ -16,6 +16,7 @@ defmodule CafDelegates.MixProject do
   defp deps do
     [
       {:caf_accounts, in_umbrella: true},
+      {:caf_cli, in_umbrella: true},
       {:caf_sessions, in_umbrella: true},
       {:caf_stream, in_umbrella: true},
       {:caf_transcripts, in_umbrella: true},

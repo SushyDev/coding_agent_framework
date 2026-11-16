@@ -132,6 +132,16 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
   defp start_args(branch),
     do: %{"project" => "app", "branch" => branch, "model" => "opus", "brief" => "Review it."}
 
+  test "start_delegate takes the delegate's own launch options, which Delegates checks", ctx do
+    args = &Map.put(start_args("unit/one"), "options", &1)
+    bad = %{"refused" => ["bad_option", "env", ["reserved", "HOME"]]}
+    assert tool(ctx, "main", "start_delegate", args.(%{"env" => %{"HOME" => "/x"}})) == bad
+    options = %{"add_dirs" => ["/srv/docs"], "allowed_tools" => ["Read"]}
+    assert %{"ok" => _} = tool(ctx, "main", "start_delegate", args.(options))
+    assert [%{options: kept}] = Table.with_status(ctx.dtable, "test", ~w(running finished))
+    assert JSON.decode!(kept) == options
+  end
+
   test "start_delegate is the main session's, by its token, and answers the name at once", ctx do
     args = Map.put(start_args("unit/one"), "parent", "app-old")
     assert tool(ctx, "main", "start_delegate", args) == %{"ok" => %{"delegate" => "app-unit-one"}}

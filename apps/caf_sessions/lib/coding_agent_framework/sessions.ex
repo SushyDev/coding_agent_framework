@@ -111,7 +111,7 @@ defmodule CodingAgentFramework.Sessions do
   require Logger
 
   alias CodingAgentFramework.{ClaudeCLI, Control, Holder, Programs, Registry, Shell, Stream}
-  alias CodingAgentFramework.Transcripts
+  alias CodingAgentFramework.{Accounts, ClaudeCLI.Options, Transcripts}
   alias CodingAgentFramework.Registry.Liveness
   alias CodingAgentFramework.Sessions.{Table, Worktree}
 
@@ -161,7 +161,8 @@ defmodule CodingAgentFramework.Sessions do
   Starts session `name` on `account` (from `Accounts.ready/2`). `launch` holds `role:` and
   `cwd:` (an absolute path) or `worktree:` (`%{project: project, branch: branch}`, with the
   project as `Sessions.Worktree.project/1` reads it; `cwd:` is then not read), and
-  `ClaudeCLI.session/3`'s `claude:`, `model:`, `env:`, `tool_timeout:`, `prompt:` and `mcp:` (the agent's own MCP config). Option:
+  `ClaudeCLI.session/3`'s `claude:`, `model:`, `env:`, `tool_timeout:`, `prompt:` and `mcp:` (the agent's own MCP config),
+  and `options:`, kept on the row, which a resume that names none takes again. Option:
   `:timeout`, to which a worktree's start adds its setup's deadline and its git commands'
   bounds.
 
@@ -762,38 +763,53 @@ defmodule CodingAgentFramework.Sessions do
   defp required(:error, key), do: {:refused, {:missing, key}}
   defp required(ok, _key), do: ok
 
-  defp cli(role, account, name, resume, launch) do
+  defp cli(role, account, name, resume, launch, own) do
     opts = Keyword.take(launch, [:claude, :model, :env, :tool_timeout, :prompt, :mcp])
-    opts = opts ++ [name: name]
+    opts = opts ++ [name: name] ++ own
     opts = if resume, do: opts ++ [resume: resume], else: opts
     ClaudeCLI.session(role, account, opts)
+  end
+
+  # The agent's own options, before its row: the launch's, or on a resume that names none, its
+  # row's. A start refused after the overlay's write leaves the file for the next to rewrite.
+  defp own(state, role, account, name, resume, launch) do
+    row =
+      resume && not Keyword.has_key?(launch, :options) &&
+        Table.get(state.db, state.host.name, name)
+
+    given = if row, do: Options.decode(row.options), else: Options.check(launch[:options])
+
+    with {:ok, options} <- given,
+         s = options[:settings],
+         {:ok, file} <- if(s, do: Accounts.overlay(account, role, name, s), else: {:ok, nil}),
+         do: {:ok, options, [options: options] ++ if(file, do: [settings: file], else: [])}
   end
 
   # What a start holds, checked before its row is written: an interactive session's own
   # command, or a headless delegate's with the session id the framework chose ("Headless
   # delegates"), which a resume keeps.
-  defp way(state, :delegate, account, _name, cwd, resume, launch) do
+  defp way(state, :delegate, account, name, cwd, resume, launch) do
     id = resume || Stream.uuid()
     start = if resume, do: [resume: id], else: [session_id: id]
+    keys = [:claude, :model, :env, :tool_timeout, :mcp]
 
     # The id names the delegate's directory, so a resume's is a plain id, never a path.
     with {:ok, stream} <- if(state.stream && state.home, do: {:ok, state.stream}, else: :error),
          true <- id =~ ~r/\A[A-Za-z0-9_-]{1,64}\z/ or {:refused, {:bad, :session_id}},
-         {:ok, cli} <-
-           ClaudeCLI.headless(
-             account,
-             Keyword.take(launch, [:claude, :model, :env, :tool_timeout, :mcp]) ++ start
-           ),
+         {:ok, options, own} <- own(state, :delegate, account, name, resume, launch),
+         {:ok, cli} <- ClaudeCLI.headless(account, Keyword.take(launch, keys) ++ start ++ own),
          {:ok, transcript} <- Transcripts.path(account.config_dir, cwd, id) do
-      {:ok, %{stream: stream, session_id: id, cli: cli, transcript: transcript}}
+      {:ok, %{stream: stream, session_id: id, cli: cli, transcript: transcript, options: options}}
     else
       :error -> {:refused, :no_stream}
       refused -> refused
     end
   end
 
-  defp way(_state, role, account, name, _cwd, resume, launch) do
-    with {:ok, cli} <- cli(role, account, name, resume, launch), do: {:ok, %{cli: cli}}
+  defp way(state, role, account, name, _cwd, resume, launch) do
+    with {:ok, options, own} <- own(state, role, account, name, resume, launch),
+         {:ok, cli} <- cli(role, account, name, resume, launch, own),
+         do: {:ok, %{cli: cli, options: options}}
   end
 
   # The start's row before it has an id.
@@ -808,6 +824,7 @@ defmodule CodingAgentFramework.Sessions do
       resume: resume,
       deadline: deadline,
       session_id: way[:session_id],
+      options: Options.encode(way.options),
       repo: place.tree && place.tree.project.repo,
       branch: place.tree && place.tree.branch
     }

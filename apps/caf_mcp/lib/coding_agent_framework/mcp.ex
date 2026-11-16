@@ -22,7 +22,7 @@ defmodule CodingAgentFramework.MCP do
     which comes as a message, to the call;
   - `start_delegate(project, branch, model, brief)`: `Grants.may_start_delegate?/2`, then the
     delegates' `start_delegate/7` with the caller as parent; answers `%{delegate: name}`, or the
-    start's refusal. The report comes later as a message;
+    start's refusal. The report comes later as a message. Both take optional `options`;
   - `run_delegate(project, branch, model, brief, timeout)`: as `start_delegate`, then the
     delegates' `await_report/4`, all within `timeout` (ms, capped as `run`'s, and under the
     client's tool timeout less the margin: `:tool_timeout` and `:margin`, so the client never
@@ -89,7 +89,9 @@ defmodule CodingAgentFramework.MCP do
   @agent ~r/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z/
   # The most a delegate's start may take of a `run_delegate`'s timeout: `Delegates`' own default.
   @start_wait 300_000
+  @options %{type: "object", description: "the delegate's own launch options (ClaudeCLI.Options)"}
   @start Map.new(~w(project branch model brief)a, &{&1, %{type: "string"}})
+         |> Map.put(:options, @options)
   # `Services` checks a name's form; the tool only needs a string to call it.
   @name %{type: "string", description: "1 to 64 letters, digits, - or _"}
   @timeout %{type: "integer", minimum: 1, description: "ms, at most a day"}
@@ -704,15 +706,20 @@ defmodule CodingAgentFramework.MCP do
 
   defp start_args(args) do
     start = Enum.map(~w(project branch model brief), &Map.get(args, &1))
-    if Enum.all?(start, &is_binary/1), do: {:ok, start}, else: {:refused, {:bad, :args}}
+
+    if Enum.all?(start, &is_binary/1),
+      do: {:ok, start ++ [Map.get(args, "options")]},
+      else: {:refused, {:bad, :args}}
   end
 
-  # The caller is the delegate's parent; the start's own wait is at most `wait`.
-  defp start_delegate(ctx, caller, [project, branch, model, brief], wait) do
+  # The caller is the delegate's parent; the start's own wait is at most `wait`. `Delegates`
+  # checks the options.
+  defp start_delegate(ctx, caller, [project, branch, model, brief, options], wait) do
     {mod, server} = ctx.delegates
+    opts = [timeout: wait, options: options]
 
     with :ok <- Grants.may_start_delegate?(ctx.grants, caller),
-         do: mod.start_delegate(server, caller, project, branch, model, brief, timeout: wait)
+         do: mod.start_delegate(server, caller, project, branch, model, brief, opts)
   end
 
   defp now, do: System.monotonic_time(:millisecond)
