@@ -666,7 +666,7 @@ framework's tools, which are strict in how they act and narrow in whom they reac
 | `services()` | any agent | each service: name, host, owner, state, restarts, forwarded port |
 | `service_logs(name, from)` | any agent | the service's output from an offset |
 | `service_send(name, input)` | owner, owner's parent | text or keys to the service's terminal, by `dtach -p` on its host while its pid is still the row's ("Hosts"); answers `sent`, `refused` or `unknown`, and is never resent |
-| `service_wait(name, until, timeout)` | any agent | until a line of the log matches a pattern, a port listens on the host, or the service exits, which ends every wait; answers which, or `{:unknown, :timeout}` (`:dropped` when its last read failed) |
+| `service_wait(name, until, timeout)` | any agent | until a line of the log matches a pattern, a port listens on the host, or the service exits, which ends every wait; answers which, or `{:unknown, :timeout}` (`:dropped` when its last read failed). A line is looked for from the log offset of the service's current start, which its row keeps, so a line an earlier start wrote never answers (F-89) |
 | `service_restart(name)` / `service_stop(name)` | owner, owner's parent | restarts or ends a service, under a claim |
 | `service_hand(name, to)` | owner | hands a service to its parent or one of its children |
 | `ask(question)` | any agent | asks a person, without blocking |
