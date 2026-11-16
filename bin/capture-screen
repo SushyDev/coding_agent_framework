@@ -166,6 +166,16 @@ launch_env=(
 for var in NODE_EXTRA_CA_CERTS NIX_SSL_CERT_FILE SSL_CERT_FILE USER LOGNAME; do
   [[ -z "${!var:-}" ]] || launch_env+=("$var=${!var}")
 done
+# Claude Code reads that login by running macOS's `security`, by name: a folder of the script's
+# own holds only it, at the end of PATH, so nothing else of /usr/bin comes in (F-105).
+if [[ -x /usr/bin/security ]]; then
+  keychain_bin="$tmp/bin"
+  mkdir "$keychain_bin"
+  ln -s /usr/bin/security "$keychain_bin/security"
+  for i in "${!launch_env[@]}"; do
+    [[ "${launch_env[i]}" != PATH=* ]] || launch_env[i]="${launch_env[i]}:$keychain_bin"
+  done
+fi
 
 version_line="$("$CAF_ENV" -i "${launch_env[@]}" "${program[@]}" --version)"
 version="${version_line%% *}"
