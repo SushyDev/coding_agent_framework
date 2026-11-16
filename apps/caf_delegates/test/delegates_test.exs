@@ -11,6 +11,7 @@ defmodule CodingAgentFramework.DelegatesTest do
 
   alias CodingAgentFramework.{Accounts, Delegates, HeadlessStandIn, Holder, SessionsSetup, Stream}
   alias CodingAgentFramework.{Sessions, Transcripts, Usage}
+  alias CodingAgentFramework.ClaudeCLI.Options
   alias CodingAgentFramework.Delegates.Table
 
   setup {SessionsSetup, :sessions}
@@ -136,6 +137,28 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert is_binary(r) and r != u
     assert text == "done #{r}"
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "message #{r}"]
+  end
+
+  test "a delegate's own options are checked, kept on its row, and given again on its resume",
+       ctx do
+    start = &Delegates.start_delegate(ctx.delegates, "main", "app", "unit/one", "opus", "Go.", &1)
+    bad = {:bad_option, :disallowed_tools, {:bad_pattern, "-x"}}
+    assert start.(options: %{"disallowed_tools" => ["-x"]}) == {:refused, bad}
+    assert Table.rows(ctx.dtable, "test") == []
+    hold(ctx)
+    options = %{"env" => %{"APP_MODE" => "review"}, "disallowed_tools" => ["WebFetch"]}
+    assert {:ok, %{id: id, session_id: sid, brief: {:ok, %{uuid: u}}}} = start.(options: options)
+    kept = Table.get(ctx.dtable, id).options
+    assert {:ok, %{env: %{"APP_MODE" => "review"}}} = Options.decode(kept)
+
+    stream_row(ctx, id, &(&1.messages[u].state == :delivered))
+    kill_delegate(ctx, id, [])
+    File.rm!(Path.join([ctx.dir, "argv", sid]))
+    File.rm!(Path.join(ctx.dir, "hold"))
+    {:ok, _} = resumed(ctx, id)
+    {:ok, again} = await(fn -> if a = HeadlessStandIn.argv(ctx.dir, sid), do: {:ok, a} end)
+    assert ["--disallowedTools", "WebFetch", "--resume"] -- again == []
+    assert Table.get(ctx.dtable, id).options == kept
   end
 
   test "a second kill before the last reply is the report, never resumed again", ctx do

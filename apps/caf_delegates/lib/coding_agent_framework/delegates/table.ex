@@ -11,7 +11,8 @@ defmodule CodingAgentFramework.Delegates.Table do
   goes in under, chosen before it is written. `report` is `none`, then `held` with its `text`
   and its `mark`, or `answering` once a call that waited on it took it (`run_delegate`), then
   `answered` once that call's answer reached its agent, or `held` again when it did not; the
-  delivery unit adds `sending` and `delivered`.
+  delivery unit adds `sending` and `delivered`. `options` is the delegate's own launch options
+  as JSON (`ClaudeCLI.Options.encode/1`), or NULL for none.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "doc.db")
       iex> {:ok, db} = CodingAgentFramework.Delegates.Table.open(path)
@@ -23,7 +24,7 @@ defmodule CodingAgentFramework.Delegates.Table do
 
   @columns ~w(id host parent project branch name account model brief brief_uuid resume_uuid
               session_id status reason resumes report text mark called_at deadline created_at
-              updated_at)a
+              updated_at options)a
 
   @schema """
   PRAGMA journal_mode = WAL;
@@ -33,7 +34,7 @@ defmodule CodingAgentFramework.Delegates.Table do
     brief TEXT NOT NULL, brief_uuid TEXT NOT NULL, resume_uuid TEXT, session_id TEXT,
     status TEXT NOT NULL, reason TEXT, resumes INTEGER NOT NULL, report TEXT NOT NULL,
     text TEXT, mark TEXT, called_at INTEGER NOT NULL, deadline INTEGER NOT NULL,
-    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, options TEXT);
   """
   # The statuses of a delegate that holds its parent's cap: started and not yet ended.
   @active ~w(starting running resuming finished failed)
@@ -45,18 +46,23 @@ defmodule CodingAgentFramework.Delegates.Table do
   def open(path) do
     with {:ok, db} <- Sqlite3.open(path),
          :ok <- Sqlite3.set_busy_timeout(db, 5_000),
-         :ok <- Sqlite3.execute(db, @schema) do
+         :ok <- Sqlite3.execute(db, @schema),
+         :ok <- added(Sqlite3.execute(db, "ALTER TABLE delegates ADD COLUMN options TEXT")) do
       {:ok, db}
     else
       {:error, reason} -> {:refused, {:sqlite, reason}}
     end
   end
 
+  # A file made before `options` gains it; a newer file already has it.
+  defp added({:error, "duplicate column name" <> _}), do: :ok
+  defp added(other), do: other
+
   @doc "Writes a start's row, as `starting`, and returns its id."
   @spec starting(db, map) :: integer
   def starting(db, start) do
     now = System.os_time(:millisecond)
-    keys = ~w(host parent project branch name account model brief brief_uuid deadline)a
+    keys = ~w(host parent project branch name account model brief brief_uuid deadline options)a
     values = Enum.map(keys, &start[&1]) ++ ["starting", 0, "none", now, now, now]
     names = Enum.join(keys ++ ~w(status resumes report called_at created_at updated_at)a, ",")
     marks = Enum.map_join(1..length(values), ",", &"?#{&1}")
