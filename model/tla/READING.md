@@ -414,3 +414,30 @@ and `ServiceEndsWithOwner`: they hold once the connection comes back for good. `
 `Copy_Services` a service, its restart and its owner's end. The slow one, run by hand,
 `slow/Copy_Large`, checks every property with a job that fetches and a service that restarts on
 one copy.
+
+A service in `Fwds` has a forward (F-91): an `ssh -N -L` held by dtach on the workstation.
+
+- `FwdStartSent` runs once the service's row is `"running"`: the row's forward (`frow`) says
+  `"starting"`, and a local `dtach -n` is under way (`fcmd`, which holds the start it was sent
+  for). `FwdLands` is dtach's answer: the ssh is held (`fproc` `"pending"`). `SshBinds` is the
+  ssh listening on the local port (`port`), and `SshFails` its exit when the port is taken
+  (`OtherTakes`) or it cannot connect. `FwdDrops` is the forward's own ssh dropping.
+- `FwdSettles` reads the forward: open when its own ssh holds the port, and the start's call
+  answers `started` then (not at `StartReplies`); dead at the start, and the service's row
+  goes `"ending"`, so the call answers `refused` once it is ended. `opens` counts the opens of
+  the current start; `gen` counts the row's starts.
+- A loss is `FwdLost`: the row runs and says the forward is open, and its socket reads dead.
+  `FwdLossClaimed` writes `"reopening"` and keeps the claimed state, `Key` (the start and the
+  open count), in `facting`. `FwdReopens` acts only while that state is still the row's;
+  `FwdReopenMoot` drops a claim the service's end or restart made stale. A reopen that fails
+  makes the row `"failed"`, for a person, as does a claim a restart cut off.
+- `FwdEnd` ends the forward when the row is `"ending"` or `"restarting"`; `EndSent` and
+  `EndConfirmed` wait for it (`FwdGone`).
+
+`fto`, `reopened`, `twice` and `badReport` are ghosts. `ForwardOnlyToCurrent` says a held
+forward was started for the row's current start, whose process is held; `ForwardEndsWithService`
+that an ended or refused row has no forward; `PortIsTheForwards` that a row said open only while
+its own ssh held the port; `OneReopenPerState` that no state was reopened twice; and
+`ForwardReopened` (liveness) that a lost forward is held again, or waits for a person, unless
+the service stops first. `Copy_Forward` checks all of them with one service; the other
+configurations have no forward (`Fwds = {}`), and their state counts did not change.
