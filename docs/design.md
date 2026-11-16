@@ -165,6 +165,19 @@ starts each part.
 
 The LiveView side is a library of components over the `Tracker`, with one example app.
 
+`caf_example` is the embedding app the example grows from (F-102): its configuration is data
+(the framework home, the workstation, other hosts, accounts, projects, ports); one supervision
+tree starts every part in the order each needs, the reaper first; it makes the hook secret and
+the claims' `start_id` once per start, and wires each part's cue to the `Tracker` and to the
+parts that read that topic. What it wires that the parts did not yet offer (F-102's findings):
+until `Mains`, it declares each project's main session, and `Grants`' tree answers it as a root
+(no parent), so a main session can start its first delegate; `Delegates` launches each delegate
+with its own MCP config, from a function of the agent's name the app gives it (`MCP.issue/2`);
+a job's late end goes to its caller through `Mailbox` as a message from `framework`, the caller
+read from `MCP`'s call log by the job's id; `Stream` and `Transcripts` are read on an interval,
+as `Registry` is, so a delegate's `result` is read without waiting for another cue; and when a
+delegate's end is seen, the app calls `Services.owner_ended/3` from a process of its own.
+
 ## Hosts
 
 Agents run only on the workstation; other hosts run jobs and services, the way an editor that
