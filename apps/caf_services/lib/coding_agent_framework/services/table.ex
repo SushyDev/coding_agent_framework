@@ -4,8 +4,8 @@ defmodule CodingAgentFramework.Services.Table do
   (`model/tla/Copy.tla`'s `row`, `owner`, `keep` and `svcRestarts`, durable).
 
   `state` is `asked`, `starting` (its start is being sent, until `start_until`, wall-clock ms),
-  `running`, `ending` (its end written before it is sent), then `ended`; or `refused` (nothing
-  runs). `host`, `project` and `copy` name the copy it runs in, `worktree`
+  `running`, `ending` (its end written before it is sent; TERM until `end_until`, then KILL),
+  then `ended`; `restarting` (an end, then `asked` again); or `refused` (nothing runs). `host`, `project` and `copy` name the copy it runs in, `worktree`
   the worktree each start syncs from, and `argv` and `env` what each start holds. `pid` and
   `started` are the held process (its pid and its start time as `ps -o lstart=` gives it, in
   the C locale and UTC); `restarts` counts its restarts; `owner` is the agent that owns it,
@@ -20,14 +20,14 @@ defmodule CodingAgentFramework.Services.Table do
   alias Exqlite.Sqlite3
 
   @columns ~w(name host project copy worktree argv env owner keep pid started restarts state
-              start_until)a
+              start_until end_until)a
   @schema """
   PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS services (
     name TEXT PRIMARY KEY, host TEXT NOT NULL, project TEXT NOT NULL, copy TEXT NOT NULL,
     worktree TEXT NOT NULL, argv TEXT NOT NULL, env TEXT NOT NULL, owner TEXT,
     keep INTEGER NOT NULL, pid INTEGER, started TEXT, restarts INTEGER NOT NULL,
-    state TEXT NOT NULL, start_until INTEGER);
+    state TEXT NOT NULL, start_until INTEGER, end_until INTEGER);
   """
 
   @type db :: Sqlite3.db()
