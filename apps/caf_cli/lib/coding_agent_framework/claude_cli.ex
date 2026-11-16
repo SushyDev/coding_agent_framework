@@ -27,6 +27,13 @@ defmodule CodingAgentFramework.ClaudeCLI do
   - `PATH`: how its Bash tool finds the programs a session runs;
   - `TERM`: the terminal type its screen is drawn for, which dtach does not set;
   - `LANG`: a UTF-8 locale, so text past ASCII is read and drawn as it is;
+  - `MCP_TOOL_TIMEOUT` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`, both the launch's
+    `:tool_timeout` (ms): how long Claude Code waits on one MCP tool call before it gives up,
+    in all and with no byte or progress from the server. Claude Code 2.1.322 reads both from
+    its environment as integers; without them it gives an `http` server's call 5 minutes of
+    silence and its HTTP request 60 seconds. `CodingAgentFramework.MCP` keeps a
+    `run_delegate`'s wait under the same value, less a margin, so the client never gives up
+    first;
   - `DISABLE_AUTOUPDATER=1`, last and for every role: devenv pins Claude Code, and a session
     that updates itself runs a version the lock does not name.
 
@@ -37,7 +44,8 @@ defmodule CodingAgentFramework.ClaudeCLI do
       iex> account = CodingAgentFramework.Accounts.Account.at("work", "/caf/accounts/work/claude")
       iex> env = %{home: "/h", path: "/bin", term: "xterm-256color", lang: "C.UTF-8"}
       iex> {:ok, %{argv: argv, env: vars}} = CodingAgentFramework.ClaudeCLI.session(:parent, account,
-      ...>   claude: "/run/bin/claude", model: "opus", name: "main", env: env)
+      ...>   claude: "/run/bin/claude", model: "opus", name: "main", env: env,
+      ...>   tool_timeout: 3_600_000)
       iex> argv
       ["/run/bin/claude", "--model", "opus", "--name", "main",
        "--settings", "/caf/accounts/work/claude/framework/parent.settings.json",
@@ -64,8 +72,9 @@ defmodule CodingAgentFramework.ClaudeCLI do
   `CodingAgentFramework.Accounts.ready/2`).
 
   Options: `:claude` (its absolute path, from `Programs`), `:model`, `:name`, `:env` (a map of
-  `:home`, `:path`, `:term` and `:lang`), and optionally `:resume` (a session id) and `:prompt`
-  (the first prompt). A delegate needs its brief as `:prompt` unless it resumes.
+  `:home`, `:path`, `:term` and `:lang`), `:tool_timeout` (ms, 1 000 to 2 147 483 647: the MCP
+  tool timeout), and optionally `:resume` (a session id) and `:prompt` (the first prompt). A
+  delegate needs its brief as `:prompt` unless it resumes.
 
   Returns `{:ok, %{argv: argv, env: env}}` or `{:refused, reason}`: `:no_account_dir` when
   `account` is not an account with a config directory, `{:missing, option}`, `{:bad, option}`,
@@ -84,7 +93,7 @@ defmodule CodingAgentFramework.ClaudeCLI do
          {:ok, resume} <- optional_word(opts, :resume),
          {:ok, mcp} <- mcp(account, opts),
          {:ok, prompt} <- prompt(role, opts, resume),
-         {:ok, env} <- env(account, Keyword.get(opts, :env)) do
+         {:ok, env} <- env(account, opts) do
       argv =
         [claude, "--model", model, "--name", name] ++
           ["--settings", account.settings[role]] ++
@@ -118,13 +127,14 @@ defmodule CodingAgentFramework.ClaudeCLI do
   `--replay-user-messages` and `--permission-prompts host`, then `--session-id <id>` for a start
   or `--resume <id>` in its place. No prompt: the first message is a line on stdin.
 
-  Options: `:claude`, `:model`, `:env` and `:mcp` as for `session/3`, and exactly one of
-  `:session_id` and `:resume`.
+  Options: `:claude`, `:model`, `:env`, `:tool_timeout` and `:mcp` as for `session/3`, and
+  exactly one of `:session_id` and `:resume`.
 
       iex> account = CodingAgentFramework.Accounts.Account.at("work", "/caf/accounts/work/claude")
       iex> env = %{home: "/h", path: "/bin", term: "dumb", lang: "C.UTF-8"}
       iex> {:ok, %{argv: argv}} = CodingAgentFramework.ClaudeCLI.headless(account,
-      ...>   claude: "/run/bin/claude", model: "opus", resume: "s1", env: env)
+      ...>   claude: "/run/bin/claude", model: "opus", resume: "s1", env: env,
+      ...>   tool_timeout: 3_600_000)
       iex> Enum.take(argv, -9)
       ["--input-format", "stream-json", "--output-format", "stream-json",
        "--replay-user-messages", "--permission-prompts", "host", "--resume", "s1"]
@@ -135,7 +145,7 @@ defmodule CodingAgentFramework.ClaudeCLI do
          {:ok, model} <- word(opts, :model),
          {:ok, id} <- start_or_resume(opts),
          {:ok, mcp} <- mcp(account, opts),
-         {:ok, env} <- env(account, Keyword.get(opts, :env)) do
+         {:ok, env} <- env(account, opts) do
       argv =
         [claude, "-p", "--verbose", "--model", model, "--settings", account.settings.delegate] ++
           ["--mcp-config" | mcp] ++
@@ -223,17 +233,32 @@ defmodule CodingAgentFramework.ClaudeCLI do
     end
   end
 
-  defp env(account, given) when is_map(given) do
-    case Enum.reject(@env, fn {key, _} -> is_binary(given[key]) and given[key] != "" end) do
-      [] ->
-        {:ok,
-         [{"CLAUDE_CONFIG_DIR", account.config_dir}] ++
-           Enum.map(@env, fn {k, v} -> {v, given[k]} end) ++ @fixed}
+  defp env(account, opts) do
+    with {:ok, given} <- given_env(Keyword.get(opts, :env)),
+         {:ok, ms} <- tool_timeout(Keyword.get(opts, :tool_timeout)) do
+      timeouts = [{"MCP_TOOL_TIMEOUT", ms}, {"CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", ms}]
 
-      missing ->
-        {:refused, {:missing, {:env, Keyword.keys(missing)}}}
+      {:ok,
+       [{"CLAUDE_CONFIG_DIR", account.config_dir}] ++
+         Enum.map(@env, fn {k, v} -> {v, given[k]} end) ++ timeouts ++ @fixed}
     end
   end
 
-  defp env(_account, _given), do: {:refused, {:missing, :env}}
+  defp given_env(given) when is_map(given) do
+    case Enum.reject(@env, fn {key, _} -> is_binary(given[key]) and given[key] != "" end) do
+      [] -> {:ok, given}
+      missing -> {:refused, {:missing, {:env, Keyword.keys(missing)}}}
+    end
+  end
+
+  defp given_env(_given), do: {:refused, {:missing, :env}}
+
+  # Claude Code holds a tool timeout in `setTimeout`, which takes at most 2^31 - 1 ms, and reads
+  # less than a second as no timeout of the launch's own.
+  defp tool_timeout(nil), do: {:refused, {:missing, :tool_timeout}}
+
+  defp tool_timeout(ms) when is_integer(ms) and ms >= 1_000 and ms <= 2_147_483_647,
+    do: {:ok, Integer.to_string(ms)}
+
+  defp tool_timeout(_), do: {:refused, {:bad, :tool_timeout}}
 end

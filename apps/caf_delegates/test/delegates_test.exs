@@ -55,7 +55,8 @@ defmodule CodingAgentFramework.DelegatesTest do
       cap: 1
     }
 
-    launch = SessionsSetup.headless(ctx, :at_start) |> Keyword.take([:claude, :env])
+    launch =
+      SessionsSetup.headless(ctx, :at_start) |> Keyword.take([:claude, :env, :tool_timeout])
 
     opts = [
       host: "test",
@@ -244,13 +245,45 @@ defmodule CodingAgentFramework.DelegatesTest do
     Table.update(ctx.dtable, id, status: "refused")
     assert {:ok, %{id: two}} = start(ctx, "app", "unit/two")
     wait = Task.async(fn -> Delegates.await_report(current(ctx), "main", two, 10_000) end)
-    assert {:ok, %{report: "answered"}} = cue_until(ctx, two, &(&1.status == "finished"))
+    assert {:ok, %{status: "finished"}} = cue_until(ctx, two, &(&1.report == "answering"))
 
     assert {:ok, %{id: ^two, name: "app-unit-two", status: "finished", text: "done " <> _}} =
              Task.await(wait)
 
     assert {:ok, [%{id: ^id, name: ^name}]} = Delegates.held(current(ctx), "main")
+    assert {:refused, :answering} = Delegates.await_report(current(ctx), "main", two, 1)
+
+    # The answer reached the agent: answered, and never held.
+    assert {:ok, :answered} = Delegates.answered(current(ctx), two)
+    assert %{report: "answered"} = Table.get(ctx.dtable, two)
     assert {:refused, :answered} = Delegates.await_report(current(ctx), "main", two, 1)
+    assert {:refused, {:not_answering, "answered"}} = Delegates.release(current(ctx), two)
+    assert {:refused, {:not_answering, "held"}} = Delegates.answered(current(ctx), id)
+    assert {:refused, {:no_delegate, 99}} = Delegates.answered(current(ctx), 99)
+    restart(ctx)
+    assert {:ok, [%{id: ^id}]} = Delegates.held(current(ctx), "main")
+  end
+
+  test "an answering report is held again by a release, and by a restart, once", ctx do
+    assert {:ok, %{id: id}} = start(ctx, "app", "unit/one")
+    wait = Task.async(fn -> Delegates.await_report(current(ctx), "main", id, 10_000) end)
+    {:ok, %{mark: mark}} = cue_until(ctx, id, &(&1.report == "answering"))
+    assert {:ok, %{id: ^id}} = Task.await(wait)
+    assert {:ok, []} = Delegates.held(current(ctx), "main")
+
+    # The answer's write failed: held again, with its own mark, for a message.
+    assert {:ok, :held} = Delegates.release(current(ctx), id)
+    assert {:ok, [%{id: ^id, mark: ^mark}]} = Delegates.held(current(ctx), "main")
+
+    # Taken again, and the process ends before it hears how the write went.
+    assert {:ok, %{id: ^id}} = Delegates.await_report(current(ctx), "main", id, 1)
+    assert %{report: "answering"} = Table.get(ctx.dtable, id)
+    restart(ctx)
+    assert {:ok, [%{id: ^id, mark: ^mark}]} = Delegates.held(current(ctx), "main")
+    assert {:refused, {:not_answering, "held"}} = Delegates.answered(current(ctx), id)
+
+    restart(ctx)
+    assert {:ok, [%{id: ^id, mark: ^mark}]} = Delegates.held(current(ctx), "main")
   end
 
   defp start(ctx, project, branch),

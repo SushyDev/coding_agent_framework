@@ -35,7 +35,10 @@ defmodule CodingAgentFramework.MailboxTest do
     transcripts = start_supervised!({Transcripts, programs: programs(), account: "work", db: db})
     project = %{name: "app", repo: repo, trunk: "main", setup: [], setup_timeout: 10_000}
     project = Map.merge(project, %{env: %{"HOME" => ctx.dir}, branches: ~r/\Aunit\//, cap: 2})
-    launch = SessionsSetup.headless(ctx, :at_start) |> Keyword.take([:claude, :env])
+
+    launch =
+      SessionsSetup.headless(ctx, :at_start) |> Keyword.take([:claude, :env, :tool_timeout])
+
     dopts = [host: "test", db: db, sessions_db: db, sessions: ctx.sessions, stream: ctx.stream]
     dopts = dopts ++ [usage: usage, accounts: accounts, transcripts: %{"work" => transcripts}]
 

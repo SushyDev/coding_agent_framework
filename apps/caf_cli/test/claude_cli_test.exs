@@ -11,7 +11,11 @@ defmodule CodingAgentFramework.ClaudeCLITest do
   @env %{home: "/h", path: "/bin", term: "xterm-256color", lang: "C.UTF-8"}
 
   # `more` comes first, so its values win `Keyword.get/2`.
-  defp opts(more), do: more ++ [claude: "/run/claude", model: "opus", name: "unit-7", env: @env]
+  defp opts(more),
+    do:
+      more ++
+        [claude: "/run/claude", model: "opus", name: "unit-7", env: @env, tool_timeout: 600_000]
+
   defp account, do: Account.at("work", @dir)
 
   test "a parent has Remote Control on with its name, and its own settings" do
@@ -64,13 +68,15 @@ defmodule CodingAgentFramework.ClaudeCLITest do
     assert Enum.take(argv, -2) == ["--resume", "s-2"]
   end
 
-  test "the environment is the account's directory, the four a session needs and the auto-updater off, nothing else" do
+  test "the environment is the account's directory, the four a session needs, the tool timeout and the auto-updater off, nothing else" do
     expected = [
       {"CLAUDE_CONFIG_DIR", @dir},
       {"HOME", "/h"},
       {"PATH", "/bin"},
       {"TERM", "xterm-256color"},
       {"LANG", "C.UTF-8"},
+      {"MCP_TOOL_TIMEOUT", "600000"},
+      {"CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "600000"},
       {"DISABLE_AUTOUPDATER", "1"}
     ]
 
@@ -103,5 +109,21 @@ defmodule CodingAgentFramework.ClaudeCLITest do
              {:refused, {:missing, {:env, [:term]}}}
 
     assert ClaudeCLI.session(:other, account(), opts([])) == {:refused, {:bad_role, :other}}
+  end
+
+  test "the tool timeout is required, in the range Claude Code reads" do
+    missing = Keyword.delete(opts(prompt: "p"), :tool_timeout)
+    assert ClaudeCLI.session(:parent, account(), missing) == {:refused, {:missing, :tool_timeout}}
+
+    assert ClaudeCLI.headless(account(), Keyword.delete(opts(resume: "s"), :tool_timeout)) ==
+             {:refused, {:missing, :tool_timeout}}
+
+    for bad <- [999, 2_147_483_648, "600000", 1.5e6] do
+      assert ClaudeCLI.session(:parent, account(), opts(tool_timeout: bad)) ==
+               {:refused, {:bad, :tool_timeout}}
+    end
+
+    assert {:ok, %{env: env}} = ClaudeCLI.session(:parent, account(), opts(tool_timeout: 1_000))
+    assert {"MCP_TOOL_TIMEOUT", "1000"} in env
   end
 end

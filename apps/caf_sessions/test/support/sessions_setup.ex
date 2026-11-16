@@ -89,13 +89,30 @@ defmodule CodingAgentFramework.SessionsSetup do
   """
   def launch(ctx, mode) do
     claude = ClaudeStandIn.write!(ctx.dir, mode)
-    [role: :parent, cwd: ctx.dir, claude: claude, model: "opus", env: env(ctx), prompt: "brief"]
+
+    [
+      role: :parent,
+      cwd: ctx.dir,
+      claude: claude,
+      model: "opus",
+      env: env(ctx),
+      prompt: "brief",
+      tool_timeout: 3_600_000
+    ]
   end
 
   @doc "The launch options of a delegate: a headless stand-in that writes its init in `mode`."
   def headless(ctx, mode) do
     claude = HeadlessStandIn.write!(ctx.dir, mode)
-    [role: :delegate, cwd: ctx.dir, claude: claude, model: "opus", env: env(ctx)]
+
+    [
+      role: :delegate,
+      cwd: ctx.dir,
+      claude: claude,
+      model: "opus",
+      env: env(ctx),
+      tool_timeout: 3_600_000
+    ]
   end
 
   defp env(ctx),

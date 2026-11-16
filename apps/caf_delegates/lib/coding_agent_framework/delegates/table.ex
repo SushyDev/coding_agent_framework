@@ -8,7 +8,8 @@ defmodule CodingAgentFramework.Delegates.Table do
   wall-clock time it is settled by), then `running`, then `finished` or `failed` once, or
   `refused` with its `reason`. `brief_uuid` and `resume_uuid` are the uuids the turn's message
   goes in under, chosen before it is written. `report` is `none`, then `held` with its `text`
-  and its `mark`, or `answered` once a call that waited on it took it (`run_delegate`); the
+  and its `mark`, or `answering` once a call that waited on it took it (`run_delegate`), then
+  `answered` once that call's answer reached its agent, or `held` again when it did not; the
   delivery unit adds `sending` and `delivered`.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "doc.db")
@@ -78,6 +79,10 @@ defmodule CodingAgentFramework.Delegates.Table do
   @spec with_status(db, String.t(), [String.t()]) :: [map]
   def with_status(db, host, statuses),
     do: select(db, "host = ?1 AND status IN (#{marks(statuses, 2)})", [host | statuses])
+
+  @doc "The host's rows whose report is `report`."
+  @spec with_report(db, String.t(), String.t()) :: [map]
+  def with_report(db, host, report), do: select(db, "host = ?1 AND report = ?2", [host, report])
 
   @doc "How many of `parent`'s delegates hold its cap: started, or starting, and not ended."
   @spec active(db, String.t(), String.t()) :: non_neg_integer

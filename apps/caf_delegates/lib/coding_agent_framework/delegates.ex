@@ -11,7 +11,7 @@ defmodule CodingAgentFramework.Delegates do
 
       {:ok, delegates} = Delegates.start_link(host: "laptop", db: db, sessions_db: db,
         sessions: sessions, stream: stream, usage: usage, accounts: accounts,
-        transcripts: %{"work" => transcripts}, launch: [claude: claude, env: env],
+        transcripts: %{"work" => transcripts}, launch: [claude: claude, env: env, tool_timeout: 3_600_000],
         projects: %{"app" => %{name: "app", repo: "/src/app", trunk: "main", setup: [],
           setup_timeout: 60_000, env: %{}, branches: ~r/\\Aunit\\//, cap: 3}})
       Delegates.start_delegate(delegates, "main", "app", "unit/review", "opus", "Review it.")
@@ -37,7 +37,10 @@ defmodule CodingAgentFramework.Delegates do
   report. A row leaves `running` once.
 
   Each report is `held` in the table, with a mark of its own, and survives restarts. A call that
-  waits on it (`await_report/4`) takes it as it is held, and it is then `answered`, never held.
+  waits on it (`await_report/4`) takes it as it is held: it is then `answering`, never held,
+  until the caller says its answer reached the agent (`answered/2`) or did not (`release/2`,
+  which holds it again). A restart holds every `answering` report again, so a report is never
+  lost to an answer that did not arrive: it is delivered as a message, at least once.
 
   It reads every row again when it starts and at each `cue/2`; the embedding app wires the cues of
   `Sessions`, `Stream` and `Transcripts` to it. After each write `notify` gets `%{topic:
@@ -59,8 +62,9 @@ defmodule CodingAgentFramework.Delegates do
   Starts a `Delegates`. Options: `host:` (the name of the host `sessions:` and `stream:` run
   on), `db:`, `sessions_db:` (the file `Sessions`' table is in), `usage:`, `accounts:`,
   `transcripts:` (account to its `Transcripts`), `projects:` (name to a project as
-  `Sessions.Worktree.project/1` reads it, with `branches:` and `cap:`), `launch:` (`claude:`
-  and `env:` for `ClaudeCLI`), and optionally `notify:` and `clock:` (wall-clock ms).
+  `Sessions.Worktree.project/1` reads it, with `branches:` and `cap:`), `launch:` (`claude:`,
+  `env:` and `tool_timeout:` for `ClaudeCLI`), and optionally `notify:` and `clock:`
+  (wall-clock ms).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -82,10 +86,11 @@ defmodule CodingAgentFramework.Delegates do
   @doc """
   Waits up to `timeout` ms for the report of `parent`'s delegate `id` and takes it, for a call
   that answers with it (`run_delegate`). Once the report is held, and only before the deadline,
-  `Delegates` marks it `answered` in the same step, so it is never also delivered as a message.
-  Answers `{:ok, %{id, name, status, text}}`; `{:unknown, :timeout}` at the deadline, the report
-  then held as any other; or `{:refused, reason}`: `{:no_delegate, id}`, `:answered`,
-  `:awaited` (another call waits on it), or `{:refused, reason}` for a start that was refused.
+  `Delegates` marks it `answering` in the same step, so it is not also delivered as a message;
+  the caller then says `answered/2` or `release/2`. Answers `{:ok, %{id, name, status, text}}`;
+  `{:unknown, :timeout}` at the deadline, the report then held as any other; or `{:refused,
+  reason}`: `{:no_delegate, id}`, `:answering`, `:answered`, `:awaited` (another call waits on
+  it), or `{:refused, reason}` for a start that was refused.
 
       Delegates.await_report(delegates, "main", 1, 60_000)
       #=> {:ok, %{id: 1, name: "app-unit-review", status: "finished", text: "Done."}}
@@ -96,6 +101,23 @@ defmodule CodingAgentFramework.Delegates do
     deadline = System.monotonic_time(:millisecond) + timeout
     call(delegates, {:await, parent, id, deadline}, [timeout: timeout + @step], @step)
   end
+
+  @doc """
+  The answer with report `id` that `await_report/4` took has reached the agent: the report is
+  `answered`, and never delivered as a message. Answers `{:ok, :answered}`; `{:refused,
+  {:not_answering, report}}` when the report is not `answering`; or `{:refused, {:no_delegate,
+  id}}`.
+
+      Delegates.answered(delegates, 1)
+      #=> {:ok, :answered}
+  """
+  def answered(delegates, id), do: call(delegates, {:answered, id}, [], @step)
+
+  @doc """
+  The answer with report `id` did not reach the agent (its write failed): the report is `held`
+  again, with its mark, for a message. Answers `{:ok, :held}`, or a refusal as `answered/2`.
+  """
+  def release(delegates, id), do: call(delegates, {:release, id}, [], @step)
 
   @doc """
   Will deliver held report `id`: mark it sending, then type it with its mark through
@@ -141,6 +163,8 @@ defmodule CodingAgentFramework.Delegates do
 
   @impl true
   def handle_continue(:settle, s) do
+    # An answer under way when the last process ended may not have reached its agent.
+    for row <- Table.with_report(s.db, s.host, "answering"), do: write(s, row, report: "held")
     Stream.read(s.stream, timeout: @step)
     for row <- Table.with_status(s.db, s.host, ~w(starting resuming)), do: wake(s, row)
 
@@ -182,11 +206,28 @@ defmodule CodingAgentFramework.Delegates do
     cond do
       row == nil or row.parent != parent -> {:reply, {:refused, {:no_delegate, id}}, s}
       row.report == "held" -> {:reply, take(s, row), s}
+      row.report == "answering" -> {:reply, {:refused, :answering}, s}
       row.report == "answered" -> {:reply, {:refused, :answered}, s}
       row.status == "refused" -> {:reply, {:refused, {:refused, row.reason}}, s}
       Map.has_key?(s.waiters, id) -> {:reply, {:refused, :awaited}, s}
       left <= 0 -> {:reply, {:unknown, :timeout}, s}
       true -> {:noreply, put_in(s.waiters[id], {from, deadline, waited(id, left)})}
+    end
+  end
+
+  def handle_call({settled, id}, _from, s) when settled in [:answered, :release] do
+    {report, reply} = if settled == :answered, do: {"answered", :answered}, else: {"held", :held}
+
+    case Table.get(s.db, id) do
+      nil ->
+        {:reply, {:refused, {:no_delegate, id}}, s}
+
+      %{report: "answering"} = row ->
+        write(s, row, report: report)
+        {:reply, {:ok, reply}, s}
+
+      %{report: other} ->
+        {:reply, {:refused, {:not_answering, other}}, s}
     end
   end
 
@@ -372,7 +413,7 @@ defmodule CodingAgentFramework.Delegates do
   end
 
   defp take(s, row) do
-    write(s, row, report: "answered")
+    write(s, row, report: "answering")
     {:ok, Map.take(row, [:id, :name, :status, :text])}
   end
 
