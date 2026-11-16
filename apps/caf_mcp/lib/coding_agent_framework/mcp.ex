@@ -15,16 +15,18 @@ defmodule CodingAgentFramework.MCP do
 
   - `message(to, text)`: `Grants.may_message?/3`, then the mailbox's `message/5`;
   - `run(host, argv, timeout, opts)`: `Grants.may_use?/2`, then the jobs' `run/6`, as job
-    `mcp-<call id>` in the copy of the caller's worktree that `place` names, with `timeout`
-    (ms, at most a day) as the job's and the call's. `opts` may name `fetch` (paths). The
-    answer is `Jobs`' own;
+    `mcp-<instance>-<call id>` in the copy of the caller's worktree that `place` names, with
+    `timeout` (ms, at most the `:cap`, a day unless the app says) as the job's and the call's.
+    `opts` may name `fetch` (paths). The answer is `Jobs`' own, except an unknown one: it is
+    `{:unknown, %{job: id, reason: reason}}`, so the caller can match the job's late end,
+    which comes as a message, to the call;
   - `reload()`: `Grants.may_use?/2`, then the tools' names; the endpoint sends the client
     `notifications/tools/list_changed` first.
 
   The other tools of the design's table come in later parts (`docs/build-notes/F-86.md`).
 
       {:ok, mcp} = MCP.start_link(dir: dir, port: 4791, grants: grants,
-        mailbox: {Mailbox, mailbox}, jobs: {Jobs, jobs}, place: &place/1)
+        mailbox: {Mailbox, mailbox}, jobs: {Jobs, jobs}, place: &place/1, instance: "a")
       {:ok, config} = MCP.issue(mcp, "app-fix")
       MCP.call(mcp, "app-fix", "message", %{"to" => "app-main", "text" => "Done."})
       #=> {:ok, {:queued, 3}}
@@ -36,7 +38,7 @@ defmodule CodingAgentFramework.MCP do
   alias CodingAgentFramework.MCP.Table
 
   @step 5_000
-  # The cap on a `run`'s timeout: a job the caller forgot still ends within a day.
+  # The default cap on a `run`'s timeout: a job the caller forgot still ends within a day.
   @day 86_400_000
   @agent ~r/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z/
 
@@ -80,7 +82,9 @@ defmodule CodingAgentFramework.MCP do
   `:jobs` (each `{module, server}`: `{CodingAgentFramework.Mailbox, pid}`,
   `{CodingAgentFramework.Jobs, pid}`, or a stand-in module with the same function), and
   `:place`, a function of an agent's name that answers `{:ok, %{project: p, name: n, worktree:
-  path}}` (the copy `Jobs` runs in) or `{:refused, reason}`.
+  path}}` (the copy `Jobs` runs in) or `{:refused, reason}`. `:instance` (a string, required)
+  is this part's name in its jobs' ids, so two of them sharing one `Jobs` never make the same
+  id. `:cap` (ms, default a day) is the most a `run`'s `timeout` may be.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -149,7 +153,7 @@ defmodule CodingAgentFramework.MCP do
          "run",
          %{"host" => host, "argv" => [_ | _] = argv, "timeout" => t} = a
        )
-       when is_binary(host) and is_integer(t) and t > 0 and t <= @day do
+       when is_binary(host) and is_integer(t) and t > 0 and t <= ctx.cap do
     {mod, server} = ctx.jobs
     fetch = get_in(a, ["opts", "fetch"]) || []
 
@@ -158,10 +162,13 @@ defmodule CodingAgentFramework.MCP do
              {:refused, {:bad, :args}},
          :ok <- Grants.may_use?(ctx.grants, caller),
          {:ok, %{project: p, name: n, worktree: w}} <- ctx.place.(caller) do
-      mod.run(server, "mcp-#{id}", %{host: host, project: p, name: n}, w, argv,
-        timeout: t,
-        fetch: fetch
-      )
+      job = "mcp-#{ctx.instance}-#{id}"
+      where = %{host: host, project: p, name: n}
+
+      case mod.run(server, job, where, w, argv, timeout: t, fetch: fetch) do
+        {:unknown, reason} -> {:unknown, %{job: job, reason: reason}}
+        answer -> answer
+      end
     end
   end
 
@@ -190,7 +197,8 @@ defmodule CodingAgentFramework.MCP do
 
     with :ok <- File.mkdir_p(Path.join(dir, "agents")),
          {:ok, db} <- Table.open(Path.join(dir, "mcp.db")) do
-      ctx = Map.new(~w(grants mailbox jobs place)a, &{&1, Keyword.fetch!(opts, &1)})
+      ctx = Map.new(~w(grants mailbox jobs place instance)a, &{&1, Keyword.fetch!(opts, &1)})
+      ctx = Map.put(ctx, :cap, Keyword.get(opts, :cap, @day))
       {:ok, %{db: db, dir: dir, port: Keyword.fetch!(opts, :port), ctx: ctx}}
     else
       {:error, reason} -> {:stop, {:mkdir, reason}}

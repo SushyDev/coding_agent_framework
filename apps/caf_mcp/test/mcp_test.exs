@@ -21,6 +21,15 @@ defmodule CodingAgentFramework.MCPTest do
     end
   end
 
+  defmodule UnknownJobs do
+    @moduledoc false
+    # A `Jobs` whose `run` is unknown, as it is when its owner drops or the exit is not read.
+    def run(test, job, _where, _worktree, _argv, opts) do
+      send(test, {:run, job, opts[:timeout]})
+      {:unknown, :dropped}
+    end
+  end
+
   setup do
     tree = fn ->
       [
@@ -52,7 +61,8 @@ defmodule CodingAgentFramework.MCPTest do
          grants: Grants.new(tree),
          mailbox: {StandIn, self()},
          jobs: {Jobs, jobs},
-         place: place}
+         place: place,
+         instance: "one"}
       )
 
     tokens = for a <- ~w(app-main app-fix stray), into: %{}, do: {a, token(mcp, a)}
@@ -172,7 +182,7 @@ defmodule CodingAgentFramework.MCPTest do
 
     assert [%{id: id, agent: "app-fix", tool: "run", state: "answered"}] = MCP.calls(mcp)
     assert [%{id: job, name: "app-fix", host: "ws"}] = Jobs.rows(jobs)
-    assert job == "mcp-#{id}"
+    assert job == "mcp-one-#{id}"
 
     where = %{host: "ws", project: "app", name: "app-fix"}
     direct = Jobs.run(jobs, "direct", where, wt, job(), timeout: 20_000, fetch: ["out.txt"])
@@ -193,6 +203,57 @@ defmodule CodingAgentFramework.MCPTest do
     assert tool(mcp, t["app-fix"], "run", bad) == %{"refused" => ["bad", "args"]}
     assert Jobs.rows(jobs) == []
     assert length(MCP.calls(mcp)) == 6
+  end
+
+  # An MCP over a `Jobs` stand-in whose `run` is always unknown.
+  defp unknown_mcp(name, extra) do
+    tree = fn -> [%{name: "app-fix", project: "app", parent: "app-main"}] end
+    place = fn agent -> {:ok, %{project: "app", name: agent, worktree: "/nowhere"}} end
+
+    opts =
+      [
+        dir: Path.join(test_dir(), name),
+        port: 4791,
+        grants: Grants.new(tree),
+        mailbox: {StandIn, self()},
+        jobs: {UnknownJobs, self()},
+        place: place,
+        instance: name
+      ] ++ extra
+
+    mcp = start_supervised!({MCP, opts}, id: name)
+    {:ok, _} = MCP.issue(mcp, "app-fix")
+    mcp
+  end
+
+  defp run_call(mcp, timeout) do
+    MCP.call(mcp, "app-fix", "run", %{"host" => "ws", "argv" => ["x"], "timeout" => timeout})
+  end
+
+  test "an unknown run answer names its job, in the JSON too" do
+    mcp = unknown_mcp("u", [])
+    assert run_call(mcp, 1000) == {:unknown, %{job: "mcp-u-1", reason: :dropped}}
+    assert_received {:run, "mcp-u-1", 1000}
+
+    assert MCP.json(run_call(mcp, 1000)) ==
+             %{"unknown" => %{"job" => "mcp-u-2", "reason" => "dropped"}}
+
+    assert [%{outcome: ~s({"unknown":{"job":"mcp-u-1","reason":"dropped"}})} | _] =
+             MCP.calls(mcp)
+  end
+
+  test "the cap is an option, a day by default, and the job id names the instance" do
+    short = unknown_mcp("short", cap: 5_000)
+    long = unknown_mcp("long", [])
+
+    assert run_call(short, 5_001) == {:refused, {:bad, :args}}
+    assert {:unknown, _} = run_call(short, 5_000)
+    assert {:unknown, _} = run_call(long, 86_400_000)
+    assert run_call(long, 86_400_001) == {:refused, {:bad, :args}}
+
+    # A refused call has an id too, so the short one's run is its second call.
+    assert_received {:run, "mcp-short-2", 5_000}
+    assert_received {:run, "mcp-long-1", 86_400_000}
   end
 
   test "reload tells the client its tools changed, then answers", %{mcp: mcp, tokens: t} do
