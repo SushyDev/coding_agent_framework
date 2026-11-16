@@ -29,8 +29,10 @@ defmodule CodingAgentFramework.Jobs do
   `%{job: id, end: {:exit, code} | {:unknown, :timeout} | {:unknown, :no_exit} | {:refused,
   {:start, :not_held} | {:refused, :interrupted}}, fetch: :not_fetched}`. Nothing is fetched for a late end, and a later
   run fetches nothing for it. `Jobs` sends no message itself: the embedding app routes the end
-  to the job's caller. The row is marked told only after the function returns, so one that
-  raises is handed again at the next start. `{:refused, :interrupted}` is for a row a restart
+  to the job's caller. The function answers `:ok` once the end is stored, and the row
+  is then marked told; it answers `{:unknown, reason}` when it could not store it, and the row
+  stays owed and is handed again at the next cue. One that raises is handed again at the next
+  start. `{:refused, :interrupted}` is for a row a restart
   left `asked`: nothing reached the host, so it is never run or retried. It and `{:refused,
   {:start, :not_held}}` are not an end: the job never ran.
 
@@ -99,7 +101,7 @@ defmodule CodingAgentFramework.Jobs do
   `:copies`, the `Copies` server; `:hosts`, each host's name to `%{programs: programs, dir:
   dir}`, its `Programs` (with `dtach`, `sh`, `env`, `rm`, `kill`, `sleep`, `mkdir`, `tail`,
   and for the copy `flock` and `rsync`) and its framework directory; `:on_late_end`, a function
-  of one argument that is handed each late end.
+  of one argument that is handed each late end and answers `:ok` or `{:unknown, reason}`.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -475,9 +477,13 @@ defmodule CodingAgentFramework.Jobs do
   end
 
   # Every write of a row goes here: an owed row that has ended is handed on, then marked told.
+  # The hand-on answers `:ok` (the end is stored: told) or `{:unknown, reason}` (not stored: the
+  # row stays owed, and the next cue hands it again). Any other answer is the app's bug: it raises.
   defp write(s, %{late: "owed", state: state} = row) when state in @ended do
-    s.on_late_end.(%{job: row.id, end: late_end(row), fetch: :not_fetched})
-    Table.put(s.db, %{row | late: "told"})
+    case s.on_late_end.(%{job: row.id, end: late_end(row), fetch: :not_fetched}) do
+      :ok -> Table.put(s.db, %{row | late: "told"})
+      {:unknown, _reason} -> Table.put(s.db, row)
+    end
   end
 
   defp write(s, row), do: Table.put(s.db, row)

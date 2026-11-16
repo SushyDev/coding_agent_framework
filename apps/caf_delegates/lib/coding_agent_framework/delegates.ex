@@ -36,6 +36,10 @@ defmodule CodingAgentFramework.Delegates do
   `Turn.resumed/0`. A second such kill, or a refused resume, is `failed`, and that is the
   report. A row leaves `running` once.
 
+  **An ended delegate**: once its report is `answered` (or `delivered`) and its process is gone,
+  as `stop` or `end_session` leave it, a cue writes its row `ended` (and notifies). The row
+  leaves the parent's cap, and the app's end rules read `ended` as an end.
+
   Each report is `held` in the table, with a mark of its own, and survives restarts. A call that
   waits on it (`await_report/4`) takes it as it is held: it is then `answering`, never held,
   until the caller says its answer reached the agent (`answered/2`) or did not (`release/2`,
@@ -384,7 +388,7 @@ defmodule CodingAgentFramework.Delegates do
   defp settle(s) do
     busy = MapSet.new(Map.values(s.pending), & &1.id)
 
-    Table.with_status(s.db, s.host, ~w(starting resuming running))
+    Table.with_status(s.db, s.host, ~w(starting resuming running finished))
     |> Enum.reject(&MapSet.member?(busy, &1.id))
     |> Enum.reduce(s, &settle_row(&2, &1))
   end
@@ -409,6 +413,17 @@ defmodule CodingAgentFramework.Delegates do
           else: s
     end
   end
+
+  # Ended: a finished delegate whose report reached its agent and whose process is gone, since
+  # `Sessions` stopped it (`stop`, `end_session`). It frees its parent's cap, and no process of it
+  # runs again. A report not yet answered keeps the row `finished`.
+  defp settle_row(s, %{status: "finished", report: report} = row)
+       when report in ~w(answered delivered) do
+    if ended?(Sessions.Table.get(s.sdb, s.host, row.name)), do: write(s, row, status: "ended")
+    s
+  end
+
+  defp settle_row(s, %{status: "finished"}), do: s
 
   defp settle_row(s, row), do: elem(running(s, row), 1)
 
@@ -517,7 +532,8 @@ defmodule CodingAgentFramework.Delegates do
 
   # The latest row of `name` that is `parent`'s, with Stream's row of its process, just read.
   defp child(s, parent, name) do
-    rows = Table.with_status(s.db, s.host, ~w(starting resuming running finished failed refused))
+    rows =
+      Table.with_status(s.db, s.host, ~w(starting resuming running finished failed ended refused))
 
     case rows |> Enum.filter(&(&1.name == name)) |> List.last() do
       %{parent: ^parent, session_id: sid} = row when is_binary(sid) ->
@@ -569,12 +585,19 @@ defmodule CodingAgentFramework.Delegates do
     end
   end
 
+  defp act(s, %{status: "ended"}, _fold, :stop, _from),
+    do: {:reply, {:refused, {:status, "ended"}}, s}
+
   # Sessions waits for the exit; this process does not wait with it.
   defp act(s, %{report: report} = row, _fold, :stop, from)
        when report in ~w(answered delivered) do
+    me = self()
+
     Task.start(fn ->
       reply = Sessions.stop(s.sessions, row.name, :report_delivered, timeout: @call)
       GenServer.reply(from, reply)
+      # The process is gone once Sessions answers: the row is read again for its end.
+      GenServer.cast(me, :cue)
     end)
 
     {:noreply, s}

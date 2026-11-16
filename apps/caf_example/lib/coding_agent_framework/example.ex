@@ -47,6 +47,8 @@ defmodule CodingAgentFramework.Example do
   }
   # A delegate that holds its parent's cap, and so is in the tree `Grants` reads.
   @tree ~w(starting running resuming finished failed)
+  # The statuses of a delegate that has ended.
+  @ended ~w(refused failed ended)
   @local {127, 0, 0, 1}
 
   @doc """
@@ -306,11 +308,11 @@ defmodule CodingAgentFramework.Example do
     end
   end
 
-  # An agent has ended once its latest start was refused or it failed: no process of it runs
-  # again. Ending a delegate after its report is a later unit.
+  # An agent has ended once its latest start was refused, it failed, or it was stopped after its
+  # report (`ended`): no process of it runs again.
   defp ended(%{ddb: ddb, c: c}),
     do: fn agent ->
-      match?(%{status: s} when s in ~w(refused failed), latest(ddb, c.workstation, agent))
+      match?(%{status: s} when s in @ended, latest(ddb, c.workstation, agent))
     end
 
   # The delegates that have ended, by `ended`'s rule, among `ids` (or all), each once.
@@ -320,7 +322,7 @@ defmodule CodingAgentFramework.Example do
       latest = Map.new(rows, &{&1.name, &1})
 
       for {name, %{id: id, status: s}} <- latest,
-          s in ~w(refused failed) and (ids == :all or id in ids),
+          s in @ended and (ids == :all or id in ids),
           do: name
     end
   end
@@ -340,8 +342,9 @@ defmodule CodingAgentFramework.Example do
 
   # A job's end that its call did not wait for goes to the job's caller as a message from
   # `framework`, once per job. It runs in `Jobs`' process, which may be starting before `MCP`,
-  # so the caller is read from `MCP`'s call log on disk. An end that cannot be stored raises:
-  # `Jobs` then hands it again at its next start; one with no caller is logged.
+  # so the caller is read from `MCP`'s call log on disk. An end that cannot be stored (`Mailbox`
+  # did not answer) is `{:unknown, reason}`: `Jobs` keeps it owed and hands it again at its next
+  # cue. One with no caller is logged, and answered `:ok`: nothing will ever store it.
   defp late_end(c, pid, %{job: job, end: e}) do
     text = "Your job #{job} ended after its call answered: #{inspect(e)}. Nothing was fetched."
 
@@ -353,7 +356,7 @@ defmodule CodingAgentFramework.Example do
         Logger.warning("caf: job #{job}'s late end has no caller: #{inspect(reason)}")
 
       other ->
-        raise "caf: job #{job}'s late end was not stored: #{inspect(other)}"
+        {:unknown, {:not_stored, other}}
     end
   end
 
