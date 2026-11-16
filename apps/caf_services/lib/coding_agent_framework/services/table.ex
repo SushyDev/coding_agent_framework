@@ -9,7 +9,12 @@ defmodule CodingAgentFramework.Services.Table do
   the worktree each start syncs from, and `argv` and `env` what each start holds. `pid` and
   `started` are the held process (its pid and its start time as `ps -o lstart=` gives it, in
   the C locale and UTC); `restarts` counts its restarts; `owner` is the agent that owns it,
-  none once ended; `keep` hands it to the owner's parent when the owner ends.
+  none once ended; `keep` hands it to the owner's parent when the owner ends. `log_from` is the
+  log's size when the current start began, where a line wait looks from.
+
+  A forwarded service has `port` (on its host) and `local` (on the workstation), and `fwd`, its
+  forward's state for the current start (`Copy.tla`'s `frow`): none, `starting`, `open`,
+  `reopening` or `failed`; `opens` counts its opens in that start (`Key`'s second half).
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "doc.db")
       iex> {:ok, db} = CodingAgentFramework.Services.Table.open(path)
@@ -20,28 +25,48 @@ defmodule CodingAgentFramework.Services.Table do
   alias Exqlite.Sqlite3
 
   @columns ~w(name host project copy worktree argv env owner keep pid started restarts state
-              start_until end_until)a
+              start_until end_until log_from port local fwd opens)a
   @schema """
   PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS services (
     name TEXT PRIMARY KEY, host TEXT NOT NULL, project TEXT NOT NULL, copy TEXT NOT NULL,
     worktree TEXT NOT NULL, argv TEXT NOT NULL, env TEXT NOT NULL, owner TEXT,
     keep INTEGER NOT NULL, pid INTEGER, started TEXT, restarts INTEGER NOT NULL,
-    state TEXT NOT NULL, start_until INTEGER, end_until INTEGER);
+    state TEXT NOT NULL, start_until INTEGER, end_until INTEGER, log_from INTEGER,
+    port INTEGER, local INTEGER, fwd TEXT, opens INTEGER NOT NULL);
   """
+  # A file made before a column gains it; a newer file already has it.
+  @added [
+    "log_from INTEGER",
+    "port INTEGER",
+    "local INTEGER",
+    "fwd TEXT",
+    "opens INTEGER NOT NULL DEFAULT 0"
+  ]
 
   @type db :: Sqlite3.db()
 
-  @doc "Opens (and creates) the file at `path`, with the table."
+  @doc "Opens (and creates) the file at `path`, with the table; an older file gains its new columns."
   @spec open(String.t()) :: {:ok, db} | {:refused, term}
   def open(path) do
     with {:ok, db} <- Sqlite3.open(path),
          :ok <- Sqlite3.set_busy_timeout(db, 5_000),
-         :ok <- Sqlite3.execute(db, @schema) do
+         :ok <- Sqlite3.execute(db, @schema),
+         :ok <- add_columns(db) do
       {:ok, db}
     else
       {:error, reason} -> {:refused, {:sqlite, reason}}
     end
+  end
+
+  defp add_columns(db) do
+    Enum.reduce_while(@added, :ok, fn column, :ok ->
+      case Sqlite3.execute(db, "ALTER TABLE services ADD COLUMN " <> column) do
+        :ok -> {:cont, :ok}
+        {:error, "duplicate column name" <> _} -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
   end
 
   @doc "The row of `name`, or nil."

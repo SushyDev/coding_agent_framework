@@ -15,6 +15,8 @@ let
   #     devenv.yaml permits only it.
   #   - rsync, ssh, flock: a copy's sync (Copies): rsync over ssh, its host side under flock.
   #   - nc: a service's port wait (Services.wait), `nc -z`.
+  #   - wc, lsof: a service's log offset at its start, and whether a forward's own ssh holds its
+  #     local port (Services).
   #   - sh, bash, rm, mv, env, kill, ps, cat, tail, mkdir, mkfifo, echo, sleep, true: the POSIX
   #     tools the tests and scripts call.
   #   - tlc and java: TLA+ checks of model/tla (bin/check-model). Development only.
@@ -28,6 +30,8 @@ let
     SSH = lib.getExe' pkgs.openssh "ssh";
     FLOCK = lib.getExe pkgs.flock;
     NC = lib.getExe' pkgs.netcat "nc";
+    WC = lib.getExe' pkgs.coreutils "wc";
+    LSOF = lib.getExe pkgs.lsof;
     SH = lib.getExe' pkgs.bash "sh";
     BASH = lib.getExe pkgs.bash;
     RM = lib.getExe' pkgs.coreutils "rm";

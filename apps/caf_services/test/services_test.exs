@@ -1,7 +1,10 @@
 defmodule CodingAgentFramework.ServicesTest do
   # Each test is named for the Copy.tla or Team.tla property it checks. No remote machine: the
   # ssh host's ssh is a stand-in that drops ssh's own arguments and runs the command here, or,
-  # while the test's `down` file exists, exits 255 as a dropped connection does.
+  # while the test's `down` file exists, exits 255 as a dropped connection does. It cannot
+  # forward: given `-L`, it becomes an nc that listens on the local port itself (its pid, the
+  # one the forward's wrapper wrote) and relays nothing; with the `no-forward` file, it runs and
+  # holds no port. That is what `OpenByPort` needs: whose process listens, not what it relays.
   use ExUnit.Case, async: true
 
   doctest CodingAgentFramework.Services.Table
@@ -51,12 +54,31 @@ defmodule CodingAgentFramework.ServicesTest do
     exec #{bash} -c '"$1" -l 127.0.0.1 "$2"; exit 0' "$0" #{program!(:nc)} "$1"
     """)
 
+    # A service that, at TERM, writes whether its forward's local port (its argument) still
+    # listens.
+    File.write!(Path.join(dir, "watch"), """
+    : 2>/dev/null > "#{dir}/pids/$$" || exit 0
+    trap '#{program!(:nc)} -z 127.0.0.1 "$1" && r=live || r=dead; echo $r > "#{dir}/at-term"; exit 0' TERM
+    echo up
+    i=0; while [ $i -lt #{stand_in_idle() * 10} ]; do #{program!(:sleep)} 0.1; i=$((i+1)); done
+    """)
+
+    # A forward writes whether db's pid file was there when it began (`ForwardEarly`). Its nc
+    # takes a name under this test's directory, so `end_recorded/1` can end it; a sleep ends it
+    # after the stand-in's idle time.
     File.write!(Path.join(dir, "ssh"), """
     #!#{bash}
     [ -e "#{dir}/down" ] && exit 255
-    while :; do case $1 in -o|-l) shift 2 ;; --) shift; break ;; -*) shift ;; *) break ;; esac; done
+    f=
+    while :; do case $1 in -L) f=$2; shift 2 ;; -o|-l) shift 2 ;; --) shift; break ;; -*) shift ;; *) break ;; esac; done
     shift
-    exec #{program!(:sh)} -c "$*"
+    [ -z "$f" ] && exec #{program!(:sh)} -c "$*"
+    : > "#{dir}/pids/$$"
+    [ -s "#{dir}/box/services/db.pid" ] && echo after > "#{dir}/fwd-saw" || echo before > "#{dir}/fwd-saw"
+    [ -e "#{dir}/no-forward" ] && exec #{bash} -c 'read -r -t #{stand_in_idle()} l' "#{dir}/fwd"
+    (#{program!(:sleep)} #{stand_in_idle()}; #{program!(:kill)} $$) 2>/dev/null &
+    l=${f#127.0.0.1:}
+    exec -a "#{dir}/fwd" #{program!(:nc)} -k -l 127.0.0.1 "${l%%:*}"
     """)
 
     File.chmod!(Path.join(dir, "ssh"), 0o755)
@@ -77,7 +99,7 @@ defmodule CodingAgentFramework.ServicesTest do
       %{name: "web-a1", project: "web", parent: "web-a"}
     ]
 
-    opts = [dir: Path.join(dir, "services"), copies: copies, hosts: hosts]
+    opts = [dir: Path.join(dir, "services"), copies: copies, hosts: hosts, workstation: "test"]
     # An agent has ended once the test writes its file.
     ended = fn agent -> File.exists?(Path.join(dir, "ended-" <> agent)) end
     opts = opts ++ [grants: Grants.new(fn -> tree end), ended: ended]
@@ -307,5 +329,157 @@ defmodule CodingAgentFramework.ServicesTest do
     assert {:ok, _} = start(c, "web-a", "web", "box", script: "listen", args: ["#{port}"])
     assert {:ok, {:port, ^port}} = Services.wait(c.services, "web", {:port, port}, 5_000)
     assert {:ok, _} = Services.stop(c.services, "web-a", "web")
+  end
+
+  test "Wait: a line wait looks from the current start's log offset, or from one the caller names",
+       c do
+    assert {:ok, %{log_from: 0}} = start(c, "web-a", "db", "box")
+    File.write!(Path.join(c.wt, "a.txt"), "three\n")
+    assert {:ok, %{log_from: 10}} = Services.restart(c.services, "web-a", "db")
+
+    assert {:ok, {:line, "up in three", 22}} =
+             Services.wait(c.services, "db", {:line, "up"}, 5_000)
+
+    assert {:unknown, :timeout} = Services.wait(c.services, "db", {:line, "one"}, 300)
+
+    assert {:ok, {:line, "up in one", 10}} =
+             Services.wait(c.services, "db", {:line, "one", 0}, 300)
+  end
+
+  test "Table (no property of its own): a file made before the forward's columns opens with them",
+       c do
+    path = Path.join(c.dir, "old.db")
+    {:ok, db} = Exqlite.Sqlite3.open(path)
+
+    old =
+      "CREATE TABLE services (name TEXT PRIMARY KEY, host TEXT NOT NULL, project TEXT NOT NULL,
+      copy TEXT NOT NULL, worktree TEXT NOT NULL, argv TEXT NOT NULL, env TEXT NOT NULL,
+      owner TEXT, keep INTEGER NOT NULL, pid INTEGER, started TEXT, restarts INTEGER NOT NULL,
+      state TEXT NOT NULL, start_until INTEGER, end_until INTEGER)"
+
+    :ok = Exqlite.Sqlite3.execute(db, old)
+    empty = Base.encode64(:erlang.term_to_binary([]))
+
+    :ok =
+      Exqlite.Sqlite3.execute(db, """
+      INSERT INTO services VALUES ('db', 'box', 'web', 'w', '/wt', '#{empty}', '#{empty}', NULL,
+        0, NULL, NULL, 0, 'ended', NULL, NULL)
+      """)
+
+    :ok = Exqlite.Sqlite3.close(db)
+    assert {:ok, db} = Services.Table.open(path)
+
+    assert %{state: "ended", log_from: nil, port: nil, fwd: nil, opens: 0} =
+             Services.Table.get(db, "db")
+
+    assert {:ok, ^db} = {Services.Table.open(path) |> elem(0), db}
+  end
+
+  # A port free a moment ago.
+  defp free_port do
+    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
+    {:ok, port} = :inet.port(socket)
+    :gen_tcp.close(socket)
+    port
+  end
+
+  defp listens?(port) do
+    case :gen_tcp.connect({127, 0, 0, 1}, port, [], 1_000) do
+      {:ok, socket} -> :gen_tcp.close(socket) || true
+      _ -> false
+    end
+  end
+
+  defp fwd_sock(c), do: Path.join(c.dir, "ws/services/db.sock")
+
+  defp fwd_pid(c),
+    do: c.dir |> Path.join("ws/services/db.fwd.pid") |> File.read!() |> String.trim()
+
+  defp start_forwarded(c, opts \\ []) do
+    {port, local} = {free_port(), free_port()}
+    opts = Keyword.merge([forward: {port, local}, forward_timeout: 2_000], opts)
+    {start(c, "web-a", "db", "box", opts), port, local}
+  end
+
+  test "ForwardEarly, OpenByPort: the forward is held once the service runs, and the start answers once its own ssh holds the local port",
+       c do
+    assert {{:ok, row}, port, local} = start_forwarded(c)
+    assert %{state: "running", port: ^port, local: ^local, fwd: "open", opens: 1} = row
+    assert {:ok, "after\n"} = read_when(Path.join(c.dir, "fwd-saw"), "after\n")
+    assert listens?(local)
+    assert {:ok, %{state: "ended"}} = Services.stop(c.services, "web-a", "db")
+    refute listens?(local)
+
+    assert {:refused, {:bad_forward, {80, 81}}} =
+             start(c, "web-a", "web", "test", forward: {80, 81})
+  end
+
+  test "OpenByPort, FailKeepsService: a forward whose ssh does not hold the port, or exits, fails and ends the service",
+       c do
+    # Another program holds the local port; the stand-in runs and holds none.
+    {:ok, other} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
+    {:ok, local} = :inet.port(other)
+    File.write!(Path.join(c.dir, "no-forward"), "")
+    port = free_port()
+
+    assert {:refused, {:forward, :not_open}} =
+             start(c, "web-a", "db", "box", forward: {port, local}, forward_timeout: 1_000)
+
+    assert %{state: "ended", fwd: "failed", owner: nil} = row(c, "db")
+    refute File.exists?(fwd_sock(c))
+    # Without the file, its nc cannot bind the port and exits, as ssh with ExitOnForwardFailure.
+    File.rm!(Path.join(c.dir, "no-forward"))
+
+    assert {:refused, {:forward, :exited}} =
+             start(c, "web-a", "db", "box", forward: {port, local}, forward_timeout: 2_000)
+
+    assert %{state: "ended", fwd: "failed"} = row(c, "db")
+    {:ok, pid} = File.read(Path.join(c.dir, "box/services/db.pid"))
+    assert {:ok, :gone} = gone(pid |> String.split() |> hd())
+    :gen_tcp.close(other)
+  end
+
+  test "ServiceEndFirst: an end ends the forward first, and is done once both sockets read dead",
+       c do
+    {port, local} = {free_port(), free_port()}
+
+    assert {:ok, %{pid: pid}} =
+             start(c, "web-a", "db", "box",
+               script: "watch",
+               args: ["#{local}"],
+               forward: {port, local}
+             )
+
+    assert {:ok, _} = log(c, "box", "db")
+    assert {:ok, %{state: "ended"}} = Services.stop(c.services, "web-a", "db")
+    assert {:ok, "dead\n"} = read_when(Path.join(c.dir, "at-term"), "dead\n")
+    refute File.exists?(fwd_sock(c))
+    assert {:ok, :gone} = gone(pid)
+  end
+
+  test "ForwardReopened once per Key: a lost forward reopens once per claimed state; a failed reopen stays failed until the next start",
+       c do
+    assert {{:ok, %{pid: pid, started: started}}, _port, local} = start_forwarded(c)
+    claim = %{pid: pid, started: started, opens: 1}
+    assert {:refused, :forward_live} = Services.reopen(c.services, "db", claim)
+
+    lose = fn ->
+      kill(fwd_pid(c))
+      await(fn -> if File.exists?(fwd_sock(c)), do: :live, else: {:ok, :dead} end)
+    end
+
+    assert {:ok, :dead} = lose.()
+    assert {:ok, %{fwd: "open", opens: 2}} = Services.reopen(c.services, "db", claim)
+    assert listens?(local)
+    assert {:ok, :dead} = lose.()
+    assert {:refused, {:changed, _}} = Services.reopen(c.services, "db", claim)
+    File.write!(Path.join(c.dir, "down"), "")
+    claim = %{claim | opens: 2}
+    assert {:refused, {:forward, :exited}} = Services.reopen(c.services, "db", claim)
+    assert %{state: "running", fwd: "failed", pid: ^pid} = row(c, "db")
+    assert {:refused, {:changed, _}} = Services.reopen(c.services, "db", claim)
+    File.rm!(Path.join(c.dir, "down"))
+    assert {:ok, %{fwd: "open", opens: 1}} = Services.restart(c.services, "web-a", "db")
+    assert {:refused, {:changed, _}} = Services.reopen(c.services, "db", %{claim | opens: 1})
   end
 end
