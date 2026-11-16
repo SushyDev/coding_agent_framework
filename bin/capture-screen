@@ -228,14 +228,16 @@ await_state() {
     # A state the pinned release never draws (its trust dialog, say) is recorded as not shown.
     if [[ "$answer" == s ]]; then
       shown=false
-      return
+      return 0
     fi
     if [[ "$state" == exited && "$(pane_dead)" != 1 ]]; then
       say "    Claude Code has not exited yet."
     elif [[ "$state" != exited && "$(pane_dead)" == 1 ]]; then
       fail "Claude Code exited before $state; nothing written"
     else
-      return
+      # 0 by name: a bare return gives the last test's status, the elif's false, and under
+      # set -e the script ended at every Enter of a real run (F-105).
+      return 0
     fi
   done
 }
