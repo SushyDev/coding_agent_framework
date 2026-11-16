@@ -99,7 +99,8 @@ defmodule CodingAgentFramework.StreamTest do
              row!(ctx, s, &(&1.requests[req] != nil)).requests[req]
 
     assert {:refused, :no_request} = Stream.write(s, "d5", {:answer, "req-other", :allow})
-    assert {:ok, _} = Stream.write(s, "d5", {:answer, req, {:deny, "no"}})
+    assert {:refused, {:bad, :label}} = Stream.answer(s, "d5", req, "maybe")
+    assert {:ok, _} = Stream.answer(s, "d5", req, "deny")
     assert {:refused, {:request, :answering}} = Stream.write(s, "d5", {:answer, req, :allow})
     row!(ctx, s, &(&1.requests[req].state == :answered and &1.idle))
     assert {:refused, {:request, :answered}} = Stream.write(s, "d5", {:answer, req, :allow})

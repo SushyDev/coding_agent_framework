@@ -88,6 +88,8 @@ defmodule CodingAgentFramework.MCPTest do
          dir: dir,
          port: 4791,
          grants: Grants.new(tree),
+         claims: :unused,
+         start_id: "t",
          mailbox: {StandIn, self()},
          delegates: {StandIn, self()},
          services: {StandIn, self()},
@@ -158,7 +160,8 @@ defmodule CodingAgentFramework.MCPTest do
     assert rpc.("tools/list")["tools"] |> Enum.map(& &1["name"]) ==
              ~w(message run start_delegate run_delegate) ++
                ~w(service_start services service_logs service_send service_wait) ++
-               ~w(service_restart service_stop service_hand agents look transcript reload)
+               ~w(service_restart service_stop service_hand agents look transcript) ++
+               ~w(interrupt answer resume stop reload)
   end
 
   test "a call is the agent's whose token it carries, whatever its arguments say",
@@ -205,8 +208,8 @@ defmodule CodingAgentFramework.MCPTest do
 
     assert tool(mcp, t["app-fix"], "message", %{"to" => 1}) == %{"refused" => ["bad", "args"]}
 
-    assert tool(mcp, t["app-fix"], "interrupt", %{}) == %{
-             "refused" => ["unknown_tool", "interrupt"]
+    assert tool(mcp, t["app-fix"], "start_main", %{}) == %{
+             "refused" => ["unknown_tool", "start_main"]
            }
   end
 
@@ -263,6 +266,8 @@ defmodule CodingAgentFramework.MCPTest do
       dir: Path.join(test_dir(), name),
       port: 4791,
       grants: Grants.new(tree),
+      claims: :unused,
+      start_id: "t",
       mailbox: {StandIn, self()},
       delegates: {StandIn, self()},
       services: {StandIn, self()},
@@ -382,7 +387,8 @@ defmodule CodingAgentFramework.MCPTest do
                "tools" =>
                  ~w(message run start_delegate run_delegate) ++
                    ~w(service_start services service_logs service_send service_wait) ++
-                   ~w(service_restart service_stop service_hand agents look transcript reload)
+                   ~w(service_restart service_stop service_hand agents look transcript) ++
+                   ~w(interrupt answer resume stop reload)
              }
            }
 

@@ -238,7 +238,9 @@ defmodule CodingAgentFramework.Example do
             place: place(w),
             instance: c.instance,
             tool_timeout: c.tool_timeout,
-            margin: c.margin}
+            margin: c.margin,
+            claims: pid.(:claims),
+            start_id: w.start_id}
          end},
         {:mcp_http,
          fn pid ->

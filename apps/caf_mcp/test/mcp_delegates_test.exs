@@ -7,9 +7,11 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, Delegates, Grants, MCP, SessionsSetup, Stream}
+  alias CodingAgentFramework.{Accounts, Delegates, Grants, MCP, Sessions, SessionsSetup, Stream}
   alias CodingAgentFramework.{Tracker, Transcripts, Usage}
   alias CodingAgentFramework.Delegates.Table
+  alias CodingAgentFramework.Grants.Claims
+  alias CodingAgentFramework.HeadlessStandIn
 
   setup {SessionsSetup, :sessions}
 
@@ -66,12 +68,21 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
       [%{name: "app-old", parent: "main"}, %{name: "lib-old", parent: "lmain"} | rows]
     end
 
+    grants = Grants.new(tree)
+
+    claims =
+      start_supervised!(
+        {Claims, path: Path.join(ctx.dir, "claims.db"), grants: grants, start_id: "s1"}
+      )
+
     mcp =
       start_supervised!(
         {MCP,
          dir: Path.join(ctx.dir, "mcp"),
          port: 4791,
-         grants: Grants.new(tree),
+         grants: grants,
+         claims: claims,
+         start_id: "s1",
          mailbox: {__MODULE__, :unused},
          jobs: {__MODULE__, :unused},
          delegates: {Delegates, delegates},
@@ -94,6 +105,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
 
     %{mcp: mcp, tokens: tokens, delegates: delegates, dtable: dtable}
     |> Map.merge(%{tracker: tracker, transcripts: transcripts})
+    |> Map.put(:claims, claims)
   end
 
   defmodule BrokenSocket do
@@ -205,6 +217,136 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     assert {:ok, [%{id: ^id, text: "done " <> ^u}]} = Delegates.held(ctx.delegates, "main")
   end
 
+  test "a fix is the parent's, once per state, and never acts on a state that moved", ctx do
+    File.write!(Path.join(ctx.dir, "hold"), "")
+    {req_one, _} = stuck(ctx, "unit/one")
+    {req_two, _} = stuck(ctx, "unit/two")
+    one = %{"agent" => "app-unit-one"}
+    two = %{"agent" => "app-unit-two"}
+
+    assert tool(ctx, "app-old", "interrupt", one) == %{"refused" => "only_parent_fixes"}
+
+    assert tool(ctx, "app-old", "stop", %{"agent" => "main"}) == %{
+             "refused" => "main_never_fixed"
+           }
+
+    assert tool(ctx, "stray", "resume", one) == %{"refused" => ["unknown_agent", "stray"]}
+    answer = Map.merge(one, %{"dialog" => req_one, "label" => "maybe"})
+    assert tool(ctx, "main", "answer", answer) == %{"refused" => ["bad", "args"]}
+    assert {:ok, []} = Claims.rows(ctx.claims)
+
+    # The act reads the state again: one that moved since the claim is not acted on.
+    {:ok, state} = Delegates.fix_state(ctx.delegates, "main", "app-unit-one")
+    stale = %{state | offset: state.offset - 1}
+
+    assert {:refused, {:moved, ^state}} =
+             Delegates.fix(ctx.delegates, "main", "app-unit-one", :interrupt, stale)
+
+    # A fix refused when it acts settles its claim not verified, and the state stays claimed.
+    assert tool(ctx, "main", "resume", one) == %{"refused" => "live"}
+    assert tool(ctx, "main", "stop", one) == %{"refused" => ["already_claimed", "main"]}
+    assert tool(ctx, "main", "interrupt", one) == %{"refused" => ["already_claimed", "main"]}
+
+    # An answer moves the state at once: its request is no longer held.
+    assert %{"ok" => %{"settled" => %{"ok" => "verified"}}} =
+             tool(
+               ctx,
+               "main",
+               "answer",
+               Map.merge(two, %{"dialog" => req_two, "label" => "allow"})
+             )
+
+    # A claim still open on a state refuses a second fix as claimed.
+    {:ok, _} = cue_until(ctx, &(&1.name == "app-unit-two" and &1.status == "finished"))
+    {:ok, now} = Delegates.fix_state(ctx.delegates, "main", "app-unit-two")
+    {:ok, id} = Claims.claim(ctx.claims, "main", "app-unit-two", now, "s1")
+    assert tool(ctx, "main", "stop", two) == %{"refused" => ["claimed", "main"]}
+
+    assert {:ok, [%{state: ^state} = r1, %{target: "app-unit-two"} = r2, %{id: ^id} = r3]} =
+             Claims.rows(ctx.claims)
+
+    assert {r1.status, r2.status, r3.status} == {"not_verified", "verified", "claimed"}
+    refute "interrupt" in HeadlessStandIn.taken(ctx.dir)
+    assert "answer #{req_two}" in HeadlessStandIn.taken(ctx.dir)
+  end
+
+  test "an interrupt goes in under a claim; a stop only once the report is delivered", ctx do
+    args = Map.put(start_args("unit/one"), "timeout", 60_000)
+    call = Task.async(fn -> tool(ctx, "main", "run_delegate", args) end)
+    {:ok, _} = cue_until(ctx, &(&1.report == "answered"))
+    assert %{"ok" => %{"status" => "finished"}} = Task.await(call)
+
+    File.write!(Path.join(ctx.dir, "hold"), "")
+    {req, _} = stuck(ctx, "unit/two")
+    two = %{"agent" => "app-unit-two"}
+
+    # Whether its result is read before the state is read again is the stand-in's timing.
+    assert %{"ok" => %{"settled" => %{"ok" => settled}}} = tool(ctx, "main", "interrupt", two)
+    assert settled in ~w(verified not_verified)
+
+    {:ok, row} = cue_until(ctx, &(&1.name == "app-unit-two" and &1.status == "finished"))
+    assert {:ok, %{held: []}} = Delegates.fix_state(ctx.delegates, "main", "app-unit-two")
+    refute "answer #{req}" in HeadlessStandIn.taken(ctx.dir)
+
+    # run_delegate's report reached its caller; the other one is held for a message.
+    assert row.report == "held"
+    assert tool(ctx, "main", "stop", two) == %{"refused" => ["report", "held"]}
+
+    assert %{"ok" => %{"done" => "stopped", "settled" => %{"ok" => "verified"}}} =
+             tool(ctx, "main", "stop", %{"agent" => "app-unit-one"})
+
+    assert {:ok, [_, %{status: "not_verified"}, %{target: "app-unit-one", status: "verified"}]} =
+             Claims.rows(ctx.claims)
+
+    assert "interrupt" in HeadlessStandIn.taken(ctx.dir)
+    assert "end" in HeadlessStandIn.taken(ctx.dir)
+  end
+
+  test "resume starts a dead delegate again through Delegates' resume path, once", ctx do
+    File.write!(Path.join(ctx.dir, "hold"), "")
+    stuck(ctx, "unit/one")
+    one = %{"agent" => "app-unit-one"}
+    [pid] = File.ls!(Path.join(ctx.dir, "pids"))
+    kill(pid)
+
+    # Nothing cues Delegates here, so its own resume does not come first. Sessions sees the
+    # exit at its cues; a read of it after each cue answers once the cue is handled.
+    {:ok, _} =
+      await(
+        fn ->
+          Sessions.cue(ctx.sessions, %{topic: "stream:test", ids: []})
+          Sessions.viewer_argv(ctx.sessions, "app-unit-one")
+
+          case Delegates.fix_state(ctx.delegates, "main", "app-unit-one") do
+            {:ok, %{gone: true, ended: true}} = ok -> ok
+            other -> other
+          end
+        end,
+        10_000
+      )
+
+    File.rm!(Path.join(ctx.dir, "hold"))
+
+    assert %{"ok" => %{"done" => "resuming", "settled" => %{"ok" => "verified"}}} =
+             tool(ctx, "main", "resume", one)
+
+    # Once the resumed process has finished, its state holds still for the next claim.
+    assert {:ok, %{resumes: 1}} = cue_until(ctx, &(&1.status == "finished"))
+    assert tool(ctx, "main", "resume", one) == %{"refused" => "resumed_once"}
+    assert {:ok, [%{status: "verified"}, %{status: "not_verified"}]} = Claims.rows(ctx.claims)
+  end
+
+  # Starts a delegate whose brief waits on a permission request, and answers the request's id
+  # once Stream has read it.
+  defp stuck(ctx, branch) do
+    {:ok, _} = MCP.call(ctx.mcp, "main", "start_delegate", start_args(branch))
+    name = "app-" <> String.replace(branch, "/", "-")
+    rows = Table.with_status(ctx.dtable, "test", ~w(running))
+    %{session_id: sid, brief_uuid: u} = Enum.find(rows, &(&1.name == name))
+    {:ok, _} = await(fn -> requested(ctx, sid, "req-" <> u) end, 10_000)
+    {"req-" <> u, sid}
+  end
+
   defp requested(ctx, sid, req) do
     {:ok, _} = Stream.read(ctx.stream)
     {:ok, %{rows: rows}} = Stream.rows(ctx.stream)
@@ -212,15 +354,15 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     if row && row.requests[req], do: {:ok, row}
   end
 
-  # Reads Stream and cues Delegates until the one delegate's row satisfies `ready?`.
+  # Reads Stream and cues Delegates until a delegate's row satisfies `ready?`, and answers it.
   defp cue_until(ctx, ready?) do
     await(
       fn ->
         {:ok, _} = Stream.read(ctx.stream)
         Delegates.cue(ctx.delegates, %{topic: "stream:test", ids: []})
         Delegates.held(ctx.delegates, "main")
-        row = List.first(Table.with_status(ctx.dtable, "test", ~w(running finished)))
-        if row && ready?.(row), do: {:ok, row}
+        row = Enum.find(Table.with_status(ctx.dtable, "test", ~w(running finished)), ready?)
+        if row, do: {:ok, row}
       end,
       20_000
     )
