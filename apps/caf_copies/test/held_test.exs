@@ -63,10 +63,13 @@ defmodule CodingAgentFramework.Copies.HeldTest do
     Held.ready(ctx, c.wt, opts, &send(test, {:refused, &1}))
   end
 
-  # The program prints the synced file into the copy, then waits.
+  # The program prints the synced file into the copy, then waits. Its `$0` names the test's own
+  # directory, so the test's end, which signals a recorded pid only while its command line names
+  # that directory, ends it (F-66; it was left until its idle bound, F-94).
   defp hold(c, ctx) do
     seen = "#{program!(:cat)} a.txt > seen.new && #{program!(:mv)} seen.new seen"
-    argv = [program!(:bash), "-c", "#{seen}; read -r -t #{stand_in_idle()} l"]
+    me = Path.join(c.dir, "held-program")
+    argv = [program!(:bash), "-c", "#{seen}; read -r -t #{stand_in_idle()} l", me]
     Held.hold(ctx, @wrapper, ["caf-held", Path.join(c.dir, "pids"), ctx.path], argv, [])
   end
 
