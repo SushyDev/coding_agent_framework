@@ -36,6 +36,28 @@
 (*             command exits, before it reaps the command, then writes the *)
 (*             exit code (or "timeout") to a file and exits; at the job's  *)
 (*             timeout it ends the group.                                  *)
+(*   Services  a service's forward (F-89's design, not built yet, F-91):   *)
+(*             an ssh -N -L with ExitOnForwardFailure, held by dtach on    *)
+(*             the workstation, started once the service's start is       *)
+(*             settled; the start answers once the forward is open, and a *)
+(*             forward that fails there ends the service, whose start then *)
+(*             answers refused. A service's end or restart ends its        *)
+(*             forward first, and sends its own end once the forward's     *)
+(*             socket reads dead;                                          *)
+(*   Recoveries a forward whose socket reads dead while its service runs: *)
+(*             claimed (the row says reopening, durable, with the state    *)
+(*             it claims: the service's start and the forward's open      *)
+(*             count), then reopened once if the claim is still current;   *)
+(*             a reopen that fails, or a claim a restart cut off, waits    *)
+(*             for a person (the row says failed).                         *)
+(*                                                                         *)
+(* The forward is open when its own ssh listens on the local port (the     *)
+(* listener's pid is the forward's), not when the port listens: another    *)
+(* program may hold it (OpenByPort). Its ssh binds the local port without  *)
+(* the service listening, so the forward need not start first. Its own ssh *)
+(* drops (FwdDrops) apart from Shell's connection, and fails to connect    *)
+(* while that connection is down. A dtach -n of the forward is local: a    *)
+(* restart of the framework before its answer ends it held or never held.  *)
 (*                                                                         *)
 (* Runs are Jobs and Svcs: each job is asked once; a service is started    *)
 (* once and restarted up to MaxSvcRestarts times. A run that has asked     *)
@@ -66,8 +88,10 @@
 (* Left abstract: the files of a sync (the host's side takes the lock and  *)
 (* begins writing in one step, completes in one, and a cut leaves the copy *)
 (* partly synced), the log and its offset (read by the same reads), the    *)
-(* job's argv, the ports a service forwards, the message an unknown answer *)
-(* is followed by, and claims (Team.tla). Time is a flag per job, `past`:  *)
+(* job's argv, the port numbers (a forward's local port is free, its       *)
+(* own, or another program's), the message an unknown answer is followed  *)
+(* by, and claims (Team.tla; a forward's reopen, under one, is not cut by  *)
+(* the service's end or restart). Time is a flag per job, `past`:          *)
 (* its timeout has passed, at any step after its run asked; the call and   *)
 (* the host's wrapper keep that one deadline. A call's own deadline is the *)
 (* job's timeout, or for a service start any time; at it, with the         *)
@@ -81,8 +105,9 @@
 (*                                                                         *)
 (* Fairness: the framework's and the host's steps happen while they stay   *)
 (* possible, and time passes. The connection's return, drops, the agents'  *)
-(* calls and edits, a job's own exit, a wrapper killed, an owner's end and *)
-(* restarts of the framework happen or not.                                *)
+(* calls and edits, a job's own exit, a wrapper killed, an owner's end,    *)
+(* restarts of the framework, a forward's drop and another program taking  *)
+(* its port happen or not. A forward's ssh binds or fails while it can.    *)
 (*                                                                         *)
 (* Break: "none" is the design. Every other value removes one guard and    *)
 (* has a Break_Copy_<value>.cfg that TLC must fail.                        *)
@@ -106,6 +131,10 @@ CONSTANTS
     MaxEdits,       \* the agent's edits of the worktree
     MaxLost,        \* job wrappers killed on the host before they write the exit file
     MaxSvcRestarts, \* service_restart calls
+    Fwds,           \* the services started with forward:, whose port is forwarded
+    MaxFwdDrops,    \* drops of a forward's own ssh
+    MaxFwdFails,    \* a forward's ssh that fails to connect while the connection is up
+    MaxTaken,       \* another program taking a forward's local port
     Break           \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -130,14 +159,22 @@ Breaks == {
     "RecordAfterSync",      \* the record is taken once the sync completes, not before it sends
     "NoHostLock",           \* the host's side of a sync writes without the copy's lock
     "NoGroupEnd",           \* the wrapper reaps the command and leaves the rest of its group
-    "CutBeforeDeadline"     \* a cut sync gives the turn back while its host side may still lock
+    "CutBeforeDeadline",    \* a cut sync gives the turn back while its host side may still lock
+    "ForwardEarly",         \* the forward starts before its service's start is settled
+    "ServiceEndFirst",      \* the service's end is sent before its forward is read dead
+    "OpenByPort",           \* a forward is taken as open when its local port listens
+    "FailKeepsService",     \* a forward that fails at the start refuses the start, the service left held
+    "ActWithoutCheck",      \* a reopen acts on its claim without reading that the service still runs
+    "RetryFailed",          \* a reopen that failed is taken as a new loss, not sent to a person
+    "ReopenInMemory",       \* a reopen is held in memory: the row still says open while it runs
+    "NoReopen"              \* Recoveries does not reopen a dropped forward
 }
 
 ASSUME Break \in Breaks
-ASSUME Jobs \cap Svcs = {} /\ Fetched \subseteq Paths
+ASSUME Jobs \cap Svcs = {} /\ Fetched \subseteq Paths /\ Fwds \subseteq Svcs
 ASSUME "none" \notin Codes /\ "timeout" \notin Codes
 ASSUME /\ MaxDrops \in Nat /\ MaxRestarts \in Nat /\ MaxEdits \in Nat /\ MaxLost \in Nat
-       /\ MaxSvcRestarts \in Nat
+       /\ MaxSvcRestarts \in Nat /\ MaxFwdDrops \in Nat /\ MaxFwdFails \in Nat /\ MaxTaken \in Nat
 
 None == "none"
 Runs == Jobs \cup Svcs
@@ -156,6 +193,13 @@ CodeVals == Codes \cup {None, "0", "255"}
 Kinds == {None, "ok", "timeout", "no_exit", "refused", "dropped", "restart", "started"}
 Answers == [k : Kinds, code : CodeVals, fetch : {None, "done", "conflict", "unknown"}]
 Say(k) == [k |-> k, code |-> None, fetch |-> None]
+\* A forward as its service's row says: none yet for this start, starting,
+\* open (and its local port reported), reopening under Recoveries' claim, or
+\* failed, a reopen that failed, waiting for a person.
+FwdRows == {None, "starting", "open", "reopening", "failed"}
+\* No forward command under way, and no claim: a service's first start is gen 1.
+NoCmd == 0
+NoClaim == <<0, 0>>
 
 VARIABLES
     \* The workstation, durable
@@ -195,11 +239,32 @@ VARIABLES
     badStart,   \* runs that started on a copy not whole or not fresh for them
     fetched,    \* the fetch's writes: [r, p, ended]
     since,      \* [Jobs -> SUBSET Paths]: paths the agent edited after j's sync began
-    clobbered   \* paths a fetch wrote over such an edit
+    clobbered,  \* paths a fetch wrote over such an edit
+    \* A service's forward. The service's row, durable:
+    gen,        \* [Svcs -> Nat]: the row's count of its starts, its pid and start time
+    frow,       \* [Svcs -> FwdRows]: the forward of the current start, as the row says
+    opens,      \* [Svcs -> Nat]: the forward's opens for the current start
+    \* The framework's memory:
+    fcmd,       \* [Svcs -> Nat]: a local dtach -n of the forward under way, and the
+                \* start (the row's gen) it was sent for, or NoCmd
+    facting,    \* [Svcs -> Nat \X Nat]: the loss Recoveries claimed and has not acted on, or NoClaim
+    \* The workstation:
+    fproc,      \* [Svcs -> {None, "pending", "bound"}]: the forward's ssh, held by dtach;
+                \* "pending" until it listens on its local port
+    port,       \* [Svcs -> {"free", "fwd", "other"}]: who listens on the forward's local port
+    fdrops, ffails, taken,
+    \* Ghosts:
+    fto,        \* [Svcs -> Nat]: the start the held forward was started for
+    reopened,   \* [Svcs -> SUBSET (Nat \X Nat)]: the states a reopen acted on
+    twice,      \* a reopen acted on a state a reopen acted on before
+    badReport   \* services whose row reported a forward open while its ssh did not hold the port
+
+fvars == <<gen, frow, opens, fcmd, facting, fproc, port, fdrops, ffails, taken, fto, reopened,
+           twice, badReport>>
 
 vars == <<row, rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale, up, fw,
           inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
-          svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+          svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered, fvars>>
 
 TypeOK ==
     /\ row \in [Runs -> Rows]
@@ -227,6 +292,12 @@ TypeOK ==
     /\ fresh \in [Runs -> BOOLEAN]
     /\ cover \in [Runs -> SUBSET Runs]
     /\ since \in [Jobs -> SUBSET Paths]
+    /\ gen \in [Svcs -> Nat] /\ frow \in [Svcs -> FwdRows] /\ opens \in [Svcs -> Nat]
+    /\ fcmd \in [Svcs -> Nat] /\ facting \in [Svcs -> Nat \X Nat]
+    /\ fproc \in [Svcs -> {None, "pending", "bound"}]
+    /\ port \in [Svcs -> {"free", "fwd", "other"}]
+    /\ fto \in [Svcs -> Nat] /\ reopened \in [Svcs -> SUBSET (Nat \X Nat)]
+    /\ twice \in BOOLEAN /\ badReport \subseteq Svcs
 
 Init ==
     /\ row = [r \in Runs |-> "idle"]
@@ -257,6 +328,12 @@ Init ==
     /\ badStart = {} /\ fetched = {}
     /\ since = [j \in Jobs |-> {}]
     /\ clobbered = {}
+    /\ gen = [s \in Svcs |-> 0] /\ frow = [s \in Svcs |-> None] /\ opens = [s \in Svcs |-> 0]
+    /\ fcmd = [s \in Svcs |-> NoCmd] /\ facting = [s \in Svcs |-> NoClaim]
+    /\ fproc = [s \in Svcs |-> None] /\ port = [s \in Svcs |-> "free"]
+    /\ fdrops = 0 /\ ffails = 0 /\ taken = 0
+    /\ fto = [s \in Svcs |-> 0] /\ reopened = [s \in Svcs |-> {}]
+    /\ twice = FALSE /\ badReport = {}
 
 Link == up /\ fw = "up"
 
@@ -279,6 +356,17 @@ Answer(r, a) ==
 \* The record of a job's named paths: from now on, a change to one is stale.
 Record(r) == stale' = IF r \in Jobs THEN [stale EXCEPT ![r] = {}] ELSE stale
 
+\* A service's end is sent once its forward's socket reads dead, with no
+\* start of the forward under way.
+FwdGone(s) ==
+    \/ s \notin Fwds
+    \/ fproc[s] = None /\ fcmd[s] = NoCmd
+    \/ Break = "ServiceEndFirst"
+
+\* The state a reopen is once per: the service's held process (the row's
+\* start) and the forward's open count.
+Key(s) == <<gen[s], opens[s]>>
+
 ----------------------------------------------------------------------------
 \* The agent's calls
 
@@ -290,6 +378,7 @@ AskJob(j) ==
     /\ UNCHANGED <<rcode, turn, owner, keep, alive, cmd, rd, fetchLeft, skipped, stale, up, fw,
                    inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* service_start, with keep: or without.
 AskService(s) ==
@@ -302,6 +391,7 @@ AskService(s) ==
     /\ UNCHANGED <<rcode, turn, alive, cmd, rd, fetchLeft, skipped, stale, up, fw, inflight, held,
                    grp, hs, lock, file, past, whole, drops, restarts, edits, lost, svcRestarts,
                    answer, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* service_restart by its owner: the row says restarting before the end is sent.
 AskRestart(s) ==
@@ -314,6 +404,7 @@ AskRestart(s) ==
     /\ UNCHANGED <<rcode, turn, owner, keep, alive, cmd, rd, fetchLeft, skipped, stale, up, fw,
                    inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    answer, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* The agent, or a subagent, edits a path of the worktree: the file no longer
 \* matches any job's record of it.
@@ -325,6 +416,7 @@ Edit(p) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, up, fw,
                    inflight, held, grp, hs, lock, file, past, whole, drops, restarts, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, clobbered>>
+    /\ UNCHANGED fvars
 
 ----------------------------------------------------------------------------
 \* The sync and the start
@@ -344,6 +436,7 @@ SyncBegins(r) ==
     /\ UNCHANGED <<rcode, owner, keep, alive, call, rd, fetchLeft, skipped, up, fw, inflight, held,
                    grp, lock, file, past, whole, drops, restarts, edits, lost, svcRestarts, answer,
                    fresh, badStart, fetched, clobbered>>
+    /\ UNCHANGED fvars
 
 \* Under SkipSync, a copy whole from an earlier sync is taken as in step.
 SyncSkipped(r) ==
@@ -354,6 +447,7 @@ SyncSkipped(r) ==
     /\ UNCHANGED <<rcode, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale, up, fw,
                    inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* The host's side takes the copy's lock and begins writing the copy. It may
 \* do so after its local side ended, until it notices.
@@ -366,6 +460,7 @@ HostLocks(r) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale,
                    up, fw, inflight, held, grp, file, past, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* The lock's deadline passes while another sync's host side holds it: the
 \* host's side exits non-zero, and the local rsync with it.
@@ -376,6 +471,7 @@ HostGivesUp(r) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, rd, fetchLeft, skipped, stale, up,
                    fw, inflight, held, grp, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* A host side whose local side ended (a drop, a restart, or its own give-up)
 \* notices and exits, and the lock goes with it.
@@ -386,6 +482,7 @@ HostSideEnds(r) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale,
                    up, fw, inflight, held, grp, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* rsync completed: the host's side wrote every file and exits, freeing the lock.
 SyncCompletes(r) ==
@@ -400,6 +497,7 @@ SyncCompletes(r) ==
     /\ UNCHANGED <<rcode, turn, owner, keep, alive, call, rd, fetchLeft, skipped, up, fw, inflight,
                    held, grp, file, past, drops, restarts, edits, lost, svcRestarts, answer, cover,
                    badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* rsync exited non-zero: the copy stays partly synced, and nothing ran. The
 \* refusal is answered at once; only the turn waits for the host's side.
@@ -416,6 +514,7 @@ SyncCut(r) ==
     /\ UNCHANGED <<rcode, owner, keep, alive, rd, fetchLeft, skipped, stale, up, fw, inflight, held,
                    grp, hs, lock, file, past, whole, drops, restarts, edits, lost, svcRestarts,
                    fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* The start's row is written, then `ssh host dtach -n …` is sent.
 StartSent(r) ==
@@ -423,9 +522,16 @@ StartSent(r) ==
     /\ row' = [row EXCEPT ![r] = "starting"]
     /\ cmd' = [cmd EXCEPT ![r] = "busy"]
     /\ inflight' = [inflight EXCEPT ![r] = "start"]
+    /\ IF r \in Fwds
+       THEN /\ gen' = [gen EXCEPT ![r] = gen[r] + 1]
+            /\ frow' = [frow EXCEPT ![r] = None]
+            /\ opens' = [opens EXCEPT ![r] = 0]
+       ELSE UNCHANGED <<gen, frow, opens>>
     /\ UNCHANGED <<rcode, turn, owner, keep, alive, call, rd, fetchLeft, skipped, stale, up, fw,
                    held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED <<fcmd, facting, fproc, port, fdrops, ffails, taken, fto, reopened, twice,
+                   badReport>>
 
 \* The host runs a command it got: a start holds a process (a job's command
 \* in a process group of its own), an end kills one.
@@ -441,6 +547,7 @@ Lands(r) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale,
                    up, fw, hs, lock, file, past, whole, drops, restarts, edits, lost, svcRestarts,
                    answer, fresh, cover, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* A command cut before the host ran it, past its deadline, never runs.
 NeverLands(r) ==
@@ -449,6 +556,7 @@ NeverLands(r) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale,
                    up, fw, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* dtach -n answered 0 over the connection: the process is held.
 StartReplies(r) ==
@@ -456,11 +564,12 @@ StartReplies(r) ==
     /\ row' = [row EXCEPT ![r] = "running"]
     /\ cmd' = [cmd EXCEPT ![r] = None]
     /\ Release(r)
-    /\ IF r \in Svcs /\ call[r] = "waiting" THEN Answer(r, Say("started"))
+    /\ IF r \in Svcs \ Fwds /\ call[r] = "waiting" THEN Answer(r, Say("started"))
                                             ELSE UNCHANGED <<call, answer>>
     /\ UNCHANGED <<rcode, owner, keep, alive, rd, fetchLeft, skipped, stale, up, fw, inflight, held,
                    grp, hs, lock, file, past, whole, drops, restarts, edits, lost, svcRestarts,
                    fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* A cut command whose deadline passed: the framework may act on its row again.
 CutCleared(r) ==
@@ -470,6 +579,7 @@ CutCleared(r) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, rd, fetchLeft, skipped, stale, up,
                    fw, inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits,
                    lost, svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* A start whose reply a drop or a restart cut is settled by reading the host,
 \* once its deadline has passed: held, or never started.
@@ -480,12 +590,13 @@ SettleStarting(r) ==
     /\ LET ran == held[r] > 0 \/ file[r] # None
        IN /\ row' = [row EXCEPT ![r] = IF ran THEN "running" ELSE "refused"]
           /\ IF call[r] = "waiting" /\ ~ran THEN Answer(r, Say("refused"))
-             ELSE IF call[r] = "waiting" /\ r \in Svcs THEN Answer(r, Say("started"))
+             ELSE IF call[r] = "waiting" /\ r \in Svcs \ Fwds THEN Answer(r, Say("started"))
              ELSE UNCHANGED <<call, answer>>
     /\ Release(r)
     /\ UNCHANGED <<rcode, owner, keep, alive, cmd, rd, fetchLeft, skipped, stale, up, fw, inflight,
                    held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* A row before its start whose call ended (a restart, or a give-up) is
 \* refused; a sync a restart cut gives the turn back as SyncCut does.
@@ -497,6 +608,7 @@ SettleUnasked(r) ==
     /\ UNCHANGED <<rcode, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale, up, fw,
                    inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* A refused run still holding the turn gives it back once its sync's host
 \* side can no longer take the lock.
@@ -506,6 +618,7 @@ TurnBack(r) ==
     /\ UNCHANGED <<row, rcode, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale, up, fw,
                    inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 ----------------------------------------------------------------------------
 \* A job on the host
@@ -516,6 +629,7 @@ Tick(j) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale,
                    up, fw, inflight, held, grp, hs, lock, file, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* The command exits, leaving a child in its group or not. Its wrapper ends
 \* what is left of the group before it reaps the command, writes the code,
@@ -528,6 +642,7 @@ JobExits(j, c) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale,
                    up, fw, inflight, hs, lock, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* The wrapper on the host ends the job's group at its timeout and writes "timeout".
 HostTimesOut(j) ==
@@ -539,6 +654,7 @@ HostTimesOut(j) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale,
                    up, fw, inflight, hs, lock, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* Under TimeoutFromFramework, the framework sends the end over ssh instead.
 FrameworkTimesOut(j) ==
@@ -550,6 +666,7 @@ FrameworkTimesOut(j) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale,
                    up, fw, inflight, hs, lock, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* The wrapper is killed on the host before it writes the exit file; its
 \* group goes with it (assumed: F-72's build note).
@@ -561,6 +678,7 @@ WrapperLost(j) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale,
                    up, fw, inflight, hs, lock, file, past, whole, drops, restarts, edits,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* The row a read of the exit file makes.
 Ended(j, v) ==
@@ -586,6 +704,7 @@ ReadSocket(j) ==
     /\ UNCHANGED <<turn, owner, keep, alive, call, cmd, fetchLeft, skipped, stale, up, fw, inflight,
                    held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 ReadFile(j) ==
     /\ ReadCan(j) /\ rd[j] = "dead"
@@ -594,6 +713,7 @@ ReadFile(j) ==
     /\ UNCHANGED <<turn, owner, keep, alive, call, cmd, fetchLeft, skipped, stale, up, fw, inflight,
                    held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* Under ReadFileFirst: the file first, kept in memory, then the socket.
 ReadFileEarly(j) ==
@@ -602,6 +722,7 @@ ReadFileEarly(j) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, cmd, fetchLeft, skipped, stale, up,
                    fw, inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits,
                    lost, svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 ReadSocketLate(j) ==
     /\ Break = "ReadFileFirst" /\ ReadCan(j) /\ rd[j] \notin {None, "dead"}
@@ -610,6 +731,7 @@ ReadSocketLate(j) ==
     /\ UNCHANGED <<turn, owner, keep, alive, call, cmd, fetchLeft, skipped, stale, up, fw, inflight,
                    held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* Under EndAtDeadline, the framework takes the timeout as the job's end.
 DeadlineTaken(j) ==
@@ -619,6 +741,7 @@ DeadlineTaken(j) ==
     /\ UNCHANGED <<rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale, up,
                    fw, inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits,
                    lost, svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* What the call answers for a job's end, with the fetch's outcome.
 EndAnswer(j, f) ==
@@ -634,6 +757,7 @@ AnswerJob(j) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, cmd, rd, fetchLeft, skipped, stale, up, fw,
                    inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* rsync of the named paths, from the copy into the worktree, after the end was read.
 FetchBegins(j) ==
@@ -646,6 +770,7 @@ FetchBegins(j) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, rd, stale, up, fw, inflight, held, grp, hs,
                    lock, file, past, whole, drops, restarts, edits, lost, svcRestarts, answer,
                    fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* One path: written into the worktree (rsync writes it whole, then renames it)
 \* if the worktree's file is still what the record says, or else a conflict,
@@ -664,6 +789,7 @@ FetchPath(j, p) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, cmd, rd, up, fw, inflight, held, grp,
                    hs, lock, file, past, whole, drops, restarts, edits, lost, svcRestarts, answer,
                    fresh, cover, badStart, since>>
+    /\ UNCHANGED fvars
 
 FetchDone(j) ==
     /\ call[j] = "fetching" /\ cmd[j] = "busy" /\ fetchLeft[j] = {}
@@ -672,6 +798,7 @@ FetchDone(j) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, rd, fetchLeft, skipped, stale, up, fw,
                    inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* A drop cut the fetch: the end is answered, and the fetch as unknown.
 FetchCut(j) ==
@@ -682,6 +809,7 @@ FetchCut(j) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, rd, skipped, stale, up, fw, inflight, held,
                    grp, hs, lock, file, past, whole, drops, restarts, edits, lost, svcRestarts,
                    fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* The call's deadline with the connection down: unknown{dropped}, or the end
 \* already read with its fetch unknown. A job's call waits for its timeout; one
@@ -697,6 +825,7 @@ GiveUp(r) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, cmd, rd, fetchLeft, skipped, stale, up, fw,
                    inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 ----------------------------------------------------------------------------
 \* A service's end
@@ -708,6 +837,7 @@ OwnerEnds ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, call, cmd, rd, fetchLeft, skipped, stale, up, fw,
                    inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* Services reads the owner's end: a kept service goes to the owner's parent,
 \* and any other is ended. One whose start is under way is taken once settled.
@@ -722,18 +852,20 @@ OwnerSeen(s) ==
     /\ UNCHANGED <<rcode, turn, keep, alive, call, cmd, rd, fetchLeft, skipped, stale, up, fw,
                    inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* The end over ssh: the service's process, by its pid and start time, read
 \* live on the host. Under EndOnce the row is marked ended as it is sent.
 EndSent(s) ==
     /\ Link /\ row[s] \in {"ending", "restarting"} /\ cmd[s] = None /\ inflight[s] = None
-    /\ held[s] > 0
+    /\ held[s] > 0 /\ FwdGone(s)
     /\ cmd' = [cmd EXCEPT ![s] = "busy"]
     /\ inflight' = [inflight EXCEPT ![s] = "end"]
     /\ row' = IF Break = "EndOnce" /\ row[s] = "ending" THEN [row EXCEPT ![s] = "ended"] ELSE row
     /\ UNCHANGED <<rcode, turn, owner, keep, alive, call, rd, fetchLeft, skipped, stale, up, fw,
                    held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* After an end, a restart's row is asked again, and goes for the turn.
 AfterEnd(s) == row' = [row EXCEPT ![s] = CASE row[s] = "restarting" -> "asked"
@@ -749,16 +881,18 @@ EndReplies(s) ==
     /\ UNCHANGED <<rcode, turn, owner, keep, alive, call, rd, fetchLeft, skipped, stale, up, fw,
                    inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* With no command in flight, a socket read dead confirms the end: after a
 \* cut end, after a restart, or when the process was gone already.
 EndConfirmed(s) ==
     /\ Link /\ row[s] \in {"ending", "restarting"} /\ cmd[s] = None /\ inflight[s] = None
-    /\ held[s] = 0
+    /\ held[s] = 0 /\ FwdGone(s)
     /\ AfterEnd(s)
     /\ UNCHANGED <<rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale, up,
                    fw, inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits,
                    lost, svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* A restart call whose service the owner's end ended answers refused.
 EndedCallAnswered(s) ==
@@ -767,6 +901,165 @@ EndedCallAnswered(s) ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, cmd, rd, fetchLeft, skipped, stale, up, fw,
                    inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
+
+----------------------------------------------------------------------------
+\* A service's forward, on the workstation: ssh -N -L held by dtach
+
+FwdOthers == <<row, rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale, up,
+               fw, inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
+               svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+
+\* Once the service's start is settled, the row says starting, then the
+\* forward's dtach -n runs on the workstation.
+FwdStartSent(s) ==
+    /\ fw = "up" /\ s \in Fwds /\ frow[s] = None /\ fcmd[s] = NoCmd /\ fproc[s] = None
+    /\ row[s] = "running" \/ (Break = "ForwardEarly" /\ row[s] = "starting")
+    /\ frow' = [frow EXCEPT ![s] = "starting"]
+    /\ fcmd' = [fcmd EXCEPT ![s] = gen[s]]
+    /\ UNCHANGED FwdOthers
+    /\ UNCHANGED <<gen, opens, facting, fproc, port, fdrops, ffails, taken, fto, reopened, twice,
+                   badReport>>
+
+\* dtach -n answered: the ssh is held, not yet listening. A restart of the
+\* framework before this step ends the local dtach -n, which then never holds.
+FwdLands(s) ==
+    /\ fcmd[s] # NoCmd
+    /\ fcmd' = [fcmd EXCEPT ![s] = NoCmd]
+    /\ fproc' = [fproc EXCEPT ![s] = "pending"]
+    /\ fto' = [fto EXCEPT ![s] = fcmd[s]]
+    /\ UNCHANGED FwdOthers
+    /\ UNCHANGED <<gen, frow, opens, facting, port, fdrops, ffails, taken, reopened, twice,
+                   badReport>>
+
+\* The ssh connects and listens on the local port, if it is free.
+SshBinds(s) ==
+    /\ fproc[s] = "pending" /\ port[s] = "free" /\ up
+    /\ fproc' = [fproc EXCEPT ![s] = "bound"]
+    /\ port' = [port EXCEPT ![s] = "fwd"]
+    /\ UNCHANGED FwdOthers
+    /\ UNCHANGED <<gen, frow, opens, fcmd, facting, fdrops, ffails, taken, fto, reopened, twice,
+                   badReport>>
+
+\* With ExitOnForwardFailure the ssh exits when the port is taken, and ssh
+\* exits when it cannot connect; dtach's socket goes with it.
+SshFails(s) ==
+    /\ fproc[s] = "pending"
+    /\ port[s] # "free" \/ ~up \/ ffails < MaxFwdFails
+    /\ fproc' = [fproc EXCEPT ![s] = None]
+    /\ ffails' = IF port[s] = "free" /\ up THEN ffails + 1 ELSE ffails
+    /\ UNCHANGED FwdOthers
+    /\ UNCHANGED <<gen, frow, opens, fcmd, facting, port, fdrops, taken, fto, reopened, twice,
+                   badReport>>
+
+\* The forward's own ssh drops, at any time.
+FwdDrops(s) ==
+    /\ fproc[s] = "bound" /\ fdrops < MaxFwdDrops
+    /\ fproc' = [fproc EXCEPT ![s] = None]
+    /\ port' = [port EXCEPT ![s] = "free"]
+    /\ fdrops' = fdrops + 1
+    /\ UNCHANGED FwdOthers
+    /\ UNCHANGED <<gen, frow, opens, fcmd, facting, ffails, taken, fto, reopened, twice, badReport>>
+
+\* Another program on the workstation takes the local port while it is free.
+OtherTakes(s) ==
+    /\ s \in Fwds /\ port[s] = "free" /\ taken < MaxTaken
+    /\ port' = [port EXCEPT ![s] = "other"]
+    /\ taken' = taken + 1
+    /\ UNCHANGED FwdOthers
+    /\ UNCHANGED <<gen, frow, opens, fcmd, facting, fproc, fdrops, ffails, fto, reopened, twice,
+                   badReport>>
+
+\* Is the forward open, as the framework reads it: its own ssh listens on the
+\* local port (the listener's pid is the forward's). Under OpenByPort, any
+\* listener on the port.
+FwdReadsOpen(s) ==
+    IF Break = "OpenByPort" THEN fproc[s] # None /\ port[s] # "free" ELSE fproc[s] = "bound"
+
+\* The framework reads a forward's start or reopen: open, and the row
+\* reports the local port; or its socket dead. A start whose forward failed
+\* ends the service, and its call answers refused once it is ended
+\* (EndedCallAnswered). A reopen that failed waits for a person.
+FwdSettles(s) ==
+    /\ fw = "up" /\ s \in Fwds /\ row[s] = "running"
+    /\ frow[s] \in {"starting", "reopening"} /\ fcmd[s] = NoCmd /\ facting[s] = NoClaim
+    /\ FwdReadsOpen(s) \/ fproc[s] = None
+    /\ IF FwdReadsOpen(s)
+       THEN /\ frow' = [frow EXCEPT ![s] = "open"]
+            /\ opens' = [opens EXCEPT ![s] = opens[s] + 1]
+            /\ badReport' = IF port[s] = "fwd" /\ fproc[s] = "bound" THEN badReport
+                            ELSE badReport \cup {s}
+            /\ IF frow[s] = "starting" /\ call[s] = "waiting" THEN Answer(s, Say("started"))
+                                                              ELSE UNCHANGED <<call, answer>>
+            /\ UNCHANGED row
+       ELSE /\ UNCHANGED <<opens, badReport>>
+            /\ IF frow[s] = "reopening"
+               THEN /\ frow' = [frow EXCEPT ![s] = IF Break = "RetryFailed" THEN "open"
+                                                                       ELSE "failed"]
+                    /\ UNCHANGED <<row, call, answer>>
+               ELSE IF Break = "FailKeepsService"
+               THEN /\ row' = [row EXCEPT ![s] = "refused"]
+                    /\ frow' = [frow EXCEPT ![s] = None]
+                    /\ IF call[s] = "waiting" THEN Answer(s, Say("refused"))
+                                              ELSE UNCHANGED <<call, answer>>
+               ELSE /\ row' = [row EXCEPT ![s] = "ending"]
+                    /\ UNCHANGED <<frow, call, answer>>
+    /\ UNCHANGED <<rcode, turn, owner, keep, alive, cmd, rd, fetchLeft, skipped, stale, up, fw,
+                   inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
+                   svcRestarts, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED <<gen, fcmd, facting, fproc, port, fdrops, ffails, taken, fto, reopened, twice>>
+
+\* A forward whose socket reads dead while its service runs and its row says
+\* open is a loss. Recoveries claims it: the row says reopening, durable,
+\* before it acts. Under ReopenInMemory only Recoveries' memory says so.
+FwdLost(s) == s \in Fwds /\ row[s] = "running" /\ frow[s] = "open" /\ fproc[s] = None
+
+FwdLossClaimed(s) ==
+    /\ Break # "NoReopen"
+    /\ fw = "up" /\ FwdLost(s) /\ fcmd[s] = NoCmd /\ facting[s] = NoClaim
+    /\ facting' = [facting EXCEPT ![s] = Key(s)]
+    /\ frow' = IF Break = "ReopenInMemory" THEN frow ELSE [frow EXCEPT ![s] = "reopening"]
+    /\ UNCHANGED FwdOthers
+    /\ UNCHANGED <<gen, opens, fcmd, fproc, port, fdrops, ffails, taken, fto, reopened, twice,
+                   badReport>>
+
+\* The claim is still current: the row runs the start it was claimed for,
+\* with the same open count. Under ActWithoutCheck, only that the row runs:
+\* a claim made before a restart of the service then acts on the new start.
+ClaimCurrent(s) ==
+    /\ row[s] = "running"
+    /\ facting[s] = Key(s) \/ Break = "ActWithoutCheck"
+
+\* The act, under its claim, reads the claim still current and runs dtach -n.
+FwdReopens(s) ==
+    /\ fw = "up" /\ facting[s] # NoClaim /\ ClaimCurrent(s)
+    /\ facting' = [facting EXCEPT ![s] = NoClaim]
+    /\ fcmd' = [fcmd EXCEPT ![s] = facting[s][1]]
+    /\ reopened' = [reopened EXCEPT ![s] = reopened[s] \cup {facting[s]}]
+    /\ twice' = (twice \/ facting[s] \in reopened[s])
+    /\ UNCHANGED FwdOthers
+    /\ UNCHANGED <<gen, frow, opens, fproc, port, fdrops, ffails, taken, fto, badReport>>
+
+\* The act reads the claim no longer current (the service ended or
+\* restarted): it does nothing. The row's next start clears the reopening
+\* (StartSent).
+FwdReopenMoot(s) ==
+    /\ fw = "up" /\ facting[s] # NoClaim /\ ~ClaimCurrent(s)
+    /\ facting' = [facting EXCEPT ![s] = NoClaim]
+    /\ UNCHANGED FwdOthers
+    /\ UNCHANGED <<gen, frow, opens, fcmd, fproc, port, fdrops, ffails, taken, fto, reopened,
+                   twice, badReport>>
+
+\* The service's end, or its restart, ends its forward first: by the
+\* forward's pid and start time, on the workstation.
+FwdEnd(s) ==
+    /\ fw = "up" /\ s \in Fwds /\ row[s] \in {"ending", "restarting"}
+    /\ fproc[s] # None /\ fcmd[s] = NoCmd
+    /\ fproc' = [fproc EXCEPT ![s] = None]
+    /\ port' = [port EXCEPT ![s] = IF port[s] = "fwd" THEN "free" ELSE port[s]]
+    /\ UNCHANGED FwdOthers
+    /\ UNCHANGED <<gen, frow, opens, fcmd, facting, fdrops, ffails, taken, fto, reopened, twice,
+                   badReport>>
 
 ----------------------------------------------------------------------------
 \* The connection and the framework
@@ -779,6 +1072,7 @@ Drop ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, rd, fetchLeft, skipped, stale, fw,
                    inflight, held, grp, hs, lock, file, past, whole, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 Reconnect ==
     /\ fw = "up" /\ ~up
@@ -786,6 +1080,7 @@ Reconnect ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale,
                    fw, inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits,
                    lost, svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 \* The framework's node dies: its memory, its calls (each agent's MCP bridge
 \* answers its call with an error) and its connection go; the reaper ends the
@@ -805,9 +1100,13 @@ FrameworkDies ==
     /\ row' = IF Break = "EndInMemory"
               THEN [r \in Runs |-> IF row[r] = "ending" THEN "running" ELSE row[r]]
               ELSE row
+    /\ fcmd' = [s \in Svcs |-> NoCmd]
+    /\ facting' = [s \in Svcs |-> NoClaim]
     /\ UNCHANGED <<rcode, owner, keep, alive, stale, inflight, held, grp, hs, lock, file, past,
                    whole, drops, edits, lost, svcRestarts, fresh, cover, badStart, fetched, since,
                    clobbered>>
+    /\ UNCHANGED <<gen, frow, opens, fproc, port, fdrops, ffails, taken, fto, reopened, twice,
+                   badReport>>
 
 FrameworkStarts ==
     /\ fw = "down"
@@ -815,6 +1114,7 @@ FrameworkStarts ==
     /\ UNCHANGED <<row, rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale,
                    up, inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits,
                    lost, svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
+    /\ UNCHANGED fvars
 
 ----------------------------------------------------------------------------
 
@@ -837,6 +1137,10 @@ Next ==
     \/ OwnerEnds
     \/ \E s \in Svcs : OwnerSeen(s) \/ EndSent(s) \/ EndReplies(s) \/ EndConfirmed(s)
                      \/ EndedCallAnswered(s)
+    \/ \E s \in Svcs :
+        \/ FwdStartSent(s) \/ FwdLands(s) \/ SshBinds(s) \/ SshFails(s) \/ FwdDrops(s)
+        \/ OtherTakes(s) \/ FwdSettles(s) \/ FwdLossClaimed(s) \/ FwdReopens(s)
+        \/ FwdReopenMoot(s) \/ FwdEnd(s)
     \/ Drop \/ Reconnect \/ FrameworkDies \/ FrameworkStarts
 
 Fairness ==
@@ -857,6 +1161,9 @@ Fairness ==
     /\ \A s \in Svcs :
          /\ WF_vars(OwnerSeen(s)) /\ WF_vars(EndSent(s)) /\ WF_vars(EndReplies(s))
          /\ WF_vars(EndConfirmed(s)) /\ WF_vars(EndedCallAnswered(s))
+         /\ WF_vars(FwdStartSent(s)) /\ WF_vars(FwdLands(s)) /\ WF_vars(SshBinds(s))
+         /\ WF_vars(SshFails(s)) /\ WF_vars(FwdSettles(s)) /\ WF_vars(FwdLossClaimed(s))
+         /\ WF_vars(FwdReopens(s)) /\ WF_vars(FwdReopenMoot(s)) /\ WF_vars(FwdEnd(s))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -904,7 +1211,32 @@ NoEditLost == clobbered = {}
 OneProcess == \A r \in Runs : held[r] <= 1
 EndedIsEnded == \A s \in Svcs : row[s] = "ended" => held[s] = 0
 
+\* A forward is held only while its service's current start is: started
+\* for it, and its process still held on the host.
+ForwardOnlyToCurrent ==
+    \A s \in Fwds : fproc[s] # None => held[s] > 0 /\ fto[s] = gen[s]
+
+\* No forward outlives its service: once the service's end is done, or its
+\* start refused, its forward is ended too.
+ForwardEndsWithService ==
+    \A s \in Fwds : row[s] \in {"ended", "refused"} => fproc[s] = None
+
+\* The local port a row reports is one its forward's own ssh held when the
+\* row said open.
+PortIsTheForwards == badReport = {}
+
+\* A dropped forward is reopened at most once per state: the service's held
+\* process and the forward's open count. A reopen that failed waits for a
+\* person, and is not acted on again.
+OneReopenPerState == ~twice
+
 \* Liveness
+
+\* A running service whose forward dropped gets one reopen: its forward is
+\* held again, or the reopen failed and waits for a person, unless the
+\* service stops running first.
+ForwardReopened ==
+    \A s \in Fwds : FwdLost(s) ~> (fproc[s] # None \/ row[s] # "running" \/ frow[s] = "failed")
 
 \* Every call is answered: with the host's answer, or unknown at its deadline.
 RunAnswered == \A r \in Runs : call[r] # None ~> call[r] = None
