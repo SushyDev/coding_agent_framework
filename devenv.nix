@@ -211,6 +211,8 @@ in
     typos = {
       enable = true;
       # American English. `@behaviour` is Elixir's own word, and `caf` is this project's prefix.
+      # Screen fixtures are Claude Code's own output as captured, so they are not checked.
+      excludes = [ "^apps/caf_screen/test/fixtures/" ];
       settings.config.default = {
         locale = "en-us";
         extend-ignore-re = [ "@behaviour" ];
