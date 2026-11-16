@@ -414,6 +414,16 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
 - A headless delegate's Stop is the `result` that ends the turn its message began, read from
   its event log; its text is the report. The log's offset persists, so a restart does not lose
   it; a kill before its line is written does, and the transcript's last reply stands in.
+- A report `run_delegate` answers with is taken in the same step of `Delegates` that holds it,
+  and only before the call's deadline (on the node's clock, as the caller set it): the row's
+  report is then `answered`, never `held`, so it is not also delivered as a message. Past the
+  deadline the call answers `{:unknown, :timeout}` and the report is held as any other (F-92).
+  A report is never lost to an answer that did not arrive: it is `answering` from that step
+  until the endpoint has written the answer to the agent, then `answered`; a write that fails
+  holds it again, and a restart finds an `answering` report and holds it again, so it is
+  delivered as a message, at least once. `run_delegate`'s `timeout` is capped under the tool
+  timeout Claude Code keeps for an MCP call, which `ClaudeCLI` sets at launch, so the client
+  never gives up first (F-92's new-2).
 - A resumed process takes no turn of its own. It is given the brief again, under its uuid, when
   the brief had not gone in, and otherwise a fixed message to go on with its brief.
 

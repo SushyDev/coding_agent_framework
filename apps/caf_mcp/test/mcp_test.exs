@@ -60,6 +60,7 @@ defmodule CodingAgentFramework.MCPTest do
          port: 4791,
          grants: Grants.new(tree),
          mailbox: {StandIn, self()},
+         delegates: {StandIn, self()},
          jobs: {Jobs, jobs},
          place: place,
          instance: "one"}
@@ -118,7 +119,8 @@ defmodule CodingAgentFramework.MCPTest do
     assert %{"serverInfo" => %{"name" => "caf"}, "capabilities" => %{"tools" => _}} =
              rpc.("initialize")
 
-    assert rpc.("tools/list")["tools"] |> Enum.map(& &1["name"]) == ~w(message run reload)
+    assert rpc.("tools/list")["tools"] |> Enum.map(& &1["name"]) ==
+             ~w(message run start_delegate run_delegate reload)
   end
 
   test "a call is the agent's whose token it carries, whatever its arguments say",
@@ -216,6 +218,7 @@ defmodule CodingAgentFramework.MCPTest do
         port: 4791,
         grants: Grants.new(tree),
         mailbox: {StandIn, self()},
+        delegates: {StandIn, self()},
         jobs: {UnknownJobs, self()},
         place: place,
         instance: name
@@ -268,7 +271,9 @@ defmodule CodingAgentFramework.MCPTest do
     assert %{"id" => 1, "result" => %{"isError" => false, "content" => [%{"text" => text}]}} =
              result
 
-    assert JSON.decode!(text) == %{"ok" => %{"tools" => ~w(message run reload)}}
+    assert JSON.decode!(text) == %{
+             "ok" => %{"tools" => ~w(message run start_delegate run_delegate reload)}
+           }
 
     # Off the tree, it is a plain refusal: nothing changed for the client.
     assert tool(mcp, t["stray"], "reload", %{}) == %{"refused" => ["unknown_agent", "stray"]}

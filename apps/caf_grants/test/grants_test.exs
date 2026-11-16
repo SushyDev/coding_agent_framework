@@ -122,6 +122,13 @@ defmodule CodingAgentFramework.GrantsTest do
     assert Grants.parent(g, "app-main") == {:refused, :main_has_no_parent}
   end
 
+  test "only a main session starts a delegate" do
+    g = grants([%{name: "app-d1", project: "app", parent: "app-main"}])
+    assert Grants.may_start_delegate?(g, "app-main") == :ok
+    assert Grants.may_start_delegate?(g, "app-d1") == {:refused, :main_session_only}
+    assert Grants.may_start_delegate?(g, "nobody") == {:refused, {:unknown_agent, "nobody"}}
+  end
+
   test "a delegate named with two parents refuses every check" do
     g =
       grants([

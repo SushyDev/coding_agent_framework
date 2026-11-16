@@ -8,7 +8,8 @@ defmodule CodingAgentFramework.Delegates.Table do
   wall-clock time it is settled by), then `running`, then `finished` or `failed` once, or
   `refused` with its `reason`. `brief_uuid` and `resume_uuid` are the uuids the turn's message
   goes in under, chosen before it is written. `report` is `none`, then `held` with its `text`
-  and its `mark`; the delivery unit adds `sending` and `delivered`.
+  and its `mark`, or `answered` once a call that waited on it took it (`run_delegate`); the
+  delivery unit adds `sending` and `delivered`.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "doc.db")
       iex> {:ok, db} = CodingAgentFramework.Delegates.Table.open(path)
