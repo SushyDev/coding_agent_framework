@@ -33,13 +33,23 @@ defmodule CodingAgentFramework.MCP do
     failed (`answer/5`). A call through `call/4` has its answer in hand, so it is answered at
     once;
   - `reload()`: `Grants.may_use?/2`, then the tools' names; the endpoint sends the client
-    `notifications/tools/list_changed` first.
+    `notifications/tools/list_changed` first;
+  - the service tools, each through the services' own function, which makes its own `Grants`
+    check, and answers as it does: `service_start(name, argv, opts)` (`start/5` in the copy
+    `place` names, on `opts`' `host`, the `:workstation` unless named, with its `forward` and
+    `keep`), `service_send(name, input)` (`send/5`), `service_restart(name)` (`restart/4`),
+    `service_stop(name)` (`stop/4`), `service_hand(name, to)` (`hand/4`). Those open to any
+    agent take `Grants.may_use?/2` first: `services()` (`list/1`, each row's name, host,
+    owner, state, restarts and ports), `service_logs(name, from)` (`logs/4`), and
+    `service_wait(name, until, timeout)` (`wait/4`, `timeout` capped as `run`'s), where `until`
+    is `{"line": pattern}` (from the current start's offset), `{"port": n}` or `"exit"`.
 
-  The other tools of the design's table come in later parts (`docs/build-notes/F-86.md`).
+  The design's other tools come in later parts (`docs/build-notes/F-86.md`).
 
       {:ok, mcp} = MCP.start_link(dir: dir, port: 4791, grants: grants,
         mailbox: {Mailbox, mailbox}, jobs: {Jobs, jobs}, delegates: {Delegates, delegates},
-        place: &place/1, instance: "a", tool_timeout: 3_600_000, margin: 60_000)
+        services: {Services, services}, workstation: "ws", place: &place/1, instance: "a",
+        tool_timeout: 3_600_000, margin: 60_000)
       {:ok, config} = MCP.issue(mcp, "app-fix")
       MCP.call(mcp, "app-fix", "message", %{"to" => "app-main", "text" => "Done."})
       #=> {:ok, {:queued, 3}}
@@ -57,6 +67,11 @@ defmodule CodingAgentFramework.MCP do
   # The most a delegate's start may take of a `run_delegate`'s timeout: `Delegates`' own default.
   @start_wait 300_000
   @start Map.new(~w(project branch model brief)a, &{&1, %{type: "string"}})
+  # A service's name is its socket's and its log's file name.
+  @service ~r/\A[A-Za-z0-9_-]{1,64}\z/
+  @name %{type: "string", pattern: "^[A-Za-z0-9_-]{1,64}$"}
+  @timeout %{type: "integer", minimum: 1, description: "ms, at most a day"}
+  @row ~w(name host owner state restarts port local)a
 
   @tools [
     %{
@@ -109,6 +124,96 @@ defmodule CodingAgentFramework.MCP do
       }
     },
     %{
+      name: "service_start",
+      description: "Holds argv as a service on a host, in a copy of your worktree.",
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          name: @name,
+          argv: %{type: "array", items: %{type: "string"}, minItems: 1},
+          opts: %{
+            type: "object",
+            properties: %{
+              host: %{type: "string", description: "the workstation unless named"},
+              forward: %{type: "integer", minimum: 1, maximum: 65_535},
+              keep: %{type: "boolean", description: "goes to your parent when you end"}
+            }
+          }
+        },
+        required: ["name", "argv"]
+      }
+    },
+    %{
+      name: "services",
+      description: "Each service: name, host, owner, state, restarts, forwarded port.",
+      inputSchema: %{type: "object", properties: %{}}
+    },
+    %{
+      name: "service_logs",
+      description: "A service's output from a byte offset; answers the text and the next offset.",
+      inputSchema: %{
+        type: "object",
+        properties: %{name: @name, from: %{type: "integer", minimum: 0}},
+        required: ["name", "from"]
+      }
+    },
+    %{
+      name: "service_send",
+      description: "Sends text or keys to your service's terminal (\\n is Enter). Never resent.",
+      inputSchema: %{
+        type: "object",
+        properties: %{name: @name, input: %{type: "string", maxLength: 65_536}},
+        required: ["name", "input"]
+      }
+    },
+    %{
+      name: "service_wait",
+      description:
+        "Waits until a log line of the current start matches, a port listens, or the service exits.",
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          name: @name,
+          until: %{
+            oneOf: [
+              %{
+                type: "object",
+                properties: %{line: %{type: "string", description: "a regex"}},
+                required: ["line"]
+              },
+              %{
+                type: "object",
+                properties: %{port: %{type: "integer", minimum: 1, maximum: 65_535}},
+                required: ["port"]
+              },
+              %{type: "string", enum: ["exit"]}
+            ]
+          },
+          timeout: @timeout
+        },
+        required: ["name", "until", "timeout"]
+      }
+    },
+    %{
+      name: "service_restart",
+      description: "Restarts a service you own, or your child owns.",
+      inputSchema: %{type: "object", properties: %{name: @name}, required: ["name"]}
+    },
+    %{
+      name: "service_stop",
+      description: "Ends a service you own, or your child owns.",
+      inputSchema: %{type: "object", properties: %{name: @name}, required: ["name"]}
+    },
+    %{
+      name: "service_hand",
+      description: "Hands a service you own to your parent or one of your children.",
+      inputSchema: %{
+        type: "object",
+        properties: %{name: @name, to: %{type: "string"}},
+        required: ["name", "to"]
+      }
+    },
+    %{
       name: "reload",
       description: "Reloads your own tools.",
       inputSchema: %{type: "object", properties: %{}}
@@ -118,16 +223,18 @@ defmodule CodingAgentFramework.MCP do
   @doc """
   Starts the part. Options: `:dir` (a directory of its own: the table and the agents' configs),
   `:port` (where the embedding app serves the endpoint on 127.0.0.1), `:grants`, `:mailbox`,
-  `:jobs` and `:delegates` (each `{module, server}`: `{CodingAgentFramework.Mailbox, pid}`,
-  `{CodingAgentFramework.Jobs, pid}`, `{CodingAgentFramework.Delegates, pid}`, or a stand-in
-  module with the same functions), and
+  `:jobs`, `:delegates` and `:services` (each `{module, server}`:
+  `{CodingAgentFramework.Mailbox, pid}`, `{CodingAgentFramework.Jobs, pid}`,
+  `{CodingAgentFramework.Delegates, pid}`, `{CodingAgentFramework.Services, pid}`, or a stand-in
+  module with the same functions), `:workstation` (the host a service starts on unless its
+  call names one), and
   `:place`, a function of an agent's name that answers `{:ok, %{project: p, name: n, worktree:
-  path}}` (the copy `Jobs` runs in) or `{:refused, reason}`. `:instance` (a string, required)
+  path}}` (the copy jobs and services run in) or `{:refused, reason}`. `:instance` (a string, required)
   is this part's name in its jobs' ids, so two of them sharing one `Jobs` never make the same
-  id. `:cap` (ms, default a day) is the most a `run`'s `timeout` may be. `:tool_timeout` (ms)
-  is the MCP tool timeout `CodingAgentFramework.ClaudeCLI` sets for every agent at launch, and
-  `:margin` (ms, under it) how far under it a `run_delegate`'s `timeout` must stay: both
-  required, positive integers.
+  id. `:cap` (ms, default a day) is the most a `run`'s or a `service_wait`'s `timeout` may be.
+  `:tool_timeout` (ms) is the MCP tool timeout `CodingAgentFramework.ClaudeCLI` sets for every
+  agent at launch, and `:margin` (ms, under it) how far under it a `run_delegate`'s `timeout`
+  must stay: both required, positive integers.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -281,11 +388,91 @@ defmodule CodingAgentFramework.MCP do
          do: {:ok, %{tools: Enum.map(@tools, & &1.name)}}
   end
 
+  defp act(_ctx, _caller, _id, "service_start", %{"opts" => o}) when not is_map(o),
+    do: {:refused, {:bad, :args}}
+
+  defp act(ctx, caller, _id, "service_start", %{"name" => name, "argv" => [_ | _] = argv} = a) do
+    {mod, server} = ctx.services
+    opts = Map.get(a, "opts", %{})
+    host = Map.get(opts, "host", ctx.workstation)
+    forward = Map.get(opts, "forward")
+    keep = Map.get(opts, "keep", false)
+
+    with :ok <- service_ok(name),
+         true <-
+           (Enum.all?([host | argv], &is_binary/1) and is_boolean(keep) and
+              (is_nil(forward) or forward in 1..65_535)) or {:refused, {:bad, :args}},
+         {:ok, %{project: p, name: n, worktree: w}} <- ctx.place.(caller) do
+      where = [host: host, project: p, copy: n, worktree: w, keep: keep, forward: forward]
+      mod.start(server, caller, name, argv, where)
+    end
+  end
+
+  defp act(ctx, caller, _id, "services", _args) do
+    {mod, server} = ctx.services
+
+    with :ok <- Grants.may_use?(ctx.grants, caller) do
+      case mod.list(server) do
+        rows when is_list(rows) -> {:ok, Enum.map(rows, &Map.take(&1, @row))}
+        unknown -> unknown
+      end
+    end
+  end
+
+  defp act(ctx, caller, _id, "service_logs", %{"name" => name, "from" => from})
+       when is_integer(from) and from >= 0 do
+    {mod, server} = ctx.services
+
+    with :ok <- service_ok(name),
+         :ok <- Grants.may_use?(ctx.grants, caller),
+         do: mod.logs(server, name, from)
+  end
+
+  defp act(ctx, caller, _id, "service_send", %{"name" => name, "input" => input})
+       when is_binary(input) do
+    {mod, server} = ctx.services
+    with :ok <- service_ok(name), do: mod.send(server, caller, name, input)
+  end
+
+  defp act(ctx, caller, _id, "service_wait", %{"name" => name, "until" => u, "timeout" => t})
+       when is_integer(t) and t > 0 and t <= ctx.cap do
+    {mod, server} = ctx.services
+
+    with :ok <- service_ok(name),
+         {:ok, until} <- until(u),
+         :ok <- Grants.may_use?(ctx.grants, caller),
+         do: mod.wait(server, name, until, t)
+  end
+
+  defp act(ctx, caller, _id, "service_" <> fix, %{"name" => name} = a)
+       when fix in ~w(restart stop hand) do
+    {mod, server} = ctx.services
+
+    with :ok <- service_ok(name) do
+      case {fix, a["to"]} do
+        {"restart", _} -> mod.restart(server, caller, name, [])
+        {"stop", _} -> mod.stop(server, caller, name, [])
+        {"hand", to} when is_binary(to) -> mod.hand(server, caller, name, to)
+        _ -> {:refused, {:bad, :args}}
+      end
+    end
+  end
+
   defp act(_ctx, _caller, _id, tool, _args) do
     if Enum.any?(@tools, &(&1.name == tool)),
       do: {:refused, {:bad, :args}},
       else: {:refused, {:unknown_tool, tool}}
   end
+
+  defp service_ok(name) do
+    if is_binary(name) and name =~ @service, do: :ok, else: {:refused, {:bad, :args}}
+  end
+
+  # A line is looked for from the current start's offset: the tool takes no other.
+  defp until(%{"line" => pattern}) when is_binary(pattern), do: {:ok, {:line, pattern}}
+  defp until(%{"port" => port}) when port in 1..65_535, do: {:ok, {:port, port}}
+  defp until("exit"), do: {:ok, :exit}
+  defp until(_), do: {:refused, {:bad, :args}}
 
   defp start_args(args) do
     start = Enum.map(~w(project branch model brief), &Map.get(args, &1))
@@ -323,7 +510,7 @@ defmodule CodingAgentFramework.MCP do
          {:ok, db} <- Table.open(Path.join(dir, "mcp.db")) do
       ctx =
         Map.new(
-          ~w(grants mailbox jobs delegates place instance)a,
+          ~w(grants mailbox jobs delegates services workstation place instance)a,
           &{&1, Keyword.fetch!(opts, &1)}
         )
 

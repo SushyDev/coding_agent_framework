@@ -90,6 +90,8 @@ defmodule CodingAgentFramework.MCPTest do
          grants: Grants.new(tree),
          mailbox: {StandIn, self()},
          delegates: {StandIn, self()},
+         services: {StandIn, self()},
+         workstation: "ws",
          jobs: {Jobs, jobs},
          place: place,
          instance: "one",
@@ -151,7 +153,9 @@ defmodule CodingAgentFramework.MCPTest do
              rpc.("initialize")
 
     assert rpc.("tools/list")["tools"] |> Enum.map(& &1["name"]) ==
-             ~w(message run start_delegate run_delegate reload)
+             ~w(message run start_delegate run_delegate) ++
+               ~w(service_start services service_logs service_send service_wait) ++
+               ~w(service_restart service_stop service_hand reload)
   end
 
   test "a call is the agent's whose token it carries, whatever its arguments say",
@@ -255,6 +259,8 @@ defmodule CodingAgentFramework.MCPTest do
       grants: Grants.new(tree),
       mailbox: {StandIn, self()},
       delegates: {StandIn, self()},
+      services: {StandIn, self()},
+      workstation: "ws",
       jobs: {UnknownJobs, self()},
       place: place,
       instance: name,
@@ -363,7 +369,12 @@ defmodule CodingAgentFramework.MCPTest do
              result
 
     assert JSON.decode!(text) == %{
-             "ok" => %{"tools" => ~w(message run start_delegate run_delegate reload)}
+             "ok" => %{
+               "tools" =>
+                 ~w(message run start_delegate run_delegate) ++
+                   ~w(service_start services service_logs service_send service_wait) ++
+                   ~w(service_restart service_stop service_hand reload)
+             }
            }
 
     # Off the tree, it is a plain refusal: nothing changed for the client.
