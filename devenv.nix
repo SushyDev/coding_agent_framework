@@ -14,6 +14,7 @@ let
   #   - tmux, dtach, claude, git, gh: what the framework runs on a host. claude-code is unfree;
   #     devenv.yaml permits only it.
   #   - rsync, ssh, flock: a copy's sync (Copies): rsync over ssh, its host side under flock.
+  #   - nc: a service's port wait (Services.wait), `nc -z`.
   #   - sh, bash, rm, mv, env, kill, ps, cat, tail, mkdir, mkfifo, echo, sleep, true: the POSIX
   #     tools the tests and scripts call.
   #   - tlc and java: TLA+ checks of model/tla (bin/check-model). Development only.
@@ -26,6 +27,7 @@ let
     RSYNC = lib.getExe pkgs.rsync;
     SSH = lib.getExe' pkgs.openssh "ssh";
     FLOCK = lib.getExe pkgs.flock;
+    NC = lib.getExe' pkgs.netcat "nc";
     SH = lib.getExe' pkgs.bash "sh";
     BASH = lib.getExe pkgs.bash;
     RM = lib.getExe' pkgs.coreutils "rm";

@@ -236,6 +236,34 @@ its host, as it has since the first part built, so the workstation is one host a
 - a service on another host is held the same way, and a port it listens on is forwarded to the
   workstation over the host's ssh connection when the service asks for it, so tests on the
   workstation reach it at `127.0.0.1:<port>`;
+- input reaches a held service by dtach's push mode, `dtach -p <socket>`, run on its host
+  through `Shell`, the same on the workstation: the input is an argument of one host shell,
+  which reads the program's pid and start time, as an end does, and pushes the input only while
+  they are still the row's, so input never reaches a program a restart put in its place. A
+  service has no turn and no input box: "checked" means the row is `running`, the caller is its
+  owner or the owner's parent, and that pid check. The input is bytes for the program's
+  terminal: a newline is Enter, `\x03` is ctrl-C (no NUL, which an argument cannot carry, and at
+  most 64 KiB). It answers `sent` once dtach has handed every byte to the terminal; `refused`
+  when the row, the pid or the socket says the program is not the one held, and nothing went
+  in; `unknown` on a drop or a timeout, when some, all or none of it may have gone in. It is
+  never resent: the caller reads the log before it sends again (F-89);
+- a wait on a service polls its host until the service's log has a line that matches a
+  pattern, or a port listens on the host's `127.0.0.1` (`nc -z`, a program of the host's that
+  only a port wait needs), and its exit, the socket read dead, ends every wait: the log is read
+  once more after that read, so a line the program wrote before it ended is still found. A read
+  that failed is no answer; the next round reads again, and a wait whose last read failed answers
+  `{:unknown, :dropped}` at its timeout, as a job does, in place of `{:unknown, :timeout}`;
+- a forward is an `ssh -N -L 127.0.0.1:<local>:127.0.0.1:<port>` with `ExitOnForwardFailure`,
+  held by dtach on the workstation in the services' directory there, named for its service, so
+  a restart of the framework does not drop it and the `TmuxSampler` reads its socket as it reads
+  every held socket. `<local>` is the service's `forward:` port unless the caller names another;
+  a local port that is taken fails the forward's start, which ends the service's start as
+  refused, and the row reports `{port, local}`. The service's end ends its forward first and is
+  done only once both sockets read dead; a forward whose socket reads dead while its service
+  runs is a loss `Recoveries` opens again once per state, the state being the service's held
+  process and the forward's open count. A workstation service needs no forward. Not built yet:
+  the forward's life beside the service's is a protocol `Copy.tla` does not cover, and is
+  modeled first (F-89);
 - a reader of a whole host (held sockets, the `TmuxSampler`) has the `Tracker` scope
   `{host, :host}`, beside the `{host, account}` of a reader of one account;
 - the `TmuxSampler` reads a host's panes and then its sockets, not in one instant, so a viewer
@@ -637,8 +665,8 @@ framework's tools, which are strict in how they act and narrow in whom they reac
 | `service_start(name, argv, opts)` | main session, delegate | holds `argv` by dtach on a host (`host:`, the workstation by default) in a copy of the caller's worktree, with its output in a log, and a port forwarded to the workstation if `forward:` names one |
 | `services()` | any agent | each service: name, host, owner, state, restarts, forwarded port |
 | `service_logs(name, from)` | any agent | the service's output from an offset |
-| `service_send(name, input)` | owner, owner's parent | text or keys to the service, through `Control`'s checked write |
-| `service_wait(name, until, timeout)` | any agent | until a line matches a pattern, a port listens, or the service exits; answers which, or `{:unknown, :timeout}` |
+| `service_send(name, input)` | owner, owner's parent | text or keys to the service's terminal, by `dtach -p` on its host while its pid is still the row's ("Hosts"); answers `sent`, `refused` or `unknown`, and is never resent |
+| `service_wait(name, until, timeout)` | any agent | until a line of the log matches a pattern, a port listens on the host, or the service exits, which ends every wait; answers which, or `{:unknown, :timeout}` (`:dropped` when its last read failed). A line is looked for from the log offset of the service's current start, which its row keeps, so a line an earlier start wrote never answers (F-89) |
 | `service_restart(name)` / `service_stop(name)` | owner, owner's parent | restarts or ends a service, under a claim |
 | `service_hand(name, to)` | owner | hands a service to its parent or one of its children |
 | `ask(question)` | any agent | asks a person, without blocking |
