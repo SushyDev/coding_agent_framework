@@ -9,7 +9,8 @@ defmodule CodingAgentFramework.ExampleTest do
   import CodingAgentFramework.TestHost
 
   alias CodingAgentFramework.{Accounts, Example, HeadlessStandIn, Jobs, Mailbox, MCP, Services}
-  alias CodingAgentFramework.{Delegates, Tmux}
+  alias CodingAgentFramework.{Delegates, Operator, Tmux}
+  alias CodingAgentFramework.Grants.Claims
   alias CodingAgentFramework.Example.Config
   alias CodingAgentFramework.Sessions.Table
 
@@ -239,6 +240,54 @@ defmodule CodingAgentFramework.ExampleTest do
         end,
         20_000
       )
+  end
+
+  test "the operator starts a delegate, messages it and interrupts it, each in its name", ctx do
+    parts = start(ctx.config)
+
+    assert {:ok, %{delegate: "app-unit-one"}} =
+             Operator.start_delegate(parts.mcp, "app-main", "app", "unit/one", "opus", "Go.")
+
+    {:ok, ddb} = Delegates.Table.open(Path.join(ctx.home, "caf.db"))
+    {:ok, _} = row(ddb, &(&1.parent == "app-main" and &1.status == "finished"))
+
+    # A message that starts with `ask` waits on a permission, so its turn is there to interrupt.
+    assert {:ok, {:queued, id}} = Operator.message(parts.mcp, "app-unit-one", "ask: again.")
+
+    {:ok, _} =
+      await(
+        fn ->
+          case Delegates.fix_state(parts.delegates, "app-main", "app-unit-one") do
+            {:ok, %{held: [_]}} = held -> held
+            other -> other
+          end
+        end,
+        20_000
+      )
+
+    # The row is marked from `Stream`'s replay, which may come after the request is read.
+    {:ok, _} =
+      await(
+        fn ->
+          case Mailbox.status(parts.mailbox, id) do
+            {:ok, %{from: "operator", to: "app-unit-one", status: "delivered"}} = ok -> ok
+            other -> other
+          end
+        end,
+        20_000
+      )
+
+    assert {:ok, %{claim: claim}} = Operator.interrupt(parts.mcp, "app-unit-one")
+    assert {:ok, %{caller: "operator", target: "app-unit-one"}} = Claims.get(parts.claims, claim)
+    assert "interrupt" in HeadlessStandIn.taken(ctx.dir)
+
+    assert for(%{agent: "operator", tool: t} <- MCP.calls(parts.mcp), do: t) ==
+             ~w(start_delegate message interrupt)
+
+    # The interrupted turn's reply goes to the delegate's main session, as every reply does.
+    {:ok, messages} = Mailbox.Table.open(Path.join(ctx.home, "caf.db"))
+    from = &Enum.find(Mailbox.Table.open_rows(messages), fn m -> m.from_agent == &1 end)
+    assert {:ok, %{to_agent: "app-main"}} = await(fn -> ok(from.("app-unit-one")) end, 20_000)
   end
 
   test "a late end `Mailbox` did not answer is kept owed, then stored once", ctx do

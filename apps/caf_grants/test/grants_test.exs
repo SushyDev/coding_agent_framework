@@ -20,16 +20,19 @@ defmodule CodingAgentFramework.GrantsTest do
     end
   end
 
-  # Each agent's place: {:main, project} or {:delegate, project}.
+  # Each agent's place: {:main, project} or {:delegate, project}; and the operator, `op`.
   defp places(tree) do
     mains = Map.new(@projects, &{"#{&1}-main", {:main, &1}})
+    mains = Map.put(mains, "op", :operator)
     Map.merge(mains, Map.new(tree, &{&1.name, {:delegate, &1.project}}))
   end
 
-  defp grants(tree), do: Grants.new(fn -> tree end)
+  defp grants(tree), do: Grants.new(fn -> tree end, operator: "op")
 
   defp edge?(places, c, t) do
     case {places[c], places[t]} do
+      {:operator, :operator} -> false
+      {:operator, _} -> true
       {{:main, _}, {:main, _}} -> c != t
       {{:main, p}, {:delegate, p}} -> true
       {{:delegate, p}, {:main, p}} -> true
@@ -52,7 +55,7 @@ defmodule CodingAgentFramework.GrantsTest do
     end
   end
 
-  property "OnlyParentFixes, NoSelfFix, MainNeverFixed: a fix is a parent's act on its child" do
+  property "OnlyParentFixes, NoSelfFix, MainFixedByOperatorOnly: a parent's or the operator's" do
     check all tree <- tree_gen() do
       places = places(tree)
 
@@ -60,7 +63,8 @@ defmodule CodingAgentFramework.GrantsTest do
         want =
           cond do
             c == t -> {:refused, :no_self_fix}
-            match?({:main, _}, places[t]) -> {:refused, :main_never_fixed}
+            places[c] == :operator -> :ok
+            match?({:main, _}, places[t]) -> {:refused, :main_fixed_by_operator_only}
             parent?(places, c, t) -> :ok
             true -> {:refused, :only_parent_fixes}
           end
@@ -70,12 +74,15 @@ defmodule CodingAgentFramework.GrantsTest do
     end
   end
 
-  property "ServiceFixedByOwnerOrParent: the owner or the owner's parent fixes a service" do
+  property "ServiceFixedByOwnerOrParent: the owner, the owner's parent or the operator" do
     check all tree <- tree_gen() do
       places = places(tree)
 
       for c <- Map.keys(places), o <- Map.keys(places) do
-        want = if c == o or parent?(places, c, o), do: :ok, else: :refused
+        want =
+          if c == o or parent?(places, c, o) or places[c] == :operator,
+            do: :ok,
+            else: :refused
 
         assert Grants.may_fix_service?(grants(tree), c, o) ==
                  ok(want, :service_fixed_by_owner_or_parent)
@@ -122,11 +129,41 @@ defmodule CodingAgentFramework.GrantsTest do
     assert Grants.parent(g, "app-main") == {:refused, :main_has_no_parent}
   end
 
-  test "only a main session starts a delegate" do
-    g = grants([%{name: "app-d1", project: "app", parent: "app-main"}])
+  test "a main session starts its own delegate; the operator one under any main session" do
+    g =
+      grants([
+        %{name: "app-d1", project: "app", parent: "app-main"},
+        %{name: "web-d1", project: "web", parent: "web-main"}
+      ])
+
     assert Grants.may_start_delegate?(g, "app-main") == :ok
     assert Grants.may_start_delegate?(g, "app-d1") == {:refused, :main_session_only}
     assert Grants.may_start_delegate?(g, "nobody") == {:refused, {:unknown_agent, "nobody"}}
+    assert Grants.may_start_delegate?(g, "op", "web-main") == :ok
+
+    assert Grants.may_start_delegate?(g, "app-main", "web-main") ==
+             {:refused, :parent_or_operator}
+
+    assert Grants.may_start_delegate?(g, "op", "app-d1") == {:refused, :main_session_only}
+    assert Grants.may_start_delegate?(g, "op") == {:refused, :main_session_only}
+  end
+
+  test "the operator owns nothing, and its name is never an agent's" do
+    g = grants([%{name: "app-d1", project: "app", parent: "app-main"}])
+    assert Grants.may_use?(g, "op") == :ok
+    assert Grants.may_start_service?(g, "op") == {:refused, :operator_owns_nothing}
+    assert Grants.may_hand?(g, "app-main", "app-main", "op") == {:refused, :handed_along_edge}
+    assert Grants.may_message?(g, "app-main", "op") == {:refused, :along_edges}
+
+    named = grants([%{name: "op", project: "app", parent: "app-main"}])
+    assert Grants.may_message?(named, "app-main", "op") == {:refused, {:reserved, "op"}}
+    root = grants([%{name: "op", project: "app", parent: nil}])
+    assert Grants.may_use?(root, "app-main") == {:refused, {:reserved, "op"}}
+
+    # With no operator, its name is any other unknown name.
+    plain = Grants.new(fn -> [%{name: "app-d1", project: "app", parent: "app-main"}] end)
+    assert Grants.may_fix?(plain, "op", "app-d1") == {:refused, {:unknown_agent, "op"}}
+    assert_raise ArgumentError, fn -> Grants.new(fn -> [] end, operator: "framework") end
   end
 
   test "a delegate named with two parents refuses every check" do

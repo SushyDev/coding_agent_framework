@@ -64,7 +64,7 @@ defmodule CodingAgentFramework.Mailbox do
   @doc """
   Stores `text` as a message from `framework` to agent `to`, delivered as any message is: the
   embedding app's word to an agent, such as a job's late end. `to` must be an agent the tree
-  holds (`Grants.may_use?/2`). Option `:key`: a message stored under the same key before is
+  holds (`Grants.may_use?/2`), not the operator. Option `:key`: a message stored under the same key before is
   not stored again, so a repeat of one event (a late end handed twice) is dropped. Answers
   `{:ok, {:queued, id}}`, `{:ok, :stored_before}`, or `{:refused, reason}` with no row.
 
@@ -140,7 +140,9 @@ defmodule CodingAgentFramework.Mailbox do
     with true <-
            (Enum.all?([to, text], &(is_binary(&1) and &1 != "")) and
               (is_nil(key) or is_binary(key))) or {:refused, {:bad, :message}},
-         :ok <- Grants.may_use?(s.grants, to) do
+         :ok <- Grants.may_use?(s.grants, to),
+         # The operator is no agent: nothing would deliver to it.
+         true <- to != Grants.operator(s.grants) or {:refused, {:not_an_agent, to}} do
       case Table.reply(s.db, @framework, to, text, Stream.uuid(), key && "key:" <> key) do
         nil ->
           {:reply, {:ok, :stored_before}, s}

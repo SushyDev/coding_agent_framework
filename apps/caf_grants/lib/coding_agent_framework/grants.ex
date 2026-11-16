@@ -14,37 +14,70 @@ defmodule CodingAgentFramework.Grants do
   `{:refused, {:unknown_agent, name}}`, and one named with two parents is
   `{:refused, {:two_parents, name}}`.
 
+  **The operator** (`docs/design.md`, "Concepts"): a person or the app acting on agents from
+  outside the tree, under a name the embedding app gives `new/2` (`operator:`). It is a parent
+  of every main session and so of every agent: it messages, reads and fixes any agent, and fixes
+  any service, through the same checks and claims as a parent. It owns nothing: it starts no
+  service and is handed none, and no agent messages it. Its name is reserved: a tree that names
+  an agent with it refuses every check with `{:refused, {:reserved, name}}`.
+
   **The checks** answer `:ok` or `{:refused, reason}`, the reason naming the rule:
 
   | Check | Rule | Reason |
   |---|---|---|
-  | `may_message?/3` | a main session to its delegates and the other main sessions; a delegate to its parent | `:along_edges` |
-  | `may_read?/3` (`look`, `transcript`) | the target itself, its parent, its children, and for a main session the other main sessions | `:close_read_along_edges` |
-  | `may_fix?/3` | a parent on its own child | `:no_self_fix`, `:main_never_fixed`, `:only_parent_fixes` |
-  | `may_start_delegate?/2` | a main session | `:main_session_only` |
-  | `may_start_service?/2`, `may_use?/2` | any agent the tree holds: a main session or a delegate | `{:unknown_agent, name}` |
-  | `may_fix_service?/3` | the service's owner or the owner's parent | `:service_fixed_by_owner_or_parent` |
+  | `may_message?/3` | the operator to any agent; a main session to its delegates and the other main sessions; a delegate to its parent | `:along_edges` |
+  | `may_read?/3` (`look`, `transcript`) | the target itself, its parent, its children, for a main session the other main sessions, and the operator | `:close_read_along_edges` |
+  | `may_fix?/3` | a parent on its own child; the operator on any agent | `:no_self_fix`, `:main_fixed_by_operator_only`, `:only_parent_fixes` |
+  | `may_start_delegate?/3` | a main session, for itself; the operator, for any main session | `:main_session_only`, `:parent_or_operator` |
+  | `may_use?/2` | any agent the tree holds, and the operator | `{:unknown_agent, name}` |
+  | `may_start_service?/2` | any agent the tree holds | `{:unknown_agent, name}`, `:operator_owns_nothing` |
+  | `may_fix_service?/3` | the service's owner, the owner's parent, or the operator | `:service_fixed_by_owner_or_parent` |
   | `may_hand?/4` | the owner, to its parent or a child | `:handed_by_owner`, `:handed_along_edge` |
 
-  A fix's claim, the other half of its job, is the next unit (F-73's build note).
+  A fix's claim, the other half of its job, is `CodingAgentFramework.Grants.Claims`.
 
       iex> tree = fn -> [%{name: "app-fix", project: "app", parent: "app-main"}] end
       iex> grants = CodingAgentFramework.Grants.new(tree)
       iex> CodingAgentFramework.Grants.may_message?(grants, "app-fix", "app-main")
       :ok
       iex> CodingAgentFramework.Grants.may_fix?(grants, "app-fix", "app-main")
-      {:refused, :main_never_fixed}
+      {:refused, :main_fixed_by_operator_only}
   """
 
   @enforce_keys [:tree]
-  defstruct [:tree]
+  defstruct [:tree, :operator]
 
-  @type t :: %__MODULE__{tree: (-> [map])}
+  @type t :: %__MODULE__{tree: (-> [map]), operator: String.t() | nil}
   @type answer :: :ok | {:refused, term}
 
-  @doc "The `Grants` that reads `tree` at each check."
-  @spec new((-> [map])) :: t
-  def new(tree) when is_function(tree, 0), do: %__MODULE__{tree: tree}
+  # `Mailbox`'s sender of a notice; the operator is not the framework.
+  @framework "framework"
+
+  @doc """
+  The `Grants` that reads `tree` at each check. Option `operator:`, the operator's name, a
+  non-empty string other than `"framework"`; with none, there is no operator.
+
+      iex> grants = CodingAgentFramework.Grants.new(fn -> [] end, operator: "operator")
+      iex> CodingAgentFramework.Grants.operator(grants)
+      "operator"
+  """
+  @spec new((-> [map]), keyword) :: t
+  def new(tree, opts \\ []) when is_function(tree, 0) do
+    operator = Keyword.get(opts, :operator)
+
+    unless is_nil(operator) or (is_binary(operator) and operator not in ["", @framework]),
+      do:
+        raise(
+          ArgumentError,
+          "operator: a name other than #{@framework}, got #{inspect(operator)}"
+        )
+
+    %__MODULE__{tree: tree, operator: operator}
+  end
+
+  @doc "The operator's name, or nil when there is none."
+  @spec operator(t) :: String.t() | nil
+  def operator(%__MODULE__{operator: operator}), do: operator
 
   @doc "May `caller` message `target`? Along an edge of the tree only (`Team.tla`, `Edge`)."
   @spec may_message?(t, String.t(), String.t()) :: answer
@@ -65,15 +98,16 @@ defmodule CodingAgentFramework.Grants do
   end
 
   @doc """
-  May `caller` fix `target` (interrupt, answer, resume, stop)? Only as its parent
-  (`Team.tla`, `MayFix`).
+  May `caller` fix `target` (interrupt, answer, resume, stop)? Only as its parent, or as the
+  operator, which is a parent of every main session (`Team.tla`, `MayFix`).
   """
   @spec may_fix?(t, String.t(), String.t()) :: answer
   def may_fix?(grants, caller, target) do
     check(grants, [caller, target], fn tree ->
       cond do
         caller == target -> {:refused, :no_self_fix}
-        main?(tree, target) -> {:refused, :main_never_fixed}
+        operator?(tree, caller) -> :ok
+        main?(tree, target) -> {:refused, :main_fixed_by_operator_only}
         child?(tree, target, caller) -> :ok
         true -> {:refused, :only_parent_fixes}
       end
@@ -81,26 +115,43 @@ defmodule CodingAgentFramework.Grants do
   end
 
   @doc """
-  May `caller` start a delegate (`start_delegate`, `run_delegate`)? A main session only: an
-  entry with no parent, or a parent the tree names.
+  May `caller` start a delegate of `parent` (`start_delegate`, `run_delegate`)? `parent` must be
+  a main session: an entry with no parent, or a parent the tree names. A main session starts its
+  own; the operator starts one under any main session.
 
-      iex> grants = CodingAgentFramework.Grants.new(fn -> [%{name: "app-main", project: "app", parent: nil}] end)
+      iex> grants = CodingAgentFramework.Grants.new(fn -> [%{name: "app-main", project: "app", parent: nil}] end, operator: "op")
       iex> CodingAgentFramework.Grants.may_start_delegate?(grants, "app-main")
       :ok
+      iex> CodingAgentFramework.Grants.may_start_delegate?(grants, "op", "app-main")
+      :ok
   """
-  @spec may_start_delegate?(t, String.t()) :: answer
-  def may_start_delegate?(grants, caller) do
-    check(grants, [caller], fn tree ->
-      if main?(tree, caller), do: :ok, else: {:refused, :main_session_only}
+  @spec may_start_delegate?(t, String.t(), String.t()) :: answer
+  def may_start_delegate?(grants, caller, parent \\ nil) do
+    parent = parent || caller
+
+    check(grants, [caller, parent], fn tree ->
+      cond do
+        not main?(tree, parent) -> {:refused, :main_session_only}
+        caller == parent or operator?(tree, caller) -> :ok
+        true -> {:refused, :parent_or_operator}
+      end
     end)
   end
 
-  @doc "May `caller` start a service? Any agent the tree holds, a main session or a delegate."
+  @doc """
+  May `caller` start a service? Any agent the tree holds, a main session or a delegate; never
+  the operator, which has no worktree for it to run in and owns nothing.
+  """
   @spec may_start_service?(t, String.t()) :: answer
-  def may_start_service?(grants, caller), do: may_use?(grants, caller)
+  def may_start_service?(grants, caller) do
+    check(grants, [caller], fn tree ->
+      if operator?(tree, caller), do: {:refused, :operator_owns_nothing}, else: :ok
+    end)
+  end
 
   @doc """
   May `caller` use a tool open to every agent the tree holds (`run`, `reload`, `agents`, …)?
+  The operator may too.
 
       iex> grants = CodingAgentFramework.Grants.new(fn -> [] end)
       iex> CodingAgentFramework.Grants.may_use?(grants, "nobody")
@@ -123,11 +174,14 @@ defmodule CodingAgentFramework.Grants do
     end)
   end
 
-  @doc "May `caller` restart or stop a service `owner` owns? As the owner or its parent."
+  @doc """
+  May `caller` restart, stop or send to a service `owner` owns? As the owner, its parent, or the
+  operator.
+  """
   @spec may_fix_service?(t, String.t(), String.t()) :: answer
   def may_fix_service?(grants, caller, owner) do
     check(grants, [caller, owner], fn tree ->
-      if caller == owner or child?(tree, owner, caller),
+      if caller == owner or child?(tree, owner, caller) or operator?(tree, caller),
         do: :ok,
         else: {:refused, :service_fixed_by_owner_or_parent}
     end)
@@ -154,20 +208,27 @@ defmodule CodingAgentFramework.Grants do
     roots = for %{name: n, parent: nil} <- entries, do: n
     named = for %{parent: p} <- entries, is_binary(p), not Map.has_key?(parents, p), do: p
     mains = MapSet.new(roots ++ named)
-    tree = %{parents: parents, mains: mains}
+    tree = %{parents: parents, mains: mains, operator: grants.operator}
+    op = grants.operator
 
     cond do
       two -> {:refused, {:two_parents, two.name}}
+      op && (Map.has_key?(parents, op) or main?(tree, op)) -> {:refused, {:reserved, op}}
       unknown = Enum.find(names, &(not known?(tree, &1))) -> {:refused, {:unknown_agent, unknown}}
       true -> rule.(tree)
     end
   end
 
-  defp known?(tree, name), do: Map.has_key?(tree.parents, name) or main?(tree, name)
+  defp known?(tree, name),
+    do: Map.has_key?(tree.parents, name) or main?(tree, name) or operator?(tree, name)
+
   defp main?(tree, name), do: MapSet.member?(tree.mains, name)
+  defp operator?(tree, name), do: tree.operator != nil and name == tree.operator
   defp child?(tree, child, parent), do: Map.get(tree.parents, child) == parent
 
+  # The operator reaches every agent; no agent reaches it.
   defp edge?(tree, a, b) do
-    (main?(tree, a) and main?(tree, b) and a != b) or child?(tree, a, b) or child?(tree, b, a)
+    (operator?(tree, a) and a != b) or (main?(tree, a) and main?(tree, b) and a != b) or
+      child?(tree, a, b) or child?(tree, b, a)
   end
 end

@@ -18,6 +18,9 @@ defmodule CodingAgentFramework.Example.Config do
     `setup`, `setup_timeout`, `env`, `branches` and `cap` (the name is filled in);
   - `mains`: each project's main session, project to its name; the tree holds each as a root
     (no parent), so it can start its first delegate. None by default;
+  - `operator`: the name the operator acts under (`CodingAgentFramework.Operator`), a person or
+    this app acting from outside the tree; `"operator"` by default. It is no agent's name, nor
+    `framework`;
   - `ports`: `%{intake: port, mcp: port}` on 127.0.0.1;
   - `claude` and `env`: what every agent's launch shares (`CodingAgentFramework.ClaudeCLI`);
     `tool_timeout` and `margin`, Claude Code's MCP tool timeout and what `run_delegate` keeps
@@ -46,6 +49,7 @@ defmodule CodingAgentFramework.Example.Config do
     hosts: %{},
     projects: %{},
     mains: %{},
+    operator: "operator",
     tool_timeout: 3_600_000,
     margin: 60_000,
     interval: 2_000
@@ -69,10 +73,18 @@ defmodule CodingAgentFramework.Example.Config do
       not match?(%{intake: i, mcp: m} when is_integer(i) and is_integer(m), fields.ports) ->
         {:refused, {:bad, :ports}}
 
+      not operator?(fields) ->
+        {:refused, {:bad, :operator}}
+
       true ->
         c = struct!(__MODULE__, fields)
         {:ok, %{c | projects: Map.new(c.projects, fn {n, p} -> {n, Map.put(p, :name, n)} end)}}
     end
+  end
+
+  defp operator?(fields) do
+    op = Map.get(fields, :operator, "operator")
+    is_binary(op) and op not in ["", "framework" | Map.values(Map.get(fields, :mains, %{}))]
   end
 
   @doc "A path under the home."

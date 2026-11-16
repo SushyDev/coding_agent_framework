@@ -323,7 +323,7 @@ delegate to its main session. Its parts share the agents and the restarts.
   table's key on `reply_to`. `SelfStarts(d)`, only when `SelfTurns`, is a turn the delegate
   starts by itself: its result names no message (`OwnTurn`), so it changes no `fold` entry.
 - Claims: `ClaimTaken(c, t)` is `Grants`: `MayFix(c, t)`, the caller is the target's main
-  session, and no claim yet on the target's state. It writes the row (`claims`) and starts the
+  session or the operator, and no claim yet on the target's state. It writes the row (`claims`) and starts the
   call (`calls`, in memory). A row's `n` is 2 for the caller's second call on the same state,
   which a subagent can make at once; only `Break = "TwoClaims"` lets one in. `FixActs` acts
   only while the claimed state is current, and may not help; `FixRefused` ends the call when it
@@ -334,8 +334,19 @@ delegate to its main session. Its parts share the agents and the restarts.
   or a child `b`; and `ServiceOwnerEnded`: a kept service goes to the owner's parent, any other
   ends.
 
+- The operator: `Operators` is `{}` or `{o}`, a person or the app acting from outside the tree.
+  `Actors` is the agents and the operator: who calls `Send`, `ClaimTaken` and `ServiceFixed`.
+  `Edge`, `MayFix` and `MayFixService` hold for the operator on any agent, as a parent of every
+  main session and so of every agent; its claims, fixes and messages take the same steps as an
+  agent's, and its name is in the rows (`msgs[i].from`, a claim's `by`). It owns no service, so
+  `MayHand` never hands to it, and `Stoppable` refuses a stop of a main session. Only the
+  `Team_Operator*` configurations set it; the others keep `{}`, and their state spaces.
+
 `fixed` and `wrong` are ghosts. `MayFix`, `MayFixService` and `MayHand` are the guards; each
-`Break` that names one widens it by one wrong case. `MessageDelivered` reads "a message whose
+`Break` that names one widens it by one wrong case. Each `Operator…` Break lets the operator's
+acts skip one guard a parent's take, and `OperatorStopsMain` and `HandToOperator` widen what it
+may do by one wrong case. `MainFixedByOperatorOnly` says no agent claims a main session's state,
+and no main session ends. `MessageDelivered` reads "a message whose
 addressee's turn ends again and again is delivered", and `EndedMarked` "a message still waiting
 when its delegate has ended settles, delivered or `"ended"`". `EndedNotDelivered` says an
 `"ended"` row is true: the message is in no transcript.
