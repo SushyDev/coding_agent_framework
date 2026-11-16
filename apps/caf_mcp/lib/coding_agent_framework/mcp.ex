@@ -50,10 +50,20 @@ defmodule CodingAgentFramework.MCP do
     `look`: a delegate's state, held requests, and last lines of its event log (`Stream.log/4`)
     and transcript (`Transcripts.text/4`), each with its own refusal; `transcript`: whole lines
     from byte `from`, and the next offset. A main session is refused until `Screen` and `Mains`.
+  - the fix tools, a parent's on its own delegate (`Grants.may_fix?/3`; a main session is
+    never fixed): `interrupt(agent)`, `answer(agent, dialog, label)` (`dialog` is the open
+    `can_use_tool` request's id, `label` `allow` or `deny`), `resume(agent)` (a delegate whose
+    process died) and `stop(agent)` (once its report is delivered). Each reads the delegate's
+    state (`Delegates.fix_state/3`), claims it (`Grants.Claims.claim/6` with `:start_id`),
+    then `Delegates.fix/5` acts only while that state is still the delegate's, and the claim
+    is settled `verified` when the fix answered `ok` and the state read after has moved, else
+    `not_verified`. A second fix of a state is refused `{:claimed, by}` or
+    `{:already_claimed, by}`. Answers `%{done: value, claim: id, settled: settle's answer}`,
+    or the fix's refusal or unknown.
 
   The design's other tools come in later parts (`docs/build-notes/F-86.md`).
 
-      {:ok, mcp} = MCP.start_link(dir: dir, port: 4791, grants: grants,
+      {:ok, mcp} = MCP.start_link(dir: dir, port: 4791, grants: grants, claims: claims, start_id: "s1",
         mailbox: {Mailbox, mailbox}, jobs: {Jobs, jobs}, delegates: {Delegates, delegates},
         services: {Services, services}, workstation: "ws", tracker: {Tracker, tracker},
         stream: {Stream, stream}, transcripts: %{"work" => {Transcripts, t}}, place: &place/1,
@@ -66,6 +76,7 @@ defmodule CodingAgentFramework.MCP do
   use GenServer
 
   alias CodingAgentFramework.Grants
+  alias CodingAgentFramework.Grants.Claims
   alias CodingAgentFramework.MCP.Table
 
   @step 5_000
@@ -83,6 +94,8 @@ defmodule CodingAgentFramework.MCP do
   @name %{type: "string", description: "1 to 64 letters, digits, - or _"}
   @timeout %{type: "integer", minimum: 1, description: "ms, at most a day"}
   @row ~w(name host owner state restarts port local)a
+  @str %{type: "string"}
+  @fixes ~w(interrupt answer resume stop)
 
   @tools [
     %{
@@ -255,6 +268,35 @@ defmodule CodingAgentFramework.MCP do
       }
     },
     %{
+      name: "interrupt",
+      description: "Interrupts your delegate's turn, under a claim on its current state.",
+      inputSchema: %{type: "object", properties: %{agent: @str}, required: ["agent"]}
+    },
+    %{
+      name: "answer",
+      description:
+        "Answers your delegate's open permission request (dialog: its request id) with allow or deny.",
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          agent: @str,
+          dialog: @str,
+          label: %{type: "string", enum: ["allow", "deny"]}
+        },
+        required: ["agent", "dialog", "label"]
+      }
+    },
+    %{
+      name: "resume",
+      description: "Resumes your delegate whose process died, once per state, under a claim.",
+      inputSchema: %{type: "object", properties: %{agent: @str}, required: ["agent"]}
+    },
+    %{
+      name: "stop",
+      description: "Ends your delegate once its report is delivered, under a claim.",
+      inputSchema: %{type: "object", properties: %{agent: @str}, required: ["agent"]}
+    },
+    %{
       name: "reload",
       description: "Reloads your own tools.",
       inputSchema: %{type: "object", properties: %{}}
@@ -272,7 +314,8 @@ defmodule CodingAgentFramework.MCP do
   `{CodingAgentFramework.Transcripts, pid}`), `:workstation` (the host a service starts on
   unless its call names one), and
   `:place`, a function of an agent's name that answers `{:ok, %{project: p, name: n, worktree:
-  path}}` (the copy jobs and services run in) or `{:refused, reason}`. `:instance` (a string, required)
+  path}}` (the copy jobs and services run in) or `{:refused, reason}`. `:claims` is a
+  `CodingAgentFramework.Grants.Claims` and `:start_id` this framework start's id in it. `:instance` (a string, required)
   is this part's name in its jobs' ids, so two of them sharing one `Jobs` never make the same
   id. `:cap` (ms, default a day) is the most a `run`'s or a `service_wait`'s `timeout` may be.
   `:tool_timeout` (ms) is the MCP tool timeout `CodingAgentFramework.ClaudeCLI` sets for every
@@ -537,11 +580,46 @@ defmodule CodingAgentFramework.MCP do
          do: lines(mod.text(t, a.session_id, from, timeout: @step, max: @read_max), false)
   end
 
+  # Team.tla's ClaimTaken, then FixActs or FixRefused (in `Delegates`, which reads the state
+  # again), then the claim settled by the state read after: verified when the fix took and the
+  # state moved. A claim left open by an unknown settle is a restart's to close as interrupted.
+  defp act(ctx, caller, _id, tool, %{"agent" => agent} = a)
+       when tool in @fixes and is_binary(agent) do
+    {mod, server} = ctx.delegates
+
+    with {:ok, fix} <- fix(tool, a),
+         :ok <- Grants.may_fix?(ctx.grants, caller, agent),
+         {:ok, state} <- mod.fix_state(server, caller, agent),
+         {:ok, claim} <- Claims.claim(ctx.claims, caller, agent, state, ctx.start_id) do
+      outcome = mod.fix(server, caller, agent, fix, state)
+
+      verdict =
+        case {outcome, mod.fix_state(server, caller, agent)} do
+          {{:ok, _}, {:ok, read}} when read != state -> :verified
+          _ -> :not_verified
+        end
+
+      settled = Claims.settle(ctx.claims, claim, verdict)
+
+      case outcome do
+        {:ok, done} -> {:ok, %{done: done, claim: claim, settled: settled}}
+        other -> other
+      end
+    end
+  end
+
   defp act(_ctx, _caller, _id, tool, _args) do
     if Enum.any?(@tools, &(&1.name == tool)),
       do: {:refused, {:bad, :args}},
       else: {:refused, {:unknown_tool, tool}}
   end
+
+  # A label is checked before the claim: a bad one never takes the state.
+  defp fix("answer", %{"dialog" => d, "label" => l}) when is_binary(d) and l in ~w(allow deny),
+    do: {:ok, {:answer, d, l}}
+
+  defp fix("answer", _args), do: {:refused, {:bad, :args}}
+  defp fix(tool, _args), do: {:ok, String.to_existing_atom(tool)}
 
   defp service_ok(name) do
     if is_binary(name), do: :ok, else: {:refused, {:bad, :args}}
@@ -638,8 +716,8 @@ defmodule CodingAgentFramework.MCP do
          {:ok, db} <- Table.open(Path.join(dir, "mcp.db")) do
       ctx =
         Map.new(
-          ~w(grants mailbox jobs delegates services workstation tracker stream transcripts)a ++
-            ~w(place instance)a,
+          ~w(grants claims start_id mailbox jobs delegates services workstation tracker stream)a ++
+            ~w(transcripts place instance)a,
           &{&1, Keyword.fetch!(opts, &1)}
         )
 

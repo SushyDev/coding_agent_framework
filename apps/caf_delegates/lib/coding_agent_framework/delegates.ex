@@ -44,6 +44,11 @@ defmodule CodingAgentFramework.Delegates do
   so a report is never lost to an answer that did not arrive: it is delivered as a message, at
   least once.
 
+  **A parent's fix** (`fix_state/3`, `fix/5`; `Team.tla`'s `FixActs`) is checked and claimed
+  by its caller (`MCP`); here it acts only while the state it claimed is still the delegate's,
+  read again in the same step, and through the part that owns the act: `Stream` for an
+  interrupt or an answer, the resume path above for a resume, `Sessions.stop/4` for a stop.
+
   It reads every row again when it starts and at each `cue/2`; the embedding app wires the cues of
   `Sessions`, `Stream` and `Transcripts` to it. After each write `notify` gets `%{topic:
   "delegates:<host>", ids: [id]}`.
@@ -128,6 +133,39 @@ defmodule CodingAgentFramework.Delegates do
   transcript after a restart. Refused until `Screen` is built.
   """
   def deliver(_delegates, _id), do: {:refused, :no_delivery}
+
+  @doc """
+  The state of `parent`'s delegate `name` that a fix claims (`Team.tla`'s `epoch`), read after
+  a read of `Stream`: the row's `id`, `status`, `resumes` and `report`, and from `Stream`'s row
+  of its process the log's `offset` (each event read moves it), `gone`, `ending`, and the ids
+  of the requests `held`; and whether `Sessions`' row of it has `ended`. A fix of one state acts once; any event, exit, end, answer, resume or
+  report moves it. The latest row of that name is the delegate. Answers `{:ok, state}`, or
+  `{:refused, {:no_delegate, name}}`, `{:refused, {:not_started, status}}`, or `Stream`'s.
+
+      Delegates.fix_state(delegates, "main", "app-unit-review")
+      #=> {:ok, %{id: 1, status: "running", resumes: 0, report: "none", offset: 812,
+      #=>   gone: false, ending: false, held: ["req-…"], ended: false}}
+  """
+  def fix_state(delegates, parent, name),
+    do: call(delegates, {:fix_state, parent, name}, [], 3 * @step)
+
+  @doc """
+  Fixes `parent`'s delegate `name`, only while `state` (`fix_state/3`'s, which the caller
+  claimed) is still its state, read again here; else `{:refused, {:moved, now}}` and nothing
+  acts. `fix` is:
+
+  - `:interrupt`: `Stream.interrupt/3`;
+  - `{:answer, request_id, label}`: `Stream.answer/5`, through the request the delegate holds;
+  - `:resume`: a dead delegate (its process gone, the row `running`) goes down the resume path
+    a cue takes, which counts its one resume first: `{:ok, :resuming}`. A live one is refused
+    as `:live`, one already resumed as `:resumed_once`, one whose `Sessions` row has not ended
+    as `:session_running`, and one the path finished instead (its transcript ends with its
+    last reply) with its status;
+  - `:stop`: `Sessions.stop/4` with `:report_delivered`, which writes `end_session` through
+    `Stream`, only once the report is `answered` (or, once delivery is built, `delivered`); else `{:refused, {:report, report}}`.
+  """
+  def fix(delegates, parent, name, fix, state),
+    do: call(delegates, {:fix, parent, name, fix, state}, [], 2 * @call)
 
   @doc "Hands it a reader's cue: every row is read again. Answers `:ok` at once."
   def cue(delegates, %{topic: _}), do: GenServer.cast(delegates, :cue)
@@ -217,6 +255,22 @@ defmodule CodingAgentFramework.Delegates do
       Map.has_key?(s.waiters, id) -> {:reply, {:refused, :awaited}, s}
       left <= 0 -> {:reply, {:unknown, :timeout}, s}
       true -> {:noreply, put_in(s.waiters[id], {from, deadline, waited(id, left)})}
+    end
+  end
+
+  def handle_call({:fix_state, parent, name}, _from, s) do
+    {:reply, with({:ok, row, fold} <- child(s, parent, name), do: {:ok, claimed(s, row, fold)}),
+     s}
+  end
+
+  # The act only while the claimed state is the delegate's, read again in this step.
+  def handle_call({:fix, parent, name, fix, state}, from, s) do
+    with {:ok, row, fold} <- child(s, parent, name),
+         now = claimed(s, row, fold),
+         true <- now == state or {:refused, {:moved, now}} do
+      act(s, row, fold, fix, from)
+    else
+      refused -> {:reply, refused, s}
     end
   end
 
@@ -449,6 +503,81 @@ defmodule CodingAgentFramework.Delegates do
   end
 
   defp reply({reply, s}), do: {:reply, reply, s}
+
+  # The latest row of `name` that is `parent`'s, with Stream's row of its process, just read.
+  defp child(s, parent, name) do
+    rows = Table.with_status(s.db, s.host, ~w(starting resuming running finished failed refused))
+
+    case rows |> Enum.filter(&(&1.name == name)) |> List.last() do
+      %{parent: ^parent, session_id: sid} = row when is_binary(sid) ->
+        with {:ok, _} <- Stream.read(s.stream, timeout: @step),
+             {:ok, fold} <- followed(s, row),
+             do: {:ok, row, fold}
+
+      %{parent: ^parent, status: status} ->
+        {:refused, {:not_started, status}}
+
+      _ ->
+        {:refused, {:no_delegate, name}}
+    end
+  end
+
+  defp claimed(s, row, fold) do
+    held = Enum.sort(for {id, %{state: :held}} <- fold.requests, do: id)
+    ended = ended?(Sessions.Table.get(s.sdb, s.host, row.name))
+    state = Map.take(row, [:id, :status, :resumes, :report])
+
+    Map.merge(state, %{offset: fold.offset, gone: fold.gone, ending: fold.ending, held: held})
+    |> Map.put(:ended, ended)
+  end
+
+  defp act(s, row, _fold, :interrupt, _from),
+    do: {:reply, Stream.interrupt(s.stream, row.session_id, timeout: @step), s}
+
+  defp act(s, row, _fold, {:answer, request, label}, _from),
+    do: {:reply, Stream.answer(s.stream, row.session_id, request, label, timeout: @step), s}
+
+  # The resume path a cue takes once the process is gone and Sessions' row has ended. A wedged
+  # delegate, alive but stuck, is not stopped first: F-100's build note, new-1.
+  defp act(s, row, fold, :resume, _from) do
+    cond do
+      row.resumes > 0 ->
+        {:reply, {:refused, :resumed_once}, s}
+
+      not fold.gone ->
+        {:reply, {:refused, :live}, s}
+
+      row.status != "running" ->
+        {:reply, {:refused, {:status, row.status}}, s}
+
+      not ended?(Sessions.Table.get(s.sdb, s.host, row.name)) ->
+        {:reply, {:refused, :session_running}, s}
+
+      true ->
+        resumed(exited(s, row, fold), row.id)
+    end
+  end
+
+  # Sessions waits for the exit; this process does not wait with it.
+  defp act(s, %{report: report} = row, _fold, :stop, from)
+       when report in ~w(answered delivered) do
+    Task.start(fn ->
+      reply = Sessions.stop(s.sessions, row.name, :report_delivered, timeout: @call)
+      GenServer.reply(from, reply)
+    end)
+
+    {:noreply, s}
+  end
+
+  defp act(s, row, _fold, :stop, _from), do: {:reply, {:refused, {:report, row.report}}, s}
+
+  # The transcript's last reply makes it a finish, not a resume.
+  defp resumed(s, id) do
+    case Table.get(s.db, id) do
+      %{status: "resuming"} -> {:reply, {:ok, :resuming}, s}
+      %{status: status} -> {:reply, {:refused, {:status, status}}, s}
+    end
+  end
 
   defp waited(id, left), do: Process.send_after(self(), {:waited, id}, left)
 

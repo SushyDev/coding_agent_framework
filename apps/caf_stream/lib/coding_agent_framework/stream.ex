@@ -112,6 +112,24 @@ defmodule CodingAgentFramework.Stream do
   def interrupt(stream, session, opts \\ []), do: write(stream, session, :interrupt, opts)
 
   @doc """
+  Answers held request `request_id` by the label an agent's `answer` names: `"allow"`, or
+  `"deny"` with a message that says its parent denied it. Any other label is refused as
+  `{:bad, :label}` before anything is marked; otherwise it answers as `write/4`.
+
+      Stream.answer(stream, "6f1c…", "req-1", "allow")
+      #=> {:ok, %{uuid: "req-1"}}
+  """
+  def answer(stream, session, request_id, label, opts \\ [])
+
+  def answer(stream, session, id, "allow", opts),
+    do: write(stream, session, {:answer, id, :allow}, opts)
+
+  def answer(stream, session, id, "deny", opts),
+    do: write(stream, session, {:answer, id, {:deny, "Your parent denied this."}}, opts)
+
+  def answer(_stream, _session, _id, _label, _opts), do: {:refused, {:bad, :label}}
+
+  @doc """
   Ends the session. It cuts a running turn and drops what has not gone in, so it goes in only
   after the turn ended with no message under way or found undelivered; once it is marked, a
   message is refused as `:ending`. The caller (`Sessions`) checks first that the report is

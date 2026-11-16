@@ -38,6 +38,8 @@ defmodule CodingAgentFramework.MCPServicesTest do
          dir: Path.join(dir, "services"),
          copies: copies,
          grants: grants,
+         claims: :unused,
+         start_id: "t",
          ended: fn _ -> false end,
          hosts: %{"ws" => %{programs: programs(), dir: Path.join(dir, "ws")}},
          workstation: "ws"}
@@ -49,6 +51,8 @@ defmodule CodingAgentFramework.MCPServicesTest do
          dir: dir,
          port: 4791,
          grants: grants,
+         claims: :unused,
+         start_id: "t",
          mailbox: {__MODULE__, :unused},
          jobs: {__MODULE__, :unused},
          delegates: {__MODULE__, :unused},
