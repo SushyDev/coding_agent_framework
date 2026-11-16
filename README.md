@@ -42,8 +42,10 @@ flowchart LR
 
     subgraph framework["The framework (Elixir and OTP)"]
       direction TB
-      readers["Readers<br/>Registry · Transcripts · Usage<br/>Stream · Intake · TmuxSampler"]
+      readers["Readers<br/>Registry · Transcripts · Usage<br/>Stream · Intake · TmuxSampler · Screen"]
       writers["Writers<br/>Control · Sessions · Stream"]
+      tools["The tree's tools, over MCP<br/>Grants · Mailbox · Delegates"]
+      waiter["The waiting Stop hook<br/>reports and messages into<br/>an idle main session"]
       tracker["Tracker<br/>one fold of every reader"]
       recoveries["Recoveries<br/>detect, act once, verify"]
       db[("SQLite tables<br/>the truth")]
@@ -69,8 +71,13 @@ flowchart LR
   tmux -.->|views| tree
   tree --- worktrees
   tree --- configs
-  tree -->|hooks, session files,<br/>transcripts, event logs| readers
+  tree -->|hooks, session files,<br/>transcripts, event logs, screens| readers
   writers -->|one checked write| tree
+  tree -->|"run_delegate, message,<br/>agents()"| tools
+  tools --> writers
+  tools --> db
+  waiter -->|wakes a turn| main
+  db --> waiter
   readers --> db
   writers --> db
   db --> tracker
@@ -84,20 +91,34 @@ flowchart LR
 - **Held, not hosted.** Every agent runs under `dtach -n` on the workstation, so it outlives
   tmux, its terminal and the framework. tmux only shows it.
 - **Readers, then one writer.** Each reader turns one source (a hook, a session file, a
-  transcript, an event log, a tmux sample) into rows. There is one writer, and each write is
-  checked against the target pane before it is sent.
+  transcript, an event log, a tmux sample, a screen) into rows. There is one writer, and each
+  write is checked against the target pane before it is sent.
+- **Nothing typed to deliver.** A report or a message reaches a main session through its
+  waiting Stop hook, which wakes the idle session with the text, so a draft in its box is never
+  touched. A session ends by SIGTERM once its session file says it is idle.
+- **Addressed by name.** Agents are rows with names; the framework finds every session across
+  every account it holds, never by a pid or a socket, so a move to another account hides none.
 - **Tables are the truth.** Views and the `agents()` tool read the `Tracker`'s fold of those
   rows, so they never lag or lie. `Recoveries` acts once per broken state and checks that it
   helped.
 
 ## Status
 
-The base layer, the readers, the writer, `Sessions`, the `Tracker` and `Recoveries` are built,
-each from a checked model in `model/tla/`. `Delegates` starts a delegate and holds its report
-when its turn's `result` comes, resumes it once after a kill, and reports a second kill;
-delivering a report comes next, once `Screen` reads a main session's screen. Then come moves
-between accounts, main sessions, the agent tools along the tree, jobs and services on hosts,
-stacks and the LiveView components. The plan and the order of the units are in
+Built, each from a checked model in `model/tla/`:
+- the base layer, the readers, the writer, `Sessions`, the `Tracker` and `Recoveries`;
+- `Delegates`: start, report, resume once after a kill, report a second kill;
+- the tree's tools: `Grants`, `Mailbox` and the MCP tools, and the operator (a person or the
+  app acting as every main session's parent);
+- `Copies`, `Jobs` and `Services` on any host;
+- launch options per agent (settings, environment, directories, appended prompt, tools);
+- `PreToolUse` held while the app decides, and `PostToolUse` handed on;
+- `Screen`, reading a main session's screen from a real release's fixtures.
+
+Next, in order: delivery into a main session by its waiting Stop hook; the move between
+accounts, modeled with the end by SIGTERM and a message in flight; interactive delegates; main
+sessions; `Mover`; then the mechanisms an app's policies stand on (an idle delegate's watchdog,
+admission by load, `Stop` held for the app, a fault ledger, clone copies, an idempotent start),
+packaging, and stacks with the LiveView components. The plan and the order of the units are in
 [docs/design.md](docs/design.md); each unit's notes are in `docs/build-notes/`.
 
 
@@ -123,12 +144,22 @@ flowchart BT
     control[caf_control]
     stream[caf_stream]
     sampler[caf_sampler]
+    screen[caf_screen]
   end
   sessions[caf_sessions]
   recoveries[caf_recoveries]
   tracker[caf_tracker]
   delegates[caf_delegates]
-  grants[caf_grants]
+  subgraph team["The tree's tools"]
+    grants[caf_grants]
+    mailbox[caf_mailbox]
+    mcp[caf_mcp]
+  end
+  subgraph hosts["Hosts"]
+    copies[caf_copies]
+    jobs[caf_jobs]
+    services[caf_services]
+  end
 
   tmux --> shell
   holder --> shell
@@ -146,8 +177,11 @@ flowchart BT
   sessions --> shell
   sessions --> holder
   sessions --> registry
+  sessions --> accounts
   sessions --> cli
   sessions --> control
+  sessions --> stream
+  sessions --> transcripts
   recoveries --> tmux
   recoveries --> holder
   recoveries --> sampler
@@ -160,15 +194,32 @@ flowchart BT
   tracker --> sampler
   tracker --> sessions
   tracker --> recoveries
+  tracker --> delegates
   delegates --> accounts
+  delegates --> cli
   delegates --> usage
   delegates --> stream
   delegates --> sessions
   delegates --> transcripts
+  mailbox --> delegates
+  mailbox --> grants
+  mailbox --> stream
+  mcp --> grants
+  copies --> shell
+  copies --> holder
+  jobs --> shell
+  jobs --> copies
+  services --> shell
+  services --> holder
+  services --> grants
+  services --> copies
 ```
 
-`caf_test` holds the shared test aids and is used only in tests. `caf_grants` uses no other
-app: the embedding app hands it the tree as a function.
+`caf_test` holds the shared test aids and is used only in tests. `caf_example` is an app built
+on the others, as an embedding app would be, and uses every one of them. `caf_grants`,
+`caf_intake` and `caf_screen` use no other app: the embedding app hands `caf_grants` the tree as
+a function, and `caf_screen` reads a screen's text it is given. `caf_mcp` reaches `Delegates`,
+`Mailbox` and the `Tracker` through modules the embedding app names.
 
 ## Development
 
