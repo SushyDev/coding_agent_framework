@@ -98,6 +98,29 @@ defmodule CodingAgentFramework.CopiesTest do
   end
 
   for reach <- [:local, :remote] do
+    test "StartsOnSyncedCopy: the #{reach} copy gets an edit of the same size in the same second",
+         c do
+      copy = c[unquote(reach)]
+      file = Path.join(c.wt, "a.txt")
+      assert {:ok, :taken} = Copies.take(c.copies, copy, "r1")
+      assert {:ok, _} = sync(c, copy, "r1")
+      {:ok, {path, _}} = Copies.place(copy)
+      assert File.read!(Path.join(path, "a.txt")) == "one\n"
+      assert {:ok, :given} = Copies.give_back(c.copies, copy, "r1")
+
+      # Same size, and the same whole second as the copy's file: the quick check of size and
+      # whole-second time cannot see it. Only the nanoseconds differ.
+      %{mtime: seconds} = File.stat!(file, time: :posix)
+      File.write!(file, "six\n")
+      File.touch!(file, seconds)
+
+      assert {:ok, :taken} = Copies.take(c.copies, copy, "r2")
+      assert {:ok, _} = sync(c, copy, "r2")
+      assert File.read!(Path.join(path, "a.txt")) == "six\n"
+    end
+  end
+
+  for reach <- [:local, :remote] do
     test "StartsOnSyncedCopy: the #{reach} copy gets every file git does not ignore", c do
       copy = c[unquote(reach)]
       File.write!(Path.join(c.wt, "a.txt"), "edited\n")

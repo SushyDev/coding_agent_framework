@@ -183,7 +183,10 @@ its host, as it has since the first part built, so the workstation is one host a
   it;
 - a job or service runs in a copy of the worktree it names. Before a job or a service starts,
   `Copies` brings the copy in step with the worktree by rsync, over every file git does not
-  ignore, edits not yet committed included; build outputs stay in the copy between runs. The
+  ignore, edits not yet committed included; it compares a file by its size and its modification
+  time to the nanosecond, not to the second, because an edit of the same size made in the same
+  second as the copy's last sync of that file would otherwise be skipped (F-85, new-1); build
+  outputs stay in the copy between runs. The
   workstation runs jobs and services in a copy too, under the framework home, so build outputs
   and a service's files stay apart from the agent's edits on every host, by one path of code.
   Two runs on one copy take turns at the sync, so neither starts on half of the other's files;
