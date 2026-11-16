@@ -101,6 +101,19 @@ defmodule CodingAgentFramework.Transcripts do
   def contains(transcripts, session_id, mark, text, offset, opts \\ []),
     do: call(transcripts, {:contains, session_id, mark, text, offset}, opts)
 
+  @doc """
+  The session's transcript from byte `from`, as it is now: `{:ok, %{bytes: bytes, from: from}}`.
+  With `{:last, n}` in place of `from`, from `n` bytes before the offset read so far. It changes
+  no row; `{:refused, :unknown_session}` for one never read, `{:refused, :no_file}`.
+
+      Transcripts.text(transcripts, "s1", 0)
+      #=> {:ok, %{bytes: "{\\"type\\":\\"user\\",…}\\n", from: 0}}
+  """
+  @spec text(GenServer.server(), String.t(), non_neg_integer | {:last, pos_integer}, keyword) ::
+          {:ok, map} | {:refused, term} | {:unknown, term}
+  def text(transcripts, session_id, from, opts \\ []),
+    do: call(transcripts, {:text, session_id, from}, opts)
+
   defp call(transcripts, request, opts) do
     timeout = Keyword.get(opts, :timeout, 6 * @timeout)
 
@@ -201,6 +214,20 @@ defmodule CodingAgentFramework.Transcripts do
             :no_file -> {:ok, false}
             other -> other
           end
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:text, sid, from}, _from, state) do
+    reply =
+      with %{path: path, fold: fold} <- state.folds[sid] || {:refused, :unknown_session},
+           at = with({:last, n} <- from, do: max(fold.offset - n, 0)),
+           {:ok, bytes} <- tail(state, path, at) do
+        {:ok, %{bytes: bytes, from: at}}
+      else
+        :no_file -> {:refused, :no_file}
+        other -> other
       end
 
     {:reply, reply, state}

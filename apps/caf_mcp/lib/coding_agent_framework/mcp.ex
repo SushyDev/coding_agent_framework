@@ -42,14 +42,21 @@ defmodule CodingAgentFramework.MCP do
     agent take `Grants.may_use?/2` first: `services()` (`list/1`, each row's name, host,
     owner, state, restarts and ports), `service_logs(name, from)` (`logs/4`), and
     `service_wait(name, until, timeout)` (`wait/4`, `timeout` capped as `run`'s), where `until`
-    is `{"line": pattern}` (from the current start's offset), `{"port": n}` or `"exit"`.
+    is `{"line": pattern}` (from the current start's offset), `{"port": n}` or `"exit"`;
+  - `agents()`: `Grants.may_use?/2`, then the tree as the `Tracker` reads it from its view
+    (`Tracker.agents/2`, `CodingAgentFramework.Tracker.Tree`), never a copy kept here;
+  - `look(agent)`, `transcript(agent, from)`: `Grants.may_read?/3`, then the agent in the tree.
+    `look`: a delegate's state, held requests, and last lines of its event log (`Stream.log/4`)
+    and transcript (`Transcripts.text/4`), each with its own refusal; `transcript`: whole lines
+    from byte `from`, and the next offset. A main session is refused until `Screen` and `Mains`.
 
   The design's other tools come in later parts (`docs/build-notes/F-86.md`).
 
       {:ok, mcp} = MCP.start_link(dir: dir, port: 4791, grants: grants,
         mailbox: {Mailbox, mailbox}, jobs: {Jobs, jobs}, delegates: {Delegates, delegates},
-        services: {Services, services}, workstation: "ws", place: &place/1, instance: "a",
-        tool_timeout: 3_600_000, margin: 60_000)
+        services: {Services, services}, workstation: "ws", tracker: {Tracker, tracker},
+        stream: {Stream, stream}, transcripts: %{"work" => {Transcripts, t}}, place: &place/1,
+        instance: "a", tool_timeout: 3_600_000, margin: 60_000)
       {:ok, config} = MCP.issue(mcp, "app-fix")
       MCP.call(mcp, "app-fix", "message", %{"to" => "app-main", "text" => "Done."})
       #=> {:ok, {:queued, 3}}
@@ -61,6 +68,8 @@ defmodule CodingAgentFramework.MCP do
   alias CodingAgentFramework.MCP.Table
 
   @step 5_000
+  # The most bytes of a log or a transcript one answer carries.
+  @window 16_384
   # The default cap on a `run`'s timeout: a job the caller forgot still ends within a day.
   @day 86_400_000
   @agent ~r/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z/
@@ -214,6 +223,28 @@ defmodule CodingAgentFramework.MCP do
       }
     },
     %{
+      name: "agents",
+      description:
+        "The tree: each agent's name, kind, project, parent, account, state, waits and subagents.",
+      inputSchema: %{type: "object", properties: %{}}
+    },
+    %{
+      name: "look",
+      description:
+        "An agent's last event-log lines, its open requests and its last transcript lines.",
+      inputSchema: %{type: "object", properties: %{agent: %{type: "string"}}, required: ["agent"]}
+    },
+    %{
+      name: "transcript",
+      description:
+        "An agent's transcript from a byte offset; answers the text and the next offset.",
+      inputSchema: %{
+        type: "object",
+        properties: %{agent: %{type: "string"}, from: %{type: "integer", minimum: 0}},
+        required: ["agent", "from"]
+      }
+    },
+    %{
       name: "reload",
       description: "Reloads your own tools.",
       inputSchema: %{type: "object", properties: %{}}
@@ -223,11 +254,13 @@ defmodule CodingAgentFramework.MCP do
   @doc """
   Starts the part. Options: `:dir` (a directory of its own: the table and the agents' configs),
   `:port` (where the embedding app serves the endpoint on 127.0.0.1), `:grants`, `:mailbox`,
-  `:jobs`, `:delegates` and `:services` (each `{module, server}`:
+  `:jobs`, `:delegates`, `:services`, `:tracker` and `:stream` (each `{module, server}`:
   `{CodingAgentFramework.Mailbox, pid}`, `{CodingAgentFramework.Jobs, pid}`,
-  `{CodingAgentFramework.Delegates, pid}`, `{CodingAgentFramework.Services, pid}`, or a stand-in
-  module with the same functions), `:workstation` (the host a service starts on unless its
-  call names one), and
+  `{CodingAgentFramework.Delegates, pid}`, `{CodingAgentFramework.Services, pid}`,
+  `{CodingAgentFramework.Tracker, pid}`, `{CodingAgentFramework.Stream, pid}`, or a stand-in
+  module with the same functions), `:transcripts` (an account's name to its
+  `{CodingAgentFramework.Transcripts, pid}`), `:workstation` (the host a service starts on
+  unless its call names one), and
   `:place`, a function of an agent's name that answers `{:ok, %{project: p, name: n, worktree:
   path}}` (the copy jobs and services run in) or `{:refused, reason}`. `:instance` (a string, required)
   is this part's name in its jobs' ids, so two of them sharing one `Jobs` never make the same
@@ -458,6 +491,36 @@ defmodule CodingAgentFramework.MCP do
     end
   end
 
+  defp act(ctx, caller, _id, "agents", _args) do
+    {mod, server} = ctx.tracker
+
+    with :ok <- Grants.may_use?(ctx.grants, caller),
+         {:ok, tree} <- mod.agents(server, timeout: @step),
+         do: {:ok, %{tree | agents: Enum.map(tree.agents, &Map.drop(&1, [:session_id, :host]))}}
+  end
+
+  defp act(ctx, caller, _id, "look", %{"agent" => agent}) when is_binary(agent) do
+    {mod, server} = ctx.stream
+
+    with {:ok, a} <- close(ctx, caller, agent, :no_screen),
+         {:ok, {tmod, t}} <- transcripts(ctx, a) do
+      events = mod.log(server, a.session_id, {:last, @window}, timeout: @step)
+      transcript = tmod.text(t, a.session_id, {:last, @window}, timeout: @step)
+
+      [events, transcript] =
+        Enum.map([events, transcript], &with({:ok, l} <- lines(&1, true), do: l.text))
+
+      {:ok, %{state: a.state, requests: a.waits_on, events: events, transcript: transcript}}
+    end
+  end
+
+  defp act(ctx, caller, _id, "transcript", %{"agent" => agent, "from" => from})
+       when is_binary(agent) and is_integer(from) and from >= 0 do
+    with {:ok, a} <- close(ctx, caller, agent, :no_session),
+         {:ok, {mod, t}} <- transcripts(ctx, a),
+         do: lines(mod.text(t, a.session_id, from, timeout: @step), false)
+  end
+
   defp act(_ctx, _caller, _id, tool, _args) do
     if Enum.any?(@tools, &(&1.name == tool)),
       do: {:refused, {:bad, :args}},
@@ -473,6 +536,55 @@ defmodule CodingAgentFramework.MCP do
   defp until(%{"port" => port}) when port in 1..65_535, do: {:ok, {:port, port}}
   defp until("exit"), do: {:ok, :exit}
   defp until(_), do: {:refused, {:bad, :args}}
+
+  # A close read: `Grants` first, then the agent as the `Tracker`'s tree has it. A main session
+  # has no screen and no known session until `Screen` and `Mains` exist (`main`, the refusal).
+  defp close(ctx, caller, agent, main) do
+    {mod, server} = ctx.tracker
+
+    with :ok <- Grants.may_read?(ctx.grants, caller, agent),
+         {:ok, tree} <- mod.agents(server, timeout: @step) do
+      case Enum.find(tree.agents, &(&1.name == agent)) do
+        nil -> {:unknown, {:not_in_tree, agent}}
+        %{kind: "main"} -> {:refused, main}
+        %{session_id: nil, state: state} -> {:refused, {:no_session, state}}
+        a -> {:ok, a}
+      end
+    end
+  end
+
+  defp transcripts(ctx, %{account: account}) do
+    case ctx.transcripts do
+      %{^account => reader} -> {:ok, reader}
+      _ -> {:refused, {:no_transcripts, account}}
+    end
+  end
+
+  # Whole lines only, at most `@window` bytes, so an answer stays small; a read that began inside
+  # a line (`look`'s, from before an offset) drops that line's end. A line longer than the
+  # window comes in pieces.
+  defp lines({:ok, %{bytes: bytes, from: from}}, last?) do
+    {bytes, from} =
+      case last? and from > 0 and :binary.match(bytes, "\n") do
+        {at, 1} ->
+          {binary_part(bytes, at + 1, byte_size(bytes) - at - 1), from + at + 1}
+
+        _ ->
+          {bytes, from}
+      end
+
+    part = binary_part(bytes, 0, min(@window, byte_size(bytes)))
+
+    text =
+      case :binary.matches(part, "\n") do
+        [] -> if byte_size(bytes) > @window, do: part, else: ""
+        found -> binary_part(part, 0, elem(List.last(found), 0) + 1)
+      end
+
+    {:ok, %{text: text, from: from, next: from + byte_size(text)}}
+  end
+
+  defp lines(other, _last?), do: other
 
   defp start_args(args) do
     start = Enum.map(~w(project branch model brief), &Map.get(args, &1))
@@ -510,7 +622,8 @@ defmodule CodingAgentFramework.MCP do
          {:ok, db} <- Table.open(Path.join(dir, "mcp.db")) do
       ctx =
         Map.new(
-          ~w(grants mailbox jobs delegates services workstation place instance)a,
+          ~w(grants mailbox jobs delegates services workstation tracker stream transcripts)a ++
+            ~w(place instance)a,
           &{&1, Keyword.fetch!(opts, &1)}
         )
 

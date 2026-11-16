@@ -128,6 +128,16 @@ defmodule CodingAgentFramework.Stream do
   @doc "The rows, as `Table.rows/2` gives them."
   def rows(stream, opts \\ []), do: call(stream, :rows, opts)
 
+  @doc """
+  `session`'s event log from byte `from`, as it is now: `{:ok, %{bytes: bytes, from: from}}`.
+  With `{:last, n}` in place of `from`, from `n` bytes before the offset read so far. It changes
+  no row; `{:refused, :not_followed}` for a session it does not follow.
+
+      Stream.log(stream, "6f1c…", {:last, 4096})
+      #=> {:ok, %{bytes: "…}\\n{\\"type\\":\\"result\\",…}\\n", from: 9001}}
+  """
+  def log(stream, session, from, opts \\ []), do: call(stream, {:log, session, from}, opts)
+
   defp call(stream, request, opts) do
     timeout = Keyword.get(opts, :timeout, 6 * @timeout)
 
@@ -226,6 +236,16 @@ defmodule CodingAgentFramework.Stream do
   end
 
   def handle_call(:rows, _from, s), do: {:reply, Table.rows(s.db, s.host.name), s}
+
+  def handle_call({:log, session, from}, _from, s) do
+    with %{fold: fold} <- s.delegates[session] || {:refused, :not_followed},
+         at = with({:last, n} <- from, do: max(fold.offset - n, 0)),
+         {:ok, bytes} <- tail(s, Path.join(dir(s.home, session), "events.jsonl"), at) do
+      {:reply, {:ok, %{bytes: bytes, from: at}}, s}
+    else
+      other -> {:reply, other, s}
+    end
+  end
 
   defp read_one(s, session, d) do
     # The pid is checked before the log is read, so a delegate seen gone has written its last
