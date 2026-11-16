@@ -29,6 +29,14 @@ defmodule CodingAgentFramework.ServicesTest do
     exec #{bash} -c 'read -r -t #{stand_in_idle()} l; exit 0' "$0"
     """)
 
+    # The same, ignoring TERM (an ignored signal stays ignored across exec).
+    File.write!(Path.join(dir, "stubborn"), """
+    trap '' TERM
+    : 2>/dev/null > "#{dir}/pids/$$" || exit 0
+    echo "up in $(#{program!(:cat)} a.txt)"
+    exec #{bash} -c 'read -r -t #{stand_in_idle()} l; exit 0' "$0"
+    """)
+
     File.write!(Path.join(dir, "ssh"), """
     #!#{bash}
     [ -e "#{dir}/down" ] && exit 255
@@ -56,21 +64,24 @@ defmodule CodingAgentFramework.ServicesTest do
     ]
 
     opts = [dir: Path.join(dir, "services"), copies: copies, hosts: hosts]
-    opts = opts ++ [grants: Grants.new(fn -> tree end)]
+    # An agent has ended once the test writes its file.
+    ended = fn agent -> File.exists?(Path.join(dir, "ended-" <> agent)) end
+    opts = opts ++ [grants: Grants.new(fn -> tree end), ended: ended]
     %{dir: dir, wt: wt, bash: bash, opts: opts, services: start_supervised!({Services, opts})}
   end
 
   defp start(c, owner, name, host, opts \\ []) do
     where = [host: host, project: "web", copy: "w", worktree: c.wt, start_timeout: 2_000]
-    argv = [c.bash, Path.join(c.dir, "svc")]
+    {script, opts} = Keyword.pop(opts, :script, "svc")
+    argv = [c.bash, Path.join(c.dir, script)]
     Services.start(c.services, owner, name, argv, Keyword.merge(where, opts))
   end
 
   defp row(c, name), do: Enum.find(Services.list(c.services), &(&1.name == name))
 
   # The service's log on the host, read here: the hosts' directories are this test's.
-  defp log(c, host, name),
-    do: read_when(Path.join([c.dir, host, "services", name <> ".log"]), "up")
+  defp log(c, host, name, text \\ "up"),
+    do: read_when(Path.join([c.dir, host, "services", name <> ".log"]), text)
 
   defp gone(pid), do: await(fn -> if alive?(pid), do: :alive, else: {:ok, :gone} end)
 
@@ -161,5 +172,67 @@ defmodule CodingAgentFramework.ServicesTest do
 
     assert %{state: "running", owner: "web-main", keep: true, pid: ^pid} = row(c, "web")
     assert {:ok, %{state: "ended"}} = Services.stop(c.services, "web-main", "web")
+  end
+
+  test "StartsOnSyncedCopy, OneProcess: a restart ends the service, syncs again and counts", c do
+    assert {:ok, %{pid: pid, restarts: 0}} = start(c, "web-a", "db", "box")
+    # Another size: rsync's quick check skips a same-size edit made in the same second.
+    File.write!(Path.join(c.wt, "a.txt"), "three\n")
+
+    assert {:refused, :service_fixed_by_owner_or_parent} =
+             Services.restart(c.services, "web-b", "db")
+
+    assert {:ok, %{state: "running", pid: new, restarts: 1, owner: "web-a"}} =
+             Services.restart(c.services, "web-main", "db")
+
+    assert new != pid
+    assert {:ok, :gone} = gone(pid)
+    assert {:ok, "up in one\nup in three\n"} = log(c, "box", "db", "up in one\nup in three\n")
+    assert {:ok, %{restarts: 2}} = Services.restart(c.services, "web-a", "db")
+    assert Copies.turns(c.opts[:copies]) |> Enum.all?(&(&1.state == "free"))
+  end
+
+  test "HandedAlongEdge, OneOwner: the owner alone hands a service, along an edge, and keep stays with it",
+       c do
+    assert {:ok, %{pid: pid}} = start(c, "web-a", "web", "test", keep: true)
+    assert {:refused, :handed_by_owner} = Services.hand(c.services, "web-main", "web", "web-b")
+    assert {:refused, :handed_along_edge} = Services.hand(c.services, "web-a", "web", "web-b")
+
+    assert {:ok, %{owner: "web-a1", keep: true, pid: ^pid}} =
+             Services.hand(c.services, "web-a", "web", "web-a1")
+
+    assert {:refused, :handed_by_owner} = Services.hand(c.services, "web-a", "web", "web-main")
+    assert {:ok, %{owner: "web-a"}} = Services.hand(c.services, "web-a1", "web", "web-a")
+  end
+
+  test "Logs (no property of its own): a service's log is read from an offset", c do
+    assert {:ok, _} = start(c, "web-a", "db", "box")
+    assert {:ok, _} = log(c, "box", "db", "up in one\n")
+    assert {:ok, %{text: "up in one\n", next: 10}} = Services.logs(c.services, "db", 0)
+    assert {:ok, %{text: "in one\n", next: 10}} = Services.logs(c.services, "db", 3)
+    assert {:ok, %{text: "", next: 10}} = Services.logs(c.services, "db", 10)
+    assert {:refused, {:no_service, "web"}} = Services.logs(c.services, "web", 0)
+  end
+
+  test "EndedIsEnded: a program that ignores TERM is ended by KILL after the grace", c do
+    assert {:ok, %{pid: pid}} = start(c, "web-a", "db", "box", script: "stubborn")
+    assert {:ok, _} = log(c, "box", "db")
+    began = System.monotonic_time(:millisecond)
+    assert {:ok, %{state: "ended"}} = Services.stop(c.services, "web-a", "db", timeout: 500)
+    assert System.monotonic_time(:millisecond) - began >= 500
+    assert {:ok, :gone} = gone(pid)
+  end
+
+  test "ServiceEndsWithOwner: a start that settles after its owner's end does not stay running",
+       c do
+    File.write!(Path.join(c.dir, "ended-web-a"), "")
+    assert {:refused, {:start, :owner_ended}} = start(c, "web-a", "db", "box")
+    assert %{state: "ended", owner: nil} = row(c, "db")
+    # The wrapper wrote the program's pid before the settle read the owner's end.
+    {:ok, pid} = File.read(Path.join(c.dir, "box/services/db.pid"))
+    assert {:ok, :gone} = gone(String.trim(pid))
+
+    assert {:ok, %{state: "running", owner: "web-main", keep: true}} =
+             start(c, "web-a", "web", "box", keep: true)
   end
 end
