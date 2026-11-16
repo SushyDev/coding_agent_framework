@@ -11,7 +11,9 @@ defmodule CodingAgentFramework.MCP.Plug do
   for another path, 405 for another method (there is no stream to `GET`). A request is one
   JSON-RPC message: `initialize`, `ping`, `tools/list` and `tools/call` get a JSON answer; a
   notification gets 202. A tool's outcome is its result's text, as JSON (`MCP.json/1`), with
-  `isError` unless it is `ok`.
+  `isError` unless it is `ok`. `reload`'s answer is an event stream that sends
+  `notifications/tools/list_changed` before the result, and `initialize` says the server sends
+  it (`listChanged`).
 
       iex> plug = CodingAgentFramework.MCP.Plug
       iex> conn = Plug.Test.conn(:post, "/mcp", "{}") |> plug.call(plug.init(mcp: self()))
@@ -63,7 +65,7 @@ defmodule CodingAgentFramework.MCP.Plug do
   defp answer(conn, _mcp, _agent, "initialize", %{"id" => id} = msg) do
     result = %{
       protocolVersion: get_in(msg, ["params", "protocolVersion"]) || @protocol,
-      capabilities: %{tools: %{}},
+      capabilities: %{tools: %{listChanged: true}},
       serverInfo: %{name: "caf", version: "0.1.0"}
     }
 
@@ -86,7 +88,12 @@ defmodule CodingAgentFramework.MCP.Plug do
       isError: elem(outcome, 0) != :ok
     }
 
-    reply(conn, id, result)
+    if tool == "reload" and elem(outcome, 0) == :ok do
+      note = %{jsonrpc: "2.0", method: "notifications/tools/list_changed"}
+      stream(conn, [note, rpc(id, result)])
+    else
+      reply(conn, id, result)
+    end
   end
 
   defp answer(conn, _mcp, _agent, _method, %{"id" => id}) do
@@ -98,4 +105,11 @@ defmodule CodingAgentFramework.MCP.Plug do
 
   defp send_json(conn, value),
     do: conn |> put_resp_content_type("application/json") |> send_resp(200, JSON.encode!(value))
+
+  # MCP's HTTP transport lets a POST answer with an event stream, which may carry messages to the
+  # client before the response; the stream ends after it.
+  defp stream(conn, messages) do
+    body = Enum.map_join(messages, &"event: message\ndata: #{JSON.encode!(&1)}\n\n")
+    conn |> put_resp_content_type("text/event-stream") |> send_resp(200, body)
+  end
 end

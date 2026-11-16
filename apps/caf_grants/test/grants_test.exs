@@ -116,6 +116,8 @@ defmodule CodingAgentFramework.GrantsTest do
     assert Grants.may_start_service?(g, "app-main") == :ok
     assert Grants.may_start_service?(g, "app-d1") == :ok
     assert Grants.may_start_service?(g, "nobody") == {:refused, {:unknown_agent, "nobody"}}
+    assert Grants.may_use?(g, "app-d1") == :ok
+    assert Grants.may_use?(g, "nobody") == {:refused, {:unknown_agent, "nobody"}}
     assert Grants.parent(g, "app-d1") == {:ok, "app-main"}
     assert Grants.parent(g, "app-main") == {:refused, :main_has_no_parent}
   end

@@ -20,6 +20,8 @@ defmodule CafMcp.MixProject do
       {:caf_grants, in_umbrella: true},
       {:exqlite, "~> 0.43.0"},
       {:plug, "~> 1.20"},
+      {:caf_copies, in_umbrella: true, only: :test},
+      {:caf_jobs, in_umbrella: true, only: :test},
       {:caf_test, in_umbrella: true, only: :test},
       {:bandit, "~> 1.14", only: :test}
     ]
