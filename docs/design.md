@@ -261,9 +261,15 @@ its host, as it has since the first part built, so the workstation is one host a
   refused, and the row reports `{port, local}`. The service's end ends its forward first and is
   done only once both sockets read dead; a forward whose socket reads dead while its service
   runs is a loss `Recoveries` opens again once per state, the state being the service's held
-  process and the forward's open count. A workstation service needs no forward. Not built yet:
-  the forward's life beside the service's is a protocol `Copy.tla` does not cover, and is
-  modeled first (F-89);
+  process and the forward's open count. A workstation service needs no forward. `Copy.tla`
+  models the forward beside its service (F-91), and settles: a forward is open only when its own
+  ssh holds the local port, read from that process, never from a port that listens (another
+  program's listener would read the same); the service's start answers only once its forward is
+  open, and a forward that fails at its start ends the service, so no service runs without the
+  forward it asked for; a reopen acts only while the state it claimed (the service's current
+  start and the forward's open count) is still the row's, never on "the service runs"; a reopen
+  that fails or that a restart cut off leaves the forward `failed` for a person, and nothing
+  opens it again until the service's next start;
 - a reader of a whole host (held sockets, the `TmuxSampler`) has the `Tracker` scope
   `{host, :host}`, beside the `{host, account}` of a reader of one account;
 - the `TmuxSampler` reads a host's panes and then its sockets, not in one instant, so a viewer
