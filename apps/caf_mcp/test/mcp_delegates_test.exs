@@ -11,7 +11,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
   alias CodingAgentFramework.{Tracker, Transcripts, Usage}
   alias CodingAgentFramework.Delegates.Table
   alias CodingAgentFramework.Grants.Claims
-  alias CodingAgentFramework.HeadlessStandIn
+  alias CodingAgentFramework.{HeadlessStandIn, Operator}
 
   setup {SessionsSetup, :sessions}
 
@@ -68,7 +68,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
       [%{name: "app-old", parent: "main"}, %{name: "lib-old", parent: "lmain"} | rows]
     end
 
-    grants = Grants.new(tree)
+    grants = Grants.new(tree, operator: "op")
 
     claims =
       start_supervised!(
@@ -237,7 +237,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     assert tool(ctx, "app-old", "interrupt", one) == %{"refused" => "only_parent_fixes"}
 
     assert tool(ctx, "app-old", "stop", %{"agent" => "main"}) == %{
-             "refused" => "main_never_fixed"
+             "refused" => "main_fixed_by_operator_only"
            }
 
     assert tool(ctx, "stray", "resume", one) == %{"refused" => ["unknown_agent", "stray"]}
@@ -344,6 +344,48 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     assert {:ok, %{resumes: 1}} = cue_until(ctx, &(&1.status == "finished"))
     assert tool(ctx, "main", "resume", one) == %{"refused" => "resumed_once"}
     assert {:ok, [%{status: "verified"}, %{status: "not_verified"}]} = Claims.rows(ctx.claims)
+  end
+
+  test "the operator acts as a parent of every main session, under its own name", ctx do
+    File.write!(Path.join(ctx.dir, "hold"), "")
+    start = &Operator.start_delegate(ctx.mcp, &1, "app", "unit/one", "opus", "Review it.")
+
+    # It starts a delegate under a main session it names, which must be one.
+    assert {:refused, :main_session_only} = start.("app-old")
+    assert {:ok, %{delegate: "app-unit-one"}} = start.("main")
+    {:ok, %{session_id: sid, brief_uuid: u}} = await(fn -> running(ctx, "app-unit-one") end)
+    {:ok, _} = await(fn -> requested(ctx, sid, "req-" <> u) end, 10_000)
+
+    # Its fix acts as the delegate's parent would, and the claim is under its own name.
+    assert {:ok, %{claim: claim, settled: {:ok, _}}} =
+             Operator.answer(ctx.mcp, "app-unit-one", "req-" <> u, "deny")
+
+    assert {:ok, %{caller: "op", target: "app-unit-one"}} = Claims.get(ctx.claims, claim)
+    assert "answer req-#{u}" in HeadlessStandIn.taken(ctx.dir)
+
+    # A main session's own fixes wait for `Mains`, and no agent fixes one. A service's fix goes
+    # to `Services` as the operator's. No token calls as the operator.
+    assert Operator.interrupt(ctx.mcp, "main") == {:refused, {:not_built, :main_fix}}
+
+    assert tool(ctx, "lmain", "interrupt", %{"agent" => "main"}) == %{
+             "refused" => "main_fixed_by_operator_only"
+           }
+
+    assert Operator.service_restart(ctx.mcp, "web") == {:unknown, {:unused, "op", "web"}}
+    assert MCP.issue(ctx.mcp, "op") == {:refused, {:reserved, "op"}}
+
+    assert for(%{agent: "op", tool: t} <- MCP.calls(ctx.mcp), do: t) ==
+             ~w(start_delegate start_delegate answer interrupt service_restart)
+  end
+
+  # `Services`, which this test does not run: it says who asked.
+  def restart(:unused, caller, name, _opts), do: {:unknown, {:unused, caller, name}}
+
+  defp running(ctx, name) do
+    case Enum.find(Table.with_status(ctx.dtable, "test", ~w(running)), &(&1.name == name)) do
+      %{session_id: sid} = row when is_binary(sid) -> {:ok, row}
+      _ -> nil
+    end
   end
 
   # Starts a delegate whose brief waits on a permission request, and answers the request's id

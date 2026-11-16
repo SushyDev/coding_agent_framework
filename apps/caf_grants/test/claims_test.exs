@@ -71,7 +71,10 @@ defmodule CodingAgentFramework.Grants.ClaimsTest do
   test "MayFix: a refused check writes no row", ctx do
     claims = open(ctx, "s1")
     assert {:refused, :no_self_fix} = Claims.claim(claims, "app-a", "app-a", 1, "s1")
-    assert {:refused, :main_never_fixed} = Claims.claim(claims, "app-a", "app-main", 1, "s1")
+
+    assert {:refused, :main_fixed_by_operator_only} =
+             Claims.claim(claims, "app-a", "app-main", 1, "s1")
+
     assert {:refused, :only_parent_fixes} = Claims.claim(claims, "app-a", "app-b", 1, "s1")
 
     assert {:refused, {:unknown_agent, "ghost"}} =

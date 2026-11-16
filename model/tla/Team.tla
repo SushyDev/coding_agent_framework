@@ -12,7 +12,12 @@
 (* session; when the delegate's process ends first, with no result, a      *)
 (* notice from the framework goes there in its place (F-79). A fix         *)
 (* is a main session's act on its own delegate, under a claim on the       *)
-(* delegate's current state. A service is owned by                         *)
+(* delegate's current state. The operator, a person or the app acting from *)
+(* outside the tree, is a parent of every main session and so of every     *)
+(* agent: it messages any agent and fixes any agent, a main session as its *)
+(* parent, through the same checks, claims and Mailbox order, and every    *)
+(* row it writes names it (F-109). It owns no service, and no stop ends a  *)
+(* main session. A service is owned by                                     *)
 (* one agent, fixed by its owner or the owner's parent, handed to the      *)
 (* owner's parent or a child, and ended or kept when its owner ends.       *)
 (*                                                                         *)
@@ -36,7 +41,8 @@
 (*             and its end with its owner (durable);                       *)
 (*   MCP       the calls: message, interrupt, resume, stop, service_start, *)
 (*             service_restart, service_stop and service_hand, each with   *)
-(*             its caller's fixed identity.                                *)
+(*             its caller's fixed identity; the operator's acts            *)
+(*             (`Operator`) go through the same calls under its name.      *)
 (*                                                                         *)
 (* Left abstract: the text of a message, and how its sender reads its row; *)
 (* the screen and the input box (Control's write checks them in one step); *)
@@ -74,7 +80,11 @@
 (* one relation, "the caller is the target's main session": no agent fixes *)
 (* itself and none fixes a main session, because a main session has no    *)
 (* parent. SiblingFix, SelfFix and FixMain each widen that relation by one *)
-(* wrong case, as a mistaken check would. `rmem` and `last` are what       *)
+(* wrong case, as a mistaken check would. The operator's Breaks each let   *)
+(* its acts skip one guard a parent's take, as an app-level path that      *)
+(* copied the checks wrongly would, or widen what it may do by one wrong   *)
+(* case (a stop of a main session, a service handed to it). `rmem` and     *)
+(* `last` are what                                                         *)
 (* ReplyInMemory's and SelfReply's wrong readers hold; the design never    *)
 (* writes them.                                                            *)
 (*                                                                         *)
@@ -93,6 +103,7 @@ CONSTANTS
     MaxFaults,    \* times an agent sticks or dies, all agents together
     MaxRestarts,  \* restarts of the framework
     SelfTurns,    \* a delegate may start a turn by itself
+    Operators,    \* {} or {the operator}: a person or the app, outside the tree
     Break         \* "none", or the guard made wrong (see Breaks)
 
 Breaks == {
@@ -117,17 +128,25 @@ Breaks == {
     "ReplyInMemory",         \* a reply's once-check is a set held in memory, not the table's key
     "ReplyAndNotice",        \* a notice read from the process's end, not the fold, keyed apart
     "SelfReply",             \* a reply is the last result since the message, whatever it names
-    "NoNotice"               \* a message whose turn ended with no result gets no notice
+    "NoNotice",              \* a message whose turn ended with no result gets no notice
+    "OperatorTwoClaims",     \* the operator's claim does not check for one on the same state
+    "OperatorStaleFix",      \* the operator's fix acts without checking the claimed state
+    "OperatorIntoRunningTurn", \* the operator's message is typed without checking the turn
+    "OperatorStopsMain",     \* the operator's stop is granted on a main session
+    "HandToOperator"         \* a main session may hand a service to the operator, its parent
 }
 
 Agents == UNION Projects
 Delegates == Agents \ Mains
+Actors == Agents \cup Operators   \* who calls: an agent, or the operator
 
 ASSUME Break \in Breaks
 ASSUME \A P \in Projects : Cardinality(P \cap Mains) = 1
 ASSUME \A P, Q \in Projects : P # Q => P \cap Q = {}
 ASSUME Mains \subseteq Agents
 ASSUME MaxMsgs \in Nat /\ MaxFaults \in Nat /\ MaxRestarts \in Nat /\ SelfTurns \in BOOLEAN
+\* The operator's name is reserved: no agent holds it.
+ASSUME Cardinality(Operators) <= 1 /\ Operators \cap Agents = {}
 
 None == "none"
 Ids == 1..MaxMsgs
@@ -144,24 +163,30 @@ Main(a) == CHOOSE m \in Mains : \E P \in Projects : {a, m} \subseteq P
 IsChild(t, c) == t \in Delegates /\ Main(t) = c
 Siblings(a, b) == a # b /\ a \in Delegates /\ b \in Delegates /\ Main(a) = Main(b)
 
-\* Grants: the edges a message goes along.
-Edge(c, t) == \/ c \in Mains /\ t \in Mains /\ c # t
+\* Grants: the edges a message goes along. The operator, a parent of every
+\* main session, reaches every agent; no agent messages it.
+Edge(c, t) == \/ c \in Operators /\ t \in Agents
+              \/ c \in Mains /\ t \in Mains /\ c # t
               \/ IsChild(t, c)
               \/ IsChild(c, t)
 
-\* Grants: a fix is a parent's act on its own child. Each Break widens it by one case.
-MayFix(c, t) == \/ IsChild(t, c)
+\* Grants: a fix is a parent's act on its own child; the operator's on any
+\* agent. Each Break widens it by one case.
+MayFix(c, t) == \/ c \in Operators
+                \/ IsChild(t, c)
                 \/ Break = "SiblingFix" /\ Siblings(c, t)
                 \/ Break = "SelfFix" /\ c = t
                 \/ Break = "FixMain" /\ Edge(c, t)
 
-\* Grants: a service is fixed by its owner or the owner's parent.
-MayFixService(c, o) == c = o \/ IsChild(o, c) \/ Break = "ServiceFixAnyone"
+\* Grants: a service is fixed by its owner or the owner's parent, or the operator.
+MayFixService(c, o) == c = o \/ IsChild(o, c) \/ c \in Operators \/ Break = "ServiceFixAnyone"
 
-\* Grants: the owner hands a service to its parent or one of its children.
+\* Grants: the owner hands a service to its parent or one of its children,
+\* never to the operator, which owns nothing.
 MayHand(c, o, b) == /\ c = o \/ Break = "HandByOther"
                     /\ \/ IsChild(o, b) \/ IsChild(b, o)
                        \/ Break = "HandToSibling" /\ Siblings(o, b)
+                       \/ Break = "HandToOperator" /\ o \in Mains /\ b \in Operators
 
 VARIABLES
     up,        \* the framework runs
@@ -169,10 +194,10 @@ VARIABLES
     proc,      \* a -> "working", "idle", "stuck", "dead", "ended"
     epoch,     \* a -> the number of a's state
     faults,    \* sticks and deaths so far
-    msgs,      \* table: i -> [from, to (addressee), st]
+    msgs,      \* table: i -> [from (an actor), to (addressee), st]
     msend,     \* in memory: i -> "none", "asked" (row says sending), "sent" (typed, row not marked)
     inbox,     \* a -> the message ids in a's transcript, in order
-    claims,    \* table: the claims, [by, t, ep, kind, n]
+    claims,    \* table: the claims, [by (an actor), t, ep, kind, n]
     done,      \* table: the claims whose call has ended
     calls,     \* in memory: the claims whose fix is under way
     fixed,     \* ghost: the states <<t, ep>> a fix acted on
@@ -193,7 +218,9 @@ svcVars == <<svc, owner, keep>>
 vars == <<up, restarts, agentVars, msgVars, claimVars, svcVars, replyVars, wrong>>
 
 Sent == {i \in Ids : msgs[i].st # "none"}
-Live(a) == proc[a] # "ended"
+\* The operator is outside the tree, and never ends. An IF, since TLC splits a
+\* disjunction in an action and would read `proc` of the operator.
+Live(a) == IF a \in Operators THEN TRUE ELSE proc[a] # "ended"
 
 -----------------------------------------------------------------------------
 Init ==
@@ -299,10 +326,16 @@ DeliveryAsked(i) ==
 Typeable(a) ==
     proc[a] = "idle" \/ (Break = "IntoRunningTurn" /\ proc[a] \in {"working", "stuck"})
 
+\* Message i may go in now: the same check whoever sent it.
+TypeableNow(i) ==
+    \/ Typeable(msgs[i].to)
+    \/ /\ Break = "OperatorIntoRunningTurn" /\ msgs[i].from \in Operators
+       /\ proc[msgs[i].to] \in {"working", "stuck"}
+
 \* Control's checked write: the message is the target's new turn.
 DeliveryTyped(i) ==
     LET a == msgs[i].to IN
-    /\ up /\ msend[i] = "asked" /\ Typeable(a)
+    /\ up /\ msend[i] = "asked" /\ TypeableNow(i)
     /\ msend' = [msend EXCEPT ![i] = "sent"]
     /\ inbox' = [inbox EXCEPT ![a] = Append(@, i)]
     /\ proc' = [proc EXCEPT ![a] = "working"]
@@ -312,7 +345,7 @@ DeliveryTyped(i) ==
     /\ UNCHANGED <<up, restarts, epoch, faults, msgs, claimVars, svcVars, answers, rmem>>
 
 DeliveryRefused(i) ==
-    /\ up /\ msend[i] = "asked" /\ ~Typeable(msgs[i].to)
+    /\ up /\ msend[i] = "asked" /\ ~TypeableNow(i)
     /\ msend' = [msend EXCEPT ![i] = "none"] /\ msgs' = [msgs EXCEPT ![i].st = "queued"]
     /\ UNCHANGED <<up, restarts, agentVars, inbox, claimVars, svcVars, wrong, replyVars>>
 
@@ -392,17 +425,25 @@ Kind(t) == CASE proc[t] = "stuck" -> "interrupt"
 \* The caller's calls already on this state: a second one is `n` = 2.
 Calls(c, t) == {q \in claims : q.by = c /\ q.t = t /\ q.ep = epoch[t]}
 
+\* A stop ends a delegate only: a main session's end is a person's, outside Grants.
+Stoppable(t) == t \in Delegates \/ Kind(t) # "stop" \/ Break = "OperatorStopsMain"
+
 ClaimTaken(c, t) ==
     LET r == [by |-> c, t |-> t, ep |-> epoch[t], kind |-> Kind(t),
               n |-> Cardinality(Calls(c, t)) + 1] IN
     /\ up /\ Live(c) /\ r.n <= 2
     /\ proc[t] \in {"stuck", "dead", "idle"}
-    /\ MayFix(c, t)
-    /\ (~\E q \in claims : q.t = t /\ q.ep = epoch[t]) \/ Break = "TwoClaims"
+    /\ MayFix(c, t) /\ Stoppable(t)
+    /\ \/ ~\E q \in claims : q.t = t /\ q.ep = epoch[t]
+       \/ Break = "TwoClaims"
+       \/ Break = "OperatorTwoClaims" /\ c \in Operators
     /\ claims' = claims \cup {r} /\ calls' = calls \cup {r}
     /\ UNCHANGED <<up, restarts, agentVars, msgVars, done, fixed, svcVars, wrong, replyVars>>
 
-CanAct(r) == (epoch[r.t] = r.ep \/ Break = "StaleFix") /\ proc[r.t] = Needs[r.kind]
+CanAct(r) ==
+    /\ \/ epoch[r.t] = r.ep \/ Break = "StaleFix"
+       \/ Break = "OperatorStaleFix" /\ r.by \in Operators
+    /\ proc[r.t] = Needs[r.kind]
 
 \* The fix acts on the state it claimed. An interrupt or a resume may not
 \* help; the state is then still claimed. An interrupt that helps ends the
@@ -449,7 +490,8 @@ ServiceFixed(c, s) ==
     /\ up /\ svc[s] = "running" /\ Live(c) /\ MayFixService(c, owner[s])
     /\ \/ svc' = [svc EXCEPT ![s] = "ended"] /\ owner' = [owner EXCEPT ![s] = None]
        \/ UNCHANGED <<svc, owner>>
-    /\ wrong' = wrong \cup (IF c = owner[s] \/ IsChild(owner[s], c) THEN {} ELSE {"service fix"})
+    /\ wrong' = wrong \cup (IF c = owner[s] \/ IsChild(owner[s], c) \/ c \in Operators
+                              THEN {} ELSE {"service fix"})
     /\ UNCHANGED <<up, restarts, agentVars, msgVars, claimVars, keep, replyVars>>
 
 ServiceHanded(c, s, b) ==
@@ -476,14 +518,15 @@ Next ==
     \/ FrameworkDies \/ FrameworkStarts
     \/ \E a \in Agents : \/ Prompted(a) \/ SelfStarts(a) \/ TurnEnds(a) \/ Faults(a)
                          \/ DelegateEnds(a)
-    \/ \E c, t \in Agents : Send(c, t) \/ ClaimTaken(c, t)
+    \/ \E c \in Actors, t \in Agents : Send(c, t) \/ ClaimTaken(c, t)
     \/ \E i \in Ids : \/ DeliveryAsked(i) \/ DeliveryTyped(i) \/ DeliveryRefused(i)
                       \/ DeliveryMarked(i) \/ SendingSettled(i) \/ EndedFirst(i)
                       \/ ReplyStored(i) \/ NoticeStored(i)
     \/ \E r \in claims : FixActs(r) \/ FixRefused(r) \/ ClaimSettled(r)
     \/ \E s \in Services : \/ ServiceOwnerEnded(s)
-                           \/ \E a \in Agents : ServiceStarts(a, s) \/ ServiceFixed(a, s)
-                           \/ \E c, b \in Agents : ServiceHanded(c, s, b)
+                           \/ \E a \in Agents : ServiceStarts(a, s)
+                           \/ \E a \in Actors : ServiceFixed(a, s)
+                           \/ \E c \in Agents, b \in Actors : ServiceHanded(c, s, b)
 
 Fairness ==
     /\ WF_vars(FrameworkStarts)
@@ -507,7 +550,8 @@ TypeOK ==
     /\ epoch \in [Agents -> 0..MaxEpoch]
     /\ msend \in [Ids -> {"none", "asked", "sent"}]
     /\ \A i \in Ids : msgs[i].st \in {"none", "queued", "sending", "delivered", "ended"}
-    /\ claims \subseteq [by : Agents, t : Agents, ep : 0..MaxEpoch, kind : Kinds, n : 1..2]
+    /\ \A i \in Ids : msgs[i].from \in Actors /\ msgs[i].to \in Agents
+    /\ claims \subseteq [by : Actors, t : Agents, ep : 0..MaxEpoch, kind : Kinds, n : 1..2]
     /\ calls \subseteq claims \ done /\ done \subseteq claims
     /\ svc \in [Services -> {"none", "running", "ended"}]
     /\ owner \in [Services -> Agents \cup {None}]
@@ -546,11 +590,13 @@ OneClaimPerState == \A q, r \in claims : q.t = r.t /\ q.ep = r.ep => q = r
 OneFixPerState == "twice" \notin wrong
 FixOnClaimedState == "stale" \notin wrong
 
-\* Only a parent fixes, and only its own child.
-OnlyParentFixes == \A r \in claims : IsChild(r.t, r.by)
+\* Only a parent fixes, and only its own child; the operator is a parent of
+\* every main session, and so of every agent.
+OnlyParentFixes == \A r \in claims : IsChild(r.t, r.by) \/ r.by \in Operators
 NoSelfFix == \A r \in claims : r.by # r.t
-MainNeverFixed == /\ \A r \in claims : r.t \notin Mains
-                  /\ \A m \in Mains : proc[m] # "ended"
+\* No agent fixes a main session, only the operator; no fix ends one.
+MainFixedByOperatorOnly == /\ \A r \in claims : r.t \in Mains => r.by \in Operators
+                           /\ \A m \in Mains : proc[m] # "ended"
 
 \* A running service has one owner; an ended one has none.
 OneOwner ==

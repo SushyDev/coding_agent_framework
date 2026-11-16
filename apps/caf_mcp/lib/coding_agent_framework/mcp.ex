@@ -20,9 +20,10 @@ defmodule CodingAgentFramework.MCP do
     `opts` may name `fetch` (paths). The answer is `Jobs`' own, except an unknown one: it is
     `{:unknown, %{job: id, reason: reason}}`, so the caller can match the job's late end,
     which comes as a message, to the call;
-  - `start_delegate(project, branch, model, brief)`: `Grants.may_start_delegate?/2`, then the
-    delegates' `start_delegate/7` with the caller as parent; answers `%{delegate: name}`, or the
-    start's refusal. The report comes later as a message. Both take optional `options`;
+  - `start_delegate(project, branch, model, brief)`: `Grants.may_start_delegate?/3`, then the
+    delegates' `start_delegate/7` with the caller as parent (the operator names a main session
+    as `parent`); answers `%{delegate: name}`, or the start's refusal. The report comes later
+    as a message. Both take optional `options`;
   - `run_delegate(project, branch, model, brief, timeout)`: as `start_delegate`, then the
     delegates' `await_report/4`, all within `timeout` (ms, capped as `run`'s, and under the
     client's tool timeout less the margin: `:tool_timeout` and `:margin`, so the client never
@@ -50,8 +51,9 @@ defmodule CodingAgentFramework.MCP do
     `look`: a delegate's state, held requests, and last lines of its event log (`Stream.log/4`)
     and transcript (`Transcripts.text/4`), each with its own refusal; `transcript`: whole lines
     from byte `from`, and the next offset. A main session is refused until `Screen` and `Mains`.
-  - the fix tools, a parent's on its own delegate (`Grants.may_fix?/3`; a main session is
-    never fixed): `interrupt(agent)`, `answer(agent, dialog, label)` (`dialog` is the open
+  - the fix tools, a parent's on its own delegate, or the operator's on any (`Grants.may_fix?/3`;
+    no agent fixes a main session, and the operator's fix of one is refused `{:not_built,
+    :main_fix}` until `Mains`): `interrupt(agent)`, `answer(agent, dialog, label)` (`dialog` is the open
     `can_use_tool` request's id, `label` `allow` or `deny`), `resume(agent)` (a delegate whose
     process died) and `stop(agent)` (once its report is delivered). Each reads the delegate's
     state (`Delegates.fix_state/3`), claims it (`Grants.Claims.claim/6` with `:start_id`),
@@ -61,7 +63,9 @@ defmodule CodingAgentFramework.MCP do
     `{:already_claimed, by}`. Answers `%{done: value, claim: id, settled: settle's answer}`,
     or the fix's refusal or unknown.
 
-  The design's other tools come in later parts (`docs/build-notes/F-86.md`).
+  **The operator** calls the same tools through `operate/3`, which writes its row under the
+  operator's name, so each act it makes names it as the actor; `issue/2` never makes it a
+  token. The design's other tools come in later parts (`docs/build-notes/F-86.md`).
 
       {:ok, mcp} = MCP.start_link(dir: dir, port: 4791, grants: grants, claims: claims, start_id: "s1",
         mailbox: {Mailbox, mailbox}, jobs: {Jobs, jobs}, delegates: {Delegates, delegates},
@@ -360,6 +364,21 @@ defmodule CodingAgentFramework.MCP do
   end
 
   @doc """
+  Calls `tool` with `args` as the operator (`docs/design.md`, "Concepts"): the person or the
+  app acting from outside the tree, under the name `Grants` was given. The call takes the same
+  path as an agent's, its checks, claims and row in the call log, which names the operator.
+  `start_delegate` and `run_delegate` take `parent`, the main session the delegate is under;
+  a fix acts as the target's parent would. `{:refused, :no_operator}` when `Grants` has none.
+  `CodingAgentFramework.Operator` names each act.
+
+      MCP.operate(mcp, "interrupt", %{"agent" => "app-unit-review"})
+      #=> {:ok, %{done: :sent, claim: 4, settled: {:ok, :verified}}}
+  """
+  @spec operate(GenServer.server(), String.t(), map) ::
+          {:ok, term} | {:refused, term} | {:unknown, term}
+  def operate(mcp, tool, args), do: call(mcp, :operator, tool, args)
+
+  @doc """
   Calls `tool` as `call/4` does, then writes its outcome with `write`, the endpoint's write of
   the answer to the agent, and answers what `write` answered. `write` answers `{:ok, _}` once
   the answer is written, and anything else when it was not; a report `run_delegate` took is
@@ -372,7 +391,7 @@ defmodule CodingAgentFramework.MCP do
         when written: term
   def answer(mcp, agent, tool, args, write) do
     case ask(mcp, {:called, agent, tool, JSON.encode!(args)}) do
-      {:ok, id, ctx} ->
+      {:ok, id, ctx, agent} ->
         {outcome, taken} = taken(act(ctx, agent, id, tool, args))
         # The outcome stands whether or not its row is written; a row left `called` reads `cut`.
         ask(mcp, {:answered, id, JSON.encode!(json(outcome))})
@@ -466,7 +485,7 @@ defmodule CodingAgentFramework.MCP do
   end
 
   defp act(ctx, caller, _id, "start_delegate", args) do
-    with {:ok, start} <- start_args(args),
+    with {:ok, start} <- start_args(ctx, args, caller),
          {:ok, %{name: name}} <- start_delegate(ctx, caller, start, @start_wait),
          do: {:ok, %{delegate: name}}
   end
@@ -478,12 +497,12 @@ defmodule CodingAgentFramework.MCP do
     under = ctx.tool_timeout - ctx.margin
 
     with true <- t < under or {:refused, {:timeout, {:under, under}}},
-         {:ok, start} <- start_args(args),
+         {:ok, [parent | _] = start} <- start_args(ctx, args, caller),
          {:ok, %{id: id, name: name}} <- start_delegate(ctx, caller, start, min(t, @start_wait)) do
       left = deadline - now()
 
       answer =
-        if left > 0, do: mod.await_report(server, caller, id, left), else: {:unknown, :timeout}
+        if left > 0, do: mod.await_report(server, parent, id, left), else: {:unknown, :timeout}
 
       case answer do
         {:ok, r} -> {:taken, id, {:ok, %{delegate: name, status: r.status, report: r.text}}}
@@ -613,12 +632,13 @@ defmodule CodingAgentFramework.MCP do
 
     with {:ok, fix} <- fix(tool, a),
          :ok <- Grants.may_fix?(ctx.grants, caller, agent),
-         {:ok, state} <- mod.fix_state(server, caller, agent),
+         {:ok, parent} <- as_parent(ctx, caller, agent),
+         {:ok, state} <- mod.fix_state(server, parent, agent),
          {:ok, claim} <- Claims.claim(ctx.claims, caller, agent, state, ctx.start_id) do
-      outcome = mod.fix(server, caller, agent, fix, state)
+      outcome = mod.fix(server, parent, agent, fix, state)
 
       verdict =
-        case {outcome, mod.fix_state(server, caller, agent)} do
+        case {outcome, mod.fix_state(server, parent, agent)} do
           {{:ok, _}, {:ok, read}} when read != state -> :verified
           _ -> :not_verified
         end
@@ -704,22 +724,37 @@ defmodule CodingAgentFramework.MCP do
 
   defp lines(other, _last?), do: other
 
-  defp start_args(args) do
-    start = Enum.map(~w(project branch model brief), &Map.get(args, &1))
+  # An agent's delegate is its own: its `parent` argument is never read. The operator names the
+  # main session, which `Grants` then checks.
+  defp start_args(ctx, args, caller) do
+    parent = if caller == Grants.operator(ctx.grants), do: args["parent"], else: caller
+    start = [parent | Enum.map(~w(project branch model brief), &Map.get(args, &1))]
 
     if Enum.all?(start, &is_binary/1),
       do: {:ok, start ++ [Map.get(args, "options")]},
       else: {:refused, {:bad, :args}}
   end
 
-  # The caller is the delegate's parent; the start's own wait is at most `wait`. `Delegates`
-  # checks the options.
-  defp start_delegate(ctx, caller, [project, branch, model, brief, options], wait) do
+  # The start's own wait is at most `wait`. `Delegates` checks the options.
+  defp start_delegate(ctx, caller, [parent, project, branch, model, brief, options], wait) do
     {mod, server} = ctx.delegates
     opts = [timeout: wait, options: options]
 
-    with :ok <- Grants.may_start_delegate?(ctx.grants, caller),
-         do: mod.start_delegate(server, caller, project, branch, model, brief, opts)
+    with :ok <- Grants.may_start_delegate?(ctx.grants, caller, parent),
+         do: mod.start_delegate(server, parent, project, branch, model, brief, opts)
+  end
+
+  # `Delegates` knows a delegate by its parent: the operator's fix acts as that parent would.
+  # A main session's own fixes need `Mains`.
+  defp as_parent(ctx, caller, agent) do
+    if caller == Grants.operator(ctx.grants) do
+      case Grants.parent(ctx.grants, agent) do
+        {:refused, :main_has_no_parent} -> {:refused, {:not_built, :main_fix}}
+        found -> found
+      end
+    else
+      {:ok, caller}
+    end
   end
 
   defp now, do: System.monotonic_time(:millisecond)
@@ -760,6 +795,10 @@ defmodule CodingAgentFramework.MCP do
   end
 
   @impl true
+  # No token ever calls as the operator.
+  def handle_call({:issue, agent}, _from, s) when agent == s.ctx.grants.operator,
+    do: {:reply, {:refused, {:reserved, agent}}, s}
+
   def handle_call({:issue, agent}, _from, s) do
     token = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
     path = Path.join([s.dir, "agents", agent <> ".json"])
@@ -793,8 +832,16 @@ defmodule CodingAgentFramework.MCP do
 
   def handle_call({:who, _}, _from, s), do: {:reply, {:refused, :unknown_token}, s}
 
+  # The operator's name is `Grants`', so its row names it as any agent's row names its agent.
+  def handle_call({:called, :operator, tool, args}, from, s) do
+    case Grants.operator(s.ctx.grants) do
+      nil -> {:reply, {:refused, :no_operator}, s}
+      name -> handle_call({:called, name, tool, args}, from, s)
+    end
+  end
+
   def handle_call({:called, agent, tool, args}, _from, s),
-    do: {:reply, {:ok, Table.called(s.db, agent, tool, args), s.ctx}, s}
+    do: {:reply, {:ok, Table.called(s.db, agent, tool, args), s.ctx, agent}, s}
 
   def handle_call({:answered, id, outcome}, _from, s),
     do: {:reply, Table.answered(s.db, id, outcome), s}

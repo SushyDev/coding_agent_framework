@@ -19,6 +19,10 @@ defmodule CodingAgentFramework.Example do
   part a restart replaced gets the cues from then on, and one not started yet misses nothing:
   every part reads its whole table when it starts.
 
+  **The operator.** The app's own acts on agents, from a view say, go through
+  `CodingAgentFramework.Operator` with `parts(sup).mcp`, under the config's `operator` name,
+  which every part's `Grants` knows: the same checks, claims and call log as an agent's tools.
+
   **Once per start.** `start_link/1` makes the claims' `start_id` and the hooks' secret, and
   writes each account's files with that secret, before any part starts.
 
@@ -108,7 +112,8 @@ defmodule CodingAgentFramework.Example do
 
   defp children(w, notify) do
     %{c: c, programs: p, db: db} = w
-    {host, every, grants} = {c.workstation, c.interval, Grants.new(tree(w))}
+    grants = Grants.new(tree(w), operator: c.operator)
+    {host, every} = {c.workstation, c.interval}
     accounts = fn pid, kind -> Map.new(c.accounts, &{&1, pid.({kind, &1})}) end
     at = fn pid, kind -> Map.new(accounts.(pid, kind), fn {a, x} -> {a, {Transcripts, x}} end) end
     hosts = Map.put(c.hosts, host, %{programs: p, dir: Config.path(c, "ws")})
