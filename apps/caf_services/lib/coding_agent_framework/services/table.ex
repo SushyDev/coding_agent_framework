@@ -35,19 +35,38 @@ defmodule CodingAgentFramework.Services.Table do
     state TEXT NOT NULL, start_until INTEGER, end_until INTEGER, log_from INTEGER,
     port INTEGER, local INTEGER, fwd TEXT, opens INTEGER NOT NULL);
   """
+  # A file made before a column gains it; a newer file already has it.
+  @added [
+    "log_from INTEGER",
+    "port INTEGER",
+    "local INTEGER",
+    "fwd TEXT",
+    "opens INTEGER NOT NULL DEFAULT 0"
+  ]
 
   @type db :: Sqlite3.db()
 
-  @doc "Opens (and creates) the file at `path`, with the table."
+  @doc "Opens (and creates) the file at `path`, with the table; an older file gains its new columns."
   @spec open(String.t()) :: {:ok, db} | {:refused, term}
   def open(path) do
     with {:ok, db} <- Sqlite3.open(path),
          :ok <- Sqlite3.set_busy_timeout(db, 5_000),
-         :ok <- Sqlite3.execute(db, @schema) do
+         :ok <- Sqlite3.execute(db, @schema),
+         :ok <- add_columns(db) do
       {:ok, db}
     else
       {:error, reason} -> {:refused, {:sqlite, reason}}
     end
+  end
+
+  defp add_columns(db) do
+    Enum.reduce_while(@added, :ok, fn column, :ok ->
+      case Sqlite3.execute(db, "ALTER TABLE services ADD COLUMN " <> column) do
+        :ok -> {:cont, :ok}
+        {:error, "duplicate column name" <> _} -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
   end
 
   @doc "The row of `name`, or nil."

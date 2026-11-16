@@ -103,6 +103,10 @@ defmodule CodingAgentFramework.Services do
   """
   # How long a forward has to open, when no call names it.
   @fwd_timeout 10_000
+  # Each read a forward's hold makes in `Services`' own process (a reopen's socket read, the
+  # pid file's clear, dtach), and the call that waits for all three.
+  @hold_read 2_000
+  @hold_call 3 * @hold_read + 1_000
   # $1 the pid, $2 its start time, $3 ps, $4 kill, $5 the signal. The check and the signal run
   # in one process, so a pid another program took is never signaled.
   @end_script ~S"""
@@ -555,7 +559,8 @@ defmodule CodingAgentFramework.Services do
   # ends the service (`FailKeepsService`).
   defp forward(services, %{state: "running", fwd: "starting"} = row, opts) do
     with {:ok, ctx} <- context(services, row, @call),
-         {:ok, row, held} <- call(services, {:hold_forward, row.name, claim(row), %{}, false}),
+         {:ok, row, held} <-
+           call(services, {:hold_forward, row.name, claim(row), %{}, false}, @hold_call),
          do: settle_forward(services, ctx, row, held, opts)
   end
 
@@ -583,7 +588,8 @@ defmodule CodingAgentFramework.Services do
 
     with {:ok, row} <- row_of(services, name),
          {:ok, %{ws: %{}} = ctx} <- context(services, row, @call),
-         {:ok, row, held} <- call(services, {:hold_forward, name, expect, fields, true}),
+         {:ok, row, held} <-
+           call(services, {:hold_forward, name, expect, fields, true}, @hold_call),
          do: settle_forward(services, ctx, row, held, opts)
   end
 
@@ -751,7 +757,7 @@ defmodule CodingAgentFramework.Services do
   defp ws(config) do
     with {:ok, %{programs: programs, dir: dir}} <- host_of(config, config.workstation),
          dir = Path.join(dir, "services"),
-         {:ok, holder} <- Holder.new(programs, dir, timeout: 2_000),
+         {:ok, holder} <- Holder.new(programs, dir, timeout: @hold_read),
          {:ok, %{lsof: lsof}} <- Programs.take(programs, [:lsof]),
          do: {:ok, %{programs: programs, holder: holder, dir: dir, lsof: lsof}}
   end
@@ -765,9 +771,11 @@ defmodule CodingAgentFramework.Services do
 
   # In this process, so a service's end, written here, comes wholly before the claim's check or
   # wholly after the hold: an end that reads the forward's socket dead never meets a forward
-  # held after it. A reopen first reads the forward dead: a live one is no loss.
+  # held after it. A reopen of a claim still current first reads the forward dead: a live one is
+  # no loss.
   defp hold_forward(s, name, expect, fields, dead_first) do
     with {:ok, ws} <- ws(s.config),
+         {:ok, _} <- put_row(s, name, %{}, expect),
          :ok <- if(dead_first, do: forward_dead(ws, name), else: :ok),
          {:ok, row} <- put_row(s, name, fields, expect) do
       %{sh: sh, mkdir: mkdir, rm: rm} = ws.programs.paths
@@ -779,7 +787,7 @@ defmodule CodingAgentFramework.Services do
       env = Map.get(s.config.hosts[row.host], :ssh_env, [])
 
       held =
-        case Shell.run(ws.programs.host, sh, clear, timeout: @call) do
+        case Shell.run(ws.programs.host, sh, clear, timeout: @hold_read) do
           {:ok, %{status: 0}} ->
             Holder.hold(ws.holder, name, argv ++ ["-L", spec, "--", destination], env: env)
 
@@ -825,8 +833,8 @@ defmodule CodingAgentFramework.Services do
   defp put(services, name, fields, expect \\ %{}),
     do: call(services, {:put, name, fields, expect})
 
-  defp call(services, request) do
-    GenServer.call(services, request, @call)
+  defp call(services, request, timeout \\ @call) do
+    GenServer.call(services, request, timeout)
   catch
     :exit, reason -> {:unknown, {:services, reason}}
   end
@@ -837,8 +845,9 @@ defmodule CodingAgentFramework.Services do
 
     with :ok <- File.mkdir_p(dir),
          {:ok, db} <- Table.open(Path.join(dir, "services.db")) do
-      keys = [:hosts, :copies, :grants, :ended, :workstation]
+      keys = [:hosts, :copies, :grants, :ended]
       config = Map.new(keys, &{&1, Keyword.fetch!(opts, &1)})
+      config = Map.put(config, :workstation, Keyword.get(opts, :workstation))
       # A start not yet sent lost its call with the restart: nothing runs.
       for %{state: "asked"} = row <- Table.all(db),
           do: Table.put(db, %{row | state: "refused", owner: nil})
