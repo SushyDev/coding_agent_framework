@@ -1,14 +1,14 @@
 defmodule CodingAgentFramework.MCPDelegatesTest do
-  # `start_delegate` and `run_delegate` over a real `Delegates`, `Sessions` and `Stream`, real
-  # dtach and tmux, a git repository in this test's own directory, and the headless stand-in for
-  # Claude Code. The test is the MCP client, with a token, and cues `Delegates` as the embedding
-  # app's wiring would.
+  # `start_delegate`, `run_delegate`, `agents`, `look` and `transcript` over a real `Delegates`,
+  # `Sessions`, `Stream`, `Transcripts` and `Tracker`, real dtach and tmux, a git repository in
+  # this test's own directory (two projects share it), and the headless stand-in for Claude Code.
+  # The test is the MCP client, with a token, and cues as the embedding app's wiring would.
   use ExUnit.Case, async: true
 
   import CodingAgentFramework.TestHost
 
   alias CodingAgentFramework.{Accounts, Delegates, Grants, MCP, SessionsSetup, Stream}
-  alias CodingAgentFramework.{Transcripts, Usage}
+  alias CodingAgentFramework.{Tracker, Transcripts, Usage}
   alias CodingAgentFramework.Delegates.Table
 
   setup {SessionsSetup, :sessions}
@@ -46,16 +46,24 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
          transcripts: %{"work" => transcripts},
          launch:
            SessionsSetup.headless(ctx, :at_start) |> Keyword.take([:claude, :env, :tool_timeout]),
-         projects: %{"app" => project}}
+         projects: %{"app" => project, "lib" => %{project | name: "lib"}}}
       )
 
     {:ok, dtable} = Table.open(db)
 
+    sources = [
+      {Tracker.DelegatesSource, db: db, host: "test"},
+      {Tracker.StreamSource, db: db, host: "test"}
+    ]
+
+    sources = [{Tracker.TranscriptsSource, db: db, host: "test", account: "work"} | sources]
+    tracker = start_supervised!({Tracker, sources: sources, timer: false})
+
     # Until `Mains` exists, a main session is known as a parent a delegate's row names: `app-old`
-    # stands for an earlier delegate of `main`.
+    # and `lib-old` stand for earlier delegates of `main` and `lmain`.
     tree = fn ->
       rows = Table.with_status(dtable, "test", ~w(starting running resuming finished failed))
-      [%{name: "app-old", project: "app", parent: "main"} | rows]
+      [%{name: "app-old", parent: "main"}, %{name: "lib-old", parent: "lmain"} | rows]
     end
 
     mcp =
@@ -69,6 +77,9 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
          delegates: {Delegates, delegates},
          services: {__MODULE__, :unused},
          workstation: "ws",
+         tracker: {Tracker, tracker},
+         stream: {Stream, ctx.stream},
+         transcripts: %{"work" => {Transcripts, transcripts}},
          place: fn _ -> {:refused, :none} end,
          instance: "d",
          tool_timeout: 600_000,
@@ -76,12 +87,13 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
       )
 
     tokens =
-      for a <- ~w(main app-old stray), into: %{} do
+      for a <- ~w(main lmain app-old app-unit-one stray), into: %{} do
         {:ok, path} = MCP.issue(mcp, a)
         {a, JSON.decode!(File.read!(path))["mcpServers"]["caf"]["headers"]["x-caf-token"]}
       end
 
     %{mcp: mcp, tokens: tokens, delegates: delegates, dtable: dtable}
+    |> Map.merge(%{tracker: tracker, transcripts: transcripts})
   end
 
   defmodule BrokenSocket do
@@ -212,5 +224,103 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
       end,
       20_000
     )
+  end
+
+  defp start(ctx, main, project, branch) do
+    args = %{"project" => project, "branch" => branch, "model" => "opus", "brief" => "Go."}
+    %{"ok" => %{"delegate" => name}} = tool(ctx, main, "start_delegate", args)
+    name
+  end
+
+  # Reads `Stream`, cues `Delegates` and the `Tracker` (every topic, as a cue with no ids) until
+  # the tree's delegates all satisfy `ready?`.
+  defp settle(ctx, count, ready?) do
+    await(
+      fn ->
+        {:ok, _} = Stream.read(ctx.stream)
+        Delegates.cue(ctx.delegates, %{topic: "stream:test", ids: []})
+        Delegates.held(ctx.delegates, "main")
+
+        for t <- ~w(delegates:test stream:test transcripts:test:work),
+            do: Tracker.cue(ctx.tracker, %{topic: t})
+
+        {:ok, tree} = Tracker.agents(ctx.tracker)
+        delegates = Enum.filter(tree.agents, &(&1.kind == "delegate"))
+        if length(delegates) == count and Enum.all?(delegates, ready?), do: {:ok, tree}
+      end,
+      20_000
+    )
+  end
+
+  test "agents() is the Tracker's tree, for two projects; transcript reads from an offset", ctx do
+    start(ctx, "main", "app", "unit/one")
+    start(ctx, "lmain", "lib", "unit/two")
+    {:ok, tree} = settle(ctx, 2, &(&1.state == "idle"))
+
+    answer = tool(ctx, "app-unit-one", "agents", %{})
+    # The same tree; only the sources' ages move between the two reads.
+    expected =
+      MCP.json(%{tree | agents: Enum.map(tree.agents, &Map.drop(&1, [:session_id, :host]))})
+
+    assert Map.delete(answer["ok"], "sources") == Map.delete(expected, "sources")
+    assert Map.keys(answer["ok"]["sources"]) == Map.keys(expected["sources"])
+
+    assert [
+             %{"name" => "main", "kind" => "main", "project" => "app", "parent" => nil} = main,
+             %{"name" => "app-unit-one", "kind" => "delegate", "parent" => "main"} = one,
+             %{"name" => "lmain", "kind" => "main", "project" => "lib"},
+             %{"name" => "lib-unit-two", "project" => "lib", "parent" => "lmain"}
+           ] = answer["ok"]["agents"]
+
+    assert %{"account" => "work", "state" => "idle", "waits_on" => [], "subagents" => []} = one
+    refute Map.has_key?(main, "state")
+
+    # The transcript, written as Claude Code would, with a last line not yet whole.
+    {:ok, %{rows: rows}} = Stream.rows(ctx.stream)
+    %{session_id: sid} = Enum.at(tree.agents, 1)
+    %{transcript: path} = Enum.find(rows, &(&1.session == sid))
+    [one, two] = for p <- ~w(p1 p2), do: ~s({"type":"user","promptId":"#{p}","message":{}}\n)
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, one <> two <> ~s({"type":"us))
+    {:ok, %{failed: []}} = Transcripts.read(ctx.transcripts, [{sid, path}])
+    {args, size} = {%{"agent" => "app-unit-one", "from" => 0}, byte_size(one <> two)}
+
+    assert tool(ctx, "main", "transcript", args) ==
+             %{"ok" => %{"text" => one <> two, "from" => 0, "next" => size}}
+
+    assert tool(ctx, "main", "transcript", %{args | "from" => byte_size(one)}) ==
+             %{"ok" => %{"text" => two, "from" => byte_size(one), "next" => size}}
+
+    assert %{"ok" => %{"transcript" => text}} =
+             tool(ctx, "main", "look", %{"agent" => "app-unit-one"})
+
+    assert text == one <> two
+
+    assert tool(ctx, "lmain", "transcript", %{args | "agent" => "main"}) == %{
+             "refused" => "no_session"
+           }
+  end
+
+  test "look shows a held request and the log's end; a close read is refused off the edges",
+       ctx do
+    # While the file is there, the stand-in's turn waits on a permission request.
+    File.write!(Path.join(ctx.dir, "hold"), "")
+    start(ctx, "main", "app", "unit/one")
+    {:ok, _} = settle(ctx, 1, &(&1.state == "waiting"))
+
+    assert %{"ok" => look} = tool(ctx, "main", "look", %{"agent" => "app-unit-one"})
+    assert %{"state" => "waiting", "requests" => [%{"request" => "req-" <> _}]} = look
+    assert look["events"] =~ ~s("control_request")
+    assert look["transcript"] == %{"refused" => "unknown_session"}
+    assert {:ok, _} = MCP.call(ctx.mcp, "app-unit-one", "look", %{"agent" => "app-unit-one"})
+
+    refused = %{"refused" => "close_read_along_edges"}
+    assert tool(ctx, "lmain", "look", %{"agent" => "app-unit-one"}) == refused
+
+    assert tool(ctx, "app-old", "transcript", %{"agent" => "app-unit-one", "from" => 0}) ==
+             refused
+
+    assert tool(ctx, "lmain", "look", %{"agent" => "main"}) == %{"refused" => "no_screen"}
+    assert tool(ctx, "app-unit-one", "look", %{"agent" => "main"}) == %{"refused" => "no_screen"}
   end
 end

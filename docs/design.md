@@ -679,7 +679,7 @@ framework's tools, which are strict in how they act and narrow in whom they reac
 
 | Tool | Who | What it does |
 |---|---|---|
-| `agents()` | any agent | the tree: each agent's name, kind, project, parent, account, state (working, waiting, idle, stuck, gone), what it waits on, and its subagents |
+| `agents()` | any agent | the tree: each agent's name, kind, project, parent, account, state (working, waiting, idle, stuck, gone; `starting` while a start or resume is under way, `unread` while nothing has read its session yet), what it waits on, and its subagents, read from the `Tracker`'s view, never a copy (F-99) |
 | `message(to, text)` | along an edge | stores a message and delivers it to the target when its turn has ended; answers `queued{id}`, then the sender learns `delivered` |
 | `look(agent)` | parent, child, main sessions | a main session's screen as text, or a delegate's rendered event log; its open dialog or request; its last transcript lines |
 | `transcript(agent, from)` | parent, child, main sessions | the agent's transcript from an offset |

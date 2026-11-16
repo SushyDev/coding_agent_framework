@@ -15,6 +15,7 @@ defmodule CafTracker.MixProject do
 
   defp deps do
     [
+      {:caf_delegates, in_umbrella: true},
       {:caf_intake, in_umbrella: true},
       {:caf_recoveries, in_umbrella: true},
       {:caf_registry, in_umbrella: true},

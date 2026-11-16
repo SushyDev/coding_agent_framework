@@ -104,6 +104,17 @@ defmodule CodingAgentFramework.Delegates.Table do
   @spec get(db, integer) :: map | nil
   def get(db, id), do: List.first(select(db, "id = ?1", [id]))
 
+  @doc "The host's rows, every status, oldest first: what the `Tracker` reads."
+  @spec rows(db, String.t()) :: [map]
+  def rows(db, host), do: select(db, "host = ?1", [host])
+
+  @doc "The host's rows with these ids; an id with no row is absent."
+  @spec rows_by_id(db, String.t(), [integer]) :: [map]
+  def rows_by_id(_db, _host, []), do: []
+
+  def rows_by_id(db, host, ids),
+    do: select(db, "host = ?1 AND id IN (#{marks(ids, 2)})", [host | ids])
+
   defp marks(list, from), do: Enum.map_join(0..(length(list) - 1)//1, ",", &"?#{&1 + from}")
 
   defp select(db, where, args) do

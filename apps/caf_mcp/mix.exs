@@ -25,6 +25,7 @@ defmodule CafMcp.MixProject do
       {:caf_delegates, in_umbrella: true, only: :test},
       {:caf_sessions, in_umbrella: true, only: :test},
       {:caf_stream, in_umbrella: true, only: :test},
+      {:caf_tracker, in_umbrella: true, only: :test},
       {:caf_transcripts, in_umbrella: true, only: :test},
       {:caf_usage, in_umbrella: true, only: :test},
       {:caf_jobs, in_umbrella: true, only: :test},

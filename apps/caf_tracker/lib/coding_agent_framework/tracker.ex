@@ -55,6 +55,13 @@ defmodule CodingAgentFramework.Tracker do
   @spec view(GenServer.server(), keyword) :: {:ok, map} | {:refused, term} | {:unknown, term}
   def view(tracker, opts \\ []), do: call(tracker, :view, opts)
 
+  @doc "The tree, read from the view as `view/2` gives it (`CodingAgentFramework.Tracker.Tree`)."
+  @spec agents(GenServer.server(), keyword) :: {:ok, map} | {:refused, term} | {:unknown, term}
+  def agents(tracker, opts \\ []) do
+    with {:ok, view} <- view(tracker, opts),
+         do: {:ok, CodingAgentFramework.Tracker.Tree.agents(view)}
+  end
+
   @doc "The sources `:unread`, or whose newest read is older than `bound` ms (`Fold.behind/3`)."
   @spec behind(GenServer.server(), non_neg_integer, keyword) ::
           {:ok, list} | {:refused, term} | {:unknown, term}

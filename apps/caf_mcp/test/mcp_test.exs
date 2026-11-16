@@ -93,6 +93,9 @@ defmodule CodingAgentFramework.MCPTest do
          services: {StandIn, self()},
          workstation: "ws",
          jobs: {Jobs, jobs},
+         tracker: {StandIn, self()},
+         stream: {StandIn, self()},
+         transcripts: %{},
          place: place,
          instance: "one",
          tool_timeout: 600_000,
@@ -155,7 +158,7 @@ defmodule CodingAgentFramework.MCPTest do
     assert rpc.("tools/list")["tools"] |> Enum.map(& &1["name"]) ==
              ~w(message run start_delegate run_delegate) ++
                ~w(service_start services service_logs service_send service_wait) ++
-               ~w(service_restart service_stop service_hand reload)
+               ~w(service_restart service_stop service_hand agents look transcript reload)
   end
 
   test "a call is the agent's whose token it carries, whatever its arguments say",
@@ -201,7 +204,10 @@ defmodule CodingAgentFramework.MCPTest do
     assert [%{state: "answered", outcome: ~s({"refused":"along_edges"})}] = MCP.calls(mcp)
 
     assert tool(mcp, t["app-fix"], "message", %{"to" => 1}) == %{"refused" => ["bad", "args"]}
-    assert tool(mcp, t["app-fix"], "look", %{}) == %{"refused" => ["unknown_tool", "look"]}
+
+    assert tool(mcp, t["app-fix"], "interrupt", %{}) == %{
+             "refused" => ["unknown_tool", "interrupt"]
+           }
   end
 
   test "run is the caller's job, named for the call, and answers as Jobs does",
@@ -262,6 +268,9 @@ defmodule CodingAgentFramework.MCPTest do
       services: {StandIn, self()},
       workstation: "ws",
       jobs: {UnknownJobs, self()},
+      tracker: {StandIn, self()},
+      stream: {StandIn, self()},
+      transcripts: %{},
       place: place,
       instance: name,
       tool_timeout: 600_000,
@@ -373,7 +382,7 @@ defmodule CodingAgentFramework.MCPTest do
                "tools" =>
                  ~w(message run start_delegate run_delegate) ++
                    ~w(service_start services service_logs service_send service_wait) ++
-                   ~w(service_restart service_stop service_hand reload)
+                   ~w(service_restart service_stop service_hand agents look transcript reload)
              }
            }
 
