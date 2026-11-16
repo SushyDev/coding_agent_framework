@@ -310,6 +310,28 @@ defmodule CodingAgentFramework.TranscriptsTest do
                Transcripts.session(t, "s1")
     end
 
+    test "a text read from an offset takes at most the bound, and a read with none runs to the end",
+         ctx do
+      whole = Enum.map_join(1..3_000, &(prompt("p#{&1}", "go") <> "\n"))
+      File.write!(ctx.path, whole)
+      size = byte_size(whole)
+      {:ok, t} = Transcripts.start_link(ctx.opts)
+      {:ok, _} = Transcripts.read(t, [{"s1", ctx.path}])
+      assert {:ok, %{offset: ^size}} = Transcripts.session(t, "s1")
+
+      assert {:ok, %{bytes: bytes, from: 5}} = Transcripts.text(t, "s1", 5, max: 100)
+      assert bytes == binary_part(whole, 5, 100)
+
+      assert {:ok, %{bytes: bytes, from: from}} = Transcripts.text(t, "s1", size - 50, max: 500)
+      assert {bytes, from} == {binary_part(whole, size - 50, 50), size - 50}
+
+      assert {:ok, %{bytes: bytes, from: from}} = Transcripts.text(t, "s1", {:last, 300}, max: 20)
+      assert {bytes, from} == {binary_part(whole, size - 300, 20), size - 300}
+
+      assert {:ok, %{bytes: bytes}} = Transcripts.text(t, "s1", 10)
+      assert byte_size(bytes) == size - 10
+    end
+
     test "a failed shell leaves the session as it was", ctx do
       File.write!(ctx.path, prompt("p1", "go") <> "\n")
       {:ok, t} = Transcripts.start_link(ctx.opts)

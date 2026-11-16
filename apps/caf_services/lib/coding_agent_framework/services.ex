@@ -57,6 +57,13 @@ defmodule CodingAgentFramework.Services do
   alias CodingAgentFramework.Services.Table
 
   @call 5_000
+  @log_max 16_384
+  # A pipe hides the tail's own status, so a log that cannot be read is refused before it; the
+  # tail's broken-pipe complaint, once head has its bytes, goes to /dev/null, not into the text.
+  @bounded ~S"""
+  [ -r "$1" ] || exit 1
+  "$2" -c "+$3" "$1" 2>/dev/null | "$4" -c "$5"
+  """
   # The grace before KILL when no call names one; and how long, after KILL, the end waits for
   # the socket to read dead.
   @grace 10_000
@@ -284,7 +291,9 @@ defmodule CodingAgentFramework.Services do
 
   @doc """
   Service `name`'s log from byte `offset`: `{:ok, %{text: text, next: offset}}`, where `next` is
-  the offset to read from next. Option: `:timeout` (ms, default 5 s).
+  the offset to read from next. The host's `tail | head` takes at most `:max` bytes, so a long
+  log does not move through `Shell` whole. Options: `:timeout` (ms, default 5 s), `:max`
+  (bytes, default 16 KiB).
 
       Services.logs(services, "db", 3)
       #=> {:ok, %{text: "in one\n", next: 10}}
@@ -293,12 +302,14 @@ defmodule CodingAgentFramework.Services do
           {:ok, map} | {:refused, term} | {:unknown, term}
   def logs(services, name, offset, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, @call)
+    max = Keyword.get(opts, :max, @log_max)
 
     with {:ok, row} <- row_of(services, name),
-         {:ok, ctx} <- context(services, row, timeout) do
-      args = ["-c", "+#{offset + 1}", ctx.log]
+         {:ok, ctx} <- context(services, row, timeout),
+         {:ok, p} <- Programs.take(ctx.programs, [:sh, :tail, :head]) do
+      args = ["-c", @bounded, "sh", ctx.log, p.tail, "#{offset + 1}", p.head, "#{max}"]
 
-      case Shell.run(ctx.programs.host, ctx.programs.paths.tail, args, timeout: timeout) do
+      case Shell.run(ctx.programs.host, p.sh, args, timeout: timeout) do
         {:ok, %{status: 0, output: text}} -> {:ok, %{text: text, next: offset + byte_size(text)}}
         other -> {:unknown, {:log, other}}
       end
@@ -444,6 +455,8 @@ defmodule CodingAgentFramework.Services do
     end
   end
 
+  # Reads to the end on purpose: a wait must see every new line, and a bound would hide a match
+  # past it.
   defp met(ctx, {:line, regex, from} = until, timeout) do
     args = ["-c", "+#{from + 1}", ctx.log]
 

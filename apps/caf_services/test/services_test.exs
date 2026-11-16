@@ -251,6 +251,22 @@ defmodule CodingAgentFramework.ServicesTest do
     assert {:refused, {:no_service, "web"}} = Services.logs(c.services, "web", 0)
   end
 
+  test "BoundedRead: a log read from an offset answers at most the bound, and the next offset",
+       c do
+    assert {:ok, _} = start(c, "web-a", "db", "box")
+    assert {:ok, _} = log(c, "box", "db", "up in one\n")
+    path = Path.join([c.dir, "box", "services", "db.log"])
+    File.write!(path, String.duplicate("0123456789", 100_000), [:append])
+
+    assert {:ok, %{text: text, next: 110}} = Services.logs(c.services, "db", 10, max: 100)
+    assert text == String.duplicate("0123456789", 10)
+    assert {:ok, %{text: text, next: next}} = Services.logs(c.services, "db", 10)
+    assert byte_size(text) == 16_384 and next == 10 + 16_384
+
+    assert {:ok, %{text: "", next: 1_000_010}} =
+             Services.logs(c.services, "db", 1_000_010, max: 100)
+  end
+
   test "EndedIsEnded: a program that ignores TERM is ended by KILL after the grace", c do
     assert {:ok, %{pid: pid}} = start(c, "web-a", "db", "box", script: "stubborn")
     assert {:ok, _} = log(c, "box", "db")

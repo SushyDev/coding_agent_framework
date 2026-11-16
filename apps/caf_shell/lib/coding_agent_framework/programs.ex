@@ -2,7 +2,7 @@ defmodule CodingAgentFramework.Programs do
   @moduledoc """
   The absolute path of every program the framework runs on one host: tmux, dtach, claude, git
   and gh, rsync, ssh and flock (a copy's sync), and the POSIX tools sh, sleep, rm, kill, env,
-  ps, cat, tail, mkdir and mkfifo (a headless delegate's stdin is a FIFO), wc (a service's log
+  ps, cat, tail, head, mkdir and mkfifo (a headless delegate's stdin is a FIFO), wc (a service's log
   offset at its start), nc (a service's port wait) and lsof (whether a forward's own ssh holds
   its local port).
 
@@ -48,6 +48,7 @@ defmodule CodingAgentFramework.Programs do
           | :ps
           | :cat
           | :tail
+          | :head
           | :mkdir
           | :mkfifo
           | :nc
@@ -72,6 +73,7 @@ defmodule CodingAgentFramework.Programs do
     :ps,
     :cat,
     :tail,
+    :head,
     :mkdir,
     :mkfifo,
     :nc,

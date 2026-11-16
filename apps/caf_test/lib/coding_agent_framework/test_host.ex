@@ -42,6 +42,7 @@ defmodule CodingAgentFramework.TestHost do
           :ps,
           :cat,
           :tail,
+          :head,
           :mkdir,
           :mkfifo
         ],
@@ -73,6 +74,7 @@ defmodule CodingAgentFramework.TestHost do
     :ps,
     :cat,
     :tail,
+    :head,
     :mkdir,
     :mkfifo,
     :echo,

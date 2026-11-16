@@ -5,7 +5,8 @@ defmodule CodingAgentFramework.Transcripts do
   writes. The caller's supervision tree starts one per `{host, account}`, with no name.
 
   A transcript is `<config>/projects/<project>/<session id>.jsonl` (see `path/3`); a hook's
-  `transcript_path` names it too. Each read runs the host's `tail -c +<byte>` through
+  `transcript_path` names it too. Each read runs the host's `tail -c +<byte>` (with `head -c` when
+  it takes a bounded part) through
   `CodingAgentFramework.Shell`, so a host over ssh is read the same way and a restart never reads
   a whole log again: the offset is in the table. What a read answers per session is in
   `CodingAgentFramework.Transcripts.Fold`.
@@ -38,14 +39,18 @@ defmodule CodingAgentFramework.Transcripts do
 
   @timeout 10_000
   # `$2` is the host's tail, by its path from `Programs`; `-c +N` prints from byte N (POSIX).
+  # With a bound (`$4`, bytes, and `$5`, the host's head) only that many bytes are read; a pipe
+  # hides the tail's own status, so a file that cannot be read is refused before it; the tail's
+  # broken-pipe complaint, once head has its bytes, goes to /dev/null, not into the text.
   @read ~S"""
   [ -f "$1" ] || { printf 'nofile'; exit 0; }
+  [ -r "$1" ] || exit 1
   printf 'file'
-  exec "$2" -c "+$3" "$1"
+  if [ -n "$4" ]; then "$2" -c "+$3" "$1" 2>/dev/null | "$5" -c "$4"; else exec "$2" -c "+$3" "$1"; fi
   """
 
   @doc """
-  Starts a `Transcripts`. Options: `programs:` (the host's, naming sh and tail), `account:`,
+  Starts a `Transcripts`. Options: `programs:` (the host's, naming sh, tail and head), `account:`,
   `db:` (this instance's SQLite path), and optionally `notify:` (a function of one cue) and
   `timeout:` (ms per shell run, default 10 s). It fails to start with `{:no_program, names}`.
   """
@@ -104,7 +109,9 @@ defmodule CodingAgentFramework.Transcripts do
   @doc """
   The session's transcript from byte `from`, as it is now: `{:ok, %{bytes: bytes, from: from}}`.
   With `{:last, n}` in place of `from`, from `n` bytes before the offset read so far. It changes
-  no row; `{:refused, :unknown_session}` for one never read, `{:refused, :no_file}`.
+  no row; `{:refused, :unknown_session}` for one never read, `{:refused, :no_file}`. Option
+  `:max` (bytes): the host reads at most that many, so a long transcript does not move whole;
+  without it the read runs to the end.
 
       Transcripts.text(transcripts, "s1", 0)
       #=> {:ok, %{bytes: "{\\"type\\":\\"user\\",…}\\n", from: 0}}
@@ -112,7 +119,7 @@ defmodule CodingAgentFramework.Transcripts do
   @spec text(GenServer.server(), String.t(), non_neg_integer | {:last, pos_integer}, keyword) ::
           {:ok, map} | {:refused, term} | {:unknown, term}
   def text(transcripts, session_id, from, opts \\ []),
-    do: call(transcripts, {:text, session_id, from}, opts)
+    do: call(transcripts, {:text, session_id, from, Keyword.get(opts, :max)}, opts)
 
   defp call(transcripts, request, opts) do
     timeout = Keyword.get(opts, :timeout, 6 * @timeout)
@@ -131,7 +138,7 @@ defmodule CodingAgentFramework.Transcripts do
     %Programs{host: host} = programs = Keyword.fetch!(opts, :programs)
     account = Keyword.fetch!(opts, :account)
 
-    with {:ok, paths} <- Programs.take(programs, [:sh, :tail]),
+    with {:ok, paths} <- Programs.take(programs, [:sh, :tail, :head]),
          {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)) do
       folds = Table.folds(db, host.name, account)
 
@@ -219,11 +226,11 @@ defmodule CodingAgentFramework.Transcripts do
     {:reply, reply, state}
   end
 
-  def handle_call({:text, sid, from}, _from, state) do
+  def handle_call({:text, sid, from, max}, _from, state) do
     reply =
       with %{path: path, fold: fold} <- state.folds[sid] || {:refused, :unknown_session},
            at = with({:last, n} <- from, do: max(fold.offset - n, 0)),
-           {:ok, bytes} <- tail(state, path, at) do
+           {:ok, bytes} <- tail(state, path, at, max) do
         {:ok, %{bytes: bytes, from: at}}
       else
         :no_file -> {:refused, :no_file}
@@ -262,8 +269,18 @@ defmodule CodingAgentFramework.Transcripts do
     end
   end
 
-  defp tail(state, path, from) do
-    args = ["-c", @read, "sh", path, state.programs.tail, Integer.to_string(from + 1)]
+  # `max` nil reads to the end: a fold must see every new event, and `contains` every prompt.
+  defp tail(state, path, from, max \\ nil) do
+    args = [
+      "-c",
+      @read,
+      "sh",
+      path,
+      state.programs.tail,
+      Integer.to_string(from + 1),
+      if(max, do: Integer.to_string(max), else: ""),
+      state.programs.head
+    ]
 
     case Shell.run(state.host, state.programs.sh, args, timeout: state.timeout) do
       {:ok, %{status: 0, output: "nofile"}} ->
