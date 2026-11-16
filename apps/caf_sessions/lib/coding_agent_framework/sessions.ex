@@ -13,7 +13,8 @@ defmodule CodingAgentFramework.Sessions do
         control: control, registries: %{"work" => registry}, db: "/srv/caf/caf.db")
       {:ok, account} = Accounts.ready(accounts, "work")
       Sessions.start(sessions, "main", account,
-        role: :parent, cwd: "/src/app", claude: claude, model: "opus", env: env)
+        role: :parent, cwd: "/src/app", claude: claude, model: "opus", env: env,
+        tool_timeout: 3_600_000)
       #=> {:ok, %{name: "main", pid: 4242, session_id: "…"}}
 
   A host that runs delegates also gives it its `Stream` and the framework home (`stream:`,
@@ -160,8 +161,9 @@ defmodule CodingAgentFramework.Sessions do
   Starts session `name` on `account` (from `Accounts.ready/2`). `launch` holds `role:` and
   `cwd:` (an absolute path) or `worktree:` (`%{project: project, branch: branch}`, with the
   project as `Sessions.Worktree.project/1` reads it; `cwd:` is then not read), and
-  `ClaudeCLI.session/3`'s `claude:`, `model:`, `env:` and `prompt:`. Option: `:timeout`, to
-  which a worktree's start adds its setup's deadline and its git commands' bounds.
+  `ClaudeCLI.session/3`'s `claude:`, `model:`, `env:`, `tool_timeout:` and `prompt:`. Option:
+  `:timeout`, to which a worktree's start adds its setup's deadline and its git commands'
+  bounds.
 
       Sessions.start(sessions, "reviewer", account,
         role: :delegate, worktree: %{project: project, branch: "unit/review"}, claude: claude)
@@ -761,7 +763,7 @@ defmodule CodingAgentFramework.Sessions do
   defp required(ok, _key), do: ok
 
   defp cli(role, account, name, resume, launch) do
-    opts = Keyword.take(launch, [:claude, :model, :env, :prompt]) ++ [name: name]
+    opts = Keyword.take(launch, [:claude, :model, :env, :tool_timeout, :prompt]) ++ [name: name]
     opts = if resume, do: opts ++ [resume: resume], else: opts
     ClaudeCLI.session(role, account, opts)
   end
@@ -777,7 +779,10 @@ defmodule CodingAgentFramework.Sessions do
     with {:ok, stream} <- if(state.stream && state.home, do: {:ok, state.stream}, else: :error),
          true <- id =~ ~r/\A[A-Za-z0-9_-]{1,64}\z/ or {:refused, {:bad, :session_id}},
          {:ok, cli} <-
-           ClaudeCLI.headless(account, Keyword.take(launch, [:claude, :model, :env]) ++ start),
+           ClaudeCLI.headless(
+             account,
+             Keyword.take(launch, [:claude, :model, :env, :tool_timeout]) ++ start
+           ),
          {:ok, transcript} <- Transcripts.path(account.config_dir, cwd, id) do
       {:ok, %{stream: stream, session_id: id, cli: cli, transcript: transcript}}
     else

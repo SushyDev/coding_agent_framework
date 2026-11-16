@@ -212,7 +212,10 @@ defmodule CodingAgentFramework.StreamTest do
     env = %{home: ctx.dir, path: "/nowhere", term: "dumb", lang: "C.UTF-8"}
 
     {:ok, launch} =
-      ClaudeCLI.headless(account, [claude: ctx.stand_in, model: "m", env: env] ++ start)
+      ClaudeCLI.headless(
+        account,
+        [claude: ctx.stand_in, model: "m", env: env, tool_timeout: 60_000] ++ start
+      )
 
     launch
   end

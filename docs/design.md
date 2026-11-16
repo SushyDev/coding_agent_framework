@@ -421,12 +421,16 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
   and only before the call's deadline (on the node's clock, as the caller set it): the row's
   report is then `answered`, never `held`, so it is not also delivered as a message. Past the
   deadline the call answers `{:unknown, :timeout}` and the report is held as any other (F-92).
-  A report is never lost to an answer that did not arrive: it is `answering` from that step
-  until the endpoint has written the answer to the agent, then `answered`; a write that fails
-  holds it again, and a restart finds an `answering` report and holds it again, so it is
-  delivered as a message, at least once. `run_delegate`'s `timeout` is capped under the tool
-  timeout Claude Code keeps for an MCP call, which `ClaudeCLI` sets at launch, so the client
-  never gives up first (F-92's new-2).
+  A report is `answering` from that step until the endpoint has written the answer to the
+  agent, then `answered`; a write that fails holds it again, a restart finds an `answering`
+  report and holds it again, and so does the end of the process that waits for it, which
+  `Delegates` watches, so it is delivered as a message instead. A write fails only on a
+  connection the client reset: one it closed normally still takes the write (F-95's new-1). So
+  what keeps the client from giving up first is the cap: `run_delegate`'s `timeout` stays under
+  both limits Claude Code keeps for a remote MCP call, the request's (`MCP_TOOL_TIMEOUT`) and the
+  idle one for a call with no progress (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`, 300 s unless set),
+  which `ClaudeCLI` sets at launch from one tool timeout (F-92's new-2, F-95's new-2). A report a
+  client dropped anyway stays in its row and in the call log, where the read tools find it.
 - A resumed process takes no turn of its own. It is given the brief again, under its uuid, when
   the brief had not gone in, and otherwise a fixed message to go on with its brief.
 

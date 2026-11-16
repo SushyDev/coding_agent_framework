@@ -24,10 +24,14 @@ defmodule CodingAgentFramework.MCP do
     delegates' `start_delegate/7` with the caller as parent; answers `%{delegate: name}`, or the
     start's refusal. The report comes later as a message;
   - `run_delegate(project, branch, model, brief, timeout)`: as `start_delegate`, then the
-    delegates' `await_report/4`, all within `timeout` (ms, capped as `run`'s). Answers
-    `%{delegate: name, status: status, report: text}`, or at the timeout `{:unknown,
-    %{delegate: name, reason: :timeout}}`, the report then held for a message. `Delegates`
-    marks a report it answered with, so it is never also delivered as a message;
+    delegates' `await_report/4`, all within `timeout` (ms, capped as `run`'s, and under the
+    client's tool timeout less the margin: `:tool_timeout` and `:margin`, so the client never
+    gives up first). Answers `%{delegate: name, status: status, report: text}`, or at the
+    timeout `{:unknown, %{delegate: name, reason: :timeout}}`, the report then held for a
+    message. A report it took is `answering` in `Delegates` until the answer is written: then
+    `answered/2` when the write succeeded, `release/2` (held again, for a message) when it
+    failed (`answer/5`). A call through `call/4` has its answer in hand, so it is answered at
+    once;
   - `reload()`: `Grants.may_use?/2`, then the tools' names; the endpoint sends the client
     `notifications/tools/list_changed` first.
 
@@ -35,7 +39,7 @@ defmodule CodingAgentFramework.MCP do
 
       {:ok, mcp} = MCP.start_link(dir: dir, port: 4791, grants: grants,
         mailbox: {Mailbox, mailbox}, jobs: {Jobs, jobs}, delegates: {Delegates, delegates},
-        place: &place/1, instance: "a")
+        place: &place/1, instance: "a", tool_timeout: 3_600_000, margin: 60_000)
       {:ok, config} = MCP.issue(mcp, "app-fix")
       MCP.call(mcp, "app-fix", "message", %{"to" => "app-main", "text" => "Done."})
       #=> {:ok, {:queued, 3}}
@@ -97,7 +101,10 @@ defmodule CodingAgentFramework.MCP do
       inputSchema: %{
         type: "object",
         properties:
-          Map.put(@start, :timeout, %{type: "integer", description: "ms, at most a day"}),
+          Map.put(@start, :timeout, %{
+            type: "integer",
+            description: "ms, under the framework's tool timeout less its margin"
+          }),
         required: ["project", "branch", "model", "brief", "timeout"]
       }
     },
@@ -117,7 +124,10 @@ defmodule CodingAgentFramework.MCP do
   `:place`, a function of an agent's name that answers `{:ok, %{project: p, name: n, worktree:
   path}}` (the copy `Jobs` runs in) or `{:refused, reason}`. `:instance` (a string, required)
   is this part's name in its jobs' ids, so two of them sharing one `Jobs` never make the same
-  id. `:cap` (ms, default a day) is the most a `run`'s `timeout` may be.
+  id. `:cap` (ms, default a day) is the most a `run`'s `timeout` may be. `:tool_timeout` (ms)
+  is the MCP tool timeout `CodingAgentFramework.ClaudeCLI` sets for every agent at launch, and
+  `:margin` (ms, under it) how far under it a `run_delegate`'s `timeout` must stay: both
+  required, positive integers.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -143,17 +153,50 @@ defmodule CodingAgentFramework.MCP do
           {:ok, String.t()} | {:refused, term} | {:unknown, term}
   def who(mcp, token), do: ask(mcp, {:who, token})
 
-  @doc "Calls `tool` with `args` (a JSON object) as `agent`; see the module's doc."
+  @doc """
+  Calls `tool` with `args` (a JSON object) as `agent`, for a caller that takes the outcome in
+  its own process; see the module's doc.
+  """
   @spec call(GenServer.server(), String.t(), String.t(), map) ::
           {:ok, term} | {:refused, term} | {:unknown, term}
   def call(mcp, agent, tool, args) do
-    with {:ok, id, ctx} <- ask(mcp, {:called, agent, tool, JSON.encode!(args)}) do
-      outcome = act(ctx, agent, id, tool, args)
-      # The outcome stands whether or not its row is written; a row left `called` reads `cut`.
-      ask(mcp, {:answered, id, JSON.encode!(json(outcome))})
-      outcome
+    {:ok, outcome} = answer(mcp, agent, tool, args, &{:ok, &1})
+    outcome
+  end
+
+  @doc """
+  Calls `tool` as `call/4` does, then writes its outcome with `write`, the endpoint's write of
+  the answer to the agent, and answers what `write` answered. `write` answers `{:ok, _}` once
+  the answer is written, and anything else when it was not; a report `run_delegate` took is
+  then `answered`, or held again. A refusal before the call is written is written too.
+
+      MCP.answer(mcp, "app-main", "run_delegate", args, fn outcome -> send_it(conn, outcome) end)
+      #=> {:ok, conn}
+  """
+  @spec answer(GenServer.server(), String.t(), String.t(), map, (term -> written)) :: written
+        when written: term
+  def answer(mcp, agent, tool, args, write) do
+    case ask(mcp, {:called, agent, tool, JSON.encode!(args)}) do
+      {:ok, id, ctx} ->
+        {outcome, taken} = taken(act(ctx, agent, id, tool, args))
+        # The outcome stands whether or not its row is written; a row left `called` reads `cut`.
+        ask(mcp, {:answered, id, JSON.encode!(json(outcome))})
+        written = write.(outcome)
+        if taken, do: settle(ctx, taken, written)
+        written
+
+      not_called ->
+        write.(not_called)
     end
   end
+
+  # A report taken is answered once written and held again otherwise. When `Delegates` cannot
+  # be told, the report stays `answering` until its next start holds it again.
+  defp settle(%{delegates: {mod, server}}, id, {:ok, _}), do: mod.answered(server, id)
+  defp settle(%{delegates: {mod, server}}, id, _failed), do: mod.release(server, id)
+
+  defp taken({:taken, id, outcome}), do: {outcome, id}
+  defp taken(outcome), do: {outcome, nil}
 
   @doc "Every call's row, oldest first."
   @spec calls(GenServer.server()) :: [map] | {:unknown, term}
@@ -215,8 +258,10 @@ defmodule CodingAgentFramework.MCP do
        when is_integer(t) and t > 0 and t <= ctx.cap do
     deadline = now() + t
     {mod, server} = ctx.delegates
+    under = ctx.tool_timeout - ctx.margin
 
-    with {:ok, start} <- start_args(args),
+    with true <- t < under or {:refused, {:timeout, {:under, under}}},
+         {:ok, start} <- start_args(args),
          {:ok, %{id: id, name: name}} <- start_delegate(ctx, caller, start, min(t, @start_wait)) do
       left = deadline - now()
 
@@ -224,7 +269,7 @@ defmodule CodingAgentFramework.MCP do
         if left > 0, do: mod.await_report(server, caller, id, left), else: {:unknown, :timeout}
 
       case answer do
-        {:ok, r} -> {:ok, %{delegate: name, status: r.status, report: r.text}}
+        {:ok, r} -> {:taken, id, {:ok, %{delegate: name, status: r.status, report: r.text}}}
         {:unknown, reason} -> {:unknown, %{delegate: name, reason: reason}}
         refused -> refused
       end
@@ -268,8 +313,13 @@ defmodule CodingAgentFramework.MCP do
   @impl true
   def init(opts) do
     dir = Keyword.fetch!(opts, :dir)
+    tool_timeout = Keyword.fetch!(opts, :tool_timeout)
+    margin = Keyword.fetch!(opts, :margin)
 
-    with :ok <- File.mkdir_p(Path.join(dir, "agents")),
+    with true <-
+           (is_integer(margin) and is_integer(tool_timeout) and margin > 0 and
+              margin < tool_timeout) or {:refused, {:bad, :tool_timeout}},
+         :ok <- File.mkdir_p(Path.join(dir, "agents")),
          {:ok, db} <- Table.open(Path.join(dir, "mcp.db")) do
       ctx =
         Map.new(
@@ -277,7 +327,8 @@ defmodule CodingAgentFramework.MCP do
           &{&1, Keyword.fetch!(opts, &1)}
         )
 
-      ctx = Map.put(ctx, :cap, Keyword.get(opts, :cap, @day))
+      cap = Keyword.get(opts, :cap, @day)
+      ctx = Map.merge(ctx, %{cap: cap, tool_timeout: tool_timeout, margin: margin})
       {:ok, %{db: db, dir: dir, port: Keyword.fetch!(opts, :port), ctx: ctx}}
     else
       {:error, reason} -> {:stop, {:mkdir, reason}}

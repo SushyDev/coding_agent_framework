@@ -12,7 +12,7 @@ defmodule CodingAgentFramework.ClaudeCLIHeldTest do
 
   setup {AccountsSetup, :accounts}
 
-  test "a held stand-in sees the account's own directory and none of the VM's CLAUDE_ variables",
+  test "a held stand-in sees the account's own directory, the tool timeout and none of the VM's CLAUDE_ variables",
        ctx do
     {:ok, account} = Accounts.prepare(ctx.accounts, "work", %{})
     out = Path.join(ctx.dir, "seen")
@@ -43,7 +43,8 @@ defmodule CodingAgentFramework.ClaudeCLIHeldTest do
         model: "opus",
         name: "d1",
         env: env,
-        prompt: "brief"
+        prompt: "brief",
+        tool_timeout: 600_000
       )
 
     {:ok, holder} = Holder.new(programs(), Path.join(ctx.dir, "sockets"))
@@ -61,7 +62,12 @@ defmodule CodingAgentFramework.ClaudeCLIHeldTest do
 
     assert held["CLAUDE_CONFIG_DIR"] == account.config_dir
     assert held["HOME"] == ctx.fake_home
-    assert for({k, _} <- held, String.starts_with?(k, "CLAUDE"), do: k) == ["CLAUDE_CONFIG_DIR"]
+    assert held["MCP_TOOL_TIMEOUT"] == "600000"
+    assert held["CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"] == "600000"
+
+    assert for({k, _} <- held, String.starts_with?(k, "CLAUDE"), do: k) ==
+             ["CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "CLAUDE_CONFIG_DIR"]
+
     assert File.read!(out <> ".argv") == Enum.join(tl(argv), "\n") <> "\n"
   end
 end

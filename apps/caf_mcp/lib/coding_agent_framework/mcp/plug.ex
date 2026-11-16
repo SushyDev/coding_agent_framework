@@ -77,12 +77,38 @@ defmodule CodingAgentFramework.MCP.Plug do
   defp answer(conn, _mcp, _agent, "tools/list", %{"id" => id}),
     do: reply(conn, id, %{tools: MCP.tools()})
 
+  # The answer is written through `MCP.answer/5`, so a report `run_delegate` took is answered
+  # only once the write returned, and held again when it raised. The adapter's write returns
+  # once the socket took every byte (Bandit: `:gen_tcp.send/2` answered `:ok`), and raises when
+  # the socket refuses it; it cannot tell whether the client read the bytes. The exception is
+  # raised again after `MCP` has heard of it, so the server sees what it would have seen.
   defp answer(conn, mcp, agent, "tools/call", %{"id" => id, "params" => %{"name" => tool} = p}) do
     args = Map.get(p, "arguments") || %{}
 
-    outcome =
-      if is_map(args), do: MCP.call(mcp, agent, tool, args), else: {:refused, {:bad, :args}}
+    write = &write(conn, id, tool, &1)
 
+    written =
+      if is_map(args),
+        do: MCP.answer(mcp, agent, tool, args, write),
+        else: write.({:refused, {:bad, :args}})
+
+    case written do
+      {:ok, conn} -> conn
+      {:failed, e, stacktrace} -> reraise e, stacktrace
+    end
+  end
+
+  defp answer(conn, _mcp, _agent, _method, %{"id" => id}) do
+    send_json(conn, %{jsonrpc: "2.0", id: id, error: %{code: -32601, message: "Method not found"}})
+  end
+
+  defp write(conn, id, tool, outcome) do
+    {:ok, outcome(conn, id, tool, outcome)}
+  rescue
+    e -> {:failed, e, __STACKTRACE__}
+  end
+
+  defp outcome(conn, id, tool, outcome) do
     result = %{
       content: [%{type: "text", text: JSON.encode!(MCP.json(outcome))}],
       isError: elem(outcome, 0) != :ok
@@ -94,10 +120,6 @@ defmodule CodingAgentFramework.MCP.Plug do
     else
       reply(conn, id, result)
     end
-  end
-
-  defp answer(conn, _mcp, _agent, _method, %{"id" => id}) do
-    send_json(conn, %{jsonrpc: "2.0", id: id, error: %{code: -32601, message: "Method not found"}})
   end
 
   defp rpc(id, result), do: %{jsonrpc: "2.0", id: id, result: result}

@@ -44,7 +44,8 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
          usage: usage,
          accounts: accounts,
          transcripts: %{"work" => transcripts},
-         launch: SessionsSetup.headless(ctx, :at_start) |> Keyword.take([:claude, :env]),
+         launch:
+           SessionsSetup.headless(ctx, :at_start) |> Keyword.take([:claude, :env, :tool_timeout]),
          projects: %{"app" => project}}
       )
 
@@ -67,7 +68,9 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
          jobs: {__MODULE__, :unused},
          delegates: {Delegates, delegates},
          place: fn _ -> {:refused, :none} end,
-         instance: "d"}
+         instance: "d",
+         tool_timeout: 600_000,
+         margin: 60_000}
       )
 
     tokens =
@@ -79,20 +82,23 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     %{mcp: mcp, tokens: tokens, delegates: delegates, dtable: dtable}
   end
 
+  defmodule BrokenSocket do
+    @moduledoc false
+    # A connection whose client is gone: the request reads as in `Plug.Test`, and the answer's
+    # write raises, as Bandit's does when the socket refuses it.
+    defdelegate read_req_body(payload, opts), to: Plug.Adapters.Test.Conn
+    def send_resp(_payload, _status, _headers, _body), do: raise(ArgumentError, "closed")
+  end
+
+  defp request(ctx, agent, name, args) do
+    body = %{jsonrpc: "2.0", id: 1, method: "tools/call", params: %{name: name, arguments: args}}
+
+    Plug.Test.conn(:post, "/mcp", JSON.encode!(body))
+    |> Plug.Conn.put_req_header("x-caf-token", ctx.tokens[agent])
+  end
+
   defp tool(ctx, agent, name, args) do
-    body =
-      JSON.encode!(%{
-        jsonrpc: "2.0",
-        id: 1,
-        method: "tools/call",
-        params: %{name: name, arguments: args}
-      })
-
-    conn =
-      Plug.Test.conn(:post, "/mcp", body)
-      |> Plug.Conn.put_req_header("x-caf-token", ctx.tokens[agent])
-      |> MCP.Plug.call(MCP.Plug.init(mcp: ctx.mcp))
-
+    conn = request(ctx, agent, name, args) |> MCP.Plug.call(MCP.Plug.init(mcp: ctx.mcp))
     %{"result" => %{"content" => [%{"text" => text}]}} = JSON.decode!(conn.resp_body)
     JSON.decode!(text)
   end
@@ -142,6 +148,29 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
 
     assert text == "done #{row.brief_uuid}" and text == row.text
     assert {:ok, []} = Delegates.held(ctx.delegates, "main")
+  end
+
+  test "a run_delegate answer whose write fails holds the report again, for a message", ctx do
+    args = Map.put(start_args("unit/one"), "timeout", 60_000)
+    conn = request(ctx, "main", "run_delegate", args)
+    conn = %{conn | adapter: {BrokenSocket, elem(conn.adapter, 1)}}
+
+    call =
+      Task.async(fn ->
+        try do
+          MCP.Plug.call(conn, MCP.Plug.init(mcp: ctx.mcp))
+        rescue
+          e -> e
+        end
+      end)
+
+    {:ok, _} = cue_until(ctx, &(&1.status == "finished"))
+    assert %ArgumentError{message: "closed"} = Task.await(call, 20_000)
+
+    assert %{report: "held", text: "done " <> _ = text, mark: "[report " <> _} =
+             List.first(Table.with_status(ctx.dtable, "test", ~w(finished)))
+
+    assert {:ok, [%{text: ^text}]} = Delegates.held(ctx.delegates, "main")
   end
 
   test "run_delegate at its timeout answers unknown with the name; the report is held", ctx do

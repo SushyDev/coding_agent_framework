@@ -19,6 +19,35 @@ defmodule CodingAgentFramework.MCPTest do
       if text == "hold", do: receive(do: (:go -> :ok))
       {:ok, {:queued, 7}}
     end
+
+    # A `Delegates` whose every report is ready at once; it tells the test what it was told.
+    def start_delegate(test, parent, _project, branch, _model, _brief, _opts) do
+      send(test, {:start, parent, branch})
+      {:ok, %{id: 9, name: "app-" <> String.replace(branch, "/", "-")}}
+    end
+
+    def await_report(test, _parent, id, left) do
+      send(test, {:await, id, left})
+      {:ok, %{id: id, name: "app-unit-one", status: "finished", text: "done"}}
+    end
+
+    def answered(test, id) do
+      send(test, {:answered, id})
+      {:ok, :answered}
+    end
+
+    def release(test, id) do
+      send(test, {:release, id})
+      {:ok, :held}
+    end
+  end
+
+  defmodule BrokenSocket do
+    @moduledoc false
+    # A connection whose client is gone: the request reads as in `Plug.Test`, and the answer's
+    # write raises, as Bandit's does when the socket refuses it.
+    defdelegate read_req_body(payload, opts), to: Plug.Adapters.Test.Conn
+    def send_resp(_payload, _status, _headers, _body), do: raise(ArgumentError, "closed")
   end
 
   defmodule UnknownJobs do
@@ -63,7 +92,9 @@ defmodule CodingAgentFramework.MCPTest do
          delegates: {StandIn, self()},
          jobs: {Jobs, jobs},
          place: place,
-         instance: "one"}
+         instance: "one",
+         tool_timeout: 600_000,
+         margin: 60_000}
       )
 
     tokens = for a <- ~w(app-main app-fix stray), into: %{}, do: {a, token(mcp, a)}
@@ -209,24 +240,27 @@ defmodule CodingAgentFramework.MCPTest do
 
   # An MCP over a `Jobs` stand-in whose `run` is always unknown.
   defp unknown_mcp(name, extra) do
+    mcp = start_supervised!({MCP, mcp_opts(name) ++ extra}, id: name)
+    {:ok, _} = MCP.issue(mcp, "app-fix")
+    mcp
+  end
+
+  defp mcp_opts(name) do
     tree = fn -> [%{name: "app-fix", project: "app", parent: "app-main"}] end
     place = fn agent -> {:ok, %{project: "app", name: agent, worktree: "/nowhere"}} end
 
-    opts =
-      [
-        dir: Path.join(test_dir(), name),
-        port: 4791,
-        grants: Grants.new(tree),
-        mailbox: {StandIn, self()},
-        delegates: {StandIn, self()},
-        jobs: {UnknownJobs, self()},
-        place: place,
-        instance: name
-      ] ++ extra
-
-    mcp = start_supervised!({MCP, opts}, id: name)
-    {:ok, _} = MCP.issue(mcp, "app-fix")
-    mcp
+    [
+      dir: Path.join(test_dir(), name),
+      port: 4791,
+      grants: Grants.new(tree),
+      mailbox: {StandIn, self()},
+      delegates: {StandIn, self()},
+      jobs: {UnknownJobs, self()},
+      place: place,
+      instance: name,
+      tool_timeout: 600_000,
+      margin: 60_000
+    ]
   end
 
   defp run_call(mcp, timeout) do
@@ -257,6 +291,63 @@ defmodule CodingAgentFramework.MCPTest do
     # A refused call has an id too, so the short one's run is its second call.
     assert_received {:run, "mcp-short-2", 5_000}
     assert_received {:run, "mcp-long-1", 86_400_000}
+  end
+
+  defp run_delegate(timeout) do
+    %{
+      "project" => "app",
+      "branch" => "unit/one",
+      "model" => "opus",
+      "brief" => "b",
+      "timeout" => timeout
+    }
+  end
+
+  test "run_delegate's timeout stays under the tool timeout less the margin", %{mcp: mcp} do
+    # 600 000 less 60 000: a wait of 540 000 ms or more could outlast the client's.
+    for t <- [540_000, 600_000, 86_400_000] do
+      assert MCP.call(mcp, "app-main", "run_delegate", run_delegate(t)) ==
+               {:refused, {:timeout, {:under, 540_000}}}
+    end
+
+    refute_received {:start, _, _}
+
+    assert {:ok, %{delegate: "app-unit-one", report: "done"}} =
+             MCP.call(mcp, "app-main", "run_delegate", run_delegate(539_999))
+
+    assert_received {:start, "app-main", "unit/one"}
+    # A caller in this process has the answer in hand: the report is answered at once.
+    assert_received {:answered, 9}
+
+    for {opts, name} <- [{[margin: 0], "m0"}, {[margin: 600_000], "m1"}, {[tool_timeout: 1], "t"}] do
+      assert {:error, {{:bad, :tool_timeout}, _}} =
+               start_supervised({MCP, Keyword.merge(mcp_opts(name), opts)}, id: name)
+    end
+  end
+
+  test "a report written to the agent is answered; one whose write fails is held again",
+       %{mcp: mcp, tokens: t} do
+    params = %{name: "run_delegate", arguments: run_delegate(10_000)}
+
+    assert %{"ok" => %{"report" => "done"}} =
+             tool(mcp, t["app-main"], "run_delegate", params.arguments)
+
+    assert_received {:answered, 9}
+    refute_received {:release, _}
+
+    body = JSON.encode!(%{jsonrpc: "2.0", id: 2, method: "tools/call", params: params})
+
+    conn =
+      Plug.Test.conn(:post, "/mcp", body)
+      |> Plug.Conn.put_req_header("x-caf-token", t["app-main"])
+
+    conn = %{conn | adapter: {BrokenSocket, elem(conn.adapter, 1)}}
+
+    # The server sees the write's own error, after the report is held again.
+    assert_raise ArgumentError, "closed", fn -> MCP.Plug.call(conn, MCP.Plug.init(mcp: mcp)) end
+    assert_received {:release, 9}
+    refute_received {:answered, _}
+    assert [%{state: "answered"}, %{state: "answered"}] = Enum.take(MCP.calls(mcp), -2)
   end
 
   test "reload tells the client its tools changed, then answers", %{mcp: mcp, tokens: t} do
