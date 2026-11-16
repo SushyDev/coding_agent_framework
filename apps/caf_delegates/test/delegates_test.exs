@@ -244,17 +244,18 @@ defmodule CodingAgentFramework.DelegatesTest do
     # The project's cap is one: the first row is set apart so a second may start.
     Table.update(ctx.dtable, id, status: "refused")
     assert {:ok, %{id: two}} = start(ctx, "app", "unit/two")
-    wait = Task.async(fn -> Delegates.await_report(current(ctx), "main", two, 10_000) end)
+    wait = caller(ctx, two, 10_000)
     assert {:ok, %{status: "finished"}} = cue_until(ctx, two, &(&1.report == "answering"))
 
-    assert {:ok, %{id: ^two, name: "app-unit-two", status: "finished", text: "done " <> _}} =
-             Task.await(wait)
+    assert_receive {:took,
+                    {:ok,
+                     %{id: ^two, name: "app-unit-two", status: "finished", text: "done " <> _}}}
 
     assert {:ok, [%{id: ^id, name: ^name}]} = Delegates.held(current(ctx), "main")
     assert {:refused, :answering} = Delegates.await_report(current(ctx), "main", two, 1)
 
-    # The answer reached the agent: answered, and never held.
-    assert {:ok, :answered} = Delegates.answered(current(ctx), two)
+    # The answer reached the agent: answered, and never held, though its caller then ends.
+    assert {:ok, :answered} = settle(wait, &Delegates.answered/2)
     assert %{report: "answered"} = Table.get(ctx.dtable, two)
     assert {:refused, :answered} = Delegates.await_report(current(ctx), "main", two, 1)
     assert {:refused, {:not_answering, "answered"}} = Delegates.release(current(ctx), two)
@@ -266,13 +267,13 @@ defmodule CodingAgentFramework.DelegatesTest do
 
   test "an answering report is held again by a release, and by a restart, once", ctx do
     assert {:ok, %{id: id}} = start(ctx, "app", "unit/one")
-    wait = Task.async(fn -> Delegates.await_report(current(ctx), "main", id, 10_000) end)
+    wait = caller(ctx, id, 10_000)
     {:ok, %{mark: mark}} = cue_until(ctx, id, &(&1.report == "answering"))
-    assert {:ok, %{id: ^id}} = Task.await(wait)
+    assert_receive {:took, {:ok, %{id: ^id}}}
     assert {:ok, []} = Delegates.held(current(ctx), "main")
 
     # The answer's write failed: held again, with its own mark, for a message.
-    assert {:ok, :held} = Delegates.release(current(ctx), id)
+    assert {:ok, :held} = settle(wait, &Delegates.release/2)
     assert {:ok, [%{id: ^id, mark: ^mark}]} = Delegates.held(current(ctx), "main")
 
     # Taken again, and the process ends before it hears how the write went.
@@ -284,6 +285,77 @@ defmodule CodingAgentFramework.DelegatesTest do
 
     restart(ctx)
     assert {:ok, [%{id: ^id, mark: ^mark}]} = Delegates.held(current(ctx), "main")
+  end
+
+  # Delegate.tla's CallerSeen: Delegates watches the process that took a report.
+  test "an answering report is held again when the process that took it ends", ctx do
+    hold(ctx)
+    assert {:ok, %{id: id, brief: {:ok, %{uuid: u}}}} = start(ctx, "app", "unit/one")
+
+    # The caller ends while it waits: the take finds it gone, and holds the report again.
+    # A wait of 0 ms is refused as :awaited once the caller waits, and never waits itself.
+    gone = caller(ctx, id, 10_000)
+
+    awaited? = fn ->
+      Delegates.await_report(current(ctx), "main", id, 0) == {:refused, :awaited}
+    end
+
+    {:ok, _} = await(fn -> if awaited?.(), do: {:ok, 1} end)
+    assert nil == Task.shutdown(gone, :brutal_kill)
+    allow(ctx, id, u)
+    File.rm!(Path.join(ctx.dir, "hold"))
+
+    # The hold and the take are one step of Delegates, so its own answer, not the table, is read.
+    {:ok, [%{mark: mark}]} =
+      await(
+        fn ->
+          cue(ctx, current(ctx))
+
+          case Delegates.held(current(ctx), "main") do
+            {:ok, [%{id: ^id}]} = held -> held
+            other -> {:not_yet, other}
+          end
+        end,
+        10_000
+      )
+
+    assert %{report: "held"} = Table.get(ctx.dtable, id)
+
+    # It takes the report and ends before it says how its write went.
+    wait = caller(ctx, id, 10_000)
+    assert_receive {:took, {:ok, %{id: ^id}}}
+    assert %{report: "answering"} = Table.get(ctx.dtable, id)
+    assert :ended = settle(wait, nil)
+    assert {:ok, %{mark: ^mark}} = row_when(ctx, id, &(&1.report == "held"))
+    assert {:refused, {:not_answering, "held"}} = Delegates.answered(current(ctx), id)
+
+    # One that says answered first is not watched after: its end changes nothing.
+    wait = caller(ctx, id, 10_000)
+    assert_receive {:took, {:ok, %{id: ^id}}}
+    assert {:ok, :answered} = settle(wait, &Delegates.answered/2)
+    assert {:refused, :answered} = Delegates.await_report(current(ctx), "main", id, 1)
+    assert %{report: "answered"} = Table.get(ctx.dtable, id)
+  end
+
+  # A caller as MCP's: one process waits on the report, sends what it took, then says how its
+  # write went (`settle/2`'s function) and ends.
+  defp caller(ctx, id, timeout) do
+    test = self()
+    delegates = current(ctx)
+
+    Task.async(fn ->
+      send(test, {:took, Delegates.await_report(delegates, "main", id, timeout)})
+
+      receive do
+        {:settle, nil} -> :ended
+        {:settle, said} -> said.(delegates, id)
+      end
+    end)
+  end
+
+  defp settle(wait, said) do
+    send(wait.pid, {:settle, said})
+    Task.await(wait)
   end
 
   defp start(ctx, project, branch),

@@ -138,9 +138,25 @@ A parent, its delegates, and restarts of the framework. Read it in the order of 
   is `Control`'s checked write, or `DeliveryRefused` holds the report again. `DeliveryMarked`
   writes `"delivered"`. A restart in between leaves `"sending"` with nothing in memory, and
   `SendingResolved` reads the parent's transcript (`got`) to settle it.
-- `DelegateEnds` waits for `"delivered"`.
+- Or a `run_delegate` call takes the report (for a delegate in `Awaited`). `CallWaits` is the
+  call, in a parent's turn; `Taken` takes a held report before the call's `Deadline`, marks it
+  `"answering"` and adds it to `watched`. `Written` is the endpoint's write, with three
+  outcomes: the agent has it (`heard`), it failed (a reset connection), or it succeeded to a
+  client that had gone (`lost`). `Told` is `answered/2` or `release/2`; `TellLost` is the
+  caller that cannot reach `Delegates`. `CallerEnds` may come at any step, and `CallerSeen`
+  holds an `"answering"` report again once its caller has ended. `FrameworkStarts` holds every
+  `"answering"` report again; `unsure` records that a report was held again while its answer
+  may have reached the agent.
+- `DelegateEnds` waits for `"delivered"` or `"answered"`.
 
-`FrameworkDies` clears what the framework holds in memory (`stops`, `sending`, `call`); the
+`ReportArrives` allows one exception, `lost`: the write succeeds to a client that is gone, and
+no one reads it. A client goes that way when the parent's process ends, or, under
+`ClientLeaves`, by its own limit. `Delegate_Cap.cfg` sets `ClientLeaves` false (the cap keeps
+`run_delegate`'s timeout under the client's limits) and stops no parent, and checks
+`ReportArrivesUnderCap`, which has no exception.
+
+`FrameworkDies` clears what the framework holds in memory (`stops`, `sending`, `call`,
+`watched`, and a call still waiting); the
 tables (`status`, `report`, `resumes`, `marked`) stay, and so does `Sessions`' row (`sess`),
 since `Sessions` runs on. `got` counts the report in the parent's transcript, `wrong` records a
 report typed where the check must refuse it, and `taken` and `resumed` count the messages the

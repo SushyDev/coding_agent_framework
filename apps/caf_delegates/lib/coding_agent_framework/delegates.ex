@@ -39,8 +39,10 @@ defmodule CodingAgentFramework.Delegates do
   Each report is `held` in the table, with a mark of its own, and survives restarts. A call that
   waits on it (`await_report/4`) takes it as it is held: it is then `answering`, never held,
   until the caller says its answer reached the agent (`answered/2`) or did not (`release/2`,
-  which holds it again). A restart holds every `answering` report again, so a report is never
-  lost to an answer that did not arrive: it is delivered as a message, at least once.
+  which holds it again). `Delegates` watches the process that waited: when it ends first, the
+  report is held again, as a release holds it. A restart holds every `answering` report again,
+  so a report is never lost to an answer that did not arrive: it is delivered as a message, at
+  least once.
 
   It reads every row again when it starts and at each `cue/2`; the embedding app wires the cues of
   `Sessions`, `Stream` and `Transcripts` to it. After each write `notify` gets `%{topic:
@@ -87,7 +89,8 @@ defmodule CodingAgentFramework.Delegates do
   Waits up to `timeout` ms for the report of `parent`'s delegate `id` and takes it, for a call
   that answers with it (`run_delegate`). Once the report is held, and only before the deadline,
   `Delegates` marks it `answering` in the same step, so it is not also delivered as a message;
-  the caller then says `answered/2` or `release/2`. Answers `{:ok, %{id, name, status, text}}`;
+  the caller then says `answered/2` or `release/2`, from the process that waited: when that
+  process ends before it says either, the report is held again. Answers `{:ok, %{id, name, status, text}}`;
   `{:unknown, :timeout}` at the deadline, the report then held as any other; or `{:refused,
   reason}`: `{:no_delegate, id}`, `:answering`, `:answered`, `:awaited` (another call waits on
   it), or `{:refused, reason}` for a start that was refused.
@@ -152,7 +155,9 @@ defmodule CodingAgentFramework.Delegates do
           notify: Keyword.get(opts, :notify, fn _ -> :ok end),
           clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
           pending: %{},
-          waiters: %{}
+          waiters: %{},
+          # The monitor of each process that took a report, to the report's id.
+          watched: %{}
         })
 
       {:ok, s, {:continue, :settle}}
@@ -205,7 +210,7 @@ defmodule CodingAgentFramework.Delegates do
 
     cond do
       row == nil or row.parent != parent -> {:reply, {:refused, {:no_delegate, id}}, s}
-      row.report == "held" -> {:reply, take(s, row), s}
+      row.report == "held" -> reply(take(s, row, from))
       row.report == "answering" -> {:reply, {:refused, :answering}, s}
       row.report == "answered" -> {:reply, {:refused, :answered}, s}
       row.status == "refused" -> {:reply, {:refused, {:refused, row.reason}}, s}
@@ -224,7 +229,7 @@ defmodule CodingAgentFramework.Delegates do
 
       %{report: "answering"} = row ->
         write(s, row, report: report)
-        {:reply, {:ok, reply}, s}
+        {:reply, {:ok, reply}, unwatch(s, id)}
 
       %{report: other} ->
         {:reply, {:refused, {:not_answering, other}}, s}
@@ -236,6 +241,19 @@ defmodule CodingAgentFramework.Delegates do
     {waiter, waiters} = Map.pop(s.waiters, id)
     with {from, _, _} <- waiter, do: GenServer.reply(from, {:unknown, :timeout})
     {:noreply, %{s | waiters: waiters}}
+  end
+
+  # CallerSeen: the process that took a report ended before it said how its answer went. The
+  # answer may not have reached the agent, so the report is held again, as release/2 holds it.
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, s) when is_map_key(s.watched, ref) do
+    {id, watched} = Map.pop(s.watched, ref)
+
+    case Table.get(s.db, id) do
+      %{report: "answering"} = row -> write(s, row, report: "held")
+      _ -> :ok
+    end
+
+    {:noreply, %{s | watched: watched}}
   end
 
   def handle_info({ref, answer}, s) when is_reference(ref) do
@@ -403,19 +421,34 @@ defmodule CodingAgentFramework.Delegates do
 
       {{from, deadline, timer}, waiters} ->
         Process.cancel_timer(timer)
+        s = %{s | waiters: waiters}
 
-        if System.monotonic_time(:millisecond) < deadline,
-          do: GenServer.reply(from, take(s, row)),
-          else: GenServer.reply(from, {:unknown, :timeout})
-
-        %{s | waiters: waiters}
+        if System.monotonic_time(:millisecond) < deadline do
+          {reply, s} = take(s, row, from)
+          GenServer.reply(from, reply)
+          s
+        else
+          GenServer.reply(from, {:unknown, :timeout})
+          s
+        end
     end
   end
 
-  defp take(s, row) do
+  # Taken: answering, and its caller watched from this step. A caller already gone is seen at
+  # once, since a monitor of a dead process answers :noproc.
+  defp take(s, row, {pid, _tag}) do
     write(s, row, report: "answering")
-    {:ok, Map.take(row, [:id, :name, :status, :text])}
+    ref = Process.monitor(pid)
+    {{:ok, Map.take(row, [:id, :name, :status, :text])}, put_in(s.watched[ref], row.id)}
   end
+
+  defp unwatch(s, id) do
+    {gone, kept} = Map.split_with(s.watched, fn {_ref, of} -> of == id end)
+    for {ref, _} <- gone, do: Process.demonitor(ref, [:flush])
+    %{s | watched: kept}
+  end
+
+  defp reply({reply, s}), do: {:reply, reply, s}
 
   defp waited(id, left), do: Process.send_after(self(), {:waited, id}, left)
 
