@@ -205,6 +205,84 @@ defmodule CodingAgentFramework.ExampleTest do
     {:ok, _} = Services.stop(parts.services, "app-main", "kept", [])
   end
 
+  test "a delegate stopped after its report is `ended`, and its services end", ctx do
+    parts = start(ctx.config)
+
+    {:ok, %{delegate: "app-unit-one"}} =
+      MCP.call(parts.mcp, "app-main", "start_delegate", args("unit/one"))
+
+    {:ok, ddb} = Delegates.Table.open(Path.join(ctx.home, "caf.db"))
+    {:ok, %{id: id}} = row(ddb, &(&1.name == "app-unit-one"))
+    svc = Path.join(ctx.dir, "svc")
+    argv = [program!(:sh), "-c", echo_tail!(svc), Path.join(svc, "it")]
+
+    {:ok, %{state: "running"}} =
+      MCP.call(parts.mcp, "app-unit-one", "service_start", %{"name" => "plain", "argv" => argv})
+
+    # Its report is taken and answered to its agent, as `run_delegate` does; then it is stopped.
+    {:ok, _} = row(ddb, &(&1.id == id and &1.status == "finished"))
+    assert {:ok, %{id: ^id}} = Delegates.await_report(parts.delegates, "app-main", id, 5_000)
+    assert {:ok, :answered} = Delegates.answered(parts.delegates, id)
+    {:ok, state} = Delegates.fix_state(parts.delegates, "app-main", "app-unit-one")
+    fix = Delegates.fix(parts.delegates, "app-main", "app-unit-one", :stop, state)
+    assert {:ok, :stopped} = fix
+
+    # No cue from the test: the stop's own end writes `ended`, a `delegates:` cue shows it, and
+    # the app ends the services the delegate owned.
+    {:ok, _} = row(ddb, &(&1.id == id and &1.status == "ended"))
+
+    {:ok, _} =
+      await(
+        fn ->
+          plain = Enum.find(Services.list(parts.services), &(&1.name == "plain"))
+          if plain && plain.state == "ended", do: {:ok, plain}
+        end,
+        20_000
+      )
+  end
+
+  test "a late end `Mailbox` did not answer is kept owed, then stored once", ctx do
+    parts = start(ctx.config)
+    {:ok, messages} = Mailbox.Table.open(Path.join(ctx.home, "caf.db"))
+    {:ok, log} = MCP.Table.open(Path.join(ctx.home, "parts/mcp/mcp.db"))
+    id = MCP.Table.called(log, "app-main", "run", "{}")
+    dropped = MCP.json({:unknown, %{job: "mcp-t-#{id}", reason: :dropped}})
+    :ok = MCP.Table.answered(log, id, JSON.encode!(dropped))
+    {:ok, jobs} = Jobs.Table.open(Path.join(ctx.home, "parts/jobs/jobs.db"))
+
+    # `Mailbox` does not answer: the first hand-on is unknown, and nothing raises or is stored.
+    :ok = :sys.suspend(parts.mailbox)
+    row = %{id: "mcp-t-#{id}", host: "ws", project: "app", name: "app-main", state: "exited"}
+    :ok = Jobs.Table.put(jobs, Map.merge(row, %{code: 3, late: "owed"}))
+
+    # A cue and then a read of its state: `Jobs` has handed the end on and had no answer.
+    Jobs.cue(parts.jobs, %{topic: "tick"})
+    :sys.get_state(parts.jobs, 60_000)
+    assert %{state: "exited", late: "owed"} = Jobs.Table.get(jobs, "mcp-t-#{id}")
+    assert Enum.filter(Mailbox.Table.open_rows(messages), &(&1.from_agent == "framework")) == []
+
+    :ok = :sys.resume(parts.mailbox)
+
+    {:ok, _} =
+      await(
+        fn ->
+          ok(Enum.find(Mailbox.Table.open_rows(messages), &(&1.from_agent == "framework")))
+        end,
+        20_000
+      )
+
+    {:ok, _} =
+      await(
+        fn -> if match?(%{late: "told"}, Jobs.Table.get(jobs, "mcp-t-#{id}")), do: {:ok, 1} end,
+        20_000
+      )
+
+    assert Process.alive?(parts.jobs)
+
+    assert [_one] =
+             Enum.filter(Mailbox.Table.open_rows(messages), &(&1.from_agent == "framework"))
+  end
+
   # Kills the delegate's current process, once the stand-in has taken `n` messages.
   defp kill_delegate(ctx, killed, n) do
     pids = Path.join(ctx.dir, "pids")

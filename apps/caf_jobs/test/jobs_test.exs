@@ -90,7 +90,12 @@ defmodule CodingAgentFramework.JobsTest do
     }
 
     test = self()
-    late = fn late_end -> send(test, {:late, late_end}) end
+    # The app's answer: unknown (not stored) once while `unknown-once` exists, else `:ok`.
+    late = fn late_end ->
+      send(test, {:late, late_end})
+      if File.rm(Path.join(dir, "unknown-once")) == :ok, do: {:unknown, :no_mailbox}, else: :ok
+    end
+
     opts = [dir: Path.join(dir, "jobs"), copies: copies, hosts: hosts, on_late_end: late]
     %{dir: dir, wt: wt, jobs: start_supervised!({Jobs, opts}), opts: opts, bash: bash}
   end
@@ -271,6 +276,30 @@ defmodule CodingAgentFramework.JobsTest do
 
     assert {:ok, %{job: "jr", end: {:exit, 4}, fetch: :not_fetched}} = late(jobs)
     assert {:ok, %{state: "exited", code: 4, late: "told"}} = Jobs.settle(jobs, "jr")
+    no_second(jobs)
+  end
+
+  test "JobSettles: a late end the app could not store stays owed, and is handed again at a cue",
+       c do
+    task = Task.async(fn -> run(c, "jk", "box", ["wait"]) end)
+    {:ok, _} = pid(c, 1)
+
+    {:ok, _} =
+      await(fn -> if Enum.any?(Jobs.rows(c.jobs), &(&1.state == "running")), do: {:ok, 1} end)
+
+    stop_supervised!(Jobs)
+    Task.shutdown(task, :brutal_kill)
+    File.write!(Path.join(c.dir, "fifo"), "5\n")
+    {:ok, _} = read_when(Path.join(c.dir, "box/jobs/jk.exit"), "5\n")
+    File.write!(Path.join(c.dir, "unknown-once"), "")
+    jobs = start_supervised!({Jobs, c.opts})
+
+    # The first hand-on gets unknown, so the row stays owed and is handed again at a cue; the
+    # second is stored, and the row is told. (A cue may already have come between the two.)
+    assert {:ok, %{job: "jk", end: {:exit, 5}}} = late(jobs)
+    assert {:ok, %{job: "jk", end: {:exit, 5}}} = late(jobs)
+    :sys.get_state(jobs)
+    assert %{state: "exited", late: "told"} = Enum.find(Jobs.rows(jobs), &(&1.id == "jk"))
     no_second(jobs)
   end
 

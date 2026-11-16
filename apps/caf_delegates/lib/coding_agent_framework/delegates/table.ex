@@ -6,7 +6,8 @@ defmodule CodingAgentFramework.Delegates.Table do
   `status` is `starting` and `resuming` while a call of `Sessions` is under way (`called_at`,
   in wall-clock ms, tells that call's `Sessions` row from an earlier one; `deadline` is the
   wall-clock time it is settled by), then `running`, then `finished` or `failed` once, or
-  `refused` with its `reason`. `brief_uuid` and `resume_uuid` are the uuids the turn's message
+  `refused` with its `reason`. A `finished` delegate whose report was answered is `ended` once
+  its process is gone, which frees its parent's cap. `brief_uuid` and `resume_uuid` are the uuids the turn's message
   goes in under, chosen before it is written. `report` is `none`, then `held` with its `text`
   and its `mark`, or `answering` once a call that waited on it took it (`run_delegate`), then
   `answered` once that call's answer reached its agent, or `held` again when it did not; the

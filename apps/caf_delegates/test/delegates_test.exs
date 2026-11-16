@@ -265,6 +265,45 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert {:ok, [%{id: ^id}]} = Delegates.held(current(ctx), "main")
   end
 
+  test "a delegate stopped after its report is ended, and no longer holds its parent's cap",
+       ctx do
+    assert {:ok, %{id: id, name: name}} = start(ctx, "app", "unit/one")
+    wait = caller(ctx, id, 10_000)
+    {:ok, _} = cue_until(ctx, id, &(&1.report == "answering"))
+    assert_receive {:took, {:ok, %{id: ^id}}}
+
+    # Not yet answered to its agent: a stop is refused, and the row stays finished.
+    assert {:ok, state} = Delegates.fix_state(current(ctx), "main", name)
+
+    assert {:refused, {:report, "answering"}} =
+             Delegates.fix(current(ctx), "main", name, :stop, state)
+
+    assert {:ok, :answered} = settle(wait, &Delegates.answered/2)
+    assert {:refused, {:cap, 1}} = start(ctx, "app", "unit/two")
+
+    # Stopped: the process is gone, and the row is `ended` without a cue from the test, as the
+    # stop's own end brings it. It is announced, and its cap is free.
+    {:ok, state} = Delegates.fix_state(current(ctx), "main", name)
+    assert {:ok, :stopped} = Delegates.fix(current(ctx), "main", name, :stop, state)
+
+    {:ok, %{status: "ended", report: "answered"}} =
+      await(fn ->
+        case Table.get(ctx.dtable, id) do
+          %{status: "ended"} = row -> {:ok, row}
+          _ -> :none
+        end
+      end)
+
+    assert {:ok, %{id: two}} = start(ctx, "app", "unit/two")
+    assert two != id
+
+    # A later cue does not move an ended row, and a second stop is refused.
+    cue(ctx, current(ctx))
+    assert %{status: "ended"} = Table.get(ctx.dtable, id)
+    {:ok, state} = Delegates.fix_state(current(ctx), "main", name)
+    assert {:refused, _} = Delegates.fix(current(ctx), "main", name, :stop, state)
+  end
+
   test "an answering report is held again by a release, and by a restart, once", ctx do
     assert {:ok, %{id: id}} = start(ctx, "app", "unit/one")
     wait = caller(ctx, id, 10_000)
