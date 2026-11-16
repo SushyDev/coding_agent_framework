@@ -113,23 +113,44 @@ Each word below names one thing, and the design, the code and the views use it o
 - **Viewer**: the tmux pane that shows a held agent: a main session's own screen (`dtach -a`),
   or a readable rendering of a delegate's event log. It can die, be reopened or be opened twice;
   the agent runs on.
-- **Claim**: an agent's hold on one of its children, or a service, in one state, taken before a
-  fix, so that only one fix of that state runs.
+- **Claim**: an actor's hold on one of its targets (a child, a service, a broken state), in one
+  state, taken before an act, so that only one act on that state runs. Every claim is a row in
+  `Acts`, whoever the actor: an agent's fix, the operator's act, a recovery.
+- **Delivery**: text the framework hands an agent (a message, a reply, a notice, a report, the
+  app's word), one row in `Mailbox`, marked before it goes and settled from evidence after. How
+  it goes in is its **transport**: a `Stream` line, the waiter's answer, the `Inlet`'s checked
+  write, or the answer of a waiting `run_delegate`.
+- **Hold**: a request held open with a deadline, answered exactly once by a named decider, and
+  settled when its holder dies. `Intake` keeps four kinds.
 
 ## The parts
 
-Each part is one OTP process or one pure module, with one job.
+Each part is one OTP process or one pure module, with one job, and is the one writer of the
+table it owns. A part reads another part's state only through that part's functions, never by
+opening its table, and a list of statuses (which statuses hold an agent, which have ended) lives
+once, in the part that owns them. So a status renamed in one part fails at compile time there,
+not at run time in three others.
+
+**Remodel.** The table below is the target shape F-115 proposed and F-116 took. The code reaches
+it through units R1 to R12 ("Order of the first units"); until a unit lands, its part runs in
+the shape it was built in (F-115's build note says where each one is today). Each later unit is
+built on the target shape: a new hold is a kind of `Intake`'s one hold, a new way into a session
+is a transport of `Mailbox`, a new act is a row kind of `Acts`, and a new reading of a session is
+a function of `Sessions`.
 
 The repository is a Mix umbrella with one OTP application per part (or per small set of parts
 that only make sense together), under `apps/`. An app declares, directly, every app it uses and only those; `gate-deps` checks it
 (Elixir alone accepts a module from any app in the dependency tree), a use outside the tree does
 not compile, and the layers stay one way: base (`caf_shell`,
-`caf_tmux`, `caf_holder`), then readers and writers (`caf_registry`, `caf_transcripts`,
-`caf_usage`, `caf_accounts`, `caf_cli`, `caf_control`, `caf_stream`, `caf_intake`,
-`caf_sampler`), then `caf_sessions`, then `caf_tracker` (with each source next to it) and
-`caf_recoveries`, then the parts built later. Shared test aids that use no part above `caf_shell` live in `caf_test`,
+`caf_tmux`, `caf_holder` with `Holder.Process`, `caf_store` with `Reader`, `caf_cues`), then
+readers and writers (`caf_registry`, `caf_transcripts`, `caf_usage`, `caf_accounts`, `caf_cli`,
+`caf_screen`, `caf_inlet`, `caf_stream`, `caf_intake`, `caf_sampler`), then `caf_sessions`,
+then `caf_tracker` (its sources made from the readers' table metadata) and `caf_recoveries`,
+then the parts built later. The remodel adds `caf_store` (R1) and `caf_cues` (R11), and
+`caf_control` becomes `caf_inlet` (R8), which uses `caf_screen`'s pure reading. Shared test aids that use no part above `caf_shell` live in `caf_test`,
 used only in tests; setup a part's tests share with a higher app's tests lives in that part's
-`test/support/`, compiled only for tests. Module names stay `CodingAgentFramework.*`. Each app
+`test/support/`, compiled only for tests. A test double is a test aid: it lives in
+`test/support/` or `caf_test`, never in a library's `lib/` (`Tmux.Fake` moves in R1 or R2). Module names stay `CodingAgentFramework.*`. Each app
 has its own tests and docs; a test of a Tracker source, or of two parts together, belongs to the
 higher app; the
 model (`model/tla/`), `bin/check-model`, devenv and the design stay at the root, and the gates
@@ -141,60 +162,91 @@ gates keep the layers one way. It is used as one package, `coding_agent_framewor
 project that compiles every part as one OTP app, by a git tag first and from Hex later. It runs
 on the Elixir and OTP versions it declares and tests; a version it needs is named with why.
 
-| Part | Job |
-|---|---|
-| `Hosts` | the workstation and the other hosts, how each is reached, and its shell |
-| `Shell` | the only module that starts programs, locally or over ssh, each leading a process group of its own, which a timeout ends |
-| `Shell.Reaper` | one per host: ends a running command's group when its caller dies first or the VM dies |
-| `Programs` | the absolute path of tmux, dtach, claude, git, gh, rsync, ssh, flock, sh, sleep, rm, kill, env, ps, cat and tail on each host, given (from devenv, as the framework's own development and gates use) or looked up on the host's `PATH`, each checked against its supported versions at start with a clear error per one missing or out of range; no other part names a fixed path |
-| `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` |
-| `Usage` | each account's weekly allowance, from what Claude Code hands its status line; picks the account with the most left ("Allowance") |
-| `Tmux` | sessions, panes, tags, keys and viewers on one server; a contract with a CLI and a fake |
-| `TmuxSampler` | samples each server's panes and each host's held sockets, reports a held agent with no viewer, and cues `Sessions` when a held socket goes away |
-| `Holder` | dtach: hold a process in a clean environment, open a viewer, list sockets and whether each lives |
-| `ClaudeCLI` | the command line and environment of a session, per role and account |
-| `Registry` | reads Claude Code's `<config>/sessions/*.json` per account, and so each held agent's pid |
-| `Transcripts` | a session's transcript tail, its chats and its subagents |
-| `Screen` | a main session's screen and dialogs, per Claude Code release, from real fixtures captured with a script: the trust dialog, typed commands and their result lines, the box before a typed write |
-| `Stream` | a headless delegate's stdin and event log: writes messages, reads events from an offset |
-| `Intake` | hook events in; holds `PermissionRequest` hooks until answered, `PreToolUse` hooks until the app decides, and each main session's waiting Stop hook until something is due for it |
-| `Control` | the one writer per host: send, answer, interrupt, stop, respawn |
-| `Sessions` | start, resume and stop held agents on the workstation, with their viewers, rows and worktrees |
-| `Mover` | drains a session and moves it between accounts |
-| `Mains` | each project's main session, what it holds, and the start of one for a project that has none |
-| `Delegates` | the delegate protocol: start, report, resume, end |
-| `Stacks` | the worktrees and `gh stack` chains of a main session's work |
-| `Copies` | a host's copy of each worktree, brought in step by rsync before each job or service, and removed with the worktree |
-| `Jobs` | one-off commands on a host, in a copy: held, logged, ended by their exit or their timeout |
-| `Tracker` | the state views read: the fold of every reader |
-| `Recoveries` | detect a broken state, act once per state, verify; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after its end within its stop's deadline, and only by the row's pid and start time (`Sessions` itself never kills) |
-| `Mailbox` | messages along the tree's edges and between main sessions: stored, delivered once, in order per sender and addressee |
-| `Services` | programs agents start and keep on a host, in a copy: held, owned, read, written to, restarted, with ports forwarded to the workstation |
-| `Grants` | decides whether a caller may act on a target, by the tree's edges; holds a fix's claim on it |
-| `MCP` | the agent tools ("Agents working together"); each call is checked by `Grants` |
-| `Ghostty` | opens or focuses a session's terminal window |
+| Part | Job | Owns |
+|---|---|---|
+| `Hosts` | the workstation and the other hosts, how each is reached, and its shell | — |
+| `Shell` | the only module that starts programs, locally or over ssh, each leading a process group of its own, which a timeout ends | — |
+| `Shell.Reaper` | one per host: ends a running command's group when its caller dies first or the VM dies | — |
+| `Programs` | the absolute path of tmux, dtach, claude, git, gh, rsync, ssh, flock, sh, sleep, rm, kill, env, ps, cat and tail on each host, given (from devenv, as the framework's own development and gates use) or looked up on the host's `PATH`, each checked against its supported versions at start with a clear error per one missing or out of range; no other part names a fixed path | — |
+| `Store` | a pure module over SQLite: open with WAL and a busy timeout, the schema and its added columns, `query`, `rows_by_id`, `update`, upsert, a reads row, and a load that fills a newer build's fields with their defaults; every table of the framework is opened through it | no table |
+| `Reader` | a pure module beside `Store`: the loop every reader runs (read on an interval or a call, diff against what it wrote, write with a reads row, cue), and a `Tracker` source made from the reader's table metadata | no table; each reader its own |
+| `Cues` | one per instance: each part declares the topics it reads, and `Cues` hands each cue to the `Tracker` and to every part that declared its topic; the order in which the system settles is the library's, not the app's | no table |
+| `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` | — |
+| `Usage` | each account's weekly allowance, from what Claude Code hands its status line; picks the account with the most left ("Allowance"); a `Reader` | its readings |
+| `Tmux` | sessions, panes, tags, keys and viewers on one server, and the one-command check of every write to a pane; a contract with a CLI (its fake is a test aid) | — |
+| `TmuxSampler` | samples each server's panes and each host's held sockets, reports a held agent with no viewer, and cues when a held socket goes away; a `Reader` | `tmux_samples` |
+| `Holder` | dtach: hold a process in a clean environment, open a viewer, list sockets and whether each lives | — |
+| `Holder.Process` | a held program's record: pid, start time and socket, read in one batch; "dead" as the pid gone and the socket absent or stale; an end by TERM, then KILL, only by the record's pid and start time. Every part that holds a program keeps this record on its own row | no table |
+| `ClaudeCLI` | the command line and environment of a session, per role and account, and the paths of a headless session's stream directory | — |
+| `Registry` | one per host, over every account the framework holds: reads Claude Code's `<config>/sessions/*.json`, and so each held agent's pid and its session file's `status`; a `Reader` | `registry_sessions` |
+| `Transcripts` | one per host, over every account: a session's transcript tail, its chats and its subagents, and whether a transcript holds a delivery's line; a `Reader` | `transcripts_sessions` |
+| `Screen` | a pure reading of a main session's screen and dialogs, per Claude Code release, from real fixtures captured with a script: the trust dialog, typed commands and their result lines, the box before a typed write | — |
+| `Inlet` | the checked typed write into an interactive session with no waiter: `Screen`'s box check, then `Tmux`'s one-command check, one per host; and the typed commands a session's start or a tool needs (the trust dialog, `/mcp reconnect`, the interrupt key). It is one transport of `Mailbox` | no table |
+| `Stream` | a headless session's transport: a FIFO per process, a spool removed as the line's claim, the event log read from an offset, and its `can_use_tool` requests. Its fold of the log (each message's replay, each result) is evidence `Mailbox` and `Sessions` read; it keeps no delivery state of its own | `stream_delegates` |
+| `Intake` | hook events in; one hold, of four kinds: `permission` (a person's or an agent's `answer`), `tool` (`PreToolUse`, the app's callback), `stop` (`Stop` held for the app's callback) and `waiter` (a main session's waiting Stop hook, answered with `Mailbox`'s due text) | `intake_events` |
+| `Sessions` | the agent row: one row per agent, main session or delegate, with its kind, parent, project, account, launch options, held process and status; start, resume, and stop by SIGTERM once idle; the tree as one function of its rows; each session's turn state as one function per kind of session, from its evidence | `agents` |
+| `Mover` | drains a session and moves it between accounts; its phase is a field of the agent row | — |
+| `Mains` | each project's main sessions, as agent rows of kind `main`; the pull after a landing, and the start of one for a project that has none | — |
+| `Delegates` | the delegate protocol only: its checks, the cap, the account pick, resume once, report a second kill; it hands the report to `Mailbox` as the reply to the brief | `delegates`: branch, brief uuid, resumes, whether the report was taken |
+| `Mailbox` | every delivery: messages, replies, notices, reports and the app's word, stored, delivered once, in order per sender and addressee; one mark and settle, with the transport the target's kind chooses | `messages` |
+| `Acts` | one ledger of acts: an actor's act on a target's state, written before it acts, once per state, settled after, closed as interrupted when a restart cut it, with a cue. Fixes, the operator's acts, recoveries, kills, resumes, starts and raised errors are its rows, and the fault ledger is a query of it | `acts` |
+| `Stacks` | the worktrees and `gh stack` chains of a main session's work | — |
+| `Copies` | a host's copy of each worktree, brought in step by rsync before each job or service, and removed with the worktree | `copies` |
+| `Jobs` | one-off commands on a host, in a copy: held, logged, ended by their exit or their timeout | `jobs` |
+| `Services` | programs agents start and keep on a host, in a copy: held, owned, read, written to, restarted, with ports forwarded to the workstation; the forward is a second `Holder.Process` record of the service | `services` |
+| `Tracker` | the state views read: the fold of every reader | — |
+| `Recoveries` | detect a broken state, take its act in `Acts`, act once per state, verify; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after its end within its stop's deadline, by `Holder.Process` (`Sessions` itself never kills) | no table of its own |
+| `Grants` | decides whether a caller may act on a target, by the edges of `Sessions`' tree; a pure module, handed the tree's function | — |
+| `MCP` | the agent tools ("Agents working together"); each call is checked by `Grants` once, and each fix takes its act in `Acts` | `mcp_tokens`, `mcp_calls` |
+| `Ghostty` | opens or focuses a session's terminal window | — |
 
 The LiveView side is a library of components over the `Tracker`, with one example app.
 
 `caf_example` is the embedding app the example grows from (F-102): its configuration is data
 (the framework home, the workstation, other hosts, accounts, projects, ports); one supervision
-tree starts every part in the order each needs, the reaper first; it makes the hook secret and
-the claims' `start_id` once per start, and wires each part's cue to the `Tracker` and to the
-parts that read that topic. What it wires that the parts did not yet offer (F-102's findings):
-until `Mains`, it declares each project's main session, and `Grants`' tree answers it as a root
-(no parent), so a main session can start its first delegate; `Delegates` launches each delegate
-with its own MCP config, from a function of the agent's name the app gives it (`MCP.issue/2`);
-a job's late end goes to its caller through `Mailbox` as a message from `framework`, once per
-job, the caller read from `MCP`'s call log by the job's id (from the file: `Jobs` hands the ends
-it owes as it starts, before `MCP`); `Stream` and `Transcripts` are read on an interval,
-as `Registry` is, so a delegate's `result` is read without waiting for another cue; and when a
-delegate's end is seen, the app calls `Services.owner_ended/3` from a process of its own (F-103;
-until a delegate's end after its report is built, an end is a refused start or `failed`). A
-delegate ended after its report (by `stop`) is written `ended` in `Delegates`' row, so the cue
+tree starts every part in the order each needs, the reaper first, and one `Cues` per instance;
+it makes the hook secret and the `start_id` of `Acts` once per start. It routes no cue by hand:
+each part declares the topics it reads, `Cues` routes them, and `Jobs` and `Services` cue like
+every other part, so no ticker sends a made-up topic (R11). It opens no part's table: the tree,
+an agent's worktree and the agent a hook names are `Sessions`' functions (R9). What it still
+wires that the parts do not offer (F-102's findings): until `Mains`, it declares each project's
+main session, written as an agent row of kind `main` with no parent, so a main session can
+start its first delegate; `Delegates` launches each delegate with its own MCP config, from a
+function of the agent's name the app gives it (`MCP.issue/2`); a job's late end goes to its
+caller through `Mailbox` as a message from `framework`, once per job, the caller read from
+`MCP`'s call log by the job's id (from the file: `Jobs` hands the ends it owes as it starts,
+before `MCP`); and when a delegate's end is seen, `Services.owner_ended/3` runs on the cue of
+the agent row's end. `Stream` and `Transcripts` are read on an interval, as `Registry` is, so a
+delegate's `result` is read without waiting for another cue; that interval is the `Reader`'s
+(R2). A delegate ended after its report (by `stop`) is `ended` on its agent row, so the cue
 shows it and its services end (F-103's new-2). `on_late_end` answers `:ok` or `{:unknown,
 reason}`, and on the second the job stays owed for the next cue: keeping an end never needs a
 crash (new-1). A delegate's reply to a message from `framework` goes to its main session, as
 any reply does (new-4).
+
+**How the flows go through the parts** (F-115):
+
+- **A session's life.** `Sessions` writes the agent row first (`starting`), holds the program,
+  and settles it by `Holder.Process` and the session file or the stream's init: `running`. Its
+  turn state is one function per kind: a headless session's from `Stream`'s fold, an
+  interactive one's from the session file's `status` and `Intake`'s waiter. Its end is SIGTERM
+  once idle (or `end_session` for a headless one), and it is `stopped` once the process is gone
+  and the socket dead. `Recoveries` ends an orphan by the same record, under its act in `Acts`.
+  A move is a phase on the same row.
+- **A delivery.** Anything for an agent is a row in `Mailbox`. `Mailbox` picks the oldest due
+  row per addressee, marks it `sending` with its transport, and hands it on: a `Stream` line
+  for a headless session, the waiter's answer for an interactive one with a waiter, the
+  `Inlet`'s checked write for one with none, or the answer of a waiting `run_delegate`
+  ("Delivery"). Refused undoes the mark; unknown keeps it for the evidence. The row is the only
+  mark: `Stream` keeps its line's claim, which is transport, and no message state; `Delegates`
+  keeps no delivery state.
+- **A hook.** `Intake` writes the event, then answers, as before. A hook that waits is a hold:
+  a key, a deadline under the hook's timeout, a named decider, exactly one response, and a
+  settle when the holder or its connection dies (`lost` or `unknown` for a hold with a row,
+  nothing for the others). The four kinds differ only in their decider, deadline and response.
+- **An act.** Every fix, recovery, kill, resume, start and raised error is a row in `Acts`,
+  `{actor, target, state, act, start_id, status, outcome}`, written before it acts, refused for
+  a state already acted on, and `interrupted` when a restart cut it.
 
 ## Hosts
 
@@ -203,8 +255,8 @@ edits files over ssh keeps the editor local and runs commands remotely. Every ke
 its host, as it has since the first part built, so the workstation is one host among them:
 
 - the workstation has the framework's node, its one tmux server, its dtach directory for agents,
-  one `Registry` reader per account and its `Control`; every agent's row, pane and socket is on
-  it;
+  one `Registry` and one `Transcripts` over every account, and its `Inlet`; every agent's row,
+  pane and socket is on it;
 - a pane is `{host, server, server_start, pane_id}`, a held process `{host, socket}`; the
   server's start (its start time and pid) is part of a pane's key, so a pane id never matches
   across a restart;
@@ -396,7 +448,7 @@ one press at any level. It goes to the account with the most allowance left:
 7. Ignore the old process's `SessionEnd` that arrives after the new one started.
 
 Running delegates, jobs and services do not hold a move: each runs in its own process and
-survives the main session's end. A delegate's report is held by its main session until a
+survives the main session's end. A delegate's report is held in `Mailbox` for its main session until a
 process of it runs whose turn has ended, and the hold survives restarts of the framework.
 
 Its chat is never archived.
@@ -413,15 +465,16 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
 4. starts `claude` headless, held by dtach, with `--session-id` set to an id the framework
    chose and the brief as its first message, opens a viewer of its event log tagged with the
    session, project and unit, and confirms the start by its first event naming that id;
-5. delivers its last message to the parent when it stops. When a restart lost the stop event,
-   it delivers the transcript's last reply instead, and ends the delegate only after delivery.
-   The delegate's row moves from running to finished once, by its Stop event or by its
-   transcript's last reply, whichever comes first; a later one is ignored. A report goes to
-   the parent's waiting Stop hook ("Delivery into a main session"); with no waiter, it is held
-   until one connects. The row is marked sending before the waiter is answered; after a
-   restart, a row still marked sending is settled from the parent's transcript, once the
-   parent's turn that took it has ended: delivered if the report is there, held again if not.
-   Each report carries a mark of its own that the transcript shows;
+5. hands its last message to `Mailbox` when it stops, as the reply to the brief's uuid. When a
+   restart lost the stop event, it hands on the transcript's last reply instead, and ends the
+   delegate only after the delivery settled. The delegate's row moves from running to finished
+   once, by its Stop event or by its transcript's last reply, whichever comes first; a later
+   one is ignored. The report is then a delivery like any other ("Delivery"): to the parent's
+   waiting Stop hook, held while no waiter is connected, its row in `Mailbox` marked sending
+   before the waiter is answered and, after a restart, settled from the parent's transcript once
+   the parent's turn that took it has ended: delivered if the report is there, due again if
+   not. Each report carries a mark of its own that the transcript shows. `Delegates` keeps only
+   whether the report was taken;
 6. resumes it once when it is killed before its last reply, and reports a second such kill
    instead of retrying. That report is held and delivered like a finish. A kill after the last
    reply is a finish, read from the transcript.
@@ -434,9 +487,14 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
   table of projects and no default cap. A delegate holds its parent's cap from its row's
   start until it ends: starting, running, resuming, finished or failed, since a finished one
   still holds its worktree and its report.
-- Until `Mains` exists, the caller names the main session, and the row keeps that name. Until
-  then `Grants` knows a main session only as a parent a delegate's row names, and refuses every
-  check on a delegate whose rows name two parents (F-73's new-3 and new-4); `Mains` ends both.
+- A delegate's life (running, finished, failed, ended) is its agent row's status in `Sessions`,
+  and which statuses hold the cap is one function there (R9). `Delegates`' own row keeps the
+  marks of its own calls (starting, resuming) and its own facts: branch, brief uuid, resumes,
+  and whether the report was taken. It reads `Sessions`' state only through `Sessions`'
+  functions.
+- A main session is an agent row of kind `main` with no parent, written by the app until
+  `Mains`, and the delegate's agent row names its parent. `Grants` reads the tree from those
+  rows, so a delegate can name only one parent (F-73's new-3 and new-4 end with R9).
 - A delegate's session is named `<project>-<branch>`, each character of the branch other than
   a letter, a digit, `_` or `-` written as `-`, so a later start of the branch finds its
   worktree.
@@ -455,14 +513,16 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
 - A headless delegate's Stop is the `result` that ends the turn its message began, read from
   its event log; its text is the report. The log's offset persists, so a restart does not lose
   it; a kill before its line is written does, and the transcript's last reply stands in.
-- A report `run_delegate` answers with is taken in the same step of `Delegates` that holds it,
-  and only before the call's deadline (on the node's clock, as the caller set it): the row's
-  report is then `answered`, never `held`, so it is not also delivered as a message. Past the
-  deadline the call answers `{:unknown, :timeout}` and the report is held as any other (F-92).
-  A report is `answering` from that step until the endpoint has written the answer to the
-  agent, then `answered`; a write that fails holds it again, a restart finds an `answering`
-  report and holds it again, and so does the end of the process that waits for it, which
-  `Delegates` watches, so it is delivered as a message instead. A write fails only on a
+- A waiting `run_delegate` is one transport of the report's delivery (R7). The report is taken
+  for the call in the same step of `Mailbox` that marks its row, and only before the call's
+  deadline (on the node's clock, as the caller set it): the row is then `sending` by the call,
+  never due for a waiter, so it is not also delivered another way. Past the deadline the call
+  answers `{:unknown, :timeout}` and the report is due as any other (F-92). The row stays
+  `sending` by the call until the endpoint has written the answer to the agent, then
+  `delivered`; a write that fails makes it due again, a restart finds it `sending` by the call
+  and makes it due again, and so does the end of the process that waits for it, which `Mailbox`
+  watches, so it is delivered by the parent's waiter instead. This was the report's own
+  `answering` mark in `Delegates`' row (F-92 to F-97); the rule is the same, kept once. A write fails only on a
   connection the client reset: one it closed normally still takes the write (F-95's new-1). So
   what keeps the client from giving up first is the cap: `run_delegate`'s `timeout` stays under
   both limits Claude Code keeps for a remote MCP call, the request's (`MCP_TOOL_TIMEOUT`) and the
@@ -470,9 +530,9 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
   which `ClaudeCLI` sets at launch from one tool timeout (F-92's new-2, F-95's new-2). A report a
   client dropped anyway stays in its row and in the call log, where the read tools find it.
   The client also goes when the main session's process ends during the call, by a move or an
-  exit, and a write to it can still succeed (F-97's new-1). So the report is `answered` only if
+  exit, and a write to it can still succeed (F-97's new-1). So the row is `delivered` only if
   the process that made the call (by pid and start time, as `Sessions` holds it) still runs
-  after the write; otherwise it is held again and delivered as a message. A move's drain waits
+  after the write; otherwise it is due again and goes by the parent's waiter. A move's drain waits
   for no `run_delegate` call of the session to be under way.
 - A resumed process takes no turn of its own. It is given the brief again, under its uuid, when
   the brief had not gone in, and otherwise a fixed message to go on with its brief.
@@ -600,7 +660,8 @@ reading for delegates:
   turn ended: a process that exited during a turn ran no `result`, and the resumed one starts
   none of its own.
 - **Writes are lines, claimed once.** A message, an answer, an interrupt or an end is one JSON
-  line. Its row is marked first, then the line goes to a spool file `out/<uuid>.json`, and the
+  line. Its row is marked first (a message's in `Mailbox`, an answer's, an interrupt's or an
+  end's in `Stream`), then the line goes to a spool file `out/<uuid>.json`, and the
   host's one writer starts `sh -c 'exec 3<"$1" && rm "$1" && exec cat <&3 >"$2"' sh <spool>
   <fifo>`, with the FIFO of the process the write was checked live for. Removing the spool is the
   claim: once it is gone, the line goes in whole, by a process that does not end with the
@@ -618,12 +679,13 @@ reading for delegates:
   wakes it); a message that joins such a turn is accepted, and is still delivered once, by its
   replay.
 - **Delivered once, seen.** A message carries a uuid of the framework's, and with
-  `--replay-user-messages` it comes back with that uuid and `isReplay`. Its sending mark is
-  settled by the replay. When the delegate exits, a message with no replay in the log, read to
-  its end, is delivered if the transcript holds its uuid and undelivered otherwise; it is never
-  written again blind. Since no line of an earlier process reaches a later one, "undelivered" is
-  final. It goes to the resumed process again, first, under its same uuid, before any other
-  message. Claude Code drops a user line whose uuid its transcript holds; with a FIFO per process
+  `--replay-user-messages` it comes back with that uuid and `isReplay`. Its sending mark, the
+  row in `Mailbox`, is settled by the replay that `Stream`'s fold reads; `Stream` keeps the
+  line's claim and the replay, not a message state of its own (R7). When the delegate exits, a
+  message with no replay in the log, read to its end, is delivered if the transcript holds its
+  uuid and undelivered otherwise; it is never written again blind. Since no line of an earlier
+  process reaches a later one, "undelivered" is final. `Mailbox` makes it due again for the
+  resumed process, first, under its same uuid, before any other row to that delegate. Claude Code drops a user line whose uuid its transcript holds; with a FIFO per process
   the framework does not rely on that, and the same uuid is defense in depth.
 - **A claim needs a reader.** Opening the pipe for writing waits while no process reads it, so
   the writer starts a claim only for a live delegate, under the write's deadline, and
@@ -640,10 +702,9 @@ reading for delegates:
   events are the log.
 - **Ending.** An `end_session` request ends the session and cuts a running turn, so it goes in
   only after the report is delivered and the turn has ended. `Sessions` checks the report before
-  it asks for the end: against the parent's row once `Delegates` exists, and until then by the
-  caller's statement. `Stream` refuses the end while the turn runs or a message is under way or
-  found undelivered, and refuses a message once an end is marked; behind the report, its turn
-  check is defense in depth. `Sessions` sees the exit by the pid; one that does not exit within
+  it asks for the end: the report's row in `Mailbox` settled delivered, and no row to the
+  delegate sending or due. `Stream` refuses the end while the turn runs, and refuses a line once
+  an end is marked; behind the report, its turn check is defense in depth. `Sessions` sees the exit by the pid; one that does not exit within
   the stop's deadline is ended by `Recoveries`.
 - **Rate limits.** A `rate_limit_event` carries the account's windows, among them
   `seven_day.utilization` (0 to 1) and `resetsAt`, as the status line does. `Usage` reads the
@@ -671,7 +732,8 @@ run and reviewed, with names and paths scrubbed; no test runs the real Claude Co
 **Delivery into a main session** (a report, a reply, a message) types nothing (F-114). Each
 main session's settings name a Stop hook with `asyncRewake: true` and a long `timeout`. Its
 program connects to `Intake` (the same port and secret as the other hooks), names its session,
-and waits. When something is due, `Intake` answers that waiter with the text; the program
+and waits: a hold of kind `waiter`, one per session, whose decider is `Mailbox`. When a row is
+due, `Mailbox` marks it sending by the waiter and `Intake` answers that waiter with the text; the program
 writes it to stderr and exits 2, and Claude Code starts a turn with it, even when the session
 is idle. Each turn's end starts the next waiter, so one waits at a time. The transcript holds
 the text as a user line (`Stop hook blocking error from command "Stop": <text>` in 2.1.322),
@@ -681,8 +743,8 @@ not be empty.
 A session with no waiter (before its first turn ends, after a waiter's timeout, or after a
 restart cut the waiter's connection) gets nothing that way, and `Intake` knows it, since it
 holds each waiter's connection. What is due is held until a waiter connects; a view shows a
-session idle with no waiter and something due, and the checked write through `Screen` reaches
-it.
+session idle with no waiter and something due, and the `Inlet`'s checked write reaches it, as
+one more transport of the same row.
 
 **Ending a session** is SIGTERM to its pid, by the row's pid and start time, once its session
 file says `idle`. It replaces a typed `/exit`. Claude Code's shutdown keeps the transcript and
@@ -699,7 +761,7 @@ framework's tools, which are strict in how they act and narrow in whom they reac
 **Strict in how:**
 - A tool names its target by what the framework holds: an agent's name or a service's name.
   Never a tmux target, a pid, a socket path or a raw command for tmux.
-- Each call acts through the part that owns the action: a key goes through `Control`'s checked
+- Each call acts through the part that owns the action: a key goes through the `Inlet`'s checked
   write, a held process through `Holder`, a dialog through the hook `Intake` holds.
 - Each call answers `{:ok, …}`, `{:refused, reason}` or `{:unknown, reason}`, with a finite
   timeout. A tool never retries, and never waits longer than the timeout it was given.
@@ -722,7 +784,8 @@ framework's tools, which are strict in how they act and narrow in whom they reac
   main session.
 - A fix (interrupt, answer, resume, stop) is a parent's act on its own child. It takes a claim on
   the child first. The claim is for the child's current state, the way `Recoveries` acts once
-  per state, and is a row in `Grants`' table, written before the fix acts. A second fix of the
+  per state, and is a row in `Acts` (the same table `Recoveries` writes its acts in), written
+  before the fix acts. A second fix of the
   same state is refused with `{:claimed, by}`. The fix acts only while the claimed state is
   still the child's current one, read again when it acts. A call ends with its fix verified or
   not; the row keeps that state until the child's state moves, and a fix that did not help goes
@@ -730,8 +793,9 @@ framework's tools, which are strict in how they act and narrow in whom they reac
   embedding app makes once per start; a row of an earlier start still claimed is one a restart
   cut off. A claim a restart of the framework cut off is closed as interrupted, never
   retried. A state once claimed stays claimed, whatever the claim's end: a second claim of it
-  is refused (`{:already_claimed, by}`), so a fix acts once per state. A caller whose claim was
-  answered unknown reads the claims' rows before it decides anything (F-75).
+  is refused (`{:already_claimed, by}`), so a fix acts once per state; a unique index on the
+  target's state keeps it so, with no scan. A caller whose claim was answered unknown reads the
+  act's row before it decides anything (F-75).
 - No agent fixes or moves a main session; only a person does, a move with one press.
 - An agent may not fix itself. A stuck agent cannot be relied on to see that it is stuck.
 - Jobs and services: a main session and its delegates may run jobs and start services on any
@@ -782,10 +846,9 @@ person's own user, and only an OS user per agent would separate them. The file s
 session's life, since a reload or a resume reads it again.
 
 **Messages** are stored before they are sent, so a restart of the framework does not lose
-them. One goes in only when the target's turn has ended (and, for a main session, its input box
-is empty), the same rule as any write, with a report's sending mark and settle: marked before the
-write, settled from the target's replay or transcript after a restart, never resent blind.
-Messages are kept in order per sender and addressee. A message is refused when its addressee is
+them. Each is a delivery ("Delivery"), the same row a report and a reply are: one goes in only
+when the target's turn has ended, marked before it goes, settled from the target's replay or
+transcript after a restart, never resent blind. Messages are kept in order per sender and addressee. A message is refused when its addressee is
 not along an edge of the sender, or is a name the framework does not hold; one to a dead agent
 is held until it is resumed or ends. A message to a delegate that has ended is not delivered:
 its row says the delegate ended before it went in, and the sender (the delegate's main
@@ -829,6 +892,34 @@ started in its foreground mode (a database with its no-daemon flag, say). A star
 after its owner has ended does not stay running: its settle reads the owner's end first, and
 ends the service, or hands it to the owner's parent when it has `keep` (F-83).
 
+## Delivery
+
+Everything the framework hands an agent is one row in `Mailbox`: a message, a reply, a notice,
+a report (the reply to the brief's uuid) and the app's word (F-115, R7). There is one mark and
+one settle, and only the transport differs. `Delivery.tla` models it before `Mailbox` is
+changed (R6).
+
+- **One row in flight per addressee.** `Mailbox` picks the oldest due row per addressee, in
+  order per sender and addressee, with a row made due again by a settle going first. It marks
+  the row `sending` with its transport, then hands it on. Refused undoes the mark; unknown keeps
+  it for the evidence. The row is the only mark: no other part keeps a delivery state.
+- **Into an ended turn only, to the current process only.** The turn state is `Sessions`'
+  function for the target's kind; the process is the agent row's.
+- **The transport is the target's**, and each transport names its evidence and what a restart
+  does to a row it left `sending`:
+
+| Transport | Target | Settled by | A row left `sending` by a restart |
+|---|---|---|---|
+| `stream` | a headless session | the replay in `Stream`'s fold; at the exit, the transcript | settled from the same evidence once read; undelivered is final, and the row is due again first, under its same uuid, to the resumed process |
+| `waiter` | an interactive session with a waiter | the transcript's `Stop hook blocking error` line, once the turn that took it has ended | settled from the transcript once that turn has ended: delivered if the line is there, due again if not |
+| `typed` | an interactive session with no waiter | the `Inlet`'s answer, then the transcript's user line once the turn has ended | as `waiter`; an unknown write is never typed again |
+| `call` | a waiting `run_delegate` | the endpoint's write, and the calling process still running after it | due again, for the parent's waiter: the call it answered is gone |
+
+The restart policy lives with the transport, as one module per transport in `Mailbox` beside
+the one mark and settle, and `Delivery.tla` models each transport's policy as its own choice.
+The common part (the row first, refused undoes, unknown keeps, a settle by evidence at a cue
+and after a restart) is written once.
+
 ## Intake
 
 Claude Code posts each hook event once and never retries it, and a post that fails loses that
@@ -843,6 +934,20 @@ section.
   held hook is one open request. PreToolUse and PostToolUse are written only when the app gives
   `Intake` a callback for them, and are not stored as they come: they carry every tool input,
   and `Transcripts` reads those.
+- **One hold, four kinds** (F-115, R5). A hook that waits is a hold: a key, a deadline under
+  the hook's `timeout`, a named decider, exactly one response, a late answer dropped, and a
+  settle when the holder or its connection dies (`lost` or `unknown` for a hold with a row,
+  nothing for the others). `Intake` keeps one structure of holds, one `:DOWN` lookup and one
+  drop; each kind names only its decider, its deadline and its response's encoder:
+
+  | Kind | Hook | Decider | Deadline | Row |
+  |---|---|---|---|---|
+  | `permission` | `PermissionRequest` | a person, or an agent's `answer` | 570 s of 600 s | yes |
+  | `tool` | `PreToolUse` | the app's callback | 5 s of 10 s | a decision only |
+  | `stop` | `Stop` | the app's callback (item 14) | under the hook's | a decision only |
+  | `waiter` | the `asyncRewake` Stop hook | `Mailbox`'s due row | under the hook's long `timeout` | the delivery's, in `Mailbox` |
+
+  `Hold.tla` models the hold once, and `Intake.tla` instances it per kind (R4).
 - **A held `PreToolUse`** (F-111). `Intake` asks the app's callback, in a process of its own,
   with a deadline of 5 s under the hook's 10 s timeout, and gives exactly one response: the
   decision (`hookSpecificOutput.permissionDecision` `allow`, `deny` or `ask`, with
@@ -886,7 +991,8 @@ section.
 ## State that never lags or lies
 
 1. **Tables are the truth.** A PubSub message is a cue to re-read rows by id, never the data.
-2. **One writer.** One process writes each table, and one `Control` per host writes panes.
+2. **One writer.** One process writes each table, and one `Inlet` per host writes panes. Every
+   other part reads a table through its owner's functions.
 3. **Unread is not empty.** A reader that has not read yet answers `:unread`, and a view says so,
    rather than "nothing runs".
 4. **Total folds.** A source answers its rows and its problems together, so a read with one bad
@@ -920,8 +1026,18 @@ Specs live in `model/tla/`, checked with TLC:
 - a guard that cannot fail on its own, because another guard refuses the same steps, is defense
   in depth: it has no `Break` value, and the spec's header names it and the guard behind it;
 - `bin/check-model` runs them; the fast configurations run in the test gate, and the slow ones
-  by hand, each with its time recorded;
-- each spec's header names the modules it models and what it leaves abstract.
+  by hand, each with its time recorded. The gate also parses every slow configuration (TLC's
+  parse and its constants, without the search), so a constant a spec declares and a slow
+  configuration leaves unset fails in the gate, not on the next run by hand (F-115's new-1);
+- a fast configuration finishes within 30 s on an idle workstation. The next unit that changes a
+  spec times the whole fast set on an idle machine and records the times in its build note; a
+  configuration over the bound moves to `slow/` or gets smaller bounds (F-115's new-13). A spec
+  that instances a module compares its state counts before and after;
+- each spec's header names the modules it models and what it leaves abstract;
+- a mechanism is written once, as a module the specs that need it instance (`Claim`, `Hold`) or
+  as a spec whose state the others read (`Delivery`), never encoded again in each spec. A
+  property that crosses specs is checked in the spec that owns it, with the other's state, not by
+  composing every spec in one run.
 
 Five specs, in this order, and beside them `Start.tla`: every session's start and resume, the
 row written first, the worktree and its setup, the held process, the session file that may come
@@ -993,6 +1109,44 @@ from the host once the connection comes back. Its second part (F-72) adds the fe
 against edits made during the job, the host side of a sync under the copy's lock, and the
 wrapper's end of a job's group: no edit is lost, one sync writes the copy at a time, and nothing
 of a job writes in the copy once its end is read.
+
+**The remodel's model** (F-115). Each mechanism is written once, and the specs above are
+reshaped around three new ones, in R4 and R6, before the code they describe:
+
+| Spec | What becomes of it | What it checks |
+|---|---|---|
+| `Shell.tla` | kept as it is | as above |
+| `Agent.tla` | kept; instances `Claim` for `Recoveries`; the comments that say `/exit` go | as above |
+| `Start.tla` | kept; `StopAsked` is SIGTERM once idle; `Recoveries`' end of an orphan by pid and start time is the same `KillsOwnOnly` | as above |
+| `Copy.tla` | kept; instances `Claim` for the forward's reopen; the forward (about 230 lines) may split into its own spec when it next changes | as above |
+| **`Claim.tla`** (new, R4, about 60 lines) | the claim before an act: once per state, acted on only while current, cut by a restart; the rule of `Acts` | `OneClaimPerState`, `OneActPerState`, `NoActOnCutOffClaim` |
+| **`Hold.tla`** (new, R4, about 80 lines) | a held request answered once by its named decider, its deadline, its holder's death, a restart | `OneResponse`, `LateDropped`, `OnlyNamed`, `RequestsEnd` |
+| `Intake.tla` | the events half kept; the holds become four `Hold` instances: `permission`, `tool`, `stop`, `waiter`; `slow/Intake_Large.cfg` sets `MaxCalls` | as above, and one waiter per session, due text held while none waits |
+| **`Delivery.tla`** (new, R6, about 450 lines) | `Mailbox`'s one mark and settle over the transports `stream`, `waiter`, `typed` and `call`, each with its restart policy; restarts; a resume; a move across accounts | at most once; only into an ended turn and to the current process; in order per sender and addressee; a reply or a notice once, never both; a report is the reply to the brief; settled against the copied transcript after a move |
+| `Stream.tla` | its transport kept (offset, spool, FIFO per process, requests); its message state becomes the evidence `Delivery` reads | as above, less `IntoEndedTurn` and `ReplayedOrFound`, which move to `Delivery` |
+| `Delegate.tla` | shrinks to the protocol: rows first, the cap, resume once, a second kill, the report handed to `Mailbox`; `DeliveryTyped` and the report's `sending` go | the start and resume properties; `ReportArrives` through `Delivery` |
+| `Team.tla` | shrinks to `Grants`, the operator and services' owners; claims by `Claim`, messages by `Delivery` | the edges, who fixes, owners |
+| `Move.tla` | rewritten (R6): the end by SIGTERM once idle, a restart of the framework, `Delivery`'s waiter across the move | as above, and nothing delivered to the old process, once to the new |
+
+Until R4 and R6 land, the specs above say what they say today; where one still models a typed
+delivery or an end by `/exit` (`Delegate.tla`'s `DeliveryTyped`, `Team.tla`'s, `Move.tla`'s
+end, `Start.tla`'s `StopAsked`), "Delivery into a main session" and "Ending a session" are the
+design, and the spec is behind it. The model stays about 5,400 lines.
+
+**What the code relies on and a spec will own** (F-115, section 3):
+
+| Property | Owner |
+|---|---|
+| a message or a report in flight during a move across accounts: held while no waiter is connected, delivered only to the new process, once, settled against the copied transcript | `Move.tla`, with `Delivery`'s state (R6) |
+| the waiter: one per session, due text held until one connects, answered at most once, its timeout, a restart that cuts it, the typed write when there is none | `Hold.tla` (the `waiter` kind in `Intake.tla`, R4) and `Delivery.tla` (its transports, R6) |
+| a report and a reply keyed by uuid across a resume, with the brief, a resume and a message together | `Delivery.tla` (R6) |
+| `Mailbox`'s order with a resume: per sender and addressee, an undelivered row resent first under its uuid | `Delivery.tla` (R6) |
+| who may answer a dialog: the decider a hold names, under the claim of `Acts` | `Hold.tla` (`OnlyNamed`) with `Claim.tla` in `Team.tla` (R4) |
+| the operator answering dialogs or moving a session | `Team.tla` (the operator) and `Move.tla` (R6) |
+| launch narrowing across a resume | `Delegate.tla` (the resume gives the same options) |
+| the fault ledger: every act a row, once per state, interrupted by a restart | `Claim.tla` (R4) |
+| `Move.tla` with a restart of the framework | `Move.tla` (R6) |
+| `Stream`'s claim ended by `Recoveries` | `Stream.tla`, with `Claim.tla` (R4) |
 
 Code emits traces where it can, and a trace spec checks them; a trace cannot show a missing
 guard, so the specs are also reviewed against the code.
@@ -1196,6 +1350,17 @@ used and when it resets). It reads no credential and calls no API.
 - A repository's hook can make `git worktree add` exit non-zero with the worktree added: read
   the worktree list for what an add did, never its exit status or the branch's existence.
 
+**Parts**
+- Build a mechanism once and give it a home before its second use. A shared SQLite helper
+  asked for at the third table was not built, and 15 copies of it followed; one mark and settle
+  was written six times, one held request four, one claim three (F-115).
+- A part never opens another part's table, and a status list lives once, in its owner. Three
+  parts opened others' tables, and the statuses that hold an agent were listed in four apps,
+  not all alike, so a rename in one fails only at run time in the others (F-115).
+- The order in which parts settle on each other's cues is the library's. Wired by hand in the
+  app, two parts got no cue at all and ran on a ticker with a made-up topic, and no test of the
+  library could see it (F-115).
+
 **State for views**
 - One malformed row (a nil timestamp) once crashed the tracker at every boot and took every
   view down: folds must be total.
@@ -1213,6 +1378,11 @@ used and when it resets). It reads no credential and calls no API.
 - A test of a cleanup cleans only a directory of its own: one that swept the real tmux socket
   directory with fake liveness ended every other suite's servers.
 - No test reaches the real Claude Code.
+- A fake is a test aid: it lives in the app's `test/support/` or in `caf_test`, never in a
+  library's `lib/`, where it compiles into the package (`Tmux.Fake`, F-115's new-12, moves in R1
+  or R2).
+- A spec's fast configuration is timed on an idle machine: a time taken under load says nothing
+  about its bound (F-115's new-13).
 - A stand-in that starts processes writes their pids and sleeps a bounded time, so a failed run
   leaves nothing for long; a test ends what is left by those pids alone. Every process a test
   holds is such a stand-in, never a bare program, whose command line names no test directory.
@@ -1256,10 +1426,10 @@ used and when it resets). It reads no credential and calls no API.
 
 Then `Delegate.tla` and `Delegates` (its start, finish and kill path are built). What is left:
 
-4. **`Screen`**, from the fixtures a person captures, then `Delegates`' delivery of a report
-   through the waiting Stop hook (F-114), and `run_delegate`.
-5. **`Mover`**, against `Move.tla`.
-6. **`Mains`**: one main session per project, on trunk in the project's checkout (the clone it
+4. **`Screen`**, from the fixtures a person captures (built, F-113), then the delivery of a
+   report through the waiting Stop hook (F-114), and `run_delegate`: now R5, R7 and R8.
+5. **`Mover`**, against `Move.tla`: now R12.
+6. **`Mains`** (the agent row of kind `main` is R9; what is left is in item 13): one main session per project, on trunk in the project's checkout (the clone it
    makes once under the framework home), the pull
    after a landing, and `start_main`.
 7. **`Team.tla`** (F-69; its message to an ended delegate becomes an answer to the sender, as
@@ -1289,32 +1459,76 @@ code:
 12. **PreToolUse and PostToolUse hooks**: held like `PermissionRequest`, PreToolUse answered by
     an app callback with a short deadline (allow, deny or ask); then a permission policy asked
     before any request waits for a person, its decision recorded as a person's is.
-13. **`Screen`** (item 4, F-113), then delivery into a main session by the waiting Stop hook,
-    modeled first, and the checked write for a session with no waiter (it records the release
-    each session runs, and never trusts one read for a turn's end: F-113's new-2, new-4); the
-    end by SIGTERM in `Move.tla`, with `Mailbox`'s delivery folded in: a message that falls due
-    during a move across accounts is held while no waiter is connected, delivered only to the
-    session on the new account, and once, settled against the copied transcript. Agents are
-    addressed by their name in the framework's tables, never by a pid or a socket, and found
-    through `Registry` across every account the framework holds, so a move never hides one;
-    then **interactive delegates**
-    (`interactive: true`), then **`Mains`** (item 6, several per project, named by the app; a main session's kept
-    services end with it or go to a person, once one can end: F-109's new-4) and
-    **`Mover`** (item 5, for delegates as well as main sessions).
-14. **Mechanisms an app's policies stand on**, in this order:
-    - a delegate idle with no report, which `Delegates` tells its parent, in `Delegate.tla`;
-    - admission by measured load and memory for delegate starts and `Jobs`, whose refusal is
-      `{:refused, {:load, …}}`, never a failed run;
-    - `Stop` held for an app callback, as `PreToolUse` is, so an app's own check before a turn
-      ends answers it;
-    - one fault ledger: every recovery, kill, resume, start and raised error as a row, with a
-      subscription;
-    - copies by the file system's clone where it has one;
-    - a start idempotent per branch: a second start answers the running delegate only while its
-      session is live, and a row with no report whose session is gone does not count as running.
+**The remodel** (F-115, taken in F-116) comes next, before the rest of item 13 and item 14, so
+that each later unit is a few lines in one part of one shape rather than one more copy of a
+mechanism. Each unit keeps every gate green at its end. Sizes are changed lines apart from
+fixtures, estimated by F-115. R1 to R3 change no behavior and may go in any order; R4 and R6
+are the model before the code they describe (R5, R7 to R10).
 
-    Which tests to rerun on a red, a re-entry brief after a reset, a reviewer and its acceptance
-    list, which edits to guard, and a replay suite are an app's policies, not the framework's.
+- **R1. `caf_store`**, and the writers' tables on it (`Sessions`, `Delegates`, `Stream`,
+  `Mailbox`, `Intake`, `Jobs`, `Services`, `Copies`, `MCP`, `Claims`, `Recoveries`); `Tmux.Fake`
+  moves to test support here or in R2. About +250, −700. (F-37's new-3.)
+- **R2. `Reader`** on `caf_store`: `Registry`, `Usage`, `Transcripts` and the sampler; the
+  `Tracker`'s sources made from table metadata; one `Registry` and one `Transcripts` per host
+  over every account, so an agent is found across every account the framework holds and a
+  move never hides one. About +200, −650.
+- **R3. `Holder.Process`**: `Sessions`, `Jobs`, `Services` and the forward on it; `Sessions`'
+  stop of an interactive session by SIGTERM once its session file says `idle`, in place of a
+  typed `/exit`; `Recoveries`' end of an orphan and of a late stop, by pid and start time.
+  About +200, −300.
+- **R4. Model**: `Claim.tla` and `Hold.tla`; `Agent.tla`, `Team.tla`, `Copy.tla` and
+  `Intake.tla` instance them; the `/exit` text goes; `slow/Intake_Large.cfg` sets `MaxCalls`,
+  and `bin/check-model` parses the slow configurations in the gate. Specs only, about −300 net.
+- **R5. `Intake`'s one hold**: `PermissionRequest`'s and `PreToolUse`'s holds become one
+  structure, then the `waiter` kind (F-114). About +250, −120.
+- **R6. Model**: `Delivery.tla`; `Delegate.tla`, `Team.tla` and `Stream.tla` read it; `Move.tla`
+  rewritten with the end by SIGTERM, a restart, and a message in flight during a move across
+  accounts: held while no waiter is connected, delivered only to the session on the new account,
+  and once, settled against the copied transcript. Specs only, about +450, −500.
+- **R7. `Mailbox` delivers everything**: the report as the reply to the brief; the transports
+  `stream`, `waiter` and `call`; `Mailbox`'s `sending` as the only mark; `Delegates`' report
+  reduced to `taken`. About +350, −350. (Item 4's delivery and `run_delegate` on this shape.)
+- **R8. `Inlet`**: `Control` with `Screen`'s box check, the checked write for a session with no
+  waiter, as the transport `typed`. It records the release each session runs, and never trusts
+  one read for a turn's end (F-113's new-2, new-4). About +200, −140.
+- **R9. The agent row and the tree**: `Sessions`' row takes kind, parent and project; the tree,
+  the statuses that hold an agent and each session's turn state are functions there; `Grants`,
+  the `Tracker`, `Mailbox` and the app read them, and no part opens another's table. A main
+  session is a row of kind `main` (most of item 6). About +300, −350.
+- **R10. `Acts`**: `Claims`' and `Recoveries`' rows in one table with a unique index and a cue;
+  the fault ledger of item 14 is its query and its topic. About +250, −300.
+- **R11. `Cues`**: each part declares the topics it reads; `Jobs` and `Services` cue; the app's
+  routing table and its ticker go. About +200, −200. (F-102's new-3.)
+- **R12. `Mover`**, on the agent row and `Delivery`, against the rewritten `Move.tla`, for
+  delegates as well as main sessions (item 5).
+
+About 3,100 lines change in all; the library ends about 1,300 lines smaller, and the model about
+the same size with each mechanism once. R6 and R7 are the riskiest: `Mailbox`'s `sending` as the
+only mark keeps `Stream`'s guarantee that "undelivered" is final and resent first under the same
+uuid, and each spec that instances a module compares its state counts before and after.
+
+13. **What is left of the main sessions' work**, on the remodel's shape (`Screen` is built,
+    F-113; the waiter is R5 and R7, the checked write R8, the end by SIGTERM R3 and R6, the
+    reach across accounts R2, `Mover` R12): **interactive delegates** (`interactive: true`: an
+    agent row of kind `delegate` whose turn state and transports are an interactive session's),
+    then **`Mains`** (item 6: what R9 leaves, the checkout, the pull after a landing and
+    `start_main`; a main session's kept services end with it or go to a person, once one can
+    end: F-109's new-4).
+14. **Mechanisms an app's policies stand on**, on the remodel's shape, in this order:
+    - a delegate idle with no report, a value of `Sessions`' turn function that `Delegates`
+      tells its parent, in `Delegate.tla`;
+    - admission by measured load and memory, a check in `Delegates` and `Jobs`, whose refusal
+      is `{:refused, {:load, …}}`, never a failed run;
+    - `Stop` held for an app callback, the hold kind `stop` of `Intake`, so an app's own check
+      before a turn ends answers it;
+    - copies by the file system's clone where it has one;
+    - a start idempotent per branch, a lookup of the agent row: a second start answers the
+      running delegate only while its session is live, and a row with no report whose session
+      is gone does not count as running.
+
+    The fault ledger is R10. Which tests to rerun on a red, a re-entry brief after a reset, a
+    reviewer and its acceptance list, which edits to guard, and a replay suite are an app's
+    policies, not the framework's.
 15. **Packaging and toolchain**: one `coding_agent_framework` package; `Programs` looked up and
     checked at start, with a Homebrew setup documented; the Elixir and OTP floor tested; a
     library supervisor from a config struct, out of `caf_example`; accounts: how to log one in,
