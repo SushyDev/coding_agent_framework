@@ -1,15 +1,15 @@
 defmodule CodingAgentFramework.MCPTest do
   # No Claude Code: the test is the MCP client, speaking JSON-RPC to the endpoint with a token,
   # as an agent's `http` server entry would. The mailbox is a stand-in that tells the test what
-  # reached it.
+  # reached it. `run` reaches a real `Jobs` whose one host is this workstation.
   use ExUnit.Case, async: true
 
   doctest CodingAgentFramework.MCP.Table
   doctest CodingAgentFramework.MCP.Plug
 
-  import CodingAgentFramework.TestHost, only: [test_dir: 0]
+  import CodingAgentFramework.TestHost, only: [test_dir: 0, program!: 1, programs: 0]
 
-  alias CodingAgentFramework.{Grants, MCP}
+  alias CodingAgentFramework.{Copies, Grants, Jobs, MCP}
 
   defmodule StandIn do
     @moduledoc false
@@ -29,14 +29,38 @@ defmodule CodingAgentFramework.MCPTest do
       ]
     end
 
-    mcp =
+    dir = test_dir()
+    wt = Path.join(dir, "wt")
+    File.mkdir_p!(wt)
+    git = [{"GIT_CONFIG_GLOBAL", "/dev/null"}, {"GIT_CONFIG_NOSYSTEM", "1"}]
+    {_, 0} = System.cmd(program!(:git), ["-C", wt, "init", "-q"], env: git)
+    copies = start_supervised!({Copies, dir: Path.join(dir, "copies"), programs: programs()})
+    hosts = %{"ws" => %{programs: programs(), dir: Path.join(dir, "ws")}}
+
+    jobs =
       start_supervised!(
-        {MCP, dir: test_dir(), port: 4791, grants: Grants.new(tree), mailbox: {StandIn, self()}}
+        {Jobs, dir: Path.join(dir, "jobs"), copies: copies, hosts: hosts, on_late_end: & &1}
       )
 
-    tokens = for a <- ~w(app-main app-fix), into: %{}, do: {a, token(mcp, a)}
-    %{mcp: mcp, tokens: tokens}
+    place = fn agent -> {:ok, %{project: "app", name: agent, worktree: wt}} end
+
+    mcp =
+      start_supervised!(
+        {MCP,
+         dir: dir,
+         port: 4791,
+         grants: Grants.new(tree),
+         mailbox: {StandIn, self()},
+         jobs: {Jobs, jobs},
+         place: place}
+      )
+
+    tokens = for a <- ~w(app-main app-fix stray), into: %{}, do: {a, token(mcp, a)}
+    %{mcp: mcp, tokens: tokens, jobs: jobs, wt: wt}
   end
+
+  # The stand-in job: it writes a file in the copy, prints a line and exits 3.
+  defp job, do: [program!(:bash), "-c", "echo made > out.txt; echo ran; exit 3"]
 
   defp token(mcp, agent) do
     {:ok, path} = MCP.issue(mcp, agent)
@@ -84,7 +108,7 @@ defmodule CodingAgentFramework.MCPTest do
     assert %{"serverInfo" => %{"name" => "caf"}, "capabilities" => %{"tools" => _}} =
              rpc.("initialize")
 
-    assert rpc.("tools/list")["tools"] |> Enum.map(& &1["name"]) == ["message"]
+    assert rpc.("tools/list")["tools"] |> Enum.map(& &1["name"]) == ~w(message run reload)
   end
 
   test "a call is the agent's whose token it carries, whatever its arguments say",
@@ -131,6 +155,62 @@ defmodule CodingAgentFramework.MCPTest do
 
     assert tool(mcp, t["app-fix"], "message", %{"to" => 1}) == %{"refused" => ["bad", "args"]}
     assert tool(mcp, t["app-fix"], "look", %{}) == %{"refused" => ["unknown_tool", "look"]}
+  end
+
+  test "run is the caller's job, named for the call, and answers as Jobs does",
+       %{mcp: mcp, tokens: t, jobs: jobs, wt: wt} do
+    args = %{
+      "host" => "ws",
+      "argv" => job(),
+      "timeout" => 20_000,
+      "opts" => %{"fetch" => ["out.txt"]}
+    }
+
+    answer = tool(mcp, t["app-fix"], "run", Map.put(args, "from", "app-main"))
+    assert answer == %{"ok" => %{"exit" => 3, "log" => "ran\n", "fetch" => "done"}}
+    assert File.read!(Path.join(wt, "out.txt")) == "made\n"
+
+    assert [%{id: id, agent: "app-fix", tool: "run", state: "answered"}] = MCP.calls(mcp)
+    assert [%{id: job, name: "app-fix", host: "ws"}] = Jobs.rows(jobs)
+    assert job == "mcp-#{id}"
+
+    where = %{host: "ws", project: "app", name: "app-fix"}
+    direct = Jobs.run(jobs, "direct", where, wt, job(), timeout: 20_000, fetch: ["out.txt"])
+    assert MCP.json(direct) == answer
+  end
+
+  test "run is refused off the tree, and its timeout is capped at a day",
+       %{mcp: mcp, tokens: t, jobs: jobs} do
+    args = %{"host" => "ws", "argv" => job(), "timeout" => 20_000}
+    assert tool(mcp, t["stray"], "run", args) == %{"refused" => ["unknown_agent", "stray"]}
+
+    for timeout <- [86_400_001, 0, "1000", nil] do
+      bad = Map.put(args, "timeout", timeout)
+      assert tool(mcp, t["app-fix"], "run", bad) == %{"refused" => ["bad", "args"]}
+    end
+
+    bad = Map.put(args, "opts", %{"fetch" => "out.txt"})
+    assert tool(mcp, t["app-fix"], "run", bad) == %{"refused" => ["bad", "args"]}
+    assert Jobs.rows(jobs) == []
+    assert length(MCP.calls(mcp)) == 6
+  end
+
+  test "reload tells the client its tools changed, then answers", %{mcp: mcp, tokens: t} do
+    conn = post(mcp, t["app-main"], "tools/call", %{name: "reload"})
+    assert ["text/event-stream" <> _] = Plug.Conn.get_resp_header(conn, "content-type")
+
+    assert [note, result] =
+             for("data: " <> d <- String.split(conn.resp_body, "\n"), do: JSON.decode!(d))
+
+    assert note == %{"jsonrpc" => "2.0", "method" => "notifications/tools/list_changed"}
+
+    assert %{"id" => 1, "result" => %{"isError" => false, "content" => [%{"text" => text}]}} =
+             result
+
+    assert JSON.decode!(text) == %{"ok" => %{"tools" => ~w(message run reload)}}
+
+    # Off the tree, it is a plain refusal: nothing changed for the client.
+    assert tool(mcp, t["stray"], "reload", %{}) == %{"refused" => ["unknown_agent", "stray"]}
   end
 
   test "a row a restart left called reads cut" do

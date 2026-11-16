@@ -13,12 +13,18 @@ defmodule CodingAgentFramework.MCP do
   **A call** (`call/4`) is written `called` before it acts and `answered` with its outcome, a
   refusal included. It answers `{:ok, value}`, `{:refused, reason}` or `{:unknown, reason}`:
 
-  - `message(to, text)`: `Grants.may_message?/3`, then the mailbox's `message/5`.
+  - `message(to, text)`: `Grants.may_message?/3`, then the mailbox's `message/5`;
+  - `run(host, argv, timeout, opts)`: `Grants.may_use?/2`, then the jobs' `run/6`, as job
+    `mcp-<call id>` in the copy of the caller's worktree that `place` names, with `timeout`
+    (ms, at most a day) as the job's and the call's. `opts` may name `fetch` (paths). The
+    answer is `Jobs`' own;
+  - `reload()`: `Grants.may_use?/2`, then the tools' names; the endpoint sends the client
+    `notifications/tools/list_changed` first.
 
   The other tools of the design's table come in later parts (`docs/build-notes/F-86.md`).
 
       {:ok, mcp} = MCP.start_link(dir: dir, port: 4791, grants: grants,
-        mailbox: {Mailbox, mailbox})
+        mailbox: {Mailbox, mailbox}, jobs: {Jobs, jobs}, place: &place/1)
       {:ok, config} = MCP.issue(mcp, "app-fix")
       MCP.call(mcp, "app-fix", "message", %{"to" => "app-main", "text" => "Done."})
       #=> {:ok, {:queued, 3}}
@@ -30,6 +36,8 @@ defmodule CodingAgentFramework.MCP do
   alias CodingAgentFramework.MCP.Table
 
   @step 5_000
+  # The cap on a `run`'s timeout: a job the caller forgot still ends within a day.
+  @day 86_400_000
   @agent ~r/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z/
 
   @tools [
@@ -41,13 +49,38 @@ defmodule CodingAgentFramework.MCP do
         properties: %{to: %{type: "string"}, text: %{type: "string"}},
         required: ["to", "text"]
       }
+    },
+    %{
+      name: "run",
+      description: "Runs a job on a host in a copy of your worktree; answers its exit and log.",
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          host: %{type: "string"},
+          argv: %{type: "array", items: %{type: "string"}},
+          timeout: %{type: "integer", description: "ms, at most a day"},
+          opts: %{
+            type: "object",
+            properties: %{fetch: %{type: "array", items: %{type: "string"}}}
+          }
+        },
+        required: ["host", "argv", "timeout"]
+      }
+    },
+    %{
+      name: "reload",
+      description: "Reloads your own tools.",
+      inputSchema: %{type: "object", properties: %{}}
     }
   ]
 
   @doc """
   Starts the part. Options: `:dir` (a directory of its own: the table and the agents' configs),
-  `:port` (where the embedding app serves the endpoint on 127.0.0.1), `:grants`, and `:mailbox`
-  (`{CodingAgentFramework.Mailbox, pid}`, or a stand-in module with the same `message/5`).
+  `:port` (where the embedding app serves the endpoint on 127.0.0.1), `:grants`, `:mailbox` and
+  `:jobs` (each `{module, server}`: `{CodingAgentFramework.Mailbox, pid}`,
+  `{CodingAgentFramework.Jobs, pid}`, or a stand-in module with the same function), and
+  `:place`, a function of an agent's name that answers `{:ok, %{project: p, name: n, worktree:
+  path}}` (the copy `Jobs` runs in) or `{:refused, reason}`.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -78,7 +111,7 @@ defmodule CodingAgentFramework.MCP do
           {:ok, term} | {:refused, term} | {:unknown, term}
   def call(mcp, agent, tool, args) do
     with {:ok, id, ctx} <- ask(mcp, {:called, agent, tool, JSON.encode!(args)}) do
-      outcome = act(ctx, agent, tool, args)
+      outcome = act(ctx, agent, id, tool, args)
       # The outcome stands whether or not its row is written; a row left `called` reads `cut`.
       ask(mcp, {:answered, id, JSON.encode!(json(outcome))})
       outcome
@@ -101,7 +134,7 @@ defmodule CodingAgentFramework.MCP do
   def json(v) when is_map(v), do: Map.new(v, fn {k, x} -> {to_string(json(k)), json(x)} end)
   def json(v), do: inspect(v)
 
-  defp act(ctx, caller, "message", %{"to" => to, "text" => text})
+  defp act(ctx, caller, _id, "message", %{"to" => to, "text" => text})
        when is_binary(to) and is_binary(text) do
     {mod, server} = ctx.mailbox
 
@@ -109,7 +142,35 @@ defmodule CodingAgentFramework.MCP do
          do: mod.message(server, caller, to, text, timeout: @step)
   end
 
-  defp act(_ctx, _caller, tool, _args) do
+  defp act(
+         ctx,
+         caller,
+         id,
+         "run",
+         %{"host" => host, "argv" => [_ | _] = argv, "timeout" => t} = a
+       )
+       when is_binary(host) and is_integer(t) and t > 0 and t <= @day do
+    {mod, server} = ctx.jobs
+    fetch = get_in(a, ["opts", "fetch"]) || []
+
+    with true <-
+           (is_list(fetch) and Enum.all?(argv ++ fetch, &is_binary/1)) or
+             {:refused, {:bad, :args}},
+         :ok <- Grants.may_use?(ctx.grants, caller),
+         {:ok, %{project: p, name: n, worktree: w}} <- ctx.place.(caller) do
+      mod.run(server, "mcp-#{id}", %{host: host, project: p, name: n}, w, argv,
+        timeout: t,
+        fetch: fetch
+      )
+    end
+  end
+
+  defp act(ctx, caller, _id, "reload", _args) do
+    with :ok <- Grants.may_use?(ctx.grants, caller),
+         do: {:ok, %{tools: Enum.map(@tools, & &1.name)}}
+  end
+
+  defp act(_ctx, _caller, _id, tool, _args) do
     if Enum.any?(@tools, &(&1.name == tool)),
       do: {:refused, {:bad, :args}},
       else: {:refused, {:unknown_tool, tool}}
@@ -129,7 +190,7 @@ defmodule CodingAgentFramework.MCP do
 
     with :ok <- File.mkdir_p(Path.join(dir, "agents")),
          {:ok, db} <- Table.open(Path.join(dir, "mcp.db")) do
-      ctx = Map.new(~w(grants mailbox)a, &{&1, Keyword.fetch!(opts, &1)})
+      ctx = Map.new(~w(grants mailbox jobs place)a, &{&1, Keyword.fetch!(opts, &1)})
       {:ok, %{db: db, dir: dir, port: Keyword.fetch!(opts, :port), ctx: ctx}}
     else
       {:error, reason} -> {:stop, {:mkdir, reason}}
