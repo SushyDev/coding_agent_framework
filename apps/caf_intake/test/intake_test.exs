@@ -113,7 +113,12 @@ defmodule CodingAgentFramework.IntakeTest do
 
   describe "the event parser" do
     defp text,
-      do: one_of([constant("PermissionRequest"), member_of(Event.names()), string(:printable)])
+      do:
+        one_of([
+          constant("PermissionRequest"),
+          member_of(Event.names() ++ Event.tool_names()),
+          string(:printable)
+        ])
 
     defp value, do: one_of([text(), integer(), constant(nil), list_of(integer(), max_length: 2)])
 
@@ -138,7 +143,10 @@ defmodule CodingAgentFramework.IntakeTest do
 
         if row.problem,
           do: assert({row.event, row.hold} == {nil, false}),
-          else: assert(row.event in Event.names() and is_binary(row.session_id))
+          else:
+            assert(
+              row.event in (Event.names() ++ Event.tool_names()) and is_binary(row.session_id)
+            )
       end
     end
 
@@ -147,7 +155,7 @@ defmodule CodingAgentFramework.IntakeTest do
 
       check all(body <- any_body()) do
         assert {:ok, outcome} = Intake.post(intake, "work", body)
-        assert outcome in [:stored, :seen] or match?({:held, _, _, _}, outcome)
+        assert outcome in [:stored, :seen, :not_read] or match?({:held, _, _, _}, outcome)
       end
     end
   end

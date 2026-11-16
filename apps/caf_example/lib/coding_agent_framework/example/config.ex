@@ -26,6 +26,9 @@ defmodule CodingAgentFramework.Example.Config do
     `tool_timeout` and `margin`, Claude Code's MCP tool timeout and what `run_delegate` keeps
     under it;
   - `interval`: ms between the reads of the readers that read on a timer.
+  - `tool_hooks`: the app's tool callbacks, `%{pre_tool_use: fun, post_tool_use: fun}`, each
+    optional, as `CodingAgentFramework.Intake` takes them; each one given adds its hook to
+    every account's settings. None by default.
 
       iex> {:ok, c} = CodingAgentFramework.Example.Config.new(home: "/srv/caf", instance: "a",
       ...>   programs: %{kill: "/bin/kill"}, accounts: ["work"], ports: %{intake: 4790, mcp: 4791},
@@ -52,7 +55,8 @@ defmodule CodingAgentFramework.Example.Config do
     operator: "operator",
     tool_timeout: 3_600_000,
     margin: 60_000,
-    interval: 2_000
+    interval: 2_000,
+    tool_hooks: %{}
   ]
 
   @type t :: %__MODULE__{}

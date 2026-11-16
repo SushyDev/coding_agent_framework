@@ -8,7 +8,7 @@ defmodule CodingAgentFramework.Intake.Plug do
   compared in constant time. Anything else is refused with a status and writes no row: 404 for
   another path, 405 for another method, 403 from another address, 401 for a wrong secret, 503
   when the `Intake` does not answer. A stored event gets 200 with an empty body; a held
-  `PermissionRequest` gets its decision, or an empty body at the deadline.
+  `PermissionRequest` or `PreToolUse` gets its decision, or an empty body at its deadline.
 
       iex> plug = CodingAgentFramework.Intake.Plug
       iex> opts = plug.init(intake: self(), secret: "s3")
@@ -29,6 +29,8 @@ defmodule CodingAgentFramework.Intake.Plug do
   @max_body 8_000_000
   # How long past the `Intake`'s own deadline the request waits, if the `Intake` stops answering.
   @margin 5_000
+  # The same for a PreToolUse, whose deadline is at most 8 s under the hook's 10 s timeout.
+  @tool_margin 1_500
 
   @impl true
   def init(opts) do
@@ -65,20 +67,35 @@ defmodule CodingAgentFramework.Intake.Plug do
 
   defp post(conn, intake, account, body) do
     case Intake.post(intake, account, body) do
-      {:ok, stored} when stored in [:stored, :seen] -> send_resp(conn, 200, "")
-      {:ok, {:held, id, ref, wait}} -> hold(conn, intake, id, ref, wait)
-      _ -> send_resp(conn, 503, "")
+      {:ok, stored} when stored in [:stored, :seen, :not_read, :handed] ->
+        send_resp(conn, 200, "")
+
+      {:ok, {:held, id, ref, wait}} ->
+        hold(conn, intake, id, ref, wait + @margin)
+
+      {:ok, {:tool, ref, wait}} ->
+        hold(conn, intake, nil, ref, wait + @tool_margin)
+
+      {:ok, {:decided, body}} ->
+        decision(conn, body)
+
+      _ ->
+        send_resp(conn, 503, "")
     end
   end
+
+  defp decision(conn, body),
+    do: conn |> put_resp_content_type("application/json") |> send_resp(200, body)
 
   defp hold(conn, intake, id, ref, wait) do
     mon = Process.monitor(GenServer.whereis(intake) || self())
 
     receive do
       {^ref, {:decision, body}} ->
-        # Spec action AnswerWritten: the decision is the response, and the request closes.
-        conn = conn |> put_resp_content_type("application/json") |> send_resp(200, body)
-        Intake.written(intake, id, ref)
+        # Spec actions AnswerWritten and ToolAnswered: the decision is the response, and the
+        # request closes. A PreToolUse (no id) has nothing to mark.
+        conn = decision(conn, body)
+        if id, do: Intake.written(intake, id, ref)
         conn
 
       {^ref, :release} ->
@@ -88,7 +105,7 @@ defmodule CodingAgentFramework.Intake.Plug do
       {:DOWN, ^mon, :process, _, _} ->
         send_resp(conn, 200, "")
     after
-      wait + @margin -> send_resp(conn, 200, "")
+      wait -> send_resp(conn, 200, "")
     end
   end
 end

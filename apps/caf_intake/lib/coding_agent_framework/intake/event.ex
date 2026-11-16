@@ -17,7 +17,11 @@ defmodule CodingAgentFramework.Intake.Event do
 
   @names ~w(SessionStart SessionEnd Stop StopFailure SubagentStart SubagentStop Notification
             UserPromptSubmit PermissionRequest PermissionDenied)
+  # Posted only when the app gives `Intake` a callback for them.
+  @tools ~w(PreToolUse PostToolUse)
   @ids %{
+    "PreToolUse" => "tool_use_id",
+    "PostToolUse" => "tool_use_id",
     "PermissionRequest" => "tool_use_id",
     "PermissionDenied" => "tool_use_id",
     "UserPromptSubmit" => "prompt_id",
@@ -29,6 +33,13 @@ defmodule CodingAgentFramework.Intake.Event do
   @doc "The events every account's settings post, as the design's Intake section lists them."
   @spec names() :: [String.t()]
   def names, do: @names
+
+  @doc """
+  The tool events, posted only when the app gives `Intake` a callback for them. Neither is stored
+  as it comes: PreToolUse's row is its decision's, and PostToolUse has none.
+  """
+  @spec tool_names() :: [String.t()]
+  def tool_names, do: @tools
 
   @doc "The row for one body: its event, session, key, the body as data when it is JSON, and its problem."
   @spec parse(binary) :: map
@@ -46,10 +57,17 @@ defmodule CodingAgentFramework.Intake.Event do
     id = if field, do: map[field]
 
     cond do
-      name not in @names -> problem(body, {:unknown_event, text(name)}, body)
-      not (is_binary(session) and session != "") -> problem(body, {:bad, "session_id"}, body)
-      field && not (is_binary(id) and id != "") -> problem(body, {:bad, field}, body)
-      true -> row(name, session, "#{name}:#{session}:#{id || hash(body)}", body, nil)
+      name not in @names and name not in @tools ->
+        problem(body, {:unknown_event, text(name)}, body)
+
+      not (is_binary(session) and session != "") ->
+        problem(body, {:bad, "session_id"}, body)
+
+      field && not (is_binary(id) and id != "") ->
+        problem(body, {:bad, field}, body)
+
+      true ->
+        row(name, session, "#{name}:#{session}:#{id || hash(body)}", body, nil)
     end
   end
 

@@ -5,7 +5,9 @@ defmodule CodingAgentFramework.Intake.Table do
 
   `CodingAgentFramework.Intake` is the one writer. A host whose `Intake` never started is
   `:unread`, never an empty list. A row's `hold` is nil for an event that is not held, and
-  otherwise one of `held`, `answering`, `answered`, `expired`, `lost` and `unknown`.
+  otherwise one of `held`, `answering`, `answered`, `expired`, `lost` and `unknown`. A
+  PreToolUse row is written only for a decision: its `decision` is the response, and its
+  `actor` who decided (`app`).
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "intake.db")
       iex> {:ok, db} = CodingAgentFramework.Intake.Table.open(path)
@@ -15,14 +17,14 @@ defmodule CodingAgentFramework.Intake.Table do
 
   alias Exqlite.Sqlite3
 
-  @columns ~w(id host account key event session_id data problem hold decision written_at)a
+  @columns ~w(id host account key event session_id data problem hold decision written_at actor)a
 
   @schema """
   PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS intake_events (
     id INTEGER PRIMARY KEY, host TEXT NOT NULL, account TEXT NOT NULL, key TEXT NOT NULL,
     event TEXT, session_id TEXT, data TEXT, problem TEXT, hold TEXT, decision TEXT,
-    written_at INTEGER NOT NULL, UNIQUE (host, account, key));
+    written_at INTEGER NOT NULL, actor TEXT, UNIQUE (host, account, key));
   CREATE TABLE IF NOT EXISTS intake_starts (host TEXT PRIMARY KEY, started_at INTEGER NOT NULL);
   """
 
@@ -33,11 +35,47 @@ defmodule CodingAgentFramework.Intake.Table do
   def open(path) do
     with {:ok, db} <- Sqlite3.open(path),
          :ok <- Sqlite3.set_busy_timeout(db, 5_000),
-         :ok <- Sqlite3.execute(db, @schema) do
+         :ok <- Sqlite3.execute(db, @schema),
+         :ok <- added(Sqlite3.execute(db, "ALTER TABLE intake_events ADD COLUMN actor TEXT")) do
       {:ok, db}
     else
       {:error, reason} -> {:refused, {:sqlite, reason}}
     end
+  end
+
+  # A file made before `actor` gains it; a newer file already has it.
+  defp added({:error, "duplicate column name" <> _}), do: :ok
+  defp added(other), do: other
+
+  @doc """
+  Writes a PreToolUse decision's row, with the response `body` as its decision and the actor
+  `app`, unless a row with its key is there. Returns the row's id and the decision it holds.
+  """
+  @spec decide(db, String.t(), String.t(), map, String.t(), integer) :: {integer, String.t()}
+  def decide(db, host, account, row, body, at) do
+    sql =
+      "INSERT INTO intake_events (host, account, key, event, session_id, data, decision, " <>
+        "actor, written_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'app', ?8) " <>
+        "ON CONFLICT (host, account, key) DO NOTHING RETURNING id"
+
+    case query(db, sql, [host, account, row.key, row.event, row.session_id, row.data, body, at]) do
+      [[id]] -> {id, body}
+      [] -> List.to_tuple(by_key(db, host, account, row.key))
+    end
+  end
+
+  @doc "The decision of the row with this key, or nil when there is none."
+  @spec decision(db, String.t(), String.t(), String.t()) :: String.t() | nil
+  def decision(db, host, account, key) do
+    case by_key(db, host, account, key) do
+      [_id, decision] -> decision
+      nil -> nil
+    end
+  end
+
+  defp by_key(db, host, account, key) do
+    sql = "SELECT id, decision FROM intake_events WHERE host = ?1 AND account = ?2 AND key = ?3"
+    db |> query(sql, [host, account, key]) |> List.first()
   end
 
   @doc """

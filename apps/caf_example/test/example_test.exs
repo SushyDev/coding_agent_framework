@@ -332,6 +332,43 @@ defmodule CodingAgentFramework.ExampleTest do
              Enum.filter(Mailbox.Table.open_rows(messages), &(&1.from_agent == "framework"))
   end
 
+  test "the app's PreToolUse callback denies a named tool through the account's hook", ctx do
+    deny = fn
+      %{tool_name: "WebFetch"} -> {:deny, "No fetches in this app."}
+      _ -> :pass
+    end
+
+    me = self()
+    tools = %{pre_tool_use: deny, post_tool_use: &send(me, {:after, &1})}
+    start(%{ctx.config | tool_hooks: tools})
+
+    # The hooks Claude Code would post, as the account's settings name them.
+    {:ok, accounts} = Accounts.new(ctx.home, ["work"])
+    {:ok, account} = Accounts.ready(accounts, "work")
+    hooks = JSON.decode!(File.read!(account.settings[:delegate]))["hooks"]
+    [%{"hooks" => [%{"url" => url, "headers" => headers}]}] = hooks["PreToolUse"]
+    assert [%{"hooks" => [%{"url" => ^url}]}] = hooks["PostToolUse"]
+
+    Mix.ensure_application!(:inets)
+    {:ok, _} = Application.ensure_all_started(:inets)
+    headers = for {k, v} <- headers, do: {to_charlist(k), to_charlist(v)}
+
+    post = fn event, tool ->
+      body = %{"hook_event_name" => event, "session_id" => "s1", "tool_use_id" => tool}
+      body = JSON.encode!(Map.merge(body, %{"tool_name" => tool, "tool_input" => %{}}))
+      request = {to_charlist(url), headers, ~c"application/json", body}
+      {:ok, {{_, 200, _}, _, answer}} = :httpc.request(:post, request, [timeout: 10_000], [])
+      to_string(answer)
+    end
+
+    assert %{"permissionDecision" => "deny", "permissionDecisionReason" => "No fetches" <> _} =
+             JSON.decode!(post.("PreToolUse", "WebFetch"))["hookSpecificOutput"]
+
+    assert post.("PreToolUse", "Read") == ""
+    assert post.("PostToolUse", "Read") == ""
+    assert_receive {:after, %{tool_name: "Read", agent: nil}}, 5_000
+  end
+
   # Kills the delegate's current process, once the stand-in has taken `n` messages.
   defp kill_delegate(ctx, killed, n) do
     pids = Path.join(ctx.dir, "pids")

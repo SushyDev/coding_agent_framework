@@ -141,7 +141,11 @@ defmodule CodingAgentFramework.Example do
        end},
       {:stream,
        fn _ -> {Stream, programs: p, holder: w.holder, home: c.home, db: db, notify: notify} end},
-      {:intake, fn _ -> {Intake, db: db, host: host, notify: notify} end},
+      {:intake,
+       fn _ ->
+         tools = Map.to_list(Map.take(c.tool_hooks, [:pre_tool_use, :post_tool_use]))
+         {Intake, [db: db, host: host, notify: notify, agent: agent_of(w)] ++ tools}
+       end},
       {:intake_http,
        fn pid ->
          plug = {Intake.Plug, intake: pid.(:intake), secret: w.secret}
@@ -313,6 +317,16 @@ defmodule CodingAgentFramework.Example do
     end
   end
 
+  # The agent a tool call's session is, by its `Sessions` row; nil for a session the framework
+  # did not start.
+  defp agent_of(%{sdb: sdb, c: c}) do
+    fn account, session_id ->
+      Enum.find_value(Sessions.Table.rows(sdb, c.workstation, account), fn row ->
+        if row.session_id == session_id, do: row.name
+      end)
+    end
+  end
+
   # An agent has ended once its latest start was refused, it failed, or it was stopped after its
   # report (`ended`): no process of it runs again.
   defp ended(%{ddb: ddb, c: c}),
@@ -395,7 +409,8 @@ defmodule CodingAgentFramework.Example do
   end
 
   defp prepare(c, accounts, programs, secret) do
-    data = %{programs: programs, intake: %{port: c.ports.intake, secret: secret}}
+    tools = Map.keys(Map.take(c.tool_hooks, [:pre_tool_use, :post_tool_use]))
+    data = %{programs: programs, intake: %{port: c.ports.intake, secret: secret, tools: tools}}
 
     Enum.reduce_while(c.accounts, :ok, fn a, :ok ->
       case Accounts.prepare(accounts, a, data) do
