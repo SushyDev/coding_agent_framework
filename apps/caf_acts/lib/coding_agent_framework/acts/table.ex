@@ -2,7 +2,7 @@ defmodule CodingAgentFramework.Acts.Table do
   @moduledoc """
   `acts`: one row per act, keyed by the state it acts on (`model/tla/Claim.tla`, `rows`). A
   unique index on `(target, state)` keeps one claim per state with no scan; a row with no state
-  (a start, a raised error) is a record and takes no claim. `CodingAgentFramework.Acts` is the
+  (a start, a raised error) claims no state, since SQLite takes no two NULLs as equal. `CodingAgentFramework.Acts` is the
   one writer; this module is its SQL and the table's metadata, from which the `Tracker` makes
   its source (`meta/0`, F-120's new-2).
 
@@ -101,7 +101,7 @@ defmodule CodingAgentFramework.Acts.Table do
   end
 
   defp recovery(r) do
-    reason = from_inspect(r.reason)
+    reason = Store.from_inspect(r.reason)
     {status, outcome} = recovery_status(r.status, reason)
 
     %{
@@ -113,7 +113,7 @@ defmodule CodingAgentFramework.Acts.Table do
       status: status,
       outcome: outcome,
       reason: if(status == "interrupted", do: nil, else: reason),
-      answer: from_inspect(r.open),
+      answer: Store.from_inspect(r.open),
       detail: r.pane,
       claimed_at: r.claimed_at,
       acted_at: r.opened_at,
@@ -196,55 +196,4 @@ defmodule CodingAgentFramework.Acts.Table do
       name
     ]) != []
   end
-
-  @doc """
-  A value an older writer stored as `inspect` text, by `Store.text/1`'s rule: the literal's
-  term, or the text as it is when it is no literal (F-117's new-2).
-
-      iex> CodingAgentFramework.Acts.Table.from_inspect(":repeating")
-      "repeating"
-      iex> CodingAgentFramework.Acts.Table.from_inspect("{:sample_too_old, 31001}")
-      ~s(["sample_too_old",31001])
-      iex> CodingAgentFramework.Acts.Table.from_inspect("ok")
-      "ok"
-  """
-  @spec from_inspect(String.t() | nil) :: String.t() | integer | nil
-  def from_inspect(nil), do: nil
-
-  def from_inspect(text) do
-    with true <- String.starts_with?(text, [":", "{", "[", "%", "\""]),
-         # An atom comes back as its name, which `Store.text/1` stores the same way, and no
-         # atom is made from what a file holds.
-         {:ok, ast} <-
-           Code.string_to_quoted(text, static_atoms_encoder: fn name, _ -> {:ok, name} end),
-         {:ok, term} <- literal(ast) do
-      Store.text(term)
-    else
-      _ -> text
-    end
-  end
-
-  defp literal(v) when is_atom(v) or is_number(v) or is_binary(v), do: {:ok, v}
-  defp literal({a, b}), do: literal({:{}, [], [a, b]})
-
-  defp literal({:{}, _, items}),
-    do: with({:ok, l} <- literal(items), do: {:ok, List.to_tuple(l)})
-
-  defp literal({:%{}, _, pairs}),
-    do:
-      with(
-        {:ok, l} <- literal(Enum.map(pairs, &Tuple.to_list/1)),
-        do: {:ok, Map.new(l, &List.to_tuple/1)}
-      )
-
-  defp literal(list) when is_list(list) do
-    Enum.reduce_while(list, {:ok, []}, fn x, {:ok, acc} ->
-      case literal(x) do
-        {:ok, v} -> {:cont, {:ok, acc ++ [v]}}
-        no -> {:halt, no}
-      end
-    end)
-  end
-
-  defp literal(_), do: :not_literal
 end

@@ -3,7 +3,8 @@ defmodule CodingAgentFramework.Acts do
   One ledger of acts (`docs/design.md`, "The parts"; `model/tla/Claim.tla`): an actor's act on
   a target's state, written before it acts, once per state, settled after, closed as
   interrupted when a restart cut it, with a cue. An agent's fix, the operator's act and a
-  recovery take their claim here; a start or a raised error is a record. The fault ledger is
+  recovery take their claim here; a start takes a row with no state (each call is an act of its
+  own), settled by its answer (`answered/4`); a raised error is a record. The fault ledger is
   `faults/2` and the same cue.
 
   One process owns the table (`CodingAgentFramework.Acts.Table`) and writes it; the embedding
@@ -100,7 +101,29 @@ defmodule CodingAgentFramework.Acts do
   end
 
   @doc """
-  Writes an act that takes no claim, already settled: a start, a raised error. `fields` as
+  Settles open row `id` by the answer of the act it claimed, one rule for every part: `{:ok,
+  _}` is `verified`; `{:refused, reason}` is `failed`, with the reason and no act's time (a
+  refusal acts on nothing); `{:unknown, reason}` is `unknown`, with the reason, since the act
+  may have run. `settle/5`'s answer.
+
+      Acts.answered(acts, id, Sessions.start(sessions, "reviewer", account, launch))
+      #=> {:ok, :verified}
+  """
+  @spec answered(GenServer.server(), id, term, keyword) :: answer(atom)
+  def answered(acts, id, answer, opts \\ [])
+  def answered(acts, id, {:ok, _}, opts), do: settle(acts, id, :verified, [acted: true], opts)
+
+  def answered(acts, id, {:refused, why}, opts),
+    do: settle(acts, id, :failed, [reason: why], opts)
+
+  def answered(acts, id, {:unknown, why}, opts),
+    do: settle(acts, id, :unknown, [reason: why, acted: true], opts)
+
+  def answered(acts, id, other, opts),
+    do: settle(acts, id, :unknown, [reason: {:answer, other}, acted: true], opts)
+
+  @doc """
+  Writes an act that takes no claim, already settled: a raised error. `fields` as
   `settle/5`'s.
   """
   @spec record(

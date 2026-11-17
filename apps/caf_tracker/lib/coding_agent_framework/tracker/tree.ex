@@ -8,13 +8,20 @@ defmodule CodingAgentFramework.Tracker.Tree do
   table, so the two never disagree on who is an agent, only, for a moment after a write, on
   how fresh their read is (F-99's new-3).
 
-  - **A main session** is a row of kind `main`, with its project and account. Nothing reads its
-    state or subagents yet (its turn state is R9's second part), so its row leaves them out.
-  - **A delegate**'s state is its `Stream` row's (by session): `gone`, `waiting` while a
-    `can_use_tool` request is held (`waits_on` names each), `working` or `idle`; `starting`
-    while its agent row's start or resume is under way, `ended` once no process of it will run
-    again (its start refused, or done for good), `unread` with no `Stream` row. Its subagents
-    are its transcript's.
+  - **A main session** is a row of kind `main`, with its project and account. Its state is its
+    session file's, as `Sessions.Turn.file_state/1` reads it from the view's `Registry` rows:
+    `working`, `waiting`, `idle`, `gone`, `unread`; `starting` while its start is under way and
+    `gone` while no process of it may live (`declared`, `stopped`). The view holds no waiter, so
+    this is one read, for a person to see, and never what decides a write (F-113's new-2).
+  - **A delegate**'s state is its `Stream` row's (by session), as `Sessions.Turn.stream/1` reads
+    it: `gone`, `waiting` while a `can_use_tool` request is held (`waits_on` names each),
+    `working` or `idle`; `starting` while its agent row's start or resume is under way, `ended`
+    once no process of it will run again (its start refused, or done for good), `unread` with
+    no `Stream` row.
+  - Each agent's subagents are its transcript's.
+
+  A delegate that ended keeps its place in the tree, but `agents/2` leaves it out unless asked
+  (`all: true`): a busy day ends many (F-129's new-5).
 
   `stuck` is never answered: nothing reads it yet. A row of the wrong shape is named in
   `problems`, and the others still show. `sources` gives each source's age, `:unread` before
@@ -33,21 +40,32 @@ defmodule CodingAgentFramework.Tracker.Tree do
       {"main", "working", "main"}
   """
 
-  alias CodingAgentFramework.Sessions.Agents
+  alias CodingAgentFramework.Sessions.{Agents, Turn}
 
-  @read ["sessions:", "stream:", "transcripts:"]
+  @read ["sessions:", "registry:", "stream:", "transcripts:"]
   @subagent [:type, :description, :state, :status, :tokens]
 
-  @doc "The tree in `view`: `%{agents: rows, sources: ages, problems: problems}`."
-  @spec agents(map) :: %{agents: [map], sources: map, problems: [map]}
-  def agents(view) when is_map(view) do
+  @doc """
+  The tree in `view`: `%{agents: rows, sources: ages, problems: problems}`. Option `all:`
+  (false by default) keeps the delegates that ended.
+  """
+  @spec agents(map, keyword) :: %{agents: [map], sources: map, problems: [map]}
+  def agents(view, opts \\ []) when is_map(view) do
     parts = Enum.filter(Map.values(view), &is_map/1)
     entries = fn kind -> for p <- parts, %{row: %{}} = e <- List.wrap(p[kind]), do: e end
     {good, bad} = Enum.split_with(entries.(:agents), &agent?(&1.row))
 
     streams = for %{row: r} <- entries.(:stream), into: %{}, do: {r[:session], r}
     transcripts = for %{row: r} <- entries.(:transcripts), into: %{}, do: {key(r), r}
-    rows = Enum.map(Agents.tree(Enum.map(good, & &1.row)), &row(&1, streams, transcripts))
+
+    files =
+      Enum.group_by(for(%{row: r} <- entries.(:sessions), do: r), &{&1[:host], &1[:account]})
+
+    full = Map.new(good, &{{&1.row.host, &1.row.name}, &1.row})
+    ev = %{streams: streams, transcripts: transcripts, files: files, full: full}
+    shown = if opts[:all], do: good, else: Enum.reject(good, &Agents.ended?(&1.row))
+    rows = Enum.map(Agents.tree(Enum.map(shown, & &1.row)), &row(&1, ev))
+
     ages = for p <- parts, {t, s} <- Map.get(p, :sources, %{}), do: {t, s[:age]}
 
     %{
@@ -64,42 +82,57 @@ defmodule CodingAgentFramework.Tracker.Tree do
 
   defp key(r), do: {r[:account], r[:session_id]}
 
-  defp row(%{kind: "main"} = m, _streams, _transcripts),
-    do: Map.take(m, [:name, :kind, :project, :parent, :account, :host])
+  # `entry` is the tree's entry; its full row holds the process the evidence names.
+  defp row(entry, ev) do
+    full = Map.get(ev.full, {entry.host, entry.name}, entry)
+    {state, waits} = state(full, ev)
 
-  defp row(d, streams, transcripts) do
-    {state, waits} = state(d, streams[d[:session_id]])
-
-    Map.merge(Map.take(d, [:name, :kind, :project, :parent, :account, :session_id, :host]), %{
+    Map.merge(Map.take(entry, [:name, :kind, :project, :parent, :account, :session_id, :host]), %{
       state: state,
       waits_on: waits,
-      subagents: subagents(transcripts[key(d)])
+      subagents: subagents(ev.transcripts[key(full)])
     })
   end
 
-  defp state(d, stream) do
+  defp state(row, ev) do
     cond do
-      Agents.ended?(d) -> {"ended", []}
-      Agents.starting?(d) -> {"starting", []}
-      stream == nil -> {"unread", []}
-      stream[:gone] == true -> {"gone", []}
-      true -> live(stream)
+      Agents.ended?(row) ->
+        {"ended", []}
+
+      Agents.starting?(row) ->
+        {"starting", []}
+
+      row.kind == "main" and Agents.free?(row) ->
+        {"gone", []}
+
+      row.kind == "main" ->
+        {word(Turn.file_state(Turn.file(row, ev.files[{row[:host], row[:account]}] || []))), []}
+
+      true ->
+        stream(ev.streams[row[:session_id]])
     end
   end
 
-  defp live(stream) do
+  defp stream(stream) do
+    case Turn.stream(stream) do
+      :waiting -> {"waiting", held(stream)}
+      turn -> {word(turn), []}
+    end
+  end
+
+  defp held(stream) do
     requests = if is_map(stream[:requests]), do: stream.requests, else: %{}
 
-    held =
-      for {id, %{state: :held} = r} <- requests,
-          do: %{request: id, tool: r[:tool_name], input: r[:input]}
-
-    cond do
-      held != [] -> {"waiting", held}
-      stream[:idle] == false -> {"working", []}
-      true -> {"idle", []}
-    end
+    for {id, %{state: :held} = r} <- requests,
+        do: %{request: id, tool: r[:tool_name], input: r[:input]}
   end
+
+  # The view's words for a turn state: what a person reads, never what decides a write.
+  defp word(:running), do: "working"
+  defp word(:waiting), do: "waiting"
+  defp word(:gone), do: "gone"
+  defp word(:unread), do: "unread"
+  defp word(_ended_idle_or_ending), do: "idle"
 
   defp subagents(%{subagents: %{} = agents}) do
     for(%{} = a <- Map.values(agents), do: a)

@@ -28,9 +28,31 @@ defmodule CodingAgentFramework.Tracker.TreeTest do
     gone = %{d | id: 3, name: "a-y", status: "ended"}
     rows = for {r, k} <- Enum.with_index([m, d, gone]), do: %{key: k, row: r}
 
-    assert %{agents: [%{name: "m"}, %{name: "a-x", state: "starting"}, %{name: "a-y"} = y]} =
-             Tree.agents(%{{"h", "agents"} => %{agents: rows}})
+    view = %{{"h", "agents"} => %{agents: rows}}
+
+    assert %{agents: [%{name: "m", state: "gone"}, %{name: "a-x", state: "starting"}]} =
+             Tree.agents(view)
+
+    assert %{agents: [%{name: "m"}, %{name: "a-x"}, %{name: "a-y"} = y]} =
+             Tree.agents(view, all: true)
 
     assert y.state == "ended"
+  end
+
+  # One read of the session file, for a person to see; the view holds no waiter.
+  test "a main session's state is its session file's, by its pid and start time" do
+    start = "Tue Nov 17 09:00:00 2026"
+    m = Map.merge(@main, %{status: "running", session_id: "s0", pid: 7, proc_start: start})
+    file = %{account: "w", host: "h", pid: 7, proc_start: start, alive: :live, status: "busy"}
+    other = %{file | pid: 8, status: "idle"}
+    files = %{sessions: [%{key: 1, row: other}, %{key: 2, row: file}]}
+    view = %{{"h", "agents"} => %{agents: [%{key: 1, row: m}]}, {"h", "w"} => files}
+
+    assert %{agents: [%{name: "m", state: "working", subagents: []}]} = Tree.agents(view)
+
+    idle = put_in(view, [{"h", "w"}, :sessions], [%{key: 2, row: %{file | status: "idle"}}])
+    assert %{agents: [%{state: "idle"}]} = Tree.agents(idle)
+
+    assert %{agents: [%{state: "unread"}]} = Tree.agents(Map.delete(view, {"h", "w"}))
   end
 end

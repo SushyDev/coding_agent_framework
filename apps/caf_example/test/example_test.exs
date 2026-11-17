@@ -205,6 +205,37 @@ defmodule CodingAgentFramework.ExampleTest do
 
     assert %{state: "running"} = rows["kept"]
     {:ok, _} = Services.stop(parts.services, "app-main", "kept", [])
+
+    # F-126's new-1: the start, `Delegates`' own resume and `Sessions`' resume are rows of
+    # `Acts`, each settled by its answer; the resume claimed the state it resumed, once.
+    {:ok, acts} =
+      await(fn ->
+        {:ok, rows} = Acts.rows(parts.acts, target: "app-unit-one")
+        if Enum.count(rows, &(&1.status == "settled")) == 3, do: {:ok, rows}
+      end)
+
+    assert [
+             %{actor: "sessions:ws", act: "start", outcome: "verified"},
+             %{actor: "delegates:ws", act: "resume", outcome: "verified", state: state},
+             %{actor: "sessions:ws", act: "resume", outcome: "verified"}
+           ] = acts
+
+    assert state =~ ~s("resumes":0)
+  end
+
+  # F-126's new-1: a raised error the app records is a part's crash, a row of `Acts`.
+  test "a part's crash is a raised error in Acts", ctx do
+    parts = start(ctx.config)
+    Process.exit(parts.ticker, :kill)
+
+    {:ok, [row]} =
+      await(fn ->
+        {:ok, rows} = Acts.rows(parts.acts, act: "error")
+        if rows != [], do: {:ok, rows}
+      end)
+
+    assert %{actor: "app", target: "part:ticker", outcome: "failed", reason: reason} = row
+    assert reason =~ "killed"
   end
 
   test "a delegate stopped after its report is `ended`, and its services end", ctx do

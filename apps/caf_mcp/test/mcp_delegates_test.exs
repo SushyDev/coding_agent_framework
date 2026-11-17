@@ -76,7 +76,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     sources = [
       {Tracker.TableSource, table: Transcripts.Table, db: db, host: "test", account: "work"},
       {Tracker.TableSource, table: Sessions.Table, db: db, host: "test"},
-      {Tracker.StreamSource, db: db, host: "test"}
+      {Tracker.TableSource, table: Stream.Table, db: db, host: "test"}
     ]
 
     tracker = start_supervised!({Tracker, sources: sources, timer: false})
@@ -495,7 +495,8 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
            ] = answer["ok"]["agents"]
 
     assert %{"account" => "work", "state" => "idle", "waits_on" => [], "subagents" => []} = one
-    refute Map.has_key?(main, "state")
+    # A main session's state is its session file's (R9 part 2); this one has no process.
+    assert %{"state" => "gone", "waits_on" => [], "subagents" => []} = main
 
     # The transcript, written as Claude Code would, with a last line not yet whole.
     {:ok, %{rows: rows}} = Stream.rows(ctx.stream)

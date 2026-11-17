@@ -6,7 +6,7 @@ defmodule CodingAgentFramework.MCPServicesTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Copies, Grants, MCP, Services}
+  alias CodingAgentFramework.{Acts, Copies, Grants, MCP, Services}
 
   setup do
     dir = test_dir()
@@ -31,6 +31,8 @@ defmodule CodingAgentFramework.MCPServicesTest do
     ]
 
     grants = Grants.new(fn -> tree end)
+    acts_db = Path.join(dir, "acts.db")
+    acts = start_supervised!({Acts, db: acts_db, start_id: "t", host: "ws", instance: "s"})
     copies = start_supervised!({Copies, dir: Path.join(dir, "copies"), programs: programs()})
 
     services =
@@ -39,7 +41,7 @@ defmodule CodingAgentFramework.MCPServicesTest do
          dir: Path.join(dir, "services"),
          copies: copies,
          grants: grants,
-         acts: :unused,
+         acts: acts,
          ended: fn _ -> false end,
          hosts: %{"ws" => %{programs: programs(), dir: Path.join(dir, "ws")}},
          workstation: "ws"}
@@ -51,7 +53,7 @@ defmodule CodingAgentFramework.MCPServicesTest do
          dir: dir,
          port: 4791,
          grants: grants,
-         acts: :unused,
+         acts: acts,
          mailbox: {__MODULE__, :unused},
          jobs: {__MODULE__, :unused},
          delegates: {__MODULE__, :unused},
@@ -73,7 +75,7 @@ defmodule CodingAgentFramework.MCPServicesTest do
         {a, JSON.decode!(File.read!(path))["mcpServers"]["caf"]["headers"]["x-caf-token"]}
       end
 
-    %{mcp: mcp, tokens: tokens, services: services, dir: dir}
+    %{mcp: mcp, tokens: tokens, services: services, dir: dir, acts: acts}
   end
 
   defp tool(c, agent, name, args) do
@@ -189,6 +191,13 @@ defmodule CodingAgentFramework.MCPServicesTest do
 
     assert %{"ok" => %{"state" => "ended"}} =
              tool(c, "app-fix", "service_stop", %{"name" => "db"})
+
+    # F-126's new-4: each fix that acted is a row of `Acts`, claimed on the running process and
+    # settled by its answer; the refused ones above were refused before any claim.
+    assert {:ok, [restart, stop]} = Acts.rows(c.acts, target: "service:db")
+    assert %{actor: "app-fix", act: "service_restart", outcome: "verified"} = restart
+    assert %{actor: "app-fix", act: "service_stop", outcome: "verified"} = stop
+    assert restart.state =~ ~s("restarts":0) and stop.state =~ ~s("restarts":1)
   end
 
   test "bad arguments are refused before anything runs", c do

@@ -41,7 +41,7 @@ defmodule CodingAgentFramework.MailboxTest do
 
     # With no `intake:` a main session has no transport: the row stays queued, with why.
     assert {:ok, {:queued, id}} = Mailbox.message(m, "d1", "main", "report")
-    assert {:ok, %{status: "queued", attempt: ":no_delivery"}} = until(ctx, id, & &1.attempt)
+    assert {:ok, %{status: "queued", attempt: "no_delivery"}} = until(ctx, id, & &1.attempt)
   end
 
   # OnlyIntoEndedTurn, InOrder, AtMostOnce: the brief first, then each message once its turn

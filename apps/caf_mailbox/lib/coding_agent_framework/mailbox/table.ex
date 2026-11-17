@@ -52,9 +52,17 @@ defmodule CodingAgentFramework.Mailbox.Table do
 
   @type db :: Store.db()
 
-  @doc "Opens (and creates) the file at `path`, with the table."
+  @doc """
+  Opens (and creates) the file at `path`, with the table. An `attempt` an earlier build stored
+  as `inspect` text is converted to `Store.text/1`'s rule.
+  """
   @spec open(String.t()) :: {:ok, db} | {:refused, term}
-  def open(path), do: Store.open(path, @schema, added: [messages: @added], then: @indexes)
+  def open(path) do
+    with {:ok, db} <- Store.open(path, @schema, added: [messages: @added], then: @indexes) do
+      Store.convert(db, "messages", [:attempt])
+      {:ok, db}
+    end
+  end
 
   @doc """
   Stores a row as `queued` and returns its id; or nil, storing nothing, when a row with its

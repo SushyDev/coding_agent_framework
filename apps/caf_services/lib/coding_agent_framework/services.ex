@@ -52,7 +52,7 @@ defmodule CodingAgentFramework.Services do
 
   use GenServer
 
-  alias CodingAgentFramework.{Grants, Holder, Programs, Shell}
+  alias CodingAgentFramework.{Acts, Grants, Holder, Programs, Shell}
   alias CodingAgentFramework.Copies.Held
   alias CodingAgentFramework.Services.Table
 
@@ -115,7 +115,9 @@ defmodule CodingAgentFramework.Services do
   `sleep`, `mkdir`, `ps`, `tail`, `wc`, `nc` for a port wait, and for the copy `flock` and `rsync`) and its framework
   directory, and for a host reached over ssh, `ssh_env`, the environment its forwards' ssh runs
   in (`{name, value}` pairs, none by default); `:workstation`, the name of the host forwards
-  are held on (its programs also with `lsof`).
+  are held on (its programs also with `lsof`); and optionally `:acts`, the instance's `Acts`,
+  where each `stop/4` of a running service and each `restart/4` is a row, act `service_stop`
+  or `service_restart`, target `service:<name>`.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -228,8 +230,13 @@ defmodule CodingAgentFramework.Services do
   @spec stop(GenServer.server(), String.t(), String.t(), keyword) ::
           {:ok, map} | {:refused, term} | {:unknown, term}
   def stop(services, caller, name, opts \\ []) do
-    with {:ok, row} <- fixable(services, caller, name, ~w(running ending)),
-         do: end_service(services, row, %{state: "ending"}, opts)
+    with {:ok, row} <- fixable(services, caller, name, ~w(running ending)) do
+      run = fn -> end_service(services, row, %{state: "ending"}, opts) end
+      # An end sent again (the row `ending`) goes on with the act its first call claimed.
+      if row.state == "running",
+        do: as_act(services, caller, row, :service_stop, run),
+        else: run.()
+    end
   end
 
   @doc """
@@ -240,10 +247,40 @@ defmodule CodingAgentFramework.Services do
   @spec restart(GenServer.server(), String.t(), String.t(), keyword) ::
           {:ok, map} | {:refused, term} | {:unknown, term}
   def restart(services, caller, name, opts \\ []) do
-    with {:ok, row} <- fixable(services, caller, name, ~w(running)),
-         {:ok, row} <-
-           end_service(services, row, %{state: "restarting", restarts: row.restarts + 1}, opts),
-         do: launch(services, row, opts)
+    with {:ok, row} <- fixable(services, caller, name, ~w(running)) do
+      as_act(services, caller, row, :service_restart, fn ->
+        with {:ok, row} <-
+               end_service(
+                 services,
+                 row,
+                 %{state: "restarting", restarts: row.restarts + 1},
+                 opts
+               ),
+             do: launch(services, row, opts)
+      end)
+    end
+  end
+
+  # A fix's row in `Acts` (F-126's new-4), when the app gave one: claimed by the caller on the
+  # running process (its pid, start time and restart count) before `run` acts, and settled by
+  # its answer (`Acts.answered/4`). A second fix of that process is refused `{:claimed, by}`
+  # or `{:already_claimed, by}`, and acts on nothing.
+  defp as_act(services, caller, row, act, run) do
+    with {:ok, config} <- call(services, :config) do
+      case config.acts do
+        nil ->
+          run.()
+
+        acts ->
+          state = %{pid: row.pid, started: row.started, restarts: row.restarts}
+
+          with {:ok, id} <- Acts.claim(acts, caller, "service:" <> row.name, state, act) do
+            answer = run.()
+            Acts.answered(acts, id, answer)
+            answer
+          end
+      end
+    end
   end
 
   @doc """
@@ -871,6 +908,7 @@ defmodule CodingAgentFramework.Services do
       keys = [:hosts, :copies, :grants, :ended]
       config = Map.new(keys, &{&1, Keyword.fetch!(opts, &1)})
       config = Map.put(config, :workstation, Keyword.get(opts, :workstation))
+      config = Map.put(config, :acts, Keyword.get(opts, :acts))
       # A start not yet sent lost its call with the restart: nothing runs.
       for %{state: "asked"} = row <- Table.all(db),
           do: Table.put(db, %{row | state: "refused", owner: nil})

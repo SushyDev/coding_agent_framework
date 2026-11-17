@@ -10,6 +10,7 @@ defmodule CodingAgentFramework.Reader do
   table module gives `meta/0`, a map that names the table:
 
     * `:schema`: the SQL that creates both tables.
+    * optional `:open`: `Store.open/3`'s options, such as the columns a later build added.
     * `:table` and `:reads`: the rows' table and the reads table, one row per scope read.
     * `:scope`: the columns that key a reads row, and that every row carries before its key,
       such as `[:host, :account]`.
@@ -114,7 +115,7 @@ defmodule CodingAgentFramework.Reader do
 
   @doc "Opens (and creates) the reader's file at `path`, with its tables."
   @spec open(meta, String.t()) :: {:ok, Store.db()} | {:refused, term}
-  def open(meta, path), do: Store.open(path, meta.schema)
+  def open(meta, path), do: Store.open(path, meta.schema, Map.get(meta, :open, []))
 
   @doc "A row's columns, in the table's order."
   @spec columns(meta) :: [atom]

@@ -60,7 +60,7 @@ defmodule CodingAgentFramework.Mailbox do
   use GenServer
 
   alias CodingAgentFramework.{Accounts, Grants, Intake, Stream, Transcripts}
-  alias CodingAgentFramework.Sessions.Agents
+  alias CodingAgentFramework.Sessions.{Agents, Turn}
   alias CodingAgentFramework.Mailbox.{Table, Transport}
   alias CodingAgentFramework.Stream.Fold
 
@@ -517,7 +517,7 @@ defmodule CodingAgentFramework.Mailbox do
 
   defp deliver(s, rows, :none) do
     for %{status: "queued"} = m <- rows,
-        m.attempt != ":no_delivery",
+        m.attempt != "no_delivery",
         do: write(s, m, attempt: :no_delivery)
   end
 
@@ -566,7 +566,7 @@ defmodule CodingAgentFramework.Mailbox do
 
       true ->
         m = hd(rows)
-        if m.attempt != ":no_waiter", do: write(s, m, attempt: :no_waiter)
+        if m.attempt != "no_waiter", do: write(s, m, attempt: :no_waiter)
     end
   end
 
@@ -657,11 +657,9 @@ defmodule CodingAgentFramework.Mailbox do
          do: Transcripts.path(dir, srow.cwd, srow.session_id)
   end
 
-  # Into an ended turn of the current process only, never to a session whose row is stopping.
-  defp ready?(srow, %{} = f),
-    do: Agents.running?(srow) and f.idle and not f.gone and not f.ending
-
-  defp ready?(_srow, _fold), do: false
+  # Into an ended turn of the current process only, never to a session whose row is stopping:
+  # `Sessions`' turn function for a headless session.
+  defp ready?(srow, fold), do: Turn.headless(srow, fold) == :ended
 
   # The call transport's take: each waiting call whose row is due, first among its addressee's
   # rows from its sender, with none to it in flight, takes it now, before its deadline.

@@ -112,6 +112,7 @@ defmodule CodingAgentFramework.Sessions.Table do
   def open(path) do
     with {:ok, db} <- Store.open(path, @schema) do
       migrate(db)
+      Store.convert(db, "agents", [:reason, :viewer])
       {:ok, db}
     end
   end
@@ -207,7 +208,7 @@ defmodule CodingAgentFramework.Sessions.Table do
   @spec update(db, integer, keyword) :: :ok
   def update(db, id, fields) do
     fields = Keyword.put(fields, :updated_at, System.os_time(:millisecond))
-    Store.update(db, "agents", id, Enum.map(fields, &dump/1))
+    Store.update(db, "agents", id, fields)
   end
 
   @doc "The row of `{host, name}`, or nil."
@@ -246,9 +247,4 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   defp select(db, where, args),
     do: Store.select(db, "agents", @columns, where <> " ORDER BY id", args)
-
-  # A status or a reason given as an atom is stored as its name; `Store` stores any other term
-  # as its inspect text.
-  defp dump({k, v}) when is_atom(v) and not is_nil(v), do: {k, Atom.to_string(v)}
-  defp dump(field), do: field
 end

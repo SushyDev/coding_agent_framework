@@ -15,12 +15,11 @@ defmodule CafTracker.MixProject do
 
   defp deps do
     [
-      {:caf_intake, in_umbrella: true},
+      {:caf_intake, in_umbrella: true, only: :test},
       {:caf_acts, in_umbrella: true, only: :test},
       {:caf_recoveries, in_umbrella: true, only: :test},
       {:caf_sessions, in_umbrella: true},
       {:caf_store, in_umbrella: true},
-      {:caf_stream, in_umbrella: true},
       {:caf_accounts, in_umbrella: true, only: :test},
       {:caf_registry, in_umbrella: true, only: :test},
       {:caf_sampler, in_umbrella: true, only: :test},

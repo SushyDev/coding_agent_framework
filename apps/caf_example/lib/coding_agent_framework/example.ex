@@ -118,7 +118,41 @@ defmodule CodingAgentFramework.Example do
 
     with {:ok, pid} <- module.start_link(opts) do
       :ets.insert(tab, {key, pid})
+      watch(tab, key, pid)
       {:ok, pid}
+    end
+  end
+
+  # A raised error, as the app records it (F-126's new-1): a part's process that ends by a
+  # crash, not a `{:unknown, reason}` answer, which its caller already holds and an act's row
+  # already settles `unknown`. One unlinked watcher per part's process, which ends with it;
+  # `Acts` is looked up when the crash is seen, so a part `rest_for_one` ends with it, or a
+  # tree stopped whole, records nothing. A crash of `Acts` itself is not recorded in it.
+  defp watch(_tab, :acts, _pid), do: :ok
+
+  defp watch(tab, key, pid) do
+    spawn(fn ->
+      ref = Process.monitor(pid)
+
+      receive do
+        {:DOWN, ^ref, :process, _, reason} ->
+          if crash?(reason), do: raised(lookup(tab, :acts), key, reason)
+      end
+    end)
+  end
+
+  defp crash?(reason) when reason in [:normal, :shutdown], do: false
+  defp crash?({:shutdown, _}), do: false
+  defp crash?(_), do: true
+
+  defp raised(nil, _key, _reason), do: :ok
+
+  defp raised(acts, key, reason) do
+    text = reason |> Exception.format_exit() |> String.slice(0, 2_000)
+
+    case Acts.record(acts, "app", "part:#{key}", :error, :failed, reason: text) do
+      {:ok, _} -> :ok
+      other -> Logger.warning("caf: the crash of #{key} has no row in Acts: #{inspect(other)}")
     end
   end
 
@@ -144,6 +178,17 @@ defmodule CodingAgentFramework.Example do
 
     [
       {:reaper, fn _ -> {Shell.Reaper, programs: p} end},
+      # Before every part that writes its acts there.
+      {:acts,
+       fn _ ->
+         {Acts,
+          db: db,
+          start_id: w.start_id,
+          host: host,
+          instance: c.instance,
+          notify: notify,
+          claims: Config.path(c, "claims.db")}
+       end},
       {:control, fn _ -> {Control, tmux: w.tmux} end},
       {:usage,
        fn _ ->
@@ -186,18 +231,9 @@ defmodule CodingAgentFramework.Example do
              notify: notify,
              open_to: &Mailbox.open_to(pid.(:mailbox), &1, status: &2),
              waiter: %{port: c.ports.intake, secret: w.secret},
+             acts: pid.(:acts),
              mains: Map.new(c.mains, fn {project, name} -> {name, project} end)
            }
-         end},
-        {:acts,
-         fn _ ->
-           {Acts,
-            db: db,
-            start_id: w.start_id,
-            host: host,
-            instance: c.instance,
-            notify: notify,
-            claims: Config.path(c, "claims.db")}
          end},
         {:recoveries,
          fn pid ->
@@ -240,6 +276,7 @@ defmodule CodingAgentFramework.Example do
             launch: [claude: c.claude, env: c.env, tool_timeout: c.tool_timeout],
             projects: c.projects,
             mcp: &issue(pid.(:mcp), &1),
+            acts: pid.(:acts),
             notify: notify}
          end},
         {:copies, fn _ -> {Copies, dir: Config.path(c, "parts/copies"), programs: p} end},
@@ -259,7 +296,8 @@ defmodule CodingAgentFramework.Example do
             grants: grants,
             ended: &Sessions.Agents.ended?(Sessions.Agents.get(w.agents, &1)),
             hosts: hosts,
-            workstation: host}
+            workstation: host,
+            acts: pid.(:acts)}
          end},
         {:mcp,
          fn pid ->
@@ -311,12 +349,12 @@ defmodule CodingAgentFramework.Example do
       {Tracker.TableSource, table: Registry.Table},
       {Tracker.TableSource, table: Transcripts.Table},
       {Tracker.TableSource, table: Usage.Table},
-      {Tracker.IntakeSource, []}
+      {Tracker.TableSource, table: Intake.Table}
     ]
 
     for(a <- c.accounts, {k, table} <- kinds, do: {k, table ++ on ++ [account: a]}) ++
       [
-        {Tracker.StreamSource, on},
+        {Tracker.TableSource, [table: Stream.Table] ++ on},
         {Tracker.TableSource, [table: Sessions.Table] ++ on},
         {Tracker.TableSource, [table: Delegates.Table] ++ on},
         {Tracker.TableSource, [table: TmuxSampler.Table] ++ on ++ [server: server]},
