@@ -10,8 +10,10 @@
 (*                                                                         *)
 (* Models the rule of Acts (R10): Grants' claims and Recoveries' rows, one *)
 (* row per state under one unique index. Agent.tla (Recoveries' reopen of  *)
-(* a lost viewer), Team.tla (a parent's fix of a child) and Copy.tla       *)
-(* (Recoveries' reopen of a forward) instance it. Each gives its own       *)
+(* a lost viewer), Team.tla (a parent's fix of a child), Copy.tla          *)
+(* (Recoveries' reopen of a forward) and Start.tla (Recoveries' end of a   *)
+(* process, which may fail and wait for a person's clear) instance it.     *)
+(* Each gives its own                                                      *)
 (* numbering of a target's states (`now`, never changed here), the act's   *)
 (* name, and what the act does and needs beside a current claim. A spec   *)
 (* that does not number its states says when they pass (Passes).          *)
@@ -72,6 +74,19 @@ Take(by, t, act) ==
         /\ rows' = IF Break = "InMemory" THEN rows ELSE rows \cup {c}
         /\ acting' = acting \cup {c}
         /\ UNCHANGED <<done, acted, twice, cut>>
+
+\* For a spec that leaves out a restart between the claim and its act: the
+\* claim and the act in one step, as the code's one call takes them. The
+\* row is written and done at once, and the act runs on the state claimed.
+TakeAndAct(by, t, act) ==
+    LET c == [by |-> by, t |-> t, s |-> now[t], act |-> act, n |-> Cardinality(On(t, now[t])) + 1]
+        k == <<t, now[t]>>
+    IN  /\ On(t, now[t]) = {} \/ (Break = "TwoClaims" /\ c.n <= 2)
+        /\ rows' = IF Break = "InMemory" THEN rows ELSE rows \cup {c}
+        /\ done' = IF Break = "InMemory" THEN done ELSE done \cup {c}
+        /\ acted' = acted \cup {k}
+        /\ twice' = (twice \/ k \in acted)
+        /\ UNCHANGED <<acting, cut>>
 
 \* The claim's state is still the target's. Under Stale any claim is.
 Current(c) == c.s = now[c.t] \/ Break = "Stale"

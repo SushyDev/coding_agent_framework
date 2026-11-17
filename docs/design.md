@@ -1200,7 +1200,7 @@ reshaped around three new ones, in R4 and R6, before the code they describe:
 |---|---|---|
 | `Shell.tla` | kept as it is | as above |
 | `Agent.tla` | kept; instances `Claim` for `Recoveries`; the comments that say `/exit` go | as above |
-| `Start.tla` | kept; `StopAsked` is SIGTERM once idle; `Recoveries`' end of an orphan by pid and start time is the same `KillsOwnOnly` (both F-118) | as above, and `TermsOnlyIdle`, `OrphanEnds`, `LateStopEnds` |
+| `Start.tla` | kept; `StopAsked` is SIGTERM once idle; `Recoveries`' end of an orphan by pid and start time is the same `KillsOwnOnly` (both F-118); the end instances `Claim`, its state the row's record and a person's clears, and a KILL may fail: the row then waits for a person, whose clear lets the end run once more (F-128) | as above, and `TermsOnlyIdle`, `OrphanEnds`, `LateStopEnds`, `OneEndPerState`, `NoEndOnCutOffClaim` |
 | `Copy.tla` | kept; instances `Claim` for the forward's reopen; the forward (about 230 lines) may split into its own spec when it next changes | as above |
 | **`Claim.tla`** (new, R4, about 60 lines) | the claim before an act: once per state, acted on only while current, cut by a restart; the rule of `Acts` | `OneClaimPerState`, `OneActPerState`, `NoActOnCutOffClaim` |
 | **`Hold.tla`** (new, R4, about 80 lines) | a held request answered once by its named decider, its deadline, its holder's death, a restart | `OneResponse`, `LateDropped`, `OnlyNamed`, `RequestsEnd` |
