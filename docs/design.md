@@ -192,6 +192,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Delegates` | the delegate protocol only: its checks, the cap, the account pick, resume once, report a second kill; it hands the report to `Mailbox` as the reply to the brief | `delegates`: branch, brief uuid, resumes, whether the report was taken |
 | `Mailbox` | every delivery: messages, replies, notices, reports, briefs, the words to go on and the app's word, stored, delivered once, in order per sender and addressee; one mark and settle, with the transport the target's kind chooses | `messages` |
 | `Acts` | one ledger of acts: an actor's act on a target's state, written before it acts, once per state, settled after, closed as interrupted when a restart cut it, with a cue. Fixes, the operator's acts, recoveries, kills, resumes, starts and raised errors are its rows, and the fault ledger is a query of it | `acts` |
+| `Scheduler` | one per instance, against `Schedule.tla`: every agent start, heavy run and landing asks it for a lease first ("A lease" below). A grant is one write transaction that checks each resource's capacity and inserts the row, with all of a landing's resources in one lease; a release is a compare-and-set on the lease id, so it happens once; after a restart a row is released only when its holder's process has ended by `Holder.Process`'s record, never because time passed. It reads pressure and each account's budget, never the load average | `leases`: id (the fencing token), request id, class, module, account, the units of each resource, the holder's record, granted and released times |
 | `Stacks` | the worktrees and `gh stack` chains of a main session's work | — |
 | `Copies` | a host's copy of each worktree, brought in step by rsync before each job or service, and removed with the worktree | `copies` |
 | `Jobs` | one-off commands on a host, in a copy: held, logged, ended by their exit or their timeout | `jobs` |
@@ -285,6 +286,44 @@ any reply does (new-4).
   (`Acts.answered/4`): ok `verified`, refused `failed`, unknown `unknown`. A raised error is a
   part's process that crashes, as the app sees it, recorded settled `failed`; a part's
   `{:unknown, reason}` is not, since its caller holds it and an act's row settles `unknown`.
+- **A lease** (F-134, `Schedule.tla`). Nothing starts an agent, a heavy run or a landing
+  without a lease from the `Scheduler`; it reads the host's own signals, so work it did not
+  start still counts. A request names its request id, class, module, account and the units of
+  each resource it needs (an agent's seat, a heavy slot, a lock); every lockable thing is a
+  resource with a capacity. The answer comes at once: `{:ok, lease}`; `{:queued, request_id}`,
+  after which exactly one more answer comes, the lease or a refusal, and no position updates
+  (each message to an idle session costs its whole context); or `{:refused, {reason,
+  retry_at}}`, `reason` one of `queue_full`, `deadline`, `pressure`, `allowance`. A refusal is
+  final for its request id, holds nothing, and is never a failed run. Requests are idempotent
+  by request id: the lease is looked up before any refusal is decided, so a second request
+  answers the lease already granted.
+  - **Classes**, four and fixed, in this order: a person's main session, a landing's gates,
+    builders, heavy runs. A class is served only when no waiting request of a higher class can
+    be granted, and no class takes back another's lease. Inside a class the modules that ask
+    take turns (an explicit rotation), and aging reorders only inside a class, saturating
+    below the next. A landing takes all its resources as one gang lease, in one step, never
+    one at a time.
+  - **Gates.** Pressure has three states, read from the host (pressure stall time where the
+    host has it, a memory-pressure level where it does not): `ok`; `high`, which admits no new
+    heavy run; `severe`, which admits nothing new but a person's main session, which is always
+    admitted (decided). Each account's budget is two fixed-reset windows, the five-hour and the
+    weekly, from `Usage`'s readings; a request is admitted only while both have room. A spent
+    budget is refused at once with `retry_at` the window's reset, never queued, and a queued
+    request whose budget runs out is refused then; pressure that bars a class refuses its
+    request at once too. Gates stop new starts only: an admitted session is never shed.
+    Thresholds, reserves and the windows' figures are measured on the workstation, not modeled.
+  - **The queue** is bounded per class and in memory (decided): a restart loses it, and a
+    requester told `queued` asks again under its request id, which answers its lease if the
+    grant was written before the restart. A queued request is refused at its deadline.
+  - **The end.** The lease lasts as long as its holder's process. While the `Scheduler` runs it
+    monitors each holder and releases the lease when the process ends; after a restart it
+    reads every unreleased row, releases it if the process ended (pid gone, or its start time
+    differs) and monitors it again if not. Both release by `UPDATE … WHERE id = ? AND
+    released_at IS NULL`, so exactly one succeeds. A resource the lease guards (a heavy slot's
+    script, a lock file) carries the lease id and refuses a holder whose id is not current.
+  - **Accounts.** Holding several Claude accounts and moving work between them is allowed
+    (decided), so the account is a resource with several entries; a start's account is
+    chosen when it is admitted, and `Mover` moves a session later.
 
 ## Hosts
 
@@ -1243,6 +1282,18 @@ against edits made during the job, the host side of a sync under the copy's lock
 wrapper's end of a job's group: no edit is lost, one sync writes the copy at a time, and nothing
 of a job writes in the copy once its end is read.
 
+`Schedule.tla` (F-134) models the `Scheduler` ("A lease"): durable lease rows, an in-memory
+queue, rotation, deadlines (tick-down timers) and owed answers, monitors lost at a restart,
+pressure and budgets as the environment, and bounded restarts that are never fair. Its grant
+(`Insert`) and the answer reaching the requester (`Tell`) are two steps, so a restart between
+them is checked. Invariants: `CapacityHolds`, `NoDoubleGrant` (across restarts), `ReleaseOnce`
+(and only after the process ended), `GangAtomic`, `AnsweredByDeadline`, `RefusedIsNotFailed`;
+action properties `ClassOrder`, `NoStartUnderSevere`, `NoStartWithoutBudget`; liveness
+`QueuedIsAnswered` and `EndedIsReleased`. It instances neither `Claim` nor `Hold`: a lease is
+units counted against a capacity for a process's life, not one act per state, and a queued
+request has no row, may be answered twice (queued, then once more) and is asked again after a
+restart rather than settled; the spec's header says so.
+
 **The remodel's model** (F-115). Each mechanism is written once, and the specs above are
 reshaped around three new ones, in R4 and R6, before the code they describe:
 
@@ -1661,6 +1712,13 @@ new-2, F-113's new-2).
   graph is in "The parts".
 - **R12. `Mover`**, on the agent row and `Delivery`, against the rewritten `Move.tla`, for
   delegates as well as main sessions (item 5).
+- **After R12: `Scheduler`**, against `Schedule.tla` (modeled in F-134): the `leases` table
+  on `Store`, the grant transaction, the compare-and-set release, the monitor and the
+  reclaimer by `Holder.Process`'s record, the queue with its classes, rotation and deadlines,
+  the pressure and budget gates, and its telemetry (each grant's wait, refusals per class and
+  module), shipped together so the thresholds are set from the workstation's own readings.
+  `Usage` reads the five-hour window beside the weekly one. Every start, heavy run and
+  landing asks it first; item 14's admission is this unit.
 
 About 3,100 lines change in all; the library ends about 1,300 lines smaller, and the model about
 the same size with each mechanism once. R6 and R7 are the riskiest: `Mailbox`'s `sending` as the
@@ -1677,8 +1735,9 @@ uuid, and each spec that instances a module compares its state counts before and
 14. **Mechanisms an app's policies stand on**, on the remodel's shape, in this order:
     - a delegate idle with no report, a value of `Sessions`' turn function that `Delegates`
       tells its parent, in `Delegate.tla`;
-    - admission by measured load and memory, a check in `Delegates` and `Jobs`, whose refusal
-      is `{:refused, {:load, …}}`, never a failed run;
+    - admission is the `Scheduler`'s lease ("A lease"; its code after R12), asked by
+      `Sessions`' start, `Delegates`, `Jobs` and a landing, in place of a check of its own in
+      each; its refusal is `{:refused, {reason, retry_at}}`, never a failed run;
     - `Stop` held for an app callback, the hold kind `stop` of `Intake`, so an app's own check
       before a turn ends answers it;
     - copies by the file system's clone where it has one;

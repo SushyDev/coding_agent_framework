@@ -57,6 +57,7 @@ flowchart LR
       cues["Cues<br/>each cue to the parts<br/>that declared its topic"]
       tracker["Tracker<br/>one fold of every reader"]
       recoveries["Recoveries<br/>detect, act once, verify"]
+      scheduler["Scheduler<br/>a lease before every start,<br/>heavy run and landing"]
       db[("SQLite tables<br/>the truth, one writer each")]
     end
   end
@@ -86,6 +87,8 @@ flowchart LR
   tools --> sessions
   tools --> mailbox
   tools --> acts
+  tools -->|ask a lease| scheduler
+  scheduler --> db
   mailbox -->|line| stream
   mailbox -->|due text| intake
   mailbox -->|no waiter| inlet
@@ -126,6 +129,9 @@ flowchart LR
   box. A session ends by SIGTERM once its session file says it is idle.
 - **Addressed by name.** Agents are rows with names; the framework finds every session across
   every account it holds, never by a pid or a socket, so a move to another account hides none.
+- **A lease before every start.** Every agent start, heavy run and landing asks the
+  `Scheduler` first: granted, queued with one answer to follow, or refused with a reason and a
+  retry time, never a failed run. Leases are rows, released once, when their process ends.
 - **Tables are the truth.** Views and the `agents()` tool read the `Tracker`'s fold of those
   rows, so they never lag or lie. `Recoveries` acts once per broken state and checks that it
   helped.
@@ -166,9 +172,11 @@ Built, each from a checked model in `model/tla/`:
   the row's uuid, Enter as its own command, and the release each interactive session runs
   recorded at its start (R8).
 
-Next, the last of the remodel (F-115, taken in F-116): `Mover` (R12). Then
+Next, the last of the remodel (F-115, taken in F-116): `Mover` (R12). Then the `Scheduler`,
+whose model `Schedule.tla` is checked (F-134): one lease ledger in front of every start, heavy
+run and landing, with classes, pressure and allowance gates. Then
 interactive delegates and main sessions, the mechanisms an app's policies stand on (an idle
-delegate's watchdog, admission by load, `Stop` held for the app, clone copies, an idempotent
+delegate's watchdog, `Stop` held for the app, clone copies, an idempotent
 start), packaging, and stacks with the LiveView components. The plan and the order of the units are in
 [docs/design.md](docs/design.md); each unit's notes are in `docs/build-notes/`.
 
