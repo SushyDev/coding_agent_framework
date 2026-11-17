@@ -129,8 +129,8 @@ defmodule CodingAgentFramework.Sessions do
   require Logger
 
   alias CodingAgentFramework.{ClaudeCLI, Control, Holder, Programs, Registry, Shell, Stream}
-  alias CodingAgentFramework.{Accounts, ClaudeCLI.Options, Intake, Transcripts}
-  alias CodingAgentFramework.Sessions.{Agents, Table, Worktree}
+  alias CodingAgentFramework.{Accounts, Acts, ClaudeCLI.Options, Intake, Store, Transcripts}
+  alias CodingAgentFramework.Sessions.{Agents, Table, Turn, Worktree}
 
   @timeout 30_000
   # Each git command of a worktree, and the checks and the add before a setup: three lists or
@@ -160,7 +160,10 @@ defmodule CodingAgentFramework.Sessions do
   (the viewer's `{columns, rows}`, default `{200, 50}`), `poll:` (ms between reads while a call
   waits, default 200), `clock:` (a function answering wall-clock ms, for the deadlines), and,
   `mains:` (until `Mains`: `%{name => project}`, each main session the app declares, written
-  as a row of kind `main` when it has none), and, where the app runs `Mailbox` and `Intake`:
+  as a row of kind `main` when it has none), `acts:` (the instance's `Acts`: each start and
+  resume is a row there, actor `sessions:<host>`, written before the agent row and settled by
+  the call's answer, `Acts.answered/4`; a start whose row cannot be written is refused
+  `{:acts, answer}`), and, where the app runs `Mailbox` and `Intake`:
 
   - `open_to:`, `fn name, :open | :sending -> {:ok, ids} end`, the ids of the `Mailbox` rows to
     `name` that are open, or only `sending`, as `Mailbox.open_to/3` answers them; a stop reads
@@ -333,6 +336,7 @@ defmodule CodingAgentFramework.Sessions do
         clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
         reaper: Keyword.get(opts, :reaper),
         open_to: Keyword.get(opts, :open_to),
+        acts: Keyword.get(opts, :acts),
         mains: Keyword.get(opts, :mains, %{}),
         waiter: waiter,
         git: Programs.fetch(programs, :git),
@@ -348,6 +352,9 @@ defmodule CodingAgentFramework.Sessions do
 
   @impl true
   def handle_continue(:adopt, state) do
+    # A start this process's last life claimed and never answered: its call ended with it.
+    if state.acts, do: Acts.interrupt(state.acts, actor(state))
+
     for {name, project} <- state.mains do
       id = Table.declare(state.db, state.host.name, name, project)
       state.notify.(%{topic: topic(state), ids: [id]})
@@ -400,7 +407,8 @@ defmodule CodingAgentFramework.Sessions do
          deadline = state.clock.() + timeout + budget(place.tree),
          row = new_row(state, name, account, role, place, resume, way, deadline),
          row = Map.merge(row, agent),
-         {:ok, viewer} <- viewer_command(state, row) do
+         {:ok, viewer} <- viewer_command(state, row),
+         {:ok, act} <- claim(state, name, resume) do
       # RowWritten: the row first, as starting, with the start's wall-clock deadline.
       row = Map.put(row, :id, Table.starting(state.db, row))
       announce(state, row)
@@ -411,7 +419,8 @@ defmodule CodingAgentFramework.Sessions do
         row: row,
         deadline: deadline,
         way: way,
-        viewer: viewer
+        viewer: viewer,
+        act: act
       }
 
       case place.tree do
@@ -574,6 +583,19 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
+  # A start's or a resume's row in `Acts`, written before the agent row, with no state to claim:
+  # each call is an act of its own. A row that cannot be written starts nothing.
+  defp claim(%{acts: nil}, _name, _resume), do: {:ok, nil}
+
+  defp claim(state, name, resume) do
+    case Acts.claim(state.acts, actor(state), name, nil, if(resume, do: :resume, else: :start)) do
+      {:ok, id} -> {:ok, id}
+      other -> {:refused, {:acts, other}}
+    end
+  end
+
+  defp actor(state), do: "sessions:" <> state.host.name
+
   # The embedding app's read of `Mailbox` (`open_to:`): the ids of the rows to `name` that are
   # open (`queued` or `sending`), or only `sending`. With no `open_to:` the app runs no
   # `Mailbox`, and nothing is delivered to wait for.
@@ -594,7 +616,7 @@ defmodule CodingAgentFramework.Sessions do
     with {:ok, registry} <- registry(state),
          {:ok, _} <- Registry.read(registry),
          {:ok, %{rows: files}} <- Registry.rows(registry, row.account) do
-      case Enum.find(files, &own_file?(&1, row)) do
+      case Turn.file(row, files) do
         %{alive: :live, status: "idle"} -> {:idle, record}
         %{alive: :live, status: status} -> {:not_idle, status}
         _ -> gone_or_not_idle(state, row)
@@ -604,11 +626,6 @@ defmodule CodingAgentFramework.Sessions do
       other -> {:unread, other}
     end
   end
-
-  defp own_file?(file, row),
-    do: file.pid == row.pid and Holder.Process.normal(file.proc_start || "") == normal(row)
-
-  defp normal(row), do: Holder.Process.normal(row.proc_start || "")
 
   # No live file names the process: it is gone, or runs with no file to read idle from.
   defp gone_or_not_idle(state, row) do
@@ -736,6 +753,7 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   defp done(state, name, pending, answer) do
+    if pending[:act], do: Acts.answered(state.acts, pending.act, answer)
     GenServer.reply(pending.from, answer)
     %{state | pending: Map.delete(state.pending, name)}
   end
@@ -1231,7 +1249,7 @@ defmodule CodingAgentFramework.Sessions do
       "removed"
     else
       {:keep, why} -> "kept: #{why}"
-      {_, reason} -> "kept: " <> inspect(reason)
+      {_, reason} -> "kept: " <> Store.text(reason)
     end
   end
 
@@ -1348,7 +1366,7 @@ defmodule CodingAgentFramework.Sessions do
   defp open_viewer(state, name, argv) do
     case viewer(state.control, name, argv, state.size) do
       {:ok, _pane} -> "open"
-      failed -> inspect(failed)
+      failed -> failed
     end
   end
 

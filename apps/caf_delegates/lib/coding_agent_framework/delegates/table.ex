@@ -87,9 +87,17 @@ defmodule CodingAgentFramework.Delegates.Table do
     }
   end
 
-  @doc "Opens (and creates) the file at `path`, with the table."
+  @doc """
+  Opens (and creates) the file at `path`, with the table. A `reason` an earlier build stored as
+  `inspect` text is converted to `Store.text/1`'s rule.
+  """
   @spec open(String.t()) :: {:ok, db} | {:refused, term}
-  def open(path), do: Store.open(path, @schema)
+  def open(path) do
+    with {:ok, db} <- Store.open(path, @schema) do
+      Store.convert(db, "delegates", [:reason])
+      {:ok, db}
+    end
+  end
 
   @doc """
   What an earlier build's table holds that `Sessions` keeps now: per name, from its latest row,

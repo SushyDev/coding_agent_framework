@@ -7,7 +7,7 @@ defmodule CodingAgentFramework.StreamTableTest do
   use ExUnit.Case, async: true
 
   alias CodingAgentFramework.Stream.{Fold, Table}
-  alias CodingAgentFramework.TestHost
+  alias CodingAgentFramework.{Reader, TestHost}
   alias Exqlite.Sqlite3
 
   @host "laptop"
@@ -43,6 +43,22 @@ defmodule CodingAgentFramework.StreamTableTest do
   end
 
   defp writers_fold(db), do: Table.delegates(db, @host)["s1"].fold
+
+  # The `Tracker`'s source is made from `meta/0` (F-120's new-2): the same rows as `rows/2`.
+  test "the source the metadata makes reads the rows as rows/2 does", %{db: db} do
+    meta = Table.meta()
+
+    assert {:ok, %{read_at: 1_000, rows: rows}} =
+             Reader.source_read(meta, db, [host: @host], :all)
+
+    assert rows == [row(db)]
+    [%{id: id}] = rows
+    assert {:ok, %{rows: [_]}} = Reader.source_read(meta, db, [host: @host], [id])
+    assert Reader.source_read(meta, db, [host: "other"], [id]) == :unread
+
+    assert %{topic: "stream:laptop", scope: {@host, "stream"}} =
+             Reader.describe(meta, host: @host)
+  end
 
   test "a fold as the writer wrote it loads whole, with no problem", %{db: db, fold: fold} do
     assert %{offset: 42, ending: true, load_problems: []} = row(db)

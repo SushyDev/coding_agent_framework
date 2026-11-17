@@ -49,11 +49,28 @@ defmodule CodingAgentFramework.StoreTest do
     assert Store.rows_by_id(db, "t", @columns, []) == []
   end
 
-  test "update stores a term other than text, an integer or nil as its inspect text" do
+  test "update stores a term by text/1's one rule, never as inspect text" do
     {:ok, db} = Store.open(path(), @schema)
     Store.insert(db, "t", host: "h", a: "x")
     Store.update(db, "t", 1, a: :repeating)
-    assert [%{a: ":repeating"}] = Store.select(db, "t", @columns, "id = ?1", [1])
+    assert [%{a: "repeating"}] = Store.select(db, "t", @columns, "id = ?1", [1])
+    Store.update(db, "t", 1, a: {:exit, 3})
+    assert [%{a: ~s(["exit",3])}] = Store.select(db, "t", @columns, "id = ?1", [1])
+  end
+
+  test "convert turns the inspect text an earlier build stored into text/1's, once" do
+    {:ok, db} = Store.open(path(), @schema)
+    old = [":repeating", "{:sample_too_old, 31001}", "%{a: [1, nil]}", "plain", nil]
+    for a <- old, do: Store.insert(db, "t", host: "h", a: a)
+    Store.update(db, "t", 5, a: %{b: {:x, 1}})
+
+    assert Store.convert(db, "t", [:a]) == 3
+
+    assert ["repeating", ~s(["sample_too_old",31001]), ~s({"a":[1,null]}), "plain", json] =
+             Enum.map(Store.select(db, "t", [:a], "1 = 1 ORDER BY id", []), & &1.a)
+
+    assert json == ~s({"b":["x",1]})
+    assert Store.convert(db, "t", [:a]) == 0
   end
 
   test "upsert writes a row in place of the one with its key" do

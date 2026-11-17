@@ -25,6 +25,28 @@ defmodule CodingAgentFramework.Stream.Table do
 
   @type db :: Store.db()
 
+  @doc """
+  The table's metadata for `CodingAgentFramework.Reader`'s `Tracker` source (F-120's new-2):
+  read per host, with `stream_reads` as its reads table; topic `stream:<host>`, scope `{host,
+  "stream"}`, rows of kind `:stream`, each loaded as `rows/2` answers it.
+  """
+  @spec meta() :: map
+  def meta do
+    %{
+      schema: @schema,
+      table: "stream_delegates",
+      reads: "stream_reads",
+      read: [:read_at],
+      columns: @columns,
+      scope: [:host],
+      topic: "stream",
+      group: "stream",
+      kind: :stream,
+      name: nil,
+      load: &to_row/1
+    }
+  end
+
   @doc "Opens (and creates) the file at `path`, with the tables."
   @spec open(String.t()) :: {:ok, db} | {:refused, term}
   def open(path), do: Store.open(path, @schema)

@@ -72,7 +72,7 @@ defmodule CodingAgentFramework.Delegates do
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, Mailbox, Sessions, Stream, Transcripts, Usage}
+  alias CodingAgentFramework.{Accounts, Acts, Mailbox, Sessions, Stream, Transcripts, Usage}
   alias CodingAgentFramework.ClaudeCLI.Options
   alias CodingAgentFramework.Delegates.{Table, Turn}
   alias CodingAgentFramework.Sessions.Agents
@@ -93,7 +93,10 @@ defmodule CodingAgentFramework.Delegates do
   ms) and `mcp:`, a function of the delegate's name that answers `{:ok, path}`, its own MCP
   config (the embedding app gives `MCP.issue/2`), or a refusal. Each start and resume calls it
   just before its launch and adds the path as `ClaudeCLI`'s `mcp:`; its refusal refuses the
-  start, and with no `mcp:` a delegate runs without the framework's tools.
+  start, and with no `mcp:` a delegate runs without the framework's tools. With `acts:` (the
+  instance's `Acts`), its own resume after a first kill is a row there, actor
+  `delegates:<host>`, state the delegate's row and resumes, claimed before the row counts it
+  and settled by `Sessions`' answer (`Acts.answered/4`); a claim not taken resumes nothing.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -175,6 +178,7 @@ defmodule CodingAgentFramework.Delegates do
           notify: Keyword.get(opts, :notify, fn _ -> :ok end),
           clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
           mcp: Keyword.get(opts, :mcp, fn _ -> {:ok, nil} end),
+          acts: Keyword.get(opts, :acts),
           pending: %{}
         })
 
@@ -190,6 +194,8 @@ defmodule CodingAgentFramework.Delegates do
 
   @impl true
   def handle_continue(:settle, s) do
+    # A resume this process's last life claimed and never saw answered ended with its call.
+    if s.acts, do: Acts.interrupt(s.acts, actor(s))
     Stream.read(s.stream, timeout: @step)
     for row <- Table.with_status(s.db, s.host, Table.calling()), do: wake(s, row)
 
@@ -251,8 +257,9 @@ defmodule CodingAgentFramework.Delegates do
       {nil, _} ->
         {:noreply, s}
 
-      {%{id: id, from: from}, pending} ->
+      {%{id: id, from: from} = call, pending} ->
         s = %{s | pending: pending}
+        if call[:act], do: Acts.answered(s.acts, call.act, answer)
         {reply, s} = answered(s, Table.get(s.db, id), answer)
         if from, do: GenServer.reply(from, reply)
         {:noreply, s}
@@ -422,16 +429,37 @@ defmodule CodingAgentFramework.Delegates do
            if(uuid,
              do: Mailbox.go_on(s.mailbox, row.name, Turn.resumed(), uuid),
              else: {:ok, nil}
-           ) do
+           ),
+         {:ok, act} <- claim_resume(s, row) do
       at = System.os_time(:millisecond)
       fields = [status: "resuming", resumes: 1, called_at: at, deadline: deadline(s, p)]
       write(s, row, fields ++ [resume_uuid: uuid])
-      call_sessions(s, Table.get(s.db, row.id), p, account, {:resume, agent.session_id}, nil)
+      s = call_sessions(s, Table.get(s.db, row.id), p, account, {:resume, agent.session_id}, nil)
+      if act, do: put_in(s.pending, Map.new(s.pending, &with_act(&1, row.id, act))), else: s
     else
       {:refused, _} = refused -> elem(answered(s, row, refused), 1)
       _not_taken -> s
     end
   end
+
+  # The resume's row in `Acts`, before the row counts it: its state is the delegate's row and
+  # its resumes, so a state is resumed once, by the ledger as by the count. A claim refused
+  # or unanswered resumes nothing now; the row stays for the next cue.
+  defp claim_resume(%{acts: nil}, _row), do: {:ok, nil}
+
+  defp claim_resume(s, row) do
+    state = %{delegate: row.id, resumes: row.resumes}
+
+    case Acts.claim(s.acts, actor(s), row.name, state, :resume) do
+      {:ok, id} -> {:ok, id}
+      other -> {:not_claimed, other}
+    end
+  end
+
+  defp with_act({ref, %{id: id} = call}, id, act), do: {ref, Map.put(call, :act, act)}
+  defp with_act(entry, _id, _act), do: entry
+
+  defp actor(s), do: "delegates:" <> s.host
 
   defp known(:error, project), do: {:refused, {:unknown_project, project}}
   defp known(ok, _project), do: ok

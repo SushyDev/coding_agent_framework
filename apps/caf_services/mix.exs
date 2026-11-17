@@ -15,6 +15,7 @@ defmodule CafServices.MixProject do
 
   defp deps do
     [
+      {:caf_acts, in_umbrella: true},
       {:caf_shell, in_umbrella: true},
       {:caf_holder, in_umbrella: true},
       {:caf_grants, in_umbrella: true},

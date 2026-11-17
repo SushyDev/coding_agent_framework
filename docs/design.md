@@ -170,7 +170,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Shell` | the only module that starts programs, locally or over ssh, each leading a process group of its own, which a timeout ends | — |
 | `Shell.Reaper` | one per host: ends a running command's group when its caller dies first or the VM dies | — |
 | `Programs` | the absolute path of tmux, dtach, claude, git, gh, rsync, ssh, flock, sh, sleep, rm, kill, env, ps, cat, tail and curl (the waiter hook) on each host, given (from devenv, as the framework's own development and gates use) or looked up on the host's `PATH`, each checked against its supported versions at start with a clear error per one missing or out of range; no other part names a fixed path | — |
-| `Store` | a pure module over SQLite: open with WAL and a busy timeout, the schema and its added columns, `query`, `rows_by_id`, `update`, upsert, a reads row, and a load that fills a newer build's fields with their defaults; every table of the framework is opened through it | no table |
+| `Store` | a pure module over SQLite: open with WAL and a busy timeout, the schema and its added columns, `query`, `rows_by_id`, `update`, upsert, a reads row, and a load that fills a newer build's fields with their defaults; every table of the framework is opened through it. A term in a column is stored by one rule (`Store.text/1`): an atom as its name, any other term as canonical JSON, never `inspect` text; a writer converts what an earlier build stored when it opens its file (`Store.convert/3`) | no table |
 | `Reader` | a pure module beside `Store`: the loop every reader runs (read on an interval or a call, diff against what it wrote, write with a reads row, cue), and a `Tracker` source made from the reader's table metadata | no table; each reader its own |
 | `Cues` | one per instance: each part declares the topics it reads, and `Cues` hands each cue to the `Tracker` and to every part that declared its topic; the order in which the system settles is the library's, not the app's | no table |
 | `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` | — |
@@ -230,8 +230,11 @@ any reply does (new-4).
 
 - **A session's life.** `Sessions` writes the agent row first (`starting`), holds the program,
   and settles it by `Holder.Process` and the session file or the stream's init: `running`. Its
-  turn state is one function per kind: a headless session's from `Stream`'s fold, an
-  interactive one's from the session file's `status` and `Intake`'s waiter. Its end is SIGTERM
+  turn state is one function per kind (`Sessions.Turn`): a headless session's from `Stream`'s
+  fold, an interactive one's from the session file's `status` and `Intake`'s waiter. Only both
+  together say an interactive turn `ended`; the file alone that reads idle is `idle`, which a
+  write must check again (R8's box check), and the `Tracker`, which holds no waiter, shows that
+  one read for a person, never to decide a write (F-113's new-2). Its end is SIGTERM
   once idle (or `end_session` for a headless one), and it is `stopped` once the process is gone
   and the socket dead. `Recoveries` ends an orphan by the same record, under its act in `Acts`.
   A move is a phase on the same row. A main session the app declares is a row `declared`
@@ -253,7 +256,13 @@ any reply does (new-4).
   nothing for the others). The four kinds differ only in their decider, deadline and response.
 - **An act.** Every fix, recovery, kill, resume, start and raised error is a row in `Acts`,
   `{actor, target, state, act, start_id, status, outcome}`, written before it acts, refused for
-  a state already acted on, and `interrupted` when a restart cut it.
+  a state already acted on, and `interrupted` when a restart cut it. A start or a resume by
+  `Sessions` has no state to claim (each call is an act); `Delegates`' own resume claims the
+  delegate's row and resumes; a service's stop or restart claims its running process (pid,
+  start time, restarts). Each is settled by its call's answer, by one rule
+  (`Acts.answered/4`): ok `verified`, refused `failed`, unknown `unknown`. A raised error is a
+  part's process that crashes, as the app sees it, recorded settled `failed`; a part's
+  `{:unknown, reason}` is not, since its caller holds it and an act's row settles `unknown`.
 
 ## Hosts
 
@@ -878,7 +887,7 @@ framework's tools, which are strict in how they act and narrow in whom they reac
 
 | Tool | Who | What it does |
 |---|---|---|
-| `agents()` | any agent | the tree: each agent's name, kind, project, parent, account, state (working, waiting, idle, stuck, gone; `starting` while a start or resume is under way, `unread` while nothing has read its session yet), what it waits on, and its subagents, read from the `Tracker`'s view, never a copy (F-99) |
+| `agents(all)` | any agent | the tree: each agent's name, kind, project, parent, account, state (working, waiting, idle, stuck, gone; `starting` while a start or resume is under way, `unread` while nothing has read its session yet; a main session's from its session file alone), what it waits on, and its subagents, read from the `Tracker`'s view, never a copy (F-99). A delegate that ended keeps its place but shows only with `all: true` (F-129's new-5) |
 | `message(to, text)` | along an edge | stores a message and delivers it to the target when its turn has ended; answers `queued{id}`, then the sender learns `delivered` |
 | `look(agent)` | parent, child, main sessions | a main session's screen as text, or a delegate's rendered event log; its open dialog or request; its last transcript lines |
 | `transcript(agent, from)` | parent, child, main sessions | the agent's transcript from an offset |
@@ -923,8 +932,10 @@ when the target's turn has ended, marked before it goes, settled from the target
 transcript after a restart, never resent blind. Messages are kept in order per sender and addressee. A message is refused when its addressee is
 not along an edge of the sender, or is a name the framework does not hold; one to a dead agent
 is held until it is resumed or ends. A message to a delegate that has ended is not delivered:
-its row says the delegate ended before it went in, and the sender (the delegate's main
-session, its only sender) learns that in place of `delivered`, from a settled row.
+its row is stored and settled `ended` (its name keeps its place in the tree, so the message is
+not refused as an unknown agent), and the sender (the delegate's main session, its only
+sender) learns that in place of `delivered`, from a settled row. Ended rows are kept; no
+retention rule drops them yet.
 
 A message into a delegate starts a turn of its own after its report; that turn's `result` is
 the delegate's reply. `Mailbox` stores it as a message from the delegate to its main session,
@@ -1603,14 +1614,16 @@ new-2, F-113's new-2).
   part uses, with the tree as one function of the rows and each status's meaning once, checked
   when it compiles; `Delegates`' table cut to its own facts; `Grants`, the `Tracker`, `Mailbox`,
   `Delegates` and the app reading through it; `Sessions`' and `Delegates`' `Tracker` sources
-  made from their tables' metadata (`TableSource`). Part 2: the turn state per kind of session,
-  the `Acts` rows (a start, `Delegates`' resume, a service's restart and stop, a raised
-  error), `Store.update/4`'s one rule for a term in a column, and `Stream`'s and `Intake`'s
-  sources as `TableSource`.
+  made from their tables' metadata (`TableSource`). Part 2, built in F-130: the turn state per
+  kind of session (`Sessions.Turn`, which `Mailbox`'s stream transport and the `Tracker`'s tree
+  read), the `Acts` rows (a start, `Delegates`' resume, a service's restart and stop, a part's
+  crash), `Store.update/4`'s one rule for a term in a column with the stored values converted
+  on open, `Stream`'s and `Intake`'s sources as `TableSource`, and `agents()` without the
+  delegates that ended unless asked (`all: true`).
 - **R10. `Acts`**: `Claims`' and `Recoveries`' rows in one table with a unique index and a cue;
   the fault ledger of item 14 is its query and its topic. About +250, −300. Built in F-126:
-  `Acts` writes the rows; starts and raised errors take its `record`, and wiring them into
-  `Sessions` and `Delegates` waits for R7 (F-126's new-1).
+  `Acts` writes the rows; R9's part 2 (F-130) wires starts, resumes, a service's fixes and
+  raised errors into it (F-126's new-1, new-4).
 - **R11. `Cues`**: each part declares the topics it reads; `Jobs` and `Services` cue; the app's
   routing table and its ticker go. About +200, −200. (F-102's new-3.)
 - **R12. `Mover`**, on the agent row and `Delivery`, against the rewritten `Move.tla`, for

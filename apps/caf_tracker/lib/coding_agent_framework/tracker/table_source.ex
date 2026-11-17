@@ -3,7 +3,8 @@ defmodule CodingAgentFramework.Tracker.TableSource do
   A part's table as a `Tracker` source, made from the table's metadata
   (`CodingAgentFramework.Reader`): option `table:` names the table module, the one with
   `meta/0` (the readers' `Registry.Table`, `Transcripts.Table`, `Usage.Table` and
-  `TmuxSampler.Table`, and the writers' `Acts.Table`, `Sessions.Table` and `Delegates.Table`),
+  `TmuxSampler.Table`, and the writers' `Acts.Table`, `Sessions.Table`, `Delegates.Table`,
+  `Stream.Table` and `Intake.Table`),
   and the rest are the scope it reads: `db:`, `host:`, and `account:`, `server:` or
   `instance:` as the table names. Its topic is the one its writer cues on. (It was
   `ReaderSource` until the writers' tables gave their metadata too, F-120's new-2.)

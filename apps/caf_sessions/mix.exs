@@ -23,6 +23,7 @@ defmodule CafSessions.MixProject do
   defp deps do
     [
       {:caf_accounts, in_umbrella: true},
+      {:caf_acts, in_umbrella: true},
       {:caf_cli, in_umbrella: true},
       {:caf_control, in_umbrella: true},
       {:caf_holder, in_umbrella: true},

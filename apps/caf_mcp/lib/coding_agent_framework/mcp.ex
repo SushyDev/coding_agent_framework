@@ -46,8 +46,9 @@ defmodule CodingAgentFramework.MCP do
     owner, state, restarts and ports), `service_logs(name, from)` (`logs/4`), and
     `service_wait(name, until, timeout)` (`wait/4`, `timeout` capped as `run`'s), where `until`
     is `{"line": pattern}` (from the current start's offset), `{"port": n}` or `"exit"`;
-  - `agents()`: `Grants.may_use?/2`, then the tree as the `Tracker` reads it from its view
-    (`Tracker.agents/2`, `CodingAgentFramework.Tracker.Tree`), never a copy kept here;
+  - `agents(all)`: `Grants.may_use?/2`, then the tree as the `Tracker` reads it from its view
+    (`Tracker.agents/2`, `CodingAgentFramework.Tracker.Tree`), never a copy kept here; a
+    delegate that ended shows only with `all: true`;
   - `look(agent)`, `transcript(agent, from)`: `Grants.may_read?/3`, then the agent in the tree.
     `look`: a delegate's state, held requests, and last lines of its event log (`Stream.log/4`)
     and transcript (`Transcripts.text/4`), each with its own refusal; `transcript`: whole lines
@@ -255,8 +256,9 @@ defmodule CodingAgentFramework.MCP do
     %{
       name: "agents",
       description:
-        "The tree: each agent's name, kind, project, parent, account, state, waits and subagents.",
-      inputSchema: %{type: "object", properties: %{}}
+        "The tree: each agent's name, kind, project, parent, account, state, waits and " <>
+          "subagents. A delegate that ended shows only with all: true.",
+      inputSchema: %{type: "object", properties: %{all: %{type: "boolean"}}}
     },
     %{
       name: "look",
@@ -597,11 +599,12 @@ defmodule CodingAgentFramework.MCP do
     end
   end
 
-  defp act(ctx, caller, _id, "agents", _args) do
+  defp act(ctx, caller, _id, "agents", args) do
     {mod, server} = ctx.tracker
+    all = is_map(args) and args["all"] == true
 
     with :ok <- Grants.may_use?(ctx.grants, caller),
-         {:ok, tree} <- mod.agents(server, timeout: @step),
+         {:ok, tree} <- mod.agents(server, timeout: @step, all: all),
          do: {:ok, %{tree | agents: Enum.map(tree.agents, &Map.drop(&1, [:session_id, :host]))}}
   end
 
@@ -693,7 +696,7 @@ defmodule CodingAgentFramework.MCP do
     {mod, server} = ctx.tracker
 
     with :ok <- Grants.may_read?(ctx.grants, caller, agent),
-         {:ok, tree} <- mod.agents(server, timeout: @step) do
+         {:ok, tree} <- mod.agents(server, timeout: @step, all: true) do
       case Enum.find(tree.agents, &(&1.name == agent)) do
         nil -> {:unknown, {:not_in_tree, agent}}
         %{kind: "main"} -> {:refused, main}

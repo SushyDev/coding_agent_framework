@@ -147,8 +147,16 @@ defmodule CodingAgentFramework.Store do
   end
 
   @doc """
-  Sets `fields` on row `id` of `table`. A value that is not text, an integer or nil is stored
-  as its `inspect/1` text.
+  Sets `fields` on row `id` of `table`. Each value is stored by `text/1`'s one rule: an atom as
+  its name, a tuple, list or map as JSON, never `inspect` text.
+
+      iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "update.db")
+      iex> alias CodingAgentFramework.Store
+      iex> {:ok, db} = Store.open(path, "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, a TEXT);")
+      iex> [[id]] = Store.insert(db, "t", [a: "x"], "RETURNING id")
+      iex> Store.update(db, "t", id, a: {:refused, :no_waiter})
+      iex> Store.rows_by_id(db, "t", [:a], [id])
+      [%{a: ~s(["refused","no_waiter"])}]
   """
   @spec update(db, String.t(), term, [{atom, term}]) :: :ok
   def update(db, table, id, fields) do
@@ -159,8 +167,9 @@ defmodule CodingAgentFramework.Store do
     :ok
   end
 
-  defp dump({_, v}) when is_binary(v) or is_integer(v) or is_nil(v), do: v
-  defp dump({_, v}), do: inspect(v)
+  # A blob is bound as it is.
+  defp dump({_, {:blob, _} = v}), do: v
+  defp dump({_, v}), do: text(v)
 
   @doc """
   A term as a column stores it, by one rule (F-117's new-2): text and integers as they are, nil
@@ -199,6 +208,85 @@ defmodule CodingAgentFramework.Store do
   defp key(k) when is_binary(k), do: k
   defp key(k) when is_atom(k), do: Atom.to_string(k)
   defp key(k), do: json(k)
+
+  @doc """
+  A value an earlier build stored as `inspect` text, by `text/1`'s rule: the literal's text, or
+  the value as it is when it is no literal or is already JSON. So it may run on a column more
+  than once: what it answers, it answers again unchanged.
+
+      iex> CodingAgentFramework.Store.from_inspect(":repeating")
+      "repeating"
+      iex> CodingAgentFramework.Store.from_inspect("{:sample_too_old, 31001}")
+      ~s(["sample_too_old",31001])
+      iex> CodingAgentFramework.Store.from_inspect(~s({"a":true}))
+      ~s({"a":true})
+      iex> CodingAgentFramework.Store.from_inspect("ok")
+      "ok"
+  """
+  @spec from_inspect(term) :: term
+  def from_inspect(text) when is_binary(text) do
+    with true <- String.starts_with?(text, [":", "{", "[", "%", "\""]),
+         {:error, _} <- JSON.decode(text),
+         # An atom comes back as its name, which `text/1` stores the same way, and no atom is
+         # made from what a file holds.
+         {:ok, ast} <-
+           Code.string_to_quoted(text, static_atoms_encoder: fn name, _ -> {:ok, name} end),
+         {:ok, term} <- literal(ast) do
+      text(term)
+    else
+      _ -> text
+    end
+  end
+
+  def from_inspect(other), do: other
+
+  defp literal(v) when is_atom(v) or is_number(v) or is_binary(v), do: {:ok, v}
+  defp literal({a, b}), do: literal({:{}, [], [a, b]})
+
+  defp literal({:{}, _, items}),
+    do: with({:ok, l} <- literal(items), do: {:ok, List.to_tuple(l)})
+
+  defp literal({:%{}, _, pairs}),
+    do:
+      with(
+        {:ok, l} <- literal(Enum.map(pairs, &Tuple.to_list/1)),
+        do: {:ok, Map.new(l, &List.to_tuple/1)}
+      )
+
+  defp literal(list) when is_list(list) do
+    Enum.reduce_while(list, {:ok, []}, fn x, {:ok, acc} ->
+      case literal(x) do
+        {:ok, v} -> {:cont, {:ok, acc ++ [v]}}
+        no -> {:halt, no}
+      end
+    end)
+  end
+
+  defp literal(_), do: :not_literal
+
+  @doc """
+  Converts what an earlier build stored as `inspect` text in `columns` of `table` to `text/1`'s
+  rule (`from_inspect/1`), in one transaction, and answers how many values changed. A writer
+  runs it when it opens its file; a second run changes nothing (F-117's new-2).
+  """
+  @spec convert(db, String.t(), [atom]) :: non_neg_integer
+  def convert(db, table, columns) do
+    transaction(db, fn ->
+      for column <- columns, reduce: 0 do
+        n ->
+          sql =
+            "SELECT id, #{column} FROM #{table} WHERE substr(#{column}, 1, 1) IN " <>
+              ~s{(':', '{', '[', '%', '"')}
+
+          changed =
+            for [id, old] <- query(db, sql, []), (new = from_inspect(old)) != old do
+              query(db, "UPDATE #{table} SET #{column} = ?2 WHERE id = ?1", [id, new])
+            end
+
+          n + length(changed)
+      end
+    end)
+  end
 
   @doc """
   `count` placeholders, numbered from `from`.

@@ -57,11 +57,14 @@ defmodule CodingAgentFramework.Tracker do
   @spec view(GenServer.server(), keyword) :: {:ok, map} | {:refused, term} | {:unknown, term}
   def view(tracker, opts \\ []), do: call(tracker, :view, opts)
 
-  @doc "The tree, read from the view as `view/2` gives it (`CodingAgentFramework.Tracker.Tree`)."
+  @doc """
+  The tree, read from the view as `view/2` gives it (`CodingAgentFramework.Tracker.Tree`).
+  Options: `:timeout`, and `all: true` to keep the delegates that ended.
+  """
   @spec agents(GenServer.server(), keyword) :: {:ok, map} | {:refused, term} | {:unknown, term}
   def agents(tracker, opts \\ []) do
     with {:ok, view} <- view(tracker, opts),
-         do: {:ok, CodingAgentFramework.Tracker.Tree.agents(view)}
+         do: {:ok, CodingAgentFramework.Tracker.Tree.agents(view, Keyword.take(opts, [:all]))}
   end
 
   @doc "The sources `:unread`, or whose newest read is older than `bound` ms (`Fold.behind/3`)."

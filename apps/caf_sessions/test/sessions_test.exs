@@ -12,7 +12,8 @@ defmodule CodingAgentFramework.SessionsTest do
   import CodingAgentFramework.TestHost
   import ExUnit.CaptureLog
 
-  alias CodingAgentFramework.{ClaudeStandIn, Control, Holder, Registry, Sessions, SessionsSetup}
+  alias CodingAgentFramework.{Acts, ClaudeStandIn, Control, Holder, Registry, Sessions}
+  alias CodingAgentFramework.SessionsSetup
   alias CodingAgentFramework.TmuxSampler
   alias CodingAgentFramework.Sessions.Table
 
@@ -73,6 +74,29 @@ defmodule CodingAgentFramework.SessionsTest do
     # Sessions never kills: the orphan's process runs on, for Recoveries.
     assert {:ok, :live} = Holder.state(ctx.holder, "orphan")
     assert {:ok, %{reason: "interrupted"}} = row_when(ctx, "dead", &(&1.status == "refused"))
+  end
+
+  # F-126's new-1: a start is a row of `Acts`, written before the agent row and settled by the
+  # call's answer; one a restart of `Sessions` cut is closed as interrupted when it starts again.
+  test "each start is a row of Acts, settled by its answer, interrupted when cut", ctx do
+    acts_db = Path.join(ctx.dir, "acts.db")
+    acts = start_supervised!({Acts, db: acts_db, start_id: "t", host: "test", instance: "a"})
+    sessions = restart(ctx, nil, acts: acts)
+    ctx = %{ctx | sessions: sessions}
+
+    assert {:ok, _} = Sessions.start(sessions, "alpha", ctx.account, launch(ctx, :at_start))
+    cut = start_task(ctx, "cut", launch(ctx, :never))
+    assert {:ok, _} = row_when(ctx, "cut", &(&1.viewer != nil))
+    Process.exit(sessions, :kill)
+    assert {:unknown, {:exit, :killed}} = Task.await(cut)
+
+    child = {Sessions, Keyword.put(ctx.opts, :acts, acts)}
+    again = start_supervised!(Supervisor.child_spec(child, id: :third, restart: :temporary))
+    :sys.get_state(again)
+
+    assert {:ok, [alpha, cut]} = Acts.rows(acts, actor: "sessions:test")
+    assert %{target: "alpha", act: "start", status: "settled", outcome: "verified"} = alpha
+    assert %{target: "cut", act: "start", status: "interrupted", state: nil} = cut
   end
 
   test "new-3: a read that fails decides nothing, so the row stays starting", ctx do

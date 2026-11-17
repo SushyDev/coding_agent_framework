@@ -27,11 +27,43 @@ defmodule CodingAgentFramework.Intake.Table do
   CREATE TABLE IF NOT EXISTS intake_starts (host TEXT PRIMARY KEY, started_at INTEGER NOT NULL);
   """
 
+  @open [added: [intake_events: ["actor TEXT"]]]
+
   @type db :: Store.db()
+
+  @doc """
+  The table's metadata for `CodingAgentFramework.Reader`'s `Tracker` source (F-120's new-2): a
+  writer's table, read per `{host, account}`, `:unread` until the host's `Intake` has started
+  once (its `intake_starts` row) and read now after that, as every writer's table is; topic
+  `intake:<host>:<account>`, scope `{host, account}`, rows of kind `:events`.
+  """
+  @spec meta() :: map
+  def meta do
+    %{
+      schema: @schema,
+      open: @open,
+      table: "intake_events",
+      reads: "intake_starts",
+      read: [:started_at],
+      load_read: &read_now/1,
+      columns: @columns,
+      scope: [:host],
+      filter: [:account],
+      topic: "intake",
+      kind: :events,
+      name: :account
+    }
+  end
+
+  # The writer has started on the host: its rows are as fresh as the table, read now.
+  defp read_now(%{started_at: at}) when is_integer(at),
+    do: %{read_at: System.os_time(:millisecond)}
+
+  defp read_now(_), do: %{read_at: nil}
 
   @doc "Opens (and creates) the file at `path`, with the tables. A reader opens its own."
   @spec open(String.t()) :: {:ok, db} | {:refused, term}
-  def open(path), do: Store.open(path, @schema, added: [intake_events: ["actor TEXT"]])
+  def open(path), do: Store.open(path, @schema, @open)
 
   @doc """
   Records a start of `host`'s `Intake`, and settles the holds the last one left: a `held` row

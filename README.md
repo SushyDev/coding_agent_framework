@@ -146,10 +146,12 @@ Built, each from a checked model in `model/tla/`:
   `Recoveries`' table (R10);
 - the agent row and the tree in `Sessions` (R9, part 1): one row per agent, main session or
   delegate, with its parent and project; the tree one function of those rows, which `Grants`
-  and the `Tracker` both read; and no part reading another's table but through its functions.
+  and the `Tracker` both read; and no part reading another's table but through its functions;
+- each session's turn state as one function per kind in `Sessions`, starts, resumes, a
+  service's fixes and a part's crash as rows of `Acts`, one rule for a term in a column, and
+  every writer's `Tracker` source made from its table's metadata (R9, part 2).
 
-Next, the rest of the remodel, in order (F-115, taken in F-116): each session's turn state, the
-acts still to be rows, and one rule for a term in a column (R9, part 2); the `Inlet`, the
+Next, the rest of the remodel, in order (F-115, taken in F-116): the `Inlet`, the
 checked typed write (R8); `Cues`, the library's own routing (R11); and `Mover` (R12). Then
 interactive delegates and main sessions, the mechanisms an app's policies stand on (an idle
 delegate's watchdog, admission by load, `Stop` held for the app, clone copies, an idempotent
@@ -229,11 +231,9 @@ flowchart BT
   recoveries --> sampler
   recoveries --> sessions
   recoveries --> acts
-  tracker --> intake
-  tracker --> stream
   tracker --> store
   tracker --> sessions
-  tracker --> recoveries
+  sessions & delegates & services --> acts
   delegates --> accounts
   delegates --> cli
   delegates --> usage

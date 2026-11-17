@@ -85,7 +85,7 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
     {:ok, {:queued, two}} = Mailbox.message(m, "d1", "main", "report two")
 
     # No waiter yet (no turn has ended): the rows stay due, and say why.
-    assert {:ok, %{status: "queued", attempt: ":no_waiter"}} = until(ctx, one, & &1.attempt)
+    assert {:ok, %{status: "queued", attempt: "no_waiter"}} = until(ctx, one, & &1.attempt)
 
     # The first turn ends; its waiter comes, and the first row goes to it.
     turn = WaiterStandIn.turn_end(main.settings, main.sid, main.transcript, :idle)
