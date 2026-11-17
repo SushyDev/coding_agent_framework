@@ -37,6 +37,12 @@ defmodule CodingAgentFramework.MCPTest do
       {:ok, if(written == :written, do: :delivered, else: :queued)}
     end
 
+    # A `Mailbox` that stores every well-formed ask as ask 12.
+    def ask(test, from, questions, _opts) do
+      send(test, {:ask, from, questions})
+      if is_list(questions), do: {:ok, {:asked, 12}}, else: {:refused, {:bad, :questions}}
+    end
+
     # A `Mover` that begins every move at once.
     def move(test, actor, agent, opts) do
       send(test, {:move, actor, agent, opts})
@@ -168,7 +174,7 @@ defmodule CodingAgentFramework.MCPTest do
              ~w(message run start_delegate run_delegate) ++
                ~w(service_start services service_logs service_send service_wait) ++
                ~w(service_restart service_stop service_hand agents look transcript) ++
-               ~w(interrupt answer resume stop move reload)
+               ~w(interrupt answer resume stop move ask reload)
   end
 
   test "a call is the agent's whose token it carries, whatever its arguments say",
@@ -416,6 +422,25 @@ defmodule CodingAgentFramework.MCPTest do
     refute_received {:move, _, _, _}
   end
 
+  # The tool answers the ask's id at once; `Mailbox` checks the questions and stores the ask.
+  test "ask hands the caller's questions to the mailbox and answers its id", %{
+    mcp: mcp,
+    tokens: t
+  } do
+    questions = [
+      %{"header" => "Base", "question" => "Which?", "options" => [], "multiSelect" => false}
+    ]
+
+    assert tool(mcp, t["app-fix"], "ask", %{questions: questions}) == %{"ok" => %{"ask" => 12}}
+    assert_received {:ask, "app-fix", ^questions}
+
+    assert tool(mcp, t["app-fix"], "ask", %{questions: "no"}) == %{
+             "refused" => ["bad", "questions"]
+           }
+
+    assert tool(mcp, t["app-fix"], "ask", %{}) == %{"refused" => ["bad", "args"]}
+  end
+
   test "reload tells the client its tools changed, then answers", %{mcp: mcp, tokens: t} do
     conn = post(mcp, t["app-main"], "tools/call", %{name: "reload"})
     assert ["text/event-stream" <> _] = Plug.Conn.get_resp_header(conn, "content-type")
@@ -434,7 +459,7 @@ defmodule CodingAgentFramework.MCPTest do
                  ~w(message run start_delegate run_delegate) ++
                    ~w(service_start services service_logs service_send service_wait) ++
                    ~w(service_restart service_stop service_hand agents look transcript) ++
-                   ~w(interrupt answer resume stop move reload)
+                   ~w(interrupt answer resume stop move ask reload)
              }
            }
 

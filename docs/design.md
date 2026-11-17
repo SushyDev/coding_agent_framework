@@ -1026,7 +1026,7 @@ framework's tools, which are strict in how they act and narrow in whom they reac
 | `service_wait(name, until, timeout)` | any agent | until a line of the log matches a pattern, a port listens on the host, or the service exits, which ends every wait; answers which, or `{:unknown, :timeout}` (`:dropped` when its last read failed). A line is looked for from the log offset of the service's current start, which its row keeps, so a line an earlier start wrote never answers (F-89) |
 | `service_restart(name)` / `service_stop(name)` | owner, owner's parent | restarts or ends a service, under a claim |
 | `service_hand(name, to)` | owner | hands a service to its parent or one of its children |
-| `ask(question)` | any agent | asks a person, without blocking |
+| `ask(questions)` | any agent | asks a person one to four questions, each with a header, its text and two to four options (a label and a description each, and whether several may be chosen), so an app can show it as a dialog; answers the ask's id at once and never waits. The person's answer comes later as a message from the operator, one line per question (F-138) |
 | `reload()` | any agent | reloads the caller's own tools |
 
 **Who calls.** The tools are served over MCP's HTTP transport from the framework's node, at
@@ -1078,6 +1078,15 @@ addressed to the operator and never delivered: the app reads it by the message's
 (`Mailbox.reply/2`). The operator's `run_delegate` hands the report to the operator, who
 waited for it. Either way the main session sees the act as it sees any act on its child: in the
 log, not as a message.
+
+**An ask** (F-138; `Team.tla`'s `Ask`, `Answers`) is a row from the agent to the operator, kept
+for the app as a reply to the operator is: stored, never delivered. The app reads the open asks
+and one by id (`Mailbox.open_asks/2`, `Mailbox.asked/3`) and answers through one function,
+`Mailbox.answer/4`, each answer the label or labels the person chose and the person's own text.
+The answer is a row from the operator to the agent that asked, keyed by the ask's uuid, so the
+table's unique key keeps the first answer and refuses a second (`:answered`). It is delivered
+as any row is, by the agent's transport, one line per question, so an idle agent wakes to it.
+To an agent that ended first it is stored and settled `ended`, never delivered.
 
 **Services** belong to the agent that started them. When the owner ends, its services end too,
 unless it handed them on with `service_hand`, or started them with `keep: true`, which hands them
@@ -1313,7 +1322,9 @@ worktree on its branch whose setup finished).
    - Invariants: a message is delivered at most once and in order per sender, only into an
      ended turn, and only along an edge of the tree; at most one claim holds a child's state;
      only a parent fixes, and no agent fixes itself or stops a main session; a service has one
-     owner, or none once it ended.
+     owner, or none once it ended; every row to the operator is kept for the app, an ask or an
+     answer to its own message, and no message goes to it; an ask has at most one answer, the
+     operator's, to the agent that asked (F-138).
    - Liveness: a message to a live agent is delivered; a claim is released or its fix verified.
 5. **`Stack.tla`**: worktrees, branches, a `gh stack` chain, rebases and squash merges.
    - Invariants: a worktree is on one branch; a layer lands only on its own checks; a rebase never
