@@ -34,6 +34,9 @@ defmodule CodingAgentFramework.MCP do
     `sending` by the call in `Mailbox` until the answer is written, then `told/3` `:written`
     when the write succeeded, or anything else (due again) when it failed (`answer/5`). A call
     through `call/4` has its answer in hand, so it is told `:written` at once;
+  - `ask(questions)`: the mailbox's `ask/4`, which checks the questions and the caller and
+    stores the ask for the app; answers `%{ask: id}` at once. The person's answer comes later
+    as a message (`Mailbox.answer/4`);
   - `reload()`: `Grants.may_use?/2`, then the tools' names; the endpoint sends the client
     `notifications/tools/list_changed` first;
   - the service tools, each through the services' own function, which makes its own `Grants`
@@ -319,6 +322,42 @@ defmodule CodingAgentFramework.MCP do
       }
     },
     %{
+      name: "ask",
+      description:
+        "Asks a person one to four questions, each with two to four options; answers the " <>
+          "ask's id at once. The answer comes later as a message, one line per question.",
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          questions: %{
+            type: "array",
+            minItems: 1,
+            maxItems: 4,
+            items: %{
+              type: "object",
+              properties: %{
+                header: %{type: "string", description: "a short tag for the question"},
+                question: @str,
+                options: %{
+                  type: "array",
+                  minItems: 2,
+                  maxItems: 4,
+                  items: %{
+                    type: "object",
+                    properties: %{label: @str, description: @str},
+                    required: ["label", "description"]
+                  }
+                },
+                multiSelect: %{type: "boolean", description: "the person may choose several"}
+              },
+              required: ["header", "question", "options", "multiSelect"]
+            }
+          }
+        },
+        required: ["questions"]
+      }
+    },
+    %{
       name: "reload",
       description: "Reloads your own tools.",
       inputSchema: %{type: "object", properties: %{}}
@@ -542,6 +581,16 @@ defmodule CodingAgentFramework.MCP do
          :ok <- Grants.may_fix?(ctx.grants, caller, agent) do
       {mod, server} = ctx.mover
       mod.move(server, caller, agent, to: a["to"])
+    end
+  end
+
+  # The ask is stored and answered at once: nothing here waits for the person.
+  defp act(ctx, caller, _id, "ask", %{"questions" => questions}) do
+    {mod, server} = ctx.mailbox
+
+    case mod.ask(server, caller, questions, timeout: @step) do
+      {:ok, {:asked, id}} -> {:ok, %{ask: id}}
+      other -> other
     end
   end
 

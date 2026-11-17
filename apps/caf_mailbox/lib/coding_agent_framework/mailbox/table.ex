@@ -4,7 +4,8 @@ defmodule CodingAgentFramework.Mailbox.Table do
   open the file and read (`model/tla/Delivery.tla`: `row`).
 
   `kind` is `msg` (a message, or the app's word), `brief`, `resume` (a resumed delegate's word to
-  go on with its brief), `reply` or `notice`. `status` is `queued` (due), `sending` (marked
+  go on with its brief), `reply`, `notice`, `ask` (an agent's questions to the operator, as
+  JSON, kept for the app) or `answer` (the operator's answer to an ask, `reply_to` its uuid). `status` is `queued` (due), `sending` (marked
   before it goes, with its transport `via`, `stream`, `waiter` or `call`, the `session_id` and
   the process `at` it is for), then `delivered` or `ended`, or `queued` again if it did not go
   in, under the `uuid` it was stored with; `again` says it was made due again, so it goes first.
@@ -131,6 +132,16 @@ defmodule CodingAgentFramework.Mailbox.Table do
   @doc "The answer (a reply or a notice) to the row stored under `uuid`, or nil."
   @spec answer(db, String.t()) :: map | nil
   def answer(db, uuid), do: List.first(select(db, "reply_to = ?1", [uuid]))
+
+  @doc "The asks with no answer yet, oldest first."
+  @spec open_asks(db) :: [map]
+  def open_asks(db) do
+    where =
+      "kind = 'ask' AND NOT EXISTS (SELECT 1 FROM messages a WHERE a.reply_to = messages.uuid) " <>
+        "ORDER BY id"
+
+    select(db, where, [])
+  end
 
   @doc "Row `id`, or nil."
   @spec get(db, integer) :: map | nil

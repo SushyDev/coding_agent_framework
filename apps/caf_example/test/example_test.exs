@@ -351,6 +351,52 @@ defmodule CodingAgentFramework.ExampleTest do
     assert {:ok, %{to_agent: "app-main"}} = await(fn -> ok(from.("app-unit-one")) end, 20_000)
   end
 
+  # F-138: a delegate asks through its tool, which answers at once; the app reads the open ask
+  # and answers it once; the answer goes to the delegate as a row it takes.
+  test "a delegate asks a person; the app answers once, and the delegate takes it", ctx do
+    parts = start(ctx.config)
+
+    {:ok, %{delegate: "app-unit-one"}} =
+      MCP.call(parts.mcp, "app-main", "start_delegate", args("unit/one"))
+
+    {:ok, ddb} = Delegates.Table.open(Path.join(ctx.home, "caf.db"))
+    {:ok, _} = row(ddb, &(&1.status == "finished"))
+
+    options = for l <- ~w(Rebase Merge), do: %{"label" => l, "description" => "by #{l}"}
+
+    q = %{
+      "header" => "Base",
+      "question" => "Which?",
+      "options" => options,
+      "multiSelect" => false
+    }
+
+    assert {:ok, %{ask: id}} = MCP.call(parts.mcp, "app-unit-one", "ask", %{"questions" => [q]})
+
+    assert {:ok, [%{id: ^id, from: "app-unit-one", questions: [^q]}]} =
+             Mailbox.open_asks(parts.mailbox)
+
+    answer = [%{"labels" => ["Rebase"], "text" => "then push"}]
+    assert {:ok, {:queued, a}} = Mailbox.answer(parts.mailbox, id, answer)
+    assert {:refused, :answered} = Mailbox.answer(parts.mailbox, id, answer)
+
+    {:ok, %{answer: %{id: ^a, text: "Ask " <> _}}} =
+      await(
+        fn ->
+          case Mailbox.asked(parts.mailbox, id) do
+            {:ok, %{answer: %{status: "delivered"}}} = ok -> ok
+            other -> other
+          end
+        end,
+        20_000
+      )
+
+    {:ok, messages} = Mailbox.Table.open(Path.join(ctx.home, "caf.db"))
+    %{uuid: u} = Mailbox.Table.get(messages, a)
+    # The replay settles the row; the stand-in's own log of what it took may come just after.
+    {:ok, _} = await(fn -> ok("message #{u}" in HeadlessStandIn.taken(ctx.dir) || nil) end)
+  end
+
   test "a late end `Mailbox` did not answer is kept owed, then stored once", ctx do
     parts = start(ctx.config)
     {:ok, messages} = Mailbox.Table.open(Path.join(ctx.home, "caf.db"))

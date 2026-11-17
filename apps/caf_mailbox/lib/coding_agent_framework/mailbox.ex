@@ -65,6 +65,11 @@ defmodule CodingAgentFramework.Mailbox do
   lets in one answer per row. The answers to a brief or a word to go on are `Delegates'`: it
   decides between a finish, a resume and a second kill, and hands the report here.
 
+  **Asks.** An agent asks a person through `ask/4`: a row from it to the operator, kept for the
+  app and never delivered, read by `open_asks/2` and `asked/3`. The app answers through
+  `answer/4`: a row from the operator to the agent that asked, under the ask's uuid, delivered
+  as any row is (`Team.tla`'s `Ask`, `Answers`).
+
   **Ended.** Once a delegate's session ended for good (its `end_session` went in and its
   process is gone, or its agent row says it ended), or its start was refused (`ended/3`), its
   `queued` rows are settled `ended`.
@@ -80,7 +85,7 @@ defmodule CodingAgentFramework.Mailbox do
   alias CodingAgentFramework.{Accounts, Grants, Inlet, Intake, Registry, Store, Stream}
   alias CodingAgentFramework.Transcripts
   alias CodingAgentFramework.Sessions.{Agents, Turn}
-  alias CodingAgentFramework.Mailbox.{Table, Transport}
+  alias CodingAgentFramework.Mailbox.{Ask, Table, Transport}
   alias CodingAgentFramework.Stream.Fold
 
   @step 5_000
@@ -172,6 +177,45 @@ defmodule CodingAgentFramework.Mailbox do
   `ended`. Answers `{:ok, ids}`.
   """
   def ended(mailbox, to, opts \\ []), do: call(mailbox, {:ended, to}, opts)
+
+  @doc """
+  Agent `from` asks a person (`docs/design.md`, `ask`; `Team.tla`'s `Ask`), with `questions`
+  as `Mailbox.Ask.questions/1` checks them. The ask is a row from `from` to the operator, kept
+  for the app as a reply to the operator is, and never delivered: nothing waits on it. Answers
+  at once `{:ok, {:asked, id}}`, or `{:refused, reason}` with no row: `Grants`' reason,
+  `:no_operator`, `{:not_an_agent, from}` for the operator itself, or `{:bad, :questions}`.
+
+      Mailbox.ask(mailbox, "app-unit-review", [question])
+      #=> {:ok, {:asked, 12}}
+  """
+  def ask(mailbox, from, questions, opts \\ []),
+    do: call(mailbox, {:ask, from, questions}, opts)
+
+  @doc "The asks not answered yet, oldest first: `{:ok, asks}`, each as `asked/3` shows one."
+  def open_asks(mailbox, opts \\ []), do: call(mailbox, :open_asks, opts)
+
+  @doc """
+  Ask `id`, for the app: `{:ok, %{id, from, questions, asked_at, answer}}`, `answer` nil until
+  it is answered, then `%{id, text, status}`, the text the agent gets and its row's status
+  (`queued`, `sending`, `delivered`, or `ended` when the agent ended first); or `{:refused,
+  :no_ask}`.
+  """
+  def asked(mailbox, id, opts \\ []), do: call(mailbox, {:asked, id}, opts)
+
+  @doc """
+  The person's answer to ask `ask_id` (`Team.tla`'s `Answers`): one entry per question, in
+  order, each `%{"labels" => [label], "text" => text}` as `Mailbox.Ask.answers/2` checks it. It
+  is stored as a row from the operator to the agent that asked, under the ask's uuid, and
+  delivered as any row is, one line per question, so an idle agent wakes to it; to an agent that
+  ended first it is stored and settled `ended`. The ask's one answer is the first: the table's
+  unique key refuses a second. Answers `{:ok, {:queued, id}}`, or `{:refused, reason}`:
+  `:no_ask`, `:answered`, or `{:bad, :answers}`.
+
+      Mailbox.answer(mailbox, 12, [%{"labels" => ["Rebase"], "text" => ""}])
+      #=> {:ok, {:queued, 13}}
+  """
+  def answer(mailbox, ask_id, answers, opts \\ []),
+    do: call(mailbox, {:answer, ask_id, answers}, opts)
 
   @doc """
   Waits up to `timeout` ms for the answer to the row stored under `key` (a delegate's report,
@@ -347,6 +391,58 @@ defmodule CodingAgentFramework.Mailbox do
     end
   end
 
+  def handle_call({:ask, from, questions}, _from, s) do
+    operator = Grants.operator(s.grants)
+
+    with {:ok, questions} <- Ask.questions(questions),
+         true <- is_binary(from) or {:refused, {:bad, :message}},
+         true <- operator != nil or {:refused, :no_operator},
+         true <- from != operator or {:refused, {:not_an_agent, from}},
+         :ok <- Grants.may_use?(s.grants, from) do
+      row = %{from: from, to: operator, text: JSON.encode!(questions), kind: "ask"}
+
+      case Table.store(s.db, Map.put(row, :uuid, Stream.uuid())) do
+        nil ->
+          {:reply, {:unknown, :not_stored}, s}
+
+        id ->
+          announce(s, id)
+          {:reply, {:ok, {:asked, id}}, s}
+      end
+    else
+      refused -> {:reply, refused, s}
+    end
+  end
+
+  def handle_call(:open_asks, _from, s),
+    do: {:reply, {:ok, Enum.map(Table.open_asks(s.db), &shown_ask(s, &1))}, s}
+
+  def handle_call({:asked, id}, _from, s) do
+    case Table.get(s.db, id) do
+      %{kind: "ask"} = m -> {:reply, {:ok, shown_ask(s, m)}, s}
+      _ -> {:reply, {:refused, :no_ask}, s}
+    end
+  end
+
+  # The answer's row is keyed by the ask's uuid in `reply_to`, whose unique index lets in the
+  # first answer only, across restarts (`Team.tla`'s AnswerOnce).
+  def handle_call({:answer, id, answers}, _from, s) do
+    with %{kind: "ask"} = m <- Table.get(s.db, id) || {:refused, :no_ask},
+         questions = JSON.decode!(m.text),
+         {:ok, answers} <- Ask.answers(questions, answers) do
+      row = %{from: m.to_agent, to: m.from_agent, text: Ask.text(id, questions, answers)}
+      row = Map.merge(row, %{uuid: Stream.uuid(), kind: "answer", reply_to: m.uuid})
+
+      case Table.store(s.db, row) do
+        nil -> {:reply, {:refused, :answered}, s}
+        answer -> stored(s, answer)
+      end
+    else
+      %{} -> {:reply, {:refused, :no_ask}, s}
+      refused -> {:reply, refused, s}
+    end
+  end
+
   def handle_call({:store, row}, _from, s) do
     if Enum.all?([row.from, row.to, row.text, row.uuid], &(is_binary(&1) and &1 != "")),
       do: stored(s, Table.store(s.db, row)),
@@ -491,6 +587,22 @@ defmodule CodingAgentFramework.Mailbox do
 
   defp bool(n), do: %{1 => true, 0 => false}[n]
 
+  defp shown_ask(s, m) do
+    answer =
+      case Table.answer(s.db, m.uuid) do
+        nil -> nil
+        a -> %{id: a.id, text: a.text, status: a.status}
+      end
+
+    %{
+      id: m.id,
+      from: m.from_agent,
+      questions: JSON.decode!(m.text),
+      asked_at: m.created_at,
+      answer: answer
+    }
+  end
+
   # Every open row, read against Stream's rows and Sessions' rows; a failed read decides nothing.
   # A waiter's row is read against its transcript only when `transcript?` (F-127's new-1): on a
   # cue of the transcripts or the waiters, at its take bound and at the start.
@@ -571,7 +683,7 @@ defmodule CodingAgentFramework.Mailbox do
         ended = for({u, _} <- fold.messages, turn_ended?(Fold.outcome(fold, u)), do: u),
         m <- Table.unanswered(s.db, sid, ended),
         to = sender(s, m),
-        do: answer(s, m, to, Fold.outcome(fold, m.uuid))
+        do: reply_row(s, m, to, Fold.outcome(fold, m.uuid))
   end
 
   # A message from `framework` is answered to the delegate's parent, the sender of its brief.
@@ -587,13 +699,13 @@ defmodule CodingAgentFramework.Mailbox do
   defp turn_ended?({:result, _}), do: true
   defp turn_ended?(outcome), do: outcome == :exited
 
-  defp answer(s, m, to, {:result, r}) do
+  defp reply_row(s, m, to, {:result, r}) do
     row = %{from: m.to_agent, to: to, text: r.text, uuid: Stream.uuid(), kind: "reply"}
     row = Map.merge(row, %{reply_to: m.uuid, subtype: r.subtype, is_error: r.is_error})
     stored_quietly(s, Table.store(s.db, row))
   end
 
-  defp answer(s, m, to, :exited) do
+  defp reply_row(s, m, to, :exited) do
     row = %{from: @framework, to: to, text: notice(m), uuid: Stream.uuid(), kind: "notice"}
     stored_quietly(s, Table.store(s.db, Map.put(row, :reply_to, m.uuid)))
   end

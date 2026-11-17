@@ -676,7 +676,8 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 TypeOK ==
     /\ \A i \in Ids : /\ row[i].st \in {"none", "due", "sending", "delivered", "ended", "kept"}
                       /\ row[i].via \in Transports \cup {"none"}
-                      /\ row[i].kind \in {"none", "msg", "brief", "resume", "reply", "notice"}
+                      /\ row[i].kind \in {"none", "msg", "brief", "resume", "reply", "notice",
+                                         "ask", "answer"}
     /\ hand \subseteq Ids /\ claimed \subseteq Ids /\ unsure \subseteq Ids
     /\ wire \in [Ids -> 0..2]
     /\ call \in [Ids -> {"none", "waiting", "timedout", "writing", "wrote", "failed", "gone",

@@ -16,8 +16,14 @@
 (* so of every agent: it messages any agent and fixes any agent, a main    *)
 (* session as its parent, through the same checks, claims and Mailbox     *)
 (* order, and every row it writes names it (F-109). A reply to its message *)
-(* is kept for it, never delivered. It owns no service, and no stop ends a *)
-(* main session. A service is owned by one agent, fixed by its owner or    *)
+(* is kept for it, never delivered. No agent messages the operator: an    *)
+(* agent reaches it by an ask (`ask`, F-138), a row from the agent to the  *)
+(* operator kept for the app, as a reply to it is, and never delivered.    *)
+(* The ask is one step that leaves the agent's turn as it is: the tool     *)
+(* answers at once. The operator answers an ask once, with a row to the    *)
+(* asking agent under the ask's key, delivered as any row is, or settled   *)
+(* ended when that agent ended first. It owns no service, and no stop ends *)
+(* a main session. A service is owned by one agent, fixed by its owner or  *)
 (* the owner's parent, handed to the owner's parent or a child, and ended  *)
 (* or kept when its owner ends.                                            *)
 (*                                                                         *)
@@ -26,14 +32,16 @@
 (*   Grants    the tree's edges, by which it decides whether a caller may  *)
 (*             message, fix or hand to a target; the claims table          *)
 (*             (durable); the fix a claim's call runs (in memory);         *)
-(*   Mailbox   the rows: messages, replies and notices (Delivery.tla);     *)
+(*   Mailbox   the rows: messages, replies and notices (Delivery.tla), and *)
+(*             asks and their answers;                                     *)
 (*   Stream    the fold of a delegate's log, which Delivery reads;         *)
 (*   Services  each service's owner, its keep flag, its fixes and hand-ons,*)
 (*             and its end with its owner (durable);                       *)
 (*   MCP       the calls: message, interrupt, resume, stop, service_start, *)
-(*             service_restart, service_stop and service_hand, each with   *)
-(*             its caller's fixed identity; the operator's acts            *)
-(*             (`Operator`) go through the same calls under its name.      *)
+(*             service_restart, service_stop, service_hand and ask, each   *)
+(*             with its caller's fixed identity; the operator's acts       *)
+(*             (`Operator`) go through the same calls under its name, and  *)
+(*             its answer to an ask through `Mailbox.answer`.              *)
 (*                                                                         *)
 (* What moved to Delivery.tla (R6): the sending mark and its settle, the  *)
 (* typed write (DeliveryTyped), the order, the ended mark, the replies and *)
@@ -98,6 +106,7 @@ CONSTANTS
     Mains,        \* the main sessions, one in each project
     Services,     \* the service names
     MaxMsgs,      \* messages sent, all senders together
+    MaxAsks,      \* asks made, all agents together
     MaxFaults,    \* times an agent sticks or dies, all agents together
     MaxRestarts,  \* restarts of the framework
     SelfTurns,    \* a delegate may start a turn by itself
@@ -121,7 +130,10 @@ Breaks == {
     "OperatorTwoClaims",     \* the operator's claim does not check for one on the same state
     "OperatorStaleFix",      \* the operator's fix acts without checking the claimed state
     "OperatorStopsMain",     \* the operator's stop is granted on a main session
-    "HandToOperator"         \* a main session may hand a service to the operator, its parent
+    "HandToOperator",        \* a main session may hand a service to the operator, its parent
+    "MessageToOperator",     \* an agent's message may go to the operator, as an ask does
+    "AnswerTwice",           \* an ask's answer does not check for one stored before
+    "AnswerToOther"          \* an ask's answer may go to an agent other than the asker
 }
 
 Agents == UNION Projects
@@ -132,12 +144,12 @@ ASSUME Break \in Breaks
 ASSUME \A P \in Projects : Cardinality(P \cap Mains) = 1
 ASSUME \A P, Q \in Projects : P # Q => P \cap Q = {}
 ASSUME Mains \subseteq Agents
-ASSUME MaxMsgs \in Nat /\ MaxFaults \in Nat /\ MaxRestarts \in Nat /\ SelfTurns \in BOOLEAN
+ASSUME MaxMsgs \in Nat /\ MaxAsks \in Nat /\ MaxFaults \in Nat /\ MaxRestarts \in Nat /\ SelfTurns \in BOOLEAN
 \* The operator's name is reserved: no agent holds it.
 ASSUME Cardinality(Operators) <= 1 /\ Operators \cap Agents = {}
 
 None == "none"
-Ids == 1..(2 * MaxMsgs)   \* each message, and its reply or notice
+Ids == 1..(2 * (MaxMsgs + MaxAsks))   \* each message or ask, and its answer
 MaxEpoch == 2 * MaxFaults + 1
 Kinds == {"interrupt", "resume", "stop"}
 Needs == [interrupt |-> "stuck", resume |-> "dead", stop |-> "idle"]
@@ -150,6 +162,7 @@ Siblings(a, b) == a # b /\ a \in Delegates /\ b \in Delegates /\ Main(a) = Main(
 \* Grants: the edges a message goes along. The operator, a parent of every
 \* main session, reaches every agent; no agent messages it.
 Edge(c, t) == \/ c \in Operators /\ t \in Agents
+              \/ Break = "MessageToOperator" /\ c \in Agents /\ t \in Operators
               \/ c \in Mains /\ t \in Mains /\ c # t
               \/ IsChild(t, c)
               \/ IsChild(c, t)
@@ -216,6 +229,8 @@ D == INSTANCE Delivery WITH
        restarts <- 0, lives <- 0, ends <- 0, prompts <- 0, stops <- 0, readAt <- 0
 
 Msgs == {i \in Ids : row[i].kind = "msg"}
+Asks == {i \in Ids : row[i].kind = "ask"}
+AnswerRows(k) == {j \in Ids : row[j].kind = "answer" /\ row[j].re = k}
 
 \* The claims, under the bug a Break puts in the claims of the actor `by`.
 ClaimBreak(by) ==
@@ -308,6 +323,25 @@ Send(c, t) ==
     /\ Edge(c, t) \/ (Break = "OffEdge" /\ c # t)
     /\ Cardinality(Msgs) < MaxMsgs
     /\ Mailbox(D!Store(D!NextId, c, t, "msg"))
+
+\* An agent asks a person: a row to the operator, kept for the app, never
+\* delivered (Delivery's StoreRow keeps a row to no session). One step, and
+\* the agent's turn goes on as it was.
+Ask(a) ==
+    /\ Live(a) /\ Operators # {}
+    /\ Cardinality(Asks) < MaxAsks
+    /\ Mailbox(D!Store(D!NextId, a, CHOOSE o \in Operators : TRUE, "ask"))
+
+\* The operator answers ask i: one row to the asker under the ask's key, the
+\* table's unique key letting in the first answer only. It is due as any row
+\* is, and settled ended when the asker ended first.
+Answers(o, i, t) ==
+    /\ up /\ o \in Operators /\ row[i].kind = "ask" /\ D!NextId \in Ids
+    /\ AnswerRows(i) = {} \/ Break = "AnswerTwice"
+    /\ t = row[i].from \/ Break = "AnswerToOther"
+    /\ Mailbox(/\ D!StoreRow(D!NextId, o, t, "answer", i, D!NoResult)
+               /\ UNCHANGED <<hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure,
+                              dlost, dwrong>>)
 
 \* Claude Code takes a row: a turn starts with it, or a stream line joins
 \* the one running.
@@ -428,6 +462,9 @@ Next ==
     \/ \E a \in Agents : \/ Prompted(a) \/ SelfStarts(a) \/ TurnEnds(a) \/ Faults(a)
                          \/ DelegateEnds(a)
     \/ \E c \in Actors, t \in Agents : Send(c, t) \/ ClaimTaken(c, t)
+    \/ \E c \in Agents, o \in Operators : Send(c, o)
+    \/ \E a \in Agents : Ask(a)
+    \/ \E o \in Operators, i \in Ids, t \in Agents : Answers(o, i, t)
     \/ \E i \in Ids : Mailboxes(i)
     \/ \E r \in calls : FixActs(r) \/ FixRefused(r)
     \/ \E r \in claims : ClaimSettled(r)
@@ -484,6 +521,23 @@ AlongEdges ==
 ReplyToSender ==
     \A j \in Ids : row[j].kind \in {"reply", "notice"} =>
         /\ row[row[j].re].to \in Delegates
+        /\ row[j].to = row[row[j].re].from
+
+\* Every row to the operator is kept for the app, never delivered: an ask
+\* from an agent, or a reply or a notice to its own message. No message goes
+\* to it.
+OperatorRowsKept ==
+    \A i \in Ids : row[i].to \in Operators =>
+        /\ row[i].st = "kept" /\ row[i].kind \in {"ask", "reply", "notice"}
+        /\ row[i].kind = "ask" => row[i].from \in Agents
+
+\* An ask has at most one answer.
+AnswerOnce == \A k \in Ids : Cardinality(AnswerRows(k)) <= 1
+
+\* An answer is the operator's, to the agent that asked.
+AnswerToAsker ==
+    \A j \in Ids : row[j].kind = "answer" =>
+        /\ row[row[j].re].kind = "ask" /\ row[j].from \in Operators
         /\ row[j].to = row[row[j].re].from
 
 \* At most one claim holds a child's state, and a state is fixed at most once.

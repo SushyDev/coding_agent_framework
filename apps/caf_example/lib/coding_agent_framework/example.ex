@@ -25,6 +25,11 @@ defmodule CodingAgentFramework.Example do
   `CodingAgentFramework.Operator` with `parts(sup).mcp`, under the config's `operator` name,
   which every part's `Grants` knows: the same checks, claims and call log as an agent's tools.
 
+  **Asks.** An agent asks a person through its `ask` tool, which answers at once. The app shows
+  the open asks (`Mailbox.open_asks(parts(sup).mailbox)`, one by id with `Mailbox.asked/3`) as
+  dialogs, and answers each once with `Mailbox.answer/4`; the answer goes to the agent that
+  asked as a message from the operator, one line per question.
+
   **The tree.** It opens no part's table: the tree `Grants` reads, an agent's worktree, the
   agent a hook names and whether an agent has ended are `Sessions.Agents`' functions over the
   agent rows. Until `Mains`, it hands `Sessions` the main sessions the config declares.
