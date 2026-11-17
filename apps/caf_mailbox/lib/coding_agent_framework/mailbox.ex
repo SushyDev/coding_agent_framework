@@ -1,55 +1,65 @@
 defmodule CodingAgentFramework.Mailbox do
   @moduledoc """
-  Messages along the tree's edges (`docs/design.md`, "Agents working together", "Messages";
-  `model/tla/Team.tla`'s `Send`, `DeliveryAsked`, `DeliveryTyped`, `DeliveryRefused`,
-  `DeliveryMarked`, `SendingSettled`, `EndedFirst`). The caller's supervision tree starts one,
-  with no name:
+  Every delivery (`docs/design.md`, "Delivery", "Agents working together", "Messages";
+  `model/tla/Delivery.tla`): a message, the app's word, a delegate's brief and its word to go on
+  after a resume, a reply, the framework's notice in a reply's place, and the report, which is
+  the reply to the brief. Each is one row of `Mailbox.Table`, with one mark and one settle; only
+  the transport differs (`Mailbox.Transport`). The caller's supervision tree starts one per
+  host, with no name:
 
       {:ok, mailbox} = Mailbox.start_link(db: db, grants: grants, stream: stream,
-        delegates_db: db, host: "laptop")
+        sessions_db: db, host: "laptop")
       Mailbox.message(mailbox, "app-main", "app-unit-review", "Rebase on main first.")
       #=> {:ok, {:queued, 1}}
 
-  **A message** is checked by `Grants.may_message?/3`, then stored `queued` before anything else.
+  **Stored first.** A message is checked by `Grants.may_message?/3`, then stored `queued`
+  before anything else. `Delegates` stores a delegate's brief (`brief/5`) before it starts it,
+  the word to go on (`go_on/4`) before it resumes it, and its report (`report/5`) once its turn
+  ended.
 
-  **A delegate** (the latest `Delegates` row of its name) takes one only into an ended turn: its
-  row is `finished` (its brief's turn ended, its report held) and its `Stream` row idle, live and
-  not ending. Its oldest queued message, while none to it is under way (so each sender's go in
-  order), is marked `sending` with the session, then written through `Stream` under the uuid it
-  was stored with. A `sending` row settles from `Stream`'s row: `delivered` by its replay, or
-  `queued` again, same uuid, when the exit found it undelivered or `Stream` never marked it;
-  never written again while it may be in the pipe. A dead delegate's messages wait. One whose
-  session ended (`end_session` marked, process gone), or whose start was refused, has its
-  queued messages settled `ended`.
+  **The mark.** Per addressee, while no row to it is `sending`, the first `queued` row (one made
+  due again first, then the oldest) is marked `sending` with its transport and the process it
+  is for, then handed on. A refusal undoes the mark; an unknown answer keeps it for the
+  evidence. The transport is the addressee's:
 
-  **A reply**: a delivered message's turn ends with a `result` that names its uuid; that result's
-  text is stored as a message from the delegate to its main session (its `Delegates` row's
-  `parent`), `reply_to` the answered message's uuid, with the result's `subtype` and
-  `is_error`, so a failed turn is told from an answer. **A notice**: when the process ended
-  during the message's turn with no result (`Stream.Fold.outcome/2`'s `:exited`), a message
-  from `"framework"` says so in place of the reply, under the same `reply_to`. The table's
-  unique index on `reply_to` lets in one of them, once.
+  - `stream`, for a headless delegate (its `Sessions` row's role): only into an ended turn of
+    its current process (`Stream`'s fold idle, live, no end marked, its `Sessions` row
+    `running`), written through `Stream` under the row's uuid;
+  - `call`, for a reply or a notice a waiting `run_delegate` takes (`await/4`), only before the
+    call's deadline; `told/3` settles it, and the end of the process that waits makes it due
+    again;
+  - a main session's `waiter` and `typed` are later units: until then its rows stay `queued`,
+    `attempt` `:no_delivery`, unless a call takes them.
 
-  **A main session**'s delivery needs `Screen`: its rows stay queued, `attempt` `:no_delivery`.
+  **Answers.** A delivered message's turn ends with a `result` that names its uuid; that
+  result's text is stored as a reply from the delegate to the message's sender (to its parent,
+  the sender of its brief, for a message from `framework`), `reply_to` the message's uuid, with
+  the result's `subtype` and `is_error`. When the process ended during the message's turn with
+  no result, a notice from `"framework"` says so in its place. The table's unique `reply_to`
+  lets in one answer per row. The answers to a brief or a word to go on are `Delegates'`: it
+  decides between a finish, a resume and a second kill, and hands the report here.
 
-  It reads every open row again at its start and at each `cue/2` (of `Stream` and `Delegates`);
-  after each write `notify` gets `%{topic: "mailbox", ids: [id]}`.
+  **Ended.** Once a delegate's session ended for good (its `end_session` went in and its
+  process is gone), or its start was refused (`ended/3`), its `queued` rows are settled `ended`.
+
+  It reads every open row again at its start and at each `cue/2` (of `Stream`, `Sessions` and
+  `Delegates`); after each write `notify` gets `%{topic: "mailbox", ids: [id]}`.
   """
 
   use GenServer
 
-  alias CodingAgentFramework.{Delegates, Grants, Stream}
-  alias CodingAgentFramework.Mailbox.Table
+  alias CodingAgentFramework.{Grants, Sessions, Stream}
+  alias CodingAgentFramework.Mailbox.{Table, Transport}
   alias CodingAgentFramework.Stream.Fold
 
   @step 5_000
-  # The sender of a notice; no agent has this name, as an agent's name holds its project's.
+  # The sender of a notice and of the words to go on; no agent has this name, as an agent's
+  # name holds its project's.
   @framework "framework"
-  @delegates ~w(starting resuming running finished failed refused)
 
   @doc """
   Starts a `Mailbox`. Options: `db:`, `grants:`, `stream:` and `host:` (where the delegates
-  run), `delegates_db:` (the file of `Delegates`' table), and optionally `notify:`.
+  run), `sessions_db:` (the file of `Sessions`' table), and optionally `notify:`.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -75,16 +85,103 @@ defmodule CodingAgentFramework.Mailbox do
     do: call(mailbox, {:notify, to, text, Keyword.get(opts, :key)}, opts)
 
   @doc """
-  What became of message `id`: `{:ok, %{id, from, to, status, attempt, reply_to, subtype,
+  Stores delegate `to`'s brief from its parent `from` under `uuid`, the uuid `Delegates` chose
+  before its start: `{:ok, {:queued, id}}`, or `{:ok, :stored_before}` when a row of `uuid` is
+  stored already. No `Grants` check: `Delegates` checked the start.
+
+      Mailbox.brief(mailbox, "app-main", "app-unit-review", "Review it.", uuid)
+      #=> {:ok, {:queued, 3}}
+  """
+  def brief(mailbox, from, to, text, uuid),
+    do: store(mailbox, %{from: from, to: to, text: text, uuid: uuid, kind: "brief"})
+
+  @doc """
+  Stores the word a resumed delegate `to` gets to go on with its brief, from `framework`, under
+  `uuid`: it goes before every other row due to `to`, as a resend does. Answers as `brief/5`.
+  """
+  def go_on(mailbox, to, text, uuid) do
+    row = %{from: @framework, to: to, text: text, uuid: uuid, kind: "resume", again: true}
+    store(mailbox, row)
+  end
+
+  @doc """
+  Stores delegate `from`'s report to its parent `to`, as the answer to its brief's uuid `key`:
+  `{:reply, text, result}` (a finish, from the delegate, with the result's `subtype` and
+  `is_error`), or `{:notice, text}` (a second kill or a refused resume, from `framework`).
+  Answers `{:ok, {:queued, id}}`, or `{:ok, :stored_before}` when `key` has an answer already.
+
+      Mailbox.report(mailbox, "app-unit-review", "app-main", brief_uuid, {:reply, "Done.", %{}})
+      #=> {:ok, {:queued, 5}}
+  """
+  def report(mailbox, from, to, key, answer) do
+    row =
+      case answer do
+        {:reply, text, result} ->
+          %{from: from, kind: "reply", text: text, subtype: result[:subtype]}
+          |> Map.put(:is_error, result[:is_error])
+
+        {:notice, text} ->
+          %{from: @framework, kind: "notice", text: text}
+      end
+
+    store(mailbox, Map.merge(row, %{to: to, uuid: Stream.uuid(), reply_to: key}))
+  end
+
+  @doc """
+  Delegate `to` will never take a row: its start was refused. Its `queued` rows are settled
+  `ended`. Answers `{:ok, ids}`.
+  """
+  def ended(mailbox, to, opts \\ []), do: call(mailbox, {:ended, to}, opts)
+
+  @doc """
+  Waits up to `timeout` ms for the answer to the row stored under `key` (a delegate's report,
+  the answer to its brief) to `to`, and takes it for a call that answers with it
+  (`run_delegate`): the `call` transport. Once it is `queued`, first among `to`'s rows from its
+  sender, no row to `to` is `sending`, and only before the deadline, it is marked `sending` by
+  the call in the same step, so it goes no other way. The caller then says `told/3`, from the
+  process that waited: when that process ends first, the row is due again. Answers `{:ok, %{id,
+  from, kind, text}}`; `{:unknown, :timeout}` at the deadline, the row then due as any other;
+  or `{:refused, reason}`: `:awaited` (another call waits on it), `{:status, status}` for one
+  already taken, delivered or ended.
+
+      Mailbox.await(mailbox, "app-main", brief_uuid, 60_000)
+      #=> {:ok, %{id: 5, from: "app-unit-review", kind: "reply", text: "Done."}}
+  """
+  def await(mailbox, to, key, timeout) when is_integer(timeout) and timeout >= 0 do
+    # The deadline is the caller's, on the node's clock: a request that waits in the queue does
+    # not move it, so the row is never taken after the caller stopped waiting.
+    deadline = System.monotonic_time(:millisecond) + timeout
+    call(mailbox, {:await, to, key, deadline}, timeout: timeout + @step)
+  end
+
+  @doc """
+  How the endpoint's write of row `id`, which `await/4` took, went: `:written` makes it
+  `delivered`, anything else due again, first. Answers `{:ok, :delivered}`, `{:ok, :queued}`,
+  or `{:refused, {:not_taken, status}}`.
+  """
+  def told(mailbox, id, written), do: call(mailbox, {:told, id, written}, [])
+
+  @doc """
+  What became of row `id`: `{:ok, %{id, from, to, kind, status, via, attempt, reply_to, subtype,
   is_error}}`, `status` being `queued`, `sending`, `delivered` or `ended`, `reply_to` the uuid
-  of the message a delegate's reply or the framework's notice answers (`key:<key>` for a
-  `notify/4` stored under a key, nil for any other), and
-  `subtype` and `is_error` a reply's result's; or `{:refused, :no_message}`.
+  of the row an answer answers (`key:<key>` for a `notify/4` stored under a key, nil for any
+  other), and `subtype` and `is_error` a reply's result's; or `{:refused, :no_message}`.
   """
   def status(mailbox, id, opts \\ []), do: call(mailbox, {:status, id}, opts)
 
+  @doc """
+  The answer to the row stored under `key` (the report, for a brief's uuid), as `status/3`
+  answers a row, or `{:refused, :no_answer}`.
+  """
+  def answer_to(mailbox, key, opts \\ []), do: call(mailbox, {:answer_to, key}, opts)
+
+  @doc "The ids of the rows to `to` still `queued` or `sending`: `{:ok, ids}`."
+  def open_to(mailbox, to, opts \\ []), do: call(mailbox, {:open_to, to}, opts)
+
   @doc "Hands it a reader's cue: every open row is read again. Answers `:ok` at once."
   def cue(mailbox, %{topic: _}), do: GenServer.cast(mailbox, :cue)
+
+  defp store(mailbox, row), do: call(mailbox, {:store, row}, [])
 
   defp call(mailbox, request, opts) do
     timeout = Keyword.get(opts, :timeout, @step)
@@ -98,16 +195,19 @@ defmodule CodingAgentFramework.Mailbox do
   @impl true
   def init(opts) do
     with {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)),
-         {:ok, ddb} <- Delegates.Table.open(Keyword.fetch!(opts, :delegates_db)) do
+         {:ok, sdb} <- Sessions.Table.open(Keyword.fetch!(opts, :sessions_db)) do
       s = Map.new(~w(grants stream host)a, &{&1, Keyword.fetch!(opts, &1)})
       notify = Keyword.get(opts, :notify, fn _ -> :ok end)
-      {:ok, Map.merge(s, %{db: db, ddb: ddb, notify: notify}), {:continue, :read}}
+      # `calls`: row id to the call that took it; `waits`: key to the call waiting for it.
+      s = Map.merge(s, %{db: db, sdb: sdb, notify: notify, calls: %{}, waits: %{}})
+      {:ok, s, {:continue, :read}}
     else
       {:refused, reason} -> {:stop, reason}
     end
   end
 
-  # A restart settles what it finds marked, from Stream's rows read to the end of each log.
+  # A restart settles what it finds marked, from Stream's rows read to the end of each log; a
+  # row a call took finds no call in memory, and is due again.
   @impl true
   def handle_continue(:read, s) do
     Stream.read(s.stream, timeout: @step)
@@ -125,17 +225,15 @@ defmodule CodingAgentFramework.Mailbox do
            Enum.all?([from, to, text], &(is_binary(&1) and &1 != "")) or
              {:refused, {:bad, :message}},
          :ok <- Grants.may_message?(s.grants, from, to) do
-      # Send: the row first; delivery follows the reply.
-      id = Table.queued(s.db, from, to, text, Stream.uuid())
-      announce(s, id)
-      {:reply, {:ok, {:queued, id}}, s, {:continue, :settle}}
+      row = %{from: from, to: to, text: text, uuid: Stream.uuid(), kind: "msg"}
+      stored(s, Table.store(s.db, row))
     else
       refused -> {:reply, refused, s}
     end
   end
 
   # The key goes in `reply_to`, whose unique index takes one row per key; a key is never a
-  # message's uuid, since it carries its own prefix.
+  # row's uuid, since it carries its own prefix.
   def handle_call({:notify, to, text, key}, _from, s) do
     with true <-
            (Enum.all?([to, text], &(is_binary(&1) and &1 != "")) and
@@ -143,133 +241,297 @@ defmodule CodingAgentFramework.Mailbox do
          :ok <- Grants.may_use?(s.grants, to),
          # The operator is no agent: nothing would deliver to it.
          true <- to != Grants.operator(s.grants) or {:refused, {:not_an_agent, to}} do
-      case Table.reply(s.db, @framework, to, text, Stream.uuid(), key && "key:" <> key) do
-        nil ->
-          {:reply, {:ok, :stored_before}, s}
-
-        id ->
-          announce(s, id)
-          {:reply, {:ok, {:queued, id}}, s, {:continue, :settle}}
-      end
+      row = %{from: @framework, to: to, text: text, uuid: Stream.uuid(), kind: "msg"}
+      stored(s, Table.store(s.db, Map.put(row, :reply_to, key && "key:" <> key)))
     else
       refused -> {:reply, refused, s}
     end
   end
 
-  def handle_call({:status, id}, _from, s) do
-    reply =
-      with %{} = m <- Table.get(s.db, id) || {:refused, :no_message},
-           do:
-             {:ok,
-              %{
-                id: id,
-                from: m.from_agent,
-                to: m.to_agent,
-                status: m.status,
-                attempt: m.attempt,
-                reply_to: m.reply_to,
-                subtype: m.subtype,
-                is_error: %{1 => true, 0 => false}[m.is_error]
-              }}
-
-    {:reply, reply, s}
+  def handle_call({:store, row}, _from, s) do
+    if Enum.all?([row.from, row.to, row.text, row.uuid], &(is_binary(&1) and &1 != "")),
+      do: stored(s, Table.store(s.db, row)),
+      else: {:reply, {:refused, {:bad, :message}}, s}
   end
 
-  # Every open row, read against Stream's rows and Delegates' rows; a failed read decides nothing.
+  def handle_call({:ended, to}, _from, s) do
+    ids = for %{to_agent: ^to, status: "queued"} = m <- Table.open_rows(s.db), do: m.id
+    for id <- ids, do: write(s, %{id: id}, status: "ended")
+    {:reply, {:ok, ids}, s}
+  end
+
+  def handle_call({:await, to, key, deadline}, from, s) do
+    m = Table.answer(s.db, key)
+
+    cond do
+      Map.has_key?(s.waits, key) ->
+        {:reply, {:refused, :awaited}, s}
+
+      m != nil and m.status != "queued" ->
+        {:reply, {:refused, {:status, m.status}}, s}
+
+      true ->
+        # A call with no time left takes only a row it can take now, and never waits.
+        left = deadline - System.monotonic_time(:millisecond)
+        # The timer names this wait: one a take or a 0 ms answer canceled too late must not end
+        # a later wait on the same key.
+        ref = make_ref()
+        timer = Process.send_after(self(), {:waited, key, ref}, max(left, 0))
+        w = %{from: from, to: to, deadline: deadline, timer: timer, ref: ref}
+        s = put_in(s.waits[key], w)
+        s = take_waiting(s)
+
+        if left <= 0 and Map.has_key?(s.waits, key) do
+          Process.cancel_timer(timer)
+          {:reply, {:unknown, :timeout}, %{s | waits: Map.delete(s.waits, key)}}
+        else
+          {:noreply, s}
+        end
+    end
+  end
+
+  def handle_call({:told, id, written}, _from, s) do
+    case Table.get(s.db, id) do
+      %{status: "sending", via: "call"} = m ->
+        s = unwatch(s, id)
+
+        if written == :written do
+          write(s, m, status: "delivered")
+          {:reply, {:ok, :delivered}, s, {:continue, :settle}}
+        else
+          again(s, m, :write_failed)
+          {:reply, {:ok, :queued}, s, {:continue, :settle}}
+        end
+
+      %{status: status} ->
+        {:reply, {:refused, {:not_taken, status}}, s}
+
+      nil ->
+        {:reply, {:refused, :no_message}, s}
+    end
+  end
+
+  def handle_call({:status, id}, _from, s),
+    do: {:reply, shown(Table.get(s.db, id) || {:refused, :no_message}), s}
+
+  def handle_call({:answer_to, key}, _from, s),
+    do: {:reply, shown(Table.answer(s.db, key) || {:refused, :no_answer}), s}
+
+  def handle_call({:open_to, to}, _from, s),
+    do: {:reply, {:ok, for(%{to_agent: ^to} = m <- Table.open_rows(s.db), do: m.id)}, s}
+
+  @impl true
+  def handle_info({:waited, key, ref}, s) do
+    case s.waits[key] do
+      %{ref: ^ref, from: from} ->
+        GenServer.reply(from, {:unknown, :timeout})
+        {:noreply, %{s | waits: Map.delete(s.waits, key)}}
+
+      _stale ->
+        {:noreply, s}
+    end
+  end
+
+  # CallerSeen: the process that took a row ended before it said how its write went. The write
+  # may have reached the agent; the row is due again, for another transport.
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, s) do
+    case Enum.find(s.calls, fn {_id, r} -> r == ref end) do
+      {id, _} ->
+        s = %{s | calls: Map.delete(s.calls, id)}
+        with %{status: "sending", via: "call"} = m <- Table.get(s.db, id), do: again(s, m, :gone)
+        {:noreply, settle(s)}
+
+      nil ->
+        {:noreply, s}
+    end
+  end
+
+  defp stored(s, nil), do: {:reply, {:ok, :stored_before}, s}
+
+  defp stored(s, id) do
+    announce(s, id)
+    {:reply, {:ok, {:queued, id}}, s, {:continue, :settle}}
+  end
+
+  defp shown({:refused, _} = refused), do: refused
+
+  defp shown(m) do
+    keys = [:id, :kind, :status, :via, :attempt, :reply_to, :subtype]
+
+    {:ok,
+     Map.take(m, keys)
+     |> Map.merge(%{from: m.from_agent, to: m.to_agent, is_error: bool(m.is_error)})}
+  end
+
+  defp bool(n), do: %{1 => true, 0 => false}[n]
+
+  # Every open row, read against Stream's rows and Sessions' rows; a failed read decides nothing.
   defp settle(s) do
     with {:ok, %{rows: rows}} <- Stream.rows(s.stream, timeout: @step) do
       folds = Map.new(rows, &{&1.session, &1})
-      Enum.each(Table.open_rows(s.db), &settle_sending(s, &1, folds))
-      agents = Map.new(Delegates.Table.with_status(s.ddb, s.host, @delegates), &{&1.name, &1})
-      replies(s, folds, agents)
+
+      for %{status: "sending"} = m <- Table.open_rows(s.db),
+          do: settled(s, m, Transport.settle(m, %{fold: folds[m.session_id], calls: s.calls}))
+
+      replies(s, folds)
 
       Table.open_rows(s.db)
       |> Enum.group_by(& &1.to_agent)
-      |> Enum.each(fn {to, rows} -> deliver(s, rows, agents[to], folds) end)
+      |> Enum.each(fn {to, rows} -> deliver(s, rows, target(s, to, folds)) end)
     end
 
-    s
+    take_waiting(s)
   end
 
-  # DeliveryMarked by the replay; SendingSettled by the exit's settle, or by no mark at all.
-  defp settle_sending(s, %{status: "sending"} = m, folds) do
-    case Fold.outcome(folds[m.session_id] || %{messages: %{}}, m.uuid) do
-      :writing -> :ok
-      outcome when outcome in [:none, :undelivered] -> write(s, m, status: "queued")
-      _delivered -> write(s, m, status: "delivered", attempt: nil)
-    end
-  end
+  defp settled(_s, _m, :keep), do: :ok
+  defp settled(s, m, :delivered), do: write(s, m, status: "delivered", attempt: nil)
+  defp settled(s, m, :again), do: again(s, m, nil)
 
-  defp settle_sending(_s, _m, _folds), do: :ok
+  # Due again, first, under its same uuid.
+  defp again(s, m, why),
+    do: write(s, m, status: "queued", via: nil, at: nil, again: 1, attempt: why)
 
   # ReplyStored and NoticeStored: a delivered message's turn ended with a result that names it
   # (the fold keeps it on the message, so a later turn's never replaces it), or its process
-  # ended with none (`:exited`). Either one row goes to the main session under the message's
-  # uuid, whose unique index lets in one reply or one notice, across restarts and cues.
-  defp replies(s, folds, agents) do
+  # ended with none (`:exited`). Either one row goes to its sender under the message's uuid,
+  # whose unique index lets in one reply or one notice, across restarts and cues.
+  defp replies(s, folds) do
     for {sid, fold} <- folds,
         ended = for({u, _} <- fold.messages, turn_ended?(Fold.outcome(fold, u)), do: u),
         m <- Table.unanswered(s.db, sid, ended),
-        %{parent: main} <- [agents[m.to_agent]],
-        do: answer(s, m, main, Fold.outcome(fold, m.uuid))
+        to = sender(s, m),
+        do: answer(s, m, to, Fold.outcome(fold, m.uuid))
   end
+
+  # A message from `framework` is answered to the delegate's parent, the sender of its brief.
+  defp sender(s, %{from_agent: @framework} = m) do
+    case Table.brief(s.db, m.to_agent) do
+      %{from_agent: parent} -> parent
+      nil -> nil
+    end
+  end
+
+  defp sender(_s, m), do: m.from_agent
 
   defp turn_ended?({:result, _}), do: true
   defp turn_ended?(outcome), do: outcome == :exited
 
-  defp answer(s, m, main, {:result, r}),
-    do: stored(s, Table.reply(s.db, m.to_agent, main, r.text, Stream.uuid(), m.uuid, r))
+  defp answer(s, m, to, {:result, r}) do
+    row = %{from: m.to_agent, to: to, text: r.text, uuid: Stream.uuid(), kind: "reply"}
+    row = Map.merge(row, %{reply_to: m.uuid, subtype: r.subtype, is_error: r.is_error})
+    stored_quietly(s, Table.store(s.db, row))
+  end
 
-  defp answer(s, m, main, :exited),
-    do: stored(s, Table.reply(s.db, @framework, main, notice(m), Stream.uuid(), m.uuid))
+  defp answer(s, m, to, :exited) do
+    row = %{from: @framework, to: to, text: notice(m), uuid: Stream.uuid(), kind: "notice"}
+    stored_quietly(s, Table.store(s.db, Map.put(row, :reply_to, m.uuid)))
+  end
 
   defp notice(m),
     do:
       "Your message #{m.id} went in to #{m.to_agent}, and its process ended before it " <>
         "answered: no reply will come. Resume it to ask again."
 
-  defp stored(_s, nil), do: :ok
-  defp stored(s, id), do: announce(s, id)
+  defp stored_quietly(_s, nil), do: :ok
+  defp stored_quietly(s, id), do: announce(s, id)
 
-  # A main session: no delivery until Screen.
-  defp deliver(s, rows, nil, _folds) do
-    for m <- rows, m.attempt != ":no_delivery", do: write(s, m, attempt: :no_delivery)
-  end
+  # The addressee and its transport: a headless delegate, by its `Sessions` row's role, with
+  # the fold of its session; anything else has none until the waiter's unit.
+  defp target(s, to, folds) do
+    case Sessions.Table.get(s.sdb, s.host, to) do
+      %{role: "delegate", session_id: sid} = srow when is_binary(sid) ->
+        {:stream, srow, folds[sid]}
 
-  defp deliver(s, rows, d, folds) do
-    fold = folds[d.session_id]
+      %{role: "delegate"} ->
+        :not_started
 
-    cond do
-      # EndedFirst: queued rows only; a sending one is settled first.
-      ended?(d, fold) ->
-        for %{status: "queued"} = m <- rows, do: write(s, m, status: "ended")
-
-      Enum.any?(rows, &(&1.status == "sending")) or not ready?(d, fold) ->
-        :ok
-
-      true ->
-        typed(s, hd(rows), d)
+      _ ->
+        :none
     end
   end
 
-  # DeliveryAsked, then the write: refused leaves nothing marked in Stream (DeliveryRefused);
-  # unknown stays sending for Stream's row to settle.
-  defp typed(s, m, d) do
-    write(s, m, status: "sending", session_id: d.session_id)
+  defp deliver(s, rows, :none) do
+    for %{status: "queued"} = m <- rows,
+        m.attempt != ":no_delivery",
+        do: write(s, m, attempt: :no_delivery)
+  end
 
-    case Stream.write(s.stream, d.session_id, {:message, m.uuid, m.text}, timeout: @step) do
+  defp deliver(_s, _rows, :not_started), do: :ok
+
+  defp deliver(s, rows, {:stream, srow, fold}) do
+    cond do
+      # EndedFirst: queued rows only; a sending one is settled first.
+      match?(%{gone: true, ending: true}, fold) ->
+        for %{status: "queued"} = m <- rows, do: write(s, m, status: "ended")
+
+      # One row in flight per addressee.
+      Enum.any?(rows, &(&1.status == "sending")) or not ready?(srow, fold) ->
+        :ok
+
+      true ->
+        mark(s, hd(rows), srow.session_id, fold.resumes)
+    end
+  end
+
+  # Mark, then the hand-on: refused undoes the mark (nothing was marked in Stream); unknown
+  # stays sending for Stream's fold to settle.
+  defp mark(s, m, sid, at) do
+    write(s, m, status: "sending", via: "stream", session_id: sid, at: at)
+
+    case Stream.write(s.stream, sid, {:message, m.uuid, m.text}, timeout: @step) do
       {:ok, _} -> :ok
-      {:refused, why} -> write(s, m, status: "queued", attempt: why)
+      {:refused, why} -> write(s, m, status: "queued", via: nil, at: nil, attempt: why)
       {:unknown, why} -> write(s, m, attempt: why)
     end
   end
 
-  # Its brief's turn ended with its report held, and its process takes a line now.
-  defp ready?(%{status: "finished"}, %{} = f), do: f.idle and not f.gone and not f.ending
-  defp ready?(_d, _fold), do: false
+  # Into an ended turn of the current process only, never to a session whose row is stopping.
+  defp ready?(%{status: "running"}, %{} = f), do: f.idle and not f.gone and not f.ending
+  defp ready?(_srow, _fold), do: false
 
-  defp ended?(%{status: "refused"}, _fold), do: true
-  defp ended?(_d, fold), do: match?(%{gone: true, ending: true}, fold)
+  # The call transport's take: each waiting call whose row is due, first among its addressee's
+  # rows from its sender, with none to it in flight, takes it now, before its deadline.
+  defp take_waiting(s) do
+    Enum.reduce(s.waits, s, fn {key, w}, s ->
+      with %{status: "queued", to_agent: to} = m <- Table.answer(s.db, key),
+           true <- to == w.to and first?(s, m) do
+        take(s, key, w, m)
+      else
+        _ -> s
+      end
+    end)
+  end
+
+  defp first?(s, m) do
+    rows = for %{to_agent: to} = r <- Table.open_rows(s.db), to == m.to_agent, do: r
+
+    not Enum.any?(rows, &(&1.status == "sending")) and
+      not Enum.any?(rows, fn r ->
+        r.id != m.id and r.status == "queued" and r.from_agent == m.from_agent and
+          (r.again > m.again or (r.again == m.again and r.id < m.id))
+      end)
+  end
+
+  defp take(s, key, w, m) do
+    Process.cancel_timer(w.timer)
+    s = %{s | waits: Map.delete(s.waits, key)}
+
+    if System.monotonic_time(:millisecond) < w.deadline do
+      write(s, m, status: "sending", via: "call", at: nil, attempt: nil)
+      {pid, _tag} = w.from
+      GenServer.reply(w.from, {:ok, %{id: m.id, from: m.from_agent, kind: m.kind, text: m.text}})
+      put_in(s.calls[m.id], Process.monitor(pid))
+    else
+      GenServer.reply(w.from, {:unknown, :timeout})
+      s
+    end
+  end
+
+  defp unwatch(s, id) do
+    {ref, calls} = Map.pop(s.calls, id)
+    if ref, do: Process.demonitor(ref, [:flush])
+    %{s | calls: calls}
+  end
 
   defp write(s, m, fields) do
     Table.update(s.db, m.id, fields)

@@ -21,12 +21,12 @@ defmodule CodingAgentFramework.Delegates.TurnTest do
     assert {:refused, {:bad, :cap}} = Turn.check(projects, "zero", "unit/one")
   end
 
-  test "a brief goes in once: written, it waits for its turn's result" do
-    assert {:write, "b1", "do it"} = Turn.next(@row, fold(%{}))
+  test "a brief's turn waits for its result; the brief itself is Mailbox's to write" do
+    assert :waiting = Turn.next(@row, fold(%{}))
     assert :waiting = Turn.next(@row, fold(%{"b1" => %{state: :writing}}))
     assert :waiting = Turn.next(@row, fold(%{"b1" => %{state: :delivered}}, false))
 
-    assert {:finished, "r"} =
+    assert {:finished, %{text: "r"}} =
              Turn.next(@row, fold(%{"b1" => %{state: :delivered}}, true, result("r", "b1")))
   end
 
@@ -34,11 +34,12 @@ defmodule CodingAgentFramework.Delegates.TurnTest do
     # KillSeen under the resume's uuid: the brief's replay and the follow again's idle are old.
     fold = fold(%{"b1" => %{state: :delivered}}, true, result("half", "b1"))
     resumed = %{@row | resume_uuid: "r1"}
-    assert {:write, "r1", text} = Turn.next(resumed, fold)
+    assert :waiting = Turn.next(resumed, fold)
+    assert {"r1", text} = Turn.message(resumed)
     assert text == Turn.resumed()
     assert :waiting = Turn.next(resumed, put_in(fold.messages["r1"], %{state: :writing}))
 
-    assert {:finished, "r"} =
+    assert {:finished, %{text: "r"}} =
              Turn.next(
                resumed,
                Fold.upgrade(%{
@@ -49,14 +50,14 @@ defmodule CodingAgentFramework.Delegates.TurnTest do
              )
   end
 
-  test "a brief found undelivered goes again under its uuid; a gone process with none is exited" do
-    assert {:write, "b1", "do it"} = Turn.next(@row, fold(%{"b1" => %{state: :undelivered}}))
+  test "a brief found undelivered waits for Mailbox's resend; a gone process with none is exited" do
+    assert :waiting = Turn.next(@row, fold(%{"b1" => %{state: :undelivered}}))
     assert :exited = Turn.next(@row, %{fold(%{"b1" => %{state: :undelivered}}) | gone: true})
     # A turn whose message went in but whose result never came, as a kill leaves it.
     assert :exited = Turn.next(@row, %{fold(%{"b1" => %{state: :delivered}}, false) | gone: true})
     # A finish, then an exit: the result came first.
     done = %{fold(%{"b1" => %{state: :delivered}}, true, result(nil, "b1")) | gone: true}
-    assert {:finished, ""} = Turn.next(@row, done)
+    assert {:finished, %{text: ""}} = Turn.next(@row, done)
   end
 
   test "a result that names another message is not this turn's" do

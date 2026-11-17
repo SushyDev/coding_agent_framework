@@ -15,16 +15,12 @@ defmodule CafMailbox.MixProject do
 
   defp deps do
     [
-      {:caf_delegates, in_umbrella: true},
       {:caf_grants, in_umbrella: true},
+      {:caf_sessions, in_umbrella: true},
       {:caf_stream, in_umbrella: true},
       {:caf_store, in_umbrella: true},
       {:exqlite, "~> 0.43.0", only: :test},
-      {:caf_accounts, in_umbrella: true, only: :test},
-      {:caf_sessions, in_umbrella: true, only: :test},
-      {:caf_test, in_umbrella: true, only: :test},
-      {:caf_transcripts, in_umbrella: true, only: :test},
-      {:caf_usage, in_umbrella: true, only: :test}
+      {:caf_test, in_umbrella: true, only: :test}
     ]
   end
 end

@@ -348,7 +348,7 @@ defmodule CodingAgentFramework.TranscriptsTest do
       programs = TestHost.programs(TestHost.host(), %{tail: "/nonexistent/tail"})
       {:ok, t} = Transcripts.start_link(Keyword.put(ctx.opts, :programs, programs))
       File.write!(ctx.path, prompt("p2", "more") <> "\n", [:append])
-      assert {:ok, %{ids: [], failed: [{"s1", {:sh, 127, _}}]}} = Transcripts.read(t)
+      assert {:ok, %{ids: [], failed: [{"a", "s1", {:sh, 127, _}}]}} = Transcripts.read(t)
       assert {:ok, %{prompts: [_]}} = Transcripts.session(t, "a", "s1")
       assert {:refused, :unknown_session} = Transcripts.contains(t, "a", "nope", "m", "t", 0)
     end

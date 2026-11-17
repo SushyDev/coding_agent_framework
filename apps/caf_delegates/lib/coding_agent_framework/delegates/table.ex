@@ -6,17 +6,17 @@ defmodule CodingAgentFramework.Delegates.Table do
   `status` is `starting` and `resuming` while a call of `Sessions` is under way (`called_at`,
   in wall-clock ms, tells that call's `Sessions` row from an earlier one; `deadline` is the
   wall-clock time it is settled by), then `running`, then `finished` or `failed` once, or
-  `refused` with its `reason`. A `finished` delegate whose report was answered is `ended` once
-  its process is gone, which frees its parent's cap. `brief_uuid` and `resume_uuid` are the uuids the turn's message
-  goes in under, chosen before it is written. `report` is `none`, then `held` with its `text`
-  and its `mark`, or `answering` once a call that waited on it took it (`run_delegate`), then
-  `answered` once that call's answer reached its agent, or `held` again when it did not; the
-  delivery unit adds `sending` and `delivered`. `options` is the delegate's own launch options
-  as JSON (`ClaudeCLI.Options.encode/1`), or NULL for none.
+  `refused` with its `reason`. A `finished` delegate whose report was delivered is `ended` once
+  its process is gone, which frees its parent's cap. `brief_uuid` and `resume_uuid` are the
+  uuids of `Mailbox`'s rows of the brief and of the word to go on, chosen before they are
+  stored. `report` is `none`, then `held` with its `text` until `Mailbox` takes it, then
+  `taken`; how it is delivered is `Mailbox`'s row, the reply to `brief_uuid`. `mark` is no
+  longer written (a row an earlier build wrote may hold one). `options` is the delegate's own
+  launch options as JSON (`ClaudeCLI.Options.encode/1`), or NULL for none.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "doc.db")
       iex> {:ok, db} = CodingAgentFramework.Delegates.Table.open(path)
-      iex> CodingAgentFramework.Delegates.Table.held(db, "laptop", "main")
+      iex> CodingAgentFramework.Delegates.Table.rows(db, "laptop")
       []
   """
 
@@ -70,10 +70,6 @@ defmodule CodingAgentFramework.Delegates.Table do
         host | statuses
       ])
 
-  @doc "The host's rows whose report is `report`."
-  @spec with_report(db, String.t(), String.t()) :: [map]
-  def with_report(db, host, report), do: select(db, "host = ?1 AND report = ?2", [host, report])
-
   @doc "How many of `parent`'s delegates hold its cap: started, or starting, and not ended."
   @spec active(db, String.t(), String.t()) :: non_neg_integer
   def active(db, host, parent),
@@ -88,11 +84,6 @@ defmodule CodingAgentFramework.Delegates.Table do
           ]
         )
       )
-
-  @doc "`parent`'s held reports, oldest first."
-  @spec held(db, String.t(), String.t()) :: [map]
-  def held(db, host, parent),
-    do: select(db, "host = ?1 AND parent = ?2 AND report = 'held'", [host, parent])
 
   @doc "Row `id`, or nil."
   @spec get(db, integer) :: map | nil

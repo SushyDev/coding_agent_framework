@@ -84,7 +84,8 @@ defmodule CodingAgentFramework.Transcripts do
 
   @doc """
   Reads these `{account, session_id, path}` transcripts now, or every session read before with
-  `:known`. Answers `{:ok, %{ids: ids, failed: [{session_id, reason}]}}`. A read records a read
+  `:known`. Answers `{:ok, %{ids: ids, failed: [{account, session_id, reason}]}}`; a session id a
+  move copied is in two accounts, so a failure names both. A read records a read
   of each account it names, and `:known` of every account.
   """
   @spec read(GenServer.server(), [{String.t(), String.t(), String.t()}] | :known, keyword) ::
@@ -252,7 +253,7 @@ defmodule CodingAgentFramework.Transcripts do
              Map.put(folds, key, s)}
 
           {_, reason} ->
-            {puts, [{sid, reason} | failed], folds}
+            {puts, [{account, sid, reason} | failed], folds}
         end
       end)
 

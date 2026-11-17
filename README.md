@@ -137,11 +137,13 @@ Built, each from a checked model in `model/tla/`:
 - the remodel's first units: `Store`, the SQLite table code every writer shares (R1), and
   `Reader`, the loop every reader runs, with one `Registry` and one `Transcripts` per host over
   every account (R2), and `Holder.Process`, one record of a held program, with a session ended
-  by SIGTERM (R3).
+  by SIGTERM (R3); `Claim` and `Hold` in the model (R4); one hold in `Intake`, with the waiting
+  Stop hook (R5); `Delivery` in the model, and the move rewritten with a message in flight
+  (R6); and `Mailbox` delivering a delegate's brief, its word to go on and its report as rows,
+  by its stream and to a waiting `run_delegate` (R7, part 1).
 
-Next, the rest of the remodel, in order (F-115, taken in F-116): `Claim` and `Hold` in the
-model (R4); one hold in `Intake`, with the waiting Stop hook (R5); `Delivery` in the model, and the move rewritten with a message in flight
-(R6); `Mailbox` delivering everything, reports included (R7); the `Inlet`, the checked typed
+Next, the rest of the remodel, in order (F-115, taken in F-116): `Mailbox`'s waiter transport,
+a main session's delivery (R7, part 2); the `Inlet`, the checked typed
 write (R8); the agent row and the tree in `Sessions` (R9); `Acts`, one ledger of claims,
 recoveries and faults (R10); `Cues`, the library's own routing (R11); and `Mover` (R12). Then
 interactive delegates and main sessions, the mechanisms an app's policies stand on (an idle
@@ -230,7 +232,8 @@ flowchart BT
   delegates --> stream
   delegates --> sessions
   delegates --> transcripts
-  mailbox --> delegates
+  delegates --> mailbox
+  mailbox --> sessions
   mailbox --> grants
   mailbox --> stream
   mcp --> grants

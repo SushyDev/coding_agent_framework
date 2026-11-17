@@ -20,25 +20,21 @@ defmodule CodingAgentFramework.MCPTest do
       {:ok, {:queued, 7}}
     end
 
-    # A `Delegates` whose every report is ready at once; it tells the test what it was told.
+    # A `Delegates` whose every start answers at once, and a `Mailbox` whose every report is
+    # ready at once; each tells the test what it was told.
     def start_delegate(test, parent, _project, branch, _model, _brief, _opts) do
       send(test, {:start, parent, branch})
-      {:ok, %{id: 9, name: "app-" <> String.replace(branch, "/", "-")}}
+      {:ok, %{id: 9, name: "app-" <> String.replace(branch, "/", "-"), brief_uuid: "b9"}}
     end
 
-    def await_report(test, _parent, id, left) do
-      send(test, {:await, id, left})
-      {:ok, %{id: id, name: "app-unit-one", status: "finished", text: "done"}}
+    def await(test, _to, key, left) do
+      send(test, {:await, key, left})
+      {:ok, %{id: 4, from: "app-unit-one", kind: "reply", text: "done"}}
     end
 
-    def answered(test, id) do
-      send(test, {:answered, id})
-      {:ok, :answered}
-    end
-
-    def release(test, id) do
-      send(test, {:release, id})
-      {:ok, :held}
+    def told(test, id, written) do
+      send(test, {:told, id, written})
+      {:ok, if(written == :written, do: :delivered, else: :queued)}
     end
   end
 
@@ -336,8 +332,8 @@ defmodule CodingAgentFramework.MCPTest do
              MCP.call(mcp, "app-main", "run_delegate", run_delegate(539_999))
 
     assert_received {:start, "app-main", "unit/one"}
-    # A caller in this process has the answer in hand: the report is answered at once.
-    assert_received {:answered, 9}
+    # A caller in this process has the answer in hand: the report is told written at once.
+    assert_received {:told, 4, :written}
 
     for {opts, name} <- [{[margin: 0], "m0"}, {[margin: 600_000], "m1"}, {[tool_timeout: 1], "t"}] do
       assert {:error, {{:bad, :tool_timeout}, _}} =
@@ -345,15 +341,15 @@ defmodule CodingAgentFramework.MCPTest do
     end
   end
 
-  test "a report written to the agent is answered; one whose write fails is held again",
+  test "a report written to the agent is delivered; one whose write fails is due again",
        %{mcp: mcp, tokens: t} do
     params = %{name: "run_delegate", arguments: run_delegate(10_000)}
 
     assert %{"ok" => %{"report" => "done"}} =
              tool(mcp, t["app-main"], "run_delegate", params.arguments)
 
-    assert_received {:answered, 9}
-    refute_received {:release, _}
+    assert_received {:told, 4, :written}
+    refute_received {:told, _, :failed}
 
     body = JSON.encode!(%{jsonrpc: "2.0", id: 2, method: "tools/call", params: params})
 
@@ -363,10 +359,10 @@ defmodule CodingAgentFramework.MCPTest do
 
     conn = %{conn | adapter: {BrokenSocket, elem(conn.adapter, 1)}}
 
-    # The server sees the write's own error, after the report is held again.
+    # The server sees the write's own error, after the report is made due again.
     assert_raise ArgumentError, "closed", fn -> MCP.Plug.call(conn, MCP.Plug.init(mcp: mcp)) end
-    assert_received {:release, 9}
-    refute_received {:answered, _}
+    assert_received {:told, 4, :failed}
+    refute_received {:told, _, :written}
     assert [%{state: "answered"}, %{state: "answered"}] = Enum.take(MCP.calls(mcp), -2)
   end
 
