@@ -53,7 +53,8 @@ defmodule CodingAgentFramework.Mailbox do
   `queued` rows are settled `ended`.
 
   It reads every open row again at its start, at each `cue/2` (of `Stream`, `Sessions`,
-  `Delegates` and `Intake`'s waiters) and at a waiter row's take bound; after each write
+  `Delegates`, `Transcripts` and `Intake`'s waiters, as `reads/0` declares; a waiter row's
+  transcript only on the last two) and at a waiter row's take bound; after each write
   `notify` gets `%{topic: "mailbox", ids: [id]}`.
   """
 
@@ -205,8 +206,25 @@ defmodule CodingAgentFramework.Mailbox do
   def open_to(mailbox, to, opts \\ []),
     do: call(mailbox, {:open_to, to, Keyword.get(opts, :status, :open)}, opts)
 
-  @doc "Hands it a reader's cue: every open row is read again. Answers `:ok` at once."
-  def cue(mailbox, %{topic: _}), do: GenServer.cast(mailbox, :cue)
+  @doc """
+  Hands it a reader's cue: every open row is read again. A `waiter` row's lines are read from
+  its transcript only on a `transcripts:` cue or a waiter's (and at its take bound): the other
+  cues leave it as it is. Answers `:ok` at once.
+  """
+  def cue(mailbox, %{topic: topic}) when is_binary(topic),
+    do: GenServer.cast(mailbox, {:cue, transcript?(topic)})
+
+  @doc "What `Mailbox` reads, for `Cues` (see `cue/2`)."
+  @spec reads() :: %{topics: [String.t()], cue: (pid, map -> :ok)}
+  def reads do
+    %{
+      topics: ~w(stream sessions delegates transcripts intake:*:*:waiters),
+      cue: &cue/2
+    }
+  end
+
+  defp transcript?("transcripts:" <> _), do: true
+  defp transcript?(topic), do: String.ends_with?(topic, ":waiters")
 
   defp store(mailbox, row), do: call(mailbox, {:store, row}, [])
 
@@ -252,13 +270,13 @@ defmodule CodingAgentFramework.Mailbox do
         is_integer(at),
         do: bound(s, at)
 
-    {:noreply, settle(s)}
+    {:noreply, settle(s, true)}
   end
 
   def handle_continue(:settle, s), do: {:noreply, settle(s)}
 
   @impl true
-  def handle_cast(:cue, s), do: {:noreply, settle(s)}
+  def handle_cast({:cue, transcript?}, s), do: {:noreply, settle(s, transcript?)}
 
   @impl true
   def handle_call({:message, from, to, text}, _from, s) do
@@ -369,7 +387,7 @@ defmodule CodingAgentFramework.Mailbox do
 
   # A waiter's row reached its take bound: settled now, by the transcript as it is.
   @impl true
-  def handle_info(:bound, s), do: {:noreply, settle(s)}
+  def handle_info(:bound, s), do: {:noreply, settle(s, true)}
 
   def handle_info({:waited, key, ref}, s) do
     case s.waits[key] do
@@ -416,11 +434,14 @@ defmodule CodingAgentFramework.Mailbox do
   defp bool(n), do: %{1 => true, 0 => false}[n]
 
   # Every open row, read against Stream's rows and Sessions' rows; a failed read decides nothing.
-  defp settle(s) do
+  # A waiter's row is read against its transcript only when `transcript?` (F-127's new-1): on a
+  # cue of the transcripts or the waiters, at its take bound and at the start.
+  defp settle(s, transcript? \\ false) do
     with {:ok, %{rows: rows}} <- Stream.rows(s.stream, timeout: @step) do
       folds = Map.new(rows, &{&1.session, &1})
 
-      for %{status: "sending"} = m <- Table.open_rows(s.db) do
+      for %{status: "sending"} = m <- Table.open_rows(s.db),
+          m.via != "waiter" or transcript? do
         evidence = %{fold: folds[m.session_id], calls: s.calls}
 
         evidence =

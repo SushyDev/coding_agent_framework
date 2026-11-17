@@ -4,7 +4,7 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
   dtach and tmux in this test's own directory, the interactive stand-in for Claude Code, and
   `WaiterStandIn` for Claude Code's side of the waiter: the hook the start put into the
   session's overlay, run at each turn's end, and the transcript lines it makes. `Intake`'s
-  waiter cue reaches `Mailbox` as the embedding app routes it. Each test names the
+  waiter cue reaches `Mailbox` as `Cues` routes it. Each test names the
   `Delivery.tla` property it checks.
   """
   use ExUnit.Case, async: true
@@ -26,7 +26,7 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
     ]
 
     db = Path.join(ctx.dir, "caf.db")
-    # The app's routing: Intake's waiter cue goes to the Mailbox of the moment.
+    # As `Cues` routes them: Intake's cues go to the Mailbox of the moment.
     route = start_supervised!(Supervisor.child_spec({Agent, fn -> nil end}, id: :route))
 
     notify = fn cue ->
@@ -174,10 +174,10 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
 
   defp mailbox(ctx), do: Process.get(:mailbox, ctx.mailbox)
 
-  # Cues Mailbox as the app would on a reader's cue; a call after the cast answers once it is
-  # handled.
+  # Cues Mailbox as `Cues` would on a transcript's cue, the one a waiter row's lines are read
+  # on; a call after the cast answers once it is handled.
   defp cue(ctx) do
-    Mailbox.cue(mailbox(ctx), %{topic: "sessions:test:work", ids: []})
+    Mailbox.cue(mailbox(ctx), %{topic: "transcripts:test:work", ids: []})
     Mailbox.status(mailbox(ctx), 0)
   end
 

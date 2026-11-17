@@ -8,7 +8,7 @@ defmodule CodingAgentFramework.Tracker do
   At start it reads every source in full, so a restarted `Tracker` comes back from the tables
   alone.
 
-  A reader's cue (`cue/2`, which an embedding app wires to the reader's `notify:`) names a topic and
+  A reader's cue (`cue/2`, which `Cues` hands it for every topic) names a topic and
   row ids; the `Tracker` re-reads those rows from the table by id. A cue is never the data, so
   cues may come late, twice, out of order or before their rows. A cue for a source still
   `:unread`, or one with no list of ids, re-reads the whole topic; a cue for an unknown topic,
@@ -52,6 +52,10 @@ defmodule CodingAgentFramework.Tracker do
   @doc "Hands the `Tracker` a reader's cue. Never raises and never waits."
   @spec cue(GenServer.server(), term) :: :ok
   def cue(tracker, cue), do: GenServer.cast(tracker, {:cue, cue})
+
+  @doc "What the `Tracker` reads, for `Cues`: every cue; one of no source's topic is dropped."
+  @spec reads() :: %{topics: :all, cue: (pid, term -> :ok)}
+  def reads, do: %{topics: :all, cue: &cue/2}
 
   @doc "The state per `{host, account}` (`Fold.view/2`), with each source's newest read re-read."
   @spec view(GenServer.server(), keyword) :: {:ok, map} | {:refused, term} | {:unknown, term}

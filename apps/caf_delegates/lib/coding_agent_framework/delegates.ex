@@ -61,8 +61,7 @@ defmodule CodingAgentFramework.Delegates do
   interrupt or an answer, the resume path above for a resume, `Sessions.stop/3` for a stop.
 
   Only each name's latest row moves; an older one is history. It reads every row again when it
-  starts and at each `cue/2`; the embedding app wires the cues of `Sessions`, `Stream`,
-  `Transcripts` and `Mailbox` to it. After each write `notify` gets `%{topic:
+  starts and at each `cue/2`: `Cues` hands it the topics `reads/0` declares. After each write `notify` gets `%{topic:
   "delegates:<host>", ids: [id]}`.
 
   **Migration** (F-129): a table an earlier build made holds each delegate's parent and
@@ -152,6 +151,13 @@ defmodule CodingAgentFramework.Delegates do
 
   @doc "Hands it a reader's cue: every row is read again. Answers `:ok` at once."
   def cue(delegates, %{topic: _}), do: GenServer.cast(delegates, :cue)
+
+  @doc """
+  What `Delegates` reads, for `Cues`: a stream's events and a transcript's lines (a turn's end
+  and its report), the agent rows (a start or an end) and `Mailbox`'s rows (a report taken).
+  """
+  @spec reads() :: %{topics: [String.t()], cue: (pid, map -> :ok)}
+  def reads, do: %{topics: ~w(stream transcripts sessions mailbox), cue: &cue/2}
 
   defp call(delegates, request, opts, default) do
     timeout = Keyword.get(opts, :timeout, default)

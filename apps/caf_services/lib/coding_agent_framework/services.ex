@@ -37,7 +37,7 @@ defmodule CodingAgentFramework.Services do
   the service when it is handed (`hand/4`). A start that settles after its owner's end reads
   that end (the `:ended` option) as it writes `running`, and is taken the same way.
 
-  **After a restart of the framework**, at its start and at each `cue/2`, in `Services`' own
+  **After a restart of the framework**, at its start, on its interval and at `cue/2`, in `Services`' own
   process: a row `asked` is `refused` (nothing was sent); one `starting` past its
   `start_until` is read once, made `running` or `refused`, and its copy's turn given back; one
   `ending` or `restarting` is sent its end again (KILL past its `end_until`) and is `ended` once
@@ -52,7 +52,7 @@ defmodule CodingAgentFramework.Services do
 
   use GenServer
 
-  alias CodingAgentFramework.{Acts, Grants, Holder, Programs, Shell}
+  alias CodingAgentFramework.{Acts, Grants, Holder, Programs, Reader, Shell}
   alias CodingAgentFramework.Copies.Held
   alias CodingAgentFramework.Services.Table
 
@@ -117,7 +117,9 @@ defmodule CodingAgentFramework.Services do
   in (`{name, value}` pairs, none by default); `:workstation`, the name of the host forwards
   are held on (its programs also with `lsof`); and optionally `:acts`, the instance's `Acts`,
   where each `stop/4` of a running service and each `restart/4` is a row, act `service_stop`
-  or `service_restart`, target `service:<name>`.
+  or `service_restart`, target `service:<name>`; `:interval` (ms between settles, as `cue/2`
+  settles; without it, rows settle only at its start and at `cue/2`); and `:notify`, a function
+  of one cue: after each write of a row it gets `%{topic: "services", ids: [name]}`.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -514,7 +516,10 @@ defmodule CodingAgentFramework.Services do
   @spec list(GenServer.server()) :: [map] | {:unknown, term}
   def list(services), do: call(services, :rows)
 
-  @doc "Hands `Services` a host reader's cue: rows a restart left are settled. Answers `:ok`."
+  @doc """
+  Settles the rows a restart or a call left, now, as each tick of its interval does. No other
+  part's cue says that a host changed, so `Services` reads no topic. Answers `:ok` at once.
+  """
   @spec cue(GenServer.server(), map) :: :ok
   def cue(services, %{topic: _}), do: GenServer.cast(services, :cue)
 
@@ -913,7 +918,7 @@ defmodule CodingAgentFramework.Services do
       for %{state: "asked"} = row <- Table.all(db),
           do: Table.put(db, %{row | state: "refused", owner: nil})
 
-      {:ok, %{db: db, config: config}, {:continue, :settle}}
+      {:ok, Map.merge(%{db: db, config: config}, Reader.loop(opts)), {:continue, :settle}}
     else
       {:error, reason} -> {:stop, {:dir, reason}}
       refused -> {:stop, refused}
@@ -927,6 +932,16 @@ defmodule CodingAgentFramework.Services do
   def handle_cast(:cue, s), do: {:noreply, settle(s)}
 
   @impl true
+  def handle_info(:tick, s), do: {:noreply, Reader.tick(s, &{:ok, settle(&1)})}
+
+  # Every write of a row after the start: the row, then its cue.
+  defp written(s, row) do
+    :ok = Table.put(s.db, row)
+    s.notify.(%{topic: "services", ids: [row.name]})
+    :ok
+  end
+
+  @impl true
   def handle_call(:config, _from, s), do: {:reply, {:ok, s.config}, s}
   def handle_call(:rows, _from, s), do: {:reply, Table.all(s.db), s}
   def handle_call({:get, name}, _from, s), do: {:reply, Table.get(s.db, name), s}
@@ -938,7 +953,7 @@ defmodule CodingAgentFramework.Services do
 
       _ ->
         case local_holder(s.db, row) do
-          nil -> {:reply, Table.put(s.db, row), s}
+          nil -> {:reply, written(s, row), s}
           holder -> {:reply, {:refused, {:local_taken, holder}}, s}
         end
     end
@@ -970,7 +985,7 @@ defmodule CodingAgentFramework.Services do
       row ->
         if Map.take(row, Map.keys(expect)) == expect do
           row = Map.merge(row, fields)
-          Table.put(s.db, row)
+          :ok = written(s, row)
           {:ok, row}
         else
           {:refused, {:changed, Map.take(row, Map.keys(expect))}}

@@ -20,7 +20,7 @@ defmodule CodingAgentFramework.Stream do
 
   use GenServer
 
-  alias CodingAgentFramework.{Holder, Programs, Shell}
+  alias CodingAgentFramework.{Holder, Programs, Reader, Shell}
   alias CodingAgentFramework.Stream.{Fold, Line, Table}
 
   @timeout 5_000
@@ -50,7 +50,8 @@ defmodule CodingAgentFramework.Stream do
   @doc """
   Starts a `Stream`. Options: `programs:` (naming sh, rm, cat, tail, mkdir and mkfifo),
   `holder:` (the `Holder` whose sockets hold the delegates), `home:` (the framework home on the
-  host), `db:`, and optionally `notify:` and `timeout:` (ms per shell run, default 5 s).
+  host), `db:`, and optionally `notify:`, `interval:` (ms between reads, as `read/2` reads;
+  without it, reads happen only on `read/2`) and `timeout:` (ms per shell run, default 5 s).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -181,10 +182,10 @@ defmodule CodingAgentFramework.Stream do
          p: paths,
          holder: %Holder{} = Keyword.fetch!(opts, :holder),
          home: Keyword.fetch!(opts, :home),
-         notify: Keyword.get(opts, :notify, fn _ -> :ok end),
          timeout: Keyword.get(opts, :timeout, @timeout),
          delegates: Table.delegates(db, host.name)
-       }}
+       }
+       |> Map.merge(Reader.loop(opts))}
     else
       {:refused, reason} -> {:stop, reason}
     end
@@ -232,6 +233,26 @@ defmodule CodingAgentFramework.Stream do
   end
 
   def handle_call(:read, _from, s) do
+    {reply, s} = read_now(s)
+    {:reply, reply, s}
+  end
+
+  def handle_call(:rows, _from, s), do: {:reply, Table.rows(s.db, s.host.name), s}
+
+  def handle_call({:log, session, from}, _from, s) do
+    with %{fold: fold} <- s.delegates[session] || {:refused, :not_followed},
+         at = with({:last, n} <- from, do: max(fold.offset - n, 0)),
+         {:ok, bytes} <- tail(s, Path.join(dir(s.home, session), "events.jsonl"), at) do
+      {:reply, {:ok, %{bytes: bytes, from: at}}, s}
+    else
+      other -> {:reply, other, s}
+    end
+  end
+
+  @impl true
+  def handle_info(:tick, s), do: {:noreply, Reader.tick(s, &read_now/1)}
+
+  defp read_now(s) do
     {s, ids, failed} =
       Enum.reduce(s.delegates, {s, [], []}, fn
         {_session, %{fold: %{gone: true}}}, acc ->
@@ -250,19 +271,7 @@ defmodule CodingAgentFramework.Stream do
     if written != [], do: s.notify.(%{topic: topic(s), ids: written})
     # Claim again what a restart left marked or spooled, for a live delegate only.
     s = Enum.reduce(Map.keys(s.delegates), s, &reclaim(&2, &1))
-    {:reply, {:ok, %{ids: written, failed: Enum.reverse(failed)}}, s}
-  end
-
-  def handle_call(:rows, _from, s), do: {:reply, Table.rows(s.db, s.host.name), s}
-
-  def handle_call({:log, session, from}, _from, s) do
-    with %{fold: fold} <- s.delegates[session] || {:refused, :not_followed},
-         at = with({:last, n} <- from, do: max(fold.offset - n, 0)),
-         {:ok, bytes} <- tail(s, Path.join(dir(s.home, session), "events.jsonl"), at) do
-      {:reply, {:ok, %{bytes: bytes, from: at}}, s}
-    else
-      other -> {:reply, other, s}
-    end
+    {{:ok, %{ids: written, failed: Enum.reverse(failed)}}, s}
   end
 
   defp read_one(s, session, d) do
