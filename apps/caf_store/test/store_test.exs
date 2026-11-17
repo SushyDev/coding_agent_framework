@@ -73,6 +73,23 @@ defmodule CodingAgentFramework.StoreTest do
     assert Store.convert(db, "t", [:a]) == 0
   end
 
+  # F-130's new-2: a reader's reads table has no `id`; its problem converts by `rowid`, at the
+  # reader's open.
+  test "a reader's open converts the columns its meta names, in a table keyed by scope" do
+    schema = "CREATE TABLE IF NOT EXISTS r (host TEXT PRIMARY KEY, problem TEXT);"
+    meta = %{schema: schema, convert: [{"r", [:problem]}]}
+    path = path()
+    {:ok, db} = Store.open(path, schema)
+    Store.upsert(db, "r", host: "h", problem: "{:unreadable, :eacces}")
+    Store.upsert(db, "r", host: "g", problem: "not_json")
+    {:ok, db} = CodingAgentFramework.Reader.open(meta, path)
+
+    assert Store.select(db, "r", [:host, :problem], "1 = 1 ORDER BY host", []) == [
+             %{host: "g", problem: "not_json"},
+             %{host: "h", problem: ~s(["unreadable","eacces"])}
+           ]
+  end
+
   test "upsert writes a row in place of the one with its key" do
     {:ok, db} = Store.open(path(), @schema)
     Store.upsert(db, "t", id: 1, host: "h", a: "x")

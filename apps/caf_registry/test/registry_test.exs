@@ -121,7 +121,7 @@ defmodule CodingAgentFramework.RegistryTest do
 
       put(dir, "7.json", binary_part(good, 0, 20))
       assert {:ok, %{problems: 1, ids: [^id]}} = Registry.read(reg)
-      assert %{name: "alpha", session_id: "s7", problem: ":not_json"} = by_file(reg)["7.json"]
+      assert %{name: "alpha", session_id: "s7", problem: "not_json"} = by_file(reg)["7.json"]
 
       put(dir, "7.json", good)
       assert {:ok, %{problems: 0, ids: [^id]}} = Registry.read(reg)

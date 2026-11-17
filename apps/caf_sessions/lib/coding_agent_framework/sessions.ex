@@ -191,7 +191,8 @@ defmodule CodingAgentFramework.Sessions do
   `kind:`, `parent:` and `project:` (the module doc's "The agent row"; a delegate with no parent
   is refused `{:missing, :parent}`, a main session with one `{:bad, :parent}`); and
   `ClaudeCLI.session/3`'s `claude:`, `model:`, `env:`, `tool_timeout:`, `prompt:` and `mcp:` (the agent's own MCP config),
-  and `options:`, kept on the row, which a resume that names none takes again. Option:
+  and `options:`, kept on the row with the model, each of which a resume that names none takes
+  again. Option:
   `:timeout`, to which a worktree's start adds its setup's deadline and its git commands'
   bounds.
 
@@ -438,13 +439,15 @@ defmodule CodingAgentFramework.Sessions do
 
   @impl true
   def handle_call({{:start, name, account, launch, resume}, timeout}, from, state) do
+    launch = model(state, name, resume, launch)
+
     with :ok <- free(state, name),
          {:ok, place} <- place(state, name, launch),
          {:ok, role} <- Keyword.fetch(launch, :role) |> required(:role),
          {:ok, agent} <- agent(state, name, role, launch, place, resume),
          {:ok, way} <- way(state, role, account, name, place.cwd, resume, launch),
          deadline = state.clock.() + timeout + budget(place.tree),
-         row = new_row(state, name, account, role, place, resume, way, deadline),
+         row = new_row(state, name, account, role, place, resume, way, deadline, launch),
          row = Map.merge(row, agent),
          row = Map.put(row, :release, release(state, role, launch)),
          {:ok, viewer} <- viewer_command(state, row),
@@ -1210,6 +1213,17 @@ defmodule CodingAgentFramework.Sessions do
     ClaudeCLI.session(role, account, opts)
   end
 
+  # The model a start launches: the launch's, or on a resume that names none, its row's (F-133's
+  # new-3), so a resume another part makes needs not know it.
+  defp model(state, name, resume, launch) do
+    with true <- resume != nil and launch[:model] == nil,
+         %{model: model} when is_binary(model) <- Table.get(state.db, state.host.name, name) do
+      Keyword.put(launch, :model, model)
+    else
+      _ -> launch
+    end
+  end
+
   # The agent's own options, before its row: the launch's, or on a resume that names none, its
   # row's. A start refused after the overlay's write leaves the file for the next to rewrite.
   # An interactive session's waiter hook goes into its overlay beside the agent's own settings;
@@ -1273,7 +1287,7 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   # The start's row before it has an id.
-  defp new_row(state, name, account, role, place, resume, way, deadline) do
+  defp new_row(state, name, account, role, place, resume, way, deadline, launch) do
     %{
       host: state.host.name,
       name: name,
@@ -1285,6 +1299,7 @@ defmodule CodingAgentFramework.Sessions do
       deadline: deadline,
       session_id: way[:session_id],
       options: Options.encode(way.options),
+      model: launch[:model],
       repo: place.tree && place.tree.project.repo,
       branch: place.tree && place.tree.branch
     }

@@ -159,8 +159,10 @@ defmodule CodingAgentFramework.Acts do
   def get(acts, id, opts \\ []), do: call(acts, {:get, id}, opts)
 
   @doc """
-  The rows whose columns equal `filter`'s values (a list is any of them), oldest first:
-  `rows(acts, actor: "operator", status: ["claimed", "acted"])`.
+  The rows whose columns equal `filter`'s values (a list is any of them, nil is NULL), oldest
+  first: `rows(acts, actor: "operator", status: ["claimed", "acted"])`. `since: at` keeps the
+  rows claimed, acted, ended or cleared at `at` or later, so a reader of a ledger that keeps
+  every row reads what changed in its window, not every row (F-126's new-5).
   """
   @spec rows(GenServer.server(), keyword, keyword) :: answer([map])
   def rows(acts, filter \\ [], opts \\ []), do: call(acts, {:rows, filter, false}, opts)
@@ -336,7 +338,7 @@ defmodule CodingAgentFramework.Acts do
 
   def handle_call({:rows, filter, faults}, _from, s) do
     reply =
-      case Keyword.keys(filter) -- Table.columns() do
+      case Keyword.keys(filter) -- [:since | Table.columns()] do
         [] ->
           {where, args} = where(filter)
           rows = Table.select(s.db, where, args)
@@ -384,10 +386,22 @@ defmodule CodingAgentFramework.Acts do
 
   defp where(filter) do
     {clauses, args} =
-      Enum.reduce(filter, {[], []}, fn {k, v}, {clauses, args} ->
-        values = List.wrap(v)
-        marks = Store.marks(length(values), length(args) + 1)
-        {clauses ++ ["#{k} IN (#{marks})"], args ++ values}
+      Enum.reduce(filter, {[], []}, fn
+        {:since, at}, {clauses, args} ->
+          n = length(args) + 1
+
+          times =
+            Enum.map_join(~w(claimed_at acted_at ended_at cleared_at), " OR ", &"#{&1} >= ?#{n}")
+
+          {clauses ++ ["(#{times})"], args ++ [at]}
+
+        {k, nil}, {clauses, args} ->
+          {clauses ++ ["#{k} IS NULL"], args}
+
+        {k, v}, {clauses, args} ->
+          values = List.wrap(v)
+          marks = Store.marks(length(values), length(args) + 1)
+          {clauses ++ ["#{k} IN (#{marks})"], args ++ values}
       end)
 
     {if(clauses == [], do: "1 = 1", else: Enum.join(clauses, " AND ")), args}

@@ -22,13 +22,19 @@ defmodule CodingAgentFramework.Sessions.Table do
   and its `branch`, with `cwd` the worktree's path, and `worktree` says what the start did with
   it (`added`, `reused`) and, after a restart, whether it was `removed` or why it was kept.
   `options` is the agent's own launch options as JSON (`ClaudeCLI.Options.encode/1`), or NULL
-  for none. `release` is the Claude Code release an interactive start launched, as its
-  `--version` reads, or NULL when it was not read.
+  for none. `model` is the model the start launched (`--model`), or NULL when its launch named
+  none; a resume whose launch names none takes it again, as it takes `options`, so a move or a
+  recovery gives the same launch (F-133's new-3). `release` is the Claude Code release an
+  interactive start launched, as its `--version` reads, or NULL when it was not read.
 
   **A move** (F-133, `Mover`): `move` is the move's phase (`draining`, `stopping`, `copying`,
   `resuming`), NULL when no move is under way; `move_from` and `move_to` the accounts it goes
   between, `move_act` its row in `Acts`, and `move_deadline` (wall-clock ms) when a move not yet
   past its stop is given up. A start writes none of them, so a move's resume keeps them.
+
+  **Indexes.** Nothing is pruned (an ended delegate keeps its row), so each hot read has one:
+  by name (the unique key), by status (each settle), by cwd (a start's check that no other
+  process holds it), by parent (a parent's delegates) and by move (the moves under way).
 
   **Migration** (F-129): a file an earlier build made has `held_sessions`, with no kind, parent
   or project. `open/1` takes its rows into `agents`, ids kept, each of kind `delegate` when it
@@ -46,7 +52,7 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   @columns ~w(id host name kind parent project socket account role cwd resume status reason
               viewer pid session_id proc_start started_at updated_at deadline repo branch
-              worktree options release move move_from move_to move_act move_deadline)a
+              worktree options model release move move_from move_to move_act move_deadline)a
 
   @schema """
   CREATE TABLE IF NOT EXISTS agents (
@@ -54,15 +60,20 @@ defmodule CodingAgentFramework.Sessions.Table do
     parent TEXT, project TEXT, socket TEXT NOT NULL, account TEXT, role TEXT, cwd TEXT,
     resume TEXT, status TEXT NOT NULL, reason TEXT, viewer TEXT, pid INTEGER, session_id TEXT,
     proc_start TEXT, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deadline INTEGER,
-    repo TEXT, branch TEXT, worktree TEXT, options TEXT, release TEXT, move TEXT,
+    repo TEXT, branch TEXT, worktree TEXT, options TEXT, model TEXT, release TEXT, move TEXT,
     move_from TEXT, move_to TEXT, move_act INTEGER, move_deadline INTEGER, UNIQUE (host, name));
+  CREATE INDEX IF NOT EXISTS agents_status ON agents (host, status);
+  CREATE INDEX IF NOT EXISTS agents_cwd ON agents (host, cwd);
+  CREATE INDEX IF NOT EXISTS agents_parent ON agents (host, parent);
+  CREATE INDEX IF NOT EXISTS agents_move ON agents (host, move);
   """
 
   # The columns a later build added to `agents`, so added if missing: the release a session
-  # runs (R8), and a move's phase on the row (F-133).
+  # runs (R8), a move's phase on the row (F-133), and the model (F-136).
   @added [
     agents: [
       "release TEXT",
+      "model TEXT",
       "move TEXT",
       "move_from TEXT",
       "move_to TEXT",
@@ -147,7 +158,7 @@ defmodule CodingAgentFramework.Sessions.Table do
 
       old =
         @columns --
-          ([:kind, :parent, :project, :release] ++
+          ([:kind, :parent, :project, :release, :model] ++
              [:move, :move_from, :move_to, :move_act, :move_deadline])
 
       Store.transaction(db, fn ->
@@ -188,7 +199,7 @@ defmodule CodingAgentFramework.Sessions.Table do
 
     keys =
       ~w(host name kind parent project socket account role cwd resume session_id deadline repo
-         branch options release)a
+         branch options model release)a
 
     fields =
       Enum.map(keys, &{&1, start[&1]}) ++ [status: "starting", started_at: now, updated_at: now]
@@ -265,6 +276,14 @@ defmodule CodingAgentFramework.Sessions.Table do
   @doc "The host's rows, oldest first."
   @spec rows(db, String.t()) :: [row]
   def rows(db, host), do: select(db, "host = ?1", [host])
+
+  @doc "The host's rows whose parent is `parent`, oldest first."
+  @spec children(db, String.t(), String.t()) :: [row]
+  def children(db, host, parent), do: select(db, "host = ?1 AND parent = ?2", [host, parent])
+
+  @doc "The host's rows a move is under way for, oldest first."
+  @spec moving(db, String.t()) :: [row]
+  def moving(db, host), do: select(db, "host = ?1 AND move IS NOT NULL", [host])
 
   @doc "The rows with these ids; an id with no row is absent."
   @spec rows_by_id(db, [integer]) :: [row]

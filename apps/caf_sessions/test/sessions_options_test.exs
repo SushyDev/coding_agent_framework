@@ -29,13 +29,17 @@ defmodule CodingAgentFramework.SessionsOptionsTest do
     {:ok, _} = await(fn -> if Holder.state(ctx.holder, "o1") == {:ok, :absent}, do: {:ok, 1} end)
     File.rm!(Path.join([ctx.dir, "argv", id]))
 
-    # The resume names no options: those of the row are given again.
-    assert {:ok, _} =
-             Sessions.resume(ctx.sessions, "o1", ctx.account, id, headless(ctx, :at_start))
+    assert %{model: "opus"} = Table.get(ctx.table, "test", "o1")
+
+    # The resume names no options and no model: those of the row are given again (F-133's
+    # new-3), as a resume another part makes (a move, a recovery) has them.
+    launch = Keyword.delete(headless(ctx, :at_start), :model)
+    assert {:ok, _} = Sessions.resume(ctx.sessions, "o1", ctx.account, id, launch)
 
     {:ok, again} = await(fn -> if a = HeadlessStandIn.argv(ctx.dir, id), do: {:ok, a} end)
     assert Enum.chunk_every(again, 5, 1) |> Enum.member?(flags)
-    assert Table.get(ctx.table, "test", "o1").options == kept
+    assert Enum.chunk_every(again, 2, 1) |> Enum.member?(["--model", "opus"])
+    assert %{options: ^kept, model: "opus"} = Table.get(ctx.table, "test", "o1")
   end
 
   defp start(ctx, launch), do: Sessions.start(ctx.sessions, "o1", ctx.account, launch)

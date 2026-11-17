@@ -48,6 +48,7 @@ defmodule CodingAgentFramework.Usage.Table do
       data: @data,
       read: [:read_at],
       view: &assumed/2,
+      convert: [{"usage_readings", [:problem]}],
       topic: "usage",
       kind: :usage,
       name: :account

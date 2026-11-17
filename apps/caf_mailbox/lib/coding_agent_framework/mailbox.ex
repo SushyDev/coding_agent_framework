@@ -20,7 +20,10 @@ defmodule CodingAgentFramework.Mailbox do
   **The mark.** Per addressee, while no row to it is `sending`, the first `queued` row (one made
   due again first, then the oldest) is marked `sending` with its transport and the process it
   is for, then handed on. A refusal undoes the mark; an unknown answer keeps it for the
-  evidence. The transport is the addressee's:
+  evidence. The hand-on runs in a task of its own, whose answer comes back as a message, so
+  `message/5`, `status/3` and every other call answer while a write (a typed one takes seconds)
+  runs; the row is `sending` meanwhile and no evidence settles it until the answer is in
+  (`Delivery.tla`'s `hand`). The transport is the addressee's:
 
   - `stream`, for a headless delegate (its agent row, read through `Sessions.Agents`): only
     into an ended turn of its current process (`Stream`'s fold idle, live, no end marked, its
@@ -285,8 +288,10 @@ defmodule CodingAgentFramework.Mailbox do
       typed =
         if opts[:inlet], do: %{inlet: opts[:inlet], registry: Keyword.fetch!(opts, :registry)}
 
-      # `calls`: row id to the call that took it; `waits`: key to the call waiting for it.
+      # `calls`: row id to the call that took it; `waits`: key to the call waiting for it;
+      # `hands`: a hand-on's task ref to the row it hands on and what its answer writes.
       s = Map.merge(s, %{db: db, agents: agents, notify: notify, calls: %{}, waits: %{}})
+      s = Map.put(s, :hands, %{})
       {:ok, Map.merge(s, %{waiter: waiter, typed: typed}), {:continue, :read}}
     else
       {:refused, reason} -> {:stop, reason}
@@ -427,6 +432,16 @@ defmodule CodingAgentFramework.Mailbox do
   @impl true
   def handle_info(:bound, s), do: {:noreply, settle(s, true)}
 
+  # A hand-on's answer: the row is settled by it as the transport says, and evidence reads it
+  # again from the next settle on.
+  # An answer that kept the mark is settled at once: evidence that came in meanwhile was left.
+  # A refusal waits for the next cue, as the row did before its mark.
+  def handle_info({ref, answer}, %{hands: hands} = s) when is_map_key(hands, ref) do
+    Process.demonitor(ref, [:flush])
+    s = handed(s, ref, answer)
+    if match?({:refused, _}, answer), do: {:noreply, s}, else: {:noreply, s, {:continue, :settle}}
+  end
+
   def handle_info({:waited, key, ref}, s) do
     case s.waits[key] do
       %{ref: ^ref, from: from} ->
@@ -440,6 +455,11 @@ defmodule CodingAgentFramework.Mailbox do
 
   # CallerSeen: the process that took a row ended before it said how its write went. The write
   # may have reached the agent; the row is due again, for another transport.
+  # A hand-on's task ended with no answer: the write may have gone in, as an unknown answer.
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{hands: hands} = s)
+      when is_map_key(hands, ref),
+      do: {:noreply, handed(s, ref, {:unknown, {:exit, reason}}), {:continue, :settle}}
+
   def handle_info({:DOWN, ref, :process, _pid, _reason}, s) do
     case Enum.find(s.calls, fn {_id, r} -> r == ref end) do
       {id, _} ->
@@ -478,7 +498,10 @@ defmodule CodingAgentFramework.Mailbox do
     with {:ok, %{rows: rows}} <- Stream.rows(s.stream, timeout: @step) do
       folds = Map.new(rows, &{&1.session, &1})
 
+      handing = handing(s)
+
       for %{status: "sending"} = m <- Table.open_rows(s.db),
+          not MapSet.member?(handing, m.id),
           m.via != "waiter" or transcript? do
         evidence = %{fold: folds[m.session_id], calls: s.calls}
 
@@ -496,10 +519,39 @@ defmodule CodingAgentFramework.Mailbox do
 
       Table.open_rows(s.db)
       |> Enum.group_by(& &1.to_agent)
-      |> Enum.each(fn {to, rows} -> deliver(s, rows, target(s, to, folds)) end)
+      |> Enum.reduce(s, fn {to, rows}, s -> deliver(s, rows, target(s, to, folds)) end)
+      |> take_waiting()
+    else
+      _ -> take_waiting(s)
     end
+  end
 
-    take_waiting(s)
+  defp handing(s), do: MapSet.new(Map.values(s.hands), fn {m, _} -> m.id end)
+
+  defp handed(s, ref, answer) do
+    {{m, after_hand}, hands} = Map.pop(s.hands, ref)
+    s = %{s | hands: hands}
+    after_hand.(s, m, answer)
+    s
+  end
+
+  # The hand-on, in a task: `hand_on` runs there, and `after_hand` writes its answer here. The
+  # task is linked, so it ends with this process; the row is then settled by its transport's
+  # restart policy. `hand_on` answers its part's outcome; a raise, throw or exit in it is an
+  # unknown answer, since the write may have gone in.
+  defp hand_on(s, m, hand_on, after_hand) do
+    task =
+      Task.async(fn ->
+        try do
+          hand_on.()
+        rescue
+          e -> {:unknown, {:raised, e.__struct__}}
+        catch
+          kind, _ -> {:unknown, {kind, :hand_on}}
+        end
+      end)
+
+    put_in(s.hands[task.ref], {m, after_hand})
   end
 
   defp settled(_s, _m, :keep), do: :ok
@@ -587,10 +639,12 @@ defmodule CodingAgentFramework.Mailbox do
     for %{status: "queued"} = m <- rows,
         m.attempt != "no_delivery",
         do: write(s, m, attempt: :no_delivery)
+
+    s
   end
 
-  defp deliver(_s, _rows, :not_started), do: :ok
-  defp deliver(_s, _rows, :moving), do: :ok
+  defp deliver(s, _rows, :not_started), do: s
+  defp deliver(s, _rows, :moving), do: s
 
   # An agent that ended takes nothing: no process of it runs again (EndedNotDelivered). A brief
   # stored since its end is a later start's, stored before `Sessions` writes that start, and
@@ -599,6 +653,8 @@ defmodule CodingAgentFramework.Mailbox do
     for %{status: "queued"} = m <- rows,
         m.kind != "brief" or m.created_at <= at,
         do: write(s, m, status: "ended")
+
+    s
   end
 
   defp deliver(s, rows, {:stream, srow, fold}) do
@@ -606,10 +662,11 @@ defmodule CodingAgentFramework.Mailbox do
       # EndedFirst: queued rows only; a sending one is settled first.
       match?(%{gone: true, ending: true}, fold) ->
         for %{status: "queued"} = m <- rows, do: write(s, m, status: "ended")
+        s
 
       # One row in flight per addressee.
       Enum.any?(rows, &(&1.status == "sending")) or not ready?(srow, fold) ->
-        :ok
+        s
 
       true ->
         mark(s, hd(rows), srow.session_id, fold.resumes)
@@ -627,10 +684,10 @@ defmodule CodingAgentFramework.Mailbox do
 
     cond do
       Enum.any?(rows, &(&1.status == "sending")) ->
-        :ok
+        s
 
       not Agents.running?(srow) or not is_integer(srow.pid) or not is_binary(srow.session_id) ->
-        :ok
+        s
 
       true ->
         interactive(s, m, srow, waiter?(s, srow))
@@ -644,9 +701,15 @@ defmodule CodingAgentFramework.Mailbox do
 
     cond do
       # Only a waiter known absent: an unread one may be there, and its turn not ended.
-      held == {:ok, false} and s.typed != nil and not refused -> type(s, m, srow)
-      m.attempt != "no_waiter" and not refused -> write(s, m, attempt: :no_waiter)
-      true -> :ok
+      held == {:ok, false} and s.typed != nil and not refused ->
+        type(s, m, srow)
+
+      m.attempt != "no_waiter" and not refused ->
+        write(s, m, attempt: :no_waiter)
+        s
+
+      true ->
+        s
     end
   end
 
@@ -654,12 +717,18 @@ defmodule CodingAgentFramework.Mailbox do
   # stays sending for Stream's fold to settle.
   defp mark(s, m, sid, at) do
     write(s, m, status: "sending", via: "stream", session_id: sid, at: at)
+    stream = s.stream
 
-    case Stream.write(s.stream, sid, {:message, m.uuid, m.text}, timeout: @step) do
-      {:ok, _} -> :ok
-      {:refused, why} -> write(s, m, status: "queued", via: nil, at: nil, attempt: why)
-      {:unknown, why} -> write(s, m, attempt: why)
-    end
+    hand_on(
+      s,
+      m,
+      fn -> Stream.write(stream, sid, {:message, m.uuid, m.text}, timeout: @step) end,
+      fn
+        _s, _m, {:ok, _} -> :ok
+        s, m, {:refused, why} -> write(s, m, status: "queued", via: nil, at: nil, attempt: why)
+        s, m, {:unknown, why} -> write(s, m, attempt: why)
+      end
+    )
   end
 
   # Mark, then the hand-on, as `mark/4`; the transcript's offset read before the mark bounds
@@ -669,19 +738,29 @@ defmodule CodingAgentFramework.Mailbox do
     mark = [status: "sending", via: "waiter", session_id: srow.session_id, at: srow.pid]
     write(s, m, mark ++ [from_byte: from, sent_at: nil])
     text = Transport.Waiter.text(m.text, m.uuid)
+    intake = s.waiter.intake
 
-    case Intake.deliver(s.waiter.intake, srow.account, srow.session_id, text, timeout: @step) do
-      {:ok, :sent} ->
-        write(s, m, sent_at: now(), attempt: nil)
-        bound(s, now())
+    hand_on(
+      s,
+      m,
+      fn -> Intake.deliver(intake, srow.account, srow.session_id, text, timeout: @step) end,
+      &sent/3
+    )
+  end
 
-      {:refused, why} ->
-        write(s, m, status: "queued", via: nil, at: nil, attempt: why)
+  # A waiter's or typed write's answer: sent or unknown starts the take bound, refused undoes
+  # the mark.
+  defp sent(s, m, {:ok, :sent}) do
+    write(s, m, sent_at: now(), attempt: nil)
+    bound(s, now())
+  end
 
-      {:unknown, why} ->
-        write(s, m, sent_at: now(), attempt: why)
-        bound(s, now())
-    end
+  defp sent(s, m, {:refused, why}),
+    do: write(s, m, status: "queued", via: nil, at: nil, sent_at: nil, attempt: why)
+
+  defp sent(s, m, {:unknown, why}) do
+    write(s, m, sent_at: now(), attempt: why)
+    bound(s, now())
   end
 
   defp waiter?(%{waiter: %{intake: nil}}, _srow), do: {:ok, false}
@@ -700,27 +779,22 @@ defmodule CodingAgentFramework.Mailbox do
         mark = [status: "sending", via: "typed", session_id: srow.session_id, at: srow.pid]
         write(s, m, mark ++ [from_byte: from, sent_at: now() + @inlet])
         text = Transport.Typed.text(m.text, m.uuid)
-        turn = fn -> turn_now(s, srow.name, srow.pid) end
+        reads = Map.take(s, [:agents, :typed, :waiter])
+        turn = fn -> turn_now(reads, srow.name, srow.pid) end
+        inlet = s.typed.inlet
 
-        case Inlet.type(s.typed.inlet, srow.name, text,
-               release: srow.release,
-               turn: turn,
-               timeout: @inlet
-             ) do
-          {:ok, :sent} ->
-            write(s, m, sent_at: now(), attempt: nil)
-            bound(s, now())
-
-          {:refused, why} ->
-            write(s, m, status: "queued", via: nil, at: nil, sent_at: nil, attempt: why)
-
-          {:unknown, why} ->
-            write(s, m, sent_at: now(), attempt: why)
-            bound(s, now())
-        end
+        hand_on(
+          s,
+          m,
+          fn ->
+            Inlet.type(inlet, srow.name, text, release: srow.release, turn: turn, timeout: @inlet)
+          end,
+          &sent/3
+        )
 
       {:refused, why} ->
         if m.attempt != Store.text(why), do: write(s, m, attempt: why)
+        s
     end
   end
 

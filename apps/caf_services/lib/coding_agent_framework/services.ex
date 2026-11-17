@@ -106,6 +106,8 @@ defmodule CodingAgentFramework.Services do
   @max_input 65_536
   # The pause between a wait's rounds of reads.
   @round 100
+  # The actor of an end that follows an owner's end: the embedding app's consequence of it.
+  @app "app"
 
   @doc """
   Starts the part. Options: `:dir`, a directory of this machine of its own (the table);
@@ -117,7 +119,7 @@ defmodule CodingAgentFramework.Services do
   in (`{name, value}` pairs, none by default); `:workstation`, the name of the host forwards
   are held on (its programs also with `lsof`); and optionally `:acts`, the instance's `Acts`,
   where each `stop/4` of a running service and each `restart/4` is a row, act `service_stop`
-  or `service_restart`, target `service:<name>`; `:interval` (ms between settles, as `cue/2`
+  or `service_restart`, target `service:<name>`, and so is an end `owner_ended/3` makes; `:interval` (ms between settles, as `cue/2`
   settles; without it, rows settle only at its start and at `cue/2`); and `:notify`, a function
   of one cue: after each write of a row it gets `%{topic: "services", ids: [name]}`.
   """
@@ -267,14 +269,14 @@ defmodule CodingAgentFramework.Services do
   # running process (its pid, start time and restart count) before `run` acts, and settled by
   # its answer (`Acts.answered/4`). A second fix of that process is refused `{:claimed, by}`
   # or `{:already_claimed, by}`, and acts on nothing.
-  defp as_act(services, caller, row, act, run) do
+  defp as_act(services, caller, row, act, run, also \\ %{}) do
     with {:ok, config} <- call(services, :config) do
       case config.acts do
         nil ->
           run.()
 
         acts ->
-          state = %{pid: row.pid, started: row.started, restarts: row.restarts}
+          state = Map.merge(%{pid: row.pid, started: row.started, restarts: row.restarts}, also)
 
           with {:ok, id} <- Acts.claim(acts, caller, "service:" <> row.name, state, act) do
             answer = run.()
@@ -491,6 +493,10 @@ defmodule CodingAgentFramework.Services do
   owns with `keep` goes to its parent; each other one ends, as `stop/4` ends it, with its
   options. Answers each service's outcome by name: `{:ok, {:handed, parent}}`, `{:ok,
   :ended}`, or what its end answered. A service whose start is under way is not taken.
+
+  With `:acts`, the end of a running service is a row of its own (F-130's new-3): actor `app`,
+  act `service_stop`, target `service:<name>`, and as its state the service's process with the
+  owner's end (`owner_ended: owner`), so it never takes the claim of the owner's own stop.
   """
   @spec owner_ended(GenServer.server(), String.t(), keyword) :: {:ok, map} | {:unknown, term}
   def owner_ended(services, owner, opts \\ []) do
@@ -509,7 +515,15 @@ defmodule CodingAgentFramework.Services do
   end
 
   defp owner_end(services, _grants, row, opts) do
-    with {:ok, _} <- end_service(services, row, %{state: "ending"}, opts), do: {:ok, :ended}
+    run = fn -> end_service(services, row, %{state: "ending"}, opts) end
+
+    # An end sent again (the row `ending`) goes on with the act its first call claimed.
+    answer =
+      if row.state == "running",
+        do: as_act(services, @app, row, :service_stop, run, %{owner_ended: row.owner}),
+        else: run.()
+
+    with {:ok, _} <- answer, do: {:ok, :ended}
   end
 
   @doc "Every service's row."

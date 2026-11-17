@@ -13,7 +13,9 @@ defmodule CodingAgentFramework.Acts.Table do
   `start_id` (the framework start that wrote it), `status`, `outcome` and `reason` (once
   settled), `answer` and `detail` (what the act answered, and what that answer carries, such as
   a pane), and the times `claimed_at`, `acted_at`, `ended_at` and `cleared_at` (a person's
-  clear). Every term is stored by `Store.text/1`.
+  clear). Every term is stored by `Store.text/1`. Nothing is pruned, so each hot read has an index:
+  an actor's open rows (`acts_open`), its rows that wait for a person by reason
+  (`acts_reason`), and its rows of one target over time (`acts_target`).
 
   Opening also takes the rows of the two tables `Acts` replaces (F-126): the `recoveries` table
   in the same file, and the `claims` table of an older claims file, each converted and then
@@ -33,6 +35,9 @@ defmodule CodingAgentFramework.Acts.Table do
     ended_at INTEGER, cleared_at INTEGER);
   CREATE UNIQUE INDEX IF NOT EXISTS acts_state ON acts (target, state);
   CREATE INDEX IF NOT EXISTS acts_actor ON acts (actor, act);
+  CREATE INDEX IF NOT EXISTS acts_open ON acts (actor, status);
+  CREATE INDEX IF NOT EXISTS acts_reason ON acts (actor, reason);
+  CREATE INDEX IF NOT EXISTS acts_target ON acts (actor, target, claimed_at);
   """
 
   @type db :: Store.db()

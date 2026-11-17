@@ -50,7 +50,7 @@ defmodule CodingAgentFramework.UsageSourceTest do
     File.write!(file, ~s({"rate_limits": {"seven))
     assert {:ok, %{problems: 1}} = Usage.read(usage)
     {:ok, %{readings: %{"work" => kept}}} = Usage.readings(usage)
-    assert %{kept | problem: nil} == reading and kept.problem == ":not_json"
+    assert %{kept | problem: nil} == reading and kept.problem == "not_json"
 
     {:ok, source} =
       TableSource.open(

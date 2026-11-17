@@ -200,6 +200,22 @@ defmodule CodingAgentFramework.MCPServicesTest do
     assert restart.state =~ ~s("restarts":0) and stop.state =~ ~s("restarts":1)
   end
 
+  # F-130's new-3: the end an owner's end makes is a row of its own, actor `app`, with the
+  # owner's end in its state; a kept service handed to the parent is no end, and no row.
+  test "an owner's end that ends its service is an act of the app", c do
+    assert %{"ok" => %{"owner" => "app-fix"}} = start(c, "app-fix")
+
+    assert {:ok, %{"db" => {:ok, :ended}}} = Services.owner_ended(c.services, "app-fix")
+    assert {:ok, [row]} = Acts.rows(c.acts, target: "service:db")
+    assert %{actor: "app", act: "service_stop", status: "settled", outcome: "verified"} = row
+    assert row.state =~ ~s("owner_ended":"app-fix") and row.state =~ ~s("restarts":0)
+
+    # Once ended, a second owner's end finds nothing to take, and writes nothing.
+    assert {:ok, ends} = Services.owner_ended(c.services, "app-fix")
+    assert ends == %{}
+    assert {:ok, [_]} = Acts.rows(c.acts, target: "service:db")
+  end
+
   test "bad arguments are refused before anything runs", c do
     bad = %{"refused" => ["bad", "args"]}
     bash = program!(:bash)

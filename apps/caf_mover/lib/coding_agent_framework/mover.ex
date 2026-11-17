@@ -68,7 +68,7 @@ defmodule CodingAgentFramework.Mover do
   file, read through `Sessions.Agents`), `mailbox:`, `accounts:` (an `Accounts`), `usage:`,
   `acts:`, and `launch:`, a function of an agent row that answers `{:ok, launch}` for its
   resume on another account (`Sessions.resume/6`'s: its role and its `cwd:` or `worktree:`,
-  `claude:`, `model:`, `env:`, `tool_timeout:`, `mcp:`), a refusal (the move then goes back, as
+  `claude:`, `env:`, `tool_timeout:`, `mcp:`; with no `model:` the row's is taken), a refusal (the move then goes back, as
   for a refused resume), or `{:unknown, reason}` (asked again at the next cue). Optionally `timeout:`
   (ms, 30 min by default), `stop:` (ms, each stop's own deadline, 30 s by default) and `clock:`
   (wall-clock ms).
@@ -227,7 +227,7 @@ defmodule CodingAgentFramework.Mover do
     if to in s.accounts.names, do: {:ok, to}, else: {:refused, {:unknown_account, to}}
   end
 
-  defp moving(s), do: Enum.filter(Agents.rows(s.agents), &Agents.moving?/1)
+  defp moving(s), do: Agents.moving(s.agents)
 
   defp steps(s, why), do: Enum.reduce(moving(s), s, &step(&2, &1, why))
 

@@ -14,6 +14,7 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
   alias CodingAgentFramework.{Accounts, Grants, Intake, Mailbox, Sessions, SessionsSetup}
   alias CodingAgentFramework.{Transcripts, WaiterStandIn}
   alias CodingAgentFramework.Mailbox.{Table, Transport}
+  alias CodingAgentFramework.MailboxWaiterTest.HeldIntake
 
   doctest Transport.Waiter
 
@@ -155,6 +156,34 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
       )
   end
 
+  # F-132's new-2: the hand-on runs in a task. While a stand-in `Intake` holds it, `Mailbox`
+  # still answers its calls, the row is `sending`, and no other row to the session is marked.
+  test "answers its calls while a hand-on runs, the row sending meanwhile", ctx do
+    main(ctx)
+    GenServer.stop(ctx.mailbox)
+    held = start_supervised!({HeldIntake, self()})
+    m = restart(Map.put(ctx, :mopts, Keyword.put(ctx.mopts, :intake, held)))
+    {:ok, {:queued, one}} = Mailbox.message(m, "d1", "main", "held one")
+    assert_receive {:held, from, text}, 5_000
+    assert text =~ "held one"
+
+    {:ok, {:queued, two}} = Mailbox.message(m, "d1", "main", "after it")
+    assert {:ok, %{status: "sending", via: "waiter"}} = Mailbox.status(m, one)
+    assert {:ok, %{status: "queued"}} = Mailbox.status(m, two)
+    assert %{sent_at: nil} = Table.get(ctx.mtable, one)
+
+    # The answer comes back as a message: the take bound starts from it.
+    GenServer.reply(from, {:ok, :sent})
+
+    {:ok, _} =
+      await(fn ->
+        with %{sent_at: at} when is_integer(at) <- Table.get(ctx.mtable, one), do: {:ok, at}
+      end)
+
+    assert {:ok, %{status: "queued"}} = Mailbox.status(m, two)
+    refute_received {:held, _, _}
+  end
+
   # The waiter's hook in a main session's start: the overlay carries it beside the account's.
   defp main(ctx) do
     {:ok, %{pid: pid, session_id: sid}} =
@@ -188,5 +217,25 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
     cue(ctx)
     row = Table.get(ctx.mtable, id)
     if ready?.(row), do: {:ok, row}, else: row
+  end
+end
+
+defmodule CodingAgentFramework.MailboxWaiterTest.HeldIntake do
+  @moduledoc false
+  # Plays `Intake` for one test: every session has a waiter, and a delivery's answer waits for
+  # the test, which gets the caller to answer it.
+  use GenServer
+
+  def start_link(test), do: GenServer.start_link(__MODULE__, test)
+
+  @impl true
+  def init(test), do: {:ok, test}
+
+  @impl true
+  def handle_call({:waiter?, _account, _session}, _from, test), do: {:reply, {:ok, true}, test}
+
+  def handle_call({:deliver, _account, _session, text}, from, test) do
+    send(test, {:held, from, text})
+    {:noreply, test}
   end
 end

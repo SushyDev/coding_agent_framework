@@ -24,6 +24,8 @@ defmodule CodingAgentFramework.TmuxSampler.Join do
       :no_server
   """
 
+  alias CodingAgentFramework.Store
+
   @type last :: %{
           up: boolean,
           generation: non_neg_integer,
@@ -98,7 +100,7 @@ defmodule CodingAgentFramework.TmuxSampler.Join do
 
     problem_rows =
       for entry <- pane_problems ++ held_problems, into: %{} do
-        text = inspect(entry, limit: 20, printable_limit: 200)
+        text = Store.text(entry)
         {"problem:#{generation}:#{text}", row(kind: :problem, status: :malformed, problem: text)}
       end
 

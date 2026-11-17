@@ -115,6 +115,31 @@ defmodule CodingAgentFramework.ActsTest do
     assert Acts.rows(acts, owner: "x") == {:refused, {:no_column, :owner}}
   end
 
+  # F-126's new-5: nothing is pruned, so a reader reads by actor and time; nil is NULL.
+  test "rows since a time, by any of its times, and a NULL column", ctx do
+    time = :counters.new(1, [])
+    clock = fn -> :counters.get(time, 1) end
+    acts = start!(Keyword.put(ctx.opts, :clock, clock), "s2")
+
+    :counters.put(time, 1, 10)
+    {:ok, old} = Acts.claim(acts, "r", "a", 1, :reopen)
+    Acts.settle(acts, old, :failed, reason: :repeating)
+    {:ok, open} = Acts.claim(acts, "r", "a", 2, :reopen)
+    :counters.put(time, 1, 20)
+    Acts.acted(acts, open)
+    {:ok, new} = Acts.claim(acts, "r", "b", 3, :reopen)
+
+    ids = fn filter -> Enum.map(elem(Acts.rows(acts, filter), 1), & &1.id) end
+    assert ids.(actor: "r", since: 20) == [open, new]
+    assert ids.(actor: "r", target: "a", since: 20) == [open]
+    assert ids.(actor: "r", reason: "repeating", cleared_at: nil) == [old]
+
+    :counters.put(time, 1, 30)
+    Acts.clear(acts, [old])
+    assert ids.(actor: "r", since: 30) == [old]
+    assert ids.(actor: "r", reason: "repeating", cleared_at: nil) == []
+  end
+
   test "an answer that does not come is unknown, and a missing Acts refused", %{acts: acts} do
     :sys.suspend(acts)
     assert {:unknown, {:timeout, 50}} = Acts.rows(acts, [], timeout: 50)
