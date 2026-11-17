@@ -202,6 +202,28 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `MCP` | the agent tools ("Agents working together"); each call is checked by `Grants` once, and each fix takes its act in `Acts` | `mcp_tokens`, `mcp_calls` |
 | `Ghostty` | opens or focuses a session's terminal window | — |
 
+**The order in which the system settles** (R11, F-131) is what each part reads. Each part that
+settles on another's rows declares it as data, its `reads/0`: the topics (a cue's first word,
+or a pattern of words with `*` for any one) and its own `cue/2`. The embedding app hands the
+declarations to `Cues`, and names each part's process to it as it starts; no part uses
+`caf_cues`. A cue of each topic reaches:
+
+| Topic | Sent by | Reaches, beside the `Tracker` (which reads every topic) |
+|---|---|---|
+| `registry:<host>:<account>` | `Registry` | `Sessions` |
+| `stream:<host>` | `Stream` | `Sessions`, `Delegates`, `Mailbox` |
+| `tmux:<host>:<server>` | `TmuxSampler` | `Sessions`, `Recoveries` |
+| `sessions:<host>` | `Sessions` | `Delegates`, `Mailbox`, the app's end of an owner's services |
+| `transcripts:<host>:<account>` | `Transcripts` | `Delegates`, `Mailbox` (a waiter row's lines are read only on this cue, the waiters' and the take bound) |
+| `delegates:<host>` | `Delegates` | `Mailbox` |
+| `mailbox` | `Mailbox` | `Delegates` |
+| `intake:<host>:<account>:waiters` | `Intake` | `Mailbox` |
+| `intake:<host>:<account>`, `usage:…`, `acts:…`, `jobs`, `services` | their parts | none |
+
+No cue says that a host's job or service changed, so `Jobs` and `Services` settle their rows on
+their own interval, as a reader reads, and `Stream` reads its logs on one; each of the three
+cues its writes like every other part.
+
 The LiveView side is a library of components over the `Tracker`, with one example app.
 
 `caf_example` is the embedding app the example grows from (F-102): its configuration is data
@@ -1625,7 +1647,8 @@ new-2, F-113's new-2).
   `Acts` writes the rows; R9's part 2 (F-130) wires starts, resumes, a service's fixes and
   raised errors into it (F-126's new-1, new-4).
 - **R11. `Cues`**: each part declares the topics it reads; `Jobs` and `Services` cue; the app's
-  routing table and its ticker go. About +200, −200. (F-102's new-3.)
+  routing table and its ticker go. About +200, −200. (F-102's new-3.) Built in F-131: the
+  graph is in "The parts".
 - **R12. `Mover`**, on the agent row and `Delivery`, against the rewritten `Move.tla`, for
   delegates as well as main sessions (item 5).
 

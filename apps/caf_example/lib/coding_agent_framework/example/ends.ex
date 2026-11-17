@@ -24,6 +24,10 @@ defmodule CodingAgentFramework.Example.Ends do
   def cue(ends, %{ids: ids}) when is_list(ids), do: GenServer.cast(ends, {:ended, ids})
   def cue(_ends, _cue), do: :ok
 
+  @doc "What it reads, for `Cues`: the agent rows' cues."
+  @spec reads() :: %{topics: [String.t()], cue: (pid, map -> :ok)}
+  def reads, do: %{topics: ~w(sessions), cue: &cue/2}
+
   @impl true
   def init(%{ended: _, act: _} = s), do: {:ok, s, {:continue, {:ended, :all}}}
 

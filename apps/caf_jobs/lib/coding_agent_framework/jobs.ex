@@ -24,7 +24,7 @@ defmodule CodingAgentFramework.Jobs do
 
   **A late end**: a job whose call answered `{:unknown, :dropped}`, or whose call a restart
   cut (a row `starting` or `running` when `Jobs` starts), is owed its end. `Jobs` settles such
-  rows from the host when it starts and at each `cue/2`, and hands each end, once, to the
+  rows from the host when it starts, on its `interval:` and at `cue/2`, and hands each end, once, to the
   embedding app's `:on_late_end` function, in `Jobs`' process:
   `%{job: id, end: {:exit, code} | {:unknown, :timeout} | {:unknown, :no_exit} | {:refused,
   {:start, :not_held} | {:refused, :interrupted}}, fetch: :not_fetched}`. Nothing is fetched for a late end, and a later
@@ -60,7 +60,7 @@ defmodule CodingAgentFramework.Jobs do
 
   use GenServer
 
-  alias CodingAgentFramework.{Copies, Holder, Programs, Shell}
+  alias CodingAgentFramework.{Copies, Holder, Programs, Reader, Shell}
   alias CodingAgentFramework.Copies.Held
   alias CodingAgentFramework.Jobs.Table
 
@@ -97,7 +97,10 @@ defmodule CodingAgentFramework.Jobs do
   `:copies`, the `Copies` server; `:hosts`, each host's name to `%{programs: programs, dir:
   dir}`, its `Programs` (with `dtach`, `sh`, `env`, `rm`, `kill`, `sleep`, `mkdir`, `tail`, `ps`,
   and for the copy `flock` and `rsync`) and its framework directory; `:on_late_end`, a function
-  of one argument that is handed each late end and answers `:ok` or `{:unknown, reason}`.
+  of one argument that is handed each late end and answers `:ok` or `{:unknown, reason}`; and
+  optionally `:interval` (ms between settles of the owed rows; without it, they settle only at
+  its start and at `cue/2`) and `:notify`, a function of one cue: after each write of a row it
+  gets `%{topic: "jobs", ids: [id]}`.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -168,8 +171,8 @@ defmodule CodingAgentFramework.Jobs do
   end
 
   @doc """
-  Hands `Jobs` a host reader's cue: every row owed a late end is settled from the host again.
-  Answers `:ok` at once.
+  Settles every row owed a late end from the host now, as each tick of its interval does. No
+  other part's cue says that a host changed, so `Jobs` reads no topic. Answers `:ok` at once.
   """
   @spec cue(GenServer.server(), map) :: :ok
   def cue(jobs, %{topic: _}), do: GenServer.cast(jobs, :cue)
@@ -442,7 +445,7 @@ defmodule CodingAgentFramework.Jobs do
           do: Copies.sweep_fetch(wt)
 
       s = %{db: db, config: config, on_late_end: Keyword.fetch!(opts, :on_late_end)}
-      {:ok, s, {:continue, :settle}}
+      {:ok, Map.merge(s, Reader.loop(opts)), {:continue, :settle}}
     else
       {:error, reason} -> {:stop, {:dir, reason}}
       refused -> {:stop, refused}
@@ -456,6 +459,9 @@ defmodule CodingAgentFramework.Jobs do
   def handle_cast(:cue, s), do: {:noreply, settle_owed(s)}
 
   @impl true
+  def handle_info(:tick, s), do: {:noreply, Reader.tick(s, &{:ok, settle_owed(&1)})}
+
+  @impl true
   def handle_call(:config, _from, s), do: {:reply, {:ok, s.config}, s}
   def handle_call(:rows, _from, s), do: {:reply, Table.all(s.db), s}
   def handle_call({:get, id}, _from, s), do: {:reply, Table.get(s.db, id), s}
@@ -463,7 +469,7 @@ defmodule CodingAgentFramework.Jobs do
   def handle_call({:ask, %{id: id} = row}, _from, s) do
     if Table.get(s.db, id),
       do: {:reply, {:refused, {:job_exists, id}}, s},
-      else: {:reply, Table.put(s.db, row), s}
+      else: {:reply, put_row(s, row), s}
   end
 
   def handle_call({:put, id, fields}, _from, s) do
@@ -501,12 +507,18 @@ defmodule CodingAgentFramework.Jobs do
   # row stays owed, and the next cue hands it again). Any other answer is the app's bug: it raises.
   defp write(s, %{late: "owed", state: state} = row) when state in @ended do
     case s.on_late_end.(%{job: row.id, end: late_end(row), fetch: :not_fetched}) do
-      :ok -> Table.put(s.db, %{row | late: "told"})
-      {:unknown, _reason} -> Table.put(s.db, row)
+      :ok -> put_row(s, %{row | late: "told"})
+      {:unknown, _reason} -> put_row(s, row)
     end
   end
 
-  defp write(s, row), do: Table.put(s.db, row)
+  defp write(s, row), do: put_row(s, row)
+
+  defp put_row(s, row) do
+    :ok = Table.put(s.db, row)
+    s.notify.(%{topic: "jobs", ids: [row.id]})
+    :ok
+  end
 
   defp late_end(%{state: "exited", code: code}), do: {:exit, code}
   defp late_end(%{state: "timedout"}), do: {:unknown, :timeout}

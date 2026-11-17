@@ -14,10 +14,12 @@ defmodule CodingAgentFramework.Example do
   reaper's death ends every group it held). Each part starts after the parts it is given. The
   two HTTP endpoints start after the part they serve, on 127.0.0.1.
 
-  **Cues.** Each part's `notify:` goes to the `Tracker` and to the parts `@routes` names for its
-  topic. A cue is looked up to the current process of each part at the moment it is sent, so a
-  part a restart replaced gets the cues from then on, and one not started yet misses nothing:
-  every part reads its whole table when it starts.
+  **Cues.** It routes no cue itself. One `CodingAgentFramework.Cues` starts after the reaper,
+  with each reading part's own declaration (`reads/0`), and every part's `notify:` goes to it.
+  Each part is named to `Cues` as it starts, so a part a restart replaced gets the cues from
+  then on, and one not started yet misses nothing: every part reads its whole table when it
+  starts. `Stream`, `Jobs` and `Services` read on the config's `interval` as the other readers
+  do; no ticker sends a made-up topic.
 
   **The operator.** The app's own acts on agents, from a view say, go through
   `CodingAgentFramework.Operator` with `parts(sup).mcp`, under the config's `operator` name,
@@ -39,6 +41,7 @@ defmodule CodingAgentFramework.Example do
   alias CodingAgentFramework.{Accounts, Acts, Control, Copies, Delegates, Grants, Holder, Host}
 
   alias CodingAgentFramework.{
+    Cues,
     Intake,
     Jobs,
     Mailbox,
@@ -51,21 +54,10 @@ defmodule CodingAgentFramework.Example do
 
   alias CodingAgentFramework.{Sessions, Shell, Stream, Tmux, TmuxSampler, Tracker, Transcripts}
   alias CodingAgentFramework.{Usage}
-  alias CodingAgentFramework.Example.{Config, Ends, Ticker}
+  alias CodingAgentFramework.Example.{Config, Ends}
 
   require Logger
 
-  # The parts each reader's cue reaches besides the Tracker, by the topic's first word.
-  @routes %{
-    "registry" => [:sessions],
-    "stream" => [:sessions, :delegates, :mailbox],
-    "tmux" => [:sessions, :recoveries],
-    "sessions" => [:delegates, :mailbox, :ends],
-    "transcripts" => [:delegates],
-    "delegates" => [:mailbox],
-    "mailbox" => [:delegates],
-    "waiters" => [:mailbox]
-  }
   @local {127, 0, 0, 1}
 
   @doc """
@@ -99,10 +91,26 @@ defmodule CodingAgentFramework.Example do
   @spec parts(Supervisor.supervisor()) :: %{term => pid}
   def parts(sup), do: Map.new(Supervisor.which_children(sup), fn {k, pid, _, _} -> {k, pid} end)
 
+  @doc """
+  What each part it starts reads, as the part declares it: the declarations it hands `Cues`,
+  and all the routing it does.
+  """
+  @spec reads() :: [{atom, Cues.declaration()}]
+  def reads do
+    [
+      sessions: Sessions.reads(),
+      recoveries: Recoveries.reads(),
+      tracker: Tracker.reads(),
+      mailbox: Mailbox.reads(),
+      delegates: Delegates.reads(),
+      ends: Ends.reads()
+    ]
+  end
+
   @impl true
   def init(w) do
     tab = :ets.new(__MODULE__, [:public, read_concurrency: true])
-    notify = fn cue -> route(tab, cue) end
+    notify = fn cue -> Cues.cue(lookup(tab, :cues), cue) end
 
     children =
       for {key, build} <- children(w, notify),
@@ -118,6 +126,7 @@ defmodule CodingAgentFramework.Example do
 
     with {:ok, pid} <- module.start_link(opts) do
       :ets.insert(tab, {key, pid})
+      Cues.started(lookup(tab, :cues), key, pid)
       watch(tab, key, pid)
       {:ok, pid}
     end
@@ -169,7 +178,8 @@ defmodule CodingAgentFramework.Example do
           into: %{},
           do: {a, dir}
 
-    read = [programs: p, db: db, notify: notify, interval: every]
+    notify_every = [notify: notify, interval: every]
+    read = [programs: p, db: db] ++ notify_every
 
     readers = [
       {:registry, fn _ -> {Registry, [accounts: dirs] ++ read} end},
@@ -178,6 +188,7 @@ defmodule CodingAgentFramework.Example do
 
     [
       {:reaper, fn _ -> {Shell.Reaper, programs: p} end},
+      {:cues, fn _ -> {Cues, parts: reads()} end},
       # Before every part that writes its acts there.
       {:acts,
        fn _ ->
@@ -195,7 +206,9 @@ defmodule CodingAgentFramework.Example do
          {Usage, accounts: w.accounts, host: host, db: db, notify: notify, interval: every}
        end},
       {:stream,
-       fn _ -> {Stream, programs: p, holder: w.holder, home: c.home, db: db, notify: notify} end},
+       fn _ ->
+         {Stream, [programs: p, holder: w.holder, home: c.home, db: db] ++ notify_every}
+       end},
       {:intake,
        fn _ ->
          tools = Map.to_list(Map.take(c.tool_hooks, [:pre_tool_use, :post_tool_use]))
@@ -283,21 +296,25 @@ defmodule CodingAgentFramework.Example do
         {:jobs,
          fn pid ->
            {Jobs,
-            dir: Config.path(c, "parts/jobs"),
-            copies: pid.(:copies),
-            hosts: hosts,
-            on_late_end: &late_end(c, pid, &1)}
+            [
+              dir: Config.path(c, "parts/jobs"),
+              copies: pid.(:copies),
+              hosts: hosts,
+              on_late_end: &late_end(c, pid, &1)
+            ] ++ notify_every}
          end},
         {:services,
          fn pid ->
            {Services,
-            dir: Config.path(c, "parts/services"),
-            copies: pid.(:copies),
-            grants: grants,
-            ended: &Sessions.Agents.ended?(Sessions.Agents.get(w.agents, &1)),
-            hosts: hosts,
-            workstation: host,
-            acts: pid.(:acts)}
+            [
+              dir: Config.path(c, "parts/services"),
+              copies: pid.(:copies),
+              grants: grants,
+              ended: &Sessions.Agents.ended?(Sessions.Agents.get(w.agents, &1)),
+              hosts: hosts,
+              workstation: host,
+              acts: pid.(:acts)
+            ] ++ notify_every}
          end},
         {:mcp,
          fn pid ->
@@ -324,21 +341,12 @@ defmodule CodingAgentFramework.Example do
            plug = {MCP.Plug, mcp: pid.(:mcp)}
            {Bandit, plug: plug, ip: @local, port: c.ports.mcp, startup_log: false}
          end},
-        {:ticker, fn pid -> {Ticker, interval: every, tick: fn -> tick(pid) end} end},
         {:ends,
          fn pid ->
            ended = &Sessions.Agents.ended_names(w.agents, &1)
            {Ends, ended: ended, act: &owner_ended(pid.(:services), &1)}
          end}
       ]
-  end
-
-  # The reader with no timer of its own, and the settles of `Jobs` and `Services`, which
-  # wait on hosts rather than on a reader's cue. `pid` looks each part up at the tick.
-  defp tick(pid) do
-    Stream.read(pid.(:stream))
-    Jobs.cue(pid.(:jobs), %{topic: "tick"})
-    Services.cue(pid.(:services), %{topic: "tick"})
   end
 
   defp sources(%{c: c, db: db, tmux: tmux}) do
@@ -391,27 +399,6 @@ defmodule CodingAgentFramework.Example do
         {:unknown, {:not_stored, other}}
     end
   end
-
-  defp route(tab, %{topic: topic} = cue) do
-    [kind | _] = String.split(topic, ":")
-    # A session's waiter coming or going, of Intake's cues, is the one Mailbox tries rows on.
-    kind = if kind == "intake" and String.ends_with?(topic, ":waiters"), do: "waiters", else: kind
-
-    for key <- [:tracker | Map.get(@routes, kind, [])], pid = lookup(tab, key) do
-      case key do
-        :recoveries -> Recoveries.cue(pid)
-        :tracker -> Tracker.cue(pid, cue)
-        :sessions -> Sessions.cue(pid, cue)
-        :delegates -> Delegates.cue(pid, cue)
-        :mailbox -> Mailbox.cue(pid, cue)
-        :ends -> Ends.cue(pid, cue)
-      end
-    end
-
-    :ok
-  end
-
-  defp route(_tab, _cue), do: :ok
 
   # A table the supervisor took with it reads as no process: a cue must not raise.
   defp lookup(tab, key) do

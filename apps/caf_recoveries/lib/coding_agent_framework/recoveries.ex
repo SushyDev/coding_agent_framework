@@ -110,12 +110,16 @@ defmodule CodingAgentFramework.Recoveries do
           {:ok, [integer]} | {:refused, term} | {:unknown, term}
   def clear(recoveries, socket, opts \\ []), do: call(recoveries, {:clear, socket}, opts)
 
-  @doc "Asks for a check without waiting for it: the sampler's cue."
-  @spec cue(pid) :: :ok
-  def cue(recoveries) do
+  @doc "Asks for a check without waiting for it: the sampler's cue. Answers `:ok` at once."
+  @spec cue(pid, map) :: :ok
+  def cue(recoveries, _cue \\ %{}) do
     send(recoveries, :check)
     :ok
   end
+
+  @doc "What `Recoveries` reads, for `Cues`: the samplers' cues, which show a lost viewer."
+  @spec reads() :: %{topics: [String.t()], cue: (pid, map -> :ok)}
+  def reads, do: %{topics: ~w(tmux), cue: &cue/2}
 
   defp call(recoveries, message, opts) do
     timeout = Keyword.get(opts, :timeout, @timeout)

@@ -254,8 +254,8 @@ defmodule CodingAgentFramework.Sessions do
 
   @doc """
   Hands `Sessions` a `Registry`'s cue (`%{topic: "registry:<host>:<account>", ids: ids}`): the
-  rows of that account with no call under way are read again from the `Registry`'s rows. The
-  embedding app wires the `Registry`'s `notify` here, for example through PubSub. A `Stream`'s cue
+  rows of that account with no call under way are read again from the `Registry`'s rows.
+  `Cues` hands it the topics `reads/0` declares. A `Stream`'s cue
   (`stream:<host>`) does the same for the host's delegates, and a `TmuxSampler`'s
   (`tmux:<host>:<server>`, sent when its rows change, as when a held socket goes away) for every
   row of the host, so a settle that met a socket dtach had not removed yet is taken again. Answers
@@ -268,6 +268,10 @@ defmodule CodingAgentFramework.Sessions do
   """
   @spec cue(GenServer.server(), map) :: :ok
   def cue(sessions, %{topic: topic}), do: GenServer.cast(sessions, {:cue, topic})
+
+  @doc "What `Sessions` reads, for `Cues`: the registries', the streams' and the samplers' cues."
+  @spec reads() :: %{topics: [String.t()], cue: (pid, map -> :ok)}
+  def reads, do: %{topics: ~w(registry stream tmux), cue: &cue/2}
 
   @doc """
   The command of the viewer of session `name`, from its row: `dtach -a` of its socket

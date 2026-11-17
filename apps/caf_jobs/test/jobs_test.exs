@@ -350,6 +350,27 @@ defmodule CodingAgentFramework.JobsTest do
     assert %{state: "interrupted", late: "told"} = Enum.find(Jobs.rows(jobs), &(&1.id == "ja"))
   end
 
+  # No part cues `Jobs`: an end owed is handed again on its own interval, and each write of a
+  # row is announced on `jobs`.
+  test "JobSettles: on its interval an owed end is handed again with no cue, and each write cues",
+       c do
+    stop_supervised!(Jobs)
+    {:ok, db} = Jobs.Table.open(Path.join(c.opts[:dir], "jobs.db"))
+    row = %{id: "ji", host: "test", project: "p", name: "w", state: "exited", code: 4}
+    :ok = Jobs.Table.put(db, Map.merge(row, %{late: "owed", worktree: c.wt}))
+    File.write!(Path.join(c.dir, "unknown-once"), "")
+    test = self()
+    start_supervised!({Jobs, c.opts ++ [interval: 50, notify: &send(test, {:cue, &1})]})
+
+    assert_receive {:late, %{job: "ji", end: {:exit, 4}}}
+    assert_receive {:late, %{job: "ji", end: {:exit, 4}}}
+    assert_receive {:cue, %{topic: "jobs", ids: ["ji"]}}
+    {:ok, _} = await(fn -> ok_told(db, "ji") end)
+  end
+
+  defp ok_told(db, id),
+    do: if(match?(%{late: "told"}, Jobs.Table.get(db, id)), do: {:ok, id})
+
   test "JobSettles: a file made before the worktree column gains it on open", c do
     path = Path.join(c.dir, "old.db")
     {:ok, db} = Exqlite.Sqlite3.open(path)

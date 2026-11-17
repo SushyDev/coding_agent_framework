@@ -54,6 +54,7 @@ flowchart LR
       stream["Stream<br/>a headless session's transport"]
       tools["The tree's tools, over MCP<br/>Grants · Delegates"]
       acts["Acts<br/>one ledger of claims,<br/>recoveries and faults"]
+      cues["Cues<br/>each cue to the parts<br/>that declared its topic"]
       tracker["Tracker<br/>one fold of every reader"]
       recoveries["Recoveries<br/>detect, act once, verify"]
       db[("SQLite tables<br/>the truth, one writer each")]
@@ -96,6 +97,10 @@ flowchart LR
   mailbox --> db
   acts --> db
   db --> tracker
+  db -.->|a cue per write| cues
+  cues -.->|re-read by id| tracker
+  cues -.-> sessions
+  cues -.-> mailbox
   tracker --> recoveries
   recoveries --> acts
   recoveries --> sessions
@@ -149,10 +154,14 @@ Built, each from a checked model in `model/tla/`:
   and the `Tracker` both read; and no part reading another's table but through its functions;
 - each session's turn state as one function per kind in `Sessions`, starts, resumes, a
   service's fixes and a part's crash as rows of `Acts`, one rule for a term in a column, and
-  every writer's `Tracker` source made from its table's metadata (R9, part 2).
+  every writer's `Tracker` source made from its table's metadata (R9, part 2);
+- `Cues`, the library's own routing (R11): each part declares the topics it reads, and the
+  embedding app hands the declarations to `Cues`, so the order in which the system settles is
+  the library's; `Jobs`, `Services` and `Stream` read on their own interval, and no ticker
+  sends a made-up topic.
 
 Next, the rest of the remodel, in order (F-115, taken in F-116): the `Inlet`, the
-checked typed write (R8); `Cues`, the library's own routing (R11); and `Mover` (R12). Then
+checked typed write (R8); and `Mover` (R12). Then
 interactive delegates and main sessions, the mechanisms an app's policies stand on (an idle
 delegate's watchdog, admission by load, `Stop` held for the app, clone copies, an idempotent
 start), packaging, and stacks with the LiveView components. The plan and the order of the units are in
@@ -165,7 +174,7 @@ The code is a Mix umbrella, one OTP app per part under `apps/`. An arrow means "
 declares every app it uses, directly, and `gate-deps` checks that. The chart shows the apps as
 built; the remodel changes it as R1 to R12 land (`caf_store` added in R1 and holding `Reader`
 from R2, `caf_acts` added in R10 in place of `Grants.Claims` and `Recoveries`' table, `caf_cues`
-added, `caf_control` becoming `caf_inlet`).
+added in R11, `caf_control` becoming `caf_inlet`).
 
 ```mermaid
 flowchart BT
@@ -174,6 +183,7 @@ flowchart BT
     tmux[caf_tmux]
     holder[caf_holder]
     store[caf_store]
+    cues[caf_cues]
   end
   subgraph io["Readers and writers"]
     registry[caf_registry]
@@ -264,9 +274,10 @@ flowchart BT
 ```
 
 `caf_test` holds the shared test aids and is used only in tests. `caf_example` is an app built
-on the others, as an embedding app would be, and uses every one of them. `caf_grants`,
-`caf_intake` and `caf_screen` use no other app: the embedding app hands `caf_grants` the tree as
-a function, and `caf_screen` reads a screen's text it is given. `caf_mcp` reaches `Delegates`,
+on the others, as an embedding app would be, and uses every one of them. `caf_cues`,
+`caf_grants`, `caf_intake` and `caf_screen` use no other app: the embedding app hands `caf_cues`
+each part's declaration of what it reads and `caf_grants` the tree as a function, and
+`caf_screen` reads a screen's text it is given. `caf_mcp` reaches `Delegates`,
 `Mailbox` and the `Tracker` through modules the embedding app names.
 
 ## Development

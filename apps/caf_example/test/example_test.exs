@@ -8,7 +8,8 @@ defmodule CodingAgentFramework.ExampleTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, Example, HeadlessStandIn, Jobs, Mailbox, MCP, Services}
+  alias CodingAgentFramework.{Accounts, Cues, Example, HeadlessStandIn, Jobs, Mailbox, MCP}
+  alias CodingAgentFramework.Services
   alias CodingAgentFramework.{Delegates, Operator, Tmux}
   alias CodingAgentFramework.Acts
   alias CodingAgentFramework.Example.Config
@@ -63,9 +64,9 @@ defmodule CodingAgentFramework.ExampleTest do
 
   defp start(config) do
     parts = Example.parts(start_supervised!({Example, config}))
-    keys = ~w(reaper control usage stream intake intake_http sampler sessions acts)a
+    keys = ~w(reaper cues control usage stream intake intake_http sampler sessions acts)a
     keys = keys ++ ~w(recoveries tracker delegates mailbox copies jobs services)a
-    keys = keys ++ ~w(mcp mcp_http ticker ends)a
+    keys = keys ++ ~w(mcp mcp_http ends)a
 
     assert Enum.sort(Map.keys(parts)) ==
              Enum.sort(keys ++ [:registry, :transcripts])
@@ -226,7 +227,7 @@ defmodule CodingAgentFramework.ExampleTest do
   # F-126's new-1: a raised error the app records is a part's crash, a row of `Acts`.
   test "a part's crash is a raised error in Acts", ctx do
     parts = start(ctx.config)
-    Process.exit(parts.ticker, :kill)
+    Process.exit(parts.ends, :kill)
 
     {:ok, [row]} =
       await(fn ->
@@ -234,7 +235,7 @@ defmodule CodingAgentFramework.ExampleTest do
         if rows != [], do: {:ok, rows}
       end)
 
-    assert %{actor: "app", target: "part:ticker", outcome: "failed", reason: reason} = row
+    assert %{actor: "app", target: "part:ends", outcome: "failed", reason: reason} = row
     assert reason =~ "killed"
   end
 
@@ -343,8 +344,9 @@ defmodule CodingAgentFramework.ExampleTest do
     row = %{id: "mcp-t-#{id}", host: "ws", project: "app", name: "app-main", state: "exited"}
     :ok = Jobs.Table.put(jobs, Map.merge(row, %{code: 3, late: "owed"}))
 
-    # A cue and then a read of its state: `Jobs` has handed the end on and had no answer.
-    Jobs.cue(parts.jobs, %{topic: "tick"})
+    # On its own interval `Jobs` hands the end on: the call waits in the suspended `Mailbox`'s
+    # queue. Once `Jobs` is read again, it has had no answer.
+    {:ok, _} = await(fn -> ok(late_end_waiting(parts.mailbox)) end, 20_000)
     :sys.get_state(parts.jobs, 60_000)
     assert %{state: "exited", late: "owed"} = Jobs.Table.get(jobs, "mcp-t-#{id}")
     assert Enum.filter(Mailbox.Table.open_rows(messages), &(&1.from_agent == "framework")) == []
@@ -406,6 +408,68 @@ defmodule CodingAgentFramework.ExampleTest do
     assert post.("PreToolUse", "Read") == ""
     assert post.("PostToolUse", "Read") == ""
     assert_receive {:after, %{tool_name: "Read", agent: nil}}, 5_000
+  end
+
+  # The parts the app wires and the topics each one cues on, as the parts write them.
+  @topics ~w(registry:ws:work stream:ws tmux:ws:caf sessions:ws transcripts:ws:work
+             delegates:ws mailbox intake:ws:work intake:ws:work:waiters acts:ws:t usage:ws:work
+             jobs services)
+
+  # What each part must be handed to settle (`docs/design.md`, "The parts"): beside the
+  # `Tracker`, which reads every topic.
+  @needs %{
+    "registry" => [:sessions],
+    "stream" => [:sessions, :delegates, :mailbox],
+    "tmux" => [:sessions, :recoveries],
+    "sessions" => [:delegates, :mailbox, :ends],
+    "transcripts" => [:delegates, :mailbox],
+    "delegates" => [:mailbox],
+    "mailbox" => [:delegates],
+    "waiters" => [:mailbox]
+  }
+
+  test "an app that wires only the parts' declarations hands each part every cue it needs" do
+    cues = start_supervised!({Cues, parts: Example.reads()})
+
+    # A stand-in for each part: it keeps whatever the part's own `cue` sends it.
+    stand_ins = for {key, _} <- Example.reads(), into: %{}, do: {key, spawn_link(&keep/0)}
+    for {key, pid} <- stand_ins, do: Cues.started(cues, key, pid)
+
+    for topic <- @topics do
+      Cues.cue(cues, %{topic: topic, ids: []})
+      # Once Cues has handled the cue, each stand-in has it in its queue, before the ask.
+      :sys.get_state(cues)
+      got = for {key, pid} <- stand_ins, kept(pid) != [], do: key
+
+      kind =
+        if String.ends_with?(topic, ":waiters"), do: "waiters", else: hd(String.split(topic, ":"))
+
+      assert Enum.sort(got) == Enum.sort([:tracker | Map.get(@needs, kind, [])]), topic
+    end
+  end
+
+  defp keep(kept \\ []) do
+    receive do
+      {:kept, from} ->
+        send(from, {:kept, self(), Enum.reverse(kept)})
+        keep([])
+
+      message ->
+        keep([message | kept])
+    end
+  end
+
+  defp kept(pid) do
+    send(pid, {:kept, self()})
+    assert_receive {:kept, ^pid, kept}
+    kept
+  end
+
+  # A late end's `notify` call, waiting in the suspended mailbox's queue.
+  defp late_end_waiting(mailbox) do
+    {:messages, messages} = Process.info(mailbox, :messages)
+
+    Enum.find(messages, &match?({:"$gen_call", _, {:notify, _, _, "job:" <> _}}, &1))
   end
 
   # Kills the delegate's current process, once the stand-in has taken `n` messages.
