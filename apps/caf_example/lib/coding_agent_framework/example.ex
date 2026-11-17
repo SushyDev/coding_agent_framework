@@ -59,7 +59,8 @@ defmodule CodingAgentFramework.Example do
     "sessions" => [:delegates, :mailbox],
     "transcripts" => [:delegates],
     "delegates" => [:mailbox, :ends],
-    "mailbox" => [:delegates]
+    "mailbox" => [:delegates],
+    "waiters" => [:mailbox]
   }
   # A delegate that holds its parent's cap, and so is in the tree `Grants` reads.
   @tree ~w(starting running resuming finished failed)
@@ -170,16 +171,21 @@ defmodule CodingAgentFramework.Example do
       [
         {:sessions,
          fn pid ->
-           {Sessions,
-            reaper: pid.(:reaper),
-            programs: p,
-            dir: Config.path(c, "d"),
-            control: pid.(:control),
-            registry: pid.(:registry),
-            stream: pid.(:stream),
-            home: c.home,
-            db: db,
-            notify: notify}
+           {
+             Sessions,
+             # Mailbox starts after Sessions: it is looked up at each read.
+             reaper: pid.(:reaper),
+             programs: p,
+             dir: Config.path(c, "d"),
+             control: pid.(:control),
+             registry: pid.(:registry),
+             stream: pid.(:stream),
+             home: c.home,
+             db: db,
+             notify: notify,
+             open_to: &Mailbox.open_to(pid.(:mailbox), &1, status: &2),
+             waiter: %{port: c.ports.intake, secret: w.secret}
+           }
          end},
         {:acts,
          fn _ ->
@@ -212,6 +218,9 @@ defmodule CodingAgentFramework.Example do
             stream: pid.(:stream),
             sessions_db: db,
             host: host,
+            intake: pid.(:intake),
+            transcripts: pid.(:transcripts),
+            accounts: w.accounts,
             notify: notify}
          end},
         {:delegates,
@@ -396,6 +405,8 @@ defmodule CodingAgentFramework.Example do
 
   defp route(tab, %{topic: topic} = cue) do
     [kind | _] = String.split(topic, ":")
+    # A session's waiter coming or going, of Intake's cues, is the one Mailbox tries rows on.
+    kind = if kind == "intake" and String.ends_with?(topic, ":waiters"), do: "waiters", else: kind
 
     for key <- [:tracker | Map.get(@routes, kind, [])], pid = lookup(tab, key) do
       case key do

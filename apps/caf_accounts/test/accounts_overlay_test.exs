@@ -27,4 +27,26 @@ defmodule CodingAgentFramework.AccountsOverlayTest do
     gone = %{account | name: "gone", settings: %{delegate: Path.join(home, "none.json")}}
     assert Accounts.overlay(gone, :delegate, "a", %{}) == {:refused, {:not_prepared, "gone"}}
   end
+
+  test "an overlay's hooks add to the account's per event; they never replace them" do
+    home = Path.join(TestHost.test_dir(), "overlay-#{System.unique_integer([:positive])}")
+    {:ok, accounts} = Accounts.new(home, ["work"])
+    stop = %{"hooks" => [%{"type" => "command", "command" => "own-stop"}]}
+    intake = %{port: 4790, secret: "s3"}
+
+    {:ok, account} =
+      Accounts.prepare(accounts, "work", %{hooks: %{"Stop" => [stop]}, intake: intake})
+
+    base = JSON.decode!(File.read!(account.settings.parent))["hooks"]
+    waiter = %{"hooks" => [%{"type" => "command", "command" => "waiter", "asyncRewake" => true}]}
+
+    assert {:ok, path} =
+             Accounts.overlay(account, :parent, "main", %{"hooks" => %{"Stop" => [waiter]}})
+
+    hooks = JSON.decode!(File.read!(path))["hooks"]
+    # The account's own Stop and Intake's, then the overlay's; every other event as it was.
+    assert hooks["Stop"] == base["Stop"] ++ [waiter]
+    assert [^stop, %{"hooks" => [%{"type" => "http"}]}, ^waiter] = hooks["Stop"]
+    assert Map.delete(hooks, "Stop") == Map.delete(base, "Stop")
+  end
 end

@@ -89,7 +89,7 @@ flowchart LR
   mailbox -->|due text| intake
   mailbox -->|no waiter| inlet
   stream --> delegate
-  intake -->|wakes a turn| main
+  intake -->|wakes a turn,<br/>or joins one| main
   inlet -->|one checked write| main
   readers --> db
   sessions --> db
@@ -115,8 +115,8 @@ flowchart LR
   recovery and fault is one row in `Acts`; every agent, main session or delegate, is one row in
   `Sessions`, and the tree is a function of those rows.
 - **Nothing typed to deliver.** A report or a message reaches a main session through its
-  waiting Stop hook, which wakes the idle session with the text, so a draft in its box is never
-  touched. A session ends by SIGTERM once its session file says it is idle.
+  waiting Stop hook, which wakes the idle session with the text, or has Claude Code queue it into
+  a turn still running, so a draft in its box is never touched; the transcript confirms it. A session ends by SIGTERM once its session file says it is idle.
 - **Addressed by name.** Agents are rows with names; the framework finds every session across
   every account it holds, never by a pid or a socket, so a move to another account hides none.
 - **Tables are the truth.** Views and the `agents()` tool read the `Tracker`'s fold of those
@@ -139,14 +139,15 @@ Built, each from a checked model in `model/tla/`:
   every account (R2), and `Holder.Process`, one record of a held program, with a session ended
   by SIGTERM (R3); `Claim` and `Hold` in the model (R4); one hold in `Intake`, with the waiting
   Stop hook (R5); `Delivery` in the model, and the move rewritten with a message in flight
-  (R6); and `Mailbox` delivering a delegate's brief, its word to go on and its report as rows,
-  by its stream and to a waiting `run_delegate` (R7, part 1);
+  (R6); and `Mailbox` delivering everything as rows: a delegate's brief, its word to go on and
+  its report, by its stream and to a waiting `run_delegate` (R7, part 1), and to a main session
+  by its waiting Stop hook, settled by its transcript (R7, part 2);
 - `Acts`, one ledger of claims, recoveries and faults, in place of `Grants.Claims` and
   `Recoveries`' table (R10).
 
-Next, the rest of the remodel, in order (F-115, taken in F-116): `Mailbox`'s waiter transport,
-a main session's delivery (R7, part 2); the `Inlet`, the checked typed
-write (R8); the agent row and the tree in `Sessions` (R9); `Cues`, the library's own routing (R11); and `Mover` (R12). Then
+Next, the rest of the remodel, in order (F-115, taken in F-116): the `Inlet`, the checked typed
+write (R8); the agent row and the tree in `Sessions` (R9); `Cues`, the library's own routing
+(R11); and `Mover` (R12). Then
 interactive delegates and main sessions, the mechanisms an app's policies stand on (an idle
 delegate's watchdog, admission by load, `Stop` held for the app, clone copies, an idempotent
 start), packaging, and stacks with the LiveView components. The plan and the order of the units are in
@@ -219,6 +220,7 @@ flowchart BT
   sessions --> control
   sessions --> stream
   sessions --> transcripts
+  sessions --> intake
   recoveries --> tmux
   recoveries --> holder
   recoveries --> sampler
@@ -240,6 +242,9 @@ flowchart BT
   mailbox --> sessions
   mailbox --> grants
   mailbox --> stream
+  mailbox --> intake
+  mailbox --> transcripts
+  mailbox --> accounts
   mcp --> grants
   mcp --> acts
   copies --> shell

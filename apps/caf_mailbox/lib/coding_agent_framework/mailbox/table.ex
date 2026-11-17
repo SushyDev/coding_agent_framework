@@ -5,9 +5,11 @@ defmodule CodingAgentFramework.Mailbox.Table do
 
   `kind` is `msg` (a message, or the app's word), `brief`, `resume` (a resumed delegate's word to
   go on with its brief), `reply` or `notice`. `status` is `queued` (due), `sending` (marked
-  before it goes, with its transport `via`, `stream` or `call`, the `session_id` and the
-  process `at` it is for), then `delivered` or `ended`, or `queued` again if it did not go in,
-  under the `uuid` it was stored with; `again` says it was made due again, so it goes first.
+  before it goes, with its transport `via`, `stream`, `waiter` or `call`, the `session_id` and
+  the process `at` it is for), then `delivered` or `ended`, or `queued` again if it did not go
+  in, under the `uuid` it was stored with; `again` says it was made due again, so it goes first.
+  A `waiter` row keeps `sent_at`, the wall-clock ms its text was handed on (the take bound runs
+  from it), and `from_byte`, how much of the session's transcript was read before its mark.
   `attempt` is why the last delivery did not go in. A reply or a notice names the uuid of the
   row it answers in `reply_to` (the report is the reply to the brief's uuid), with a result's
   `subtype` and `is_error`. `reply_to` and `uuid` are unique, so one row has one answer, and a
@@ -22,7 +24,7 @@ defmodule CodingAgentFramework.Mailbox.Table do
   alias CodingAgentFramework.Store
 
   @columns ~w(id from_agent to_agent text uuid status session_id attempt reply_to subtype
-              is_error kind via at again created_at updated_at)a
+              is_error kind via at again sent_at from_byte created_at updated_at)a
 
   @schema """
   CREATE TABLE IF NOT EXISTS messages (
@@ -39,7 +41,9 @@ defmodule CodingAgentFramework.Mailbox.Table do
     "kind TEXT",
     "via TEXT",
     "at INTEGER",
-    "again INTEGER NOT NULL DEFAULT 0"
+    "again INTEGER NOT NULL DEFAULT 0",
+    "sent_at INTEGER",
+    "from_byte INTEGER"
   ]
   @indexes """
   CREATE UNIQUE INDEX IF NOT EXISTS messages_reply_to ON messages (reply_to);

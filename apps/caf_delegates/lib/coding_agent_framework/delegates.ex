@@ -126,7 +126,7 @@ defmodule CodingAgentFramework.Delegates do
     as `:live`, one already resumed as `:resumed_once`, one whose `Sessions` row has not ended
     as `:session_running`, and one the path finished instead (its transcript ends with its
     last reply) with its status;
-  - `:stop`: `Sessions.stop/4` with `:report_delivered`, which writes `end_session` through
+  - `:stop`: `Sessions.stop/3`, which writes `end_session` through
     `Stream`, only once `Mailbox` has the report delivered and no row to the delegate still
     `queued` or `sending`; else `{:refused, {:report, status}}` or `{:refused, {:open, ids}}`.
   """
@@ -491,7 +491,7 @@ defmodule CodingAgentFramework.Delegates do
       me = self()
 
       Task.start(fn ->
-        reply = Sessions.stop(s.sessions, row.name, :report_delivered, timeout: @call)
+        reply = Sessions.stop(s.sessions, row.name, timeout: @call)
         GenServer.reply(from, reply)
         # The process is gone once Sessions answers: the row is read again for its end.
         GenServer.cast(me, :cue)

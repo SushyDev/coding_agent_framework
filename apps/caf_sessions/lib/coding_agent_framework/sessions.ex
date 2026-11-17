@@ -64,10 +64,12 @@ defmodule CodingAgentFramework.Sessions do
   keeps its transcript, fires `SessionEnd` with reason `other`, and exits 143 (F-114). A process
   already gone is sent nothing. Then the stop waits until that process is gone, judged by
   `{pid, procStart}` (`Holder.Process.liveness/3`), never by name, and its socket is dead, so a
-  resume after the answer is never refused `{:live, name}`. A delegate's stop writes
-  `end_session` through `Stream` instead, once the caller says its report is delivered, and its
+  resume after the answer is never refused `{:live, name}`. The idle read waits, in the same
+  step, until no `Mailbox` row to the session is `sending` (`open_to:`). A delegate's stop
+  writes `end_session` through `Stream` instead, once no `Mailbox` row to it is open, and its
   turn is `Stream`'s row's, not the caller's: `Stream` refuses the end while a turn runs or a
-  message has not gone in.
+  message has not gone in. An interactive session's start puts `Intake`'s waiter hook into its
+  launch overlay (`waiter:`).
 
   Each call answers `{:ok, …}`, `{:refused, reason}` or `{:unknown, reason}` within its
   `:timeout` (30 s by default, plus the hold's and the viewer's own bounds). Nothing is retried:
@@ -118,7 +120,7 @@ defmodule CodingAgentFramework.Sessions do
   require Logger
 
   alias CodingAgentFramework.{ClaudeCLI, Control, Holder, Programs, Registry, Shell, Stream}
-  alias CodingAgentFramework.{Accounts, ClaudeCLI.Options, Transcripts}
+  alias CodingAgentFramework.{Accounts, ClaudeCLI.Options, Intake, Transcripts}
   alias CodingAgentFramework.Sessions.{Table, Worktree}
 
   @timeout 30_000
@@ -149,7 +151,16 @@ defmodule CodingAgentFramework.Sessions do
   `reaper:` (the host's `Shell.Reaper`, for worktrees; `programs:` then names git and mkdir),
   `notify:`, `size:`
   (the viewer's `{columns, rows}`, default `{200, 50}`), `poll:` (ms between reads while a call
-  waits, default 200) and `clock:` (a function answering wall-clock ms, for the deadlines).
+  waits, default 200), `clock:` (a function answering wall-clock ms, for the deadlines), and,
+  where the app runs `Mailbox` and `Intake`:
+
+  - `open_to:`, `fn name, :open | :sending -> {:ok, ids} end`, the ids of the `Mailbox` rows to
+    `name` that are open, or only `sending`, as `Mailbox.open_to/3` answers them; a stop reads
+    it (`stop/3`);
+  - `waiter:`, `%{port: port, secret: secret}`, `Intake`'s: an interactive session's start
+    puts the waiter hook (`Intake.waiter_hook/5`, with the host's sh and curl) into its launch
+    overlay, beside the account's hooks, so `Mailbox` delivers to it ("Delivery into a main
+    session"). `programs:` then names curl.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -183,20 +194,23 @@ defmodule CodingAgentFramework.Sessions do
     do: request(sessions, {:start, name, account, launch, session_id}, opts)
 
   @doc """
-  Ends running session `name` and waits for its process to exit. An interactive session gets
-  SIGTERM once its session file says `idle`, and is refused `{:not_idle, status}` otherwise:
-  the file decides, and `word` is not read. For a delegate `word` is the caller's word on its
-  report: only `:report_delivered` writes `end_session`, any other is refused as `{:report,
-  word}`, since the end cuts a turn and drops what has not gone in. `Stream` then refuses the
-  end while its row's turn runs (`:turn_running`) or a message is under way or found
-  undelivered. Option: `:timeout`.
+  Ends running session `name` and waits for its process to exit. Its row is `stopping` first,
+  so `Mailbox` marks no row to it from then on. An interactive session gets SIGTERM once its
+  session file says `idle` and, read in the same step through `open_to:`, no `Mailbox` row to it
+  is `sending`: a row marked before the stop is waited for until the stop's deadline, then
+  refused as `{:sending, ids}` (F-122's new-1). Another status is refused as
+  `{:not_idle, status}`. A delegate gets `end_session` through `Stream` only when no row to it
+  is open (`{:refused, {:open, ids}}`), since the end cuts a turn and drops what has not gone
+  in; its caller, `Delegates`, checks its report delivered before it asks. `Stream` then refuses
+  the end while its row's turn runs (`:turn_running`) or a message is under way or found
+  undelivered. A refusal puts the row back to `running`. Option: `:timeout`.
 
-      Sessions.stop(sessions, "main", :idle)
+      Sessions.stop(sessions, "main")
       #=> {:ok, :stopped}
       #=> {:refused, {:not_idle, "busy"}}
   """
-  @spec stop(GenServer.server(), String.t(), atom, keyword) :: outcome(:stopped)
-  def stop(sessions, name, word, opts \\ []), do: request(sessions, {:stop, name, word}, opts)
+  @spec stop(GenServer.server(), String.t(), keyword) :: outcome(:stopped)
+  def stop(sessions, name, opts \\ []), do: request(sessions, {:stop, name}, opts)
 
   @doc """
   Hands `Sessions` a `Registry`'s cue (`%{topic: "registry:<host>:<account>", ids: ids}`): the
@@ -264,6 +278,7 @@ defmodule CodingAgentFramework.Sessions do
     with {:ok, holder} <- Holder.new(programs, Keyword.fetch!(opts, :dir)),
          {:ok, procs} <- Holder.Process.new(programs, holder),
          {:ok, ps} <- Programs.take(programs, [:env, :ps, :tail]),
+         {:ok, waiter} <- waiter(programs, Keyword.get(opts, :waiter)),
          {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)) do
       state = %{
         host: host,
@@ -280,6 +295,8 @@ defmodule CodingAgentFramework.Sessions do
         poll: Keyword.get(opts, :poll, 200),
         clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
         reaper: Keyword.get(opts, :reaper),
+        open_to: Keyword.get(opts, :open_to),
+        waiter: waiter,
         git: Programs.fetch(programs, :git),
         worktrees: root(host, holder.sh, programs, Keyword.get(opts, :home)),
         pending: %{}
@@ -403,29 +420,16 @@ defmodule CodingAgentFramework.Sessions do
     {:reply, reply, state}
   end
 
-  def handle_call({{:stop, name, word}, timeout}, from, state) do
+  def handle_call({{:stop, name}, timeout}, from, state) do
     deadline = state.clock.() + timeout
 
     case Table.get(state.db, state.host.name, name) do
-      # The report before the end: the caller's word until `Delegates` holds the parent's row.
-      %{role: "delegate"} when word != :report_delivered ->
-        {:reply, {:refused, {:report, word}}, state}
-
       %{status: "running", pid: pid} = row when is_integer(pid) ->
-        # StopAsked, with the stop's own deadline in the row.
+        # StopAsked, with the stop's own deadline in the row: from here `Mailbox` marks no row
+        # to the session, so a row it marked before is the only one the idle read waits for.
         write(state, row, status: "stopping", reason: nil, deadline: deadline)
-
-        case ask_end(state, row) do
-          {:refused, _} = refused ->
-            write(state, row, status: "running")
-            {:reply, refused, state}
-
-          # An unknown end may have gone out: the exit is waited for, and never sent again.
-          sent ->
-            send(self(), {:check, name})
-            pending = %{kind: :stop, from: from, row: row, deadline: deadline, sent: sent}
-            {:noreply, put_in(state.pending[name], pending)}
-        end
+        pending = %{kind: :ask, from: from, row: row, deadline: deadline}
+        {:noreply, ask(state, name, pending)}
 
       nil ->
         {:reply, {:refused, :no_session}, state}
@@ -435,21 +439,71 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
-  # A delegate's `end_session` line through Stream.
+  # The end asked, or waited for: a row `Mailbox` still has `sending` to an interactive session
+  # holds the SIGTERM until it settles or the stop's deadline passes (F-122's new-1). A refusal
+  # sends nothing and puts the row back to running.
+  defp ask(state, name, %{row: row} = pending) do
+    case ask_end(state, row) do
+      {:refused, {:sending, _}} = refused ->
+        state = put_in(state.pending[name], pending)
+
+        wait(state, name, pending, fn ->
+          write(state, row, status: "running")
+          refused
+        end)
+
+      {:refused, _} = refused ->
+        write(state, row, status: "running")
+        done(state, name, pending, refused)
+
+      # An unknown end may have gone out: the exit is waited for, and never sent again.
+      sent ->
+        send(self(), {:check, name})
+        put_in(state.pending[name], Map.merge(pending, %{kind: :stop, sent: sent}))
+    end
+  end
+
+  # A delegate's `end_session` line through Stream, once no row to it is open in `Mailbox`:
+  # `Delegates` checked its report delivered before it asked.
   defp ask_end(state, %{role: "delegate"} = row) do
-    if state.stream,
-      do: Stream.end_session(state.stream, row.session_id, timeout: @stream),
-      else: {:refused, :no_stream}
+    with :ok <- open(state, row.name, :open) do
+      if state.stream,
+        do: Stream.end_session(state.stream, row.session_id, timeout: @stream),
+        else: {:refused, :no_stream}
+    end
   end
 
   # StopAsked: SIGTERM by the row's pid and start time, once the session file of that process
-  # reads idle. A refusal sends nothing; a process already gone is sent nothing and settles.
+  # reads idle and, in the same step, no `Mailbox` row to it is `sending`. A refusal sends
+  # nothing; a process already gone is sent nothing and settles.
   defp ask_end(state, row) do
     case end_reading(state, row) do
-      {:idle, record} -> Holder.Process.signal(state.procs, record, "TERM")
-      :gone -> {:ok, :gone}
-      {:not_idle, _} = busy -> {:refused, busy}
-      {:unread, _} = unread -> {:refused, unread}
+      {:idle, record} ->
+        with :ok <- open(state, row.name, :sending),
+             do: Holder.Process.signal(state.procs, record, "TERM")
+
+      :gone ->
+        {:ok, :gone}
+
+      {:not_idle, _} = busy ->
+        {:refused, busy}
+
+      {:unread, _} = unread ->
+        {:refused, unread}
+    end
+  end
+
+  # The embedding app's read of `Mailbox` (`open_to:`): the ids of the rows to `name` that are
+  # open (`queued` or `sending`), or only `sending`. With no `open_to:` the app runs no
+  # `Mailbox`, and nothing is delivered to wait for.
+  defp open(%{open_to: nil}, _name, _which), do: :ok
+
+  defp open(state, name, which) do
+    case state.open_to.(name, which) do
+      {:ok, []} -> :ok
+      {:ok, ids} when which == :sending -> {:refused, {:sending, ids}}
+      {:ok, ids} -> {:refused, {:open, ids}}
+      other -> {:refused, {:unread, {:mailbox, other}}}
     end
   end
 
@@ -585,6 +639,8 @@ defmodule CodingAgentFramework.Sessions do
       end)
     end
   end
+
+  defp check(state, name, %{kind: :ask} = pending), do: ask(state, name, pending)
 
   defp unconfirmed(%{role: "delegate"}), do: :no_first_event
   defp unconfirmed(_row), do: :no_session_file
@@ -891,7 +947,9 @@ defmodule CodingAgentFramework.Sessions do
 
   # The agent's own options, before its row: the launch's, or on a resume that names none, its
   # row's. A start refused after the overlay's write leaves the file for the next to rewrite.
-  defp own(state, role, account, name, resume, launch) do
+  # An interactive session's waiter hook goes into its overlay beside the agent's own settings;
+  # the row keeps only the agent's own options, so a resume adds the hook again.
+  defp own(state, role, account, name, resume, launch, hooks \\ nil) do
     row =
       resume && not Keyword.has_key?(launch, :options) &&
         Table.get(state.db, state.host.name, name)
@@ -899,10 +957,27 @@ defmodule CodingAgentFramework.Sessions do
     given = if row, do: Options.decode(row.options), else: Options.check(launch[:options])
 
     with {:ok, options} <- given,
-         s = options[:settings],
+         s = with_hooks(options[:settings], hooks),
          {:ok, file} <- if(s, do: Accounts.overlay(account, role, name, s), else: {:ok, nil}),
          do: {:ok, options, [options: options] ++ if(file, do: [settings: file], else: [])}
   end
+
+  defp with_hooks(settings, nil), do: settings
+  defp with_hooks(settings, hooks), do: Map.put(settings || %{}, "hooks", hooks)
+
+  defp waiter(_programs, nil), do: {:ok, nil}
+
+  defp waiter(programs, %{port: port, secret: secret}) do
+    with {:ok, paths} <- Programs.take(programs, [:sh, :curl]),
+         do: {:ok, %{port: port, secret: secret, paths: paths}}
+  end
+
+  defp waiter(_programs, other), do: {:refused, {:bad, {:waiter, other}}}
+
+  defp waiter_hooks(%{waiter: nil}, _account), do: {:ok, nil}
+
+  defp waiter_hooks(%{waiter: w}, account),
+    do: Intake.waiter_hook(w.port, account.name, w.secret, w.paths)
 
   # What a start holds, checked before its row is written: an interactive session's own
   # command, or a headless delegate's with the session id the framework chose ("Headless
@@ -926,7 +1001,8 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   defp way(state, role, account, name, _cwd, resume, launch) do
-    with {:ok, options, own} <- own(state, role, account, name, resume, launch),
+    with {:ok, hooks} <- waiter_hooks(state, account),
+         {:ok, options, own} <- own(state, role, account, name, resume, launch, hooks),
          {:ok, cli} <- cli(role, account, name, resume, launch, own),
          do: {:ok, %{cli: cli, options: options}}
   end

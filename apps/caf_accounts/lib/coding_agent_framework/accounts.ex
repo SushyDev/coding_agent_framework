@@ -136,7 +136,9 @@ defmodule CodingAgentFramework.Accounts do
   Writes agent `name`'s own settings file, `<config>/framework/agents/<name>.settings.json`:
   the account's `role` settings with `settings` (checked by `ClaudeCLI.Options`) over them. The
   `permissions` rule lists (`allow`, `deny`, `ask`, `additionalDirectories`) add to the
-  account's; any other key replaces it. Answers `{:ok, path}`, `{:refused, {:bad, :name}}`,
+  account's, and so do the `hooks` of each event (the account's first, as `prepare/3` puts
+  Intake's after the caller's), so a main session's waiter never drops Intake's hooks; any
+  other key replaces it. Answers `{:ok, path}`, `{:refused, {:bad, :name}}`,
   `{:refused, {:not_prepared, account}}` or `{:unknown, {path, reason}}`.
   """
   @spec overlay(Account.t(), :parent | :delegate, String.t(), map) ::
@@ -167,6 +169,10 @@ defmodule CodingAgentFramework.Accounts do
       _key, _a, b -> b
     end)
   end
+
+  # F-123's new-2: an overlay's hooks add to the account's, per event.
+  defp merge("hooks", %{} = account, %{} = own),
+    do: Map.merge(account, own, fn _event, a, b -> List.wrap(a) ++ List.wrap(b) end)
 
   defp merge(_key, _account, own), do: own
 

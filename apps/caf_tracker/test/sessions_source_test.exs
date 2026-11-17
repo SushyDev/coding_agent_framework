@@ -31,7 +31,7 @@ defmodule CodingAgentFramework.SessionsSourceTest do
     assert {:refused, {:exists, "running"}} =
              Sessions.start(ctx.sessions, "alpha", ctx.account, launch(ctx, :at_start))
 
-    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "alpha", :idle)
+    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "alpha")
     refute alive?(pid)
     assert %{status: "stopped"} = Table.get(ctx.table, "test", "alpha")
   end

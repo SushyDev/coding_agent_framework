@@ -100,6 +100,30 @@ defmodule CodingAgentFramework.IntakeWaiterTest do
     assert {:unknown, {:request_closed, _}} = Task.await(task)
   end
 
+  # F-123's new-3: Mailbox tries a due row on the cue of the session's waiter coming and going.
+  test "a session's waiter coming and going is cued on its own topic", %{start: start} do
+    intake = start.([])
+    waiters = %{topic: "intake:h:work:waiters", ids: ["s1"]}
+    {first, key1, ref1} = stand_in(intake)
+    assert_receive ^waiters, 5_000
+    # A second behind the first changes nothing for the session: no cue.
+    {second, key2, ref2} = stand_in(intake)
+    refute_received ^waiters
+
+    # The first's hold ends, the second takes its place: one cue; then the second goes: one.
+    task = Task.async(fn -> Intake.deliver(intake, "work", "s1", "one") end)
+    assert_receive {:got, ^first, {^ref1, {:decision, "one"}}}, 5_000
+    Intake.written(intake, key1, ref1)
+    assert {:ok, :sent} = Task.await(task)
+    assert_receive ^waiters, 5_000
+    task = Task.async(fn -> Intake.deliver(intake, "work", "s1", "two") end)
+    assert_receive {:got, ^second, {^ref2, {:decision, "two"}}}, 5_000
+    Intake.written(intake, key2, ref2)
+    assert {:ok, :sent} = Task.await(task)
+    assert_receive ^waiters, 5_000
+    assert {:ok, false} = waiter?(intake)
+  end
+
   test "a failed write ends the hold: unknown while text is in flight, and the next takes over",
        %{start: start} do
     intake = start.([])

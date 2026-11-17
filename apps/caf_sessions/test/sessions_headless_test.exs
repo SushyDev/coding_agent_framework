@@ -65,15 +65,18 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
     {:ok, %{uuid: u}} = Stream.write(ctx.stream, id, {:message, "ask first"})
     stream_row(ctx, id, &(&1.requests["req-" <> u].state == :held))
 
-    # A delegate's end waits for the caller's word that its report is delivered (new-5); the
-    # caller's reading of the turn is not read, Stream's row is.
-    assert {:refused, {:report, :ended}} = Sessions.stop(ctx.sessions, "d3", :ended)
-    assert {:refused, :turn_running} = Sessions.stop(ctx.sessions, "d3", :report_delivered)
+    # A delegate's end waits until no Mailbox row to it is open, read through `open_to:`
+    # (F-125's new-2); then Stream's row decides the turn.
+    Agent.update(ctx.open, &Map.put(&1, {"d3", :open}, [7]))
+    assert {:refused, {:open, [7]}} = Sessions.stop(ctx.sessions, "d3")
+    assert %{status: "running"} = Table.get(ctx.table, "test", "d3")
+    Agent.update(ctx.open, &Map.delete(&1, {"d3", :open}))
+    assert {:refused, :turn_running} = Sessions.stop(ctx.sessions, "d3")
     assert %{status: "running"} = Table.get(ctx.table, "test", "d3")
 
     assert {:ok, _} = Stream.write(ctx.stream, id, {:answer, "req-" <> u, :allow})
     stream_row(ctx, id, & &1.idle)
-    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "d3", :report_delivered)
+    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "d3")
     refute alive?(pid)
     assert %{status: "stopped"} = Table.get(ctx.table, "test", "d3")
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "answer req-#{u}", "end"]
@@ -85,7 +88,7 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
 
     {:ok, %{uuid: u1}} = Stream.write(ctx.stream, id, {:message, "before"})
     before = stream_row(ctx, id, &(&1.messages[u1].state == :delivered and &1.idle))
-    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "d4", :report_delivered)
+    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "d4")
     # The process is gone by pid; its dtach master ends a moment later.
     {:ok, :absent} = await(fn -> absent(Holder.state(ctx.holder, "d4")) end)
 

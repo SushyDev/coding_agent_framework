@@ -26,6 +26,7 @@ defmodule CafSessions.MixProject do
       {:caf_cli, in_umbrella: true},
       {:caf_control, in_umbrella: true},
       {:caf_holder, in_umbrella: true},
+      {:caf_intake, in_umbrella: true},
       {:caf_registry, in_umbrella: true},
       {:caf_shell, in_umbrella: true},
       {:caf_stream, in_umbrella: true},

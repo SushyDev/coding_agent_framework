@@ -23,8 +23,9 @@ defmodule CodingAgentFramework.SessionsSetup do
 
   @doc """
   An ExUnit setup. Its `opts` start another `Sessions` on the same table; its cues come to the
-  test as `{:cue, cue}`. The test's `clock` is an `Agent` holding ms, and `server` its tmux
-  server.
+  test as `{:cue, cue}`. The test's `clock` is an `Agent` holding ms, `open` an `Agent` holding
+  the `Mailbox` rows `open_to:` answers (`%{{name, :open | :sending} => ids}`), and `server` its
+  tmux server.
   """
   def sessions(_context) do
     dir = test_dir()
@@ -50,8 +51,11 @@ defmodule CodingAgentFramework.SessionsSetup do
     stream_opts = [programs: programs(), holder: holder, home: dir, db: db]
     stream = start_supervised!(Supervisor.child_spec({Stream, stream_opts}, id: Stream))
     reaper = start_supervised!({Shell.Reaper, programs: programs()})
+    # Mailbox's open rows as the test sets them: `{name, :open | :sending}` to ids.
+    open = start_supervised!(Supervisor.child_spec({Agent, fn -> %{} end}, id: :open))
 
     opts = [
+      open_to: fn name, which -> {:ok, Agent.get(open, &Map.get(&1, {name, which}, []))} end,
       reaper: reaper,
       programs: programs(),
       dir: dtach,
@@ -78,6 +82,7 @@ defmodule CodingAgentFramework.SessionsSetup do
      table: table,
      opts: opts,
      clock: clock,
+     open: open,
      registry: registry,
      stream: stream,
      sessions: start_supervised!(Supervisor.child_spec({Sessions, opts}, restart: :temporary))}
