@@ -12,13 +12,16 @@ defmodule CodingAgentFramework.ScreenStandIn do
   - `--version` prints the release as Claude Code does (`2.1.322 (Claude Code)`) and exits;
   - the argument after `--` is the start's prompt, run as its first turn: written to
     `<dir>/prompts/<pid>` (`prompts/1`), its session file `busy`, then `idle`;
-  - written with `trust: true`, it first draws `trust-dialog`'s screen, "No, exit" selected:
-    Down and Up move the selection, Enter on "Yes, I trust this folder" goes on (and writes
-    `<dir>/trusted`), Enter on "No, exit" exits.
+  - written with `dialogs: [:trust, :imports]` (or `trust: true`, the trust dialog alone), it
+    first draws each startup dialog's screen in turn, its first option selected, as 2.1.322
+    does: `trust-dialog`'s, then `imports-dialog`'s. Down and Up move the selection, Enter
+    answers: "Yes, I trust this folder" goes on (and writes `<dir>/trusted`), "No, exit" exits;
+    either imports option goes on, and writes it to `<dir>/imports` (`yes` or `no`).
 
   Started by `Sessions` (`CLAUDE_CONFIG_DIR` set), it writes its session file as
-  `CodingAgentFramework.ClaudeStandIn` does, and records its pid in `<dir>/pids/`. It exits
-  after `idle` seconds with no key.
+  `CodingAgentFramework.ClaudeStandIn` does, once its startup dialogs are answered (2.1.322
+  writes none while one is shown, F-140), and records its pid in `<dir>/pids/`. It exits after
+  `idle` seconds with no key.
   """
 
   import CodingAgentFramework.TestHost, only: [program!: 1, stand_in_idle: 0]
@@ -42,22 +45,22 @@ defmodule CodingAgentFramework.ScreenStandIn do
     running = File.read!(Path.join(fixtures(release), "turn-running.txt"))
     File.write!(Path.join(screens, "running"), String.trim_trailing(running, "\n"))
 
-    trust =
-      String.trim_trailing(File.read!(Path.join(fixtures(release), "trust-dialog.txt")), "\n")
+    dialog!(screens, release, "trust", " ", "No, exit", "Yes, I trust this folder")
 
-    File.write!(Path.join(screens, "trust-no"), trust)
+    dialog!(
+      screens,
+      release,
+      "imports",
+      "  ",
+      "No, disable external imports",
+      "Yes, allow external imports"
+    )
 
-    yes =
-      trust
-      |> String.replace(" ❯ No, exit", "   No, exit")
-      |> String.replace("   Yes, I trust this folder", " ❯ Yes, I trust this folder")
-
-    File.write!(Path.join(screens, "trust-yes"), yes)
-
-    name = if opts[:trust], do: "claude-screen-trust-#{release}", else: "claude-screen-#{release}"
-    path = Path.join(dir, name)
+    dialogs = Keyword.get(opts, :dialogs, if(opts[:trust], do: [:trust], else: []))
+    suffix = Enum.map_join(dialogs, &"-#{&1}")
+    path = Path.join(dir, "claude-screen#{suffix}-#{release}")
     tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
-    File.write!(tmp, script(dir, screens, release, idle, if(opts[:trust], do: 1, else: 0)))
+    File.write!(tmp, script(dir, screens, release, idle, Enum.join(dialogs, " ")))
     File.chmod!(tmp, 0o755)
     # Renamed into place, as `ClaudeStandIn.write!/3` does: a start may be running the path.
     File.rename!(tmp, path)
@@ -80,6 +83,20 @@ defmodule CodingAgentFramework.ScreenStandIn do
     end
   end
 
+  # A two-option dialog's screens, each option selected: `<kind>-no` and `<kind>-yes`.
+  defp dialog!(screens, release, kind, pad, no, yes) do
+    file = Path.join(fixtures(release), "#{kind}-dialog.txt")
+    shown = String.trim_trailing(File.read!(file), "\n")
+    File.write!(Path.join(screens, "#{kind}-no"), shown)
+
+    selected =
+      shown
+      |> String.replace(pad <> "❯ " <> no, pad <> "  " <> no)
+      |> String.replace(pad <> "  " <> yes, pad <> "❯ " <> yes)
+
+    File.write!(Path.join(screens, "#{kind}-yes"), selected)
+  end
+
   # The lines above the box's line, and those below it, the last with no newline: a newline
   # after the last row would scroll the screen by one.
   defp split_at_box(text) do
@@ -89,10 +106,10 @@ defmodule CodingAgentFramework.ScreenStandIn do
     {Enum.map_join(before, &(&1 <> "\n")), Enum.join(rest, "\n")}
   end
 
-  defp script(dir, screens, release, idle, trust) do
+  defp script(dir, screens, release, idle, dialogs) do
     ~s"""
     #!#{program!(:bash)}
-    name='' resume='' screen=idle prompt='' trust=#{trust} choice=no
+    name='' resume='' screen=idle prompt='' dialogs='#{dialogs}' choice=no
     while [ $# -gt 0 ]; do
       case $1 in
         --version) printf '%s (Claude Code)\\n' '#{release}'; exit 0 ;;
@@ -103,7 +120,9 @@ defmodule CodingAgentFramework.ScreenStandIn do
         *) shift ;;
       esac
     done
-    [ $trust = 1 ] && screen=trust
+    # The startup dialogs left to answer; the first is shown.
+    set -- $dialogs
+    [ $# -gt 0 ] && screen=$1
     : 2>/dev/null > "#{dir}/pids/$$" || exit 0
     file="${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/sessions/$$.json}"
     announce() {
@@ -119,8 +138,8 @@ defmodule CodingAgentFramework.ScreenStandIn do
       printf '\\033[H\\033[2J'
       if [ $screen = running ]; then
         #{program!(:cat)} "#{screens}/running"
-      elif [ $screen = trust ]; then
-        #{program!(:cat)} "#{screens}/trust-$choice"
+      elif [ $screen = trust ] || [ $screen = imports ]; then
+        #{program!(:cat)} "#{screens}/$screen-$choice"
       else
         #{program!(:cat)} "#{screens}/top"
         printf '❯ %s\\n' "$box"
@@ -132,24 +151,32 @@ defmodule CodingAgentFramework.ScreenStandIn do
     # Keys are read one at a time with no echo, so text typed without an Enter is drawn by the
     # stand-in, in its box, as Claude Code draws it, and the terminal shows nothing else.
     #{program!(:stty)} -echo -icanon min 1
-    # The start's prompt runs as the first turn, once the trust dialog is passed.
+    # Past the startup dialogs: the session file, then the start's prompt as the first turn.
     first() {
+      announce idle
       [ -n "$prompt" ] || return 0
       printf '%s' "$prompt" > "#{dir}/prompts/$$"
       announce busy
       announce idle
     }
     box=''
-    announce idle
-    [ $screen = trust ] || first
+    [ $screen = idle ] && first
+    [ $screen = running ] && announce idle
     draw
     while IFS= read -r -N1 -t #{idle} key; do
-      if [ $screen = trust ]; then
+      if [ $screen = trust ] || [ $screen = imports ]; then
         case $key in
           $'\\e') IFS= read -r -N2 -t 1 seq
                  case $seq in '[B') choice=yes ;; '[A') choice=no ;; esac ;;
-          $'\\n'|$'\\r') [ $choice = yes ] || exit 1
-                       screen=idle; : > "#{dir}/trusted"; first ;;
+          $'\\n'|$'\\r')
+            if [ $screen = trust ]; then
+              [ $choice = yes ] || exit 1
+              : > "#{dir}/trusted"
+            else
+              printf '%s' $choice > "#{dir}/imports"
+            fi
+            shift; choice=no
+            if [ $# -gt 0 ]; then screen=$1; else screen=idle; first; fi ;;
         esac
       elif [ "$key" = $'\\n' ] || [ "$key" = $'\\r' ]; then
         [ $screen = running ] && continue

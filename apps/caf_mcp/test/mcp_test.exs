@@ -174,7 +174,7 @@ defmodule CodingAgentFramework.MCPTest do
              ~w(message run start_delegate run_delegate) ++
                ~w(service_start services service_logs service_send service_wait) ++
                ~w(service_restart service_stop service_hand agents look transcript) ++
-               ~w(interrupt answer resume stop move ask reload)
+               ~w(interrupt answer resume stop move answer_startup ask reload)
   end
 
   test "a call is the agent's whose token it carries, whatever its arguments say",
@@ -459,7 +459,7 @@ defmodule CodingAgentFramework.MCPTest do
                  ~w(message run start_delegate run_delegate) ++
                    ~w(service_start services service_logs service_send service_wait) ++
                    ~w(service_restart service_stop service_hand agents look transcript) ++
-                   ~w(interrupt answer resume stop move ask reload)
+                   ~w(interrupt answer resume stop move answer_startup ask reload)
              }
            }
 

@@ -94,7 +94,7 @@ flowchart LR
   mailbox -->|no waiter| inlet
   stream --> delegate
   intake -->|wakes a turn,<br/>or joins one| main
-  inlet -->|one checked write| main
+  inlet -->|one checked write,<br/>or a startup dialog's<br/>checked press| main
   sessions -->|first row, as its<br/>start's prompt| main
   readers --> db
   sessions --> db
@@ -190,8 +190,14 @@ Built, each from a checked model in `model/tla/`:
 - interactive delegates (F-137): a delegate started `interactive: true` runs Claude Code's
   terminal interface, as a main session does, so a person can attach and type; its brief goes
   in as its start's prompt (the `launch` transport, read from a file into the last argument),
-  its start answers the folder's trust dialog by label, and its report is the reply to its
-  brief read from its transcript, never a later turn's.
+  and its report is the reply to its brief read from its transcript, never a later turn's;
+- startup dialogs (F-140), against `Dialog.tla`: an interactive start that stops on Claude
+  Code's folder trust dialog or its external imports dialog, which send no hook event and leave
+  no session file, is read from its pane; its agent row says `dialog`, with the dialog's
+  options and listed paths, and waits on a person through its deadline and a restart, its lease
+  held. Nothing answers one on its own: the app may choose kinds through a callback, and a
+  person answers by label (`Sessions.answer_dialog/5`, the operator's `answer_startup`), marked
+  first, pressed once and checked on the screen.
 
 The remodel (F-115, taken in F-116) is done. Next, `Jobs`' start and a landing's gang lease ask
 the `Scheduler` too. Then
@@ -326,7 +332,7 @@ on the others, as an embedding app would be, and uses every one of them. `caf_cu
 `caf_grants`, `caf_intake` and `caf_screen` use no other app: the embedding app hands `caf_cues`
 each part's declaration of what it reads and `caf_grants` the tree as a function, and
 `caf_screen` reads a screen's text it is given. `caf_mcp` reaches `Delegates`,
-`Mailbox`, the `Tracker` and the `Mover` through modules the embedding app names.
+`Mailbox`, the `Tracker`, the `Mover` and `Sessions` through modules the embedding app names.
 
 ## Development
 

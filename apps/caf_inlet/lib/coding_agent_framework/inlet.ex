@@ -78,17 +78,20 @@ defmodule CodingAgentFramework.Inlet do
   end
 
   @doc """
-  Answers a dialog of `kind` on `session`'s screen by the option labeled `label` (F-137: a
-  start's trust dialog, `:trust` and "Yes, I trust this folder"). In one step of this process:
-  the screen is read as the session's release draws it, and must show that dialog; the keys
-  that move its selection there (`Screen.option_keys/2`) go as one tmux command; the screen is
-  read again until that option is selected (`see:` ms); then Enter, as its own command. Options
-  `release:` (required), `see:` and `timeout:`.
+  Answers a dialog of `kind` on `session`'s screen by the option labeled `label`: the checked
+  press of a start's dialog (F-140, `model/tla/Dialog.tla`'s `Press`), which `Sessions` makes
+  for a person's answer or the app's. In one step of this process: the screen is read as the
+  session's release draws it, and must show that dialog; the keys that move its selection
+  there (`Screen.option_keys/2`) go as one tmux command; the screen is read again until that
+  option is selected (`see:` ms); then Enter, as its own command; then the screen again, until
+  that dialog has left (`see:` ms). Options `release:` (required), `see:` and `timeout:`.
 
-  Answers `{:ok, :sent}`; `{:refused, reason}` when no key went: `:no_release`,
-  `{:screen, reading}` (another screen, or another dialog), `{:no_option, label}`, or `Tmux`'s;
-  `{:unknown, reason}` once a key may have gone: `{:not_selected, reading}` (the keys went and
-  the screen never showed the option selected; no Enter went), `{:enter, reason}`.
+  Answers `{:ok, :sent}` once the dialog has left; `{:refused, reason}` when no key went:
+  `:no_release`, `{:screen, reading}` (another screen, or another dialog), `{:no_option,
+  label}`, or `Tmux`'s; `{:unknown, reason}` once a key may have gone: `{:not_selected,
+  reading}` (the keys went and the screen never showed the option selected; no Enter went),
+  `{:enter, reason}`, or `{:still_shown, reading}` (Enter went and the dialog stayed). An
+  unknown press is never made again by the caller: its keys may still land.
 
       iex> {:ok, fake} = CodingAgentFramework.Tmux.Fake.start_link(key: {"laptop", "fake"})
       iex> server = CodingAgentFramework.Tmux.Fake.new(fake, {"laptop", "fake"})
@@ -101,6 +104,23 @@ defmodule CodingAgentFramework.Inlet do
     request = {:choose, session, kind, label, Keyword.fetch!(opts, :release)}
     call(inlet, request, Keyword.get(opts, :see, @see), opts)
   end
+
+  @doc """
+  Reads `session`'s screen as `release` draws it (`Screen.read/2`), for a caller that writes
+  nothing: `Sessions` reads a starting session's pane for a dialog. Answers `{:ok, screen}`,
+  `{:unknown, {:unrecognized, release}}`, or a refusal (`:no_release`, `{:unknown_release,
+  release}`, `Tmux`'s). Option `timeout:`.
+
+      iex> {:ok, fake} = CodingAgentFramework.Tmux.Fake.start_link(key: {"laptop", "fake"})
+      iex> server = CodingAgentFramework.Tmux.Fake.new(fake, {"laptop", "fake"})
+      iex> {:ok, inlet} = CodingAgentFramework.Inlet.start_link(tmux: server)
+      iex> CodingAgentFramework.Inlet.look(inlet, "alpha", nil)
+      {:refused, :no_release}
+  """
+  @spec look(GenServer.server(), String.t(), String.t() | nil, keyword) ::
+          {:ok, Screen.t()} | {:refused, term} | {:unknown, term}
+  def look(inlet, session, release, opts \\ []),
+    do: call(inlet, {:look, session, release}, 0, opts)
 
   defp call(inlet, request, see, opts) do
     timeout = Keyword.get(opts, :timeout, @timeout)
@@ -145,6 +165,14 @@ defmodule CodingAgentFramework.Inlet do
     end
   end
 
+  defp act({:look, session, release}, _see, tmux) do
+    with :ok <- if(is_binary(release), do: :ok, else: {:refused, :no_release}),
+         {:ok, pane} <- pane(tmux, session),
+         {:ok, %{text: screen}} <- Tmux.capture(tmux, pane, session) do
+      Screen.read(screen, release)
+    end
+  end
+
   defp act({:choose, session, kind, label, release}, see, tmux) do
     with :ok <- if(is_binary(release), do: :ok, else: {:refused, :no_release}),
          {:ok, pane} <- pane(tmux, session),
@@ -153,10 +181,43 @@ defmodule CodingAgentFramework.Inlet do
          {:ok, :sent} <- move(tmux, pane, session, keys) do
       deadline = System.monotonic_time(:millisecond) + see
 
-      case selected(tmux, pane, session, release, kind, label, deadline) do
-        :selected -> enter(tmux, pane, session)
+      with :selected <- selected(tmux, pane, session, release, kind, label, deadline),
+           {:ok, :sent} <- enter(tmux, pane, session) do
+        left(tmux, pane, session, release, kind, System.monotonic_time(:millisecond) + see)
+      else
         {:not_selected, reading} -> {:unknown, {:not_selected, reading}}
+        unknown -> unknown
       end
+    end
+  end
+
+  # After the Enter, the dialog of `kind` leaves: the pane is read, and shows another screen,
+  # another dialog, or one being drawn (unrecognized). A capture that fails says nothing.
+  defp left(tmux, pane, session, release, kind, deadline) do
+    reading =
+      with {:ok, %{text: screen}} <- Tmux.capture(tmux, pane, session),
+           do: Screen.read(screen, release)
+
+    gone? =
+      case reading do
+        {:ok, %{state: :dialog, kind: ^kind}} -> false
+        {:ok, _} -> true
+        {:unknown, {:unrecognized, _}} -> true
+        _ -> false
+      end
+
+    cond do
+      gone? ->
+        {:ok, :sent}
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        {:unknown, {:still_shown, reading}}
+
+      true ->
+        receive do
+        after
+          @look -> left(tmux, pane, session, release, kind, deadline)
+        end
     end
   end
 

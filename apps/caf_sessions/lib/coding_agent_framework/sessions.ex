@@ -41,11 +41,21 @@ defmodule CodingAgentFramework.Sessions do
   **An interactive start's prompt** (`prompt:`, F-137: `Mailbox`'s `launch` transport) is
   written to `<dtach dir>/<name>.prompt`, and the hold runs `ClaudeCLI.prompted/5`, which reads
   it into the last argument, after `--`, and removes it; a prompt over `ClaudeCLI.prompt_max/0`
-  bytes is refused. Claude Code runs it as the session's first turn. With `inlet:`, an
-  interactive start in a worktree answers the folder's trust dialog before it confirms the
-  start: `Inlet.choose/5` moves to "Yes, I trust this folder" and sends Enter; a screen idle or
-  running shows a folder trusted before. A dialog still there at the deadline leaves the row
-  `unknown`, reason `trust_dialog`, for a person.
+  bytes is refused. Claude Code runs it as the session's first turn.
+
+  **A startup dialog** (F-140, `model/tla/Dialog.tla`). Before its first turn an interactive
+  session may show the folder trust dialog, then the external imports dialog; neither sends a
+  hook event, and no session file exists while one is shown. With `inlet:`, an interactive
+  start reads its pane (`Inlet.look/4`) at each check while it has no session file. A startup
+  dialog makes the row `dialog`, with the dialog (`Sessions.Dialog`), and a cue. The app's
+  `dialog:` callback is asked once per kind: `{:answer, label}` presses that option, and
+  `:ask`, the default, leaves it to a person: the start answers `{:unknown, {:dialog, kind}}`
+  at once, and the row waits, through the start's deadline and a restart, until
+  `answer_dialog/5` presses an option. Each press is marked on the row before it goes, checked
+  by the `Inlet` (`Inlet.choose/5`), and never made twice. While a row waits, its pane is read
+  every `look:` ms and at each cue: the next dialog becomes the row's, and once the session
+  file names the process the row is `running`, as a start's confirm makes it. A start whose
+  process exits on a dialog ("No, exit") is `stopped`.
 
   **A delegate** (role `:delegate`) runs headless ("Headless delegates"): after its row, which
   keeps the session id the framework chose, `Stream.follow/5` makes its directory and FIFO under
@@ -146,7 +156,7 @@ defmodule CodingAgentFramework.Sessions do
   alias CodingAgentFramework.{ClaudeCLI, Holder, Programs, Registry, Shell, Stream, Tmux}
   alias CodingAgentFramework.{Accounts, Acts, ClaudeCLI.Options, Inlet, Intake, Store}
   alias CodingAgentFramework.Transcripts
-  alias CodingAgentFramework.Sessions.{Agents, Table, Turn, Worktree}
+  alias CodingAgentFramework.Sessions.{Agents, Dialog, Table, Turn, Worktree}
 
   @timeout 30_000
   # Each git command of a worktree, and the checks and the add before a setup: three lists or
@@ -165,8 +175,8 @@ defmodule CodingAgentFramework.Sessions do
   @version 5_000
   # The held program starts in the session's directory; `$0` is the directory.
   @cd ~S(cd -- "$0" && exec "$@")
-  # The trust dialog's option an interactive start in a worktree answers (2.1.322's label).
-  @trusted "Yes, I trust this folder"
+  # A checked press of a dialog's option: the Inlet's keys, its two screen reads and Enter.
+  @press 20_000
 
   @type outcome(ok) :: {:ok, ok} | {:refused, term} | {:unknown, term}
 
@@ -176,8 +186,11 @@ defmodule CodingAgentFramework.Sessions do
   `tmux:` (the host's tmux server, for the viewers), `registry:` (the host's `Registry`), `db:`, and optionally `stream:`
   and `home:` (the host's `Stream` and the framework home, for delegates and worktrees),
   `reaper:` (the host's `Shell.Reaper`, for worktrees; `programs:` then names git and mkdir),
-  `inlet:` (the host's `Inlet`, which answers an interactive start's trust dialog; `programs:`
-  names cat for an interactive start's prompt),
+  `inlet:` (the host's `Inlet`, which reads an interactive start's pane and presses an answer
+  to its startup dialog; `programs:` names cat for an interactive start's prompt), `dialog:`
+  (the app's callback for a startup dialog, `fn kind, options -> {:answer, label} | :ask end`,
+  by default `Sessions.Dialog.ask/2`: ask a person), `look:` (ms between reads of a pane that
+  waits on a person, default 5 000),
   `notify:`, `size:`
   (the viewer's `{columns, rows}`, default `{200, 50}`), `poll:` (ms between reads while a call
   waits, default 200), `clock:` (a function answering wall-clock ms, for the deadlines), and,
@@ -253,6 +266,35 @@ defmodule CodingAgentFramework.Sessions do
   @spec stop(GenServer.server(), String.t(), keyword) :: outcome(:stopped)
   def stop(sessions, name, opts \\ []),
     do: request(sessions, {:stop, name, Keyword.get(opts, :for, :end)}, opts)
+
+  @doc """
+  Answers the startup dialog agent `name`'s start waits on (its row `dialog`) by the option
+  labeled `label`: a person's answer, from the app's view or the operator's tool. `kind` is the
+  dialog's (`:trust` or `:imports`, or its name), so an answer meant for one dialog never
+  presses another. The answer is marked on the row, then the `Inlet`'s checked press goes
+  (`Inlet.choose/5`); the start then goes on as before.
+
+  Answers `{:ok, :sent}` once the dialog has left the pane. Refused, with nothing pressed:
+  `:no_session`, `{:not_on_dialog, status}`, `{:bad, :kind}`, `{:shown, kind}` (the row shows
+  another dialog, or none), `{:no_option, label}`, `{:answered, mark}` (an answer to that
+  dialog was already marked: never pressed twice), `:no_inlet`, or the `Inlet`'s refusal.
+  Unknown: the `Inlet`'s, once a key may have gone; that answer is never pressed again. Option:
+  `:timeout` (ms, default 25 000).
+
+      Sessions.answer_dialog(sessions, "app-main", :trust, "Yes, I trust this folder")
+      #=> {:ok, :sent}
+      #=> {:refused, {:answered, "sent"}}
+  """
+  @spec answer_dialog(GenServer.server(), String.t(), atom | String.t(), String.t(), keyword) ::
+          outcome(:sent)
+  def answer_dialog(sessions, name, kind, label, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, @press + @read)
+
+    case Dialog.kind(kind) do
+      nil -> {:refused, {:bad, :kind}}
+      kind -> call(sessions, {:answer_dialog, name, kind, label}, timeout)
+    end
+  end
 
   @doc """
   Begins a move of running agent `name` (`Mover`'s, F-133): its row takes the move's phase,
@@ -396,6 +438,9 @@ defmodule CodingAgentFramework.Sessions do
         git: Programs.fetch(programs, :git),
         cat: Programs.fetch(programs, :cat),
         inlet: Keyword.get(opts, :inlet),
+        dialog: Keyword.get(opts, :dialog, &Dialog.ask/2),
+        look: Keyword.get(opts, :look, 5_000),
+        looking: false,
         worktrees: root(host, holder.sh, programs, Keyword.get(opts, :home)),
         pending: %{}
       }
@@ -416,6 +461,11 @@ defmodule CodingAgentFramework.Sessions do
       state.notify.(%{topic: topic(state), ids: [id]})
     end
 
+    # A press marked before this process's last life ended may have gone: never pressed again.
+    for row <- Table.with_status(state.db, state.host.name, "dialog"),
+        answers = Dialog.after_restart(row),
+        do: write(state, row, answers: answers)
+
     settle(state, :all, true)
 
     # One wake at each starting row's deadline, when Adopt may decide; not a poll.
@@ -423,7 +473,7 @@ defmodule CodingAgentFramework.Sessions do
       Process.send_after(self(), :deadline, max((row.deadline || 0) - state.clock.(), 0))
     end
 
-    {:noreply, state}
+    {:noreply, look_later(state)}
   end
 
   @impl true
@@ -479,9 +529,7 @@ defmodule CodingAgentFramework.Sessions do
         deadline: deadline,
         way: way,
         viewer: viewer,
-        act: act,
-        # An interactive start in a worktree answers the folder's trust dialog, when it shows.
-        trust: if(role == :parent and place.tree != nil and state.inlet, do: :open)
+        act: act
       }
 
       case place.tree do
@@ -500,6 +548,20 @@ defmodule CodingAgentFramework.Sessions do
       end
     else
       failed -> {:reply, failed, state}
+    end
+  end
+
+  def handle_call({:answer_dialog, name, kind, label}, _from, state) do
+    with %{} = row <- Table.get(state.db, state.host.name, name) || {:refused, :no_session},
+         "dialog" <- row.status,
+         :ok <- Dialog.check(row, kind, label) do
+      answer = press(state, row, kind, label)
+      # The next screen, a dialog or the start going on, is the row's now, not at the next look.
+      if answer != {:refused, :no_inlet}, do: look_at(state, Table.get(state.db, row.host, name))
+      {:reply, answer, look_later(state)}
+    else
+      status when is_binary(status) -> {:reply, {:refused, {:not_on_dialog, status}}, state}
+      refused -> {:reply, refused, state}
     end
   end
 
@@ -798,7 +860,14 @@ defmodule CodingAgentFramework.Sessions do
 
   def handle_info(:deadline, state) do
     settle(state, :all, true)
-    {:noreply, state}
+    {:noreply, look_later(state)}
+  end
+
+  # The rows that wait on a person: each pane read again, and each row settled.
+  def handle_info(:look, state) do
+    state = %{state | looking: false}
+    for row <- settling(state, :all, "dialog"), do: settle_row(state, row, false)
+    {:noreply, look_later(state)}
   end
 
   # A worktree's task answered: the start goes on to the hold, or is refused with nothing held.
@@ -839,27 +908,11 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
-  # The trust dialog first, by label through the Inlet: answered, or a screen past it (a folder
-  # trusted before) ends it; anything else is read again at the next check, until the deadline.
-  defp check(state, name, %{kind: :start, trust: :open, row: row} = pending) do
-    opts = [release: row.release, timeout: @read]
-
-    case Inlet.choose(state.inlet, name, :trust, @trusted, opts) do
-      {:ok, :sent} ->
-        check(state, name, %{pending | trust: :passed})
-
-      {:refused, {:screen, %{state: past}}} when past in [:idle, :running] ->
-        check(state, name, %{pending | trust: :passed})
-
-      _not_yet ->
-        wait(state, name, pending, fn ->
-          write(state, row, status: "unknown", reason: "trust_dialog")
-          {:unknown, :trust_dialog}
-        end)
-    end
-  end
-
-  # StartDecided: running when the file names the live process, unknown past the deadline.
+  # StartDecided: running when the file names the live process. With no file yet, an
+  # interactive start's pane is read: a startup dialog the app's callback leaves to a person
+  # answers the call at once, and the row waits (Dialog.tla's Read and Callback). Past the
+  # deadline, a dialog on the pane, read in the same step, keeps the row waiting (Deadline);
+  # anything else is unknown.
   defp check(state, name, %{kind: :start, row: row} = pending) do
     case confirm(state, row, true) do
       {:ok, file} ->
@@ -868,11 +921,13 @@ defmodule CodingAgentFramework.Sessions do
         done(state, name, pending, {:ok, answer})
 
       _ ->
-        wait(state, name, pending, fn ->
-          why = unconfirmed(row)
-          write(state, row, status: "unknown", reason: why)
-          {:unknown, why}
-        end)
+        case look_at(state, row) do
+          {:ask, kind} ->
+            state |> done(name, pending, {:unknown, {:dialog, kind}}) |> look_later()
+
+          _ ->
+            wait(state, name, pending, fn -> late(state, row) end)
+        end
     end
   end
 
@@ -897,6 +952,94 @@ defmodule CodingAgentFramework.Sessions do
 
   defp check(state, name, %{kind: :ask} = pending), do: ask(state, name, pending)
 
+  # The start's deadline with no session file: a row on a dialog waits on a person.
+  defp late(state, row) do
+    look_at(state, row)
+
+    case Table.get(state.db, row.host, row.name) do
+      %{status: "dialog"} = now ->
+        {:unknown, {:dialog, Dialog.shown(now).kind}}
+
+      _ ->
+        why = unconfirmed(row)
+        write(state, row, status: "unknown", reason: why)
+        {:unknown, why}
+    end
+  end
+
+  # Reads an interactive start's pane (Dialog.tla's Read): a startup dialog becomes the row's,
+  # with a cue, and the app's callback is asked once for its kind. Answers `{:ask, kind}` when
+  # the dialog waits on a person, `:pressed` when an answer to it went or was tried, or `:none`.
+  defp look_at(%{inlet: nil}, _row), do: :none
+  defp look_at(_state, %{role: role}) when role != "parent", do: :none
+
+  defp look_at(state, row) do
+    with {:ok, screen} <- Inlet.look(state.inlet, row.name, row.release, timeout: @read),
+         true <- Dialog.startup?(screen) do
+      now = Table.get(state.db, row.host, row.name) || row
+      shown = Dialog.encode(screen)
+
+      if now.status != "dialog" or Dialog.shown(now) != shown,
+        do: write(state, now, status: "dialog", reason: nil, dialog: shown)
+
+      now = Table.get(state.db, row.host, row.name)
+      decide(state, now, screen)
+    else
+      _ -> :none
+    end
+  end
+
+  # The app's callback, for a dialog no answer has been marked for: an answer it gives is
+  # pressed, as a person's is; anything else leaves the dialog to a person.
+  defp decide(state, row, %{kind: kind, options: options}) do
+    if Dialog.answers(row)[kind] do
+      :pressed
+    else
+      with {:answer, label} <- state.dialog.(kind, options),
+           :ok <- Dialog.check(row, kind, label) do
+        press(state, row, kind, label)
+        :pressed
+      else
+        _ -> {:ask, kind}
+      end
+    end
+  end
+
+  # Dialog.tla's Take and Press: the answer marked pressing on the row first, then the Inlet's
+  # checked press; sent or unknown stays marked, and only a refusal, which pressed nothing,
+  # takes the mark away.
+  defp press(%{inlet: nil}, _row, _kind, _label), do: {:refused, :no_inlet}
+
+  defp press(state, row, kind, label) do
+    write(state, row, answers: Dialog.mark(row, kind, label, "pressing"))
+    row = Table.get(state.db, row.host, row.name)
+
+    answer =
+      Inlet.choose(state.inlet, row.name, kind, label, release: row.release, timeout: @press)
+
+    mark =
+      case answer do
+        {:ok, :sent} -> "sent"
+        {:refused, _} -> nil
+        {:unknown, _} -> "unknown"
+      end
+
+    write(state, row, answers: Dialog.mark(row, kind, label, mark))
+    answer
+  end
+
+  # One read of the waiting rows' panes `look` ms from now, while any row waits on a person.
+  defp look_later(%{looking: true} = state), do: state
+
+  defp look_later(state) do
+    if Table.with_status(state.db, state.host.name, "dialog") == [] do
+      state
+    else
+      Process.send_after(self(), :look, state.look)
+      %{state | looking: true}
+    end
+  end
+
   defp unconfirmed(%{role: "delegate"}), do: :no_first_event
   defp unconfirmed(_row), do: :no_session_file
 
@@ -918,7 +1061,7 @@ defmodule CodingAgentFramework.Sessions do
   # Settles each row of `which` (`:all`, `{:account, name}` or `:delegates`) with no call under
   # way. `read?` reads the Registry or Stream first; on a reader's cue its rows are fresh.
   defp settle(state, which, read?) do
-    for status <- ~w(starting unknown stopping orphan),
+    for status <- ~w(starting dialog unknown stopping orphan),
         row <- settling(state, which, status),
         do: settle_row(state, row, read?)
 
@@ -943,8 +1086,9 @@ defmodule CodingAgentFramework.Sessions do
       {:ok, file} ->
         running(state, row, file)
 
+      # A pane on a startup dialog waits on a person, never an orphan (Dialog.tla's Deadline).
       {:live, why} when past? ->
-        orphan_held(state, row, why)
+        if look_at(state, row) == :none, do: orphan_held(state, row, why)
 
       {:unheld, file} when past? ->
         orphan(state, row, file)
@@ -956,6 +1100,18 @@ defmodule CodingAgentFramework.Sessions do
 
       _unknown_or_early ->
         :ok
+    end
+  end
+
+  # A row on a startup dialog: running once its file names its live process, as a start's
+  # confirm makes it; stopped once its socket is dead with no such file ("No, exit"); else its
+  # pane is read again, and the next dialog becomes the row's.
+  defp settle_row(state, %{status: "dialog"} = row, read?) do
+    case confirm(state, row, read?) do
+      {:ok, file} -> running(state, row, file)
+      {:unheld, file} -> orphan(state, row, file)
+      {:dead, _} -> write(state, row, status: "stopped")
+      _ -> look_at(state, row)
     end
   end
 

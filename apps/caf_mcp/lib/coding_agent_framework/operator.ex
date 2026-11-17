@@ -45,6 +45,20 @@ defmodule CodingAgentFramework.Operator do
   def answer(mcp, agent, dialog, label),
     do: MCP.operate(mcp, "answer", %{"agent" => agent, "dialog" => dialog, "label" => label})
 
+  @doc """
+  Answers the startup dialog `agent`'s start waits on (F-140): `kind` `"trust"` or
+  `"imports"`, as the agent row shows it, by its option's `label`. Nothing answers one unless
+  the operator does, or the app's callback chose to.
+
+      Operator.answer_startup(mcp, "app-main", "trust", "Yes, I trust this folder")
+      #=> {:ok, :sent}
+  """
+  @spec answer_startup(GenServer.server(), String.t(), String.t(), String.t()) :: answer
+  def answer_startup(mcp, agent, kind, label) do
+    args = %{"agent" => agent, "kind" => kind, "label" => label}
+    MCP.operate(mcp, "answer_startup", args)
+  end
+
   @doc "Resumes `agent` whose process died, once per state, under a claim."
   @spec resume(GenServer.server(), String.t()) :: answer
   def resume(mcp, agent), do: fix(mcp, "resume", agent)

@@ -10,6 +10,7 @@ defmodule CodingAgentFramework.ScreenTest do
   @release @manifest["claude_version"]
 
   @trust ["No, exit", "Yes, I trust this folder"]
+  @imports ["No, disable external imports", "Yes, allow external imports"]
   @permission [
     "Yes",
     "Yes, and always allow access to /work/repo from this project",
@@ -32,7 +33,14 @@ defmodule CodingAgentFramework.ScreenTest do
       selected: "Yes"
     },
     "turn-ended-after-tool" => %{state: :idle, box: :empty},
-    "exited" => %{state: :exited}
+    "exited" => %{state: :exited},
+    "imports-dialog" => %{
+      state: :dialog,
+      kind: :imports,
+      options: @imports,
+      selected: "No, disable external imports",
+      paths: ["/work/outside.md"]
+    }
   }
 
   defp fixture(name), do: File.read!(Path.join(@fixtures, name))
@@ -126,6 +134,31 @@ defmodule CodingAgentFramework.ScreenTest do
       assert Screen.read(screen, @release) == {:ok, %{state: :idle, box: :empty}}
     end
 
+    test "the imports dialog lists each external path, and needs one" do
+      two =
+        edit("imports-dialog.txt", "    /work/outside.md\n", "    /work/a.md\n    /work/b.md\n")
+
+      assert {:ok, %{kind: :imports, paths: ["/work/a.md", "/work/b.md"]}} =
+               Screen.read(two, @release)
+
+      none = edit("imports-dialog.txt", "    /work/outside.md\n", "")
+      assert Screen.read(none, @release) == {:unknown, {:unrecognized, @release}}
+
+      flush = edit("imports-dialog.txt", "    /work/outside.md", "  /work/outside.md")
+      assert Screen.read(flush, @release) == {:unknown, {:unrecognized, @release}}
+    end
+
+    test "a dialog's options at another dialog's indent are unrecognized" do
+      screen =
+        edit(
+          "imports-dialog.txt",
+          "Allow external CLAUDE.md file imports?",
+          "Accessing workspace:"
+        )
+
+      assert Screen.read(screen, @release) == {:unknown, {:unrecognized, @release}}
+    end
+
     test "a resume line with more under it is not an exit" do
       screen = fixture("exited.txt") <> "$ \n"
       assert Screen.read(screen, @release) == {:unknown, {:unrecognized, @release}}
@@ -167,6 +200,12 @@ defmodule CodingAgentFramework.ScreenTest do
 
       {:ok, %{selected: "No"} = screen} = Screen.read(screen, @release)
       assert Screen.option_keys(screen, "Yes") == {:ok, ["Up", "Up", "Up"]}
+    end
+
+    test "moves from the imports dialog's selected option to each one" do
+      {:ok, screen} = Screen.read(fixture("imports-dialog.ansi"), @release)
+      assert Screen.option_keys(screen, "No, disable external imports") == {:ok, []}
+      assert Screen.option_keys(screen, "Yes, allow external imports") == {:ok, ["Down"]}
     end
 
     test "refuses a label the dialog does not show, and a screen with no dialog" do

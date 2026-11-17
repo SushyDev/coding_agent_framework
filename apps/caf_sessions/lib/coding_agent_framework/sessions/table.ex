@@ -12,7 +12,8 @@ defmodule CodingAgentFramework.Sessions.Table do
   session (nil for a main session); `project` the project it works on. `role` is how it runs
   (`parent`, Claude Code's terminal interface, or `delegate`, headless). `status` is one of
   `statuses/0`: `declared` (a main session the embedding app named, with no process yet),
-  `starting`, `running`, `stopping`, `stopped`, `refused`, `unknown`, `orphan` (a live socket
+  `starting`, `dialog` (an interactive start on a startup dialog, waiting on a person, F-140),
+  `running`, `stopping`, `stopped`, `refused`, `unknown`, `orphan` (a live socket
   with no session file past the start's deadline, or a dead socket whose file names a live
   process, `unheld`, for `Recoveries`) and `ended` (a delegate done for good: its report went in
   and no process of it runs again). `reason` says why a row is refused, unknown or orphan, or
@@ -26,6 +27,10 @@ defmodule CodingAgentFramework.Sessions.Table do
   none; a resume whose launch names none takes it again, as it takes `options`, so a move or a
   recovery gives the same launch (F-133's new-3). `release` is the Claude Code release an
   interactive start launched, as its `--version` reads, or NULL when it was not read.
+  `dialog` is the startup dialog the start's pane shows, or showed last, as JSON (`kind`,
+  `options`, `selected`, and the imports dialog's `paths`), and `answers` each kind's answer as
+  JSON (`kind => {label, mark}`, `mark` one of `pressing`, `sent`, `unknown`); both NULL until a
+  start meets a dialog (`CodingAgentFramework.Sessions.Dialog`).
 
   **A move** (F-133, `Mover`): `move` is the move's phase (`draining`, `stopping`, `copying`,
   `resuming`), NULL when no move is under way; `move_from` and `move_to` the accounts it goes
@@ -52,7 +57,8 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   @columns ~w(id host name kind parent project socket account role cwd resume status reason
               viewer pid session_id proc_start started_at updated_at deadline repo branch
-              worktree options model release move move_from move_to move_act move_deadline)a
+              worktree options model release move move_from move_to move_act move_deadline
+              dialog answers)a
 
   @schema """
   CREATE TABLE IF NOT EXISTS agents (
@@ -61,7 +67,8 @@ defmodule CodingAgentFramework.Sessions.Table do
     resume TEXT, status TEXT NOT NULL, reason TEXT, viewer TEXT, pid INTEGER, session_id TEXT,
     proc_start TEXT, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deadline INTEGER,
     repo TEXT, branch TEXT, worktree TEXT, options TEXT, model TEXT, release TEXT, move TEXT,
-    move_from TEXT, move_to TEXT, move_act INTEGER, move_deadline INTEGER, UNIQUE (host, name));
+    move_from TEXT, move_to TEXT, move_act INTEGER, move_deadline INTEGER, dialog TEXT,
+    answers TEXT, UNIQUE (host, name));
   CREATE INDEX IF NOT EXISTS agents_status ON agents (host, status);
   CREATE INDEX IF NOT EXISTS agents_cwd ON agents (host, cwd);
   CREATE INDEX IF NOT EXISTS agents_parent ON agents (host, parent);
@@ -69,7 +76,8 @@ defmodule CodingAgentFramework.Sessions.Table do
   """
 
   # The columns a later build added to `agents`, so added if missing: the release a session
-  # runs (R8), a move's phase on the row (F-133), and the model (F-136).
+  # runs (R8), a move's phase on the row (F-133), the model (F-136), and a startup dialog and
+  # its answers (F-140).
   @added [
     agents: [
       "release TEXT",
@@ -78,7 +86,9 @@ defmodule CodingAgentFramework.Sessions.Table do
       "move_from TEXT",
       "move_to TEXT",
       "move_act INTEGER",
-      "move_deadline INTEGER"
+      "move_deadline INTEGER",
+      "dialog TEXT",
+      "answers TEXT"
     ]
   ]
 
@@ -88,7 +98,7 @@ defmodule CodingAgentFramework.Sessions.Table do
   # Every status, once. The lists below are this part's only readings of a status, and each is
   # checked against this one when the module compiles: a status renamed here and not there
   # fails the build here, not a read in another part at run time.
-  @statuses ~w(declared starting running stopping stopped refused unknown orphan ended)
+  @statuses ~w(declared starting dialog running stopping stopped refused unknown orphan ended)
   # No process of the row may live, so its name and its cwd are free for a new start.
   @free ~w(declared stopped refused ended)
   # No process of the row will run again: its start was refused, or it ended.
@@ -159,7 +169,7 @@ defmodule CodingAgentFramework.Sessions.Table do
       old =
         @columns --
           ([:kind, :parent, :project, :release, :model] ++
-             [:move, :move_from, :move_to, :move_act, :move_deadline])
+             [:move, :move_from, :move_to, :move_act, :move_deadline, :dialog, :answers])
 
       Store.transaction(db, fn ->
         Store.query(
@@ -204,7 +214,9 @@ defmodule CodingAgentFramework.Sessions.Table do
     fields =
       Enum.map(keys, &{&1, start[&1]}) ++ [status: "starting", started_at: now, updated_at: now]
 
-    reset = "reason = NULL, viewer = NULL, pid = NULL, proc_start = NULL, worktree = NULL"
+    reset =
+      "reason = NULL, viewer = NULL, pid = NULL, proc_start = NULL, worktree = NULL, " <>
+        "dialog = NULL, answers = NULL"
 
     sets =
       Enum.map_join(keys -- [:host, :name], ",", &"#{&1} = excluded.#{&1}") <>
@@ -238,7 +250,7 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   @doc """
   Sets `fields` (status, reason, viewer, pid, session_id, proc_start, deadline, worktree,
-  parent, project, and a move's `move`, `move_from`, `move_to`, `move_act`, `move_deadline`) on
+  parent, project, dialog, answers, and a move's `move`, `move_from`, `move_to`, `move_act`, `move_deadline`) on
   row `id`.
   """
   @spec update(db, integer, keyword) :: :ok

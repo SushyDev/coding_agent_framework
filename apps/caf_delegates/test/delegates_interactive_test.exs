@@ -3,7 +3,7 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
   An interactive delegate (`interactive: true`, F-137) over a real `Sessions`, `Inlet`,
   `Registry`, `Transcripts` and `Mailbox`, real dtach and tmux, a real git repository in this
   test's own directory, and the screen stand-in for Claude Code, which draws 2.1.322's trust
-  dialog first. The test writes the transcript lines Claude Code would. Each test names the
+  dialog first, which this test's app answers. The test writes the transcript lines Claude Code would. Each test names the
   `Delegate.tla` and `Delivery.tla` steps it checks.
   """
   use ExUnit.Case, async: true
@@ -35,13 +35,12 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     transcripts =
       start_supervised!({Transcripts, programs: programs(), accounts: ["work"], db: db})
 
-    # A Sessions that answers an interactive start's trust dialog through the Inlet.
+    # A Sessions whose app chose to answer the trust dialog (F-140's `dialog:` callback); by
+    # default nothing answers it, and a person does.
     inlet = start_supervised!({Inlet, tmux: ctx.server})
-
-    sessions =
-      start_supervised!(
-        Supervisor.child_spec({Sessions, ctx.opts ++ [inlet: inlet]}, id: :trusting)
-      )
+    trust = fn :trust, _ -> {:answer, "Yes, I trust this folder"} end
+    trusting = ctx.opts ++ [inlet: inlet, dialog: trust]
+    sessions = start_supervised!(Supervisor.child_spec({Sessions, trusting}, id: :trusting))
 
     project = %{
       name: "app",
