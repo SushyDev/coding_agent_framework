@@ -6,7 +6,7 @@ defmodule CodingAgentFramework.Recoveries do
   `CodingAgentFramework.Acts`, under the actor `recoveries:<host>:<server>`, and `Acts` cues it.
 
   The caller's supervision tree starts one per host, with no name, given the host's
-  `TmuxSampler`, `Control`, `Holder`, `Sessions`, tmux server (for its key) and the instance's
+  `TmuxSampler`, `Holder`, `Sessions`, tmux server (for its key and its viewers) and the instance's
   `Acts`. It reads the sampler's rows, never a pane's screen: by `check/2`, or after `cue/1`,
   which the sampler's `notify` can call.
 
@@ -75,10 +75,9 @@ defmodule CodingAgentFramework.Recoveries do
   @lost [:unviewed, :no_server]
 
   @doc """
-  Starts a `Recoveries`. Options: `sampler:` (the host's `TmuxSampler`), `control:` (its
-  `Control`), `holder:` (its `Holder`), `programs:` (its `Programs`, with ps, kill and sleep,
+  Starts a `Recoveries`. Options: `sampler:` (the host's `TmuxSampler`), `holder:` (its `Holder`), `programs:` (its `Programs`, with ps, kill and sleep,
   for `Holder.Process`), `sessions:` (its `Sessions`, which answers each viewer's command and
-  the ends owed), `server:` (its `Tmux` server, for the key), `acts:` (the instance's `Acts`),
+  the ends owed), `server:` (its `Tmux` server, for the key and the viewers it opens), `acts:` (the instance's `Acts`),
   and optionally `size:` (a viewer's `{columns, rows}`, default `{200, 50}`), `max_age:` (ms,
   default 30 000), `window:` (ms, default 60 000), `end_grace:` (ms between an end's TERM and
   its KILL, default 5 000) and `clock:` (a function answering the time in ms, by default the
@@ -194,8 +193,8 @@ defmodule CodingAgentFramework.Recoveries do
          procs: procs,
          end_grace: Keyword.get(opts, :end_grace, 5_000),
          sampler: Keyword.fetch!(opts, :sampler),
-         control: Keyword.fetch!(opts, :control),
          sessions: Keyword.fetch!(opts, :sessions),
+         tmux: Keyword.fetch!(opts, :server),
          size: Keyword.get(opts, :size, {200, 50}),
          max_age: Keyword.get(opts, :max_age, 30_000),
          window: Keyword.get(opts, :window, 60_000),
@@ -372,7 +371,7 @@ defmodule CodingAgentFramework.Recoveries do
   defp act(state, id, %{socket: name}, _prior) do
     answer =
       case Sessions.viewer_argv(state.sessions, name) do
-        {:ok, argv} -> Sessions.viewer(state.control, name, argv, state.size)
+        {:ok, argv} -> Sessions.viewer(state.tmux, name, argv, state.size)
         {:refused, _} = refused -> refused
         # Asking opens nothing, so an answer that did not come is a state that did not act.
         {:unknown, why} -> {:refused, {:no_viewer_command, why}}

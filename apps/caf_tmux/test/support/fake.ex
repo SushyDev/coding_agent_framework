@@ -88,6 +88,25 @@ defmodule CodingAgentFramework.Tmux.Fake do
     end)
   end
 
+  @doc "Test aid: sets the screen `capture/3` answers for a pane, empty until set."
+  @spec set_screen(t, String.t(), String.t()) :: :ok
+  def set_screen(%__MODULE__{} = s, pane, text),
+    do: Agent.update(s.pid, &put_in(&1, [:panes, pane, :screen], text), s.timeout)
+
+  @impl true
+  def capture(%__MODULE__{} = s, pane, session) do
+    call(s, fn st ->
+      case st.panes do
+        %{^pane => %{tag: ^session} = p} when st.up ->
+          {columns, _} = p.size || {80, 24}
+          {{:ok, %{text: Map.get(p, :screen, ""), width: columns}}, st}
+
+        _ ->
+          {guarded_refusal(st, pane), st}
+      end
+    end)
+  end
+
   @impl true
   def kill_pane(%__MODULE__{} = s, pane, session),
     do: guarded(s, pane, session, :killed, &%{&1 | panes: Map.delete(&1.panes, pane)})
@@ -109,13 +128,19 @@ defmodule CodingAgentFramework.Tmux.Fake do
   defp guarded(s, pane, session, done, act) do
     call(s, fn st ->
       case st.panes do
-        _ when not st.up -> {{:refused, :no_server}, st}
-        %{^pane => %{tag: ^session}} -> {{:ok, done}, act.(st)}
-        %{^pane => %{tag: nil}} -> {{:refused, :untagged}, st}
-        %{^pane => %{tag: other}} -> {{:refused, {:tagged_for, other}}, st}
-        _ -> {{:refused, :no_pane}, st}
+        %{^pane => %{tag: ^session}} when st.up -> {{:ok, done}, act.(st)}
+        _ -> {guarded_refusal(st, pane), st}
       end
     end)
+  end
+
+  defp guarded_refusal(st, pane) do
+    case st.panes do
+      _ when not st.up -> {:refused, :no_server}
+      %{^pane => %{tag: nil}} -> {:refused, :untagged}
+      %{^pane => %{tag: other}} -> {:refused, {:tagged_for, other}}
+      _ -> {:refused, :no_pane}
+    end
   end
 
   @impl true

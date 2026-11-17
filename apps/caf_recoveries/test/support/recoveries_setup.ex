@@ -16,7 +16,7 @@ defmodule CodingAgentFramework.RecoveriesSetup do
   import ExUnit.Assertions
   import ExUnit.Callbacks, only: [on_exit: 1]
 
-  alias CodingAgentFramework.{Acts, Control, Holder, Recoveries, Sessions, Tmux, TmuxSampler}
+  alias CodingAgentFramework.{Acts, Holder, Recoveries, Sessions, Tmux, TmuxSampler}
   alias CodingAgentFramework.Tmux.CLI
 
   @doc """
@@ -29,14 +29,13 @@ defmodule CodingAgentFramework.RecoveriesSetup do
     on_exit(fn -> Tmux.kill_server(server) end)
     File.mkdir_p!(Path.join(dir, "d"))
     {:ok, holder} = Holder.new(programs(), Path.join(dir, "d"))
-    {:ok, control} = Control.start_link(tmux: server)
     db = Path.join(dir, "r.db")
 
     {:ok, sessions} =
       Sessions.start_link(
         programs: programs(),
         dir: Path.join(dir, "d"),
-        control: control,
+        tmux: server,
         home: dir,
         db: db
       )
@@ -64,7 +63,6 @@ defmodule CodingAgentFramework.RecoveriesSetup do
 
     opts = [
       sampler: sampler,
-      control: control,
       holder: holder,
       programs: programs(),
       sessions: sessions,
@@ -83,7 +81,6 @@ defmodule CodingAgentFramework.RecoveriesSetup do
      acts: acts,
      server: server,
      holder: holder,
-     control: control,
      sessions: sessions,
      sampler: sampler,
      opts: opts,
@@ -123,10 +120,10 @@ defmodule CodingAgentFramework.RecoveriesSetup do
     {:ok, id}
   end
 
-  @doc "Opens a viewer of `name` through the test's `Control`, as `Sessions` does."
+  @doc "Opens a viewer of `name` on the test's tmux server, as `Sessions` does."
   def view(ctx, name) do
     {:ok, argv} = Sessions.viewer_argv(ctx.sessions, name)
-    Sessions.viewer(ctx.control, name, argv, {80, 24})
+    Sessions.viewer(ctx.server, name, argv, {80, 24})
   end
 
   @doc """

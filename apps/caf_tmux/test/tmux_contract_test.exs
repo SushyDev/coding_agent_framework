@@ -144,6 +144,21 @@ defmodule CodingAgentFramework.TmuxContractTest do
       assert tmux(ctx, ["show-options", "-w", "-t", pane, "window-size"]) == ""
     end
 
+    test "a capture shows the pane's screen and width, only for the session its tag names",
+         ctx do
+      script = ~s(printf 'hello\\nworld  '; exec #{program!(:cat)})
+      argv = [program!(:sh), "-c", script]
+      {:ok, pane} = Tmux.new_session(ctx.server, "alpha", argv, size: {50, 5})
+      assert {:refused, {:tagged_for, "alpha"}} = Tmux.capture(ctx.server, pane, "beta")
+
+      assert {:ok, %{width: 50, text: "hello\nworld\n" <> _}} =
+               await(fn ->
+                 with {:ok, %{text: "hello\nworld\n" <> _}} = ok <-
+                        Tmux.capture(ctx.server, pane, "alpha"),
+                      do: ok
+               end)
+    end
+
     test "killing the server removes its socket file", ctx do
       {:ok, _} = Tmux.new_session(ctx.server, "alpha", stand_in(ctx, "alpha"))
       assert File.exists?(ctx.socket)

@@ -141,13 +141,13 @@ defmodule CodingAgentFramework.RecoveriesTest do
   end
 
   test "a viewer that fails to open leaves a failed row and the agent running", ctx do
-    {child, _} = hold!(ctx, "alpha")
+    # Held with no agent row: `Sessions` has no viewer command for it, so the open is refused
+    # before it reaches tmux.
+    {child, _} = hold!(ctx, "alpha", nil)
     {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
-    # The host's writer is gone: the open is refused before it reaches tmux.
-    :ok = GenServer.stop(ctx.control)
 
     assert {:ok, _} = agree(ctx, "alpha")
-    assert [%{outcome: "failed", reason: "no_control", acted_at: nil}] = rows(ctx)
+    assert [%{outcome: "failed", reason: "no_session", acted_at: nil}] = rows(ctx)
     assert held(ctx, "alpha").status == :unviewed
     assert {:ok, %{claimed: [], ended: []}} = Recoveries.check(ctx.recoveries)
     assert {:ok, :live} = Holder.state(ctx.holder, "alpha")

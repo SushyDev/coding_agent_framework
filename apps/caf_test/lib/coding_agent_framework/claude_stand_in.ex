@@ -10,6 +10,7 @@ defmodule CodingAgentFramework.ClaudeStandIn do
     and removed when the stand-in exits;
   - exits 143 on SIGTERM, as Claude Code does (F-114), unless it read the line `deaf`, after
     which it ignores SIGTERM, as a process that does not end would;
+  - prints `2.1.322 (Claude Code)` for `--version`, as Claude Code prints its release;
   - echoes each line of its input, and exits on `/exit`, or after `idle` seconds with none
     (`TestHost.stand_in_idle/0` by default), so no run leaves it for long;
   - records its pid in `<dir>/pids/`, so a test ends what it started by pid (`kill_all/1`,
@@ -52,6 +53,7 @@ defmodule CodingAgentFramework.ClaudeStandIn do
     name='' resume=''
     while [ $# -gt 0 ]; do
       case $1 in
+        --version) printf '2.1.322 (Claude Code)\\n'; exit 0 ;;
         --name) name=$2; shift 2 ;;
         --resume) resume=$2; shift 2 ;;
         --) break ;;

@@ -121,7 +121,9 @@ flowchart LR
   `Sessions`, and the tree is a function of those rows.
 - **Nothing typed to deliver.** A report or a message reaches a main session through its
   waiting Stop hook, which wakes the idle session with the text, or has Claude Code queue it into
-  a turn still running, so a draft in its box is never touched; the transcript confirms it. A session ends by SIGTERM once its session file says it is idle.
+  a turn still running, so a draft in its box is never touched; the transcript confirms it. Only a
+  session with no waiter gets a typed line, from the `Inlet`, into an ended turn with an empty
+  box. A session ends by SIGTERM once its session file says it is idle.
 - **Addressed by name.** Agents are rows with names; the framework finds every session across
   every account it holds, never by a pid or a socket, so a move to another account hides none.
 - **Tables are the truth.** Views and the `agents()` tool read the `Tracker`'s fold of those
@@ -158,10 +160,13 @@ Built, each from a checked model in `model/tla/`:
 - `Cues`, the library's own routing (R11): each part declares the topics it reads, and the
   embedding app hands the declarations to `Cues`, so the order in which the system settles is
   the library's; `Jobs`, `Services` and `Stream` read on their own interval, and no ticker
-  sends a made-up topic.
+  sends a made-up topic;
+- the `Inlet`, the checked typed write into a main session with no waiter, as `Mailbox`'s
+  `typed` transport: the turn and the screen read again in the write's own step, one line with
+  the row's uuid, Enter as its own command, and the release each interactive session runs
+  recorded at its start (R8).
 
-Next, the rest of the remodel, in order (F-115, taken in F-116): the `Inlet`, the
-checked typed write (R8); and `Mover` (R12). Then
+Next, the last of the remodel (F-115, taken in F-116): `Mover` (R12). Then
 interactive delegates and main sessions, the mechanisms an app's policies stand on (an idle
 delegate's watchdog, admission by load, `Stop` held for the app, clone copies, an idempotent
 start), packaging, and stacks with the LiveView components. The plan and the order of the units are in
@@ -174,7 +179,7 @@ The code is a Mix umbrella, one OTP app per part under `apps/`. An arrow means "
 declares every app it uses, directly, and `gate-deps` checks that. The chart shows the apps as
 built; the remodel changes it as R1 to R12 land (`caf_store` added in R1 and holding `Reader`
 from R2, `caf_acts` added in R10 in place of `Grants.Claims` and `Recoveries`' table, `caf_cues`
-added in R11, `caf_control` becoming `caf_inlet`).
+added in R11, `caf_inlet` in place of `caf_control` in R8).
 
 ```mermaid
 flowchart BT
@@ -192,7 +197,7 @@ flowchart BT
     accounts[caf_accounts]
     usage[caf_usage]
     cli[caf_cli]
-    control[caf_control]
+    inlet[caf_inlet]
     stream[caf_stream]
     sampler[caf_sampler]
     screen[caf_screen]
@@ -222,7 +227,8 @@ flowchart BT
   accounts --> intake
   usage --> accounts
   cli --> accounts
-  control --> tmux
+  inlet --> tmux
+  inlet --> screen
   stream --> shell
   stream --> holder
   sampler --> tmux
@@ -232,7 +238,7 @@ flowchart BT
   sessions --> registry
   sessions --> accounts
   sessions --> cli
-  sessions --> control
+  sessions --> tmux
   sessions --> stream
   sessions --> transcripts
   sessions --> intake
@@ -257,6 +263,8 @@ flowchart BT
   mailbox --> intake
   mailbox --> transcripts
   mailbox --> accounts
+  mailbox --> inlet
+  mailbox --> registry
   mcp --> grants
   mcp --> acts
   copies --> shell

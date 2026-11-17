@@ -37,8 +37,16 @@ defmodule CodingAgentFramework.Mailbox do
     directory (`accounts:`), settles it, or `take_bound:` ms (10 s by default) with no line
     makes it due again. With no waiter its rows stay `queued`, `attempt` `:no_waiter`, until
     `Intake`'s waiter cue;
-  - `typed` is R8's. Without `intake:` a main session's rows stay `queued`, `attempt`
-    `:no_delivery`, unless a call takes them.
+  - `typed`, for an interactive session with no waiter held, when `Mailbox` was given `inlet:`
+    (with `registry:`, `transcripts:` and `accounts:`): only while its row is `running` and its
+    session file reads idle, handed to `Inlet.type/4` as one line with the row's uuid at its end
+    (`Transport.Typed`). The `Inlet` reads the turn again in its own step, with the screen as
+    the session's recorded release draws it, and types only into an ended turn with an empty
+    box. The transcript settles it, as a waiter's row. A row whose text the `Inlet` refused (too
+    long for the box, or more than one line) is not typed again: it waits for a waiter.
+
+  Without `intake:` or `inlet:` a main session's rows stay `queued`, `attempt` `:no_delivery`,
+  unless a call takes them.
 
   **Answers.** A delivered message's turn ends with a `result` that names its uuid; that
   result's text is stored as a reply from the delegate to the message's sender (to its parent,
@@ -60,7 +68,8 @@ defmodule CodingAgentFramework.Mailbox do
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, Grants, Intake, Stream, Transcripts}
+  alias CodingAgentFramework.{Accounts, Grants, Inlet, Intake, Registry, Store, Stream}
+  alias CodingAgentFramework.Transcripts
   alias CodingAgentFramework.Sessions.{Agents, Turn}
   alias CodingAgentFramework.Mailbox.{Table, Transport}
   alias CodingAgentFramework.Stream.Fold
@@ -69,6 +78,8 @@ defmodule CodingAgentFramework.Mailbox do
   # The take bound (`docs/design.md`, "Delivery"): Claude Code 2.1.322 writes the `enqueue`
   # line within about a second of the waiter's answer (measured for F-127).
   @take_bound 10_000
+  # The Inlet's typed write: its reads, the keys, and the box seen before the Enter.
+  @inlet 10_000
   # The sender of a notice and of the words to go on; no agent has this name, as an agent's
   # name holds its project's.
   @framework "framework"
@@ -78,7 +89,8 @@ defmodule CodingAgentFramework.Mailbox do
   run), `sessions_db:` (the file of `Sessions`' table, read through `Sessions.Agents`), and
   optionally `notify:`; for the
   waiter transport, `intake:` with `transcripts:` and `accounts:` (an `Accounts`), and
-  `take_bound:` (ms, 10 000 by default).
+  `take_bound:` (ms, 10 000 by default); for the typed transport, `inlet:` with `registry:` (the
+  host's `Registry`), `transcripts:` and `accounts:`.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -244,16 +256,22 @@ defmodule CodingAgentFramework.Mailbox do
          {:ok, agents} <- Agents.open(Keyword.fetch!(opts, :sessions_db), host) do
       s = Map.new(~w(grants stream host)a, &{&1, Keyword.fetch!(opts, &1)})
       notify = Keyword.get(opts, :notify, fn _ -> :ok end)
-      # The waiter transport's parts; without `intake:` a main session has no transport here.
+      # The interactive transports' parts: the waiter with `intake:`, the typed write with
+      # `inlet:`, both settled by the transcript. With neither, a main session has no transport.
       waiter =
-        if opts[:intake],
-          do: Map.new(~w(intake transcripts accounts)a, &{&1, Keyword.fetch!(opts, &1)}),
-          else: %{intake: nil}
+        if opts[:intake] || opts[:inlet],
+          do: Map.new(~w(transcripts accounts)a, &{&1, Keyword.fetch!(opts, &1)}),
+          else: %{}
 
-      waiter = Map.put(waiter, :bound, Keyword.get(opts, :take_bound, @take_bound))
+      bound = Keyword.get(opts, :take_bound, @take_bound)
+      waiter = Map.merge(waiter, %{intake: opts[:intake], bound: bound})
+
+      typed =
+        if opts[:inlet], do: %{inlet: opts[:inlet], registry: Keyword.fetch!(opts, :registry)}
+
       # `calls`: row id to the call that took it; `waits`: key to the call waiting for it.
       s = Map.merge(s, %{db: db, agents: agents, notify: notify, calls: %{}, waits: %{}})
-      {:ok, Map.put(s, :waiter, waiter), {:continue, :read}}
+      {:ok, Map.merge(s, %{waiter: waiter, typed: typed}), {:continue, :read}}
     else
       {:refused, reason} -> {:stop, reason}
     end
@@ -266,7 +284,8 @@ defmodule CodingAgentFramework.Mailbox do
   def handle_continue(:read, s) do
     Stream.read(s.stream, timeout: @step)
 
-    for %{via: "waiter", status: "sending", sent_at: at} <- Table.open_rows(s.db),
+    for %{via: via, status: "sending", sent_at: at} <- Table.open_rows(s.db),
+        via in ["waiter", "typed"],
         is_integer(at),
         do: bound(s, at)
 
@@ -445,7 +464,11 @@ defmodule CodingAgentFramework.Mailbox do
         evidence = %{fold: folds[m.session_id], calls: s.calls}
 
         evidence =
-          if m.via == "waiter", do: Map.put(evidence, :waiter, seen(s, m)), else: evidence
+          case m.via do
+            "waiter" -> Map.put(evidence, :waiter, seen(s, m))
+            "typed" -> Map.put(evidence, :typed, typed_seen(s, m))
+            _ -> evidence
+          end
 
         settled(s, m, Transport.settle(m, evidence))
       end
@@ -513,8 +536,8 @@ defmodule CodingAgentFramework.Mailbox do
   defp stored_quietly(s, id), do: announce(s, id)
 
   # The addressee and its transport, by its agent row (`Sessions.Agents`): a headless
-  # delegate's stream, with the fold of its session; an interactive session's waiter, when this
-  # Mailbox was given an `Intake`. Anything else has none (the typed write is R8's).
+  # delegate's stream, with the fold of its session; an interactive session's waiter or typed
+  # write, when this Mailbox was given an `Intake` or an `Inlet`. Anything else has none.
   defp target(s, to, folds) do
     srow = Agents.get(s.agents, to)
 
@@ -528,7 +551,7 @@ defmodule CodingAgentFramework.Mailbox do
       Agents.headless?(srow) ->
         :not_started
 
-      srow != nil and s.waiter.intake != nil ->
+      srow != nil and (s.waiter.intake != nil or s.typed != nil) ->
         {:waiter, srow}
 
       true ->
@@ -571,9 +594,12 @@ defmodule CodingAgentFramework.Mailbox do
   # A main session's waiter: one row in flight, to a running session that has a waiter held now
   # (each turn's end starts one). Claude Code takes the text into an ended turn, or queues it
   # into a running one (a person's prompt started a turn while the last turn's waiter waited);
-  # nothing is typed either way. A session with no waiter keeps its rows due, and `Intake`'s
+  # nothing is typed either way. A session with no waiter gets the Inlet's typed write, into an
+  # ended turn only; with no Inlet, or a text it refused, its rows stay due, and `Intake`'s
   # waiter cue tries them again.
   defp deliver(s, rows, {:waiter, srow}) do
+    m = hd(rows)
+
     cond do
       Enum.any?(rows, &(&1.status == "sending")) ->
         :ok
@@ -581,13 +607,21 @@ defmodule CodingAgentFramework.Mailbox do
       not Agents.running?(srow) or not is_integer(srow.pid) or not is_binary(srow.session_id) ->
         :ok
 
-      Intake.waiter?(s.waiter.intake, srow.account, srow.session_id, timeout: @step) ==
-          {:ok, true} ->
-        hand(s, hd(rows), srow)
-
       true ->
-        m = hd(rows)
-        if m.attempt != "no_waiter", do: write(s, m, attempt: :no_waiter)
+        interactive(s, m, srow, waiter?(s, srow))
+    end
+  end
+
+  defp interactive(s, m, srow, {:ok, true}), do: hand(s, m, srow)
+
+  defp interactive(s, m, srow, held) do
+    refused = Transport.Typed.text_refused?(m.attempt)
+
+    cond do
+      # Only a waiter known absent: an unread one may be there, and its turn not ended.
+      held == {:ok, false} and s.typed != nil and not refused -> type(s, m, srow)
+      m.attempt != "no_waiter" and not refused -> write(s, m, attempt: :no_waiter)
+      true -> :ok
     end
   end
 
@@ -623,6 +657,79 @@ defmodule CodingAgentFramework.Mailbox do
         write(s, m, sent_at: now(), attempt: why)
         bound(s, now())
     end
+  end
+
+  defp waiter?(%{waiter: %{intake: nil}}, _srow), do: {:ok, false}
+
+  defp waiter?(s, srow),
+    do: Intake.waiter?(s.waiter.intake, srow.account, srow.session_id, timeout: @step)
+
+  # The typed write: marked only once the session file reads idle (a row is not marked and
+  # unmarked at every cue while a turn runs); the Inlet reads the turn again in its own step,
+  # with the screen. `sent_at` at the mark is the latest the keys can go in, the Inlet's call
+  # timeout past it, so a restart before the answer waits that long and the bound.
+  defp type(s, m, srow) do
+    case turn_now(s, srow.name, srow.pid) do
+      :ok ->
+        from = offset(s, srow)
+        mark = [status: "sending", via: "typed", session_id: srow.session_id, at: srow.pid]
+        write(s, m, mark ++ [from_byte: from, sent_at: now() + @inlet])
+        text = Transport.Typed.text(m.text, m.uuid)
+        turn = fn -> turn_now(s, srow.name, srow.pid) end
+
+        case Inlet.type(s.typed.inlet, srow.name, text,
+               release: srow.release,
+               turn: turn,
+               timeout: @inlet
+             ) do
+          {:ok, :sent} ->
+            write(s, m, sent_at: now(), attempt: nil)
+            bound(s, now())
+
+          {:refused, why} ->
+            write(s, m, status: "queued", via: nil, at: nil, sent_at: nil, attempt: why)
+
+          {:unknown, why} ->
+            write(s, m, sent_at: now(), attempt: why)
+            bound(s, now())
+        end
+
+      {:refused, why} ->
+        if m.attempt != Store.text(why), do: write(s, m, attempt: why)
+    end
+  end
+
+  # The turn of `name`'s process `pid` read now: its row, its session file and its waiter.
+  defp turn_now(s, name, pid) do
+    with %{} = row <- Agents.get(s.agents, name),
+         {:ok, files} <- files(s, row),
+         {:ok, held} <- waiter?(s, row) do
+      Transport.Typed.turn(Turn.interactive(row, files, held), row.pid == pid)
+    else
+      nil -> {:refused, :no_row}
+      {_, why} -> {:refused, why}
+    end
+  end
+
+  defp files(s, row) do
+    with {:ok, _} <- Registry.read(s.typed.registry, timeout: @step),
+         {:ok, %{rows: files}} <- Registry.rows(s.typed.registry, row.account, timeout: @step),
+         do: {:ok, files}
+  end
+
+  # A typed row's evidence: the waiter's, and whether the turn reads ended now.
+  defp typed_seen(s, m) do
+    srow = Agents.get(s.agents, m.to_agent)
+
+    ended =
+      with %{} <- srow,
+           {:ok, files} <- files(s, srow) do
+        Turn.interactive(srow, files, false) in [:idle, :ended]
+      else
+        _ -> false
+      end
+
+    Map.put(seen(s, m), :ended, ended)
   end
 
   defp bound(s, sent_at),

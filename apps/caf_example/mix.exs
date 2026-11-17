@@ -20,12 +20,12 @@ defmodule CafExample.MixProject do
     [
       {:caf_accounts, in_umbrella: true},
       {:caf_acts, in_umbrella: true},
-      {:caf_control, in_umbrella: true},
       {:caf_copies, in_umbrella: true},
       {:caf_cues, in_umbrella: true},
       {:caf_delegates, in_umbrella: true},
       {:caf_grants, in_umbrella: true},
       {:caf_holder, in_umbrella: true},
+      {:caf_inlet, in_umbrella: true},
       {:caf_intake, in_umbrella: true},
       {:caf_jobs, in_umbrella: true},
       {:caf_mailbox, in_umbrella: true},

@@ -119,6 +119,26 @@ defmodule CodingAgentFramework.Tmux.CLI do
   def write(%__MODULE__{} = s, pane, session, {:keys, keys}),
     do: guarded(s, pane, session, "send-keys -t #{pane} #{Enum.join(keys, " ")}", :sent)
 
+  # The width comes first, on a line of its own, so the screen after it is read whole.
+  @impl true
+  def capture(%__MODULE__{} = s, pane, session) do
+    command =
+      "display-message -p -t #{pane} 'captured\t\#{pane_width}' ; capture-pane -p -t #{pane}"
+
+    guarded(s, pane, session, command, fn
+      "captured\t" <> rest ->
+        with [width, text] <- String.split(rest, "\n", parts: 2),
+             {width, ""} when width > 0 <- Integer.parse(width) do
+          {:ok, %{text: text, width: width}}
+        else
+          _ -> :other
+        end
+
+      _ ->
+        :other
+    end)
+  end
+
   @impl true
   def kill_pane(%__MODULE__{} = s, pane, session),
     do: guarded(s, pane, session, "kill-pane -t #{pane}", :killed)
@@ -137,23 +157,21 @@ defmodule CodingAgentFramework.Tmux.CLI do
 
   # Runs `command` only when the pane at `pane` has that id and its tag names `session`, in one
   # tmux command, and prints `done` after it.
-  defp guarded(%__MODULE__{tag: tag} = s, pane, session, command, done) do
-    check = "\#{&&:\#{==:\#{pane_id},#{pane}},\#{==:\#{#{tag}},#{session}}}"
-    refuse = "display-message -p -t #{pane} 'refused\t\#{pane_id}\t\#{#{tag}}'"
+  defp guarded(s, pane, session, command, done) when is_atom(done) do
     expected = "#{done}\n"
 
-    case run(s, [
-           "if-shell",
-           "-F",
-           "-t",
-           pane,
-           check,
-           "#{command} ; display-message -p #{done}",
-           refuse
-         ]) do
-      {:ok, %{status: 0, output: ^expected}} ->
-        {:ok, done}
+    guarded(s, pane, session, "#{command} ; display-message -p #{done}", fn
+      ^expected -> {:ok, done}
+      _ -> :other
+    end)
+  end
 
+  # As above, with `parse` reading what `command` printed: `{:ok, value}`, or `:other`.
+  defp guarded(%__MODULE__{tag: tag} = s, pane, session, command, parse) do
+    check = "\#{&&:\#{==:\#{pane_id},#{pane}},\#{==:\#{#{tag}},#{session}}}"
+    refuse = "display-message -p -t #{pane} 'refused\t\#{pane_id}\t\#{#{tag}}'"
+
+    case run(s, ["if-shell", "-F", "-t", pane, check, command, refuse]) do
       {:ok, %{status: 0, output: "refused\t" <> rest}} ->
         case String.split(String.trim_trailing(rest, "\n"), "\t") do
           ["", _] -> {:refused, :no_pane}
@@ -161,6 +179,9 @@ defmodule CodingAgentFramework.Tmux.CLI do
           [^pane, other] -> {:refused, {:tagged_for, other}}
           _ -> {:unknown, {:tmux_output, rest}}
         end
+
+      {:ok, %{status: 0, output: out}} = other ->
+        with :other <- parse.(out), do: failure(other)
 
       other ->
         failure(other)

@@ -12,7 +12,7 @@ defmodule CodingAgentFramework.SessionsTest do
   import CodingAgentFramework.TestHost
   import ExUnit.CaptureLog
 
-  alias CodingAgentFramework.{Acts, ClaudeStandIn, Control, Holder, Registry, Sessions}
+  alias CodingAgentFramework.{Acts, ClaudeStandIn, Holder, Registry, Sessions}
   alias CodingAgentFramework.SessionsSetup
   alias CodingAgentFramework.TmuxSampler
   alias CodingAgentFramework.Sessions.Table
@@ -46,7 +46,7 @@ defmodule CodingAgentFramework.SessionsTest do
 
     # Before the deadline the adoption decides nothing.
     assert %{status: "starting"} = Table.get(ctx.table, "test", "slow")
-    assert {:ok, :sent} = Control.send(ctx.control, "slow", "go")
+    assert {:ok, :sent} = SessionsSetup.type(ctx, "slow", "go")
     assert {:ok, _} = file_written(ctx)
     cue(ctx, sessions)
     assert {:ok, %{pid: pid}} = row_when(ctx, "slow", &(&1.status == "running"))
@@ -140,7 +140,7 @@ defmodule CodingAgentFramework.SessionsTest do
     assert {:unknown, :no_session_file} = Task.await(late, 15_000)
     assert {:unknown, :no_session_file} = Task.await(lost, 15_000)
 
-    assert {:ok, :sent} = Control.send(ctx.control, "late", "go")
+    assert {:ok, :sent} = SessionsSetup.type(ctx, "late", "go")
     assert {:ok, _} = file_written(ctx)
     kill_held(ctx, lost_dir, "lost")
     cue(ctx, ctx.sessions)
@@ -186,14 +186,14 @@ defmodule CodingAgentFramework.SessionsTest do
     assert {:ok, %{pid: pid}} = Sessions.start(ctx.sessions, "turn", ctx.account, own)
 
     # A turn runs: the file says busy, the stop is refused, and nothing was sent.
-    assert {:ok, :sent} = Control.send(ctx.control, "turn", "busy")
+    assert {:ok, :sent} = SessionsSetup.type(ctx, "turn", "busy")
     assert {:ok, _} = file_says(ctx, "busy")
     assert {:refused, {:not_idle, "busy"}} = Sessions.stop(ctx.sessions, "turn")
     assert %{status: "running"} = Table.get(ctx.table, "test", "turn")
     assert alive?(pid)
 
     # The turn ends: SIGTERM, the stand-in exits 143 as Claude Code does, and the row stops.
-    assert {:ok, :sent} = Control.send(ctx.control, "turn", "idle")
+    assert {:ok, :sent} = SessionsSetup.type(ctx, "turn", "idle")
     assert {:ok, _} = file_says(ctx, "idle")
     assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "turn")
     refute alive?(pid)

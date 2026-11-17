@@ -64,7 +64,7 @@ defmodule CodingAgentFramework.ExampleTest do
 
   defp start(config) do
     parts = Example.parts(start_supervised!({Example, config}))
-    keys = ~w(reaper cues control usage stream intake intake_http sampler sessions acts)a
+    keys = ~w(reaper cues inlet usage stream intake intake_http sampler sessions acts)a
     keys = keys ++ ~w(recoveries tracker delegates mailbox copies jobs services)a
     keys = keys ++ ~w(mcp mcp_http ends)a
 

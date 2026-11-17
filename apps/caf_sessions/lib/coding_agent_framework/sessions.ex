@@ -6,11 +6,11 @@ defmodule CodingAgentFramework.Sessions do
   project that its start checks, adds and sets up.
 
   The caller's supervision tree starts one `Sessions` per host, with no name, and gives it the
-  host's `Programs`, its dtach directory, its `Control`, the host's `Registry` (one over every
+  host's `Programs`, its dtach directory, its tmux server, the host's `Registry` (one over every
   account) and the SQLite path:
 
       {:ok, sessions} = Sessions.start_link(programs: programs, dir: "/srv/caf/dtach",
-        control: control, registry: registry, db: "/srv/caf/caf.db")
+        tmux: tmux, registry: registry, db: "/srv/caf/caf.db")
       {:ok, account} = Accounts.ready(accounts, "work")
       Sessions.start(sessions, "main", account,
         role: :parent, cwd: "/src/app", claude: claude, model: "opus", env: env,
@@ -24,13 +24,19 @@ defmodule CodingAgentFramework.Sessions do
   with the socket name and the session's name, which are one name. Then it holds
   `ClaudeCLI.session/3`'s argv and environment through `Holder.Process.hold/4`, which writes the
   held program's record (its pid and start time) before it execs it, in the given directory,
-  and opens a viewer pane (`dtach -a`, as `viewer_argv/3` answers) through `Control`, tagged
+  and opens a viewer pane (`dtach -a`, as `viewer_argv/3` answers) on the tmux server, tagged
   with the session as it opens: one row short, then grown, since Claude Code does not redraw
   for a viewer that attaches at its own size. A viewer that fails leaves the session running;
   its row's `viewer` says why. The start is confirmed when the account's `Registry` reads a
   session file with the session's name (`--name`) whose pid lives, and the socket is live. The
   pid comes from that file, since dtach does not report it. **A resume** is the same with
   `--resume <id>`.
+
+  **The release.** An interactive start records, on its row (`release`), the Claude Code release
+  its program is: what `<claude> --version` prints first, as in `2.1.322 (Claude Code)`, read
+  before the row is written (F-113's new-4). `Screen` reads the session's screen as that
+  release draws it, and the `Inlet` refuses a typed write to a session whose release is nil (not
+  read) or has no reading. A headless session's is not read: nothing reads its screen.
 
   **A delegate** (role `:delegate`) runs headless ("Headless delegates"): after its row, which
   keeps the session id the framework chose, `Stream.follow/5` makes its directory and FIFO under
@@ -128,7 +134,7 @@ defmodule CodingAgentFramework.Sessions do
 
   require Logger
 
-  alias CodingAgentFramework.{ClaudeCLI, Control, Holder, Programs, Registry, Shell, Stream}
+  alias CodingAgentFramework.{ClaudeCLI, Holder, Programs, Registry, Shell, Stream, Tmux}
   alias CodingAgentFramework.{Accounts, Acts, ClaudeCLI.Options, Intake, Store, Transcripts}
   alias CodingAgentFramework.Sessions.{Agents, Table, Turn, Worktree}
 
@@ -145,6 +151,8 @@ defmodule CodingAgentFramework.Sessions do
   @slack 30_000
   # Each call to Stream, within a call of Sessions.
   @stream 5_000
+  # `claude --version` at an interactive start.
+  @version 5_000
   # The held program starts in the session's directory; `$0` is the directory.
   @cd ~S(cd -- "$0" && exec "$@")
 
@@ -153,7 +161,7 @@ defmodule CodingAgentFramework.Sessions do
   @doc """
   Starts a `Sessions` and adopts or ends the rows a previous one left `starting`. Options:
   `programs:` (naming dtach, sh, env, rm, ps, kill, sleep and tail), `dir:` (the dtach directory),
-  `control:`, `registry:` (the host's `Registry`), `db:`, and optionally `stream:`
+  `tmux:` (the host's tmux server, for the viewers), `registry:` (the host's `Registry`), `db:`, and optionally `stream:`
   and `home:` (the host's `Stream` and the framework home, for delegates and worktrees),
   `reaper:` (the host's `Shell.Reaper`, for worktrees; `programs:` then names git and mkdir),
   `notify:`, `size:`
@@ -330,7 +338,7 @@ defmodule CodingAgentFramework.Sessions do
         procs: procs,
         ps: ps,
         db: db,
-        control: Keyword.fetch!(opts, :control),
+        tmux: Keyword.fetch!(opts, :tmux),
         registry: Keyword.get(opts, :registry),
         stream: Keyword.get(opts, :stream),
         home: Keyword.get(opts, :home),
@@ -411,6 +419,7 @@ defmodule CodingAgentFramework.Sessions do
          deadline = state.clock.() + timeout + budget(place.tree),
          row = new_row(state, name, account, role, place, resume, way, deadline),
          row = Map.merge(row, agent),
+         row = Map.put(row, :release, release(state, role, launch)),
          {:ok, viewer} <- viewer_command(state, row),
          {:ok, act} <- claim(state, name, resume) do
       # RowWritten: the row first, as starting, with the start's wall-clock deadline.
@@ -1077,6 +1086,20 @@ defmodule CodingAgentFramework.Sessions do
   defp required(:error, key), do: {:refused, {:missing, key}}
   defp required(ok, _key), do: ok
 
+  # The release the start launches, or nil when it cannot be read: no typed write then goes in.
+  defp release(state, :parent, launch) do
+    with "/" <> _ = claude <- launch[:claude],
+         {:ok, %{status: 0, output: out}} <-
+           Shell.run(state.host, claude, ["--version"], timeout: @version),
+         [_, release] <- Regex.run(~r/\A(\d+\.\d+\.\d+) /, out) do
+      release
+    else
+      _ -> nil
+    end
+  end
+
+  defp release(_state, _role, _launch), do: nil
+
   defp cli(role, account, name, resume, launch, own) do
     opts = Keyword.take(launch, [:claude, :model, :env, :tool_timeout, :prompt, :mcp])
     opts = opts ++ [name: name] ++ own
@@ -1368,24 +1391,24 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   defp open_viewer(state, name, argv) do
-    case viewer(state.control, name, argv, state.size) do
+    case viewer(state.tmux, name, argv, state.size) do
       {:ok, _pane} -> "open"
       failed -> failed
     end
   end
 
   @doc """
-  Opens a viewer of held session `name` through `control`: a tmux session of that name running
+  Opens a viewer of held session `name` on tmux server `tmux`: a tmux session of that name running
   `argv` (`viewer_argv/3`'s answer), tagged as it opens, one row short of `{columns, rows}`, then
   grown, since Claude Code redraws only when its size changes. tmux starts its server when it is
-  down. `Recoveries` reopens a lost viewer with it. Answers `{:ok, pane}`, or `Control`'s
+  down. `Recoveries` reopens a lost viewer with it. Answers `{:ok, pane}`, or `Tmux`'s
   refusal or unknown; a pane that opened and was not grown is `{:unknown, {:resize, pane, why}}`.
   """
-  @spec viewer(GenServer.server(), String.t(), [String.t()], {pos_integer, pos_integer}) ::
+  @spec viewer(Tmux.server(), String.t(), [String.t()], {pos_integer, pos_integer}) ::
           outcome(String.t())
-  def viewer(control, name, argv, {columns, rows}) do
-    with {:ok, pane} <- Control.open(control, name, argv, size: {columns, rows - 1}) do
-      case Control.resize(control, name, {columns, rows}) do
+  def viewer(tmux, name, argv, {columns, rows}) do
+    with {:ok, pane} <- Tmux.new_session(tmux, name, argv, size: {columns, rows - 1}) do
+      case Tmux.resize_pane(tmux, pane, name, {columns, rows}) do
         {:ok, :resized} -> {:ok, pane}
         failed -> {:unknown, {:resize, pane, failed}}
       end

@@ -1,7 +1,7 @@
 defmodule CodingAgentFramework.SessionsSetup do
   @moduledoc """
   The setup `SessionsTest` and `AgentsSourceTest` share: a `Sessions` on a real tmux server
-  and real dtach sockets in the test's own directory, with its `Control`, a `Registry` of one
+  and real dtach sockets in the test's own directory, with its tmux server, a `Registry` of one
   prepared account, a `Stream` for its delegates, a `Shell.Reaper` for its worktrees' commands,
   and a clock the test moves; and the launches
   of stand-ins for Claude Code: interactive (`CodingAgentFramework.ClaudeStandIn`) and headless
@@ -16,7 +16,7 @@ defmodule CodingAgentFramework.SessionsSetup do
   import CodingAgentFramework.TestHost
   import ExUnit.Callbacks, only: [on_exit: 1, start_supervised!: 1]
 
-  alias CodingAgentFramework.{Accounts, ClaudeStandIn, Control, HeadlessStandIn, Holder, Registry}
+  alias CodingAgentFramework.{Accounts, ClaudeStandIn, HeadlessStandIn, Holder, Registry}
   alias CodingAgentFramework.{Sessions, Shell, Stream, Tmux}
   alias CodingAgentFramework.Sessions.Table
   alias CodingAgentFramework.Tmux.CLI
@@ -31,7 +31,6 @@ defmodule CodingAgentFramework.SessionsSetup do
     dir = test_dir()
     {:ok, server} = CLI.new(programs(), {:socket, Path.join(dir, "tmux.sock")})
     on_exit(fn -> Tmux.kill_server(server) end)
-    control = start_supervised!({Control, tmux: server})
 
     {:ok, accounts} = Accounts.new(Path.join(dir, "home"), ["work"])
     {:ok, account} = Accounts.prepare(accounts, "work", %{})
@@ -59,7 +58,7 @@ defmodule CodingAgentFramework.SessionsSetup do
       reaper: reaper,
       programs: programs(),
       dir: dtach,
-      control: control,
+      tmux: server,
       registry: registry,
       stream: stream,
       home: dir,
@@ -77,7 +76,6 @@ defmodule CodingAgentFramework.SessionsSetup do
      dir: dir,
      account: account,
      server: server,
-     control: control,
      holder: holder,
      table: table,
      opts: opts,
@@ -86,6 +84,16 @@ defmodule CodingAgentFramework.SessionsSetup do
      registry: registry,
      stream: stream,
      sessions: start_supervised!(Supervisor.child_spec({Sessions, opts}, restart: :temporary))}
+  end
+
+  @doc """
+  Types `line` and Enter into the viewer pane of session `name`, as a person would: the
+  interactive stand-in reads it as a line.
+  """
+  def type(ctx, name, line) do
+    {:ok, panes} = Tmux.list_panes(ctx.server)
+    %{pane: pane} = Enum.find(panes, &(&1.tag == name))
+    Tmux.write(ctx.server, pane, name, {:line, line})
   end
 
   @doc """
