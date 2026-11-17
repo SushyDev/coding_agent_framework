@@ -22,7 +22,7 @@ defmodule CafIntake.MixProject do
 
   defp deps do
     [
-      {:exqlite, "~> 0.43.0"},
+      {:caf_store, in_umbrella: true},
       {:plug, "~> 1.20"},
       {:caf_test, in_umbrella: true, only: :test},
       {:bandit, "~> 1.14", only: :test},
