@@ -22,7 +22,7 @@ defmodule CodingAgentFramework.Registry do
       %{topic: "registry:laptop:work", ids: [id]}
 
   Each read lists every file and reads it in one shell command, checks every pid with one `ps`
-  (`CodingAgentFramework.Registry.Liveness`), and writes only the rows that changed, in one
+  (`CodingAgentFramework.Holder.Process.liveness/3`), and writes only the rows that changed, in one
   transaction. A file that is gone has its row deleted. A file that cannot be parsed (half
   written, not JSON, a required key missing or of the wrong type) is not dropped: its row keeps
   the last good data, if any, and names the problem in `problem`. A read whose shell fails
@@ -37,7 +37,8 @@ defmodule CodingAgentFramework.Registry do
   use GenServer
 
   alias CodingAgentFramework.{Programs, Shell}
-  alias CodingAgentFramework.Registry.{Liveness, SessionFile, Table}
+  alias CodingAgentFramework.Holder
+  alias CodingAgentFramework.Registry.{SessionFile, Table}
 
   @timeout 10_000
   @mark "\0caf-file\0"
@@ -164,7 +165,11 @@ defmodule CodingAgentFramework.Registry do
       for {_, {row, _}} <- parsed, is_integer(row.pid), uniq: true, do: {row.pid, row.proc_start}
 
     alive =
-      Liveness.check(state.host, procs, Map.to_list(state.programs) ++ [timeout: state.timeout])
+      Holder.Process.liveness(
+        state.host,
+        procs,
+        Map.to_list(state.programs) ++ [timeout: state.timeout]
+      )
 
     rows =
       Map.new(parsed, fn {file, {row, problem}} ->

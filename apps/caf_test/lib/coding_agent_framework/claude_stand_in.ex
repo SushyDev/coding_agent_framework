@@ -5,8 +5,11 @@ defmodule CodingAgentFramework.ClaudeStandIn do
 
   - writes `<CLAUDE_CONFIG_DIR>/sessions/<pid>.json` in the shape `Registry` reads, with
     synthetic values: its pid, `sessionId` (the `--resume` id, or one made up), `name` (from
-    `--name`), `cwd` and `procStart` as `ps` prints it. The file is written whole and renamed,
+    `--name`), `cwd`, `procStart` as `ps` prints it, and `status`: `idle`, or `busy` from the
+    line `busy` until the line `idle`, as a turn runs. The file is written whole and renamed,
     and removed when the stand-in exits;
+  - exits 143 on SIGTERM, as Claude Code does (F-114), unless it read the line `deaf`, after
+    which it ignores SIGTERM, as a process that does not end would;
   - echoes each line of its input, and exits on `/exit`, or after `idle` seconds with none
     (`TestHost.stand_in_idle/0` by default), so no run leaves it for long;
   - records its pid in `<dir>/pids/`, so a test ends what it started by pid (`kill_all/1`,
@@ -57,15 +60,18 @@ defmodule CodingAgentFramework.ClaudeStandIn do
     done
     : 2>/dev/null > "#{pids}/$$" || exit 0
     file="$CLAUDE_CONFIG_DIR/sessions/$$.json"
+    status=idle announced=''
     announce() {
       start=$(LC_ALL=C TZ=UTC #{program!(:ps)} -o lstart= -p $$)
       start=${start#"${start%%[![:space:]]*}"}
       start=${start%"${start##*[![:space:]]}"}
-      printf '{"pid": %d, "sessionId": "%s", "name": "%s", "cwd": "%s", "procStart": "%s"}' \\
-        $$ "${resume:-stand-in-$$}" "$name" "$PWD" "$start" > "$file.tmp"
+      printf '{"pid": %d, "sessionId": "%s", "name": "%s", "cwd": "%s", "procStart": "%s", "status": "%s"}' \\
+        $$ "${resume:-stand-in-$$}" "$name" "$PWD" "$start" "$status" > "$file.tmp"
       #{program!(:mv)} -f "$file.tmp" "$file"
+      announced=1
     }
     trap '#{program!(:rm)} -f "$file"' EXIT
+    trap 'exit 143' TERM
     mode=#{mode}
     [ $mode = at_start ] && announce
     while IFS= read -r -t #{idle} line; do
@@ -73,6 +79,8 @@ defmodule CodingAgentFramework.ClaudeStandIn do
       case $line in
         /exit) exit 0 ;;
         go) [ $mode = on_go ] && announce ;;
+        busy|idle) status=$line; [ -n "$announced" ] && announce ;;
+        deaf) trap '' TERM ;;
       esac
     done
     """

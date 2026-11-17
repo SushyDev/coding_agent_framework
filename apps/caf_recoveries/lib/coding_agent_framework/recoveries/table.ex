@@ -93,7 +93,8 @@ defmodule CodingAgentFramework.Recoveries.Table do
       Store.query(
         db,
         "SELECT COUNT(*) FROM recoveries WHERE host = ?1 AND server = ?2 AND socket = ?3 " <>
-          "AND status != 'skipped' AND claimed_at >= ?4 AND claimed_at > COALESCE(" <>
+          "AND kind = 'lost_viewer' AND status != 'skipped' AND claimed_at >= ?4 " <>
+          "AND claimed_at > COALESCE(" <>
           "(SELECT MAX(cleared_at) FROM recoveries WHERE host = ?1 AND server = ?2 " <>
           "AND socket = ?3), -1)",
         [host, server, socket, from]
@@ -131,6 +132,24 @@ defmodule CodingAgentFramework.Recoveries.Table do
   @doc "Sets `fields` (status, reason, pane, open, opened_at, ended_at) on row `id`."
   @spec update(db, integer, keyword) :: :ok
   def update(db, id, fields), do: Store.update(db, "recoveries", id, fields)
+
+  @doc """
+  Ends a `{host, server}`'s `end` rows left `claimed` as `unknown{interrupted}` at `at`: a
+  restart cut them between their claim and their act, so they are never acted on. Answers their
+  ids.
+  """
+  @spec interrupt_ends(db, String.t(), String.t(), integer) :: [integer]
+  def interrupt_ends(db, host, server, at) do
+    for [id] <-
+          Store.query(
+            db,
+            "UPDATE recoveries SET status = 'unknown', reason = ':interrupted', ended_at = ?3 " <>
+              "WHERE host = ?1 AND server = ?2 AND kind = 'end' AND status = 'claimed' " <>
+              "RETURNING id",
+            [host, server, at]
+          ),
+        do: id
+  end
 
   @doc "A `{host, server}`'s rows that have not ended: `claimed` and `opened`."
   @spec open_rows(db, String.t(), String.t()) :: [row]

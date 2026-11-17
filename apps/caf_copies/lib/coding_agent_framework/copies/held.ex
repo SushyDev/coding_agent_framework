@@ -3,7 +3,7 @@ defmodule CodingAgentFramework.Copies.Held do
   The steps a program held on a host takes in a copy, shared by `Jobs` and `Services` (see
   "Hosts" in `docs/design.md` and `model/tla/Copy.tla`): the copy's turn and sync
   (`CodingAgentFramework.Copies`), the host's directory, the hold under dtach of a small
-  wrapper (`CodingAgentFramework.Holder`), and the start's settle, after which the turn goes
+  wrapper with its record (`CodingAgentFramework.Holder.Process`), and the start's settle, after which the turn goes
   back. Pure functions over a context; each call works in its caller's process.
 
   What the program is, how its host is read and what its row says stay with the caller: the
@@ -48,7 +48,8 @@ defmodule CodingAgentFramework.Copies.Held do
 
   @doc """
   The context of the program `where` names: its host's programs, its copy and the copy's path,
-  a `Holder` of `<dir>/<kind>` on the host whose shell runs wait `timeout` ms, `dir` and `base`
+  a `Holder` of `<dir>/<kind>` on the host whose shell runs wait `timeout` ms and its records
+  (`procs`, a `Holder.Process`; the host's programs then name ps, kill and sleep), `dir` and `base`
   (`<dir>/<kind>/<name>`, for the caller's own files). `config` holds `:hosts`, each host's
   name to `%{programs: programs, dir: dir}`, and `:copies`, the `Copies` server. `run` names
   the copy's turn; `name` the socket.
@@ -63,13 +64,15 @@ defmodule CodingAgentFramework.Copies.Held do
          copy = %{programs: programs, dir: dir, project: where.project, name: where.copy},
          {:ok, {path, _lock}} <- Copies.place(copy),
          kind_dir = Path.join(dir, where.kind),
-         {:ok, holder} <- Holder.new(programs, kind_dir, timeout: timeout) do
+         {:ok, holder} <- Holder.new(programs, kind_dir, timeout: timeout),
+         {:ok, procs} <- Holder.Process.new(programs, holder) do
       {:ok,
        %{
          copies: copies,
          copy: copy,
          programs: programs,
          holder: holder,
+         procs: procs,
          path: path,
          dir: kind_dir,
          base: Path.join(kind_dir, where.name),
@@ -146,7 +149,8 @@ defmodule CodingAgentFramework.Copies.Held do
   end
 
   @doc """
-  Holds `sh -c script args… argv…` on the context's socket, in the environment `env`, and
+  Holds `sh -c script args… argv…` on the context's socket under `Holder.Process.hold/4`, which
+  writes the record of its pid and start time first, in the environment `env`, and
   answers dtach's reply as `CodingAgentFramework.Holder.hold/4` does. `args` begins with the
   script's `$0`.
   """
@@ -154,7 +158,7 @@ defmodule CodingAgentFramework.Copies.Held do
           {:ok, String.t()} | {:refused, term} | {:unknown, term}
   def hold(ctx, script, args, argv, env) do
     wrapper = [ctx.programs.paths.sh, "-c", script | args]
-    Holder.hold(ctx.holder, ctx.name, wrapper ++ argv, env: env)
+    Holder.Process.hold(ctx.procs, ctx.name, wrapper ++ argv, env: env)
   end
 
   @doc """

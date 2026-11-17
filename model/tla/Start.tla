@@ -29,12 +29,25 @@
 (*   Holder    dtach -n: a socket holds one process, and refuses a second; *)
 (*             a socket read as live or dead (absent or stale); dtach      *)
 (*             exits after its process, and may be killed hard before;     *)
-(*   Registry  the session file, matched by the session's name, and a      *)
-(*             process's liveness by its pid and start time; its cue when  *)
-(*             the process a file names is gone;                           *)
+(*   Holder.Process (F-118) the held program's record: the pid and start   *)
+(*             time its wrapper writes before it execs the program, so     *)
+(*             every hold has one (`pidFile`); a process's liveness by its *)
+(*             pid and start time; a signal sent only to the process with  *)
+(*             the record's pid and start time;                            *)
+(*   Registry  the session file, matched by the session's name, with its   *)
+(*             `status` (`busy` while a turn runs); its cue when the       *)
+(*             process a file names is gone;                               *)
 (*   TmuxSampler its cue when a held socket goes away (absent or stale);   *)
-(*   Recoveries only as the owner of an orphan row and of a stop past its  *)
-(*             deadline, which it kills by pid and start time (not built). *)
+(*   Recoveries the end of an orphan row's process and of one a stop's     *)
+(*             deadline passed with, by the row's record: TERM, then KILL, *)
+(*             one act here (F-118).                                       *)
+(*                                                                         *)
+(* A stop (F-118, "Ending a session") is SIGTERM to the row's process, by  *)
+(* its pid and start time, once its session file reads idle; Claude Code   *)
+(* keeps its transcript and exits 143 when it will. The read of the file   *)
+(* and the signal are one step here: a turn that a delivery starts between *)
+(* them is the delivery's to rule out (Delivery.tla, R6). A turn starts    *)
+(* and ends only while the row is running, which is all the stop reads.    *)
 (*                                                                         *)
 (* Worktrees: with `Worktrees` FALSE a session runs in the directory it is *)
 (* given, and the worktree steps are off; the configurations of F-17 and   *)
@@ -62,8 +75,9 @@
 (* and the project's data, and the setup's commands, which are one step    *)
 (* that finishes or fails. Time is one flag per start, `past`: its         *)
 (* deadline has passed. The deadline is wall-clock from the row's start,   *)
-(* so a restart does not move it. A process exits at any time, by /exit or *)
-(* a crash. Other programs on the host take free pids, so a pid is reused. *)
+(* so a restart does not move it. A process exits at any time, after a     *)
+(* SIGTERM or by itself, or never: then Recoveries ends it. Other programs *)
+(* on the host take free pids, so a pid is reused.                         *)
 (* Delegate.tla's single start step stands for this whole spec.            *)
 (*                                                                         *)
 (* Cues (F-64): `cued` is a cue Sessions has not handled yet. The Registry *)
@@ -139,7 +153,11 @@ Breaks == {
     "StopByLiveness",     \* a stopping row is settled by its pid and start time alone
     "ReReadBySocket",     \* an unknown row is stopped on a dead socket while its file names a live one
     "AdoptBySocket",      \* a starting row is refused on a dead socket while its file names a live one
-    "NoSocketCue"         \* the sampler does not cue Sessions when a held socket goes away
+    "NoSocketCue",        \* the sampler does not cue Sessions when a held socket goes away
+    \* F-118: the end by SIGTERM, and Recoveries' end of an orphan
+    "StopWhileBusy",      \* the stop's SIGTERM is sent while the session file reads busy
+    "TermByPid",          \* the stop's SIGTERM targets the row's pid alone, without its start time
+    "OrphanKept"          \* Recoveries ends a late stop's process but not an orphan's
 }
 
 ASSUME Break \in Breaks
@@ -184,13 +202,17 @@ VARIABLES
     touched,     \* ghost: a tree was reused, set up or removed while busy
     offTree,     \* ghost: a setup or a process ran in a path that is not a tree
     removedDirty, \* ghost: a tree with changes was removed
-    reusedDirty  \* ghost: a new start (not a resume) reused a tree with changes
+    reusedDirty, \* ghost: a new start (not a resume) reused a tree with changes
+    busy,        \* s -> the process's turn runs: its session file reads busy
+    pidFile,     \* s -> the record the wrapper of s's last hold wrote, or NoProc
+    cutTurns     \* ghost: a SIGTERM reached a process in the middle of a turn
 
 trees == <<wt, dirty, ready, branch, setupRuns, outside>>
 socks == <<sock, cued, hardKills>>
 treeGhosts == <<touched, offTree, removedDirty, reusedDirty>>
+records == <<busy, pidFile, cutTurns>>
 vars == <<up, restarts, row, rowProc, starts, resume, call, past, proc, file, foreign, clock,
-          late, onTime, ends, wrongKills, trees, treeGhosts, socks>>
+          late, onTime, ends, wrongKills, trees, treeGhosts, socks, records>>
 
 LiveProcs == ({proc[t] : t \in S} \ {NoProc}) \cup foreign
 FreePids == Pids \ {q.pid : q \in LiveProcs}
@@ -226,6 +248,7 @@ Init ==
     /\ setupRuns = [p \in Paths |-> FALSE] /\ outside = 0
     /\ touched = FALSE /\ offTree = FALSE /\ removedDirty = FALSE /\ reusedDirty = FALSE
     /\ sock = [s \in S |-> FALSE] /\ cued = [s \in S |-> FALSE] /\ hardKills = 0
+    /\ busy = [s \in S |-> FALSE] /\ pidFile = [s \in S |-> NoProc] /\ cutTurns = FALSE
 
 \* Writes row s's status; entering an ended status counts as its end.
 SetRow(s, st) ==
@@ -235,12 +258,26 @@ SetRow(s, st) ==
 \* A cue settles only a running or stopping row with no call under way here:
 \* Adopt and ReRead do not wait for one. A cue for any other row settles
 \* nothing, so the model drops it, which keeps the search small.
-Cueable(s) == call[s] = "none" /\ row[s] \in {"running", "stopping"}
+Cueable(s) == call[s] = "none" /\ row[s] \in {"running", "stopping", "orphan"}
 \* A reader's cue for s, when c holds; one that comes while the framework is
 \* down reaches nothing.
 Cue(s, c) == cued' = [cued EXCEPT ![s] = @ \/ (up /\ c /\ Cueable(s))]
 \* Sessions handled s's cue.
 Handled(s) == cued' = [cued EXCEPT ![s] = FALSE]
+
+\* A signal to the process with pid and start time `q0` (Holder.Process): the
+\* check and the signal run in one shell on the host, so a pid another program
+\* took is not reached. Under the Break `brk` the pid alone is matched. A
+\* process other than s's own that it reaches ends (a wrong kill); s's own ends
+\* when it will, or at once when `final` holds (KILL).
+Signal(s, q0, brk, final) ==
+    LET hit == {q \in LiveProcs : q.pid = q0.pid /\ (q = q0 \/ Break = brk)}
+        gone == IF final THEN hit ELSE hit \ {proc[s]}
+    IN /\ proc' = [t \in S |-> IF proc[t] \in gone THEN NoProc ELSE proc[t]]
+       /\ busy' = [t \in S |-> busy[t] /\ proc[t] \notin gone]
+       /\ foreign' = foreign \ gone
+       /\ wrongKills' = wrongKills \cup (hit \ {proc[s]})
+       /\ cutTurns' = (cutTurns \/ (proc[s] \in hit /\ busy[s]))
 
 \* The worktree at s's path is removed, after a restart, when it is a tree
 \* on s's branch, clean, and no other row holds it; the branch stays.
@@ -268,14 +305,14 @@ FrameworkDies ==
     /\ cued' = [s \in S |-> FALSE]
     /\ UNCHANGED <<late, row, rowProc, starts, resume, past, proc, file, foreign, clock, onTime,
                    ends, wrongKills, wt, dirty, ready, branch, outside, treeGhosts, sock,
-                   hardKills>>
+                   hardKills, records>>
 
 \* Sessions settles every row when it starts: a cue for each.
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
     /\ cued' = [s \in S |-> Cueable(s)]
     /\ UNCHANGED <<late, restarts, row, rowProc, starts, resume, call, past, proc, file, foreign,
-                   clock, onTime, ends, wrongKills, trees, treeGhosts, sock, hardKills>>
+                   clock, onTime, ends, wrongKills, trees, treeGhosts, sock, hardKills, records>>
 
 -----------------------------------------------------------------------------
 (* The outside: processes, dtach, other programs, people, Claude Code's     *)
@@ -285,9 +322,26 @@ FrameworkStarts ==
 \* cues when a file named it.
 ProcExits(s) ==
     /\ Live(s) /\ proc' = [proc EXCEPT ![s] = NoProc]
+    /\ busy' = [busy EXCEPT ![s] = FALSE]
     /\ Cue(s, Named(s))
     /\ UNCHANGED <<late, up, restarts, row, rowProc, starts, resume, call, past, file, foreign,
-                   clock, onTime, ends, wrongKills, trees, treeGhosts, sock, hardKills>>
+                   clock, onTime, ends, wrongKills, trees, treeGhosts, sock, hardKills, pidFile,
+                   cutTurns>>
+
+\* A turn starts in a running session (a message went in), and its session
+\* file reads busy; it ends, and the file reads idle.
+TurnStarts(s) ==
+    /\ Named(s) /\ row[s] = "running" /\ ~busy[s]
+    /\ busy' = [busy EXCEPT ![s] = TRUE]
+    /\ UNCHANGED <<up, restarts, row, rowProc, starts, resume, call, past, proc, file, foreign,
+                   clock, late, onTime, ends, wrongKills, trees, treeGhosts, socks, pidFile,
+                   cutTurns>>
+
+TurnEnds(s) ==
+    /\ busy[s] /\ busy' = [busy EXCEPT ![s] = FALSE]
+    /\ UNCHANGED <<up, restarts, row, rowProc, starts, resume, call, past, proc, file, foreign,
+                   clock, late, onTime, ends, wrongKills, trees, treeGhosts, socks, pidFile,
+                   cutTurns>>
 
 \* dtach exits once its process has, and removes its socket; the sampler
 \* sees the socket go and cues.
@@ -296,7 +350,8 @@ DtachExits(s) ==
     /\ sock' = [sock EXCEPT ![s] = FALSE]
     /\ Cue(s, Break # "NoSocketCue")
     /\ UNCHANGED <<late, up, restarts, row, rowProc, starts, resume, call, past, proc, file,
-                   foreign, clock, onTime, ends, wrongKills, trees, treeGhosts, hardKills>>
+                   foreign, clock, onTime, ends, wrongKills, trees, treeGhosts, hardKills,
+                   records>>
 
 \* dtach is killed hard: its socket is left stale, and its process runs on,
 \* unheld, until it exits. Only once a file names the process (assumed).
@@ -305,7 +360,7 @@ DtachKilled(s) ==
     /\ sock' = [sock EXCEPT ![s] = FALSE] /\ hardKills' = hardKills + 1
     /\ Cue(s, Break # "NoSocketCue")
     /\ UNCHANGED <<late, up, restarts, row, rowProc, starts, resume, call, past, proc, file,
-                   foreign, clock, onTime, ends, wrongKills, trees, treeGhosts>>
+                   foreign, clock, onTime, ends, wrongKills, trees, treeGhosts, records>>
 
 \* Another program starts and takes a free pid, perhaps one a session had.
 ForeignStarts ==
@@ -313,7 +368,7 @@ ForeignStarts ==
     /\ \E p \in FreePids : foreign' = foreign \cup {[pid |-> p, start |-> clock + 1]}
     /\ clock' = clock + 1
     /\ UNCHANGED <<late, up, restarts, row, rowProc, starts, resume, call, past, proc, file,
-                   onTime, ends, wrongKills, trees, treeGhosts, socks>>
+                   onTime, ends, wrongKills, trees, treeGhosts, socks, records>>
 
 \* Claude Code writes its session file, with the session's name, perhaps late.
 FileWritten(s) ==
@@ -321,12 +376,12 @@ FileWritten(s) ==
     /\ file' = [file EXCEPT ![s] = proc[s]]
     /\ onTime' = [onTime EXCEPT ![s] = ~past[s]]
     /\ UNCHANGED <<late, up, restarts, row, rowProc, starts, resume, call, past, proc, foreign,
-                   clock, ends, wrongKills, trees, treeGhosts, socks>>
+                   clock, ends, wrongKills, trees, treeGhosts, socks, records>>
 
 Tick(s) ==
     /\ row[s] = "starting" /\ ~past[s] /\ past' = [past EXCEPT ![s] = TRUE]
     /\ UNCHANGED <<late, up, restarts, row, rowProc, starts, resume, call, proc, file, foreign,
-                   clock, onTime, ends, wrongKills, trees, treeGhosts, socks>>
+                   clock, onTime, ends, wrongKills, trees, treeGhosts, socks, records>>
 
 \* A person or a program makes a directory at a free path.
 PathTaken(p) ==
@@ -334,7 +389,7 @@ PathTaken(p) ==
     /\ wt' = [wt EXCEPT ![p] = "other"] /\ outside' = outside + 1
     /\ UNCHANGED <<up, restarts, row, rowProc, starts, resume, call, past, proc, file, foreign,
                    clock, late, onTime, ends, wrongKills, dirty, ready, branch, setupRuns,
-                   treeGhosts, socks>>
+                   treeGhosts, socks, records>>
 
 \* Someone changes files in a tree: its agent, a person, or an add cut midway.
 TreeChanged(p) ==
@@ -342,7 +397,7 @@ TreeChanged(p) ==
     /\ dirty' = [dirty EXCEPT ![p] = TRUE] /\ outside' = outside + 1
     /\ UNCHANGED <<up, restarts, row, rowProc, starts, resume, call, past, proc, file, foreign,
                    clock, late, onTime, ends, wrongKills, wt, ready, branch, setupRuns,
-                   treeGhosts, socks>>
+                   treeGhosts, socks, records>>
 
 \* A setup a restart left running (SetupOutlives only) ends by itself.
 LeftSetupEnds(p) ==
@@ -350,7 +405,7 @@ LeftSetupEnds(p) ==
     /\ setupRuns' = [setupRuns EXCEPT ![p] = FALSE]
     /\ UNCHANGED <<up, restarts, row, rowProc, starts, resume, call, past, proc, file, foreign,
                    clock, late, onTime, ends, wrongKills, wt, dirty, ready, branch, outside,
-                   treeGhosts, socks>>
+                   treeGhosts, socks, records>>
 
 -----------------------------------------------------------------------------
 (* A start, in the order it runs *)
@@ -371,7 +426,7 @@ RowWritten(s) ==
     /\ onTime' = [onTime EXCEPT ![s] = FALSE]
     /\ ends' = [ends EXCEPT ![s] = 0]
     /\ UNCHANGED <<late, up, restarts, proc, file, foreign, clock, wrongKills, trees, treeGhosts,
-                   socks>>
+                   socks, records>>
 
 \* The checks of the path (git worktree list, git status): absent, so it is
 \* added; a tree on the branch, reused when clean or for a resume; anything
@@ -394,7 +449,7 @@ Checked(s) ==
              /\ SetRow(s, "refused") /\ call' = [call EXCEPT ![s] = "none"]
              /\ UNCHANGED treeGhosts
     /\ UNCHANGED <<late, up, restarts, rowProc, starts, resume, past, proc, file, foreign, clock,
-                   onTime, wrongKills, trees, socks>>
+                   onTime, wrongKills, trees, socks, records>>
 
 \* git worktree add: with -b when the branch does not exist. At a path taken
 \* since the check it fails, and a -b leaves its new branch behind.
@@ -412,7 +467,7 @@ Added(s) ==
                THEN call' = [call EXCEPT ![s] = "setup"] /\ UNCHANGED <<row, ends>>
                ELSE SetRow(s, "refused") /\ call' = [call EXCEPT ![s] = "none"]
     /\ UNCHANGED <<late, up, restarts, rowProc, starts, resume, past, proc, file, foreign, clock,
-                   onTime, wrongKills, dirty, ready, setupRuns, outside, treeGhosts, socks>>
+                   onTime, wrongKills, dirty, ready, setupRuns, outside, treeGhosts, socks, records>>
 
 \* The project's setup starts in the path; what it builds is not ready yet.
 SetupStarts(s) ==
@@ -425,7 +480,7 @@ SetupStarts(s) ==
     /\ call' = [call EXCEPT ![s] = "setting"]
     /\ UNCHANGED <<late, up, restarts, row, rowProc, starts, resume, past, proc, file, foreign,
                    clock, onTime, ends, wrongKills, wt, dirty, branch, outside, removedDirty,
-                   reusedDirty, socks>>
+                   reusedDirty, socks, records>>
 
 \* The setup finishes, and the start goes on to the hold; or it fails or
 \* passes its deadline, and the start is refused, the tree left as it is.
@@ -439,16 +494,20 @@ SetupEnds(s) ==
           \/ /\ SetRow(s, "refused") /\ call' = [call EXCEPT ![s] = "none"]
              /\ UNCHANGED ready
     /\ UNCHANGED <<late, up, restarts, rowProc, starts, resume, past, proc, file, foreign, clock,
-                   onTime, wrongKills, wt, dirty, branch, outside, treeGhosts, socks>>
+                   onTime, wrongKills, wt, dirty, branch, outside, treeGhosts, socks, records>>
 
 \* dtach -n: the process is held on a live socket; or the hold is refused,
 \* with nothing held; or it answers unknown, and the start waits for the
 \* file either way. dtach refuses a live socket; a name's process left
 \* running by a killed dtach is gone before its row ends (NoHeldWithoutRow).
+\* Holder.Process removes the last hold's record first, and the wrapper writes
+\* the new process's before it execs the program: one step here.
 Held(s) ==
     /\ up /\ call[s] = "hold"
     /\ \/ /\ ~Live(s) /\ ~sock[s] /\ FreePids # {}
-          /\ \E p \in FreePids : proc' = [proc EXCEPT ![s] = [pid |-> p, start |-> clock + 1]]
+          /\ \E p \in FreePids :
+               /\ proc' = [proc EXCEPT ![s] = [pid |-> p, start |-> clock + 1]]
+               /\ pidFile' = [pidFile EXCEPT ![s] = [pid |-> p, start |-> clock + 1]]
           /\ sock' = [sock EXCEPT ![s] = TRUE]
           /\ clock' = clock + 1
           /\ call' = [call EXCEPT ![s] = "viewer"]
@@ -456,12 +515,15 @@ Held(s) ==
           /\ UNCHANGED <<row, ends>>
        \/ /\ ~Live(s)
           /\ call' = [call EXCEPT ![s] = "viewer"]
+          /\ pidFile' = [pidFile EXCEPT ![s] = NoProc]
           /\ UNCHANGED <<row, ends, proc, clock, offTree, sock>>
        \/ /\ SetRow(s, "refused")
           /\ call' = [call EXCEPT ![s] = "none"]
+          /\ pidFile' = [pidFile EXCEPT ![s] = NoProc]
           /\ UNCHANGED <<proc, clock, offTree, sock>>
     /\ UNCHANGED <<late, up, restarts, rowProc, starts, resume, past, file, foreign, onTime,
-                   wrongKills, trees, touched, removedDirty, reusedDirty, cued, hardKills>>
+                   wrongKills, trees, touched, removedDirty, reusedDirty, cued, hardKills, busy,
+                   cutTurns>>
 
 \* The viewer opens, or fails and leaves the process running (Agent.tla).
 ViewerOpened(s) ==
@@ -469,7 +531,7 @@ ViewerOpened(s) ==
     /\ call' = [call EXCEPT ![s] = "wait"]
     /\ row' = IF Break = "HoldFirst" THEN [row EXCEPT ![s] = "starting"] ELSE row
     /\ UNCHANGED <<late, up, restarts, rowProc, starts, resume, past, proc, file, foreign, clock,
-                   onTime, ends, wrongKills, trees, treeGhosts, socks>>
+                   onTime, ends, wrongKills, trees, treeGhosts, socks, records>>
 
 \* The call reads the Registry until its deadline: running, or unknown.
 StartDecided(s) ==
@@ -480,16 +542,17 @@ StartDecided(s) ==
           /\ SetRow(s, "unknown") /\ UNCHANGED rowProc
     /\ call' = [call EXCEPT ![s] = "none"]
     /\ UNCHANGED <<late, up, restarts, starts, resume, past, proc, file, foreign, clock, onTime,
-                   wrongKills, trees, treeGhosts, socks>>
+                   wrongKills, trees, treeGhosts, socks, records>>
 
 -----------------------------------------------------------------------------
 (* After a restart: a starting row with no call under way *)
 
 \* Adopted when its file names its live process and its socket is live;
 \* otherwise, once the start's deadline has passed, an orphan row for a live
-\* socket, and one with the file's pid and start time for a dead socket while
-\* the file names a live process (dtach killed hard); refused{interrupted}
-\* for the rest, whose worktree is removed when clean and held by no one.
+\* socket, with the record its wrapper wrote (Holder.Process), and one with
+\* the file's pid and start time for a dead socket while the file names a
+\* live process (dtach killed hard); refused{interrupted} for the rest, whose
+\* worktree is removed when clean and held by no one.
 Adopt(s) ==
     /\ up /\ call[s] = "none" /\ row[s] = "starting"
     /\ \/ /\ Confirms(s)
@@ -500,12 +563,13 @@ Adopt(s) ==
              IN IF \/ sock[s] /\ Break # "DropOrphan"
                    \/ unheld /\ Break # "AdoptBySocket"
                   THEN /\ SetRow(s, "orphan")
-                       /\ rowProc' = IF unheld THEN [rowProc EXCEPT ![s] = file[s]] ELSE rowProc
+                       /\ rowProc' = [rowProc EXCEPT ![s] = IF unheld THEN file[s]
+                                                                          ELSE pidFile[s]]
                        /\ IF Break = "RemoveOrphan" THEN Remove(s)
                           ELSE UNCHANGED <<trees, treeGhosts>>
                   ELSE SetRow(s, "refused") /\ Remove(s) /\ UNCHANGED rowProc
     /\ UNCHANGED <<late, up, restarts, starts, resume, call, past, proc, file, foreign, clock,
-                   onTime, wrongKills, socks>>
+                   onTime, wrongKills, socks, records>>
 
 \* An unknown row is read again until it is running or gone: running when
 \* confirmed; on a dead socket, an orphan with the file's pid and start time
@@ -519,19 +583,23 @@ ReRead(s) ==
        \/ /\ ~sock[s] /\ (~Named(s) \/ Break = "ReReadBySocket")
           /\ SetRow(s, "stopped") /\ UNCHANGED rowProc
     /\ UNCHANGED <<late, up, restarts, starts, resume, call, past, proc, file, foreign, clock,
-                   onTime, wrongKills, trees, treeGhosts, socks>>
+                   onTime, wrongKills, trees, treeGhosts, socks, records>>
 
 -----------------------------------------------------------------------------
 (* A stop *)
 
-\* /exit is typed (Control's checked write); the process exits when it will.
+\* SIGTERM, once the session file that names the row's process reads idle, to
+\* that process by its pid and start time; it exits when it will. A process
+\* already gone is sent nothing, and the row settles.
 StopAsked(s) ==
     /\ up /\ call[s] = "none" /\ row[s] = "running"
+    /\ file[s] = rowProc[s] /\ (~busy[s] \/ Break = "StopWhileBusy")
+    /\ Signal(s, rowProc[s], "TermByPid", FALSE)
     /\ row' = [row EXCEPT ![s] = "stopping"]
     /\ call' = [call EXCEPT ![s] = "stop"]
     /\ late' = [late EXCEPT ![s] = FALSE]
-    /\ UNCHANGED <<up, restarts, rowProc, starts, resume, past, proc, file, foreign, clock, onTime,
-                   ends, wrongKills, trees, treeGhosts, socks>>
+    /\ UNCHANGED <<up, restarts, rowProc, starts, resume, past, file, clock, onTime,
+                   ends, trees, treeGhosts, socks, pidFile>>
 
 \* A stopping row's process is gone by the row's pid and start time, and its
 \* socket is dead.
@@ -554,7 +622,7 @@ StopSettled(s) ==
     /\ call' = [call EXCEPT ![s] = "none"]
     /\ IF call[s] = "none" THEN Handled(s) ELSE UNCHANGED cued
     /\ UNCHANGED <<late, up, restarts, rowProc, starts, resume, past, proc, file, foreign, clock,
-                   onTime, wrongKills, trees, treeGhosts, sock, hardKills>>
+                   onTime, wrongKills, trees, treeGhosts, sock, hardKills, records>>
 
 \* The stop's deadline passed with the process alive, or gone while its
 \* socket is still live: the row stays stopping, with no call under way, and
@@ -564,24 +632,25 @@ StopTimedOut(s) ==
     /\ late' = [late EXCEPT ![s] = Alive(rowProc[s])]
     /\ call' = [call EXCEPT ![s] = "none"]
     /\ UNCHANGED <<up, restarts, row, rowProc, starts, resume, past, proc, file, foreign, clock,
-                   onTime, ends, wrongKills, trees, treeGhosts, socks>>
+                   onTime, ends, wrongKills, trees, treeGhosts, socks, records>>
 
-\* Recoveries kills a stop past its deadline, by the row's pid and start time;
-\* the Registry cues, as at an exit.
+\* Recoveries ends the process of a stop past its deadline, or of an orphan
+\* row, by the row's record (Holder.Process): TERM, then KILL at its own
+\* deadline, which ends it; one step here. The Registry or the sampler cues,
+\* as at an exit.
 Kill(s) ==
-    /\ up /\ row[s] = "stopping" /\ late[s]
-    /\ \E q \in LiveProcs :
-         /\ q.pid = rowProc[s].pid
-         /\ q = rowProc[s] \/ Break = "KillByPid"
-         /\ proc' = [t \in S |-> IF proc[t] = q THEN NoProc ELSE proc[t]]
-         /\ foreign' = foreign \ {q}
-         /\ wrongKills' = IF q = proc[s] THEN wrongKills ELSE wrongKills \cup {q}
+    /\ up
+    /\ \/ row[s] = "stopping" /\ late[s]
+       \/ row[s] = "orphan" /\ Break # "OrphanKept"
+    /\ \E q \in LiveProcs : q.pid = rowProc[s].pid /\ (q = rowProc[s] \/ Break = "KillByPid")
+    /\ Signal(s, rowProc[s], "KillByPid", TRUE)
     /\ Cue(s, TRUE)
     /\ UNCHANGED <<late, up, restarts, row, rowProc, starts, resume, call, past, file, clock,
-                   onTime, ends, trees, treeGhosts, sock, hardKills>>
+                   onTime, ends, trees, treeGhosts, sock, hardKills, pidFile>>
 
 -----------------------------------------------------------------------------
-(* A running row whose process exited by itself *)
+(* A running row whose process exited by itself, and an orphan row whose   *)
+(* process exited or Recoveries ended                                      *)
 
 \* Its process is gone by the row's pid and start time, and its socket is
 \* dead: each half has a Break.
@@ -590,16 +659,16 @@ RunningGone(s) ==
     \/ ~IF Break = "SettleRunningByPid" THEN AliveByPid(rowProc[s]) ELSE Alive(rowProc[s])
 RunningDead(s) == ~sock[s] \/ Break = "SettleRunningByLiveness"
 RunningDecides(s) ==
-    call[s] = "none" /\ row[s] = "running" /\ RunningGone(s) /\ RunningDead(s)
+    call[s] = "none" /\ row[s] \in {"running", "orphan"} /\ RunningGone(s) /\ RunningDead(s)
 
-\* At a cue, with no call under way: stopped (reason exited) once its process
-\* is gone and its socket is dead, so its name can be resumed. A pid another
-\* program took does not keep the row running.
+\* At a cue, with no call under way: stopped (reason exited, or ended for an
+\* orphan) once its process is gone and its socket is dead, so its name can be
+\* started or resumed. A pid another program took does not keep the row.
 RunningSettled(s) ==
     /\ up /\ cued[s] /\ RunningDecides(s)
     /\ SetRow(s, "stopped") /\ Handled(s)
     /\ UNCHANGED <<late, up, restarts, rowProc, starts, resume, call, past, proc, file, foreign,
-                   clock, onTime, wrongKills, trees, treeGhosts, sock, hardKills>>
+                   clock, onTime, wrongKills, trees, treeGhosts, sock, hardKills, records>>
 
 \* A cue whose settle decides nothing: a socket dtach has not removed yet, a
 \* live process, or a row with a call under way. The next cue reads again.
@@ -607,7 +676,7 @@ CueIdle(s) ==
     /\ up /\ cued[s] /\ ~StopDecides(s) /\ ~RunningDecides(s)
     /\ Handled(s)
     /\ UNCHANGED <<late, up, restarts, row, rowProc, starts, resume, call, past, proc, file,
-                   foreign, clock, onTime, ends, wrongKills, trees, treeGhosts, sock, hardKills>>
+                   foreign, clock, onTime, ends, wrongKills, trees, treeGhosts, sock, hardKills, records>>
 
 -----------------------------------------------------------------------------
 Next ==
@@ -615,6 +684,7 @@ Next ==
     \/ \E p \in Paths : PathTaken(p) \/ TreeChanged(p) \/ LeftSetupEnds(p)
     \/ \E s \in S :
          \/ ProcExits(s) \/ DtachExits(s) \/ DtachKilled(s) \/ FileWritten(s) \/ Tick(s)
+         \/ TurnStarts(s) \/ TurnEnds(s)
          \/ RowWritten(s) \/ Checked(s) \/ Added(s) \/ SetupStarts(s) \/ SetupEnds(s)
          \/ Held(s) \/ ViewerOpened(s) \/ StartDecided(s)
          \/ Adopt(s) \/ ReRead(s)
@@ -630,6 +700,7 @@ Fairness ==
          /\ WF_vars(Held(s)) /\ WF_vars(ViewerOpened(s))
          /\ WF_vars(StartDecided(s)) /\ WF_vars(Adopt(s)) /\ WF_vars(ReRead(s))
          /\ WF_vars(StopSettled(s)) /\ WF_vars(RunningSettled(s)) /\ WF_vars(CueIdle(s))
+         /\ WF_vars(Kill(s))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -646,8 +717,9 @@ TypeOK ==
     /\ wt \in [Paths -> {"none", "tree", "other"}]
     /\ dirty \in [Paths -> BOOLEAN] /\ ready \in [Paths -> BOOLEAN]
     /\ branch \in [Paths -> BOOLEAN] /\ setupRuns \in [Paths -> BOOLEAN]
-    /\ sock \in [S -> BOOLEAN] /\ cued \in [S -> BOOLEAN]
+    /\ sock \in [S -> BOOLEAN] /\ cued \in [S -> BOOLEAN] /\ busy \in [S -> BOOLEAN]
     /\ \A s \in S : proc[s] = NoProc \/ proc[s].pid \in Pids
+    /\ \A s \in S : pidFile[s] = NoProc \/ pidFile[s].pid \in Pids
     /\ \A q \in foreign : q.pid \in Pids
     \* a socket holds one process, and a pid names one live process
     /\ \A q, r \in LiveProcs : q.pid = r.pid => q = r
@@ -666,8 +738,12 @@ RunningOnlyIfLive ==
 \* A row ends at most once per start.
 RowEndsOnce == \A s \in S : ends[s] <= 1
 
-\* Nothing kills a process but by its own pid and start time.
+\* Nothing signals a process but by its own pid and start time: the stop's
+\* SIGTERM, and Recoveries' end of an orphan or a late stop.
 KillsOwnOnly == wrongKills = {}
+
+\* A stop's SIGTERM never reaches a process whose turn runs (F-118).
+TermsOnlyIdle == ~cutTurns
 
 \* A start whose live, held process wrote its file before the deadline is
 \* never given up as orphan or refused: the adoption waited for the deadline.
@@ -710,5 +786,14 @@ RunningSettles == \A s \in S : row[s] = "running" /\ ~Alive(rowProc[s]) ~> row[s
 \* the process and the stop's own reads (F-64).
 StoppingSettles ==
     \A s \in S : row[s] = "stopping" /\ ~Alive(rowProc[s]) ~> row[s] # "stopping"
+
+\* An orphan row with a record, and a stop past its deadline, end: Recoveries
+\* ends the process, and the cues settle the row, so its name is free again
+\* (F-118). An orphan that has no record (a delegate's whose wrapper wrote
+\* none) is the code's, not this spec's: every hold here writes one.
+OrphanEnds ==
+    \A s \in S : row[s] = "orphan" /\ rowProc[s] # NoProc ~> row[s] \in Ended
+LateStopEnds ==
+    \A s \in S : row[s] = "stopping" /\ late[s] ~> row[s] # "stopping"
 
 =============================================================================

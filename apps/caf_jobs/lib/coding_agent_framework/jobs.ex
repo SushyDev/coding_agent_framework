@@ -46,7 +46,10 @@ defmodule CodingAgentFramework.Jobs do
   the group, itself included: the group's id is the wrapper's own pid, alive until then, so the
   kill never reaches a reused id. Whichever comes first wins the exit file, by `mkdir`; the
   other leaves it to the winner. dtach removes the socket once the wrapper is gone, so a job is
-  read dead first, then its exit file, and nothing of its group is left by then.
+  read dead first, then its exit file, and nothing of its group is left by then. "Dead" is
+  `Holder.Process`'s: the wrapper's pid, recorded with its start time as it was held, gone, and
+  the socket absent or stale. A run's wait for the end runs on the host
+  (`Holder.Process.await_dead/3`), one shell for the whole wait.
 
       {:ok, jobs} = Jobs.start_link(dir: dir, copies: copies, on_late_end: &route/1,
         hosts: %{"box" => %{programs: p, dir: "/srv/caf"}})
@@ -57,7 +60,7 @@ defmodule CodingAgentFramework.Jobs do
 
   use GenServer
 
-  alias CodingAgentFramework.{Copies, Programs, Shell}
+  alias CodingAgentFramework.{Copies, Holder, Programs, Shell}
   alias CodingAgentFramework.Copies.Held
   alias CodingAgentFramework.Jobs.Table
 
@@ -81,17 +84,10 @@ defmodule CodingAgentFramework.Jobs do
   # How long a read made in `Jobs`' own process (its start, a cue) waits on the host.
   @settle_read 2_000
   @ended ~w(exited timedout lost refused interrupted)
-  # $0 dtach; $1 the socket, $2 the exit file, $3 sleep, $4 "wait" to wait while it lives.
-  # The socket is read dead first, then the exit file, in one process.
-  @read ~S"""
-  while [ -e "$1" ]; do
-    if out=$("$0" -p "$1" </dev/null 2>&1); then
-      [ "$4" = wait ] || { echo live; exit 0; }
-      "$3" 0.2; continue
-    fi
-    case $out in *"Connection refused"*) break ;; *) echo "unknown $out"; exit 0 ;; esac
-  done
-  if [ -e "$2" ]; then printf 'end '; cat "$2"; else echo 'end none'; fi
+  # $1 the exit file, read once the job is dead (`Holder.Process`): its process gone and its
+  # socket dead, so nothing of the job writes it after.
+  @exit ~S"""
+  if [ -e "$1" ]; then read -r x < "$1"; echo "end $x"; else echo 'end none'; fi
   """
 
   @type where :: %{host: String.t(), project: String.t(), name: String.t()}
@@ -99,7 +95,7 @@ defmodule CodingAgentFramework.Jobs do
   @doc """
   Starts the part. Options: `:dir`, a directory of this machine of its own (the table);
   `:copies`, the `Copies` server; `:hosts`, each host's name to `%{programs: programs, dir:
-  dir}`, its `Programs` (with `dtach`, `sh`, `env`, `rm`, `kill`, `sleep`, `mkdir`, `tail`,
+  dir}`, its `Programs` (with `dtach`, `sh`, `env`, `rm`, `kill`, `sleep`, `mkdir`, `tail`, `ps`,
   and for the copy `flock` and `rsync`) and its framework directory; `:on_late_end`, a function
   of one argument that is handed each late end and answers `:ok` or `{:unknown, reason}`.
   """
@@ -299,12 +295,36 @@ defmodule CodingAgentFramework.Jobs do
     end
   end
 
+  # The job's record and socket, once (`:once`) or waited on the host until it is dead
+  # (`:wait`); once dead, its exit file. A part of the reading that failed is no answer.
   defp read(ctx, mode, timeout) do
-    %{dtach: dtach, sh: sh, sleep: sleep} = ctx.programs.paths
-    args = ["-c", @read, dtach, ctx.socket, ctx.exit, sleep, Atom.to_string(mode)]
+    name = ctx.name
 
-    case Shell.run(ctx.programs.host, sh, args, timeout: timeout) do
-      {:ok, %{status: 0, output: "live\n"}} -> {:ok, :live}
+    reading =
+      case mode do
+        :once -> Holder.Process.read(ctx.procs, [name], timeout: timeout)
+        :wait -> Holder.Process.await_dead(ctx.procs, name, timeout)
+      end
+
+    case reading do
+      {:ok, %{^name => r}} -> judge(ctx, r)
+      {:ok, %{} = r} -> judge(ctx, r)
+      other -> {:unknown, {:read, other}}
+    end
+  end
+
+  defp judge(ctx, reading) do
+    cond do
+      Holder.Process.dead?(reading) -> exit_file(ctx)
+      :unknown in [reading.socket, reading.process] -> {:unknown, {:read, reading}}
+      true -> {:ok, :live}
+    end
+  end
+
+  defp exit_file(ctx) do
+    args = ["-c", @exit, "caf-exit", ctx.exit]
+
+    case Shell.run(ctx.programs.host, ctx.programs.paths.sh, args, timeout: @call) do
       {:ok, %{status: 0, output: "end " <> value}} -> {:ok, {:end, String.trim(value)}}
       other -> {:unknown, {:read, other}}
     end

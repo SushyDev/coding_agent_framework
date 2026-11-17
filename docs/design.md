@@ -1117,7 +1117,7 @@ reshaped around three new ones, in R4 and R6, before the code they describe:
 |---|---|---|
 | `Shell.tla` | kept as it is | as above |
 | `Agent.tla` | kept; instances `Claim` for `Recoveries`; the comments that say `/exit` go | as above |
-| `Start.tla` | kept; `StopAsked` is SIGTERM once idle; `Recoveries`' end of an orphan by pid and start time is the same `KillsOwnOnly` | as above |
+| `Start.tla` | kept; `StopAsked` is SIGTERM once idle; `Recoveries`' end of an orphan by pid and start time is the same `KillsOwnOnly` (both F-118) | as above, and `TermsOnlyIdle`, `OrphanEnds`, `LateStopEnds` |
 | `Copy.tla` | kept; instances `Claim` for the forward's reopen; the forward (about 230 lines) may split into its own spec when it next changes | as above |
 | **`Claim.tla`** (new, R4, about 60 lines) | the claim before an act: once per state, acted on only while current, cut by a restart; the rule of `Acts` | `OneClaimPerState`, `OneActPerState`, `NoActOnCutOffClaim` |
 | **`Hold.tla`** (new, R4, about 80 lines) | a held request answered once by its named decider, its deadline, its holder's death, a restart | `OneResponse`, `LateDropped`, `OnlyNamed`, `RequestsEnd` |
@@ -1130,8 +1130,8 @@ reshaped around three new ones, in R4 and R6, before the code they describe:
 
 Until R4 and R6 land, the specs above say what they say today; where one still models a typed
 delivery or an end by `/exit` (`Delegate.tla`'s `DeliveryTyped`, `Team.tla`'s, `Move.tla`'s
-end, `Start.tla`'s `StopAsked`), "Delivery into a main session" and "Ending a session" are the
-design, and the spec is behind it. The model stays about 5,400 lines.
+end), "Delivery into a main session" and "Ending a session" are the design, and the spec is
+behind it. `Start.tla` took the end by SIGTERM in R3 (F-118). The model stays about 5,400 lines.
 
 **What the code relies on and a spec will own** (F-115, section 3):
 

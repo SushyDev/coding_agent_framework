@@ -16,6 +16,7 @@ defmodule CafJobs.MixProject do
   defp deps do
     [
       {:caf_shell, in_umbrella: true},
+      {:caf_holder, in_umbrella: true},
       {:caf_copies, in_umbrella: true},
       {:caf_store, in_umbrella: true},
       {:exqlite, "~> 0.43.0", only: :test},

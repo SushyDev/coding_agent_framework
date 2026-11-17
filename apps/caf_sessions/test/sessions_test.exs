@@ -68,6 +68,8 @@ defmodule CodingAgentFramework.SessionsTest do
     restart(ctx, nil)
     assert {:ok, row} = row_when(ctx, "orphan", &(&1.status == "orphan"))
     assert row.reason == "no_session_file"
+    # With the held program's record, for Recoveries (F-118).
+    assert is_integer(row.pid) and is_binary(row.proc_start)
     # Sessions never kills: the orphan's process runs on, for Recoveries.
     assert {:ok, :live} = Holder.state(ctx.holder, "orphan")
     assert {:ok, %{reason: "interrupted"}} = row_when(ctx, "dead", &(&1.status == "refused"))
@@ -155,13 +157,31 @@ defmodule CodingAgentFramework.SessionsTest do
     assert %{status: "running", pid: ^pid} = Table.get(ctx.table, "test", "unsure")
   end
 
+  test "F-118: a stop sends SIGTERM only once the session file says idle (StopAsked)", ctx do
+    {_dir, own} = own_dir(ctx, "turn", :at_start)
+    assert {:ok, %{pid: pid}} = Sessions.start(ctx.sessions, "turn", ctx.account, own)
+
+    # A turn runs: the file says busy, the stop is refused, and nothing was sent.
+    assert {:ok, :sent} = Control.send(ctx.control, "turn", "busy")
+    assert {:ok, _} = file_says(ctx, "busy")
+    assert {:refused, {:not_idle, "busy"}} = Sessions.stop(ctx.sessions, "turn", :idle)
+    assert %{status: "running"} = Table.get(ctx.table, "test", "turn")
+    assert alive?(pid)
+
+    # The turn ends: SIGTERM, the stand-in exits 143 as Claude Code does, and the row stops.
+    assert {:ok, :sent} = Control.send(ctx.control, "turn", "idle")
+    assert {:ok, _} = file_says(ctx, "idle")
+    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "turn", :idle)
+    refute alive?(pid)
+  end
+
   test "new-9: StopTimedOut leaves the row stopping, late, for Recoveries", ctx do
     assert {:ok, %{pid: pid}} =
              Sessions.start(ctx.sessions, "deaf", ctx.account, launch(ctx, :at_start))
 
-    # Stopped by signal, it cannot read `/exit` until it is continued.
+    # Stopped by signal, it acts on its SIGTERM only once it is continued.
     assert {:ok, %{status: 0}} = kill(pid, "-STOP")
-    stop = Task.async(fn -> Sessions.stop(ctx.sessions, "deaf", :ended) end)
+    stop = Task.async(fn -> Sessions.stop(ctx.sessions, "deaf", :idle) end)
     assert {:ok, _} = row_when(ctx, "deaf", &(&1.status == "stopping"))
     advance(ctx)
     assert {:unknown, {:no_exit, {:ok, :sent}}} = Task.await(stop)
@@ -250,9 +270,9 @@ defmodule CodingAgentFramework.SessionsTest do
     assert {:ok, %{session_id: id}} =
              Sessions.start(ctx.sessions, "linger", ctx.account, lingers)
 
-    stop = Task.async(fn -> Sessions.stop(ctx.sessions, "linger", :ended) end)
+    stop = Task.async(fn -> Sessions.stop(ctx.sessions, "linger", :idle) end)
 
-    # The stand-in exits on /exit; its wrapper keeps the socket live, so the stop is not done
+    # The stand-in exits 143 on SIGTERM; its wrapper keeps the socket live, so the stop is not done
     # by its deadline.
     assert {:ok, _} =
              await(fn -> if File.exists?(Path.join(dir, "exited")), do: {:ok, :exited} end)
@@ -426,6 +446,19 @@ defmodule CodingAgentFramework.SessionsTest do
     File.chmod!(tmp, 0o755)
     File.rename!(tmp, path)
     path
+  end
+
+  # The one session file of the account says `status`.
+  defp file_says(ctx, status) do
+    sessions = Path.join(ctx.account.config_dir, "sessions")
+
+    await(fn ->
+      with [file] <- File.ls!(sessions),
+           {:ok, text} <- File.read(Path.join(sessions, file)),
+           true <- text =~ ~s("status": "#{status}") do
+        {:ok, status}
+      end
+    end)
   end
 
   defp file_written(ctx) do

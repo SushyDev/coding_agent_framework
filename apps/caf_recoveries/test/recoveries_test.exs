@@ -13,7 +13,7 @@ defmodule CodingAgentFramework.RecoveriesTest do
   import CodingAgentFramework.RecoveriesSetup
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Holder, Recoveries, RecoveriesSetup, Tmux, TmuxSampler}
+  alias CodingAgentFramework.{Holder, Recoveries, RecoveriesSetup, Sessions, Tmux, TmuxSampler}
   alias CodingAgentFramework.Recoveries.Table
 
   doctest Recoveries
@@ -222,6 +222,79 @@ defmodule CodingAgentFramework.RecoveriesTest do
     assert held(ctx, "alpha").status == :stale
     assert {:ok, %{claimed: []}} = Recoveries.check(ctx.recoveries)
     assert rows(ctx) == []
+  end
+
+  test "F-118: an orphan's process is ended by its record, once; Sessions then stops its row",
+       ctx do
+    {:ok, procs} = Holder.Process.new(programs(), ctx.holder)
+    script = ~s(trap '' TERM; ) <> echo_tail!(ctx.dir)
+    on_exit(fn -> end_recorded(ctx.dir) end)
+
+    assert {:ok, _} =
+             Holder.Process.hold(procs, "lost", [
+               program!(:sh),
+               "-c",
+               script,
+               Path.join(ctx.dir, "lost")
+             ])
+
+    assert {:ok, %{pid: pid} = record} = await(fn -> record(procs, "lost") end)
+    orphan!(ctx, "lost", record)
+
+    # TERM is ignored, so KILL ends it at the grace; the row is the claim of that state.
+    assert {:ok, _} = TmuxSampler.sample(ctx.sampler)
+    assert {:ok, %{ends: [id]}} = Recoveries.check(ctx.recoveries)
+    refute alive?(pid)
+    assert [%{id: ^id, kind: "end", status: "recovered", open: "ended"}] = rows(ctx)
+
+    # Sessions settles its row at the next cue; the state is never acted on again.
+    Sessions.cue(ctx.sessions, %{topic: "tmux:test:#{key(ctx)}", ids: []})
+
+    assert {:ok, %{reason: "ended"}} =
+             await(fn ->
+               case Sessions.Table.get(sessions_db(ctx), "test", "lost") do
+                 %{status: "stopped"} = row -> {:ok, row}
+                 other -> other
+               end
+             end)
+
+    assert {:ok, %{ends: []}} = Recoveries.check(ctx.recoveries)
+  end
+
+  defp record(procs, name) do
+    case Holder.Process.read(procs, [name]) do
+      {:ok, %{^name => %{process: :live, record: record}}} -> {:ok, record}
+      other -> {:waiting, other}
+    end
+  end
+
+  # The orphan row Sessions' adoption leaves, with the held program's record.
+  defp orphan!(ctx, name, %{pid: pid, start: start}) do
+    db = sessions_db(ctx)
+
+    row = %{
+      host: "test",
+      name: name,
+      socket: name,
+      account: "work",
+      role: "parent",
+      cwd: ctx.dir,
+      resume: nil,
+      session_id: nil,
+      deadline: nil
+    }
+
+    Sessions.Table.update(db, Sessions.Table.starting(db, row),
+      status: "orphan",
+      reason: "no_session_file",
+      pid: pid,
+      proc_start: start
+    )
+  end
+
+  defp sessions_db(ctx) do
+    {:ok, db} = Sessions.Table.open(ctx.db)
+    db
   end
 
   defp move(ctx, ms), do: :counters.add(ctx.time, 1, ms)

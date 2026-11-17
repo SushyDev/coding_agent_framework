@@ -58,10 +58,12 @@ defmodule CodingAgentFramework.RecoveriesSetup do
       sampler: sampler,
       control: control,
       holder: holder,
+      programs: programs(),
       sessions: sessions,
       server: server,
       db: db,
       size: {80, 24},
+      end_grace: 300,
       notify: &send(me, {:cue, &1}),
       clock: clock
     ]

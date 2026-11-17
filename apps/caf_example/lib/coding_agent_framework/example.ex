@@ -176,6 +176,7 @@ defmodule CodingAgentFramework.Example do
            {Recoveries,
             server: w.tmux,
             holder: w.holder,
+            programs: w.programs,
             sampler: pid.(:sampler),
             control: pid.(:control),
             sessions: pid.(:sessions),
