@@ -3,8 +3,8 @@ defmodule CodingAgentFramework.Mailbox.Transport do
   How a row `Mailbox` marked `sending` settles, one module per transport (`docs/design.md`,
   "Delivery"; `model/tla/Delivery.tla`): each names its evidence and what a restart does to a
   row it left `sending`. The mark, the refusal that undoes it and the unknown that keeps it are
-  `Mailbox`'s, once. `waiter` is settled by the transcript (`Transport.Waiter`); `typed` comes
-  with R8, as one more module here.
+  `Mailbox`'s, once. `waiter` and `typed` are settled by the transcript (`Transport.Waiter`,
+  `Transport.Typed`).
 
   `settle/2` answers `:keep` (the evidence has not decided), `:delivered`, or `:again` (due
   again, first, under its same uuid). A row an earlier build marked has no `via`: it went by
@@ -15,15 +15,17 @@ defmodule CodingAgentFramework.Mailbox.Transport do
       :again
   """
 
-  alias CodingAgentFramework.Mailbox.Transport.{Call, Stream, Waiter}
+  alias CodingAgentFramework.Mailbox.Transport.{Call, Stream, Typed, Waiter}
 
   @doc """
   Settles `row` by its transport's evidence: `%{fold: fold | nil, calls: calls}`, and for a
-  `waiter` row `waiter:`, as `Waiter.settle/2` reads it.
+  `waiter` row `waiter:`, as `Waiter.settle/2` reads it, and for a `typed` row `typed:`, as
+  `Typed.settle/2` reads it.
   """
   @spec settle(map, map) :: :keep | :delivered | :again
   def settle(%{via: "call"} = row, evidence), do: Call.settle(row, evidence.calls)
   def settle(%{via: "waiter"} = row, evidence), do: Waiter.settle(row, evidence.waiter)
+  def settle(%{via: "typed"} = row, evidence), do: Typed.settle(row, evidence.typed)
   def settle(row, evidence), do: Stream.settle(row, evidence.fold)
 end
 
@@ -177,4 +179,91 @@ defmodule CodingAgentFramework.Mailbox.Transport.Call do
   @doc "Settles `row` by `calls`, the calls in memory by row id."
   @spec settle(map, map) :: :keep | :again
   def settle(row, calls), do: if(Map.has_key?(calls, row.id), do: :keep, else: :again)
+end
+
+defmodule CodingAgentFramework.Mailbox.Transport.Typed do
+  @moduledoc """
+  The `typed` transport: the `Inlet`'s checked write into an interactive session with no waiter
+  (`docs/design.md`, "A session with no waiter"; `Delivery.tla`'s `typed`, `Unknown`,
+  `SettleSeen`). The text is typed into the session's input box and sent with Enter, so it is
+  one line: the row's uuid goes at its end (`text/2`), which the transcript's user line keeps.
+
+  The `Inlet` types only when the turn function it is handed, read in its own step, says the
+  turn ended (`turn/2`: the session file reads idle with no waiter held, for the process the row
+  was marked for) and the screen shows an empty box. `{:ok, :sent}` says the keys went in, not
+  that Claude Code took them, so the row stays `sending` until the transcript decides, as a
+  waiter's does: the user line carrying the mark, once the turn it started has ended (or its
+  process is gone), is delivered; no line of it past the take bound, or its process gone with no
+  line, is due again, first, under its same uuid. An unknown write keeps the mark and is never
+  typed again by the `Inlet`; the same evidence settles it.
+
+  The bound runs from `sent_at`. The mark sets it to the latest the hand-on can be (the mark's
+  time and the `Inlet`'s call timeout), and the answer to its own time, so a restart between the
+  two never makes a row due again while its keys may still go in.
+
+      iex> alias CodingAgentFramework.Mailbox.Transport.Typed
+      iex> Typed.text("Done.", "u1")
+      "Done. [delivery u1]"
+      iex> Typed.settle(%{sent_at: 0}, %{seen: :taken, ended: false, gone: false, now: 1, bound: 10})
+      :keep
+  """
+
+  alias CodingAgentFramework.Mailbox.Transport.Waiter
+
+  @doc "The text typed: the row's text and, at the end of the same line, its uuid."
+  @spec text(String.t(), String.t()) :: String.t()
+  def text(text, uuid), do: text <> " [delivery " <> uuid <> "]"
+
+  @doc """
+  What the transcript `bytes` show of the row under `uuid`, as `Waiter.seen/2` reads them: a user
+  line with its mark is `:taken`.
+  """
+  @spec seen(binary, String.t()) :: :taken | :queued | :none
+  def seen(bytes, uuid), do: Waiter.seen(bytes, uuid)
+
+  @doc """
+  The `Inlet`'s turn check, from `Sessions.Turn.interactive/3` read in the write's step: `:ok`
+  for `:idle` (the file reads idle, and no waiter is held) when the row's process is still the
+  one the row was marked for. `:ended` means a waiter is held now, which is the `waiter`
+  transport's.
+
+      iex> CodingAgentFramework.Mailbox.Transport.Typed.turn(:idle, true)
+      :ok
+      iex> CodingAgentFramework.Mailbox.Transport.Typed.turn(:running, true)
+      {:refused, :running}
+  """
+  @spec turn(atom, boolean) :: :ok | {:refused, term}
+  def turn(_state, false), do: {:refused, :other_process}
+  def turn(:idle, true), do: :ok
+  def turn(:ended, true), do: {:refused, :waiter}
+  def turn(state, true), do: {:refused, state}
+
+  @doc """
+  Whether a row's stored `attempt` says the `Inlet` refused its text itself (too long, or a
+  control character in it): such a row waits for a waiter, and is not typed again.
+
+      iex> CodingAgentFramework.Mailbox.Transport.Typed.text_refused?(~s(["too_long",116]))
+      true
+  """
+  @spec text_refused?(String.t() | nil) :: boolean
+  def text_refused?(attempt) when is_binary(attempt) do
+    match?({:ok, [kind | _]} when kind in ["too_long", "bad_text"], JSON.decode(attempt))
+  end
+
+  def text_refused?(_attempt), do: false
+
+  @doc """
+  Settles `row` by `evidence`: `%{seen: seen/2's answer | :unread, ended: whether the session's
+  turn reads ended or idle now, gone: whether the process it was typed into is gone, now:
+  wall-clock ms, bound: the take bound}`.
+  """
+  @spec settle(map, map) :: :keep | :delivered | :again
+  def settle(_row, %{seen: :unread}), do: :keep
+  def settle(_row, %{seen: :taken, gone: true}), do: :delivered
+  def settle(_row, %{seen: :taken, ended: ended}), do: if(ended, do: :delivered, else: :keep)
+  def settle(_row, %{gone: true}), do: :again
+  def settle(_row, %{seen: :queued}), do: :keep
+
+  def settle(row, %{now: now, bound: bound}),
+    do: if(now >= row.sent_at + bound, do: :again, else: :keep)
 end

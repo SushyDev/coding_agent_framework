@@ -836,7 +836,12 @@ A session with no waiter (before its first turn ends, after a waiter's deadline,
 restart cut the waiter's connection) gets nothing that way, and `Intake` knows it
 (`Intake.waiter?`), once a heartbeat has found a connection that died. What is due is held until
 a waiter connects; a view shows a session idle with no waiter and something due, and the
-`Inlet`'s checked write reaches it, as one more transport of the same row. `Intake` cues a
+`Inlet`'s checked write reaches it, as one more transport of the same row. It types one line, the row's
+uuid at its end, only when the session file reads idle with no waiter held and the screen shows
+an empty box, both read again in the write's own step, and sends Enter as its own command once
+the box shows the text. The limit (F-132): a text of more than one line, or longer than the
+pane's width less four columns, is refused untyped and waits for a waiter, since no fixture shows
+how a release draws a wrapped box (F-113's new-1). `Intake` cues a
 session's waiter coming and going on a topic of its own (`intake:<host>:<account>:waiters`, with
 the session ids), and `Mailbox` tries a due row on that cue, not on a timer (F-123's new-3).
 The cue also settles a row `sending` by the last waiter: a turn's end starts the next waiter,
@@ -1118,8 +1123,9 @@ section.
 ## State that never lags or lies
 
 1. **Tables are the truth.** A PubSub message is a cue to re-read rows by id, never the data.
-2. **One writer.** One process writes each table, and one `Inlet` per host writes panes. Every
-   other part reads a table through its owner's functions.
+2. **One writer.** One process writes each table, and one `Inlet` per host types into panes;
+   `Sessions` and `Recoveries` open and size the viewers, each through `Tmux`'s one-command check.
+   Every other part reads a table through its owner's functions.
 3. **Unread is not empty.** A reader that has not read yet answers `:unread`, and a view says so,
    rather than "nothing runs".
 4. **Total folds.** A source answers its rows and its problems together, so a read with one bad
@@ -1625,7 +1631,11 @@ new-2, F-113's new-2).
   reading `Mailbox` (`open_to:`) in place of `stop/4`'s word.
 - **R8. `Inlet`**: `Control` with `Screen`'s box check, the checked write for a session with no
   waiter, as the transport `typed`. It records the release each session runs, and never trusts
-  one read for a turn's end (F-113's new-2, new-4). About +200, −140.
+  one read for a turn's end (F-113's new-2, new-4). About +200, −140. Built in F-132: `caf_control`
+  became `caf_inlet`, whose `Inlet.type/4` is the transport `typed` in `Mailbox`
+  (`Transport.Typed`); `Tmux.capture/3` reads a pane under the tag check; `Sessions` records an
+  interactive start's release (`claude --version`) on the agent row; the viewers' tmux use moved
+  to `Sessions` and `Recoveries`, and `Control`'s uncalled `interrupt`, `stop` and `respawn` went.
 - **R9. The agent row and the tree**: `Sessions`' row takes kind, parent and project; the tree,
   the statuses that hold an agent and each session's turn state are functions there; `Grants`,
   the `Tracker`, `Mailbox` and the app read them, and no part opens another's table. A main

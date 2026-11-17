@@ -10,11 +10,12 @@
 (*               (Tmux.CLI.write/4, built in unit 2);                      *)
 (*   Holder      dtach: a process held on a socket, a viewer of it, a      *)
 (*               stale socket and its cleaning (built in unit 2);          *)
-(*   Control     the one writer per host: a write names a session and a    *)
-(*               pane id kept from earlier, and goes out only to that      *)
-(*               session's pane (built in unit 3). Its stop and respawn    *)
-(*               of a pane go through the same one-command check, and are  *)
-(*               writes here;                                              *)
+(*   Inlet       the one writer of typed text per host: a write names a  *)
+(*               session and a pane id read earlier, and goes out only to  *)
+(*               that session's pane (built as Control in unit 3, Inlet in *)
+(*               F-132, which reads the id from the panes' tags). Sessions *)
+(*               and Recoveries open and size viewers through the same     *)
+(*               one-command check;                                        *)
 (*   TmuxSampler reads the panes, then the held sockets, and reports a     *)
 (*               held agent with no viewer (built in F-22). A viewer       *)
 (*               opened between its two reads shows as lost for that one   *)
@@ -486,7 +487,7 @@ Passes(a, id) ==
 Reached(a, id, from) ==
     [session |-> a, reached |-> panes[id], keptEpoch |-> from, epoch |-> epoch]
 
-\* Control is asked to write to session a at the pane id it kept. In the
+\* The Inlet is asked to write to session a at the pane id it kept. In the
 \* design the tag check and the send are one tmux command, so tmux checks the
 \* pane it sends to. A write that fails a guard is refused and sends nothing.
 \* Under CheckThenSend the check passes here and the send comes as its own step.

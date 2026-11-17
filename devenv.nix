@@ -18,8 +18,8 @@ let
   #   - wc, lsof: a service's log offset at its start, and whether a forward's own ssh holds its
   #     local port (Services).
   #   - curl: a main session's waiter hook (Intake.waiter_hook), run by its contract test.
-  #   - sh, bash, rm, mv, env, kill, ps, cat, tail, head, mkdir, mkfifo, echo, sleep, true: the POSIX
-  #     tools the tests and scripts call.
+  #   - sh, bash, rm, mv, env, kill, ps, cat, tail, head, mkdir, mkfifo, stty, echo, sleep, true: the
+  #     POSIX tools the tests and scripts call (stty: the screen stand-in reads keys raw).
   #   - tlc and java: TLA+ checks of model/tla (bin/check-model). Development only.
   programs = {
     TMUX = lib.getExe pkgs.tmux;
@@ -46,6 +46,7 @@ let
     HEAD = lib.getExe' pkgs.coreutils "head";
     MKDIR = lib.getExe' pkgs.coreutils "mkdir";
     MKFIFO = lib.getExe' pkgs.coreutils "mkfifo";
+    STTY = lib.getExe' pkgs.coreutils "stty";
     ECHO = lib.getExe' pkgs.coreutils "echo";
     SLEEP = lib.getExe' pkgs.coreutils "sleep";
     TRUE = lib.getExe' pkgs.coreutils "true";

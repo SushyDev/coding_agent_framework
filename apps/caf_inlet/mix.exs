@@ -1,9 +1,9 @@
-defmodule CafControl.MixProject do
+defmodule CafInlet.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :caf_control,
+      app: :caf_inlet,
       version: "0.1.0",
       build_path: "../../_build",
       deps_path: "../../deps",
@@ -15,6 +15,7 @@ defmodule CafControl.MixProject do
 
   defp deps do
     [
+      {:caf_screen, in_umbrella: true},
       {:caf_tmux, in_umbrella: true},
       {:caf_test, in_umbrella: true, only: :test}
     ]

@@ -38,7 +38,7 @@ defmodule CodingAgentFramework.Example do
 
   use Supervisor
 
-  alias CodingAgentFramework.{Accounts, Acts, Control, Copies, Delegates, Grants, Holder, Host}
+  alias CodingAgentFramework.{Accounts, Acts, Copies, Delegates, Grants, Holder, Host, Inlet}
 
   alias CodingAgentFramework.{
     Cues,
@@ -200,7 +200,7 @@ defmodule CodingAgentFramework.Example do
           notify: notify,
           claims: Config.path(c, "claims.db")}
        end},
-      {:control, fn _ -> {Control, tmux: w.tmux} end},
+      {:inlet, fn _ -> {Inlet, tmux: w.tmux} end},
       {:usage,
        fn _ ->
          {Usage, accounts: w.accounts, host: host, db: db, notify: notify, interval: every}
@@ -236,7 +236,7 @@ defmodule CodingAgentFramework.Example do
              reaper: pid.(:reaper),
              programs: p,
              dir: Config.path(c, "d"),
-             control: pid.(:control),
+             tmux: w.tmux,
              registry: pid.(:registry),
              stream: pid.(:stream),
              home: c.home,
@@ -255,7 +255,6 @@ defmodule CodingAgentFramework.Example do
             holder: w.holder,
             programs: w.programs,
             sampler: pid.(:sampler),
-            control: pid.(:control),
             sessions: pid.(:sessions),
             acts: pid.(:acts)}
          end},
@@ -272,6 +271,8 @@ defmodule CodingAgentFramework.Example do
             intake: pid.(:intake),
             transcripts: pid.(:transcripts),
             accounts: w.accounts,
+            inlet: pid.(:inlet),
+            registry: pid.(:registry),
             notify: notify}
          end},
         {:delegates,

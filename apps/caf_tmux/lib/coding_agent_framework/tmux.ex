@@ -59,6 +59,14 @@ defmodule CodingAgentFramework.Tmux do
               {:ok, :sent} | {:refused, term} | {:unknown, term}
 
   @doc """
+  The screen of `pane` as it shows now (`capture-pane -p`: its visible rows, each with its
+  trailing spaces dropped) and the pane's width in columns, only when its tag names `session`,
+  checked in the same tmux command as a write is. Refusals as `c:write/4`'s.
+  """
+  @callback capture(server, pane, session) ::
+              {:ok, %{text: String.t(), width: pos_integer}} | {:refused, term} | {:unknown, term}
+
+  @doc """
   Ends `pane` only when its tag names `session`, checked in the same tmux command as a write is.
   """
   @callback kill_pane(server, pane, session) ::
@@ -121,6 +129,17 @@ defmodule CodingAgentFramework.Tmux do
       not session?(session) -> {:refused, {:bad_session, session}}
       not input?(input) -> {:refused, {:bad_input, input}}
       true -> mod.write(server, pane, session, input)
+    end
+  end
+
+  @doc "See the `c:capture/3` callback."
+  @spec capture(server, pane, session) ::
+          {:ok, %{text: String.t(), width: pos_integer}} | {:refused, term} | {:unknown, term}
+  def capture(%mod{} = server, pane, session) do
+    cond do
+      not pane?(pane) -> {:refused, {:bad_target, pane}}
+      not session?(session) -> {:refused, {:bad_session, session}}
+      true -> mod.capture(server, pane, session)
     end
   end
 

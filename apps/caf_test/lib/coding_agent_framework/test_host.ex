@@ -79,6 +79,7 @@ defmodule CodingAgentFramework.TestHost do
     :head,
     :mkdir,
     :mkfifo,
+    :stty,
     :echo,
     :sleep,
     true,
