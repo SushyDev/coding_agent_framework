@@ -92,8 +92,9 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
     assert {2, text} = Task.await(turn, 10_000)
     %{uuid: u1} = Table.get(ctx.mtable, one)
     assert text == "report one\n\n[delivery #{u1}]"
-    assert %{status: "sending", via: "waiter", at: pid} = Table.get(ctx.mtable, one)
-    assert pid == main.pid
+    # The waiter's going cue may settle it from the lines before this read: sending or taken.
+    assert %{status: status, via: "waiter", at: pid} = Table.get(ctx.mtable, one)
+    assert status in ~w(sending delivered) and pid == main.pid
     assert %{status: "queued"} = Table.get(ctx.mtable, two)
 
     # The turn it started ends: the next waiter's cue settles the first from its lines, and the

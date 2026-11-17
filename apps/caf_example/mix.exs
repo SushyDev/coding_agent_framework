@@ -30,6 +30,7 @@ defmodule CafExample.MixProject do
       {:caf_jobs, in_umbrella: true},
       {:caf_mailbox, in_umbrella: true},
       {:caf_mcp, in_umbrella: true},
+      {:caf_mover, in_umbrella: true},
       {:caf_recoveries, in_umbrella: true},
       {:caf_registry, in_umbrella: true},
       {:caf_sampler, in_umbrella: true},

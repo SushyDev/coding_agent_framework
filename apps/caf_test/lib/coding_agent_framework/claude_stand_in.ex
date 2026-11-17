@@ -9,7 +9,9 @@ defmodule CodingAgentFramework.ClaudeStandIn do
     line `busy` until the line `idle`, as a turn runs. The file is written whole and renamed,
     and removed when the stand-in exits;
   - exits 143 on SIGTERM, as Claude Code does (F-114), unless it read the line `deaf`, after
-    which it ignores SIGTERM, as a process that does not end would;
+    which it ignores SIGTERM, as a process that does not end would; after the line
+    `cut <path>` it first appends `{"type":"cut"}` to that file, as Claude Code keeps what a turn
+    the SIGTERM cut wrote in its transcript;
   - prints `2.1.322 (Claude Code)` for `--version`, as Claude Code prints its release;
   - echoes each line of its input, and exits on `/exit`, or after `idle` seconds with none
     (`TestHost.stand_in_idle/0` by default), so no run leaves it for long;
@@ -83,6 +85,7 @@ defmodule CodingAgentFramework.ClaudeStandIn do
         go) [ $mode = on_go ] && announce ;;
         busy|idle) status=$line; [ -n "$announced" ] && announce ;;
         deaf) trap '' TERM ;;
+        cut\\ *) cut=${line#cut }; trap 'printf "%s\\n" "{\\"type\\":\\"cut\\"}" >> "$cut"; exit 143' TERM ;;
       esac
     done
     """

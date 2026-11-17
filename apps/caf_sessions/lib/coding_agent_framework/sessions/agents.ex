@@ -108,6 +108,34 @@ defmodule CodingAgentFramework.Sessions.Agents do
   def starting?(%{status: "starting"}), do: true
   def starting?(_), do: false
 
+  @doc """
+  Whether a move of the agent is under way (`Mover`, F-133): from its drain until it runs on
+  the other account. `Mailbox` hands it no row that would start a turn, and `Delegates` starts
+  no delegate under it and takes its end for the move's, not a kill.
+
+      iex> CodingAgentFramework.Sessions.Agents.moving?(%{move: "draining"})
+      true
+  """
+  @spec moving?(row | nil) :: boolean
+  def moving?(%{move: phase}) when is_binary(phase), do: true
+  def moving?(_), do: false
+
+  @doc """
+  The move under way: `%{phase, from, to, act, deadline}`, or nil when none is.
+  """
+  @spec move(row | nil) :: map | nil
+  def move(%{move: phase} = row) when is_binary(phase) do
+    %{
+      phase: phase,
+      from: row.move_from,
+      to: row.move_to,
+      act: row.move_act,
+      deadline: row.move_deadline
+    }
+  end
+
+  def move(_), do: nil
+
   @doc "Whether the row runs headless (a delegate's stream), not Claude Code's terminal interface."
   @spec headless?(row | nil) :: boolean
   def headless?(%{role: "delegate"}), do: true

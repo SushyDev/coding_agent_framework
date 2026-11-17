@@ -225,22 +225,49 @@ defmodule CodingAgentFramework.Sessions do
   is open (`{:refused, {:open, ids}}`), since the end cuts a turn and drops what has not gone
   in; its caller, `Delegates`, checks its report delivered before it asks. `Stream` then refuses
   the end while its row's turn runs (`:turn_running`) or a message is under way or found
-  undelivered. A refusal puts the row back to `running`. Option: `:timeout`.
+  undelivered. A refusal puts the row back to `running`. Options: `:timeout`, and `for: :move`
+  (`Mover`'s): a delegate is then ended as an interactive session is, by SIGTERM to its process
+  by pid and start time once `Stream`'s fold reads its turn ended (`Sessions.Turn.stream/1`) and
+  no row to it is `sending`, since a move keeps what is still `queued` for the next process
+  (an `end_session` would end those rows); a turn that runs is refused `{:not_idle, turn}`.
 
       Sessions.stop(sessions, "main")
       #=> {:ok, :stopped}
       #=> {:refused, {:not_idle, "busy"}}
   """
   @spec stop(GenServer.server(), String.t(), keyword) :: outcome(:stopped)
-  def stop(sessions, name, opts \\ []), do: request(sessions, {:stop, name}, opts)
+  def stop(sessions, name, opts \\ []),
+    do: request(sessions, {:stop, name, Keyword.get(opts, :for, :end)}, opts)
+
+  @doc """
+  Begins a move of running agent `name` (`Mover`'s, F-133): its row takes the move's phase,
+  `draining`, with `move` (`%{to: account, act: id, deadline: ms}`) and `move_from` its account,
+  in one write, so no two moves of one agent begin. Refused `{:moving, phase}` while one is under
+  way, `{:not_running, status}`, `{:same_account, to}`, or `:no_session`. Answers `{:ok, row}`.
+  Option: `:timeout` (ms, default 5 000).
+  """
+  @spec begin_move(GenServer.server(), String.t(), map, keyword) :: outcome(map)
+  def begin_move(sessions, name, %{to: _, act: _, deadline: _} = move, opts \\ []),
+    do: call(sessions, {:begin_move, name, move}, Keyword.get(opts, :timeout, @read))
+
+  @doc """
+  Sets the phase of agent `name`'s move under way (`"stopping"`, `"copying"`, `"resuming"`), with
+  `fields` (`to:`, `act:`), or ends it with `nil`, which clears every move field. `Mover` is its
+  one caller. Refused `:no_move` for a row with no move under way, or `:no_session`.
+  """
+  @spec move_phase(GenServer.server(), String.t(), String.t() | nil, keyword, keyword) ::
+          outcome(:ok)
+  def move_phase(sessions, name, phase, fields \\ [], opts \\ []),
+    do: call(sessions, {:move_phase, name, phase, fields}, Keyword.get(opts, :timeout, @read))
 
   @doc """
   Delegate `name` is done for good: its report went in and no process of it may live. Its row
   becomes `ended`, so it frees its parent's cap and what it owns ends with it; it keeps its
   place in the tree, so what it kept goes to its parent.
   `Delegates` asks it. Answers `{:ok, :ended}` (also for a row already `ended`), `{:refused,
-  :no_session}`, `{:refused, :main}` for a main session, which never ends, or `{:refused,
-  {:not_free, status}}` while its process may live. Option: `:timeout` (ms, default 5 000).
+  :no_session}`, `{:refused, :main}` for a main session, which never ends, `{:refused,
+  {:moving, phase}}` while a move resumes it, or `{:refused, {:not_free, status}}` while its
+  process may live. Option: `:timeout` (ms, default 5 000).
 
       Sessions.ended(sessions, "app-unit-review")
       #=> {:ok, :ended}
@@ -489,6 +516,10 @@ defmodule CodingAgentFramework.Sessions do
         %{status: "ended"} ->
           {:ok, :ended}
 
+        # A move resumes it: its process may live again.
+        %{move: phase} when is_binary(phase) ->
+          {:refused, {:moving, phase}}
+
         row ->
           if Agents.free?(row) and not Map.has_key?(state.pending, name) do
             write(state, row, status: "ended")
@@ -523,7 +554,61 @@ defmodule CodingAgentFramework.Sessions do
     {:reply, reply, state}
   end
 
-  def handle_call({{:stop, name}, timeout}, from, state) do
+  def handle_call({:begin_move, name, move}, _from, state) do
+    reply =
+      case Table.get(state.db, state.host.name, name) do
+        nil ->
+          {:refused, :no_session}
+
+        %{move: phase} when is_binary(phase) ->
+          {:refused, {:moving, phase}}
+
+        %{account: account} when account == move.to ->
+          {:refused, {:same_account, move.to}}
+
+        %{status: "running", pid: pid} = row when is_integer(pid) ->
+          if Map.has_key?(state.pending, name) do
+            {:refused, {:not_running, "calling"}}
+          else
+            fields = [move: "draining", move_from: row.account, move_to: move.to]
+            write(state, row, fields ++ [move_act: move.act, move_deadline: move.deadline])
+            {:ok, Table.get(state.db, state.host.name, name)}
+          end
+
+        row ->
+          {:refused, {:not_running, row.status}}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:move_phase, name, phase, fields}, _from, state) do
+    reply =
+      case Table.get(state.db, state.host.name, name) do
+        nil ->
+          {:refused, :no_session}
+
+        %{move: nil} ->
+          {:refused, :no_move}
+
+        row when is_nil(phase) ->
+          clear = [move: nil, move_from: nil, move_to: nil, move_act: nil, move_deadline: nil]
+          write(state, row, clear)
+          {:ok, :ok}
+
+        row when phase in ~w(stopping copying resuming) ->
+          extra = for {k, v} <- fields, k in [:to, :act], do: {:"move_#{k}", v}
+          write(state, row, [move: phase] ++ extra)
+          {:ok, :ok}
+
+        _row ->
+          {:refused, {:bad, :phase}}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({{:stop, name, how}, timeout}, from, state) do
     deadline = state.clock.() + timeout
 
     case Table.get(state.db, state.host.name, name) do
@@ -531,7 +616,7 @@ defmodule CodingAgentFramework.Sessions do
         # StopAsked, with the stop's own deadline in the row: from here `Mailbox` marks no row
         # to the session, so a row it marked before is the only one the idle read waits for.
         write(state, row, status: "stopping", reason: nil, deadline: deadline)
-        pending = %{kind: :ask, from: from, row: row, deadline: deadline}
+        pending = %{kind: :ask, from: from, row: row, deadline: deadline, how: how}
         {:noreply, ask(state, name, pending)}
 
       nil ->
@@ -546,7 +631,7 @@ defmodule CodingAgentFramework.Sessions do
   # holds the SIGTERM until it settles or the stop's deadline passes (F-122's new-1). A refusal
   # sends nothing and puts the row back to running.
   defp ask(state, name, %{row: row} = pending) do
-    case ask_end(state, row) do
+    case ask_end(state, row, pending.how) do
       {:refused, {:sending, _}} = refused ->
         state = put_in(state.pending[name], pending)
 
@@ -568,7 +653,7 @@ defmodule CodingAgentFramework.Sessions do
 
   # A delegate's `end_session` line through Stream, once no row to it is open in `Mailbox`:
   # `Delegates` checked its report delivered before it asked.
-  defp ask_end(state, %{role: "delegate"} = row) do
+  defp ask_end(state, %{role: "delegate"} = row, :end) do
     with :ok <- open(state, row.name, :open) do
       if state.stream,
         do: Stream.end_session(state.stream, row.session_id, timeout: @stream),
@@ -576,10 +661,25 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
+  # A move's end of a delegate (`Move.tla`'s IdleRead and Term): SIGTERM by its record, once
+  # Stream's fold, read now, says its turn ended and no row to it is `sending`. Its `queued` rows
+  # stay for the process the move resumes; an `end_session` would have them settled ended.
+  defp ask_end(state, %{role: "delegate"} = row, :move) do
+    with {:ok, fold} <- followed(state, row, true) |> unread(),
+         :ended <- Turn.stream(fold),
+         :ok <- open(state, row.name, :sending) do
+      Holder.Process.signal(state.procs, %{pid: row.pid, start: row.proc_start}, "TERM")
+    else
+      :gone -> {:ok, :gone}
+      turn when is_atom(turn) -> {:refused, {:not_idle, turn}}
+      refused -> refused
+    end
+  end
+
   # StopAsked: SIGTERM by the row's pid and start time, once the session file of that process
   # reads idle and, in the same step, no `Mailbox` row to it is `sending`. A refusal sends
   # nothing; a process already gone is sent nothing and settles.
-  defp ask_end(state, row) do
+  defp ask_end(state, row, _how) do
     case end_reading(state, row) do
       {:idle, record} ->
         with :ok <- open(state, row.name, :sending),
@@ -608,6 +708,9 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   defp actor(state), do: "sessions:" <> state.host.name
+
+  defp unread({:ok, _} = ok), do: ok
+  defp unread(other), do: {:refused, {:unread, other}}
 
   # The embedding app's read of `Mailbox` (`open_to:`): the ids of the rows to `name` that are
   # open (`queued` or `sending`), or only `sending`. With no `open_to:` the app runs no

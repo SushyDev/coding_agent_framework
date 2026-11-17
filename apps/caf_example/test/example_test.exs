@@ -65,7 +65,7 @@ defmodule CodingAgentFramework.ExampleTest do
   defp start(config) do
     parts = Example.parts(start_supervised!({Example, config}))
     keys = ~w(reaper cues inlet usage stream intake intake_http sampler sessions acts)a
-    keys = keys ++ ~w(recoveries tracker delegates mailbox copies jobs services)a
+    keys = keys ++ ~w(recoveries tracker delegates mover mailbox copies jobs services)a
     keys = keys ++ ~w(mcp mcp_http ends)a
 
     assert Enum.sort(Map.keys(parts)) ==
@@ -418,13 +418,13 @@ defmodule CodingAgentFramework.ExampleTest do
   # What each part must be handed to settle (`docs/design.md`, "The parts"): beside the
   # `Tracker`, which reads every topic.
   @needs %{
-    "registry" => [:sessions],
-    "stream" => [:sessions, :delegates, :mailbox],
+    "registry" => [:sessions, :mover],
+    "stream" => [:sessions, :delegates, :mailbox, :mover],
     "tmux" => [:sessions, :recoveries],
-    "sessions" => [:delegates, :mailbox, :ends],
+    "sessions" => [:delegates, :mailbox, :ends, :mover],
     "transcripts" => [:delegates, :mailbox],
     "delegates" => [:mailbox],
-    "mailbox" => [:delegates],
+    "mailbox" => [:delegates, :mover],
     "waiters" => [:mailbox]
   }
 

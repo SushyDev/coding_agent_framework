@@ -64,6 +64,9 @@ defmodule CodingAgentFramework.MCP do
     `not_verified`. A second fix of a state is refused `{:claimed, by}` or
     `{:already_claimed, by}`. Answers `%{done: value, claim: id, settled: settle's answer}`,
     or the fix's refusal or unknown.
+  - `move(agent, to)`: `Grants.may_fix?/3`, then the mover's `move/4` (`to` optional: by default
+    the account with the most allowance left), which claims the act `move` in `Acts` and settles
+    it when the move ends. Answers `%{act: id, from: account, to: account}` once the drain began.
 
   **The operator** calls the same tools through `operate/3`, which writes its row under the
   operator's name, so each act it makes names it as the actor; `issue/2` never makes it a
@@ -306,6 +309,16 @@ defmodule CodingAgentFramework.MCP do
       inputSchema: %{type: "object", properties: %{agent: @str}, required: ["agent"]}
     },
     %{
+      name: "move",
+      description:
+        "Moves your delegate to another account (to: its name, or the one with the most allowance left): drained, ended once idle, resumed there.",
+      inputSchema: %{
+        type: "object",
+        properties: %{agent: @str, to: @str},
+        required: ["agent"]
+      }
+    },
+    %{
       name: "reload",
       description: "Reloads your own tools.",
       inputSchema: %{type: "object", properties: %{}}
@@ -324,7 +337,9 @@ defmodule CodingAgentFramework.MCP do
   unless its call names one), and
   `:place`, a function of an agent's name that answers `{:ok, %{project: p, name: n, worktree:
   path}}` (the copy jobs and services run in) or `{:refused, reason}`. `:acts` is the
-  instance's `CodingAgentFramework.Acts`, where each fix takes its claim. `:instance` (a string, required)
+  instance's `CodingAgentFramework.Acts`, where each fix takes its claim. `:mover` (optional)
+  is `{CodingAgentFramework.Mover, pid}`, which the `move` tool calls; without it `move` is
+  refused `:no_mover`. `:instance` (a string, required)
   is this part's name in its jobs' ids, so two of them sharing one `Jobs` never make the same
   id. `:cap` (ms, default a day) is the most a `run`'s or a `service_wait`'s `timeout` may be.
   `:tool_timeout` (ms) is the MCP tool timeout `CodingAgentFramework.ClaudeCLI` sets for every
@@ -515,6 +530,18 @@ defmodule CodingAgentFramework.MCP do
         {:unknown, reason} -> {:unknown, %{delegate: name, reason: reason}}
         refused -> refused
       end
+    end
+  end
+
+  # A move is a fix's act (`Grants.may_fix?/3`: a parent's of its delegate, the operator's of
+  # any agent, never a main session's own), claimed in `Acts` by `Mover`, which settles it when
+  # the move ends.
+  defp act(ctx, caller, _id, "move", %{"agent" => agent} = a) when is_binary(agent) do
+    with true <- is_nil(a["to"]) or is_binary(a["to"]) or {:refused, {:bad, :args}},
+         true <- ctx.mover != nil or {:refused, :no_mover},
+         :ok <- Grants.may_fix?(ctx.grants, caller, agent) do
+      {mod, server} = ctx.mover
+      mod.move(server, caller, agent, to: a["to"])
     end
   end
 
@@ -802,6 +829,7 @@ defmodule CodingAgentFramework.MCP do
 
       cap = Keyword.get(opts, :cap, @day)
       ctx = Map.merge(ctx, %{cap: cap, tool_timeout: tool_timeout, margin: margin})
+      ctx = Map.put(ctx, :mover, Keyword.get(opts, :mover))
       {:ok, %{db: db, dir: dir, port: Keyword.fetch!(opts, :port), ctx: ctx}}
     else
       {:error, reason} -> {:stop, {:mkdir, reason}}

@@ -170,11 +170,15 @@ Built, each from a checked model in `model/tla/`:
 - the `Inlet`, the checked typed write into a main session with no waiter, as `Mailbox`'s
   `typed` transport: the turn and the screen read again in the write's own step, one line with
   the row's uuid, Enter as its own command, and the release each interactive session runs
-  recorded at its start (R8).
+  recorded at its start (R8);
+- `Mover` (R12): a main session or a delegate moved to another account with one act, by the
+  operator or a delegate's parent: drained, ended by SIGTERM once idle, its transcript copied
+  after its exit, resumed there under its name and session id; what came for it meanwhile goes
+  once, to the new process. Its phase is on the agent row, so a restart goes on from it.
 
-Next, the last of the remodel (F-115, taken in F-116): `Mover` (R12). Then the `Scheduler`,
-whose model `Schedule.tla` is checked (F-134): one lease ledger in front of every start, heavy
-run and landing, with classes, pressure and allowance gates. Then
+The remodel (F-115, taken in F-116) is done. Next, the `Scheduler`, whose model `Schedule.tla`
+is checked (F-134): one lease ledger in front of every start, heavy run and landing, with
+classes, pressure and allowance gates. Then
 interactive delegates and main sessions, the mechanisms an app's policies stand on (an idle
 delegate's watchdog, `Stop` held for the app, clone copies, an idempotent
 start), packaging, and stacks with the LiveView components. The plan and the order of the units are in
@@ -215,6 +219,7 @@ flowchart BT
   recoveries[caf_recoveries]
   tracker[caf_tracker]
   delegates[caf_delegates]
+  mover[caf_mover]
   subgraph team["The tree's tools"]
     grants[caf_grants]
     mailbox[caf_mailbox]
@@ -273,6 +278,12 @@ flowchart BT
   mailbox --> accounts
   mailbox --> inlet
   mailbox --> registry
+  mover --> sessions
+  mover --> mailbox
+  mover --> accounts
+  mover --> usage
+  mover --> transcripts
+  mover --> acts
   mcp --> grants
   mcp --> acts
   copies --> shell
@@ -294,7 +305,7 @@ on the others, as an embedding app would be, and uses every one of them. `caf_cu
 `caf_grants`, `caf_intake` and `caf_screen` use no other app: the embedding app hands `caf_cues`
 each part's declaration of what it reads and `caf_grants` the tree as a function, and
 `caf_screen` reads a screen's text it is given. `caf_mcp` reaches `Delegates`,
-`Mailbox` and the `Tracker` through modules the embedding app names.
+`Mailbox`, the `Tracker` and the `Mover` through modules the embedding app names.
 
 ## Development
 
