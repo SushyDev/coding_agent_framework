@@ -120,6 +120,10 @@ defmodule CodingAgentFramework.Sessions.Agents do
   def moving?(%{move: phase}) when is_binary(phase), do: true
   def moving?(_), do: false
 
+  @doc "The host's rows a move is under way for, by index (nothing is pruned)."
+  @spec moving(t) :: [row]
+  def moving(%__MODULE__{db: db, host: host}), do: Table.moving(db, host)
+
   @doc """
   The move under way: `%{phase, from, to, act, deadline}`, or nil when none is.
   """
@@ -181,7 +185,7 @@ defmodule CodingAgentFramework.Sessions.Agents do
   @spec children(t, String.t(), [String.t()]) :: non_neg_integer
   def children(agents, parent, also \\ []) do
     named =
-      for %{kind: "delegate", parent: ^parent, name: n} = row <- rows(agents),
+      for %{kind: "delegate", name: n} = row <- Table.children(agents.db, agents.host, parent),
           active?(row),
           do: n
 

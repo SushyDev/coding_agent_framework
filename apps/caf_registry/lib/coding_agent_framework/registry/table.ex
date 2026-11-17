@@ -50,6 +50,7 @@ defmodule CodingAgentFramework.Registry.Table do
       read: [:read_at, :files, :problems],
       dump: &dump/2,
       load: &load/1,
+      convert: [{"registry_sessions", [:problem]}],
       topic: "registry",
       kind: :sessions,
       name: :account

@@ -174,7 +174,11 @@ Built, each from a checked model in `model/tla/`:
 - `Mover` (R12): a main session or a delegate moved to another account with one act, by the
   operator or a delegate's parent: drained, ended by SIGTERM once idle, its transcript copied
   after its exit, resumed there under its name and session id; what came for it meanwhile goes
-  once, to the new process. Its phase is on the agent row, so a restart goes on from it.
+  once, to the new process. Its phase is on the agent row, so a restart goes on from it;
+- the cleanups the remodel left (F-136): `Mailbox` answers while a write is handed on, the
+  readers store a problem by the one rule, an owner's end that ends its services is an act,
+  the model is kept on the agent row for any resume, and the hot reads of tables that keep
+  every row are indexed.
 
 The remodel (F-115, taken in F-116) is done. Next, the `Scheduler`, whose model `Schedule.tla`
 is checked (F-134): one lease ledger in front of every start, heavy run and landing, with

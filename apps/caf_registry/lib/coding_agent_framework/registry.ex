@@ -39,7 +39,7 @@ defmodule CodingAgentFramework.Registry do
 
   use GenServer
 
-  alias CodingAgentFramework.{Holder, Programs, Reader, Shell}
+  alias CodingAgentFramework.{Holder, Programs, Reader, Shell, Store}
   alias CodingAgentFramework.Registry.{SessionFile, Table}
 
   @timeout 10_000
@@ -218,14 +218,14 @@ defmodule CodingAgentFramework.Registry do
       end
 
     case {unreadable, SessionFile.parse(bytes)} do
-      {true, _} -> {last_good(cached), inspect(:unreadable)}
+      {true, _} -> {last_good(cached), Store.text(:unreadable)}
       {false, {:ok, row}} -> {Map.drop(row, [:problems]), problems(row.problems)}
-      {false, {:malformed, reason}} -> {last_good(cached), inspect(reason)}
+      {false, {:malformed, reason}} -> {last_good(cached), Store.text(reason)}
     end
   end
 
   defp problems([]), do: nil
-  defp problems(list), do: inspect(list)
+  defp problems(list), do: Store.text(list)
 
   defp last_good(nil), do: SessionFile.fields() |> Map.new(&{&1, nil}) |> Map.put(:extra, %{})
   defp last_good(row), do: Map.drop(row, [:problem, :alive])

@@ -31,7 +31,7 @@ defmodule CodingAgentFramework.Usage do
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, Reader}
+  alias CodingAgentFramework.{Accounts, Reader, Store}
   alias CodingAgentFramework.Usage.{Reading, Table}
 
   @doc """
@@ -170,11 +170,11 @@ defmodule CodingAgentFramework.Usage do
           Map.merge(reading, %{seen_at: File.Stat.from_record(info).mtime * 1000, problem: nil})
 
         {:malformed, reason} ->
-          %{last_good(cached) | problem: inspect(reason)}
+          %{last_good(cached) | problem: Store.text(reason)}
       end
     else
       {:error, :enoent} -> :none
-      {:error, reason} -> %{last_good(cached) | problem: inspect({:unreadable, reason})}
+      {:error, reason} -> %{last_good(cached) | problem: Store.text({:unreadable, reason})}
     end
   end
 

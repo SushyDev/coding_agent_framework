@@ -186,7 +186,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Inlet` | the checked typed write into an interactive session with no waiter: `Screen`'s box check, then `Tmux`'s one-command check, one per host; and the typed commands a session's start or a tool needs (the trust dialog, `/mcp reconnect`, the interrupt key). It is one transport of `Mailbox` | no table |
 | `Stream` | a headless session's transport: a FIFO per process, a spool removed as the line's claim, the event log read from an offset, and its `can_use_tool` requests. Its fold of the log (each message's replay, each result) is evidence `Mailbox` and `Sessions` read; it keeps no delivery state of its own | `stream_delegates` |
 | `Intake` | hook events in; one hold, of four kinds: `permission` (a person's or an agent's `answer`), `tool` (`PreToolUse`, the app's callback), `stop` (`Stop` held for the app's callback) and `waiter` (a main session's waiting Stop hook, answered with `Mailbox`'s due text) | `intake_events` |
-| `Sessions` | the agent row: one row per agent, main session or delegate, with its kind, parent, project, account, launch options, held process and status; start, resume, and stop by SIGTERM once idle; the tree as one function of its rows; each session's turn state as one function per kind of session, from its evidence. Other parts read its rows only through `Sessions.Agents`, a pure module over a reader's own connection, which answers what each status means | `agents` |
+| `Sessions` | the agent row: one row per agent, main session or delegate, with its kind, parent, project, account, launch options and model, held process and status; start, resume, and stop by SIGTERM once idle; the tree as one function of its rows; each session's turn state as one function per kind of session, from its evidence. Other parts read its rows only through `Sessions.Agents`, a pure module over a reader's own connection, which answers what each status means | `agents` |
 | `Mover` | drains a session, a main session or a delegate, and moves it between accounts; its phase is a field of the agent row (`move`, with the accounts, its act and its deadline), which `Sessions` writes for it | — |
 | `Mains` | each project's main sessions, as agent rows of kind `main`; the pull after a landing, and the start of one for a project that has none | — |
 | `Delegates` | the delegate protocol only: its checks, the cap, the account pick, resume once, report a second kill; it hands the report to `Mailbox` as the reply to the brief | `delegates`: branch, brief uuid, resumes, whether the report was taken |
@@ -532,11 +532,16 @@ process of it runs whose turn has ended, and the hold survives restarts of the f
 
 **How `Mover` does it** (F-133, `Move.tla`). A move is an act in `Acts` (act `move`, by the
 operator or a delegate's parent, as a fix is, `Grants.may_fix?`), claimed on the session's
-process and the moves of it already ended, then marked acted, then the phase written on the
-agent row, `draining`, with the accounts, the act and a deadline; a restart goes on from the
-phase. While the row has a phase, `Mailbox` marks no row to the session by the stream or the
-waiter (a waiting call still takes its answer), `Delegates` starts no delegate under it and
-takes a delegate's end for the move's, not a kill, and `Sessions` does not end it. The drain is
+state, then marked acted, then the phase written on the agent row, `draining`, with the
+accounts, the act and a deadline; a restart goes on from the phase. A move's state is the
+process (its pid, start time and account) and the count of its moves already ended (decided,
+F-133's new-5): a second press while a move runs is refused (`{:moving, phase}` by the row, or
+`{:claimed, by}`), and a press after a move that was given up is a new state, not a second
+claim of the first. While the row has a phase, `Mailbox` marks no row to the session by the
+stream or the waiter, `Delegates` starts no delegate under it and takes a delegate's end for the
+move's, not a kill, and `Sessions` does not end it. "No new deliveries" means no row that
+would start a turn: a `run_delegate` call already waiting still takes its answer, inside the
+turn that called, since the drain waits for that call (decided, F-133's new-8). The drain is
 clear once no `Mailbox` row to it is `sending` and no `run_delegate` call of it waits
 (`Mailbox.awaited/3`). `stopping` is `Sessions.stop` `for: :move`: an interactive session's
 SIGTERM as above; a delegate's is SIGTERM too, by its record, once `Stream`'s fold reads its
@@ -546,7 +551,7 @@ ended. A stop refused while a turn runs is asked again only on a `registry:` or 
 beside it, each whole under a temporary name and renamed, once the row is free (its process
 gone by pid and start time and its socket dead); `resuming` is `Sessions.resume` on the other
 account with the same session id and the app's launch for the agent (a delegate's from
-`Delegates.launch/2`), the row's own options taken again. Each failure settles on one account:
+`Delegates.launch/2`), the row's own options and model taken again. Each failure settles on one account:
 
 - the drain or the stop not done by the move's deadline while the old process runs: given up,
   the session runs on on its account, the act `failed`;
@@ -1089,7 +1094,10 @@ changed (R6).
   order per sender and addressee, with a row made due again by a settle going first, and a
   resumed delegate's word to go on with them (F-122's new-3). It marks
   the row `sending` with its transport, then hands it on. Refused undoes the mark; unknown keeps
-  it for the evidence. The row is the only mark: no other part keeps a delivery state.
+  it for the evidence. The row is the only mark: no other part keeps a delivery state. The
+  hand-on never blocks `Mailbox`: it runs in a task whose answer comes back as a message, the
+  row `sending` meanwhile and settled by no evidence until the answer is in (`Delivery.tla`'s
+  `hand`), so its calls answer while a typed write runs (F-132's new-2).
 - **Into an ended turn only, to the current process only.** The turn state is `Sessions`'
   function for the target's kind; the process is the agent row's. The waiter's row is the one
   exception: Claude Code queues a waiter's answer and takes it into a person's turn still
@@ -1746,6 +1754,11 @@ new-2, F-113's new-2).
 - **R12. `Mover`**, on the agent row and `Delivery`, against the rewritten `Move.tla`, for
   delegates as well as main sessions (item 5). Built in F-133 ("How `Mover` does it"); the
   move at 90 % of an account's allowance is not (F-133's new-2).
+- **Cleanups the remodel left** (F-136): `Mailbox`'s hand-on in a task (F-132's new-2); the
+  readers' problems by `Store.text/1`, converted on open (F-130's new-2); an owner's end that
+  ends its services an `Acts` row, actor `app` (F-130's new-3); the model on the agent row
+  (F-133's new-3); the indexed reads a ledger that keeps every row needs, `Recoveries` by
+  actor, target and time (F-126's new-5, F-129's new-5).
 - **After R12: `Scheduler`**, against `Schedule.tla` (modeled in F-134): the `leases` table
   on `Store`, the grant transaction, the compare-and-set release, the monitor and the
   reclaimer by `Holder.Process`'s record, the queue with its classes, rotation and deadlines,

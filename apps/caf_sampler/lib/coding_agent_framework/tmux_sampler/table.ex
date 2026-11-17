@@ -57,6 +57,7 @@ defmodule CodingAgentFramework.TmuxSampler.Table do
       dump: &dump/2,
       load: &load/1,
       load_read: &load_read/1,
+      convert: [{"tmux_samples", [:problem]}, {"tmux_sample_reads", [:problem]}],
       topic: "tmux",
       group: "tmux:",
       kind: :viewers,
@@ -114,7 +115,7 @@ defmodule CodingAgentFramework.TmuxSampler.Table do
       db,
       "INSERT INTO tmux_sample_reads (host, server, failed_at, problem) VALUES (?1,?2,?3,?4) " <>
         "ON CONFLICT (host, server) DO UPDATE SET failed_at = ?3, problem = ?4",
-      [host, server, at, inspect(problem)]
+      [host, server, at, Store.text(problem)]
     )
 
     :ok

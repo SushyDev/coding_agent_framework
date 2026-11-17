@@ -11,6 +11,9 @@ defmodule CodingAgentFramework.Reader do
 
     * `:schema`: the SQL that creates both tables.
     * optional `:open`: `Store.open/3`'s options, such as the columns a later build added.
+    * optional `:convert`: `[{table, columns}]` whose values an earlier build stored as
+      `inspect` text, converted to `Store.text/1`'s rule at each open (`Store.convert/3`). A
+      reader stores a problem by `Store.text/1` (F-130's new-2).
     * `:table` and `:reads`: the rows' table and the reads table, one row per scope read.
     * `:scope`: the columns that key a reads row, and that every row carries before its key,
       such as `[:host, :account]`.
@@ -113,9 +116,17 @@ defmodule CodingAgentFramework.Reader do
 
   # The table.
 
-  @doc "Opens (and creates) the reader's file at `path`, with its tables."
+  @doc """
+  Opens (and creates) the reader's file at `path`, with its tables, and converts the columns
+  `meta.convert` names.
+  """
   @spec open(meta, String.t()) :: {:ok, Store.db()} | {:refused, term}
-  def open(meta, path), do: Store.open(path, meta.schema, Map.get(meta, :open, []))
+  def open(meta, path) do
+    with {:ok, db} <- Store.open(path, meta.schema, Map.get(meta, :open, [])) do
+      for {table, columns} <- Map.get(meta, :convert, []), do: Store.convert(db, table, columns)
+      {:ok, db}
+    end
+  end
 
   @doc "A row's columns, in the table's order."
   @spec columns(meta) :: [atom]

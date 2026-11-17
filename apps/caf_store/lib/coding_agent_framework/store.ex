@@ -267,7 +267,8 @@ defmodule CodingAgentFramework.Store do
   @doc """
   Converts what an earlier build stored as `inspect` text in `columns` of `table` to `text/1`'s
   rule (`from_inspect/1`), in one transaction, and answers how many values changed. A writer
-  runs it when it opens its file; a second run changes nothing (F-117's new-2).
+  runs it when it opens its file; a second run changes nothing (F-117's new-2). Rows are found
+  by `rowid`, so a table keyed by other columns (a reader's reads table) converts too.
   """
   @spec convert(db, String.t(), [atom]) :: non_neg_integer
   def convert(db, table, columns) do
@@ -275,12 +276,12 @@ defmodule CodingAgentFramework.Store do
       for column <- columns, reduce: 0 do
         n ->
           sql =
-            "SELECT id, #{column} FROM #{table} WHERE substr(#{column}, 1, 1) IN " <>
+            "SELECT rowid, #{column} FROM #{table} WHERE substr(#{column}, 1, 1) IN " <>
               ~s{(':', '{', '[', '%', '"')}
 
           changed =
             for [id, old] <- query(db, sql, []), (new = from_inspect(old)) != old do
-              query(db, "UPDATE #{table} SET #{column} = ?2 WHERE id = ?1", [id, new])
+              query(db, "UPDATE #{table} SET #{column} = ?2 WHERE rowid = ?1", [id, new])
             end
 
           n + length(changed)

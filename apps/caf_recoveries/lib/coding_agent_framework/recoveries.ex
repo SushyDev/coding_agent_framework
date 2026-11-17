@@ -240,11 +240,22 @@ defmodule CodingAgentFramework.Recoveries do
   defp waits?(%{cleared_at: nil, act: "end", outcome: "unknown"}), do: true
   defp waits?(_), do: false
 
+  # The ledger keeps every row (F-126's new-5), so a check reads by index only what can decide
+  # it: the acts that wait for a sample, the losses that wait for a person, and the rows of the
+  # sockets lost now since the earliest time that changes a state's key or count; and per end
+  # owed, that socket's ends.
   defp check_now(state) do
-    with {:ok, rows} <- Acts.rows(state.acts, actor: state.actor) do
-      ends = end_owed(state, rows)
+    with {:ok, open} <- Acts.rows(state.acts, actor: state.actor, status: "acted"),
+         {:ok, waiting} <-
+           Acts.rows(state.acts,
+             actor: state.actor,
+             act: "reopen",
+             reason: "repeating",
+             cleared_at: nil
+           ) do
+      ends = end_owed(state)
 
-      case check_viewers(state, Enum.filter(rows, &(&1.act == "reopen"))) do
+      case check_viewers(state, Enum.filter(open, &(&1.act == "reopen")), repeating(waiting)) do
         {{:ok, done}, state} -> {{:ok, Map.put(done, :ends, ends)}, state}
         other -> other
       end
@@ -254,10 +265,14 @@ defmodule CodingAgentFramework.Recoveries do
   end
 
   # Each end owed, once per state: claimed, ended by the record alone, then the row settles.
-  defp end_owed(state, rows) do
+  defp end_owed(state) do
     case Sessions.ends_owed(state.sessions) do
       {:ok, owed} ->
-        for o <- owed, {:ok, id} <- [claim(state, o.socket, end_key(state, o, rows), :end)] do
+        for o <- owed,
+            {:ok, rows} <- [
+              Acts.rows(state.acts, actor: state.actor, act: "end", target: o.socket)
+            ],
+            {:ok, id} <- [claim(state, o.socket, end_key(state, o, rows), :end)] do
           case Holder.Process.end_held(state.procs, o.socket, o.record, state.end_grace) do
             {:ok, :ended} ->
               Acts.settle(state.acts, id, :recovered, answer: "ended", acted: true)
@@ -287,22 +302,49 @@ defmodule CodingAgentFramework.Recoveries do
 
   defp scoped(state, key), do: "#{state.host}:#{state.server}:#{key}"
 
-  defp check_viewers(state, rows) do
+  defp check_viewers(state, open, repeating) do
     case TmuxSampler.rows(state.sampler) do
       {:ok, %{failed_at: at}} when is_integer(at) ->
         {{:refused, :sample_failed}, state}
 
       {:ok, read} ->
-        age = now(state) - read.read_at
-        repeating = repeating(rows)
-        lost = for l <- lost_viewers(read, last_opened(rows)), l.socket not in repeating, do: l
+        at = now(state)
+        age = at - read.read_at
 
-        if age > state.max_age,
-          do: skip(state, lost, age),
-          else: act_on(state, read, lost, rows)
+        with {:ok, rows} <- lost_rows(state, read, repeating, at - state.window) do
+          lost =
+            for l <- lost_viewers(read, last_opened(rows)), l.socket not in repeating, do: l
+
+          if age > state.max_age,
+            do: skip(state, lost, age),
+            else: act_on(state, read, lost, open, rows)
+        else
+          other -> {other, state}
+        end
 
       other ->
         {other, state}
+    end
+  end
+
+  # The rows of the sockets the sample reads lost, since the window's start or the time their
+  # sample row took its status, whichever is earlier: an open or a clear before both changes no
+  # state's key (`lost_viewers/2` takes the later of the two) and no count (`losses/3`).
+  defp lost_rows(state, read, repeating, window_start) do
+    lost =
+      for %{kind: :held, socket: :live, status: s, name: n} = row <- read.rows,
+          s in @lost,
+          n not in repeating,
+          do: row
+
+    case lost do
+      [] ->
+        {:ok, []}
+
+      lost ->
+        since = Enum.min([window_start | Enum.map(lost, & &1.written_at)])
+        sockets = Enum.map(lost, & &1.name)
+        Acts.rows(state.acts, actor: state.actor, act: "reopen", target: sockets, since: since)
     end
   end
 
@@ -324,8 +366,8 @@ defmodule CodingAgentFramework.Recoveries do
     {{:refused, reason}, state}
   end
 
-  defp act_on(state, read, lost, rows) do
-    ended = verify(state, read, rows)
+  defp act_on(state, read, lost, open, rows) do
+    ended = verify(state, read, open)
     state = remember(state, read.read_at, MapSet.new(lost, & &1.key))
     agreed = for l <- lost, state.before && MapSet.member?(state.before.keys, l.key), do: l
 

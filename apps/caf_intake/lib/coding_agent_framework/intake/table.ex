@@ -63,7 +63,13 @@ defmodule CodingAgentFramework.Intake.Table do
 
   @doc "Opens (and creates) the file at `path`, with the tables. A reader opens its own."
   @spec open(String.t()) :: {:ok, db} | {:refused, term}
-  def open(path), do: Store.open(path, @schema, @open)
+  def open(path) do
+    with {:ok, db} <- Store.open(path, @schema, @open) do
+      # A problem an earlier build stored as `inspect` text (F-130's new-2).
+      Store.convert(db, "intake_events", [:problem])
+      {:ok, db}
+    end
+  end
 
   @doc """
   Records a start of `host`'s `Intake`, and settles the holds the last one left: a `held` row
@@ -94,7 +100,7 @@ defmodule CodingAgentFramework.Intake.Table do
   def insert(db, host, account, row, at) do
     values =
       [host, account, row.key, row.event, row.session_id, row.data] ++
-        [row.problem && inspect(row.problem), if(row.hold, do: "held"), at]
+        [Store.text(row.problem), if(row.hold, do: "held"), at]
 
     sql =
       "INSERT INTO intake_events (host, account, key, event, session_id, data, problem, hold, " <>

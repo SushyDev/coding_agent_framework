@@ -73,7 +73,7 @@ defmodule CodingAgentFramework.TrackerTest do
       status: member_of([nil, "busy", "idle"]),
       updated_at: one_of([constant(nil), integer(0..100)]),
       alive: member_of([:live, :replaced, :gone, :unknown]),
-      problem: member_of([nil, ":not_json"])
+      problem: member_of([nil, "not_json"])
     })
   end
 
