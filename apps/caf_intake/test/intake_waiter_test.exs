@@ -199,7 +199,9 @@ defmodule CodingAgentFramework.IntakeWaiterTest do
 
   describe "the hook program" do
     setup %{start: start, dir: dir} do
-      secret = "t" <> Integer.to_string(System.unique_integer([:positive]))
+      # Long and random: the test looks for it in every process's arguments, and a short one
+      # (`t72`) matched another program's.
+      secret = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
       intake = start.(beat: 20, waiter_deadline: 2_000)
       plug = {Intake.Plug, intake: intake, secret: secret}
 

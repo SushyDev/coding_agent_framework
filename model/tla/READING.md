@@ -75,6 +75,54 @@ its own, so its configurations (`Claim_Design`, `Break_Claim_…`) check it alon
   hold a decision names; `Decides` hands the decision and `Marked` records it; `Expires` and
   `Passed` hand an empty response; `Cut` closes requests whose holder died, and `Settles` ends
   their rows. `OneResponse`, `LateDropped`, `OnlyNamed`, `AnsweredWasSent`, `RequestsEnd`.
+- `Delivery.tla`: `Mailbox`'s rows, with one mark and one settle over four transports. Its
+  steps change only its own variables (`row`, `hand`, `wire`, `waiter`, `call`, `tx`, `fold`
+  and the ghosts) and read the addressee's (`up`, `pr`, `idle`, `stopping`, `over`), which an
+  instancing spec gives as expressions of its own state: Team's `pr` is
+  `IF proc[a] \in {"dead", "ended"} THEN 0 ELSE life[a]`. The spec's own step that changes
+  the addressee calls the module's in the same step: Team's `TurnEnds(a)` is its own
+  `proc' = …` and `D!Result(a)`. Read below.
+
+## `Delivery.tla`
+
+A row (`row[i]`) has a sender, an addressee (`to`), a kind (`"msg"`, `"brief"`, `"resume"`,
+`"reply"`, `"notice"`), a key (`re`: the row its answer answers), and a state: `"due"`,
+`"sending"` with its transport (`via`) and the process it is for (`at`), `"delivered"`,
+`"ended"`, or `"kept"` (a reply for the operator, which no transport takes). `again` says a
+settle made it due again. Read it in the order of one row:
+
+- `Store` writes the row due. `First(i)` is the row `Mailbox` picks: none to its addressee in
+  flight, none before it (`Precedes`: made due again, or older from the same sender).
+- `Mark(i, t)` writes `"sending"` while the addressee's process runs (`pr`), its turn has
+  ended (`idle`; a `"call"` answers inside the turn that called) and its row is not stopping;
+  `hand` holds the rows whose transport has not answered. `Reaches` says which transport fits:
+  `"stream"` for a headless session, `"waiter"` while a waiter of the current process is
+  connected (`waiter[a] = pr[a]`), `"typed"` when none is, `"call"` while a `run_delegate`
+  waits.
+- `Handed` sends it on (`wire[i]`, copies on their way to a turn); `Refused` undoes the mark when
+  the transport can no longer reach the process (`Open`); `Unknown` is the `Inlet`'s unknown
+  answer. `Reclaim` claims a stream line again after a restart. `Take` is Claude Code taking
+  it: the row joins the transcript (`tx`) and its turn (`fold[i] = "turn"`).
+- The settle, by transport: `SettleReplay` (stream, while the process runs), `SettleExit`
+  (stream, once it is gone: the transcript, or due again), `SettleSeen` (waiter and typed: the
+  transcript once the turn ended; due again once nothing is on its way or the process is gone).
+  The call: `CallWaits`, `Deadline`, `Written` (three outcomes, as `Delegate.tla` had them),
+  `Told`, `CallerEnds`, `CallerSeen`, and `SettleCut` after a restart.
+- `Result(a)` and `Exited(a, term)` are the instancing spec's turn end and process end: the
+  fold keeps a result on the rows it names, and an end leaves them `"exited"`; `term` says the
+  end was the stop's SIGTERM, which must cut no row's turn (`NotCutByStop`).
+- `ReplyStored`, `NoticeStored` and `GoOn` store the answers: one per key, and a brief cut by
+  its process's end gets a row to go on, under the brief's key.
+- `Restart` is what a restart does to `Mailbox`; `EndedFirst` marks a due row to a session that
+  ended for good.
+
+Alone, its own `Next` adds senders, sessions (`Prompted`, `SelfStarts`, `TurnEnds`, `Ends`,
+`Resumed`), the stop (`StopAsked`, `IdleRead`, `Term`: two steps, the read waiting until no row
+to the session is sending), `Over` (a delegate's end) and restarts. `Delivery_Interactive`
+checks the invariants on one interactive session with two senders; `Delivery_Turns` its
+liveness; `Delivery_Stream`, `Delivery_Replies` and `Delivery_Answers` a headless one;
+`Delivery_Calls` a call. Liveness costs much more than the invariants, so the liveness
+configurations are the smaller ones.
 
 ## `Agent.tla`
 
@@ -121,21 +169,31 @@ and `slow/Agent_WritesLarge` two writes over one restart.
 
 ## `Move.tla`
 
-A parent session moves from account `Home` to the other one. Read it in the order of a move:
+A main session moves from account `Home` to the other one. Read it in the order of a move:
 
 - `Drain` (a press, or `UsageRises` to 90 %) sets `phase` to `"draining"`. From then on
   `BgStarted` and `DelegateStarted` are refused (`Draining`).
 - `Cleared` is the Mover reading that no background command runs. It is a reading, not a lock:
   only the drain keeps it true until the end.
-- `EndAsked` ends the process once its turn has ended; `ProcessExits` is the process going, with
-  whatever still runs in it, which goes into `lost`. It sends a `SessionEnd`, held in `ends`
-  until `SessionEndArrives` handles it, at any later time.
+- The stop, as `Sessions` makes it: `StopAsked` writes the row `"stopping"`; `IdleRead` reads
+  the turn ended and no row to the session sending, and keeps the pid in memory (`readAt`);
+  `Term` is the SIGTERM, a step of its own, so a person's prompt (`PromptSent`) can start a turn
+  between them. `Exits(p, "term")` is the process going, with whatever still runs in it: a
+  background command goes into `lost`, and the cut turn stays in the old account's transcript.
+  `Exits(p, "crash")` is the old process crashing once its stop was asked. Each sends a
+  `SessionEnd`, held in `ends` until `SessionEndArrives` handles it, at any later time.
 - `Copied` then `Resumed` start a new process on `target` from the copied transcript.
-- Delegates outlive the parent's process: `ReportDelivered` waits for a live one.
+- Rows to the session are `Delivery.tla`'s (`D`): a delegate's report (`DelegateReports`) and
+  a message (`MessageSent`). `Takes` puts a row in the transcript of the account its process
+  runs on; `Has(i)` reads the transcript of the account the session's row names, so after the
+  resume a row is settled against the copy.
 
 `procs` holds the session's processes as `[pid, account, ending]`; `turn` is the pid whose turn
-runs, or `0`. `NoStartWhileDraining` is a step property, like `AgentOutlivesServer`: no step taken
-while the move runs starts anything. `DelegatesStarted'` is that count after the step.
+runs, or `0`; `transcript[a]` is the session's transcript on account `a`, rows by their id and
+a prompt's turn as `0`. `Current` is the process `Mailbox` sees: the row's pid while it runs.
+`NoStartWhileDraining` is a step property, like `AgentOutlivesServer`: no step taken while the
+move runs starts anything. `DelegatesStarted'` is that count after the step. `FrameworkDies`
+clears the idle read and `Mailbox`'s memory; the Mover's phase is a row and stays.
 
 ## `Delegate.tla`
 
@@ -152,39 +210,30 @@ A parent, its delegates, and restarts of the framework. Read it in the order of 
   `marked` is `Stream`'s table, which refuses the uuid again. `pipe` holds the lines the
   current process has not taken; `InputTaken` starts its turn.
 - `DelegateFinishes` ends the delegate's turn with its last reply (`reply`) and fires its Stop
-  hook, which lands in `stops` only while the framework runs. `StopHandled` turns it into a held
-  report; when a restart lost it, `TranscriptRead` reads the last reply instead.
+  hook, which lands in `stops` only while the framework runs. `StopHandled` hands the report to
+  `Mailbox` (`Report`, which stores row `d`); when a restart lost it, `TranscriptRead` reads the
+  last reply instead.
 - `DelegateKilled` then `KillSeen`: the first kill is resumed, counted in the row first as
   `"resuming"`, with a call of `Sessions` like a start's; the second is the report.
-- `DeliveryAsked` marks the row `"sending"` once the parent's turn has ended. `DeliveryTyped`
-  is `Control`'s checked write, or `DeliveryRefused` holds the report again. `DeliveryMarked`
-  writes `"delivered"`. A restart in between leaves `"sending"` with nothing in memory, and
-  `SendingResolved` reads the parent's transcript (`got`) to settle it.
-- Or a `run_delegate` call takes the report (for a delegate in `Awaited`). `CallWaits` is the
-  call, in a parent's turn; `Taken` takes a held report before the call's `Deadline`, marks it
-  `"answering"` and adds it to `watched`. `Written` is the endpoint's write, with three
-  outcomes: the agent has it (`heard`), it failed (a reset connection), or it succeeded to a
-  client that had gone (`lost`). `Told` is `answered/2` or `release/2`; `TellLost` is the
-  caller that cannot reach `Delegates`. `CallerEnds` may come at any step, and `CallerSeen`
-  holds an `"answering"` report again once its caller has ended. `FrameworkStarts` holds every
-  `"answering"` report again; `unsure` records that a report was held again while its answer
-  may have reached the agent.
-- `DelegateEnds` waits for `"delivered"` or `"answered"`.
+- The report's row is `Delivery.tla`'s (`D`), to the parent: marked for the waiter, the typed
+  write, or a `run_delegate` call that waits on it (`CallWaits`, for a delegate in `Awaited`),
+  then taken (`Takes` starts a parent's turn) and settled from the parent's transcript, or by
+  the call's outcome. `ParentStops` and `ParentRuns` give the parent a new process number
+  (`ParentProc`), so a text meant for an earlier process never reaches the next one.
+- `DelegateEnds` waits for the row to be `"delivered"`.
 
-`ReportArrives` allows one exception, `lost`: the write succeeds to a client that is gone, and
-no one reads it. A client goes that way when the parent's process ends, or, under
-`ClientLeaves`, by its own limit. `Delegate_Cap.cfg` sets `ClientLeaves` false (the cap keeps
-`run_delegate`'s timeout under the client's limits) and stops no parent, and checks
-`ReportArrivesUnderCap`, which has no exception.
+`ReportArrives` allows one exception: a call's write that succeeded to a client that gave up by
+its own limit (`<<d, "left">>` in `lost`), under `ClientLeaves`. `Delegate_Cap.cfg` sets
+`ClientLeaves` false (the cap keeps `run_delegate`'s timeout under the client's limits) and
+checks `ReportArrivesUnderCap`, which has no exception. A write to a client whose process ended
+is made due again, for the waiter.
 
-`FrameworkDies` clears what the framework holds in memory (`stops`, `sending`, `call`,
-`watched`, and a call still waiting); the
-tables (`status`, `report`, `resumes`, `marked`) stay, and so does `Sessions`' row (`sess`),
-since `Sessions` runs on. `got` counts the report in the parent's transcript, `wrong` records a
-report typed where the check must refuse it, and `taken` and `resumed` count the messages the
-delegate's processes took and the resumes `Sessions` made. `SF_vars`, strong fairness, says a
-step that is possible again and again, not always, happens: the user's prompts may take the
-parent's turn each time a report waits for it.
+`FrameworkDies` clears what the framework holds in memory (`stops`, `call`, `Mailbox`'s hand-ons
+and waiters); the tables (`status`, `resumes`, `marked`, the rows) stay, and so does `Sessions`'
+row (`sess`), since `Sessions` runs on. `held` is only what `HeldInMemory`'s wrong `Delegates`
+holds. `taken` and `resumed` count the messages the delegate's processes took and the resumes
+`Sessions` made. `SF_vars`, strong fairness, says a step that is possible again and again, not
+always, happens: the user's prompts may take the parent's turn each time a report waits for it.
 
 ## `Start.tla`
 
@@ -286,8 +335,10 @@ It has three actors: Claude Code, the claim commands on disk, and the framework.
   the answer, and `DropAnswer` drops an answer to a request no longer pending. `Malformed` is a
   cut line followed by another: the session ends. `Exit` ends it from outside, and a line it was
   writing stays cut at the log's end (`cutEnd`): the next event written joins it.
-- A message's write: `Mark` writes the row `"writing"` once the turn has ended (`idle`, set by
-  a handled `result`), every earlier message is delivered and no end is marked. `Claim` spools
+- A message's row is `Delivery.tla`'s (`D`, `row[m]`): due, sending (`Writing(m)`), delivered,
+  or due again (`Undelivered(m)`). `Mark` is `D!Mark` with the stream: once the turn has ended
+  (`idle`, set by a handled `result`), none before it waiting and no end marked (the row's
+  `stopping` is `ending # "none"`). `Claim` spools
   the line and starts its claim command (`spool` is `"claimed"`: the spool file is gone), which
   names the FIFO of the row's resume count (`cfifo`). `WriteBegins` and `WriteEnds` are the
   framework writing a line itself, under `WriteInFramework` only.
@@ -319,7 +370,7 @@ It has three actors: Claude Code, the claim commands on disk, and the framework.
 
 `mine`, `begun`, `wmem`, `reading` and `telling` are memory, cleared by `FrameworkDies`; the
 tables and the disk stay. `handled`, `written`, `awritten`, `partialRead`, `malformed`,
-`intoRunning`, `wrong`, `endCut`, `endEarly`, `endLost` and `joined` are ghosts for the
+`dwrong` (Delivery's), `wrong`, `endCut`, `endEarly`, `endLost` and `joined` are ghosts for the
 invariants. `Unseen` names a process whose tell a restart cut and that exited before any read
 saw it live: its exit is never seen (F-51, new-3).
 
@@ -335,23 +386,13 @@ delegate to its main session. Its parts share the agents and the restarts.
   and `epoch` numbers it: it moves when the agent sticks, dies, is fixed or ends, so a claim
   names a state as `<<target, epoch>>`. `Faults` sticks or kills an agent; `DelegateEnds` is a
   delegate's own end once its report is delivered. A main session never ends.
-- Messages, read in the order of one message: `Send` stores the row as `"queued"`, along an
-  edge only. `DeliveryAsked` marks it `"sending"` once the target's turn has ended and every
-  earlier message from the same sender to the same addressee is delivered. `DeliveryTyped` is
-  `Control`'s checked write, which appends the id to the target's transcript (`inbox`), or
-  `DeliveryRefused` queues it again. `DeliveryMarked` writes `"delivered"`; after a restart,
-  `SendingSettled` reads the transcript instead, as `Delegate.tla` settles a report.
-  `EndedFirst` marks a settled row whose addressee has ended `"ended"`: it is not delivered,
-  and its sender reads that in place of `"delivered"`.
-- Replies, read in the order of one message to a delegate: `DeliveryTyped` starts its turn,
-  `fold[i] = "turn"`. `fold` is `Stream`'s fold of the delegate's log, so a restart keeps it.
-  `Result(a)` ends the turn with a result that names the message (`TurnEnds`, or an interrupt
-  that helps, whose result is `error_during_execution`), `fold[i] = "result"`; a `Faults` that
-  kills the process mid-turn makes it `"exited"`. `ReplyStored(i)` is `Mailbox` storing the
-  reply to the delegate's main session; `NoticeStored(i)` stores the framework's notice for an
-  exited turn. Both need the row `"delivered"` and no answer yet for `i` in `answers`, the
-  table's key on `reply_to`. `SelfStarts(d)`, only when `SelfTurns`, is a turn the delegate
-  starts by itself: its result names no message (`OwnTurn`), so it changes no `fold` entry.
+- Messages are `Delivery.tla`'s rows (`D`): `Send` stores one along an edge only; `Mailboxes(i)`
+  is its mark (the stream to a delegate, the typed write to a main session), hand-on, take,
+  settle, ended mark and answer. `life` numbers each agent's processes (a resume starts a new
+  one), so `D`'s `pr` is the agent's process while it runs. `TurnEnds`, `Faults`,
+  `DelegateEnds` and `FixActs` call `D!Result` and `D!Exited` in the same step, so the fold
+  keeps each result on the row it names. `SelfStarts(d)`, only when `SelfTurns`, is a turn the
+  delegate starts by itself: its result names no row.
 - Claims: `ClaimTaken(c, t)` is `Grants`: `MayFix(c, t)`, the caller is the target's main
   session or the operator, and no claim yet on the target's state. The claim is `Claim.tla`'s,
   instanced as `Cl(b)` on Team's variables with the bug `b` a Break puts in the claims of one
@@ -370,7 +411,7 @@ delegate to its main session. Its parts share the agents and the restarts.
   `Actors` is the agents and the operator: who calls `Send`, `ClaimTaken` and `ServiceFixed`.
   `Edge`, `MayFix` and `MayFixService` hold for the operator on any agent, as a parent of every
   main session and so of every agent; its claims, fixes and messages take the same steps as an
-  agent's, and its name is in the rows (`msgs[i].from`, a claim's `by`). It owns no service, so
+  agent's, and its name is in the rows (`row[i].from`, a claim's `by`); a reply to its message is kept for it. It owns no service, so
   `MayHand` never hands to it, and `Stoppable` refuses a stop of a main session. Only the
   `Team_Operator*` configurations set it; the others keep `{}`, and their state spaces.
 
@@ -378,18 +419,13 @@ delegate to its main session. Its parts share the agents and the restarts.
 `Break` that names one widens it by one wrong case. Each `Operator…` Break lets the operator's
 acts skip one guard a parent's take, and `OperatorStopsMain` and `HandToOperator` widen what it
 may do by one wrong case. `MainFixedByOperatorOnly` says no agent claims a main session's state,
-and no main session ends. `MessageDelivered` reads "a message whose
-addressee's turn ends again and again is delivered", and `EndedMarked` "a message still waiting
-when its delegate has ended settles, delivered or `"ended"`". `EndedNotDelivered` says an
-`"ended"` row is true: the message is in no transcript.
-
-`ReplyOnce` and `ReplyOrNotice` say a message is answered once, by a reply or a notice, never
-both; `ReplyToMain` that the answer goes to the delegate's main session; `ReplyNamesMessage`
-that a reply's source (`src`) is the result that names its message. `ReplyOrNoticeComes` reads
-"a message to a delegate whose turn ends, with a result or the process's end, is answered".
-`rmem` and `last` are only what the wrong readers of `ReplyInMemory` and `SelfReply` hold; the
-design leaves them empty. `SelfTurns` is off in the configurations that do not check replies:
-`Team_Replies` and `Team_RepliesTwo` check them with it on.
+and no main session ends. `AlongEdges` says every message in a transcript went along an edge;
+`ReplyToSender` that an answer goes from a delegate to its message's sender. `MessageDelivered`
+reads "a message whose addressee's turn ends again and again is delivered", and `EndedMarked`
+"a message still waiting when its delegate has ended settles, delivered or `"ended"`". The
+other delivery properties (`DeliveredAtMostOnce`, `InOrder`, `ReplyOnce` and the rest) are
+`Delivery.tla`'s, checked here on Team's state; their Breaks are `Delivery.tla`'s.
+`SelfTurns` is off in the configurations that do not check replies.
 
 ## `Shell.tla`
 
