@@ -110,6 +110,68 @@ defmodule CodingAgentFramework.Transcripts.Fold do
     end)
   end
 
+  @doc """
+  The reply of the turn that the first prompt holding `mark` began, in `bytes` (whole lines of
+  a transcript): an interactive delegate's report, the reply to its brief (F-137). Answers
+  `:absent` while no prompt holds `mark`, else `{:ok, %{reply: text | nil, closed: closed}}`:
+  the last reply that ended a message of that turn (`stop_reason` `end_turn`), and whether a
+  later user entry began another turn, which closes it: a prompt, or a notification that starts
+  a turn (a waiter's text). A text queued into the running turn (a waiter's `queued_command`
+  attachment) joins it, as Claude Code takes it there.
+
+      iex> alias CodingAgentFramework.Transcripts.Fold
+      iex> brief = ~s({"type":"user","message":{"content":"Review it. [delivery b-1]"}}\\n)
+      iex> reply = ~s({"type":"assistant","message":{"id":"m1","stop_reason":"end_turn",) <>
+      ...>   ~s("content":[{"type":"text","text":"Done."}]}}\\n)
+      iex> Fold.reply_to(brief <> reply, "[delivery b-1]")
+      {:ok, %{reply: "Done.", closed: false}}
+      iex> later = ~s({"type":"user","message":{"content":"And now?"}}\\n)
+      iex> Fold.reply_to(brief <> reply <> later, "[delivery b-1]")
+      {:ok, %{reply: "Done.", closed: true}}
+      iex> Fold.reply_to(reply, "[delivery b-1]")
+      :absent
+  """
+  @spec reply_to(binary, String.t()) ::
+          :absent | {:ok, %{reply: String.t() | nil, closed: boolean}}
+  def reply_to(bytes, mark) do
+    lines = bytes |> String.split("\n") |> Enum.drop(-1)
+
+    case Enum.split_while(lines, &(not marked?(&1, mark))) do
+      {_, []} ->
+        :absent
+
+      {_, [first | rest]} ->
+        {fold, closed} =
+          Enum.reduce_while(rest, {line(new(), first), false}, fn l, {f, _} ->
+            if opens?(l), do: {:halt, {f, true}}, else: {:cont, {line(f, l), false}}
+          end)
+
+        {:ok, %{reply: fold.last_reply && fold.last_reply.text, closed: closed}}
+    end
+  end
+
+  defp line(fold, l), do: lines(fold, l <> "\n")
+
+  # A user entry that is not a tool's result nor meta begins a turn: a person's prompt, or a
+  # notification that starts one (a waiter's text, a background task's end).
+  defp opens?(line) do
+    case JSON.decode(line) do
+      {:ok, %{"type" => "user", "message" => %{"content" => c}} = e} ->
+        e["isMeta"] != true and e["isSidechain"] != true and
+          not (is_list(c) and Enum.any?(c, &match?(%{"type" => "tool_result"}, &1)))
+
+      _ ->
+        false
+    end
+  end
+
+  defp marked?(line, mark) do
+    case JSON.decode(line) do
+      {:ok, %{"type" => "user"} = e} -> Enum.any?(texts(e), &String.contains?(&1, mark))
+      _ -> false
+    end
+  end
+
   defp texts(%{"type" => "user", "message" => %{"content" => c}}) when is_binary(c), do: [c]
 
   defp texts(%{"type" => "user", "message" => %{"content" => c}}) when is_list(c),

@@ -3,8 +3,8 @@ defmodule CodingAgentFramework.Mailbox.Transport do
   How a row `Mailbox` marked `sending` settles, one module per transport (`docs/design.md`,
   "Delivery"; `model/tla/Delivery.tla`): each names its evidence and what a restart does to a
   row it left `sending`. The mark, the refusal that undoes it and the unknown that keeps it are
-  `Mailbox`'s, once. `waiter` and `typed` are settled by the transcript (`Transport.Waiter`,
-  `Transport.Typed`).
+  `Mailbox`'s, once. `waiter`, `typed` and `launch` are settled by the transcript
+  (`Transport.Waiter`, `Transport.Typed`, `Transport.Launch`).
 
   `settle/2` answers `:keep` (the evidence has not decided), `:delivered`, or `:again` (due
   again, first, under its same uuid). A row an earlier build marked has no `via`: it went by
@@ -15,7 +15,7 @@ defmodule CodingAgentFramework.Mailbox.Transport do
       :again
   """
 
-  alias CodingAgentFramework.Mailbox.Transport.{Call, Stream, Typed, Waiter}
+  alias CodingAgentFramework.Mailbox.Transport.{Call, Launch, Stream, Typed, Waiter}
 
   @doc """
   Settles `row` by its transport's evidence: `%{fold: fold | nil, calls: calls}`, and for a
@@ -26,6 +26,7 @@ defmodule CodingAgentFramework.Mailbox.Transport do
   def settle(%{via: "call"} = row, evidence), do: Call.settle(row, evidence.calls)
   def settle(%{via: "waiter"} = row, evidence), do: Waiter.settle(row, evidence.waiter)
   def settle(%{via: "typed"} = row, evidence), do: Typed.settle(row, evidence.typed)
+  def settle(%{via: "launch"} = row, evidence), do: Launch.settle(row, evidence.launch)
   def settle(row, evidence), do: Stream.settle(row, evidence.fold)
 end
 
@@ -67,7 +68,14 @@ defmodule CodingAgentFramework.Mailbox.Transport.Waiter do
   @spec text(String.t(), String.t()) :: String.t()
   def text(text, uuid), do: text <> "\n\n" <> mark(uuid)
 
-  defp mark(uuid), do: "[delivery " <> uuid <> "]"
+  @doc """
+  The mark a row's text carries on its last line, which the transcript keeps.
+
+      iex> CodingAgentFramework.Mailbox.Transport.Waiter.mark("u1")
+      "[delivery u1]"
+  """
+  @spec mark(String.t()) :: String.t()
+  def mark(uuid), do: "[delivery " <> uuid <> "]"
 
   @doc """
   What the transcript `bytes` (whole lines) show of the row stored under `uuid`: `:taken` (a
@@ -263,6 +271,49 @@ defmodule CodingAgentFramework.Mailbox.Transport.Typed do
   def settle(_row, %{seen: :taken, ended: ended}), do: if(ended, do: :delivered, else: :keep)
   def settle(_row, %{gone: true}), do: :again
   def settle(_row, %{seen: :queued}), do: :keep
+
+  def settle(row, %{now: now, bound: bound}),
+    do: if(now >= row.sent_at + bound, do: :again, else: :keep)
+end
+
+defmodule CodingAgentFramework.Mailbox.Transport.Launch do
+  @moduledoc """
+  The `launch` transport (F-137; `Delivery.tla`'s `Launch`): the first row to an interactive
+  session (a delegate's brief, its word to go on at a resume) is the prompt argument of the
+  session's start, and Claude Code runs it as the session's first turn. The row is marked before
+  the start (`Mailbox.launch/4`, by the part that starts the session) and told the start's
+  answer (`Mailbox.launched/3`): a refused start makes it due again, under its same uuid; a
+  start that runs, or one whose answer is unknown, waits for the transcript.
+
+  The text carries the row's uuid on a last line of its own, as a waiter's does
+  (`Transport.Waiter.text/2`), and the transcript's user line with it is the delivery. With no
+  such line, the row is due again once the process of the start is gone, or the take bound
+  has passed since the start's answer (`sent_at`; at the mark, the start's own deadline, so a
+  restart before the answer waits for it). A transcript that could not be read decides nothing.
+
+      iex> alias CodingAgentFramework.Mailbox.Transport.Launch
+      iex> Launch.settle(%{sent_at: 0}, %{seen: :taken, gone: true, now: 0, bound: 10_000})
+      :delivered
+      iex> Launch.settle(%{sent_at: 0}, %{seen: :none, gone: false, now: 5_000, bound: 10_000})
+      :keep
+      iex> Launch.settle(%{sent_at: 0}, %{seen: :none, gone: true, now: 5_000, bound: 10_000})
+      :again
+  """
+
+  alias CodingAgentFramework.Mailbox.Transport.Waiter
+
+  @doc "The prompt a start carries: the row's text and its uuid, as `Waiter.text/2`."
+  @spec text(String.t(), String.t()) :: String.t()
+  def text(text, uuid), do: Waiter.text(text, uuid)
+
+  @doc """
+  Settles `row` by `evidence`: `%{seen: Waiter.seen/2's answer | :unread, gone: whether no
+  process of the start runs, now: wall-clock ms, bound: the take bound}`.
+  """
+  @spec settle(map, map) :: :keep | :delivered | :again
+  def settle(_row, %{seen: :unread}), do: :keep
+  def settle(_row, %{seen: :taken}), do: :delivered
+  def settle(_row, %{gone: true}), do: :again
 
   def settle(row, %{now: now, bound: bound}),
     do: if(now >= row.sent_at + bound, do: :again, else: :keep)

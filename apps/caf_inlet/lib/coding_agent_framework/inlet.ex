@@ -77,6 +77,31 @@ defmodule CodingAgentFramework.Inlet do
     call(inlet, request, Keyword.get(opts, :see, @see), opts)
   end
 
+  @doc """
+  Answers a dialog of `kind` on `session`'s screen by the option labeled `label` (F-137: a
+  start's trust dialog, `:trust` and "Yes, I trust this folder"). In one step of this process:
+  the screen is read as the session's release draws it, and must show that dialog; the keys
+  that move its selection there (`Screen.option_keys/2`) go as one tmux command; the screen is
+  read again until that option is selected (`see:` ms); then Enter, as its own command. Options
+  `release:` (required), `see:` and `timeout:`.
+
+  Answers `{:ok, :sent}`; `{:refused, reason}` when no key went: `:no_release`,
+  `{:screen, reading}` (another screen, or another dialog), `{:no_option, label}`, or `Tmux`'s;
+  `{:unknown, reason}` once a key may have gone: `{:not_selected, reading}` (the keys went and
+  the screen never showed the option selected; no Enter went), `{:enter, reason}`.
+
+      iex> {:ok, fake} = CodingAgentFramework.Tmux.Fake.start_link(key: {"laptop", "fake"})
+      iex> server = CodingAgentFramework.Tmux.Fake.new(fake, {"laptop", "fake"})
+      iex> {:ok, inlet} = CodingAgentFramework.Inlet.start_link(tmux: server)
+      iex> CodingAgentFramework.Inlet.choose(inlet, "alpha", :trust, "Yes", release: nil)
+      {:refused, :no_release}
+  """
+  @spec choose(GenServer.server(), String.t(), atom, String.t(), keyword) :: outcome
+  def choose(inlet, session, kind, label, opts) do
+    request = {:choose, session, kind, label, Keyword.fetch!(opts, :release)}
+    call(inlet, request, Keyword.get(opts, :see, @see), opts)
+  end
+
   defp call(inlet, request, see, opts) do
     timeout = Keyword.get(opts, :timeout, @timeout)
     deadline = System.monotonic_time(:millisecond) + timeout
@@ -117,6 +142,62 @@ defmodule CodingAgentFramework.Inlet do
         :seen -> enter(tmux, pane, session)
         {:not_seen, reading} -> {:unknown, {:not_seen, reading}}
       end
+    end
+  end
+
+  defp act({:choose, session, kind, label, release}, see, tmux) do
+    with :ok <- if(is_binary(release), do: :ok, else: {:refused, :no_release}),
+         {:ok, pane} <- pane(tmux, session),
+         {:ok, screen} <- dialog(tmux, pane, session, release, kind),
+         {:ok, keys} <- Screen.option_keys(screen, label),
+         {:ok, :sent} <- move(tmux, pane, session, keys) do
+      deadline = System.monotonic_time(:millisecond) + see
+
+      case selected(tmux, pane, session, release, kind, label, deadline) do
+        :selected -> enter(tmux, pane, session)
+        {:not_selected, reading} -> {:unknown, {:not_selected, reading}}
+      end
+    end
+  end
+
+  defp dialog(tmux, pane, session, release, kind) do
+    with {:ok, %{text: screen}} <- Tmux.capture(tmux, pane, session) do
+      case Screen.read(screen, release) do
+        {:ok, %{state: :dialog, kind: ^kind} = dialog} -> {:ok, dialog}
+        {:ok, reading} -> {:refused, {:screen, reading}}
+        {:unknown, {:unrecognized, _}} -> {:refused, {:screen, :unrecognized}}
+        {:refused, _} = refused -> refused
+      end
+    end
+  end
+
+  defp move(_tmux, _pane, _session, []), do: {:ok, :sent}
+
+  defp move(tmux, pane, session, keys) do
+    case Tmux.write(tmux, pane, session, {:keys, keys}) do
+      {:ok, :sent} -> {:ok, :sent}
+      {:refused, _} = refused -> refused
+      {:unknown, reason} -> {:unknown, {:keys, reason}}
+    end
+  end
+
+  defp selected(tmux, pane, session, release, kind, label, deadline) do
+    reading =
+      with {:ok, %{text: screen}} <- Tmux.capture(tmux, pane, session),
+           do: Screen.read(screen, release)
+
+    cond do
+      match?({:ok, %{state: :dialog, kind: ^kind, selected: ^label}}, reading) ->
+        :selected
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        {:not_selected, reading}
+
+      true ->
+        receive do
+        after
+          @look -> selected(tmux, pane, session, release, kind, label, deadline)
+        end
     end
   end
 

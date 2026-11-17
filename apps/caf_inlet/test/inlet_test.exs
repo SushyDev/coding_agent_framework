@@ -146,6 +146,33 @@ defmodule CodingAgentFramework.InletTest do
     assert Fake.received(server, pane) == []
   end
 
+  # A start's trust dialog (F-137): moved to its option by label, seen selected, then Enter on
+  # its own; a screen that is not that dialog takes no key.
+  test "answers a dialog by its label, and nothing that is not that dialog", ctx do
+    script = ScreenStandIn.write!(ctx.dir, @release, stand_in_idle(), trust: true)
+    {:ok, _} = Tmux.new_session(ctx.server, "alpha", [script, "--", "go"], size: {120, 40})
+    {:ok, %{kind: :trust}} = screen(ctx, "alpha", &(&1.state == :dialog))
+    yes = "Yes, I trust this folder"
+
+    assert {:ok, :sent} = Inlet.choose(ctx.inlet, "alpha", :trust, yes, release: @release)
+    inlet = ctx.inlet
+    assert_received {:write, ^inlet, {:keys, ["Down"]}}
+    assert_received {:write, ^inlet, {:keys, ["Enter"]}}
+    assert {:ok, _} = screen(ctx, "alpha", &(&1.state == :idle))
+
+    assert {:ok, ["go"]} =
+             await(fn ->
+               if ScreenStandIn.prompts(ctx.dir) == [],
+                 do: :no,
+                 else: {:ok, ScreenStandIn.prompts(ctx.dir)}
+             end)
+
+    assert {:refused, {:screen, %{state: :idle}}} =
+             Inlet.choose(ctx.inlet, "alpha", :trust, yes, release: @release)
+
+    refute_received {:write, ^inlet, _}
+  end
+
   defp open(ctx, name, args \\ []) do
     script = ScreenStandIn.write!(ctx.dir)
     {:ok, _} = Tmux.new_session(ctx.server, name, [script | args], size: {120, 40})

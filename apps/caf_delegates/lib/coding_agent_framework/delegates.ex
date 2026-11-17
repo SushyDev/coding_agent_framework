@@ -51,6 +51,13 @@ defmodule CodingAgentFramework.Delegates do
   brief again itself. A second such kill, or a refused resume, is `failed`, and that is the
   report, a notice from `framework`. A row leaves `running` once.
 
+  **An interactive delegate** (`interactive: true`, F-137; `docs/design.md`, "Interactive
+  delegates") runs Claude Code's terminal interface: role `:parent`, kind `:delegate`. Its brief
+  is marked by `Mailbox.launch/4` and carried by its start as the prompt; its report is the
+  reply of the turn its brief (or its word to go on) began, read from its transcript
+  (`Transcripts.Fold.reply_to/2`) once that turn has ended: closed by a later turn, or its
+  session file read ended through `registry:`. Its resume carries the word to go on by launch.
+
   **The report** is handed to `Mailbox` (`Mailbox.report/5`) under the brief's uuid, to the
   agent row's parent, and the row's `report` is then `taken`; until `Mailbox` takes it, it is
   `held`, with its text, and handed again at each cue.
@@ -77,8 +84,11 @@ defmodule CodingAgentFramework.Delegates do
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, Acts, Mailbox, Scheduler, Sessions, Stream}
-  alias CodingAgentFramework.{Transcripts, Usage}
+  alias CodingAgentFramework.{Accounts, Acts, ClaudeCLI, Mailbox, Registry, Scheduler}
+  alias CodingAgentFramework.{Sessions, Stream, Transcripts, Usage}
+  alias CodingAgentFramework.Mailbox.Transport.Waiter
+  alias CodingAgentFramework.Sessions.Turn, as: SessionsTurn
+  alias CodingAgentFramework.Transcripts.Fold
   alias CodingAgentFramework.ClaudeCLI.Options
   alias CodingAgentFramework.Delegates.{Table, Turn, Work}
   alias CodingAgentFramework.Sessions.Agents
@@ -105,6 +115,8 @@ defmodule CodingAgentFramework.Delegates do
   and settled by `Sessions`' answer (`Acts.answered/4`); a claim not taken resumes nothing.
   With `scheduler:` (the instance's `Scheduler`), each start asks it for a lease first, of the
   units `lease:` names (default `%{"seat" => 1}`); a resume runs under the start's lease.
+  With `registry:` (the host's `Registry`), it starts interactive delegates, whose turn's end
+  it reads from their session files.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -116,10 +128,13 @@ defmodule CodingAgentFramework.Delegates do
   reason}`; or `{:unknown, reason}`, when its row stays `starting` for a later read to settle.
   Options: `:timeout`, what the caller waits (default 300 000 ms; the start goes on past it),
   and `:options` (`ClaudeCLI.Options`), checked before the row and kept on the agent row,
-  which its resume takes again.
+  which its resume takes again; and `interactive: true` for the terminal interface, refused
+  `:no_registry` by a `Delegates` given no `registry:`, and `{:too_long, max}` for a brief a
+  launch cannot carry.
   """
   def start_delegate(delegates, parent, project, branch, model, brief, opts \\ []) do
-    start = {:start, parent, project, branch, model, brief, Keyword.get(opts, :options)}
+    how = if Keyword.get(opts, :interactive, false), do: :interactive, else: :headless
+    start = {:start, parent, project, branch, model, brief, Keyword.get(opts, :options), how}
     call(delegates, start, opts, 300_000)
   end
 
@@ -209,6 +224,7 @@ defmodule CodingAgentFramework.Delegates do
           acts: Keyword.get(opts, :acts),
           scheduler: Keyword.get(opts, :scheduler),
           lease: Keyword.get(opts, :lease, %{"seat" => 1}),
+          registry: Keyword.get(opts, :registry),
           pending: %{}
         })
 
@@ -239,10 +255,11 @@ defmodule CodingAgentFramework.Delegates do
   def handle_cast(:cue, s), do: {:noreply, settle(s)}
 
   @impl true
-  def handle_call({:start, parent, project, branch, model, brief, options}, from, s) do
+  def handle_call({:start, parent, project, branch, model, brief, options, how}, from, s) do
     with true <-
            Enum.all?([parent, model, brief], &(is_binary(&1) and &1 != "")) or
              {:refused, {:bad, :start}},
+         :ok <- interactive_ok(s, how, brief),
          {:ok, options} <- Options.check(options),
          {:ok, p} <- Turn.check(s.projects, project, branch),
          # Move.tla's NoStartWhileDraining: no delegate starts under a parent a move drains.
@@ -255,7 +272,7 @@ defmodule CodingAgentFramework.Delegates do
       id = Table.starting(s.db, row)
       announce(s, id)
       row = Table.get(s.db, id)
-      start = %{p: p, account: account, parent: parent, options: options, brief: brief}
+      start = %{p: p, account: account, parent: parent, options: options, brief: brief, how: how}
 
       # Schedule.tla: the row is the lease's holder, written before the lease is asked for.
       case lease(s, row, project, account) do
@@ -279,7 +296,7 @@ defmodule CodingAgentFramework.Delegates do
       with %{} = row <- Enum.find(Table.latest(s.db, s.host), &(&1.name == name)),
            %{project: project} <- agent(s, row),
            {:ok, p} <- Map.fetch(s.projects, project) |> known(project) do
-        {:ok, launch(s, row, p)}
+        {:ok, launch(s, row, p, how(agent(s, row)))}
       else
         {:refused, _} = refused -> refused
         _ -> {:refused, {:no_delegate, name}}
@@ -360,15 +377,17 @@ defmodule CodingAgentFramework.Delegates do
     {:noreply, s}
   end
 
-  # A start with its lease: the brief is stored, then Sessions is called.
+  # A start with its lease: the brief is stored, then Sessions is called. An interactive
+  # delegate's brief goes in as its start's prompt: marked by launch first.
   defp begin(s, row, start, from) do
-    case Mailbox.brief(s.mailbox, start.parent, row.name, start.brief, row.brief_uuid) do
-      {:ok, _} ->
-        call = {start.parent, start.options}
-        {:noreply, call_sessions(s, row, start.p, start.account, call, from)}
-
-      not_stored ->
-        reply(answered(s, row, {:refused, {:brief, not_stored}}))
+    with {:ok, _} <-
+           Mailbox.brief(s.mailbox, start.parent, row.name, start.brief, row.brief_uuid)
+           |> stored(),
+         {:ok, launched} <- launch_first(s, row, start.how) do
+      call = {start.parent, start.options}
+      {:noreply, call_sessions(s, row, start.p, start.account, call, from, launched)}
+    else
+      not_started -> reply(answered(s, row, {:refused, not_started}))
     end
   end
 
@@ -407,34 +426,70 @@ defmodule CodingAgentFramework.Delegates do
   end
 
   # Called: Sessions writes its own row first and runs on through a restart of this process.
-  # A start names the parent and the options; a resume takes the agent row's.
-  defp call_sessions(s, row, p, account, start, from) do
-    launch = launch(s, row, p)
+  # A start names the parent and the options; a resume takes the agent row's. An interactive
+  # one carries the row `launch_first/3` marked as its prompt, and `Mailbox` is told the answer.
+  defp call_sessions(s, row, p, account, start, from, launched) do
+    launch = launch(s, row, p, if(launched, do: :interactive, else: :headless))
+    launch = if launched, do: launch ++ [prompt: launched.text], else: launch
+    mailbox = s.mailbox
 
     # The config is made in the task: the embedding app's `issue` may call a part that waits.
     task =
       Task.async(fn ->
-        with {:ok, mcp} <- s.mcp.(row.name) do
-          launch = if mcp, do: launch ++ [mcp: mcp], else: launch
+        answer =
+          with {:ok, mcp} <- s.mcp.(row.name) do
+            launch = if mcp, do: launch ++ [mcp: mcp], else: launch
 
-          case start do
-            {:resume, session_id} ->
-              Sessions.resume(s.sessions, row.name, account, session_id, launch, timeout: @call)
+            case start do
+              {:resume, session_id} ->
+                Sessions.resume(s.sessions, row.name, account, session_id, launch, timeout: @call)
 
-            {parent, options} ->
-              launch = launch ++ [parent: parent, options: options]
-              Sessions.start(s.sessions, row.name, account, launch, timeout: @call)
+              {parent, options} ->
+                launch = launch ++ [parent: parent, options: options]
+                Sessions.start(s.sessions, row.name, account, launch, timeout: @call)
+            end
           end
-        end
+
+        if launched, do: Mailbox.launched(mailbox, launched.id, answer)
+        answer
       end)
 
     parent = with {parent, _} when is_binary(parent) <- start, do: parent, else: (_ -> nil)
     put_in(s.pending[task.ref], %{id: row.id, from: from, parent: parent, name: row.name})
   end
 
-  defp launch(s, row, p),
-    do:
-      [role: :delegate, worktree: %{project: p, branch: row.branch}, model: row.model] ++ s.launch
+  # An interactive delegate runs Claude Code's terminal interface, as a main session does: role
+  # `:parent`, kind `:delegate`.
+  defp launch(s, row, p, how) do
+    role = if how == :interactive, do: :parent, else: :delegate
+    tree = %{project: p, branch: row.branch}
+    [role: role, kind: :delegate, worktree: tree, model: row.model] ++ s.launch
+  end
+
+  defp how(agent), do: if(agent && not Agents.headless?(agent), do: :interactive, else: :headless)
+
+  # An interactive start needs the turn's reader and a brief its argument can carry.
+  defp interactive_ok(_s, :headless, _brief), do: :ok
+  defp interactive_ok(%{registry: nil}, :interactive, _brief), do: {:refused, :no_registry}
+
+  defp interactive_ok(_s, :interactive, brief) do
+    max = ClaudeCLI.prompt_max() - 200
+    if byte_size(brief) <= max, do: :ok, else: {:refused, {:too_long, max}}
+  end
+
+  defp stored({:ok, _} = ok), do: ok
+  defp stored(other), do: {:brief, other}
+
+  # The first row due to an interactive delegate, marked by launch for the start the caller
+  # makes next, by the row's deadline. A headless one's goes by its stream after the start.
+  defp launch_first(_s, _row, :headless), do: {:ok, nil}
+
+  defp launch_first(s, row, :interactive) do
+    case Mailbox.launch(s.mailbox, row.name, row.deadline) do
+      {:ok, %{id: _, text: _} = launched} -> {:ok, launched}
+      other -> {:launch, other}
+    end
+  end
 
   # CallAnswered and Settled: a start or resume runs, and Mailbox delivers its turn's message; a
   # refused start is refused, and the rows to it end; a refused resume is the report. An
@@ -512,6 +567,7 @@ defmodule CodingAgentFramework.Delegates do
   # a kill, and nothing of the row moves until the move is done.
   defp settle_row(s, row, agent) do
     with false <- Agents.moving?(agent),
+         :headless <- how(agent),
          {:ok, fold} <- followed(s, agent) do
       case Turn.next(row, fold) do
         {:finished, r} -> finish(s, row, "finished", {:reply, r.text, r})
@@ -519,7 +575,67 @@ defmodule CodingAgentFramework.Delegates do
         :waiting -> s
       end
     else
+      :interactive -> settle_interactive(s, row, agent)
       _unread -> s
+    end
+  end
+
+  # An interactive delegate's report (F-137, `Delegate.tla`'s ReportAnswersTheBrief): the reply
+  # of the turn its brief, or its word to go on, began, read from its transcript, once that
+  # turn has ended: a later turn closed it, or its session reads its turn ended. Never the
+  # transcript's last reply, which a person's later turn gives. Its process gone with no such
+  # reply, it is resumed once, as a headless one is. A read that fails decides nothing.
+  defp settle_interactive(s, row, agent) do
+    with {:ok, brief} <- turn_of(s, agent, row.brief_uuid),
+         {:ok, turn} <-
+           if(row.resume_uuid, do: turn_of(s, agent, row.resume_uuid), else: {:ok, brief}) do
+      reply = with {:ok, %{reply: text}} when is_binary(text) <- turn, do: text, else: (_ -> nil)
+
+      cond do
+        reply && Agents.free?(agent) ->
+          finish(s, row, "finished", {:reply, reply, %{}})
+
+        Agents.free?(agent) and row.resumes > 0 ->
+          finish(s, row, "failed", {:notice, @twice})
+
+        Agents.free?(agent) ->
+          resume(s, row, agent, brief != :absent)
+
+        reply && (match?({:ok, %{closed: true}}, turn) or turn_ended?(s, agent)) ->
+          finish(s, row, "finished", {:reply, reply, %{}})
+
+        true ->
+          s
+      end
+    else
+      _unread -> s
+    end
+  end
+
+  # What the transcript holds of the turn the row `uuid` began (`Transcripts.Fold.reply_to/2`).
+  defp turn_of(s, %{session_id: sid} = agent, uuid) when is_binary(sid) do
+    t = s.transcripts
+
+    with {:ok, dir} <- Accounts.config_dir(s.accounts, agent.account),
+         {:ok, path} <- Transcripts.path(dir, agent.cwd, sid),
+         {:ok, %{failed: []}} <- Transcripts.read(t, [{agent.account, sid, path}], timeout: @step),
+         {:ok, %{bytes: bytes}} <- Transcripts.text(t, agent.account, sid, 0, timeout: @step) do
+      {:ok, Fold.reply_to(bytes, Waiter.mark(uuid))}
+    else
+      {:refused, :no_file} -> {:ok, :absent}
+      other -> {:unread, other}
+    end
+  end
+
+  defp turn_of(_s, _agent, _uuid), do: {:unread, :no_session}
+
+  # The session file of its process reads its turn ended (`Sessions.Turn.interactive/3`).
+  defp turn_ended?(s, agent) do
+    with {:ok, _} <- Registry.read(s.registry, timeout: @step),
+         {:ok, %{rows: files}} <- Registry.rows(s.registry, agent.account, timeout: @step) do
+      SessionsTurn.interactive(agent, files, false) in [:idle, :ended]
+    else
+      _ -> false
     end
   end
 
@@ -544,7 +660,7 @@ defmodule CodingAgentFramework.Delegates do
       cond do
         tr.ends_with_reply -> finish(s, row, "finished", {:reply, tr.last_reply.text, %{}})
         row.resumes > 0 -> finish(s, row, "failed", {:notice, @twice})
-        Agents.free?(agent) -> resume(s, row, agent, fold)
+        Agents.free?(agent) -> resume(s, row, agent, went_in?(row, fold))
         true -> s
       end
     else
@@ -552,13 +668,18 @@ defmodule CodingAgentFramework.Delegates do
     end
   end
 
+  defp went_in?(row, fold), do: match?(%{state: :delivered}, fold.messages[row.brief_uuid])
+
   # The row counts the resume before Sessions is asked: a restart never asks it twice. When the
   # brief had gone in, Mailbox takes the word to go on first, under the row's new uuid; when it
   # had not, Mailbox has the brief due again. A word Mailbox did not take leaves the row
   # running, for the next cue.
-  defp resume(s, row, agent, fold) do
-    went_in? = match?(%{state: :delivered}, fold.messages[row.brief_uuid])
+  # An interactive delegate's resume carries the first row due to it as its prompt (the word
+  # to go on, or the brief again), marked by launch after the claim; a mark refused answers the
+  # claim and leaves the row running for the next cue.
+  defp resume(s, row, agent, went_in?) do
     uuid = if went_in?, do: Stream.uuid()
+    deadline = with {:ok, p} <- Map.fetch(s.projects, agent.project), do: deadline(s, p)
 
     with {:ok, p} <- Map.fetch(s.projects, agent.project) |> known(agent.project),
          {:ok, account} <- Accounts.ready(s.accounts, agent.account),
@@ -567,16 +688,26 @@ defmodule CodingAgentFramework.Delegates do
              do: Mailbox.go_on(s.mailbox, row.name, Turn.resumed(), uuid),
              else: {:ok, nil}
            ),
-         {:ok, act} <- claim_resume(s, row) do
+         {:ok, act} <- claim_resume(s, row),
+         {:ok, launched} <-
+           launch_first(s, %{row | deadline: deadline}, how(agent)) |> told(s, act) do
       at = System.os_time(:millisecond)
-      fields = [status: "resuming", resumes: 1, called_at: at, deadline: deadline(s, p)]
+      fields = [status: "resuming", resumes: 1, called_at: at, deadline: deadline]
       write(s, row, fields ++ [resume_uuid: uuid])
-      s = call_sessions(s, Table.get(s.db, row.id), p, account, {:resume, agent.session_id}, nil)
+      start = {:resume, agent.session_id}
+      s = call_sessions(s, Table.get(s.db, row.id), p, account, start, nil, launched)
       if act, do: put_in(s.pending, Map.new(s.pending, &with_act(&1, row.id, act))), else: s
     else
       {:refused, _} = refused -> elem(answered(s, row, refused), 1)
       _not_taken -> s
     end
+  end
+
+  defp told({:ok, _} = ok, _s, _act), do: ok
+
+  defp told(not_marked, s, act) do
+    if act, do: Acts.answered(s.acts, act, {:refused, not_marked})
+    {:not_launched, not_marked}
   end
 
   # The resume's row in `Acts`, before the row counts it: its state is the delegate's row and

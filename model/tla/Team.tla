@@ -225,6 +225,7 @@ D == INSTANCE Delivery WITH
        idle <- [a \in Agents |-> proc[a] = "idle"],
        stopping <- [a \in Agents |-> FALSE],
        over <- [a \in Agents |-> proc[a] = "ended"],
+       turned <- [a \in Agents |-> TRUE], Long <- {}, Launched <- {},
        call <- dcall, lost <- dlost, wrong <- dwrong,
        restarts <- 0, lives <- 0, ends <- 0, prompts <- 0, stops <- 0, readAt <- 0
 

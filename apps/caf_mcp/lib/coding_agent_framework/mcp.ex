@@ -104,6 +104,10 @@ defmodule CodingAgentFramework.MCP do
   @options %{type: "object", description: "the delegate's own launch options (ClaudeCLI.Options)"}
   @start Map.new(~w(project branch model brief)a, &{&1, %{type: "string"}})
          |> Map.put(:options, @options)
+         |> Map.put(:interactive, %{
+           type: "boolean",
+           description: "runs the terminal interface, so a person can attach and type"
+         })
   # `Services` checks a name's form; the tool only needs a string to call it.
   @name %{type: "string", description: "1 to 64 letters, digits, - or _"}
   @timeout %{type: "integer", minimum: 1, description: "ms, at most a day"}
@@ -822,14 +826,14 @@ defmodule CodingAgentFramework.MCP do
     start = [parent | Enum.map(~w(project branch model brief), &Map.get(args, &1))]
 
     if Enum.all?(start, &is_binary/1),
-      do: {:ok, start ++ [Map.get(args, "options")]},
+      do: {:ok, start ++ [Map.get(args, "options"), Map.get(args, "interactive") == true]},
       else: {:refused, {:bad, :args}}
   end
 
   # The start's own wait is at most `wait`. `Delegates` checks the options.
-  defp start_delegate(ctx, caller, [parent, project, branch, model, brief, options], wait) do
+  defp start_delegate(ctx, caller, [parent, project, branch, model, brief, options, i], wait) do
     {mod, server} = ctx.delegates
-    opts = [timeout: wait, options: options]
+    opts = [timeout: wait, options: options, interactive: i]
 
     with :ok <- Grants.may_start_delegate?(ctx.grants, caller, parent),
          do: mod.start_delegate(server, parent, project, branch, model, brief, opts)
