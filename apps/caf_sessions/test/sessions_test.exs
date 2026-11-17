@@ -80,7 +80,7 @@ defmodule CodingAgentFramework.SessionsTest do
     assert {:ok, _} = row_when(ctx, "blind", &(&1.viewer != nil))
     advance(ctx)
     gone = spawn(fn -> :ok end)
-    sessions = restart(ctx, blind, registries: %{"work" => gone})
+    sessions = restart(ctx, blind, registry: gone)
     :sys.get_state(sessions)
     assert %{status: "starting"} = Table.get(ctx.table, "test", "blind")
 

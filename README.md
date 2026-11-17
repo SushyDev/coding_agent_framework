@@ -134,12 +134,13 @@ Built, each from a checked model in `model/tla/`:
 - launch options per agent (settings, environment, directories, appended prompt, tools);
 - `PreToolUse` held while the app decides, and `PostToolUse` handed on;
 - `Screen`, reading a main session's screen from a real release's fixtures;
-- the remodel's first unit: `Store`, the SQLite table code every writer shares (R1).
+- the remodel's first units: `Store`, the SQLite table code every writer shares (R1), and
+  `Reader`, the loop every reader runs, with one `Registry` and one `Transcripts` per host over
+  every account (R2), and `Holder.Process`, one record of a held program, with a session ended
+  by SIGTERM (R3).
 
-Next, the rest of the remodel, in order (F-115, taken in F-116): one reader
-loop, with one `Registry` and one `Transcripts` over every account (R2); one held-process record
-and the end by SIGTERM (R3); `Claim` and `Hold` in the model (R4); one hold in `Intake`, with the
-waiting Stop hook (R5); `Delivery` in the model, and the move rewritten with a message in flight
+Next, the rest of the remodel, in order (F-115, taken in F-116): `Claim` and `Hold` in the
+model (R4); one hold in `Intake`, with the waiting Stop hook (R5); `Delivery` in the model, and the move rewritten with a message in flight
 (R6); `Mailbox` delivering everything, reports included (R7); the `Inlet`, the checked typed
 write (R8); the agent row and the tree in `Sessions` (R9); `Acts`, one ledger of claims,
 recoveries and faults (R10); `Cues`, the library's own routing (R11); and `Mover` (R12). Then
@@ -153,8 +154,8 @@ start), packaging, and stacks with the LiveView components. The plan and the ord
 
 The code is a Mix umbrella, one OTP app per part under `apps/`. An arrow means "uses"; each app
 declares every app it uses, directly, and `gate-deps` checks that. The chart shows the apps as
-built; the remodel changes it as R1 to R12 land (`caf_store` added in R1, `caf_cues` added,
-`caf_control` becoming `caf_inlet`).
+built; the remodel changes it as R1 to R12 land (`caf_store` added in R1 and holding `Reader`
+from R2, `caf_cues` added, `caf_control` becoming `caf_inlet`).
 
 ```mermaid
 flowchart BT
@@ -194,6 +195,7 @@ flowchart BT
   tmux --> shell
   holder --> shell
   registry --> shell
+  registry --> holder
   transcripts --> shell
   accounts --> shell
   accounts --> intake
@@ -216,12 +218,9 @@ flowchart BT
   recoveries --> holder
   recoveries --> sampler
   recoveries --> sessions
-  tracker --> registry
-  tracker --> transcripts
   tracker --> intake
-  tracker --> usage
   tracker --> stream
-  tracker --> sampler
+  tracker --> store
   tracker --> sessions
   tracker --> recoveries
   tracker --> delegates
@@ -239,9 +238,11 @@ flowchart BT
   copies --> holder
   jobs --> shell
   jobs --> copies
+  jobs --> holder
   services --> shell
   sessions & delegates & stream & mailbox & intake & jobs --> store
   services & copies & mcp & grants & recoveries --> store
+  registry & transcripts & usage & sampler --> store
   services --> holder
   services --> grants
   services --> copies

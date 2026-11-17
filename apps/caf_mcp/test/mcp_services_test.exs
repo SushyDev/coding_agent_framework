@@ -60,7 +60,7 @@ defmodule CodingAgentFramework.MCPServicesTest do
          workstation: "ws",
          tracker: {__MODULE__, :unused},
          stream: {__MODULE__, :unused},
-         transcripts: %{},
+         transcripts: nil,
          place: fn agent -> {:ok, %{project: "app", name: agent, worktree: wt}} end,
          instance: "s",
          cap: 60_000,

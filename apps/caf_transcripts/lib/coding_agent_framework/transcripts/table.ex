@@ -1,9 +1,10 @@
 defmodule CodingAgentFramework.Transcripts.Table do
   @moduledoc """
-  `transcripts_sessions`, one row per transcript a `{host, account}`'s `Transcripts` reads, with
-  its fold (`CodingAgentFramework.Transcripts.Fold`) and so its offset; and `transcripts_reads`,
-  one row per `{host, account}` read at least once. `Transcripts` is the one writer; any process
-  may open the file and read. A `{host, account}` with no read row is `:unread`.
+  `transcripts_sessions`, one row per transcript a host's `Transcripts` reads, keyed by `{host,
+  account, session_id}`, with its fold (`CodingAgentFramework.Transcripts.Fold`) and so its
+  offset; and `transcripts_reads`, one row per `{host, account}` read at least once. Its table
+  code is `CodingAgentFramework.Reader`'s, from `meta/0`. `Transcripts` is the one writer; any
+  process may open the file and read. A `{host, account}` with no read row is `:unread`.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "doc.db")
       iex> {:ok, db} = CodingAgentFramework.Transcripts.Table.open(path)
@@ -11,13 +12,10 @@ defmodule CodingAgentFramework.Transcripts.Table do
       :unread
   """
 
+  alias CodingAgentFramework.{Reader, Store}
   alias CodingAgentFramework.Transcripts.Fold
-  alias Exqlite.Sqlite3
-
-  @columns ~w(id host account session_id path fold rewrites problem written_at)a
 
   @schema """
-  PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS transcripts_sessions (
     id INTEGER PRIMARY KEY,
     host TEXT NOT NULL, account TEXT NOT NULL, session_id TEXT NOT NULL, path TEXT NOT NULL,
@@ -28,100 +26,72 @@ defmodule CodingAgentFramework.Transcripts.Table do
     PRIMARY KEY (host, account));
   """
 
-  @type db :: Sqlite3.db()
+  @type db :: Store.db()
+
+  @doc """
+  The table as `Reader` reads and writes it; a `Tracker` source is made from it. A row as read
+  holds its fold's fields beside its own: `offset`, `last_reply`, `ends_with_reply`, `prompts`,
+  `subagents`, `usage`, `problems`, `problem_count` and `entries`.
+  """
+  @spec meta() :: Reader.meta()
+  def meta do
+    %{
+      schema: @schema,
+      table: "transcripts_sessions",
+      reads: "transcripts_reads",
+      scope: [:host, :account],
+      key: :session_id,
+      data: [:path, :fold, :rewrites, :problem],
+      read: [:read_at],
+      dump: &dump/2,
+      load: &to_row/1,
+      topic: "transcripts",
+      kind: :transcripts,
+      name: :account
+    }
+  end
 
   @doc "Opens (and creates) the file at `path`, with the tables."
   @spec open(String.t()) :: {:ok, db} | {:refused, term}
-  def open(path) do
-    with {:ok, db} <- Sqlite3.open(path),
-         :ok <- Sqlite3.set_busy_timeout(db, 5_000),
-         :ok <- Sqlite3.execute(db, @schema) do
-      {:ok, db}
-    else
-      {:error, reason} -> {:refused, {:sqlite, reason}}
-    end
-  end
+  def open(path), do: Reader.open(meta(), path)
 
-  @doc """
-  A `{host, account}`'s rows and when it was last read; `:unread` before its first read. Each
-  row holds its fold's fields beside its own: `offset`, `last_reply`, `ends_with_reply`,
-  `prompts`, `subagents`, `usage`, `problems`, `problem_count` and `entries`.
-  """
+  @doc "A `{host, account}`'s rows and when it was last read; `:unread` before its first read."
   @spec rows(db, String.t(), String.t()) :: :unread | {:ok, %{read_at: integer, rows: [map]}}
-  def rows(db, host, account) do
-    with {:ok, at} <- last_read(db, host, account) do
-      sql =
-        "SELECT #{cols()} FROM transcripts_sessions WHERE host = ?1 AND account = ?2 ORDER BY id"
-
-      {:ok, %{read_at: at, rows: db |> query(sql, [host, account]) |> Enum.map(&to_row/1)}}
-    end
-  end
-
-  @doc "When a `{host, account}` was last read, or `:unread`."
-  @spec last_read(db, String.t(), String.t()) :: :unread | {:ok, integer}
-  def last_read(db, host, account) do
-    sql = "SELECT read_at FROM transcripts_reads WHERE host = ?1 AND account = ?2"
-
-    case query(db, sql, [host, account]) do
-      [] -> :unread
-      [[at]] -> {:ok, at}
-    end
-  end
+  def rows(db, host, account), do: Reader.rows(meta(), db, host: host, account: account)
 
   @doc "The rows with these ids; an id with no row is absent."
   @spec rows_by_id(db, [integer]) :: [map]
-  def rows_by_id(_db, []), do: []
+  def rows_by_id(db, ids), do: Reader.rows_by_id(meta(), db, ids)
 
-  def rows_by_id(db, ids) do
-    marks = Enum.map_join(1..length(ids), ",", &"?#{&1}")
+  @doc """
+  Writes, per account, each `{session_id, row}` put (`path`, `fold`, `rewrites`, `problem`)
+  and records that account's read at `at`, in one transaction. Answers per account, in order,
+  the ids written and whether it was the account's first read.
+  """
+  @spec write(db, String.t(), [{String.t(), [{String.t(), map}]}], integer) :: [map]
+  def write(db, host, puts, at) do
+    writes =
+      for {account, rows} <- puts,
+          do:
+            {[host: host, account: account], for({sid, row} <- rows, do: {:put, sid, row}),
+             [read_at: at]}
 
-    db
-    |> query("SELECT #{cols()} FROM transcripts_sessions WHERE id IN (#{marks}) ORDER BY id", ids)
-    |> Enum.map(&to_row/1)
+    Reader.write(meta(), db, writes)
   end
 
   @doc """
-  Writes each `{session_id, path, fold, rewrites, problem}` and records the read, in one
-  transaction. Returns the ids written and whether this was the `{host, account}`'s first read.
+  The writer's own view of its rows on a host, by `{account, session_id}`: each one's path,
+  whole fold (its seam included, which `rows/3` leaves out), rewrites and problem. A writer
+  loads them at its start.
   """
-  @spec write(db, String.t(), String.t(), [tuple], integer) ::
-          {:ok, %{ids: [integer], first: boolean}}
-  def write(db, host, account, puts, at) do
-    :ok = Sqlite3.execute(db, "BEGIN IMMEDIATE")
-    first = last_read(db, host, account) == :unread
+  @spec folds(db, String.t()) :: %{{String.t(), String.t()} => map}
+  def folds(db, host) do
+    columns = [:account, :session_id, :path, :fold, :rewrites, :problem]
 
-    ids =
-      Enum.flat_map(puts, fn {session_id, path, fold, rewrites, problem} ->
-        db
-        |> query(
-          "INSERT INTO transcripts_sessions (host, account, session_id, path, fold, rewrites, " <>
-            "problem, written_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) " <>
-            "ON CONFLICT (host, account, session_id) DO UPDATE SET path = excluded.path, " <>
-            "fold = excluded.fold, rewrites = excluded.rewrites, problem = excluded.problem, " <>
-            "written_at = excluded.written_at RETURNING id",
-          [host, account, session_id, path, {:blob, :erlang.term_to_binary(fold)}, rewrites] ++
-            [problem, at]
-        )
-        |> List.flatten()
-      end)
-
-    query(db, "INSERT OR REPLACE INTO transcripts_reads VALUES (?1, ?2, ?3)", [host, account, at])
-    :ok = Sqlite3.execute(db, "COMMIT")
-    {:ok, %{ids: ids, first: first}}
-  end
-
-  @doc """
-  The writer's own view of its rows, by session id: each one's path, whole fold (its seam
-  included, which `rows/3` leaves out), rewrites and problem. A writer loads them at its start.
-  """
-  @spec folds(db, String.t(), String.t()) :: %{String.t() => map}
-  def folds(db, host, account) do
-    sql =
-      "SELECT session_id, path, fold, rewrites, problem FROM transcripts_sessions " <>
-        "WHERE host = ?1 AND account = ?2"
-
-    for [sid, path, fold, rewrites, problem] <- query(db, sql, [host, account]), into: %{} do
-      {sid, %{path: path, fold: load_fold(fold), rewrites: rewrites, problem: problem}}
+    for row <- Store.select(db, "transcripts_sessions", columns, "host = ?1", [host]),
+        into: %{} do
+      {{row.account, row.session_id},
+       %{path: row.path, fold: load_fold(row.fold), rewrites: row.rewrites, problem: row.problem}}
     end
   end
 
@@ -143,25 +113,11 @@ defmodule CodingAgentFramework.Transcripts.Table do
 
   def load_fold(_), do: Fold.new()
 
-  defp cols, do: Enum.join(@columns, ",")
+  defp dump(:fold, fold), do: {:blob, :erlang.term_to_binary(fold)}
+  defp dump(_, value), do: value
 
-  defp to_row(values) do
-    row = @columns |> Enum.zip(values) |> Map.new()
+  defp to_row(row) do
     fold = load_fold(row.fold)
     Map.merge(Map.delete(row, :fold), Map.drop(fold, [:seam, :message]))
-  end
-
-  # The writer's own statements: an error here is a bug or a broken file, so it raises and the
-  # supervisor restarts the writer, which reloads its rows from the file.
-  defp query(db, sql, args) do
-    {:ok, stmt} = Sqlite3.prepare(db, sql)
-
-    try do
-      :ok = Sqlite3.bind(stmt, args)
-      {:ok, rows} = Sqlite3.fetch_all(db, stmt)
-      rows
-    after
-      Sqlite3.release(db, stmt)
-    end
   end
 end

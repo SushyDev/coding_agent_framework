@@ -22,7 +22,7 @@ defmodule CafSampler.MixProject do
     [
       {:caf_holder, in_umbrella: true},
       {:caf_tmux, in_umbrella: true},
-      {:exqlite, "~> 0.43.0"},
+      {:caf_store, in_umbrella: true},
       {:caf_test, in_umbrella: true, only: :test},
       {:stream_data, "~> 1.4", only: :test}
     ]

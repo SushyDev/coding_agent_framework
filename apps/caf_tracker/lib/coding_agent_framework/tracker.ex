@@ -4,8 +4,9 @@ defmodule CodingAgentFramework.Tracker do
 
   The caller's supervision tree starts one `Tracker` per instance, with no name, and gives it
   its sources as `{module, opts}` (`CodingAgentFramework.Tracker.Source`), such as
-  `{Tracker.RegistrySource, db: path, host: "laptop", account: "work"}`. At start it reads
-  every source in full, so a restarted `Tracker` comes back from the tables alone.
+  `{Tracker.ReaderSource, table: Registry.Table, db: path, host: "laptop", account: "work"}`.
+  At start it reads every source in full, so a restarted `Tracker` comes back from the tables
+  alone.
 
   A reader's cue (`cue/2`, which an embedding app wires to the reader's `notify:`) names a topic and
   row ids; the `Tracker` re-reads those rows from the table by id. A cue is never the data, so
@@ -21,7 +22,8 @@ defmodule CodingAgentFramework.Tracker do
       iex> dir = CodingAgentFramework.TestHost.test_dir()
       iex> me = self()
       iex> {:ok, tracker} = CodingAgentFramework.Tracker.start_link(
-      ...>   sources: [{CodingAgentFramework.Tracker.RegistrySource,
+      ...>   sources: [{CodingAgentFramework.Tracker.ReaderSource,
+      ...>              table: CodingAgentFramework.Registry.Table,
       ...>              db: Path.join(dir, "r.db"), host: "laptop", account: "work"}],
       ...>   notify: &send(me, &1))
       iex> {:ok, view} = CodingAgentFramework.Tracker.view(tracker)

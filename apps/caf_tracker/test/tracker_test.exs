@@ -4,7 +4,7 @@ defmodule CodingAgentFramework.TrackerTest do
 
   alias CodingAgentFramework.{Registry, TestHost, Tracker}
   alias CodingAgentFramework.Registry.Table
-  alias CodingAgentFramework.Tracker.{Fold, RegistrySource}
+  alias CodingAgentFramework.Tracker.{Fold, ReaderSource}
   alias Exqlite.Sqlite3
 
   doctest Tracker
@@ -19,7 +19,8 @@ defmodule CodingAgentFramework.TrackerTest do
     {ref, fn -> :atomics.get(ref, 1) end}
   end
 
-  defp sources(db), do: for({h, a} <- @scopes, do: {RegistrySource, db: db, host: h, account: a})
+  defp sources(db),
+    do: for({h, a} <- @scopes, do: {ReaderSource, table: Table, db: db, host: h, account: a})
 
   defp start(db, clock, notify \\ fn _ -> :ok end) do
     {:ok, t} =
@@ -232,13 +233,12 @@ defmodule CodingAgentFramework.TrackerTest do
         File.mkdir_p!(Path.join(dir, "sessions"))
         File.write!(Path.join(dir, "sessions/7.json"), ~s({"pid": 7, "sessionId": "s#{n}"}))
         db = Path.join(dir, "r.db")
-        src = [{RegistrySource, db: db, host: "test", account: "a"}]
+        src = [{ReaderSource, table: Table, db: db, host: "test", account: "a"}]
 
         reg = [
           programs: TestHost.programs(),
           host: TestHost.host(),
-          account: "a",
-          config_dir: dir,
+          accounts: %{"a" => dir},
           db: db,
           notify: &send(me, {:reg, n, &1})
         ]
@@ -271,8 +271,12 @@ defmodule CodingAgentFramework.TrackerTest do
     dir = TestHost.test_dir()
     db = Path.join(dir, "r.db")
     {ref, now} = clock()
-    src = {RegistrySource, db: db, host: "h", account: "a"}
-    broken = {RegistrySource, db: Path.join(dir, "no/such/dir/r.db"), host: "h", account: "x"}
+    src = {ReaderSource, table: Table, db: db, host: "h", account: "a"}
+
+    broken =
+      {ReaderSource,
+       table: Table, db: Path.join(dir, "no/such/dir/r.db"), host: "h", account: "x"}
+
     {:ok, t} = Tracker.start_link(sources: [src, broken], clock: now)
 
     assert {:ok, [{"registry:h:a", :unread}, {"registry:h:x", :unread}]} =

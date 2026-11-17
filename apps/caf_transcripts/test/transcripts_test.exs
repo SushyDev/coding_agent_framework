@@ -264,7 +264,7 @@ defmodule CodingAgentFramework.TranscriptsTest do
 
       opts = [
         programs: TestHost.programs(),
-        account: "a",
+        accounts: ["a"],
         db: Path.join(dir, "t.db"),
         notify: &send(me, {:cue, &1})
       ]
@@ -275,23 +275,26 @@ defmodule CodingAgentFramework.TranscriptsTest do
     test "reads a file written in pieces, resumes after a restart, and reads a shrunk file again",
          ctx do
       {:ok, t} = Transcripts.start_link(ctx.opts)
-      assert Transcripts.rows(t) == :unread
-      assert {:ok, %{ids: [id], failed: []}} = Transcripts.read(t, [{"s1", ctx.path}])
-      assert {:ok, %{problem: "no_file", offset: 0}} = Transcripts.session(t, "s1")
+      assert Transcripts.rows(t, "a") == :unread
+      assert {:ok, %{ids: [id], failed: []}} = Transcripts.read(t, [{"a", "s1", ctx.path}])
+      assert {:ok, %{problem: "no_file", offset: 0}} = Transcripts.session(t, "a", "s1")
 
       first = prompt("p1", "[r-1] go") <> "\n"
       reply = assistant("m1", [text("done")], "end_turn", 2) <> "\n"
       File.write!(ctx.path, first <> binary_part(reply, 0, 10))
       assert {:ok, %{ids: [^id]}} = Transcripts.read(t)
       assert_received {:cue, %{topic: "transcripts:test:a", ids: [^id]}}
-      assert {:ok, %{offset: offset, last_reply: nil}} = Transcripts.session(t, "s1")
+      assert {:ok, %{offset: offset, last_reply: nil}} = Transcripts.session(t, "a", "s1")
       assert offset == byte_size(first)
 
       File.write!(ctx.path, binary_part(reply, 10, byte_size(reply) - 10), [:append])
       assert {:ok, %{ids: [^id]}} = Transcripts.read(t)
-      assert {:ok, %{last_reply: %{text: "done"}, problem: nil}} = Transcripts.session(t, "s1")
-      assert {:ok, true} = Transcripts.contains(t, "s1", "[r-1]", "go", 0)
-      assert {:ok, false} = Transcripts.contains(t, "s1", "[r-1]", "go", offset)
+
+      assert {:ok, %{last_reply: %{text: "done"}, problem: nil}} =
+               Transcripts.session(t, "a", "s1")
+
+      assert {:ok, true} = Transcripts.contains(t, "a", "s1", "[r-1]", "go", 0)
+      assert {:ok, false} = Transcripts.contains(t, "a", "s1", "[r-1]", "go", offset)
 
       # A restarted reader resumes at its offset: bytes before the seam are never read again.
       GenServer.stop(t)
@@ -301,13 +304,13 @@ defmodule CodingAgentFramework.TranscriptsTest do
       assert {:ok, %{ids: [^id]}} = Transcripts.read(t)
 
       assert {:ok, %{problem_count: 0, prompts: [%{prompt_id: "p1"}, %{prompt_id: "p2"}]}} =
-               Transcripts.session(t, "s1")
+               Transcripts.session(t, "a", "s1")
 
       File.write!(ctx.path, first)
       assert {:ok, %{ids: [^id]}} = Transcripts.read(t)
 
       assert {:ok, %{problem: "rewritten", rewrites: 1, prompts: [_], last_reply: nil}} =
-               Transcripts.session(t, "s1")
+               Transcripts.session(t, "a", "s1")
     end
 
     test "a text read from an offset takes at most the bound, and a read with none runs to the end",
@@ -316,34 +319,60 @@ defmodule CodingAgentFramework.TranscriptsTest do
       File.write!(ctx.path, whole)
       size = byte_size(whole)
       {:ok, t} = Transcripts.start_link(ctx.opts)
-      {:ok, _} = Transcripts.read(t, [{"s1", ctx.path}])
-      assert {:ok, %{offset: ^size}} = Transcripts.session(t, "s1")
+      {:ok, _} = Transcripts.read(t, [{"a", "s1", ctx.path}])
+      assert {:ok, %{offset: ^size}} = Transcripts.session(t, "a", "s1")
 
-      assert {:ok, %{bytes: bytes, from: 5}} = Transcripts.text(t, "s1", 5, max: 100)
+      assert {:ok, %{bytes: bytes, from: 5}} = Transcripts.text(t, "a", "s1", 5, max: 100)
       assert bytes == binary_part(whole, 5, 100)
 
-      assert {:ok, %{bytes: bytes, from: from}} = Transcripts.text(t, "s1", size - 50, max: 500)
+      assert {:ok, %{bytes: bytes, from: from}} =
+               Transcripts.text(t, "a", "s1", size - 50, max: 500)
+
       assert {bytes, from} == {binary_part(whole, size - 50, 50), size - 50}
 
-      assert {:ok, %{bytes: bytes, from: from}} = Transcripts.text(t, "s1", {:last, 300}, max: 20)
+      assert {:ok, %{bytes: bytes, from: from}} =
+               Transcripts.text(t, "a", "s1", {:last, 300}, max: 20)
+
       assert {bytes, from} == {binary_part(whole, size - 300, 20), size - 300}
 
-      assert {:ok, %{bytes: bytes}} = Transcripts.text(t, "s1", 10)
+      assert {:ok, %{bytes: bytes}} = Transcripts.text(t, "a", "s1", 10)
       assert byte_size(bytes) == size - 10
     end
 
     test "a failed shell leaves the session as it was", ctx do
       File.write!(ctx.path, prompt("p1", "go") <> "\n")
       {:ok, t} = Transcripts.start_link(ctx.opts)
-      {:ok, _} = Transcripts.read(t, [{"s1", ctx.path}])
+      {:ok, _} = Transcripts.read(t, [{"a", "s1", ctx.path}])
       GenServer.stop(t)
 
       programs = TestHost.programs(TestHost.host(), %{tail: "/nonexistent/tail"})
       {:ok, t} = Transcripts.start_link(Keyword.put(ctx.opts, :programs, programs))
       File.write!(ctx.path, prompt("p2", "more") <> "\n", [:append])
       assert {:ok, %{ids: [], failed: [{"s1", {:sh, 127, _}}]}} = Transcripts.read(t)
-      assert {:ok, %{prompts: [_]}} = Transcripts.session(t, "s1")
-      assert {:refused, :unknown_session} = Transcripts.contains(t, "nope", "m", "t", 0)
+      assert {:ok, %{prompts: [_]}} = Transcripts.session(t, "a", "s1")
+      assert {:refused, :unknown_session} = Transcripts.contains(t, "a", "nope", "m", "t", 0)
+    end
+
+    test "one Transcripts over every account: a session id in two accounts is two rows, read on its interval",
+         ctx do
+      moved = Path.join(ctx.dir, "s1-b.jsonl")
+      File.write!(ctx.path, prompt("p1", "go") <> "\n")
+      File.write!(moved, prompt("p1", "go") <> "\n" <> prompt("p2", "on") <> "\n")
+      {:ok, t} = Transcripts.start_link(Keyword.put(ctx.opts, :accounts, ["a", "b", "c"]))
+
+      sessions = [{"a", "s1", ctx.path}, {"b", "s1", moved}]
+      assert {:ok, %{ids: [one, two], failed: []}} = Transcripts.read(t, sessions)
+      assert_received {:cue, %{topic: "transcripts:test:a", ids: [^one]}}
+      assert_received {:cue, %{topic: "transcripts:test:b", ids: [^two]}}
+      assert Transcripts.rows(t, "c") == :unread
+      assert {:ok, %{prompts: [_]}} = Transcripts.session(t, "a", "s1")
+      assert {:ok, %{prompts: [_, _]}} = Transcripts.session(t, "b", "s1")
+
+      # Every known session, and a read row for every account, on the reader's own interval.
+      GenServer.stop(t)
+      opts = ctx.opts |> Keyword.put(:accounts, ["a", "b", "c"]) |> Keyword.put(:interval, 60_000)
+      {:ok, _} = Transcripts.start_link(opts)
+      assert_receive {:cue, %{topic: "transcripts:test:c", ids: []}}
     end
   end
 end

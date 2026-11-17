@@ -6,11 +6,11 @@ defmodule CodingAgentFramework.Sessions do
   project that its start checks, adds and sets up.
 
   The caller's supervision tree starts one `Sessions` per host, with no name, and gives it the
-  host's `Programs`, its dtach directory, its `Control`, a `Registry` per account and the SQLite
-  path:
+  host's `Programs`, its dtach directory, its `Control`, the host's `Registry` (one over every
+  account) and the SQLite path:
 
       {:ok, sessions} = Sessions.start_link(programs: programs, dir: "/srv/caf/dtach",
-        control: control, registries: %{"work" => registry}, db: "/srv/caf/caf.db")
+        control: control, registry: registry, db: "/srv/caf/caf.db")
       {:ok, account} = Accounts.ready(accounts, "work")
       Sessions.start(sessions, "main", account,
         role: :parent, cwd: "/src/app", claude: claude, model: "opus", env: env,
@@ -144,7 +144,7 @@ defmodule CodingAgentFramework.Sessions do
   @doc """
   Starts a `Sessions` and adopts or ends the rows a previous one left `starting`. Options:
   `programs:` (naming dtach, sh, env, rm, ps, kill, sleep and tail), `dir:` (the dtach directory),
-  `control:`, `registries:` (account name to its `Registry`), `db:`, and optionally `stream:`
+  `control:`, `registry:` (the host's `Registry`), `db:`, and optionally `stream:`
   and `home:` (the host's `Stream` and the framework home, for delegates and worktrees),
   `reaper:` (the host's `Shell.Reaper`, for worktrees; `programs:` then names git and mkdir),
   `notify:`, `size:`
@@ -272,7 +272,7 @@ defmodule CodingAgentFramework.Sessions do
         ps: ps,
         db: db,
         control: Keyword.fetch!(opts, :control),
-        registries: Keyword.fetch!(opts, :registries),
+        registry: Keyword.get(opts, :registry),
         stream: Keyword.get(opts, :stream),
         home: Keyword.get(opts, :home),
         notify: Keyword.get(opts, :notify, fn _ -> :ok end),
@@ -456,9 +456,9 @@ defmodule CodingAgentFramework.Sessions do
   defp end_reading(state, row) do
     record = %{pid: row.pid, start: row.proc_start}
 
-    with {:ok, registry} <- Map.fetch(state.registries, row.account),
+    with {:ok, registry} <- registry(state),
          {:ok, _} <- Registry.read(registry),
-         {:ok, %{rows: files}} <- Registry.rows(registry) do
+         {:ok, %{rows: files}} <- Registry.rows(registry, row.account) do
       case Enum.find(files, &own_file?(&1, row)) do
         %{alive: :live, status: "idle"} -> {:idle, record}
         %{alive: :live, status: status} -> {:not_idle, status}
@@ -797,9 +797,9 @@ defmodule CodingAgentFramework.Sessions do
   # file; any read that fails is `{:unknown, _}`.
   defp confirm(state, row, read?) do
     with {:ok, socket} <- Holder.state(state.holder, row.socket),
-         {:ok, registry} <- Map.fetch(state.registries, row.account),
+         {:ok, registry} <- registry(state),
          {:ok, _} <- if(read?, do: Registry.read(registry), else: {:ok, :cued}),
-         {:ok, %{rows: files}} <- Registry.rows(registry) do
+         {:ok, %{rows: files}} <- Registry.rows(registry, row.account) do
       named = Enum.filter(files, &(&1.name == row.name))
       file = Enum.find(named, &(&1.alive == :live))
 
@@ -819,6 +819,9 @@ defmodule CodingAgentFramework.Sessions do
 
   defp file_of(row, record),
     do: %{pid: record.pid, proc_start: record.start, session_id: row.session_id}
+
+  defp registry(%{registry: nil}), do: :error
+  defp registry(%{registry: registry}), do: {:ok, registry}
 
   # A pid that `ps` lists with another start time was reused: the held process exited.
   defp liveness(state, row), do: alive(state, [row])[{row.pid, row.proc_start}]

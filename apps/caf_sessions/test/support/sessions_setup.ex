@@ -39,7 +39,7 @@ defmodule CodingAgentFramework.SessionsSetup do
 
     registry =
       start_supervised!(
-        {Registry, programs: programs(), account: "work", config_dir: account.config_dir, db: db}
+        {Registry, programs: programs(), accounts: %{"work" => account.config_dir}, db: db}
       )
 
     dtach = Path.join(dir, "d")
@@ -56,7 +56,7 @@ defmodule CodingAgentFramework.SessionsSetup do
       programs: programs(),
       dir: dtach,
       control: control,
-      registries: %{"work" => registry},
+      registry: registry,
       stream: stream,
       home: dir,
       db: db,
