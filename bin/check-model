@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Checks the TLA+ specs in model/tla with TLC. TLC comes from devenv:
 #
-#   devenv shell -- bin/check-model                every fast configuration, model/tla/*.cfg
+#   devenv shell -- bin/check-model                every fast configuration, model/tla/*.cfg,
+#                                                  and a parse of every slow one
 #   devenv shell -- bin/check-model all            the same
 #   devenv shell -- bin/check-model slow           every slow configuration, model/tla/slow/*.cfg
 #   devenv shell -- bin/check-model Agent_Viewers               one configuration, by its name
@@ -10,7 +11,10 @@
 # TLC uses every core unless TLC_WORKERS names a number: TLC_WORKERS=2 bin/check-model
 #
 # The fast configurations finish in under 30 s each and run in the test gate. The slow ones are
-# run by hand, and their times go in the build note.
+# run by hand, and their times go in the build note. `all` also parses every slow configuration:
+# TLC reads the spec and the configuration and takes the initial state alone (a simulation one
+# state deep), so a constant left unset or a name the spec lost fails here, not on the next run
+# by hand.
 #
 # A configuration `<Spec>_<Scenario>.cfg` checks `<Spec>.tla`. One named `Break_<Spec>_<Bug>.cfg`
 # sets the spec's `Break` constant to a deliberate bug: it passes only when TLC reports an
@@ -36,8 +40,12 @@ tlc="$CAF_TLC"
 export PATH="$CAF_TOOLS_PATH"
 
 configs=()
+parsed=()
 case "$what" in
-  all) configs=("$specs"/*.cfg) ;;
+  all)
+    configs=("$specs"/*.cfg)
+    parsed=("$specs"/slow/*.cfg)
+    ;;
   slow) configs=("$specs"/slow/*.cfg) ;;
   -h | --help)
     echo "usage: bin/check-model [all | slow | <configuration> | slow/<configuration>]"
@@ -99,6 +107,25 @@ for cfg in "${configs[@]}"; do
     failed=1
   else
     echo "   ok"
+  fi
+done
+
+for cfg in "${parsed[@]}"; do
+  name="$(basename "$cfg" .cfg)"
+  spec="${name%%_*}"
+  relative="${cfg#"$specs"/}"
+  echo "== parse $relative ($spec.tla)"
+  status=0
+  (cd "$specs" &&
+    "$tlc" -workers 1 -cleanup -noGenerateSpecTE -metadir "$out/states-parse-$name" \
+      -simulate num=1 -depth 1 -config "$relative" "$spec.tla") >"$out/parse-$name.out" 2>&1 ||
+    status=$?
+  if [[ $status -eq 0 ]]; then
+    echo "   ok"
+  else
+    grep -E "Error:|is violated|not assigned" "$out/parse-$name.out" | head -3 | sed 's/^/   /' || true
+    echo "   FAILED: TLC exited $status; see _build/tlc/parse-$name.out"
+    failed=1
   fi
 done
 

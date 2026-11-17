@@ -88,10 +88,16 @@
 (* ReplyInMemory's and SelfReply's wrong readers hold; the design never    *)
 (* writes them.                                                            *)
 (*                                                                         *)
+(* A claim is Claim.tla's (Cl): its row, the call that holds it, the check *)
+(* that its state is current, a restart that cuts it, and the properties   *)
+(* OneClaimPerState, OneFixPerState (Claim's OneActPerState), ClaimEnds    *)
+(* and NoActOnCutOffClaim. A state is the agent's `epoch`. The operator's  *)
+(* Breaks instance Claim with a bug for its own claims only.               *)
+(*                                                                         *)
 (* Defense in depth, with no Break: FixActs' check of the target's process *)
 (* for an interrupt or a resume, behind its check of the claimed state's   *)
 (* number (stuck and dead are left only by steps that move it). For a stop *)
-(* the process check is Control's checked write, as the /exit of Move.tla. *)
+(* the process check is the end by the delegate's own pid and start time.  *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -197,10 +203,13 @@ VARIABLES
     msgs,      \* table: i -> [from (an actor), to (addressee), st]
     msend,     \* in memory: i -> "none", "asked" (row says sending), "sent" (typed, row not marked)
     inbox,     \* a -> the message ids in a's transcript, in order
-    claims,    \* table: the claims, [by (an actor), t, ep, kind, n]
+    \* The claims, as Claim.tla's variables (Cl)
+    claims,    \* table: the claims, [by (an actor), t, s (t's epoch), act (the fix), n]
     done,      \* table: the claims whose call has ended
     calls,     \* in memory: the claims whose fix is under way
-    fixed,     \* ghost: the states <<t, ep>> a fix acted on
+    fixed,     \* ghost: the states <<t, epoch>> a fix acted on
+    twice,     \* ghost: a fix acted on a state a fix acted on before
+    cut,       \* ghost: the states whose claim a restart cut off before any fix
     svc,       \* table: s -> "none", "running", "ended"
     owner,     \* table: s -> its owner, or None
     keep,      \* table: s -> kept for the owner's parent when the owner ends
@@ -213,7 +222,7 @@ VARIABLES
 agentVars == <<proc, epoch, faults>>
 msgVars == <<msgs, msend, inbox>>
 replyVars == <<fold, answers, rmem, last>>
-claimVars == <<claims, done, calls, fixed>>
+claimVars == <<claims, done, calls, fixed, twice, cut>>
 svcVars == <<svc, owner, keep>>
 vars == <<up, restarts, agentVars, msgVars, claimVars, svcVars, replyVars, wrong>>
 
@@ -222,6 +231,18 @@ Sent == {i \in Ids : msgs[i].st # "none"}
 \* disjunction in an action and would read `proc` of the operator.
 Live(a) == IF a \in Operators THEN TRUE ELSE proc[a] # "ended"
 
+\* The claims, under the bug a Break puts in the claims of the actor `by`.
+ClaimBreak(by) ==
+    CASE Break = "TwoClaims" \/ (Break = "OperatorTwoClaims" /\ by \in Operators) -> "TwoClaims"
+      [] Break = "StaleFix" \/ (Break = "OperatorStaleFix" /\ by \in Operators) -> "Stale"
+      [] Break = "ClaimInMemory" -> "InMemory"
+      [] OTHER -> "none"
+
+Cl(b) == INSTANCE Claim WITH
+           Targets <- Agents, Actors <- Actors, MaxState <- MaxEpoch, now <- epoch,
+           rows <- claims, acting <- calls, done <- done, acted <- fixed, twice <- twice,
+           cut <- cut, Break <- b
+
 -----------------------------------------------------------------------------
 Init ==
     /\ up = TRUE /\ restarts = 0
@@ -229,7 +250,7 @@ Init ==
     /\ epoch = [a \in Agents |-> 0] /\ faults = 0
     /\ msgs = [i \in Ids |-> NoMsg] /\ msend = [i \in Ids |-> "none"]
     /\ inbox = [a \in Agents |-> <<>>]
-    /\ claims = {} /\ done = {} /\ calls = {} /\ fixed = {}
+    /\ claims = {} /\ done = {} /\ calls = {} /\ fixed = {} /\ twice = FALSE /\ cut = {}
     /\ svc = [s \in Services |-> "none"] /\ owner = [s \in Services |-> None]
     /\ keep = [s \in Services |-> FALSE]
     /\ fold = [i \in Ids |-> "none"] /\ answers = {} /\ rmem = {}
@@ -243,10 +264,9 @@ FrameworkDies ==
     /\ up /\ restarts < MaxRestarts
     /\ up' = FALSE /\ restarts' = restarts + 1
     /\ msend' = [i \in Ids |-> "none"]
-    /\ calls' = {}
-    /\ IF Break = "ClaimInMemory" THEN claims' = {} /\ done' = {} ELSE UNCHANGED <<claims, done>>
+    /\ Cl("none")!Restart
     /\ rmem' = {}
-    /\ UNCHANGED <<agentVars, msgs, inbox, fixed, svcVars, fold, answers, last, wrong>>
+    /\ UNCHANGED <<agentVars, msgs, inbox, svcVars, fold, answers, last, wrong>>
 
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
@@ -422,58 +442,43 @@ Kind(t) == CASE proc[t] = "stuck" -> "interrupt"
              [] proc[t] = "dead" -> "resume"
              [] OTHER -> "stop"
 
-\* The caller's calls already on this state: a second one is `n` = 2.
-Calls(c, t) == {q \in claims : q.by = c /\ q.t = t /\ q.ep = epoch[t]}
-
 \* A stop ends a delegate only: a main session's end is a person's, outside Grants.
 Stoppable(t) == t \in Delegates \/ Kind(t) # "stop" \/ Break = "OperatorStopsMain"
 
+\* The claim on t's state now, for the fix that state needs (Cl!Take).
 ClaimTaken(c, t) ==
-    LET r == [by |-> c, t |-> t, ep |-> epoch[t], kind |-> Kind(t),
-              n |-> Cardinality(Calls(c, t)) + 1] IN
-    /\ up /\ Live(c) /\ r.n <= 2
+    /\ up /\ Live(c)
     /\ proc[t] \in {"stuck", "dead", "idle"}
     /\ MayFix(c, t) /\ Stoppable(t)
-    /\ \/ ~\E q \in claims : q.t = t /\ q.ep = epoch[t]
-       \/ Break = "TwoClaims"
-       \/ Break = "OperatorTwoClaims" /\ c \in Operators
-    /\ claims' = claims \cup {r} /\ calls' = calls \cup {r}
-    /\ UNCHANGED <<up, restarts, agentVars, msgVars, done, fixed, svcVars, wrong, replyVars>>
+    /\ Cl(ClaimBreak(c))!Take(c, t, Kind(t))
+    /\ UNCHANGED <<up, restarts, agentVars, msgVars, svcVars, wrong, replyVars>>
 
-CanAct(r) ==
-    /\ \/ epoch[r.t] = r.ep \/ Break = "StaleFix"
-       \/ Break = "OperatorStaleFix" /\ r.by \in Operators
-    /\ proc[r.t] = Needs[r.kind]
+\* The claim is current, and the target is in the state its fix needs.
+CanAct(r) == Cl(ClaimBreak(r.by))!Current(r) /\ proc[r.t] = Needs[r.act]
 
 \* The fix acts on the state it claimed. An interrupt or a resume may not
 \* help; the state is then still claimed. An interrupt that helps ends the
 \* turn with a result (`error_during_execution`) that names its message; a
 \* resume's turn names none; a stop takes an idle agent.
 FixActs(r) ==
-    /\ up /\ r \in calls /\ CanAct(r)
-    /\ \/ /\ proc' = [proc EXCEPT ![r.t] = CASE r.kind = "interrupt" -> "idle"
-                                             [] r.kind = "resume" -> "working"
+    /\ up /\ CanAct(r) /\ Cl(ClaimBreak(r.by))!Act(r)
+    /\ \/ /\ proc' = [proc EXCEPT ![r.t] = CASE r.act = "interrupt" -> "idle"
+                                             [] r.act = "resume" -> "working"
                                              [] OTHER -> "ended"]
           /\ epoch' = [epoch EXCEPT ![r.t] = @ + 1]
-          /\ IF r.kind = "interrupt" THEN Result(r.t) ELSE UNCHANGED <<fold, last>>
-       \/ (r.kind # "stop" /\ UNCHANGED <<proc, epoch, fold, last>>)
-    /\ calls' = calls \ {r} /\ done' = done \cup {r}
-    /\ fixed' = fixed \cup {<<r.t, epoch[r.t]>>}
-    /\ wrong' = wrong \cup (IF <<r.t, epoch[r.t]>> \in fixed THEN {"twice"} ELSE {})
-                      \cup (IF epoch[r.t] = r.ep THEN {} ELSE {"stale"})
-    /\ UNCHANGED <<up, restarts, faults, msgVars, claims, svcVars, answers, rmem>>
+          /\ IF r.act = "interrupt" THEN Result(r.t) ELSE UNCHANGED <<fold, last>>
+       \/ (r.act # "stop" /\ UNCHANGED <<proc, epoch, fold, last>>)
+    /\ wrong' = wrong \cup (IF epoch[r.t] = r.s THEN {} ELSE {"stale"})
+    /\ UNCHANGED <<up, restarts, faults, msgVars, svcVars, answers, rmem>>
 
 FixRefused(r) ==
-    /\ up /\ r \in calls /\ ~CanAct(r)
-    /\ calls' = calls \ {r} /\ done' = done \cup {r}
-    /\ UNCHANGED <<up, restarts, agentVars, msgVars, claims, fixed, svcVars, wrong, replyVars>>
+    /\ up /\ ~CanAct(r) /\ Cl("none")!LetGo(r)
+    /\ UNCHANGED <<up, restarts, agentVars, msgVars, svcVars, wrong, replyVars>>
 
 \* A restart cut off the call: the claim ends, and its fix is never sent again.
 ClaimSettled(r) ==
-    /\ up /\ r \in claims \ done /\ r \notin calls
-    /\ done' = done \cup {r}
-    /\ UNCHANGED <<up, restarts, agentVars, msgVars, claims, calls, fixed, svcVars, replyVars,
-                   wrong>>
+    /\ up /\ Cl("none")!Settle(r)
+    /\ UNCHANGED <<up, restarts, agentVars, msgVars, svcVars, replyVars, wrong>>
 
 -----------------------------------------------------------------------------
 (* Services: one owner; fixed by it or its parent; handed along an edge; *)
@@ -522,7 +527,8 @@ Next ==
     \/ \E i \in Ids : \/ DeliveryAsked(i) \/ DeliveryTyped(i) \/ DeliveryRefused(i)
                       \/ DeliveryMarked(i) \/ SendingSettled(i) \/ EndedFirst(i)
                       \/ ReplyStored(i) \/ NoticeStored(i)
-    \/ \E r \in claims : FixActs(r) \/ FixRefused(r) \/ ClaimSettled(r)
+    \/ \E r \in calls : FixActs(r) \/ FixRefused(r)
+    \/ \E r \in claims : ClaimSettled(r)
     \/ \E s \in Services : \/ ServiceOwnerEnded(s)
                            \/ \E a \in Agents : ServiceStarts(a, s)
                            \/ \E a \in Actors : ServiceFixed(a, s)
@@ -536,7 +542,7 @@ Fairness ==
          /\ WF_vars(DeliveryTyped(i) \/ DeliveryRefused(i))
          /\ WF_vars(DeliveryMarked(i)) /\ WF_vars(SendingSettled(i)) /\ WF_vars(EndedFirst(i))
          /\ WF_vars(ReplyStored(i)) /\ WF_vars(NoticeStored(i))
-    /\ WF_vars(\E r \in claims : FixActs(r) \/ FixRefused(r))
+    /\ WF_vars(\E r \in calls : FixActs(r) \/ FixRefused(r))
     /\ WF_vars(\E r \in claims : ClaimSettled(r))
     /\ \A s \in Services : WF_vars(ServiceOwnerEnded(s))
 
@@ -551,8 +557,9 @@ TypeOK ==
     /\ msend \in [Ids -> {"none", "asked", "sent"}]
     /\ \A i \in Ids : msgs[i].st \in {"none", "queued", "sending", "delivered", "ended"}
     /\ \A i \in Ids : msgs[i].from \in Actors /\ msgs[i].to \in Agents
-    /\ claims \subseteq [by : Actors, t : Agents, ep : 0..MaxEpoch, kind : Kinds, n : 1..2]
+    /\ claims \subseteq [by : Actors, t : Agents, s : 0..MaxEpoch, act : Kinds, n : 1..2]
     /\ calls \subseteq claims \ done /\ done \subseteq claims
+    /\ twice \in BOOLEAN /\ cut \subseteq Agents \X (0..MaxEpoch)
     /\ svc \in [Services -> {"none", "running", "ended"}]
     /\ owner \in [Services -> Agents \cup {None}]
     /\ fold \in [Ids -> {"none", "turn", "result", "exited"}]
@@ -586,8 +593,8 @@ AlongEdges ==
 EndedNotDelivered == \A i \in Ids : msgs[i].st = "ended" => Count(i) = 0
 
 \* At most one claim holds a child's state, and a state is fixed at most once.
-OneClaimPerState == \A q, r \in claims : q.t = r.t /\ q.ep = r.ep => q = r
-OneFixPerState == "twice" \notin wrong
+OneClaimPerState == Cl("none")!OneClaimPerState
+OneFixPerState == Cl("none")!OneActPerState
 FixOnClaimedState == "stale" \notin wrong
 
 \* Only a parent fixes, and only its own child; the operator is a parent of
@@ -625,7 +632,10 @@ EndedMarked ==
 \* A claim's call ends: its fix verified, or the claim released.
 \* Claims are bounded and a claim never leaves `done`, so this says each
 \* claim's call ends.
-ClaimEnds == <>[](claims = done)
+ClaimEnds == Cl("none")!ClaimsEnd
+
+\* A claim a restart cut off is never acted on.
+NoActOnCutOffClaim == Cl("none")!NoActOnCutOffClaim
 
 \* A service whose owner ended without keeping it ends.
 ServiceEndsWithOwner ==
