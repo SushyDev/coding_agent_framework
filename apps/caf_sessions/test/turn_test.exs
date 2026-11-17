@@ -15,6 +15,8 @@ defmodule CodingAgentFramework.Sessions.TurnTest do
     assert Turn.interactive(@main, [@session_file], false) == :idle
     assert Turn.interactive(@main, [@session_file], :unread) == :idle
     assert Turn.interactive(@main, [%{@session_file | status: "busy"}], true) == :running
+    # A background command still runs after the turn ended (Claude Code 2.1.322, F-142).
+    assert Turn.interactive(@main, [%{@session_file | status: "shell"}], true) == :running
     assert Turn.interactive(@main, [%{@session_file | status: "waiting"}], true) == :waiting
     assert Turn.interactive(@main, [%{@session_file | alive: :gone}], true) == :gone
     assert Turn.interactive(@main, [%{@session_file | status: "new"}], true) == :unread

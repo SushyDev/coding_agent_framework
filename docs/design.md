@@ -598,6 +598,9 @@ one press at any level. It goes to the account with the most allowance left:
 2. Wait until no background command runs and no `run_delegate` call of the session is under
    way (its report would otherwise be written to a process the move ends). This is read after
    the drain began, so nothing can start after it; a background command is a child of the session's process and ends with it.
+   The session file says `shell`, not `idle`, while a background command runs after the turn
+   ended, and `idle` once it ends (measured on 2.1.322, F-142), so the idle read of step 3 is
+   this wait.
 3. End the session by SIGTERM to its pid, by the row's pid and start time, once its session
    file says `idle` (F-114) and no `Mailbox` row to it is `sending`; once the row is `stopping`,
    `Mailbox` neither marks nor hands on a row to it (F-122's new-1: a row marked before the
@@ -632,11 +635,15 @@ clear once no `Mailbox` row to it is `sending` and no `run_delegate` call of it 
 SIGTERM as above; a delegate's is SIGTERM too, by its record, once `Stream`'s fold reads its
 turn ended and no row to it is sending, since an `end_session` would settle its queued rows
 ended. A stop refused while a turn runs is asked again only on a `registry:` or `stream:` cue.
-`copying` copies `<config>/projects/<cwd>/<session id>.jsonl` and the directory of that name
-beside it, each whole under a temporary name and renamed, once the row is free (its process
+`copying` copies `<config>/projects/<cwd>/<session id>.jsonl`, the directory of that name
+beside it and `<config>/session-env/<session id>` (the one other per-session file 2.1.322
+keeps, F-133's new-4), each whole under a temporary name and renamed, once the row is free (its process
 gone by pid and start time and its socket dead); `resuming` is `Sessions.resume` on the other
 account with the same session id and the app's launch for the agent (a delegate's from
-`Delegates.launch/2`), the row's own options and model taken again. Each failure settles on one account:
+`Delegates.launch/2`), the row's own options and model taken again. An interactive session's
+first due row goes in as the resume's prompt (`launch`, "Delivery"; F-137's new-1), since the
+resumed process has no waiter until a turn of it ends; a row still `sending` settles first.
+Each failure settles on one account:
 
 - the drain or the stop not done by the move's deadline while the old process runs: given up,
   the session runs on on its account, the act `failed`;
@@ -649,8 +656,9 @@ account with the same session id and the app's launch for the agent (a delegate'
   act `move` `failed`, reason `stranded`, for a person.
 
 A resume is asked again only while the row is free, and `Sessions` starts no name whose process
-may live, so a restart never runs two. Background commands (step 2) are not read: no reader of
-them is built (F-133's new-1).
+may live, so a restart never runs two. Background commands (step 2) are read by the stop's idle
+read, through the session file (F-133's new-1); a move whose background command outlives its
+deadline is given up.
 
 Its chat is never archived.
 
@@ -1068,8 +1076,10 @@ the idle read, and waits for a `sending` one to settle until the stop's deadline
 with `{:sending, ids}`; a row still `queued` is not waited for (F-125's new-2). It
 replaces a typed `/exit`. Claude Code's shutdown keeps the transcript and
 fires SessionEnd with reason `other`, which `Sessions` and `Recoveries` read as that end. The
-session file's `status` (`busy`, `idle`, `waiting` with `waitingFor`) is not documented; it is
-checked against each pinned release, as the screen fixtures are.
+session file's `status` (`busy`, `idle`, `waiting` with `waitingFor`, and `shell` while a
+background command runs after the turn ended) is not documented; its shape is checked against
+each pinned release, as the screen fixtures are, and with it which per-session files a
+`--resume` reads (2.1.322: the transcript, its directory and `session-env/<session id>`).
 
 ## Agents working together
 
@@ -1263,7 +1273,8 @@ changed (R6).
 `Inlet` types only a short row, so neither carries a delegate's brief into a new interactive
 session. Claude Code takes an initial prompt as its last argument, at a start and with
 `--resume`, and runs it as the first turn. So the first row to an interactive session (a
-delegate's brief, or its word to go on, or the brief again, at a resume) is marked `sending`
+delegate's brief, or its word to go on, or the brief again, at a resume; the first row due at a
+move's resume, F-142) is marked `sending`
 by `launch` before the start (`Mailbox.launch/4`, by the part that starts it, by the start's
 deadline), and the start's answer is told to `Mailbox` (`launched/3`). Every later row goes by
 the waiter, or by `typed` when it is short and no waiter is connected. A long row to a session

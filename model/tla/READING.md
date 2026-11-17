@@ -173,16 +173,22 @@ A main session moves from account `Home` to the other one. Read it in the order 
 
 - `Drain` (a press, or `UsageRises` to 90 %) sets `phase` to `"draining"`. From then on
   `BgStarted` and `DelegateStarted` are refused (`Draining`).
-- `Cleared` is the Mover reading that no background command runs. It is a reading, not a lock:
-  only the drain keeps it true until the end.
+- `Cleared` is the drain read clear (no `run_delegate` call waits, left abstract).
 - The stop, as `Sessions` makes it: `StopAsked` writes the row `"stopping"`; `IdleRead` reads
-  the turn ended and no row to the session sending, and keeps the pid in memory (`readAt`);
+  the session file `idle`, so the turn and every background command ended (`shell` while one
+  runs), and no row to the session sending, and keeps the pid in memory (`readAt`). It is a
+  reading, not a lock: only the drain keeps no background command from starting after it;
   `Term` is the SIGTERM, a step of its own, so a person's prompt (`PromptSent`) can start a turn
   between them. `Exits(p, "term")` is the process going, with whatever still runs in it: a
   background command goes into `lost`, and the cut turn stays in the old account's transcript.
   `Exits(p, "crash")` is the old process crashing once its stop was asked. Each sends a
   `SessionEnd`, held in `ends` until `SessionEndArrives` handles it, at any later time.
-- `Copied` then `Resumed` start a new process on `target` from the copied transcript.
+- `Copied` then `Resumed` start a new process on `target` from the copied transcript, its
+  `turned` false. `LaunchMarked` marks the first due row by `launch` once the old process is
+  gone, and `ResumedWith` carries it as the resume's prompt; `ResumedBare` resumes with none
+  only when no row is due or in flight. `bare` remembers such a resume: a row stored after it
+  waits for a person's prompt (`Waits`), since the new process has no waiter until a turn of
+  it ends and any row may be long (`Long` is every row).
 - Rows to the session are `Delivery.tla`'s (`D`): a delegate's report (`DelegateReports`) and
   a message (`MessageSent`). `Takes` puts a row in the transcript of the account its process
   runs on; `Has(i)` reads the transcript of the account the session's row names, so after the

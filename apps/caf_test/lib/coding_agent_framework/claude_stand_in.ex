@@ -5,8 +5,9 @@ defmodule CodingAgentFramework.ClaudeStandIn do
 
   - writes `<CLAUDE_CONFIG_DIR>/sessions/<pid>.json` in the shape `Registry` reads, with
     synthetic values: its pid, `sessionId` (the `--resume` id, or one made up), `name` (from
-    `--name`), `cwd`, `procStart` as `ps` prints it, and `status`: `idle`, or `busy` from the
-    line `busy` until the line `idle`, as a turn runs. The file is written whole and renamed,
+    `--name`), `cwd`, `procStart` as `ps` prints it, and `status`: `idle`, or `busy` or `shell`
+    from the line of that word until the line `idle`, as a turn runs, or a background command
+    after it (Claude Code 2.1.322's `shell`). The file is written whole and renamed,
     and removed when the stand-in exits;
   - exits 143 on SIGTERM, as Claude Code does (F-114), unless it read the line `deaf`, after
     which it ignores SIGTERM, as a process that does not end would; after the line
@@ -83,7 +84,7 @@ defmodule CodingAgentFramework.ClaudeStandIn do
       case $line in
         /exit) exit 0 ;;
         go) [ $mode = on_go ] && announce ;;
-        busy|idle) status=$line; [ -n "$announced" ] && announce ;;
+        busy|idle|shell) status=$line; [ -n "$announced" ] && announce ;;
         deaf) trap '' TERM ;;
         cut\\ *) cut=${line#cut }; trap 'printf "%s\\n" "{\\"type\\":\\"cut\\"}" >> "$cut"; exit 143' TERM ;;
       esac

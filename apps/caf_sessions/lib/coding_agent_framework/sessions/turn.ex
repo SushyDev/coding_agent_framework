@@ -104,12 +104,14 @@ defmodule CodingAgentFramework.Sessions.Turn do
   end
 
   @doc """
-  What a session file alone says of the turn: `:running` (`busy`), `:waiting`, `:idle`,
-  `:gone` for a file whose process is not live, `:unread` with no file or a status this build
-  does not know (the field is not documented, and is checked per release).
+  What a session file alone says of the turn: `:running` (`busy`, or `shell`: the turn ended
+  and a background command of it still runs, measured on Claude Code 2.1.322), `:waiting`,
+  `:idle`, `:gone` for a file whose process is not live, `:unread` with no file or a status
+  this build does not know (the field is not documented, and is checked per release).
   """
   @spec file_state(map | nil) :: t
   def file_state(%{alive: :live, status: "busy"}), do: :running
+  def file_state(%{alive: :live, status: "shell"}), do: :running
   def file_state(%{alive: :live, status: "waiting"}), do: :waiting
   def file_state(%{alive: :live, status: "idle"}), do: :idle
   def file_state(%{alive: alive}) when alive in [:gone, :replaced], do: :gone
