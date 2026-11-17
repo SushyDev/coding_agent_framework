@@ -245,6 +245,8 @@ defmodule CodingAgentFramework.Example do
              Sessions,
              # Mailbox starts after Sessions: it is looked up at each read.
              # Until `Mains`: each main session the config declares, as an agent row.
+             # A startup dialog waits on a person (F-140): the app answers none on its own,
+             # and the operator answers through `Operator.answer_startup/4`.
              reaper: pid.(:reaper),
              programs: p,
              dir: Config.path(c, "d"),
@@ -255,6 +257,7 @@ defmodule CodingAgentFramework.Example do
              db: db,
              notify: notify,
              inlet: pid.(:inlet),
+             dialog: &Sessions.Dialog.ask/2,
              open_to: &Mailbox.open_to(pid.(:mailbox), &1, status: &2),
              waiter: %{port: c.ports.intake, secret: w.secret},
              acts: pid.(:acts),
@@ -379,7 +382,8 @@ defmodule CodingAgentFramework.Example do
             tool_timeout: c.tool_timeout,
             margin: c.margin,
             acts: pid.(:acts),
-            mover: {Mover, pid.(:mover)}}
+            mover: {Mover, pid.(:mover)},
+            sessions: {Sessions, pid.(:sessions)}}
          end},
         {:mcp_http,
          fn pid ->

@@ -21,7 +21,10 @@ defmodule CodingAgentFramework.Screen do
     * `%{state: :running}`: a turn runs. Only the footer under the box says so; a spinner line
       alone does not, and an ended turn's `… · done` line stays above the box;
     * `%{state: :dialog, kind: kind, options: [label], selected: label}`: a dialog, its
-      options' labels in order and the one the `❯` marks. Answer it by label (`option_keys/2`);
+      options' labels in order and the one the `❯` marks. Answer it by label (`option_keys/2`).
+      Its kinds: `:trust` (the folder trust dialog), `:imports` (external `CLAUDE.md` imports,
+      with `paths:`, the external paths it lists) and `:permission`. The two a start meets
+      first, `:trust` and `:imports`, send no hook event;
     * `%{state: :exited}`: Claude Code has exited.
 
   A screen the release's reading cannot place, or places only by a guess, is unrecognized: a
@@ -35,7 +38,13 @@ defmodule CodingAgentFramework.Screen do
   @type t ::
           %{state: :idle, box: box}
           | %{state: :running}
-          | %{state: :dialog, kind: atom, options: [String.t()], selected: String.t()}
+          | %{
+              required(:state) => :dialog,
+              required(:kind) => atom,
+              required(:options) => [String.t()],
+              required(:selected) => String.t(),
+              optional(:paths) => [String.t()]
+            }
           | %{state: :exited}
 
   @doc """
@@ -151,27 +160,58 @@ defmodule CodingAgentFramework.Screen do
   end
 
   defp options(body, kind) do
-    {run, rest} = body |> drop_trailing_blanks() |> Enum.reverse() |> Enum.split_while(&option?/1)
+    pad = String.duplicate(" ", kind.indent)
+
+    {run, rest} =
+      body |> drop_trailing_blanks() |> Enum.reverse() |> Enum.split_while(&option?(&1, pad))
+
     titled = Enum.any?(rest, &(String.trim(&1) == kind.title))
     # A line just above the options that is neither blank nor the title may be a wrapped option.
     bounded = String.trim(List.first(rest, "")) in ["", kind.title]
-    parsed = run |> Enum.reverse() |> Enum.map(&parse_option/1)
+    parsed = run |> Enum.reverse() |> Enum.map(&parse_option(&1, pad))
     labels = Enum.map(parsed, &label(&1, kind))
 
     with true <- titled and bounded and run != [],
          [selected] <- parsed |> Enum.filter(&elem(&1, 0)) |> Enum.map(&label(&1, kind)),
          true <- Enum.all?(labels, &is_binary/1) and Enum.uniq(labels) == labels,
-         true <- not kind.numbered or numbered_in_order?(parsed) do
-      {:ok, %{state: :dialog, kind: kind.kind, options: labels, selected: selected}}
+         true <- not kind.numbered or numbered_in_order?(parsed),
+         {:ok, extra} <- paths(Enum.reverse(rest), kind) do
+      {:ok,
+       Map.merge(%{state: :dialog, kind: kind.kind, options: labels, selected: selected}, extra)}
     else
       _ -> nil
     end
   end
 
-  defp option?(line), do: Regex.match?(~r/\A [❯ ] \S/u, line)
+  # The paths a dialog lists under its heading, one a line, more indented than the heading,
+  # up to the first blank line. A heading with no path under it is not the dialog the
+  # fixture shows.
+  defp paths(body, %{paths: heading}) do
+    with [line | after_it] <- Enum.drop_while(body, &(String.trim(&1) != heading)),
+         depth = indent(line),
+         listed = Enum.take_while(after_it, &(&1 != "")),
+         true <- listed != [] and Enum.all?(listed, &(indent(&1) > depth)) do
+      {:ok, %{paths: Enum.map(listed, &String.trim/1)}}
+    else
+      _ -> :error
+    end
+  end
 
-  defp parse_option(" ❯ " <> text), do: {true, text}
-  defp parse_option("   " <> text), do: {false, text}
+  defp paths(_body, _kind), do: {:ok, %{}}
+
+  defp option?(line, pad) do
+    case String.split_at(line, String.length(pad)) do
+      {^pad, rest} -> Regex.match?(~r/\A[❯ ] \S/u, rest)
+      _ -> false
+    end
+  end
+
+  defp parse_option(line, pad) do
+    case String.replace_prefix(line, pad, "") do
+      "❯ " <> text -> {true, text}
+      "  " <> text -> {false, text}
+    end
+  end
 
   defp label({_, text}, %{numbered: false}), do: text
 
@@ -197,6 +237,8 @@ defmodule CodingAgentFramework.Screen do
         {:ok, Enum.take(lines, length(lines) - after_it - 1), Enum.take(lines, -after_it)}
     end
   end
+
+  defp indent(line), do: String.length(line) - String.length(String.trim_leading(line, " "))
 
   defp rule?(line), do: line != "" and String.trim(line, "─") == ""
 

@@ -16,14 +16,18 @@ defmodule CodingAgentFramework.Screen.Reading do
     * `exited`: the line Claude Code leaves on the screen when it exits;
     * `resume`: what starts the line under `exited`;
     * `dialogs`: each dialog `Screen` knows, by its kind: its `title` (a line inside it), its
-      `footer` (what starts its last line) and whether its options are `numbered`.
+      `footer` (what starts its last line), whether its options are `numbered`, their `indent`
+      (the spaces before the selection mark), and, for a dialog that lists paths, the heading
+      above them (`paths`). Two kinds that share a footer differ by their title.
   """
 
   @type dialog :: %{
-          kind: atom,
-          title: String.t(),
-          footer: String.t(),
-          numbered: boolean
+          required(:kind) => atom,
+          required(:title) => String.t(),
+          required(:footer) => String.t(),
+          required(:numbered) => boolean,
+          required(:indent) => pos_integer,
+          optional(:paths) => String.t()
         }
 
   @type t :: %{

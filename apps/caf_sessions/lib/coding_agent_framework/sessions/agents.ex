@@ -29,7 +29,7 @@ defmodule CodingAgentFramework.Sessions.Agents do
       ["app-main", "app-fix"]
   """
 
-  alias CodingAgentFramework.Sessions.Table
+  alias CodingAgentFramework.Sessions.{Dialog, Table}
 
   @enforce_keys [:db, :host]
   defstruct [:db, :host]
@@ -102,6 +102,24 @@ defmodule CodingAgentFramework.Sessions.Agents do
   @spec running?(row | nil) :: boolean
   def running?(%{status: "running"}), do: true
   def running?(_), do: false
+
+  @doc """
+  The startup dialog the agent's start waits on, for a view (F-140): `%{kind, options,
+  selected, paths, answers}`, `answers` each kind's answer so far (`%{kind => %{label, mark}}`),
+  or nil when its row is not on one. Such a row is neither started nor idle, and not free: its
+  lease stays held. A person answers it through `Sessions.answer_dialog/5`.
+
+      iex> row = %{status: "dialog", answers: nil,
+      ...>   dialog: ~s({"kind":"trust","options":["No, exit","Yes"],"selected":"No, exit"})}
+      iex> CodingAgentFramework.Sessions.Agents.dialog(row).kind
+      :trust
+  """
+  @spec dialog(row | nil) :: map | nil
+  def dialog(%{status: "dialog"} = row) do
+    with %{} = shown <- Dialog.shown(row), do: Map.put(shown, :answers, Dialog.answers(row))
+  end
+
+  def dialog(_), do: nil
 
   @doc "Whether a start or a resume of the row is under way."
   @spec starting?(row | nil) :: boolean

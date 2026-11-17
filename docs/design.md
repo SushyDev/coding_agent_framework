@@ -185,8 +185,8 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `ClaudeCLI` | the command line and environment of a session, per role and account, and the paths of a headless session's stream directory | — |
 | `Registry` | one per host, over every account the framework holds: reads Claude Code's `<config>/sessions/*.json`, and so each held agent's pid and its session file's `status`; a `Reader` | `registry_sessions` |
 | `Transcripts` | one per host, over every account: a session's transcript tail, its chats and its subagents, and whether a transcript holds a delivery's line; a `Reader` | `transcripts_sessions` |
-| `Screen` | a pure reading of a main session's screen and dialogs, per Claude Code release, from real fixtures captured with a script: the trust dialog, typed commands and their result lines, the box before a typed write | — |
-| `Inlet` | the checked typed write into an interactive session with no waiter: `Screen`'s box check, then `Tmux`'s one-command check, one per host; and the typed commands a session's start or a tool needs (the trust dialog, `/mcp reconnect`, the interrupt key). It is one transport of `Mailbox` | no table |
+| `Screen` | a pure reading of a main session's screen and dialogs, per Claude Code release, from real fixtures captured with a script: the startup dialogs (trust, and external imports with the paths it lists), typed commands and their result lines, the box before a typed write | — |
+| `Inlet` | the checked typed write into an interactive session with no waiter: `Screen`'s box check, then `Tmux`'s one-command check, one per host; and the typed commands a session's start or a tool needs (a startup dialog's checked press, `/mcp reconnect`, the interrupt key), and a read of a pane for `Sessions`. It is one transport of `Mailbox` | no table |
 | `Stream` | a headless session's transport: a FIFO per process, a spool removed as the line's claim, the event log read from an offset, and its `can_use_tool` requests. Its fold of the log (each message's replay, each result) is evidence `Mailbox` and `Sessions` read; it keeps no delivery state of its own | `stream_delegates` |
 | `Intake` | hook events in; one hold, of four kinds: `permission` (a person's or an agent's `answer`), `tool` (`PreToolUse`, the app's callback), `stop` (`Stop` held for the app's callback) and `waiter` (a main session's waiting Stop hook, answered with `Mailbox`'s due text) | `intake_events` |
 | `Sessions` | the agent row: one row per agent, main session or delegate, with its kind, parent, project, account, launch options and model, held process and status; start, resume, and stop by SIGTERM once idle; the tree as one function of its rows; each session's turn state as one function per kind of session, from its evidence. Other parts read its rows only through `Sessions.Agents`, a pure module over a reader's own connection, which answers what each status means | `agents` |
@@ -586,6 +586,30 @@ them is built (F-133's new-1).
 
 Its chat is never archived.
 
+**Startup dialogs** (F-140, `Dialog.tla`). Any session the framework starts interactively, a
+main session, an interactive delegate or a move's resume, may stop before its first turn on
+Claude Code's own dialogs: the folder trust dialog, then "Allow external CLAUDE.md file
+imports?" when the project's `CLAUDE.md` imports a file outside its folder. Neither sends a hook
+event, and on 2.1.322 no session file exists while one is shown, so `Registry` sees nothing.
+While an interactive start has no session file, `Sessions` reads its pane through the `Inlet`;
+`Screen` reads each dialog's kind, its options by label, the selected one, and the imports
+dialog's external paths. A dialog makes the agent row `dialog`, with the dialog on the row and
+a cue: not started, not idle, and not free, so the `Scheduler` counts its lease held and a view
+shows why (`Sessions.Agents.dialog/1`). The start's deadline does not end it, and a restart
+leaves it waiting.
+
+Nothing answers a startup dialog on its own. The app may give `Sessions` a callback, `fn kind,
+options -> {:answer, label} | :ask end`, asked once per kind; its default asks, and the example
+app asks. On `:ask` the start answers `{:unknown, {:dialog, kind}}` at once and the row waits.
+The answer comes from outside, by the option's label: `Sessions.answer_dialog/5`, which the app
+calls and the operator's tool `answer_startup` calls (the operator's alone). It is marked on
+the row before its press, and the `Inlet` presses it checked: the pane still shows that dialog,
+the press lands on the chosen option, and the dialog leaves; otherwise refused (nothing went)
+or unknown. A kind with any mark is never pressed again, and a mark a restart finds `pressing`
+is unknown. While the row waits its pane is read again on an interval and at each cue, so the
+next dialog becomes the row's; past the dialogs the session file names the process and the row
+runs, as a start's confirm makes it. "No, exit" ends the process, and the row is `stopped`.
+
 ## The delegate protocol
 
 A main session calls `start_delegate(project, branch, model, brief)`. The framework:
@@ -773,10 +797,10 @@ transports. `Delegates` needs the host's `Registry` for it, and refuses a brief 
 launch carries.
 
 - Its brief is stored first, as any delegate's, then marked by `launch`, and the start carries
-  it as its prompt. Its start in its worktree answers the folder's trust dialog through the
-  `Inlet` and `Screen` by label (Down to "Yes, I trust this folder", then Enter, each seen on
-  the screen first), before the start is confirmed; a screen idle or running shows a folder
-  trusted before. Its settings carry the waiter hook in its launch overlay.
+  it as its prompt. A startup dialog its start meets (the folder's trust dialog in a new
+  worktree, the imports dialog) waits on a person, as any interactive start's does ("Startup
+  dialogs"), unless the app's callback chose to answer that kind. Its settings carry the waiter
+  hook in its launch overlay.
 - Its report is the reply to the brief's uuid, read from its transcript: the last reply that
   ended a message of the turn whose user line holds the brief's mark (or, after a resume, the
   word to go on's), once that turn has ended: a later user entry began another turn, or its
@@ -1391,6 +1415,15 @@ against edits made during the job, the host side of a sync under the copy's lock
 wrapper's end of a job's group: no edit is lost, one sync writes the copy at a time, and nothing
 of a job writes in the copy once its end is read.
 
+`Dialog.tla` (F-140) models a startup dialog: the pane read while a start has no session
+file, the row `dialog` waiting on a person through its deadline and a restart, the app's
+callback for the kinds it chose, an answer marked before its checked press, and the start going
+on past the dialogs. Invariants: `OnlyAsked` (nothing presses a dialog no one asked to
+answer), `OnNamed` (a press lands only on the dialog it names), `AtMostOnce` (an answer whose
+press is unknown, or cut by a restart, is never pressed again), `NotEndedOnDialog` (a row on a
+dialog is never an orphan), `LeaseWhileLive`; liveness `DialogShown` (the next dialog becomes
+the row's after an answer) and `GoesOn`. Each has a `Break_Dialog_*` configuration.
+
 `Schedule.tla` (F-134, F-135) models the `Scheduler` ("A lease"): durable lease rows, an
 in-memory queue, rotation, deadlines (tick-down timers) and owed answers, monitors lost at a
 restart, the owner's row of each lease's work (`starting`, `live`, `ended`, outliving a
@@ -1574,8 +1607,12 @@ without it.
   its settings still set `remoteControlAtStartup` to false, and a check against each pinned
   Claude Code release confirms a delegate starts with it off.
 - An interactive session in a new directory meets the workspace trust dialog first, and until it
-  is trusted Claude Code runs no status line. `Screen` answers that dialog by its label at a
-  main session's start, and the settings never set `disableAllHooks`. A headless delegate skips it.
+  is trusted Claude Code runs no status line; a project whose `CLAUDE.md` imports a file outside
+  its folder meets the imports dialog next. Neither sends a hook event, and no session file
+  exists while one is shown, so a start that nothing answers sat on one for hours, holding its
+  slot, with nothing to see it. `Sessions` reads the pane, the row says `dialog`, and a person
+  answers it by label ("Startup dialogs"); nothing answers one on its own unless the app chose
+  to. The settings never set `disableAllHooks`. A headless delegate skips both.
 - A headless session draws no status line; its event log's `rate_limit_event` stands in
   ("Headless delegates").
 - Every launch sets `DISABLE_AUTOUPDATER=1`, because devenv pins Claude Code and a session that

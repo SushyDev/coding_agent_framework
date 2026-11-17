@@ -70,6 +70,11 @@ defmodule CodingAgentFramework.MCP do
   - `move(agent, to)`: `Grants.may_fix?/3`, then the mover's `move/4` (`to` optional: by default
     the account with the most allowance left), which claims the act `move` in `Acts` and settles
     it when the move ends. Answers `%{act: id, from: account, to: account}` once the drain began.
+  - `answer_startup(agent, kind, label)`: the operator's alone (F-140); any other caller is
+    refused `:operator_only`. The startup dialog an interactive start waits on (`kind`
+    `trust` or `imports`, as the agent row shows it, `Sessions.Agents.dialog/1`), answered by
+    its option's label through the sessions' `answer_dialog/5`, which marks the answer on the
+    row before its checked press and never presses it twice. Answers `Sessions`' answer.
 
   **The operator** calls the same tools through `operate/3`, which writes its row under the
   operator's name, so each act it makes names it as the actor; `issue/2` never makes it a
@@ -326,6 +331,21 @@ defmodule CodingAgentFramework.MCP do
       }
     },
     %{
+      name: "answer_startup",
+      description:
+        "The operator's: answers the startup dialog (trust or imports) an agent's start waits " <>
+          "on, by its option's label, as the agent row shows it.",
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          agent: @str,
+          kind: %{type: "string", enum: ["trust", "imports"]},
+          label: @str
+        },
+        required: ["agent", "kind", "label"]
+      }
+    },
+    %{
       name: "ask",
       description:
         "Asks a person one to four questions, each with two to four options; answers the " <>
@@ -382,7 +402,9 @@ defmodule CodingAgentFramework.MCP do
   path}}` (the copy jobs and services run in) or `{:refused, reason}`. `:acts` is the
   instance's `CodingAgentFramework.Acts`, where each fix takes its claim. `:mover` (optional)
   is `{CodingAgentFramework.Mover, pid}`, which the `move` tool calls; without it `move` is
-  refused `:no_mover`. `:instance` (a string, required)
+  refused `:no_mover`. `:sessions` (optional) is `{CodingAgentFramework.Sessions, pid}`, which
+  `answer_startup` calls; without it that tool is refused `:no_sessions`. `:instance` (a string,
+  required)
   is this part's name in its jobs' ids, so two of them sharing one `Jobs` never make the same
   id. `:cap` (ms, default a day) is the most a `run`'s or a `service_wait`'s `timeout` may be.
   `:tool_timeout` (ms) is the MCP tool timeout `CodingAgentFramework.ClaudeCLI` sets for every
@@ -585,6 +607,16 @@ defmodule CodingAgentFramework.MCP do
          :ok <- Grants.may_fix?(ctx.grants, caller, agent) do
       {mod, server} = ctx.mover
       mod.move(server, caller, agent, to: a["to"])
+    end
+  end
+
+  # A startup dialog is a person's to answer: the operator's tool alone, never an agent's.
+  defp act(ctx, caller, _id, "answer_startup", %{"agent" => agent, "kind" => k, "label" => l})
+       when is_binary(agent) and is_binary(k) and is_binary(l) do
+    with true <- caller == Grants.operator(ctx.grants) or {:refused, :operator_only},
+         true <- ctx.sessions != nil or {:refused, :no_sessions} do
+      {mod, server} = ctx.sessions
+      mod.answer_dialog(server, agent, k, l)
     end
   end
 
@@ -883,6 +915,7 @@ defmodule CodingAgentFramework.MCP do
       cap = Keyword.get(opts, :cap, @day)
       ctx = Map.merge(ctx, %{cap: cap, tool_timeout: tool_timeout, margin: margin})
       ctx = Map.put(ctx, :mover, Keyword.get(opts, :mover))
+      ctx = Map.put(ctx, :sessions, Keyword.get(opts, :sessions))
       {:ok, %{db: db, dir: dir, port: Keyword.fetch!(opts, :port), ctx: ctx}}
     else
       {:error, reason} -> {:stop, {:mkdir, reason}}
