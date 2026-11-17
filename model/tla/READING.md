@@ -59,6 +59,23 @@ it shows the check would catch that bug. When TLC finds one, its output in
 
 Run them with `devenv shell -- bin/check-model` (see its header).
 
+## Modules the specs instance
+
+A mechanism several specs share is written once, as a module, and a spec takes it in with
+`INSTANCE`, naming which of its own variables and constants stand for the module's:
+`RC == INSTANCE Claim WITH rows <- claims, …`. `RC!Take(…)` is then the module's step on the
+spec's variables, and `RC!OneActPerState` its property. Each module also has a small `Spec` of
+its own, so its configurations (`Claim_Design`, `Break_Claim_…`) check it alone.
+
+- `Claim.tla`: a claim on a target's state before an act. `Take` writes the row and the call
+  holds it; `Act` runs only while the claim's state is the target's; `LetGo` ends it with no
+  act; `Restart` cuts the calls, and `Settle` ends a cut row. `OneClaimPerState`,
+  `OneActPerState`, `NoActOnCutOffClaim`.
+- `Hold.tla`: a request held open with a deadline. `Held` writes the row; `Asked` takes the
+  hold a decision names; `Decides` hands the decision and `Marked` records it; `Expires` and
+  `Passed` hand an empty response; `Cut` closes requests whose holder died, and `Settles` ends
+  their rows. `OneResponse`, `LateDropped`, `OnlyNamed`, `AnsweredWasSent`, `RequestsEnd`.
+
 ## `Agent.tla`
 
 One host's tmux server, its held agents and their viewers, and the writes to a pane. Read the
@@ -72,23 +89,28 @@ recovery of a lost viewer in the order it happens:
   for `a`. A reading names a new loss (`new`): an agent not read in the last reading, or one
   `Recoveries` opened a viewer for since. `agreed` holds the losses the last two readings both
   read; `fresh` says `Recoveries` restarted since the last reading and holds none.
-- `RecoveryClaims(a)` writes the claim, only on an agreed loss not claimed yet. The third loss
-  since a person cleared the agent (`losses`) goes into `repeating` with no act, until
+- `RecoveryClaims(a)` takes the claim (`RC!Take`), only on an agreed loss not claimed yet. The
+  claim of the third loss since a person cleared the agent (`losses`) is for the end
+  failed{repeating}: its act puts the agent in `repeating` and opens nothing, until
   `PersonClears(a)`.
 - `RecoveryActs(c)` opens the viewer, and starts the server when it is down. An act on an agent
   that has a viewer already is refused by tmux, and still counts as an open (`opened`).
 - `RecoveriesRestart` drops what `Recoveries` holds in memory (`acting`, `agreed`); its table
-  (`claimed`) stays. `cutOff` is a history variable that takes the agents in `claimed` at that
-  restart.
+  (`claims`) stays. `cutOff` is a history variable that takes the losses whose claim was in
+  memory, not yet acted on, at that restart.
 
-`OneReopenPerLoss` says one loss gets at most one reopen. `NoActOnCutOffClaim` is a step property,
-like `AgentOutlivesServer`: no `RecoveryActs` step acts on an agent in `cutOff`, the agents whose
-claim a restart of `Recoveries` cut off, so that loss is not acted on again. A reading that names
-a new loss takes the agent out of `cutOff`, since a claim of that loss is a new claim.
-`Agent_Claims` checks it, and `Break_Agent_ClaimTwice` drops `a \notin claimed` from
-`RecoveryClaims` and must fail it. `OneReopenPerLoss` does not catch that break: the cut-off claim
-was never acted on, so the act of the second claim is the loss's only reopen. `a \notin opened` in
-`RecoveryClaims` is defense in depth behind `a \notin claimed`, so it has no `Break` value.
+Recoveries' claim is `Claim.tla`'s, instanced as `RC` on Agent's own variables: `RC!Take`,
+`RC!Act`, `RC!Restart` are Claim's steps, and the properties below are Claim's. A loss has no
+number here, so a reading that names a new loss passes the old one (`RC!Passes`): its rows and
+history go, and a claim of it still in memory is let go.
+
+`OneReopenPerLoss` (Claim's `OneActPerState`) says one loss gets at most one act.
+`NoActOnCutOffClaim` says no act runs on a loss whose claim a restart of `Recoveries` cut off. A
+reading that names a new loss takes the agent out of `cutOff`, since a claim of that loss is a new
+claim. `Agent_Claims` checks it, and `Break_Agent_ClaimTwice` lets a claim skip the check for a row
+on its loss and must fail it. `OneReopenPerLoss` does not catch that break: the cut-off claim was
+never acted on, so the act of the second claim is the loss's only act. `a \notin opened` in
+`RecoveryClaims` is defense in depth behind the claim's row, so it has no `Break` value.
 `NoActOnOneWrongReading` says no claim
 rests on a single reading that was wrong (`wrongOnce`). `Agent_Viewers` checks the liveness
 with two agents; `Agent_LateViewers` with one agent, a late viewer and three losses;
@@ -227,22 +249,30 @@ live process its file names. `cued` is memory, cleared by `FrameworkDies`.
 
 ## `Intake.tla`
 
-Hook events into the framework, and a held `PermissionRequest`. It has two halves that share
-only the restarts.
+Hook events into the framework, and its held requests: a `PermissionRequest` and a `PreToolUse`.
+The events and the holds share only the restarts. Each hold is `Hold.tla`'s, instanced on
+Intake's own variables: `HP` for the dialogs, `HT` for the tool calls. `HP!Held`, `HP!Asked`,
+`HP!Decides` and the rest are Hold's steps, and Intake adds what Claude Code reads of each.
 
 - Events: `Posted` is Claude Code's post, refused while the framework is down; posting one id
   twice is a duplicate. `Stored` writes the row (`rows`), then `Acked` answers 200. `AckedFirst`
   and `StoredLate` are the broken order, under `AckBeforeStore` only.
 - Dialogs, numbered, open one at a time. `DialogOpens` shows the dialog and posts its hook
   (`hook` is `"waiting"`, and `conn` is the open request). `HoldStored` writes the row `"held"`.
-  `AnswerAsked(m, h)` is an answer meant for dialog `m` taking hold `h`; the design needs
-  `h = m`. `AnswerWritten` is the response on the request, which a waiting hook reads (`heard`).
-  `AnswerMarked` writes `"answered"`. `HoldExpires` is the framework's own deadline.
+  `AnswerAsked(m, h)` is an answer meant for dialog `m` taking hold `h`, whose row then says
+  `"deciding"`; the design needs `h = m`. `AnswerWritten` is the response on the request, which a
+  waiting hook reads (`heard`). `AnswerMarked` writes `"answered"`. `HoldExpires` is the
+  framework's own deadline.
 - `PersonAnswers` closes a dialog and leaves its hook waiting. `HookTimesOut` is Claude Code's
   timeout; its guard says the framework's deadline comes first, so in the design it never
   happens while a hold is open.
 - `FrameworkDies` cuts every open request, and `HoldSettled` then marks a `"held"` row `"lost"`
-  and an `"answering"` one `"unknown"`.
+  and a `"deciding"` one `"unknown"`.
+- Tool calls: `ToolPosted` and `ToolHeld` as a dialog's; the callback answers in a process of its
+  own (`CallbackAnswers`), `DecisionTaken` puts its decision on the row while the request is
+  held, and `DecisionHanded`, `PassHanded` and `ToolDeadline` hand the plug one response, which
+  Claude Code reads (`call`). `handed` holds every response handed, so `OneResponse` and
+  `LateDropped` read it.
 
 ## `Stream.tla`
 
@@ -323,12 +353,14 @@ delegate to its main session. Its parts share the agents and the restarts.
   table's key on `reply_to`. `SelfStarts(d)`, only when `SelfTurns`, is a turn the delegate
   starts by itself: its result names no message (`OwnTurn`), so it changes no `fold` entry.
 - Claims: `ClaimTaken(c, t)` is `Grants`: `MayFix(c, t)`, the caller is the target's main
-  session or the operator, and no claim yet on the target's state. It writes the row (`claims`) and starts the
-  call (`calls`, in memory). A row's `n` is 2 for the caller's second call on the same state,
-  which a subagent can make at once; only `Break = "TwoClaims"` lets one in. `FixActs` acts
-  only while the claimed state is current, and may not help; `FixRefused` ends the call when it
-  is not. A call cut off by a restart is closed by `ClaimSettled` and never sent again. A row in
-  `done` still holds its state, so a fix that did not help leaves the state claimed.
+  session or the operator, and no claim yet on the target's state. The claim is `Claim.tla`'s,
+  instanced as `Cl(b)` on Team's variables with the bug `b` a Break puts in the claims of one
+  actor (`ClaimBreak`): its row (`claims`), its call (`calls`, in memory), its state (the
+  target's `epoch`). A row's `n` is 2 for a second claim on the same state; only
+  `Break = "TwoClaims"` lets one in. `FixActs` acts only while the claimed state is current, and
+  may not help; `FixRefused` ends the call when it is not. A call cut off by a restart is closed
+  by `ClaimSettled` and never sent again. A row in `done` still holds its state, so a fix that
+  did not help leaves the state claimed.
 - Services: `ServiceStarts` with or without `keep`; `ServiceFixed(c, s)`, a restart or a stop,
   by the owner or the owner's parent; `ServiceHanded(c, s, b)`, by the owner `c` to its parent
   or a child `b`; and `ServiceOwnerEnded`: a kept service goes to the owner's parent, any other
@@ -454,14 +486,16 @@ A service in `Fwds` has a forward (F-91): an `ssh -N -L` held by dtach on the wo
   goes `"ending"`, so the call answers `refused` once it is ended. `opens` counts the opens of
   the current start; `gen` counts the row's starts.
 - A loss is `FwdLost`: the row runs and says the forward is open, and its socket reads dead.
-  `FwdLossClaimed` writes `"reopening"` and keeps the claimed state, `Key` (the start and the
-  open count), in `facting`. `FwdReopens` acts only while that state is still the row's;
-  `FwdReopenMoot` drops a claim the service's end or restart made stale. A reopen that fails
-  makes the row `"failed"`, for a person, as does a claim a restart cut off.
+  `FwdLossClaimed` writes `"reopening"` and takes the claim on the state `Key` (the start and
+  the open count). The claim is `Claim.tla`'s, instanced as `RF`: its row (`fclaims`), the claim
+  in memory (`facting`), and its history (`fdone`, `reopened`, `twice`, `fcut`). `FwdReopens`
+  acts only while that state is still the row's; `FwdReopenMoot` lets go a claim the service's
+  end or restart made stale. A reopen that fails makes the row `"failed"`, for a person, as does
+  a claim a restart cut off.
 - `FwdEnd` ends the forward when the row is `"ending"` or `"restarting"`; `EndSent` and
   `EndConfirmed` wait for it (`FwdGone`).
 
-`fto`, `reopened`, `twice` and `badReport` are ghosts. `ForwardOnlyToCurrent` says a held
+`fto`, `reopened`, `twice`, `fcut` and `badReport` are ghosts. `ForwardOnlyToCurrent` says a held
 forward was started for the row's current start, whose process is held; `ForwardEndsWithService`
 that an ended or refused row has no forward; `PortIsTheForwards` that a row said open only while
 its own ssh held the port; `OneReopenPerState` that no state was reopened twice; and

@@ -117,6 +117,17 @@
 (* nothing. EndSent's check that the socket is live, behind EndConfirmed,  *)
 (* which takes a dead one first: a second kill would reach nothing of      *)
 (* ours, as the kill is by the service's own pid and start time.           *)
+(*                                                                         *)
+(* Recoveries' claim of a forward's loss is Claim.tla's (RF), on the state *)
+(* Key(s): its row, the call that holds it, the check that it is current,  *)
+(* a restart that cuts it, and OneReopenPerState (Claim's                  *)
+(* OneActPerState). Defense in depth, with no Break: the claim's row, the  *)
+(* table's one claim per state, behind the forward's row: a loss is        *)
+(* claimed only while the row says open, which after a reopen it says only *)
+(* once the open count has moved, so the state is new. A reopen that      *)
+(* failed and is taken as a new loss (RetryFailed) is refused by the       *)
+(* claim's row on its state, and then waits for no one: ForwardReopened    *)
+(* finds it.                                                               *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
@@ -197,9 +208,8 @@ Say(k) == [k |-> k, code |-> None, fetch |-> None]
 \* open (and its local port reported), reopening under Recoveries' claim, or
 \* failed, a reopen that failed, waiting for a person.
 FwdRows == {None, "starting", "open", "reopening", "failed"}
-\* No forward command under way, and no claim: a service's first start is gen 1.
+\* No forward command under way: a service's first start is gen 1.
 NoCmd == 0
-NoClaim == <<0, 0>>
 
 VARIABLES
     \* The workstation, durable
@@ -247,7 +257,10 @@ VARIABLES
     \* The framework's memory:
     fcmd,       \* [Svcs -> Nat]: a local dtach -n of the forward under way, and the
                 \* start (the row's gen) it was sent for, or NoCmd
-    facting,    \* [Svcs -> Nat \X Nat]: the loss Recoveries claimed and has not acted on, or NoClaim
+    \* Recoveries' claims, as Claim.tla's variables (RF); a state is Key(s):
+    fclaims,    \* its table: the claims, [by, t (the service), s (the state), act, n]
+    facting,    \* its memory: the claims it has not acted on or let go
+    fdone,      \* its table: the claims acted on or let go
     \* The workstation:
     fproc,      \* [Svcs -> {None, "pending", "bound"}]: the forward's ssh, held by dtach;
                 \* "pending" until it listens on its local port
@@ -255,12 +268,15 @@ VARIABLES
     fdrops, ffails, taken,
     \* Ghosts:
     fto,        \* [Svcs -> Nat]: the start the held forward was started for
-    reopened,   \* [Svcs -> SUBSET (Nat \X Nat)]: the states a reopen acted on
+    reopened,   \* the states <<s, Key(s)>> a reopen acted on
     twice,      \* a reopen acted on a state a reopen acted on before
+    fcut,       \* the states whose claim a restart cut off before a reopen
     badReport   \* services whose row reported a forward open while its ssh did not hold the port
 
-fvars == <<gen, frow, opens, fcmd, facting, fproc, port, fdrops, ffails, taken, fto, reopened,
-           twice, badReport>>
+fclaimVars == <<fclaims, facting, fdone, reopened, twice, fcut>>
+
+fvars == <<gen, frow, opens, fcmd, fclaimVars, fproc, port, fdrops, ffails, taken, fto,
+           badReport>>
 
 vars == <<row, rcode, turn, owner, keep, alive, call, cmd, rd, fetchLeft, skipped, stale, up, fw,
           inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
@@ -293,11 +309,15 @@ TypeOK ==
     /\ cover \in [Runs -> SUBSET Runs]
     /\ since \in [Jobs -> SUBSET Paths]
     /\ gen \in [Svcs -> Nat] /\ frow \in [Svcs -> FwdRows] /\ opens \in [Svcs -> Nat]
-    /\ fcmd \in [Svcs -> Nat] /\ facting \in [Svcs -> Nat \X Nat]
+    /\ fcmd \in [Svcs -> Nat]
+    /\ fclaims \subseteq [by : {"recoveries"}, t : Svcs, s : Nat \X Nat, act : {"reopen"},
+                          n : {1}]
+    /\ facting \subseteq fclaims /\ fdone \subseteq fclaims /\ facting \cap fdone = {}
+    /\ \A c, d \in facting : c.t = d.t => c = d
     /\ fproc \in [Svcs -> {None, "pending", "bound"}]
     /\ port \in [Svcs -> {"free", "fwd", "other"}]
-    /\ fto \in [Svcs -> Nat] /\ reopened \in [Svcs -> SUBSET (Nat \X Nat)]
-    /\ twice \in BOOLEAN /\ badReport \subseteq Svcs
+    /\ fto \in [Svcs -> Nat] /\ reopened \subseteq Svcs \X (Nat \X Nat)
+    /\ twice \in BOOLEAN /\ fcut \subseteq Svcs \X (Nat \X Nat) /\ badReport \subseteq Svcs
 
 Init ==
     /\ row = [r \in Runs |-> "idle"]
@@ -329,10 +349,11 @@ Init ==
     /\ since = [j \in Jobs |-> {}]
     /\ clobbered = {}
     /\ gen = [s \in Svcs |-> 0] /\ frow = [s \in Svcs |-> None] /\ opens = [s \in Svcs |-> 0]
-    /\ fcmd = [s \in Svcs |-> NoCmd] /\ facting = [s \in Svcs |-> NoClaim]
+    /\ fcmd = [s \in Svcs |-> NoCmd]
+    /\ fclaims = {} /\ facting = {} /\ fdone = {} /\ fcut = {}
     /\ fproc = [s \in Svcs |-> None] /\ port = [s \in Svcs |-> "free"]
     /\ fdrops = 0 /\ ffails = 0 /\ taken = 0
-    /\ fto = [s \in Svcs |-> 0] /\ reopened = [s \in Svcs |-> {}]
+    /\ fto = [s \in Svcs |-> 0] /\ reopened = {}
     /\ twice = FALSE /\ badReport = {}
 
 Link == up /\ fw = "up"
@@ -366,6 +387,18 @@ FwdGone(s) ==
 \* The state a reopen is once per: the service's held process (the row's
 \* start) and the forward's open count.
 Key(s) == <<gen[s], opens[s]>>
+
+\* Recoveries' claims of a forward's loss, on the state Key(s).
+RF == INSTANCE Claim WITH
+        Targets <- Svcs, Actors <- {"recoveries"}, MaxState <- 0,
+        now <- [s \in Svcs |-> Key(s)], rows <- fclaims, acting <- facting, done <- fdone,
+        acted <- reopened, twice <- twice, cut <- fcut,
+        Break <- CASE Break = "ActWithoutCheck" -> "Stale"
+                   [] Break = "ReopenInMemory" -> "InMemory"
+                   [] OTHER -> "none"
+
+\* The claims of s that Recoveries holds in memory: one at most.
+Acting(s) == {c \in facting : c.t = s}
 
 ----------------------------------------------------------------------------
 \* The agent's calls
@@ -530,7 +563,7 @@ StartSent(r) ==
     /\ UNCHANGED <<rcode, turn, owner, keep, alive, call, rd, fetchLeft, skipped, stale, up, fw,
                    held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, answer, fresh, cover, badStart, fetched, since, clobbered>>
-    /\ UNCHANGED <<fcmd, facting, fproc, port, fdrops, ffails, taken, fto, reopened, twice,
+    /\ UNCHANGED <<fcmd, fclaimVars, fproc, port, fdrops, ffails, taken, fto,
                    badReport>>
 
 \* The host runs a command it got: a start holds a process (a job's command
@@ -918,7 +951,7 @@ FwdStartSent(s) ==
     /\ frow' = [frow EXCEPT ![s] = "starting"]
     /\ fcmd' = [fcmd EXCEPT ![s] = gen[s]]
     /\ UNCHANGED FwdOthers
-    /\ UNCHANGED <<gen, opens, facting, fproc, port, fdrops, ffails, taken, fto, reopened, twice,
+    /\ UNCHANGED <<gen, opens, fclaimVars, fproc, port, fdrops, ffails, taken, fto,
                    badReport>>
 
 \* dtach -n answered: the ssh is held, not yet listening. A restart of the
@@ -929,7 +962,7 @@ FwdLands(s) ==
     /\ fproc' = [fproc EXCEPT ![s] = "pending"]
     /\ fto' = [fto EXCEPT ![s] = fcmd[s]]
     /\ UNCHANGED FwdOthers
-    /\ UNCHANGED <<gen, frow, opens, facting, port, fdrops, ffails, taken, reopened, twice,
+    /\ UNCHANGED <<gen, frow, opens, fclaimVars, port, fdrops, ffails, taken,
                    badReport>>
 
 \* The ssh connects and listens on the local port, if it is free.
@@ -938,7 +971,7 @@ SshBinds(s) ==
     /\ fproc' = [fproc EXCEPT ![s] = "bound"]
     /\ port' = [port EXCEPT ![s] = "fwd"]
     /\ UNCHANGED FwdOthers
-    /\ UNCHANGED <<gen, frow, opens, fcmd, facting, fdrops, ffails, taken, fto, reopened, twice,
+    /\ UNCHANGED <<gen, frow, opens, fcmd, fclaimVars, fdrops, ffails, taken, fto,
                    badReport>>
 
 \* With ExitOnForwardFailure the ssh exits when the port is taken, and ssh
@@ -949,7 +982,7 @@ SshFails(s) ==
     /\ fproc' = [fproc EXCEPT ![s] = None]
     /\ ffails' = IF port[s] = "free" /\ up THEN ffails + 1 ELSE ffails
     /\ UNCHANGED FwdOthers
-    /\ UNCHANGED <<gen, frow, opens, fcmd, facting, port, fdrops, taken, fto, reopened, twice,
+    /\ UNCHANGED <<gen, frow, opens, fcmd, fclaimVars, port, fdrops, taken, fto,
                    badReport>>
 
 \* The forward's own ssh drops, at any time.
@@ -959,7 +992,7 @@ FwdDrops(s) ==
     /\ port' = [port EXCEPT ![s] = "free"]
     /\ fdrops' = fdrops + 1
     /\ UNCHANGED FwdOthers
-    /\ UNCHANGED <<gen, frow, opens, fcmd, facting, ffails, taken, fto, reopened, twice, badReport>>
+    /\ UNCHANGED <<gen, frow, opens, fcmd, fclaimVars, ffails, taken, fto, badReport>>
 
 \* Another program on the workstation takes the local port while it is free.
 OtherTakes(s) ==
@@ -967,7 +1000,7 @@ OtherTakes(s) ==
     /\ port' = [port EXCEPT ![s] = "other"]
     /\ taken' = taken + 1
     /\ UNCHANGED FwdOthers
-    /\ UNCHANGED <<gen, frow, opens, fcmd, facting, fproc, fdrops, ffails, fto, reopened, twice,
+    /\ UNCHANGED <<gen, frow, opens, fcmd, fclaimVars, fproc, fdrops, ffails, fto,
                    badReport>>
 
 \* Is the forward open, as the framework reads it: its own ssh listens on the
@@ -982,7 +1015,7 @@ FwdReadsOpen(s) ==
 \* (EndedCallAnswered). A reopen that failed waits for a person.
 FwdSettles(s) ==
     /\ fw = "up" /\ s \in Fwds /\ row[s] = "running"
-    /\ frow[s] \in {"starting", "reopening"} /\ fcmd[s] = NoCmd /\ facting[s] = NoClaim
+    /\ frow[s] \in {"starting", "reopening"} /\ fcmd[s] = NoCmd /\ Acting(s) = {}
     /\ FwdReadsOpen(s) \/ fproc[s] = None
     /\ IF FwdReadsOpen(s)
        THEN /\ frow' = [frow EXCEPT ![s] = "open"]
@@ -1007,7 +1040,7 @@ FwdSettles(s) ==
     /\ UNCHANGED <<rcode, turn, owner, keep, alive, cmd, rd, fetchLeft, skipped, stale, up, fw,
                    inflight, held, grp, hs, lock, file, past, whole, drops, restarts, edits, lost,
                    svcRestarts, fresh, cover, badStart, fetched, since, clobbered>>
-    /\ UNCHANGED <<gen, fcmd, facting, fproc, port, fdrops, ffails, taken, fto, reopened, twice>>
+    /\ UNCHANGED <<gen, fcmd, fclaimVars, fproc, port, fdrops, ffails, taken, fto>>
 
 \* A forward whose socket reads dead while its service runs and its row says
 \* open is a loss. Recoveries claims it: the row says reopening, durable,
@@ -1016,39 +1049,36 @@ FwdLost(s) == s \in Fwds /\ row[s] = "running" /\ frow[s] = "open" /\ fproc[s] =
 
 FwdLossClaimed(s) ==
     /\ Break # "NoReopen"
-    /\ fw = "up" /\ FwdLost(s) /\ fcmd[s] = NoCmd /\ facting[s] = NoClaim
-    /\ facting' = [facting EXCEPT ![s] = Key(s)]
+    /\ fw = "up" /\ FwdLost(s) /\ fcmd[s] = NoCmd /\ Acting(s) = {}
+    /\ RF!Take("recoveries", s, "reopen")
     /\ frow' = IF Break = "ReopenInMemory" THEN frow ELSE [frow EXCEPT ![s] = "reopening"]
     /\ UNCHANGED FwdOthers
-    /\ UNCHANGED <<gen, opens, fcmd, fproc, port, fdrops, ffails, taken, fto, reopened, twice,
+    /\ UNCHANGED <<gen, opens, fcmd, fproc, port, fdrops, ffails, taken, fto,
                    badReport>>
 
 \* The claim is still current: the row runs the start it was claimed for,
-\* with the same open count. Under ActWithoutCheck, only that the row runs:
-\* a claim made before a restart of the service then acts on the new start.
-ClaimCurrent(s) ==
-    /\ row[s] = "running"
-    /\ facting[s] = Key(s) \/ Break = "ActWithoutCheck"
+\* with the same open count (RF!Current). Under ActWithoutCheck, only that
+\* the row runs: a claim made before a restart of the service then acts on
+\* the new start.
+ClaimCurrent(c) == row[c.t] = "running" /\ RF!Current(c)
 
-\* The act, under its claim, reads the claim still current and runs dtach -n.
+\* The act, under its claim, reads the claim still current and runs dtach -n
+\* for the start the claim names.
 FwdReopens(s) ==
-    /\ fw = "up" /\ facting[s] # NoClaim /\ ClaimCurrent(s)
-    /\ facting' = [facting EXCEPT ![s] = NoClaim]
-    /\ fcmd' = [fcmd EXCEPT ![s] = facting[s][1]]
-    /\ reopened' = [reopened EXCEPT ![s] = reopened[s] \cup {facting[s]}]
-    /\ twice' = (twice \/ facting[s] \in reopened[s])
+    /\ fw = "up"
+    /\ \E c \in Acting(s) : /\ ClaimCurrent(c) /\ RF!Act(c)
+                            /\ fcmd' = [fcmd EXCEPT ![s] = c.s[1]]
     /\ UNCHANGED FwdOthers
     /\ UNCHANGED <<gen, frow, opens, fproc, port, fdrops, ffails, taken, fto, badReport>>
 
 \* The act reads the claim no longer current (the service ended or
-\* restarted): it does nothing. The row's next start clears the reopening
-\* (StartSent).
+\* restarted): it does nothing, and lets the claim go. The row's next start
+\* clears the reopening (StartSent).
 FwdReopenMoot(s) ==
-    /\ fw = "up" /\ facting[s] # NoClaim /\ ~ClaimCurrent(s)
-    /\ facting' = [facting EXCEPT ![s] = NoClaim]
+    /\ fw = "up"
+    /\ \E c \in Acting(s) : ~ClaimCurrent(c) /\ RF!LetGo(c)
     /\ UNCHANGED FwdOthers
-    /\ UNCHANGED <<gen, frow, opens, fcmd, fproc, port, fdrops, ffails, taken, fto, reopened,
-                   twice, badReport>>
+    /\ UNCHANGED <<gen, frow, opens, fcmd, fproc, port, fdrops, ffails, taken, fto, badReport>>
 
 \* The service's end, or its restart, ends its forward first: by the
 \* forward's pid and start time, on the workstation.
@@ -1058,7 +1088,7 @@ FwdEnd(s) ==
     /\ fproc' = [fproc EXCEPT ![s] = None]
     /\ port' = [port EXCEPT ![s] = IF port[s] = "fwd" THEN "free" ELSE port[s]]
     /\ UNCHANGED FwdOthers
-    /\ UNCHANGED <<gen, frow, opens, fcmd, facting, fdrops, ffails, taken, fto, reopened, twice,
+    /\ UNCHANGED <<gen, frow, opens, fcmd, fclaimVars, fdrops, ffails, taken, fto,
                    badReport>>
 
 ----------------------------------------------------------------------------
@@ -1101,11 +1131,11 @@ FrameworkDies ==
               THEN [r \in Runs |-> IF row[r] = "ending" THEN "running" ELSE row[r]]
               ELSE row
     /\ fcmd' = [s \in Svcs |-> NoCmd]
-    /\ facting' = [s \in Svcs |-> NoClaim]
+    /\ RF!Restart
     /\ UNCHANGED <<rcode, owner, keep, alive, stale, inflight, held, grp, hs, lock, file, past,
                    whole, drops, edits, lost, svcRestarts, fresh, cover, badStart, fetched, since,
                    clobbered>>
-    /\ UNCHANGED <<gen, frow, opens, fproc, port, fdrops, ffails, taken, fto, reopened, twice,
+    /\ UNCHANGED <<gen, frow, opens, fproc, port, fdrops, ffails, taken, fto,
                    badReport>>
 
 FrameworkStarts ==
@@ -1228,7 +1258,7 @@ PortIsTheForwards == badReport = {}
 \* A dropped forward is reopened at most once per state: the service's held
 \* process and the forward's open count. A reopen that failed waits for a
 \* person, and is not acted on again.
-OneReopenPerState == ~twice
+OneReopenPerState == RF!OneActPerState
 
 \* Liveness
 
