@@ -1,6 +1,6 @@
 defmodule CodingAgentFramework.SessionsSetup do
   @moduledoc """
-  The setup `SessionsTest` and `SessionsSourceTest` share: a `Sessions` on a real tmux server
+  The setup `SessionsTest` and `AgentsSourceTest` share: a `Sessions` on a real tmux server
   and real dtach sockets in the test's own directory, with its `Control`, a `Registry` of one
   prepared account, a `Stream` for its delegates, a `Shell.Reaper` for its worktrees' commands,
   and a clock the test moves; and the launches
@@ -106,12 +106,16 @@ defmodule CodingAgentFramework.SessionsSetup do
     ]
   end
 
-  @doc "The launch options of a delegate: a headless stand-in that writes its init in `mode`."
+  @doc """
+  The launch options of a delegate of main session `main`: a headless stand-in that writes its
+  init in `mode`.
+  """
   def headless(ctx, mode) do
     claude = HeadlessStandIn.write!(ctx.dir, mode)
 
     [
       role: :delegate,
+      parent: "main",
       cwd: ctx.dir,
       claude: claude,
       model: "opus",

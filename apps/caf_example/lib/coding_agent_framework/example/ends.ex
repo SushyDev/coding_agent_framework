@@ -4,13 +4,13 @@ defmodule CodingAgentFramework.Example.Ends do
   `Services.owner_ended/3`) ends the services it owns, which waits on hosts, and a cue runs in
   the part that sends it, so the cue only hands the ids on.
 
-  `ended` is a function of `:all` or a list of `Delegates` row ids that answers the names of
-  the agents among them that have ended. At its start it acts on every agent that has ended,
+  `ended` is a function of `:all` or a list of agent row ids (`Sessions`' cue) that answers the
+  names of the agents among them that have ended (`Sessions.Agents.ended_names/2`). At its start it acts on every agent that has ended,
   since a cue sent while it was down is lost; `owner_ended/3` takes nothing from an owner with
   no running service, so acting twice on one end does nothing more.
 
       {:ok, ends} = Ends.start_link(ended: &ended/1, act: &Services.owner_ended(services, &1))
-      Ends.cue(ends, %{topic: "delegates:ws", ids: [4]})
+      Ends.cue(ends, %{topic: "sessions:ws", ids: [4]})
   """
 
   use GenServer
@@ -19,7 +19,7 @@ defmodule CodingAgentFramework.Example.Ends do
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, Map.new(opts))
 
-  @doc "Hands it a `delegates:` cue. Answers `:ok` at once."
+  @doc "Hands it a `sessions:` cue. Answers `:ok` at once."
   @spec cue(GenServer.server(), map) :: :ok
   def cue(ends, %{ids: ids}) when is_list(ids), do: GenServer.cast(ends, {:ended, ids})
   def cue(_ends, _cue), do: :ok

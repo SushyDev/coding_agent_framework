@@ -187,8 +187,8 @@ defmodule CodingAgentFramework.ExampleTest do
         })
     end
 
-    # A first kill is resumed; the second before its last reply ends the delegate as `failed`,
-    # which a `delegates:` cue shows.
+    # A first kill is resumed; the second before its last reply fails the delegate, and its agent
+    # row ends at once, which a `sessions:` cue shows.
     killed = kill_delegate(ctx, [], 1)
     {:ok, _} = row(ddb, &(&1.resumes == 1 and &1.status == "running"))
     kill_delegate(ctx, killed, 2)
@@ -230,9 +230,12 @@ defmodule CodingAgentFramework.ExampleTest do
     fix = Delegates.fix(parts.delegates, "app-main", "app-unit-one", :stop, state)
     assert {:ok, :stopped} = fix
 
-    # No cue from the test: the stop's own end writes `ended`, a `delegates:` cue shows it, and
-    # the app ends the services the delegate owned.
-    {:ok, _} = row(ddb, &(&1.id == id and &1.status == "ended"))
+    # No cue from the test: the stop's own end makes the agent row `ended`, a `sessions:` cue
+    # shows it, and the app ends the services the delegate owned.
+    {:ok, sdb} = Table.open(Path.join(ctx.home, "caf.db"))
+
+    {:ok, _} =
+      await(fn -> ok(match?(%{status: "ended"}, Table.get(sdb, "ws", "app-unit-one")) || nil) end)
 
     {:ok, _} =
       await(
@@ -251,7 +254,7 @@ defmodule CodingAgentFramework.ExampleTest do
              Operator.start_delegate(parts.mcp, "app-main", "app", "unit/one", "opus", "Go.")
 
     {:ok, ddb} = Delegates.Table.open(Path.join(ctx.home, "caf.db"))
-    {:ok, _} = row(ddb, &(&1.parent == "app-main" and &1.status == "finished"))
+    {:ok, _} = row(ddb, &(&1.status == "finished"))
 
     # A message that starts with `ask` waits on a permission, so its turn is there to interrupt.
     assert {:ok, {:queued, id}} = Operator.message(parts.mcp, "app-unit-one", "ask: again.")

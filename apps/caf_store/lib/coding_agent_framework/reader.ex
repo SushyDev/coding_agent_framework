@@ -17,7 +17,8 @@ defmodule CodingAgentFramework.Reader do
     * `:data`: the columns a row's data is compared and written by.
     * `:read`: the reads row's columns besides the scope; `read_at` is one of them.
     * `:topic`, `:kind` and `:name`: a source's topic is `<topic>:<host>:<name option>`, its
-      scope `{host, <group><name option>}`, and its rows of kind `kind`.
+      scope `{host, <group><name option>}`, and its rows of kind `kind`. With `name: nil` the
+      table is read per host: topic `<topic>:<host>`, scope `{host, <group>}`.
     * optional `:group` (default `""`), `:filter` (more columns a source narrows rows by),
       `:load` (a row map as stored to the row as read), `:load_read` (the same for a reads
       row), `:dump` (a column and a value to what is stored), `:view` (rows and a source's
@@ -222,6 +223,11 @@ defmodule CodingAgentFramework.Reader do
   names): the topic its reader cues on, the scope of its rows, and their kind.
   """
   @spec describe(meta, keyword) :: %{topic: String.t(), scope: {term, String.t()}, kind: atom}
+  def describe(%{name: nil} = meta, opts) do
+    host = Keyword.fetch!(opts, :host)
+    %{topic: "#{meta.topic}:#{host}", scope: {host, meta.group}, kind: meta.kind}
+  end
+
   def describe(meta, opts) do
     {host, name} = {Keyword.fetch!(opts, :host), Keyword.fetch!(opts, meta.name)}
     group = Map.get(meta, :group, "")

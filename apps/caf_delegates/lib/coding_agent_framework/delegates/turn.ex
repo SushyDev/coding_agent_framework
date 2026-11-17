@@ -7,7 +7,7 @@ defmodule CodingAgentFramework.Delegates.Turn do
       iex> alias CodingAgentFramework.Delegates.Turn
       iex> Turn.name(%{name: "app"}, "unit/f-1.fix")
       "app-unit-f-1-fix"
-      iex> row = %{brief_uuid: "b1", resume_uuid: nil, brief: "do it"}
+      iex> row = %{brief_uuid: "b1", resume_uuid: nil}
       iex> Turn.next(row, %{gone: false, idle: true, messages: %{}, last_result: nil})
       :waiting
       iex> fold = %{gone: false, idle: true, last_result: nil,
@@ -58,16 +58,15 @@ defmodule CodingAgentFramework.Delegates.Turn do
   def name(project, branch), do: project.name <> "-" <> String.replace(branch, ~r/[^\w-]/, "-")
 
   @doc """
-  The uuid and text of the message the current process's turn waits for: the brief, or after a
-  resume whose brief had gone in, `resumed/0` under `resume_uuid`.
+  The uuid of the message the current process's turn waits for: the brief's, or after a resume
+  whose brief had gone in, the word to go on's (`resume_uuid`, whose text is `resumed/0`).
 
-      iex> CodingAgentFramework.Delegates.Turn.message(%{brief_uuid: "b1", resume_uuid: nil,
-      ...>   brief: "do it"})
-      {"b1", "do it"}
+      iex> CodingAgentFramework.Delegates.Turn.uuid(%{brief_uuid: "b1", resume_uuid: nil})
+      "b1"
   """
-  @spec message(map) :: {String.t(), String.t()}
-  def message(%{resume_uuid: nil} = row), do: {row.brief_uuid, row.brief}
-  def message(row), do: {row.resume_uuid, resumed()}
+  @spec uuid(map) :: String.t()
+  def uuid(%{resume_uuid: nil} = row), do: row.brief_uuid
+  def uuid(row), do: row.resume_uuid
 
   @doc """
   What a running delegate's `Stream` row (`fold`) says, read by `Stream.Fold.outcome/2`:
@@ -78,9 +77,7 @@ defmodule CodingAgentFramework.Delegates.Turn do
   """
   @spec next(map, map) :: {:finished, map} | :exited | :waiting
   def next(row, fold) do
-    {uuid, _text} = message(row)
-
-    case Fold.outcome(fold, uuid) do
+    case Fold.outcome(fold, uuid(row)) do
       {:result, result} -> {:finished, result}
       _ when fold.gone -> :exited
       _ -> :waiting

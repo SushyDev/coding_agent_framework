@@ -143,11 +143,14 @@ Built, each from a checked model in `model/tla/`:
   its report, by its stream and to a waiting `run_delegate` (R7, part 1), and to a main session
   by its waiting Stop hook, settled by its transcript (R7, part 2);
 - `Acts`, one ledger of claims, recoveries and faults, in place of `Grants.Claims` and
-  `Recoveries`' table (R10).
+  `Recoveries`' table (R10);
+- the agent row and the tree in `Sessions` (R9, part 1): one row per agent, main session or
+  delegate, with its parent and project; the tree one function of those rows, which `Grants`
+  and the `Tracker` both read; and no part reading another's table but through its functions.
 
-Next, the rest of the remodel, in order (F-115, taken in F-116): the `Inlet`, the checked typed
-write (R8); the agent row and the tree in `Sessions` (R9); `Cues`, the library's own routing
-(R11); and `Mover` (R12). Then
+Next, the rest of the remodel, in order (F-115, taken in F-116): each session's turn state, the
+acts still to be rows, and one rule for a term in a column (R9, part 2); the `Inlet`, the
+checked typed write (R8); `Cues`, the library's own routing (R11); and `Mover` (R12). Then
 interactive delegates and main sessions, the mechanisms an app's policies stand on (an idle
 delegate's watchdog, admission by load, `Stop` held for the app, clone copies, an idempotent
 start), packaging, and stacks with the LiveView components. The plan and the order of the units are in
@@ -231,7 +234,6 @@ flowchart BT
   tracker --> store
   tracker --> sessions
   tracker --> recoveries
-  tracker --> delegates
   delegates --> accounts
   delegates --> cli
   delegates --> usage

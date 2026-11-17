@@ -5,7 +5,7 @@ defmodule CodingAgentFramework.UsageSourceTest do
   import CodingAgentFramework.UsageSetup
 
   alias CodingAgentFramework.{Accounts, Usage, UsageSetup}
-  alias CodingAgentFramework.Tracker.ReaderSource
+  alias CodingAgentFramework.Tracker.TableSource
 
   @now UsageSetup.now()
 
@@ -53,7 +53,7 @@ defmodule CodingAgentFramework.UsageSourceTest do
     assert %{kept | problem: nil} == reading and kept.problem == ":not_json"
 
     {:ok, source} =
-      ReaderSource.open(
+      TableSource.open(
         table: Usage.Table,
         db: db,
         account: "work",
@@ -61,12 +61,12 @@ defmodule CodingAgentFramework.UsageSourceTest do
       )
 
     assert {:ok, %{rows: [%{account: "work", used: 41.5, assumed: false}]}} =
-             ReaderSource.read(source, :all)
+             TableSource.read(source, :all)
 
     # Once its reset has passed, the source marks the reading assumed.
     File.write!(file, JSON.encode!(week(41.5, 1)))
     assert {:ok, %{ids: [_]}} = Usage.read(usage)
-    assert {:ok, %{rows: [%{assumed: true}]}} = ReaderSource.read(source, :all)
-    assert {:ok, %{rows: []}} = ReaderSource.read(source, [id + 1])
+    assert {:ok, %{rows: [%{assumed: true}]}} = TableSource.read(source, :all)
+    assert {:ok, %{rows: []}} = TableSource.read(source, [id + 1])
   end
 end

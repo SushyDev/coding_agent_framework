@@ -22,13 +22,14 @@ defmodule CodingAgentFramework.Mailbox do
   is for, then handed on. A refusal undoes the mark; an unknown answer keeps it for the
   evidence. The transport is the addressee's:
 
-  - `stream`, for a headless delegate (its `Sessions` row's role): only into an ended turn of
-    its current process (`Stream`'s fold idle, live, no end marked, its `Sessions` row
+  - `stream`, for a headless delegate (its agent row, read through `Sessions.Agents`): only
+    into an ended turn of its current process (`Stream`'s fold idle, live, no end marked, its
+    agent row
     `running`), written through `Stream` under the row's uuid;
   - `call`, for a reply or a notice a waiting `run_delegate` takes (`await/4`), only before the
     call's deadline; `told/3` settles it, and the end of the process that waits makes it due
     again;
-  - `waiter`, for an interactive session (any other `Sessions` role), when `Mailbox` was
+  - `waiter`, for an interactive session (any agent row not headless), when `Mailbox` was
     given `intake:`: only while its row is `running` and `Intake` holds a waiter for it, into
     an ended turn or queued by Claude Code into a running one, handed to `Intake.deliver/5`
     with the row's uuid on a last line (`Transport.Waiter`). `{:ok, :sent}` keeps the row
@@ -48,7 +49,8 @@ defmodule CodingAgentFramework.Mailbox do
   decides between a finish, a resume and a second kill, and hands the report here.
 
   **Ended.** Once a delegate's session ended for good (its `end_session` went in and its
-  process is gone), or its start was refused (`ended/3`), its `queued` rows are settled `ended`.
+  process is gone, or its agent row says it ended), or its start was refused (`ended/3`), its
+  `queued` rows are settled `ended`.
 
   It reads every open row again at its start, at each `cue/2` (of `Stream`, `Sessions`,
   `Delegates` and `Intake`'s waiters) and at a waiter row's take bound; after each write
@@ -57,7 +59,8 @@ defmodule CodingAgentFramework.Mailbox do
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, Grants, Intake, Sessions, Stream, Transcripts}
+  alias CodingAgentFramework.{Accounts, Grants, Intake, Stream, Transcripts}
+  alias CodingAgentFramework.Sessions.Agents
   alias CodingAgentFramework.Mailbox.{Table, Transport}
   alias CodingAgentFramework.Stream.Fold
 
@@ -71,7 +74,8 @@ defmodule CodingAgentFramework.Mailbox do
 
   @doc """
   Starts a `Mailbox`. Options: `db:`, `grants:`, `stream:` and `host:` (where the delegates
-  run), `sessions_db:` (the file of `Sessions`' table), and optionally `notify:`; for the
+  run), `sessions_db:` (the file of `Sessions`' table, read through `Sessions.Agents`), and
+  optionally `notify:`; for the
   waiter transport, `intake:` with `transcripts:` and `accounts:` (an `Accounts`), and
   `take_bound:` (ms, 10 000 by default).
   """
@@ -218,7 +222,8 @@ defmodule CodingAgentFramework.Mailbox do
   @impl true
   def init(opts) do
     with {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)),
-         {:ok, sdb} <- Sessions.Table.open(Keyword.fetch!(opts, :sessions_db)) do
+         host = Keyword.fetch!(opts, :host),
+         {:ok, agents} <- Agents.open(Keyword.fetch!(opts, :sessions_db), host) do
       s = Map.new(~w(grants stream host)a, &{&1, Keyword.fetch!(opts, &1)})
       notify = Keyword.get(opts, :notify, fn _ -> :ok end)
       # The waiter transport's parts; without `intake:` a main session has no transport here.
@@ -229,7 +234,7 @@ defmodule CodingAgentFramework.Mailbox do
 
       waiter = Map.put(waiter, :bound, Keyword.get(opts, :take_bound, @take_bound))
       # `calls`: row id to the call that took it; `waits`: key to the call waiting for it.
-      s = Map.merge(s, %{db: db, sdb: sdb, notify: notify, calls: %{}, waits: %{}})
+      s = Map.merge(s, %{db: db, agents: agents, notify: notify, calls: %{}, waits: %{}})
       {:ok, Map.put(s, :waiter, waiter), {:continue, :read}}
     else
       {:refused, reason} -> {:stop, reason}
@@ -486,21 +491,26 @@ defmodule CodingAgentFramework.Mailbox do
   defp stored_quietly(_s, nil), do: :ok
   defp stored_quietly(s, id), do: announce(s, id)
 
-  # The addressee and its transport, by its `Sessions` row's role: a headless delegate's
-  # stream, with the fold of its session; an interactive session's waiter, when this Mailbox
-  # was given an `Intake`. Anything else has none (the typed write is R8's).
+  # The addressee and its transport, by its agent row (`Sessions.Agents`): a headless
+  # delegate's stream, with the fold of its session; an interactive session's waiter, when this
+  # Mailbox was given an `Intake`. Anything else has none (the typed write is R8's).
   defp target(s, to, folds) do
-    case Sessions.Table.get(s.sdb, s.host, to) do
-      %{role: "delegate", session_id: sid} = srow when is_binary(sid) ->
-        {:stream, srow, folds[sid]}
+    srow = Agents.get(s.agents, to)
 
-      %{role: "delegate"} ->
+    cond do
+      Agents.ended?(srow) ->
+        {:ended, srow.updated_at}
+
+      Agents.headless?(srow) and is_binary(srow.session_id) ->
+        {:stream, srow, folds[srow.session_id]}
+
+      Agents.headless?(srow) ->
         :not_started
 
-      %{} = srow when s.waiter.intake != nil ->
+      srow != nil and s.waiter.intake != nil ->
         {:waiter, srow}
 
-      _ ->
+      true ->
         :none
     end
   end
@@ -512,6 +522,15 @@ defmodule CodingAgentFramework.Mailbox do
   end
 
   defp deliver(_s, _rows, :not_started), do: :ok
+
+  # An agent that ended takes nothing: no process of it runs again (EndedNotDelivered). A brief
+  # stored since its end is a later start's, stored before `Sessions` writes that start, and
+  # waits for it.
+  defp deliver(s, rows, {:ended, at}) do
+    for %{status: "queued"} = m <- rows,
+        m.kind != "brief" or m.created_at <= at,
+        do: write(s, m, status: "ended")
+  end
 
   defp deliver(s, rows, {:stream, srow, fold}) do
     cond do
@@ -538,7 +557,7 @@ defmodule CodingAgentFramework.Mailbox do
       Enum.any?(rows, &(&1.status == "sending")) ->
         :ok
 
-      srow.status != "running" or not is_integer(srow.pid) or not is_binary(srow.session_id) ->
+      not Agents.running?(srow) or not is_integer(srow.pid) or not is_binary(srow.session_id) ->
         :ok
 
       Intake.waiter?(s.waiter.intake, srow.account, srow.session_id, timeout: @step) ==
@@ -593,8 +612,8 @@ defmodule CodingAgentFramework.Mailbox do
   # The waiter's evidence for row `m`: its lines in the transcript of its session, read now
   # from the offset its mark kept, and whether the process it was handed to is gone.
   defp seen(s, m) do
-    srow = Sessions.Table.get(s.sdb, s.host, m.to_agent)
-    gone = srow == nil or srow.pid != m.at or srow.status in ["stopped", "refused"]
+    srow = Agents.get(s.agents, m.to_agent)
+    gone = srow == nil or srow.pid != m.at or Agents.free?(srow)
 
     seen =
       with %{} <- srow,
@@ -639,7 +658,9 @@ defmodule CodingAgentFramework.Mailbox do
   end
 
   # Into an ended turn of the current process only, never to a session whose row is stopping.
-  defp ready?(%{status: "running"}, %{} = f), do: f.idle and not f.gone and not f.ending
+  defp ready?(srow, %{} = f),
+    do: Agents.running?(srow) and f.idle and not f.gone and not f.ending
+
   defp ready?(_srow, _fold), do: false
 
   # The call transport's take: each waiting call whose row is due, first among its addressee's

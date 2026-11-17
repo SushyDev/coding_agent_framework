@@ -5,12 +5,12 @@ defmodule CodingAgentFramework.Grants do
   starts no process.
 
   **The tree** is read from what holds it at each check, never kept: `tree` is a function the
-  embedding app hands `new/1`, of no arguments, that answers one map per delegate the framework
-  holds, `%{name: String.t(), project: String.t(), parent: String.t() | nil}` (for now, each
-  row of `Delegates`' table, and each main session the embedding app declares). Main sessions
-  are the entries with no parent (`parent: nil`, a root), and the parents no entry names as a
-  delegate. The checks
-  read only `name` and `parent`; a name the tree does not hold is
+  embedding app hands `new/1`, of no arguments, that answers one map per agent the framework
+  holds, `%{name: String.t(), project: String.t(), parent: String.t() | nil}`: `Sessions`'
+  tree, one function of its agent rows (`Sessions.Agents.read_tree/1`), which the `Tracker`
+  folds by the same rule. Main sessions are the entries with no parent (`parent: nil`, a
+  root): every main session is an agent row of kind `main`. The checks read only `name` and
+  `parent`; a name the tree does not hold, a parent with no entry of its own among them, is
   `{:refused, {:unknown_agent, name}}`, and one named with two parents is
   `{:refused, {:two_parents, name}}`.
 
@@ -36,7 +36,8 @@ defmodule CodingAgentFramework.Grants do
 
   A fix's claim, the other half of its job, is a row in `CodingAgentFramework.Acts`.
 
-      iex> tree = fn -> [%{name: "app-fix", project: "app", parent: "app-main"}] end
+      iex> tree = fn -> [%{name: "app-main", project: "app", parent: nil},
+      ...>   %{name: "app-fix", project: "app", parent: "app-main"}] end
       iex> grants = CodingAgentFramework.Grants.new(tree)
       iex> CodingAgentFramework.Grants.may_message?(grants, "app-fix", "app-main")
       :ok
@@ -204,10 +205,8 @@ defmodule CodingAgentFramework.Grants do
     entries = grants.tree.()
     parents = Map.new(entries, &{&1.name, &1.parent})
     two = Enum.find(entries, &(parents[&1.name] != &1.parent))
-    # A root is a main session; so is a parent no entry names, until every main is declared.
-    roots = for %{name: n, parent: nil} <- entries, do: n
-    named = for %{parent: p} <- entries, is_binary(p), not Map.has_key?(parents, p), do: p
-    mains = MapSet.new(roots ++ named)
+    # A root is a main session, and only a root is.
+    mains = MapSet.new(for %{name: n, parent: nil} <- entries, do: n)
     tree = %{parents: parents, mains: mains, operator: grants.operator}
     op = grants.operator
 

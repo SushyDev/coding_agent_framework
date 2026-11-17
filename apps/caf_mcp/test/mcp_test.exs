@@ -58,6 +58,7 @@ defmodule CodingAgentFramework.MCPTest do
   setup do
     tree = fn ->
       [
+        %{name: "app-main", project: "app", parent: nil},
         %{name: "app-fix", project: "app", parent: "app-main"},
         %{name: "app-other", project: "app", parent: "app-main"}
       ]
@@ -254,7 +255,13 @@ defmodule CodingAgentFramework.MCPTest do
   end
 
   defp mcp_opts(name) do
-    tree = fn -> [%{name: "app-fix", project: "app", parent: "app-main"}] end
+    tree = fn ->
+      [
+        %{name: "app-main", project: "app", parent: nil},
+        %{name: "app-fix", project: "app", parent: "app-main"}
+      ]
+    end
+
     place = fn agent -> {:ok, %{project: "app", name: agent, worktree: "/nowhere"}} end
 
     [

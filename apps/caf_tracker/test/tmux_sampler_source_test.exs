@@ -1,6 +1,6 @@
 defmodule CodingAgentFramework.TmuxSamplerSourceTest do
   @moduledoc """
-  `ReaderSource` over `TmuxSampler.Table` reads what a `TmuxSampler` wrote, and its failed
+  `TableSource` over `TmuxSampler.Table` reads what a `TmuxSampler` wrote, and its failed
   reads, into a `Tracker`.
   The sampler reads a server whose panes the test sets.
   """
@@ -34,7 +34,7 @@ defmodule CodingAgentFramework.TmuxSamplerSourceTest do
     {:ok, tracker} =
       Tracker.start_link(
         sources: [
-          {Tracker.ReaderSource,
+          {Tracker.TableSource,
            table: TmuxSampler.Table, db: db, host: "test", server: "scripted"}
         ],
         timer: false

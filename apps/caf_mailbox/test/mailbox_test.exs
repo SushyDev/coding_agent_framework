@@ -82,7 +82,25 @@ defmodule CodingAgentFramework.MailboxTest do
     {:ok, {:queued, b}} = Mailbox.brief(mailbox(ctx), "main", "d2", "Go.", Stream.uuid())
     assert {:ok, [^b]} = Mailbox.ended(mailbox(ctx), "d2")
     assert %{status: "ended"} = Table.get(ctx.mtable, b)
+
+    # An agent row `ended` (Delegates asked Sessions): a message is settled ended, but a later
+    # start's brief, stored before that start's row, waits for it.
+    {:ok, _} =
+      await(fn ->
+        Sessions.cue(ctx.sessions, %{topic: "stream:test", ids: []})
+        ok_ended(Sessions.ended(ctx.sessions, "d1"))
+      end)
+
+    assert {:ok, {:queued, m}} = Mailbox.message(ctx.mailbox, "main", "d1", "later")
+    {:ok, _} = until(ctx, m, &(&1.status == "ended"))
+    {:ok, {:queued, next}} = Mailbox.brief(mailbox(ctx), "main", "d1", "Again.", Stream.uuid())
+    cue(ctx)
+    assert %{status: "queued"} = Table.get(ctx.mtable, next)
   end
+
+  # Sessions settles the stopped row at a cue; until then the end is refused.
+  defp ok_ended({:ok, :ended} = ok), do: ok
+  defp ok_ended(_), do: nil
 
   # SettleReplay, and a row marked whose line Stream never marked: due again, then once.
   test "a restart settles a marked row: from the replay, or due again under its uuid", ctx do
