@@ -86,7 +86,7 @@ defmodule CodingAgentFramework.IntakeTest do
     assert {:refused, {:not_held, "expired"}} = Intake.answer(intake, id, :allow)
   end
 
-  test "after a restart a held row is lost and an answering one unknown", %{db: db, start: start} do
+  test "after a restart a held row is lost and a deciding one unknown", %{db: db, start: start} do
     intake = start.([])
     {task, id} = hold(intake)
     {:ok, other} = Table.open(db)
@@ -100,7 +100,7 @@ defmodule CodingAgentFramework.IntakeTest do
         1
       )
 
-    true = Table.move(other, id2, "held", "answering", "{}", 1)
+    true = Table.move(other, id2, "held", "deciding", "{}", 1)
     stop_supervised!(Intake)
     # The Intake is gone, so the open request is let go with no decision.
     assert %{status: 200, resp_body: ""} = Task.await(task)
