@@ -17,7 +17,8 @@ defmodule CafTracker.MixProject do
     [
       {:caf_delegates, in_umbrella: true},
       {:caf_intake, in_umbrella: true},
-      {:caf_recoveries, in_umbrella: true},
+      {:caf_acts, in_umbrella: true, only: :test},
+      {:caf_recoveries, in_umbrella: true, only: :test},
       {:caf_sessions, in_umbrella: true},
       {:caf_store, in_umbrella: true},
       {:caf_stream, in_umbrella: true},

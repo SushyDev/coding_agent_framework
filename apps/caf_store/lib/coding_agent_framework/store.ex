@@ -163,6 +163,44 @@ defmodule CodingAgentFramework.Store do
   defp dump({_, v}), do: inspect(v)
 
   @doc """
+  A term as a column stores it, by one rule (F-117's new-2): text and integers as they are, nil
+  as nil, an atom as its name, and anything else as canonical JSON, with a tuple as an array, an
+  atom inside as its name (`true`, `false` and `nil` as JSON's), and a map's keys sorted, so
+  equal terms give equal text. Never `inspect` text, except for a pid, a reference, a port or a
+  function, which have no other: they name a process, not data.
+
+      iex> CodingAgentFramework.Store.text(:repeating)
+      "repeating"
+      iex> CodingAgentFramework.Store.text({:sample_too_old, 31_001})
+      ~s(["sample_too_old",31001])
+      iex> CodingAgentFramework.Store.text(%{b: [1, nil], a: true})
+      ~s({"a":true,"b":[1,null]})
+  """
+  @spec text(term) :: String.t() | integer | nil
+  def text(nil), do: nil
+  def text(v) when is_binary(v) or is_integer(v), do: v
+  def text(v) when is_atom(v), do: Atom.to_string(v)
+  def text(v), do: json(v)
+
+  defp json(v) when is_boolean(v) or is_nil(v) or is_number(v) or is_binary(v),
+    do: JSON.encode!(v)
+
+  defp json(v) when is_atom(v), do: JSON.encode!(Atom.to_string(v))
+  defp json(v) when is_tuple(v), do: json(Tuple.to_list(v))
+  defp json(v) when is_list(v), do: "[" <> Enum.map_join(v, ",", &json/1) <> "]"
+
+  defp json(%{} = v) do
+    pairs = v |> Enum.map(fn {k, x} -> {key(k), json(x)} end) |> Enum.sort()
+    "{" <> Enum.map_join(pairs, ",", fn {k, x} -> JSON.encode!(k) <> ":" <> x end) <> "}"
+  end
+
+  defp json(v), do: JSON.encode!(inspect(v))
+
+  defp key(k) when is_binary(k), do: k
+  defp key(k) when is_atom(k), do: Atom.to_string(k)
+  defp key(k), do: json(k)
+
+  @doc """
   `count` placeholders, numbered from `from`.
 
       iex> CodingAgentFramework.Store.marks(3, 2)

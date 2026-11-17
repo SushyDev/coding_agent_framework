@@ -145,9 +145,10 @@ that only make sense together), under `apps/`. An app declares, directly, every 
 not compile, and the layers stay one way: base (`caf_shell`,
 `caf_tmux`, `caf_holder` with `Holder.Process`, `caf_store` with `Reader`, `caf_cues`), then
 readers and writers (`caf_registry`, `caf_transcripts`, `caf_usage`, `caf_accounts`, `caf_cli`,
-`caf_screen`, `caf_inlet`, `caf_stream`, `caf_intake`, `caf_sampler`), then `caf_sessions`,
-then `caf_tracker` (its sources made from the readers' table metadata) and `caf_recoveries`,
-then the parts built later. The remodel adds `caf_store` (R1) and `caf_cues` (R11), and
+`caf_screen`, `caf_inlet`, `caf_stream`, `caf_intake`, `caf_sampler`, `caf_acts`), then
+`caf_sessions`, then `caf_tracker` (its sources made from the readers' and `Acts`' table
+metadata) and `caf_recoveries`, then the parts built later. The remodel adds `caf_store` (R1),
+`caf_acts` (R10, in place of `Grants.Claims` and `Recoveries`' table) and `caf_cues` (R11), and
 `caf_control` becomes `caf_inlet` (R8), which uses `caf_screen`'s pure reading. Shared test aids that use no part above `caf_shell` live in `caf_test`,
 used only in tests; setup a part's tests share with a higher app's tests lives in that part's
 `test/support/`, compiled only for tests. A test double is a test aid: it lives in
@@ -196,7 +197,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Jobs` | one-off commands on a host, in a copy: held, logged, ended by their exit or their timeout | `jobs` |
 | `Services` | programs agents start and keep on a host, in a copy: held, owned, read, written to, restarted, with ports forwarded to the workstation; the forward is a second `Holder.Process` record of the service | `services` |
 | `Tracker` | the state views read: the fold of every reader | — |
-| `Recoveries` | detect a broken state, take its act in `Acts`, act once per state, verify; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after its end within its stop's deadline, by `Holder.Process` (`Sessions` itself never kills) | no table of its own |
+| `Recoveries` | detect a broken state, take its act in `Acts`, act once per state, verify; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after its end within its stop's deadline, by `Holder.Process` (`Sessions` itself never kills). Two states wait for a person, whose clear makes the next one new: a viewer lost a third time within a window, and an end whose process outlived the KILL (`unknown`, F-118's new-5); the fault ledger shows both | no table of its own |
 | `Grants` | decides whether a caller may act on a target, by the edges of `Sessions`' tree; a pure module, handed the tree's function | — |
 | `MCP` | the agent tools ("Agents working together"); each call is checked by `Grants` once, and each fix takes its act in `Acts` | `mcp_tokens`, `mcp_calls` |
 | `Ghostty` | opens or focuses a session's terminal window | — |
@@ -1557,7 +1558,9 @@ are the model before the code they describe (R5, R7 to R10).
   the `Tracker`, `Mailbox` and the app read them, and no part opens another's table. A main
   session is a row of kind `main` (most of item 6). About +300, −350.
 - **R10. `Acts`**: `Claims`' and `Recoveries`' rows in one table with a unique index and a cue;
-  the fault ledger of item 14 is its query and its topic. About +250, −300.
+  the fault ledger of item 14 is its query and its topic. About +250, −300. Built in F-126:
+  `Acts` writes the rows; starts and raised errors take its `record`, and wiring them into
+  `Sessions` and `Delegates` waits for R7 (F-126's new-1).
 - **R11. `Cues`**: each part declares the topics it reads; `Jobs` and `Services` cue; the app's
   routing table and its ticker go. About +200, −200. (F-102's new-3.)
 - **R12. `Mover`**, on the agent row and `Delivery`, against the rewritten `Move.tla`, for

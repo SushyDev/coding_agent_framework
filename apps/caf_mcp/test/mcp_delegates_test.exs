@@ -11,7 +11,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
   alias CodingAgentFramework.Stream
   alias CodingAgentFramework.{Tracker, Transcripts, Usage}
   alias CodingAgentFramework.Delegates.Table
-  alias CodingAgentFramework.Grants.Claims
+  alias CodingAgentFramework.Acts
   alias CodingAgentFramework.{HeadlessStandIn, Operator}
 
   setup {SessionsSetup, :sessions}
@@ -83,9 +83,9 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
 
     tracker = start_supervised!({Tracker, sources: sources, timer: false})
 
-    claims =
+    acts =
       start_supervised!(
-        {Claims, path: Path.join(ctx.dir, "claims.db"), grants: grants, start_id: "s1"}
+        {Acts, db: Path.join(ctx.dir, "acts.db"), start_id: "s1", host: "test", instance: "d"}
       )
 
     mcp =
@@ -94,8 +94,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
          dir: Path.join(ctx.dir, "mcp"),
          port: 4791,
          grants: grants,
-         claims: claims,
-         start_id: "s1",
+         acts: acts,
          mailbox: {Mailbox, mailbox},
          jobs: {__MODULE__, :unused},
          delegates: {Delegates, delegates},
@@ -118,7 +117,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
 
     %{mcp: mcp, tokens: tokens, delegates: delegates, dtable: dtable, mailbox: mailbox}
     |> Map.merge(%{tracker: tracker, transcripts: transcripts})
-    |> Map.put(:claims, claims)
+    |> Map.put(:acts, acts)
   end
 
   defmodule BrokenSocket do
@@ -259,10 +258,11 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     assert tool(ctx, "stray", "resume", one) == %{"refused" => ["unknown_agent", "stray"]}
     answer = Map.merge(one, %{"dialog" => req_one, "label" => "maybe"})
     assert tool(ctx, "main", "answer", answer) == %{"refused" => ["bad", "args"]}
-    assert {:ok, []} = Claims.rows(ctx.claims)
+    assert {:ok, []} = Acts.rows(ctx.acts)
 
     # The act reads the state again: one that moved since the claim is not acted on.
     {:ok, state} = Delegates.fix_state(ctx.delegates, "main", "app-unit-one")
+    stored = CodingAgentFramework.Store.text(state)
     stale = %{state | offset: state.offset - 1}
 
     assert {:refused, {:moved, ^state}} =
@@ -285,13 +285,13 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     # A claim still open on a state refuses a second fix as claimed.
     {:ok, _} = cue_until(ctx, &(&1.name == "app-unit-two" and &1.status == "finished"))
     {:ok, now} = Delegates.fix_state(ctx.delegates, "main", "app-unit-two")
-    {:ok, id} = Claims.claim(ctx.claims, "main", "app-unit-two", now, "s1")
+    {:ok, id} = Acts.claim(ctx.acts, "main", "app-unit-two", now, :stop)
     assert tool(ctx, "main", "stop", two) == %{"refused" => ["claimed", "main"]}
 
-    assert {:ok, [%{state: ^state} = r1, %{target: "app-unit-two"} = r2, %{id: ^id} = r3]} =
-             Claims.rows(ctx.claims)
+    assert {:ok, [%{state: ^stored} = r1, %{target: "app-unit-two"} = r2, %{id: ^id} = r3]} =
+             Acts.rows(ctx.acts)
 
-    assert {r1.status, r2.status, r3.status} == {"not_verified", "verified", "claimed"}
+    assert {r1.outcome, r2.outcome, r3.status} == {"not_verified", "verified", "claimed"}
     refute "interrupt" in HeadlessStandIn.taken(ctx.dir)
     assert "answer #{req_two}" in HeadlessStandIn.taken(ctx.dir)
   end
@@ -321,8 +321,8 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     assert %{"ok" => %{"done" => "stopped", "settled" => %{"ok" => "verified"}}} =
              tool(ctx, "main", "stop", %{"agent" => "app-unit-one"})
 
-    assert {:ok, [_, %{status: "not_verified"}, %{target: "app-unit-one", status: "verified"}]} =
-             Claims.rows(ctx.claims)
+    assert {:ok, [_, %{outcome: "not_verified"}, %{target: "app-unit-one", outcome: "verified"}]} =
+             Acts.rows(ctx.acts)
 
     assert "interrupt" in HeadlessStandIn.taken(ctx.dir)
     assert "end" in HeadlessStandIn.taken(ctx.dir)
@@ -359,7 +359,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     # Once the resumed process has finished, its state holds still for the next claim.
     assert {:ok, %{resumes: 1}} = cue_until(ctx, &(&1.status == "finished"))
     assert tool(ctx, "main", "resume", one) == %{"refused" => "resumed_once"}
-    assert {:ok, [%{status: "verified"}, %{status: "not_verified"}]} = Claims.rows(ctx.claims)
+    assert {:ok, [%{outcome: "verified"}, %{outcome: "not_verified"}]} = Acts.rows(ctx.acts)
   end
 
   test "the operator acts as a parent of every main session, under its own name", ctx do
@@ -376,7 +376,9 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     assert {:ok, %{claim: claim, settled: {:ok, _}}} =
              Operator.answer(ctx.mcp, "app-unit-one", "req-" <> u, "deny")
 
-    assert {:ok, %{caller: "op", target: "app-unit-one"}} = Claims.get(ctx.claims, claim)
+    assert {:ok, %{actor: "op", target: "app-unit-one", act: "answer"}} =
+             Acts.get(ctx.acts, claim)
+
     assert "answer req-#{u}" in HeadlessStandIn.taken(ctx.dir)
 
     # A main session's own fixes wait for `Mains`, and no agent fixes one. A service's fix goes

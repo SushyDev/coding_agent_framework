@@ -34,7 +34,7 @@ defmodule CodingAgentFramework.Grants do
   | `may_fix_service?/3` | the service's owner, the owner's parent, or the operator | `:service_fixed_by_owner_or_parent` |
   | `may_hand?/4` | the owner, to its parent or a child | `:handed_by_owner`, `:handed_along_edge` |
 
-  A fix's claim, the other half of its job, is `CodingAgentFramework.Grants.Claims`.
+  A fix's claim, the other half of its job, is a row in `CodingAgentFramework.Acts`.
 
       iex> tree = fn -> [%{name: "app-fix", project: "app", parent: "app-main"}] end
       iex> grants = CodingAgentFramework.Grants.new(tree)

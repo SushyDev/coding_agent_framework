@@ -1,10 +1,10 @@
 defmodule CodingAgentFramework.RecoveriesSetup do
   @moduledoc """
-  The setup and helpers `RecoveriesTest` and `RecoveriesSourceTest` share: a `Recoveries` on a
-  real tmux server and real dtach sockets in the test's own directory, with `cat` held as the
-  agent's stand-in, and the host's `Sessions`, which answers each viewer's command from the
-  row `hold!/3` leaves. The sampler and `Recoveries` share a clock the test moves: it ticks one
-  ms per reading.
+  The setup and helpers `RecoveriesTest` and `ActsSourceTest` share: a `Recoveries` on a real
+  tmux server and real dtach sockets in the test's own directory, with `cat` held as the agent's
+  stand-in, the instance's `Acts`, and the host's `Sessions`, which answers each viewer's
+  command from the row `hold!/3` leaves. The sampler, `Acts` and `Recoveries` share a clock the
+  test moves: it ticks one ms per reading. `Acts`' cues come to the test as `{:cue, cue}`.
 
   It compiles only for tests. It lives in `caf_recoveries`, not `caf_test`, because it uses
   `Recoveries`, and `caf_test` may not use an app above it.
@@ -16,8 +16,7 @@ defmodule CodingAgentFramework.RecoveriesSetup do
   import ExUnit.Assertions
   import ExUnit.Callbacks, only: [on_exit: 1]
 
-  alias CodingAgentFramework.{Control, Holder, Recoveries, Sessions, Tmux, TmuxSampler}
-  alias CodingAgentFramework.Recoveries.Table
+  alias CodingAgentFramework.{Acts, Control, Holder, Recoveries, Sessions, Tmux, TmuxSampler}
   alias CodingAgentFramework.Tmux.CLI
 
   @doc """
@@ -53,6 +52,16 @@ defmodule CodingAgentFramework.RecoveriesSetup do
     {:ok, sampler} = TmuxSampler.start_link(server: server, holder: holder, db: db, clock: clock)
     me = self()
 
+    {:ok, acts} =
+      Acts.start_link(
+        db: db,
+        start_id: "s1",
+        host: "test",
+        instance: "a",
+        clock: clock,
+        notify: &send(me, {:cue, &1})
+      )
+
     opts = [
       sampler: sampler,
       control: control,
@@ -60,10 +69,9 @@ defmodule CodingAgentFramework.RecoveriesSetup do
       programs: programs(),
       sessions: sessions,
       server: server,
-      db: db,
+      acts: acts,
       size: {80, 24},
       end_grace: 300,
-      notify: &send(me, {:cue, &1}),
       clock: clock
     ]
 
@@ -72,6 +80,7 @@ defmodule CodingAgentFramework.RecoveriesSetup do
     {:ok,
      dir: dir,
      db: db,
+     acts: acts,
      server: server,
      holder: holder,
      control: control,
@@ -86,11 +95,14 @@ defmodule CodingAgentFramework.RecoveriesSetup do
   @doc "The key of the test's tmux server, as the rows name it."
   def key(ctx), do: elem(Tmux.key(ctx.server), 1)
 
-  @doc "The rows `Recoveries` wrote for the test's server."
+  @doc "The rows `Recoveries` wrote in `Acts` for the test's server."
   def rows(ctx) do
-    {:ok, db} = Table.open(ctx.db)
-    Table.rows(db, "test", key(ctx))
+    {:ok, rows} = Acts.rows(ctx.acts, actor: actor(ctx))
+    rows
   end
+
+  @doc "The actor the test's `Recoveries` writes its rows as."
+  def actor(ctx), do: "recoveries:test:" <> key(ctx)
 
   @doc "Samples once and answers the held row of `name`."
   def held(ctx, name) do

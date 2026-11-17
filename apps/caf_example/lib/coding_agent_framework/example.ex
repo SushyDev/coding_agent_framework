@@ -23,7 +23,7 @@ defmodule CodingAgentFramework.Example do
   `CodingAgentFramework.Operator` with `parts(sup).mcp`, under the config's `operator` name,
   which every part's `Grants` knows: the same checks, claims and call log as an agent's tools.
 
-  **Once per start.** `start_link/1` makes the claims' `start_id` and the hooks' secret, and
+  **Once per start.** `start_link/1` makes `Acts`' `start_id` and the hooks' secret, and
   writes each account's files with that secret, before any part starts.
 
   Nothing it starts acts outside the framework home but its own tmux server (whose socket is in
@@ -32,8 +32,19 @@ defmodule CodingAgentFramework.Example do
 
   use Supervisor
 
-  alias CodingAgentFramework.{Accounts, Control, Copies, Delegates, Grants, Holder, Host, Intake}
-  alias CodingAgentFramework.{Jobs, Mailbox, MCP, Programs, Recoveries, Registry, Services}
+  alias CodingAgentFramework.{Accounts, Acts, Control, Copies, Delegates, Grants, Holder, Host}
+
+  alias CodingAgentFramework.{
+    Intake,
+    Jobs,
+    Mailbox,
+    MCP,
+    Programs,
+    Recoveries,
+    Registry,
+    Services
+  }
+
   alias CodingAgentFramework.{Sessions, Shell, Stream, Tmux, TmuxSampler, Tracker, Transcripts}
   alias CodingAgentFramework.{Usage}
   alias CodingAgentFramework.Example.{Config, Ends, Ticker}
@@ -170,6 +181,16 @@ defmodule CodingAgentFramework.Example do
             db: db,
             notify: notify}
          end},
+        {:acts,
+         fn _ ->
+           {Acts,
+            db: db,
+            start_id: w.start_id,
+            host: host,
+            instance: c.instance,
+            notify: notify,
+            claims: Config.path(c, "claims.db")}
+         end},
         {:recoveries,
          fn pid ->
            {Recoveries,
@@ -179,8 +200,7 @@ defmodule CodingAgentFramework.Example do
             sampler: pid.(:sampler),
             control: pid.(:control),
             sessions: pid.(:sessions),
-            db: db,
-            notify: notify}
+            acts: pid.(:acts)}
          end},
         {:tracker, fn _ -> {Tracker, sources: sources(w)} end},
         # Before `Delegates`, which stores each brief and report in it.
@@ -210,11 +230,6 @@ defmodule CodingAgentFramework.Example do
             projects: c.projects,
             mcp: &issue(pid.(:mcp), &1),
             notify: notify}
-         end},
-        {:claims,
-         fn _ ->
-           {Grants.Claims,
-            path: Config.path(c, "claims.db"), grants: grants, start_id: w.start_id}
          end},
         {:copies, fn _ -> {Copies, dir: Config.path(c, "parts/copies"), programs: p} end},
         {:jobs,
@@ -253,8 +268,7 @@ defmodule CodingAgentFramework.Example do
             instance: c.instance,
             tool_timeout: c.tool_timeout,
             margin: c.margin,
-            claims: pid.(:claims),
-            start_id: w.start_id}
+            acts: pid.(:acts)}
          end},
         {:mcp_http,
          fn pid ->
@@ -294,7 +308,7 @@ defmodule CodingAgentFramework.Example do
         {Tracker.StreamSource, on},
         {Tracker.DelegatesSource, on},
         {Tracker.ReaderSource, [table: TmuxSampler.Table] ++ on ++ [server: server]},
-        {Tracker.RecoveriesSource, on ++ [server: server]}
+        {Tracker.ReaderSource, [table: Acts.Table] ++ on ++ [instance: c.instance]}
       ]
   end
 

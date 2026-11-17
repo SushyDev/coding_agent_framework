@@ -13,11 +13,10 @@ defmodule CodingAgentFramework.RecoveriesTest do
   import CodingAgentFramework.RecoveriesSetup
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Holder, Recoveries, RecoveriesSetup, Sessions, Tmux, TmuxSampler}
-  alias CodingAgentFramework.Recoveries.Table
+  alias CodingAgentFramework.{Acts, Holder, Recoveries, RecoveriesSetup, Sessions, Tmux}
+  alias CodingAgentFramework.TmuxSampler
 
   doctest Recoveries
-  doctest Table
 
   setup {RecoveriesSetup, :recoveries}
 
@@ -42,13 +41,16 @@ defmodule CodingAgentFramework.RecoveriesTest do
     # Another part opens the viewer after the second sample and before the check acts.
     {:ok, pane} = view(ctx, "alpha")
     assert {:ok, %{claimed: [id]}} = Recoveries.check(ctx.recoveries)
-    assert [%{id: ^id, status: "unknown", reason: ":session_exists", open: "exists"}] = rows(ctx)
+
+    assert [%{id: ^id, outcome: "unknown", reason: "session_exists", answer: "exists"}] =
+             rows(ctx)
 
     # Its viewer dies before the next sample: the row still reads the same, yet it is a new loss.
     assert {:ok, :killed} = Tmux.kill_pane(ctx.server, pane, "alpha")
     assert {:ok, second} = agree(ctx, "alpha")
     assert second != id
-    assert [%{opened_at: at}, %{status: "opened", open: "ok", since: at}] = rows(ctx)
+    assert [%{acted_at: at}, %{status: "acted", answer: "ok", state: state}] = rows(ctx)
+    assert String.ends_with?(state, ":#{at}")
   end
 
   test "a third loss within the window waits for a person", ctx do
@@ -65,15 +67,15 @@ defmodule CodingAgentFramework.RecoveriesTest do
 
     assert {:ok, :killed} = Tmux.kill_pane(ctx.server, pane, "alpha")
     assert {:ok, id} = agree(ctx, "alpha")
-    assert %{status: "failed", reason: ":repeating", opened_at: nil} = List.last(rows(ctx))
+    assert %{outcome: "failed", reason: "repeating", acted_at: nil} = List.last(rows(ctx))
     assert held(ctx, "alpha").status == :unviewed
     assert {:ok, %{claimed: [], ended: []}} = Recoveries.check(ctx.recoveries)
     assert length(rows(ctx)) == 5
 
-    assert {:refused, :not_repeating} = Recoveries.clear(ctx.recoveries, "beta")
+    assert {:refused, :not_waiting} = Recoveries.clear(ctx.recoveries, "beta")
     assert {:ok, [^id]} = Recoveries.clear(ctx.recoveries, "alpha")
     assert {:ok, sixth} = agree(ctx, "alpha")
-    assert %{id: ^sixth, status: "opened", open: "ok"} = List.last(rows(ctx))
+    assert %{id: ^sixth, status: "acted", answer: "ok"} = List.last(rows(ctx))
   end
 
   test "a sample older than the maximum age is not acted on, and the row says why", ctx do
@@ -86,13 +88,13 @@ defmodule CodingAgentFramework.RecoveriesTest do
     move(ctx, 31_000)
     assert {:refused, {:sample_too_old, age}} = Recoveries.check(ctx.recoveries)
     assert age > 30_000
-    assert [%{status: "skipped", reason: reason, open: nil}] = rows(ctx)
-    assert reason == inspect({:sample_too_old, age})
+    assert [%{status: "skipped", reason: reason, answer: nil}] = rows(ctx)
+    assert reason == ~s(["sample_too_old",#{age}])
     assert held(ctx, "alpha").status == :unviewed
 
     # A fresh sample agrees with the last one checked, and its claim takes the row over.
     assert {:ok, %{claimed: [_]}} = Recoveries.check(ctx.recoveries)
-    assert [%{status: "opened", reason: nil, open: "ok"}] = rows(ctx)
+    assert [%{status: "acted", reason: nil, answer: "ok"}] = rows(ctx)
   end
 
   test "a killed server comes back with the viewer", ctx do
@@ -105,12 +107,12 @@ defmodule CodingAgentFramework.RecoveriesTest do
     assert {:ok, %{claimed: []}} = Recoveries.check(ctx.recoveries)
     assert held(ctx, "alpha").status == :no_server
     assert {:ok, %{claimed: [id]}} = Recoveries.check(ctx.recoveries)
-    assert [%{status: "opened", pane: "%0"}] = rows(ctx)
+    assert [%{status: "acted", detail: "%0"}] = rows(ctx)
 
     assert %{status: :viewed} = held(ctx, "alpha")
     assert {:ok, %{generation: 1}} = TmuxSampler.rows(ctx.sampler)
     assert {:ok, %{ended: [^id]}} = Recoveries.check(ctx.recoveries)
-    assert [%{status: "recovered"}] = rows(ctx)
+    assert [%{outcome: "recovered"}] = rows(ctx)
     assert alive?(child)
   end
 
@@ -122,19 +124,19 @@ defmodule CodingAgentFramework.RecoveriesTest do
     # The claim a Recoveries wrote just before it ended, with no act after it.
     {:ok, read} = TmuxSampler.rows(ctx.sampler)
     [lost] = Recoveries.lost_viewers(read, %{})
-    {:ok, db} = Table.open(ctx.db)
-    state = Map.merge(lost, %{host: "test", server: key(ctx)})
-    {:ok, id} = Table.claim(db, state, ctx.clock.())
+    state = "test:#{key(ctx)}:#{lost.key}"
+    {:ok, id} = Acts.claim(ctx.acts, actor(ctx), "alpha", state, :reopen)
     ref = Process.monitor(ctx.recoveries)
     GenServer.stop(ctx.recoveries)
     assert_receive {:DOWN, ^ref, _, _, _}
 
+    # The restarted Recoveries closes the claim it did not act on, and never acts on its state.
     {:ok, recoveries} = Recoveries.start_link(ctx.opts)
+    assert [%{id: ^id, status: "interrupted", answer: nil}] = rows(ctx)
     assert {:ok, %{claimed: []}} = Recoveries.check(recoveries)
     assert held(ctx, "alpha").status == :unviewed
-    assert {:ok, %{claimed: [], ended: [^id]}} = Recoveries.check(recoveries)
-    assert [%{status: "unknown", reason: ":interrupted", open: nil}] = rows(ctx)
     assert {:ok, %{claimed: [], ended: []}} = Recoveries.check(recoveries)
+    assert {:ok, [%{id: ^id}]} = Acts.faults(ctx.acts, actor: actor(ctx))
     assert held(ctx, "alpha").status == :unviewed
   end
 
@@ -145,7 +147,7 @@ defmodule CodingAgentFramework.RecoveriesTest do
     :ok = GenServer.stop(ctx.control)
 
     assert {:ok, _} = agree(ctx, "alpha")
-    assert [%{status: "failed", reason: ":no_control", opened_at: nil}] = rows(ctx)
+    assert [%{outcome: "failed", reason: "no_control", acted_at: nil}] = rows(ctx)
     assert held(ctx, "alpha").status == :unviewed
     assert {:ok, %{claimed: [], ended: []}} = Recoveries.check(ctx.recoveries)
     assert {:ok, :live} = Holder.state(ctx.holder, "alpha")
@@ -157,14 +159,14 @@ defmodule CodingAgentFramework.RecoveriesTest do
     {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
 
     assert {:ok, id} = agree(ctx, "alpha")
-    assert [%{status: "opened", open: "ok"}] = rows(ctx)
+    assert [%{status: "acted", answer: "ok"}] = rows(ctx)
     assert {:ok, [dtach, "-a" | _] = argv} = Holder.viewer_argv(ctx.holder, "alpha")
     assert dtach == program!(:dtach)
     assert started_with(ctx, "alpha") == Enum.join(argv, " ")
 
     assert %{status: :viewed} = held(ctx, "alpha")
     assert {:ok, %{ended: [^id]}} = Recoveries.check(ctx.recoveries)
-    assert [%{status: "recovered"}] = rows(ctx)
+    assert [%{outcome: "recovered"}] = rows(ctx)
   end
 
   test "a lost viewer of a delegate is reopened following its event log", ctx do
@@ -175,14 +177,14 @@ defmodule CodingAgentFramework.RecoveriesTest do
     {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
 
     assert {:ok, id} = agree(ctx, "delta")
-    assert [%{status: "opened", open: "ok"}] = rows(ctx)
+    assert [%{status: "acted", answer: "ok"}] = rows(ctx)
     assert started_with(ctx, "delta") == Enum.join([program!(:tail), "-F", log], " ")
     # The viewer shows the log, which `dtach -a` of the held stand-in would not.
     assert {:ok, _} = await(fn -> if screen(ctx, "delta") =~ "an event", do: {:ok, :shown} end)
 
     assert %{status: :viewed} = held(ctx, "delta")
     assert {:ok, %{ended: [^id]}} = Recoveries.check(ctx.recoveries)
-    assert [%{status: "recovered"}] = rows(ctx)
+    assert [%{outcome: "recovered"}] = rows(ctx)
   end
 
   test "a lost viewer of a socket Sessions has no row of is not reopened", ctx do
@@ -190,7 +192,7 @@ defmodule CodingAgentFramework.RecoveriesTest do
     {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
 
     assert {:ok, _} = agree(ctx, "alpha")
-    assert [%{status: "failed", reason: ":no_session", opened_at: nil}] = rows(ctx)
+    assert [%{outcome: "failed", reason: "no_session", acted_at: nil}] = rows(ctx)
     assert held(ctx, "alpha").status == :unviewed
     assert {:ok, %{claimed: [], ended: []}} = Recoveries.check(ctx.recoveries)
     assert alive?(child)
@@ -202,7 +204,7 @@ defmodule CodingAgentFramework.RecoveriesTest do
     :ok = GenServer.stop(ctx.sessions)
 
     assert {:ok, _} = agree(ctx, "alpha")
-    assert [%{status: "failed", reason: ":no_sessions", opened_at: nil}] = rows(ctx)
+    assert [%{outcome: "failed", reason: "no_sessions", acted_at: nil}] = rows(ctx)
     assert held(ctx, "alpha").status == :unviewed
     assert alive?(child)
   end
@@ -245,7 +247,7 @@ defmodule CodingAgentFramework.RecoveriesTest do
     assert {:ok, _} = TmuxSampler.sample(ctx.sampler)
     assert {:ok, %{ends: [id]}} = Recoveries.check(ctx.recoveries)
     refute alive?(pid)
-    assert [%{id: ^id, kind: "end", status: "recovered", open: "ended"}] = rows(ctx)
+    assert [%{id: ^id, act: "end", outcome: "recovered", answer: "ended"}] = rows(ctx)
 
     # Sessions settles its row at the next cue; the state is never acted on again.
     Sessions.cue(ctx.sessions, %{topic: "tmux:test:#{key(ctx)}", ids: []})
@@ -259,6 +261,34 @@ defmodule CodingAgentFramework.RecoveriesTest do
              end)
 
     assert {:ok, %{ends: []}} = Recoveries.check(ctx.recoveries)
+  end
+
+  test "F-118 new-5: an end that settled unknown waits for a person, whose clear tries it again",
+       ctx do
+    {:ok, procs} = Holder.Process.new(programs(), ctx.holder)
+    on_exit(fn -> end_recorded(ctx.dir) end)
+    argv = [program!(:sh), "-c", echo_tail!(ctx.dir), Path.join(ctx.dir, "lost")]
+    assert {:ok, _} = Holder.Process.hold(procs, "lost", argv)
+    assert {:ok, %{pid: pid, start: start} = record} = await(fn -> record(procs, "lost") end)
+    orphan!(ctx, "lost", record)
+
+    # The end of this state was tried and its process outlived the KILL, as the row says.
+    state = "test:#{key(ctx)}:end:lost:#{pid}:#{Holder.Process.normal(start)}"
+    {:ok, first} = Acts.claim(ctx.acts, actor(ctx), "lost", state, :end)
+    {:ok, :unknown} = Acts.settle(ctx.acts, first, :unknown, reason: :alive, acted: true)
+
+    assert {:ok, _} = TmuxSampler.sample(ctx.sampler)
+    assert {:ok, %{ends: []}} = Recoveries.check(ctx.recoveries)
+    assert alive?(pid)
+    assert {:ok, [%{id: ^first, cleared_at: nil}]} = Acts.faults(ctx.acts, target: "lost")
+
+    assert {:refused, :not_waiting} = Recoveries.clear(ctx.recoveries, "beta")
+    assert {:ok, [^first]} = Recoveries.clear(ctx.recoveries, "lost")
+    assert {:ok, %{ends: [second]}} = Recoveries.check(ctx.recoveries)
+    refute alive?(pid)
+    assert [%{cleared_at: at}, %{id: ^second, outcome: "recovered", state: again}] = rows(ctx)
+    assert again == "#{state}:cleared:#{at}"
+    assert {:refused, :not_waiting} = Recoveries.clear(ctx.recoveries, "lost")
   end
 
   defp record(procs, name) do
@@ -317,7 +347,7 @@ defmodule CodingAgentFramework.RecoveriesTest do
     assert {:ok, id} = agree(ctx, "alpha")
     assert held(ctx, "alpha").status == :viewed
     assert {:ok, %{ended: [^id]}} = Recoveries.check(ctx.recoveries)
-    assert %{id: ^id, status: "recovered", pane: new} = List.last(rows(ctx))
+    assert %{id: ^id, outcome: "recovered", detail: new} = List.last(rows(ctx))
     new
   end
 end

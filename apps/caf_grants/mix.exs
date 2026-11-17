@@ -15,8 +15,6 @@ defmodule CafGrants.MixProject do
 
   defp deps do
     [
-      {:caf_store, in_umbrella: true},
-      {:caf_test, in_umbrella: true, only: :test},
       {:stream_data, "~> 1.4", only: :test}
     ]
   end
