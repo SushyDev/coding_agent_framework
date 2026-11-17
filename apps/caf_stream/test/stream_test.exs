@@ -20,9 +20,11 @@ defmodule CodingAgentFramework.StreamTest do
   setup do
     dir = test_dir()
     {:ok, holder} = Holder.new(programs(), dir)
+    {:ok, procs} = Holder.Process.new(programs(), holder)
     stand_in = HeadlessStandIn.write!(dir)
     on_exit(fn -> end_recorded(dir) end)
-    ctx = %{dir: dir, holder: holder, stand_in: stand_in, db: Path.join(dir, "s.db")}
+    ctx = %{dir: dir, holder: holder, procs: procs, stand_in: stand_in}
+    ctx = Map.put(ctx, :db, Path.join(dir, "s.db"))
     {:ok, Map.put(ctx, :stream, start!(ctx))}
   end
 
@@ -229,14 +231,15 @@ defmodule CodingAgentFramework.StreamTest do
     transcript = Path.join(ctx.dir, "#{session}.jsonl")
     {:ok, %{dir: dir, fifo: fifo}} = Stream.follow(s, session, session, transcript)
     argv = ClaudeCLI.wrapper(program!(:sh), dir, fifo, argv)
-    {:ok, _} = Holder.hold(ctx.holder, session, argv, env: env)
+    {:ok, _} = Holder.Process.hold(ctx.procs, session, argv, env: env)
     row!(ctx, s, &(&1.session == session and &1.live_seen))
     s
   end
 
-  # Ends the process the wrapper recorded for `session`, by its pid, and waits for its socket.
+  # Ends the process `Holder.Process` recorded for `session`, by its pid, and waits for its
+  # socket. The record is `<pid> <start time>`.
   defp kill_held!(ctx, session) do
-    pid = File.read!(Path.join([ctx.dir, "streams", session, "pid"])) |> String.trim()
+    [pid | _] = File.read!(Holder.Process.record_path(ctx.procs, session)) |> String.split(" ")
     kill(pid)
     {:ok, :absent} = await(fn -> absent(Holder.state(ctx.holder, session)) end, 10_000)
   end

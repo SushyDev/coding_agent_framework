@@ -1,16 +1,16 @@
 defmodule CodingAgentFramework.DelegatesTest do
   @moduledoc """
-  `Delegates` up to a held report, over a real `Sessions`, `Stream` and `Transcripts`, real
-  dtach and tmux, a real git repository in this test's own directory, and the headless
-  stand-in for Claude Code. Each test waits on rows and moves the test's clock instead of
-  waiting for a deadline, and names the `Delegate.tla` steps it checks.
+  `Delegates` with its brief and report in `Mailbox`, over a real `Sessions`, `Stream`,
+  `Transcripts` and `Mailbox`, real dtach and tmux, a real git repository in this test's own
+  directory, and the headless stand-in for Claude Code. Each test waits on rows and moves the
+  test's clock instead of waiting for a deadline, and names the `Delegate.tla` steps it checks.
   """
   use ExUnit.Case, async: true
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, Delegates, HeadlessStandIn, Holder, SessionsSetup, Stream}
-  alias CodingAgentFramework.{Sessions, Transcripts, Usage}
+  alias CodingAgentFramework.{Accounts, Delegates, Grants, HeadlessStandIn, Holder, Mailbox}
+  alias CodingAgentFramework.{Sessions, SessionsSetup, Stream, Transcripts, Usage}
   alias CodingAgentFramework.ClaudeCLI.Options
   alias CodingAgentFramework.Delegates.Table
 
@@ -79,9 +79,26 @@ defmodule CodingAgentFramework.DelegatesTest do
       }
     ]
 
-    delegates = start_supervised!(Supervisor.child_spec({Delegates, opts}, restart: :temporary))
     {:ok, dtable} = Table.open(db)
-    {:ok, delegates: delegates, dopts: opts, fifo: fifo, dtable: dtable}
+    {:ok, mtable} = Mailbox.Table.open(db)
+
+    tree = fn ->
+      Table.with_status(dtable, "test", ~w(starting running resuming finished failed))
+    end
+
+    mopts = [db: db, grants: Grants.new(tree), stream: ctx.stream, sessions_db: db, host: "test"]
+    mailbox = start_supervised!(Supervisor.child_spec({Mailbox, mopts}, id: make_ref()))
+    opts = [{:mailbox, mailbox} | opts]
+    delegates = start_supervised!(Supervisor.child_spec({Delegates, opts}, restart: :temporary))
+
+    {:ok,
+     delegates: delegates,
+     dopts: opts,
+     fifo: fifo,
+     dtable: dtable,
+     mailbox: mailbox,
+     mopts: mopts,
+     mtable: mtable}
   end
 
   test "a start's row comes first, its brief goes in once, and its result is the report", ctx do
@@ -89,28 +106,29 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert {:refused, {:unknown_project, "web"}} = start(ctx, "web", "unit/one")
     assert {:refused, {:bad, :branch}} = start(ctx, "app", "main")
 
-    assert {:ok, %{id: id, name: "app-unit-one", account: "work", brief: {:ok, %{uuid: u}}}} =
+    assert {:ok, %{id: id, name: "app-unit-one", account: "work", brief_uuid: u}} =
              start(ctx, "app", "unit/one")
 
+    # The brief is Mailbox's row, stored before the session, from the parent, under its uuid.
     assert %{brief_uuid: ^u, brief: "Review it."} = Table.get(ctx.dtable, id)
+
+    assert [%{uuid: ^u, kind: "brief", from_agent: "main", to_agent: "app-unit-one"}] =
+             Enum.filter(rows(ctx), &(&1.kind == "brief"))
+
     # The cap counts a delegate until it ends: a finished one holds its report and its tree.
     assert {:refused, {:cap, 1}} = start(ctx, "app", "unit/two")
 
-    assert {:ok, %{report: "held", text: text, mark: "[report " <> _}} =
-             cue_until(ctx, id, &(&1.status == "finished"))
-
+    assert {:ok, %{report: "taken", text: text}} = cue_until(ctx, id, &(&1.status == "finished"))
     assert text == "done #{u}"
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}"]
 
-    # Its row leaves running once, and the report survives a restart.
+    # The report is the reply to the brief, and its row leaves running once, across a restart.
+    assert {:ok, %{kind: "reply", from: "app-unit-one", to: "main", status: "queued"}} =
+             Mailbox.answer_to(ctx.mailbox, u)
+
     delegates = restart(ctx)
     cue(ctx, delegates)
-
-    assert {:ok, [%{id: ^id, status: "finished", text: ^text}]} =
-             Delegates.held(delegates, "main")
-
-    assert {:ok, []} = Delegates.held(delegates, "other")
-    assert {:refused, :no_delivery} = Delegates.deliver(delegates, id)
+    assert [%{text: ^text}] = Enum.filter(rows(ctx), &(&1.reply_to == u))
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}"]
   end
 
@@ -120,25 +138,29 @@ defmodule CodingAgentFramework.DelegatesTest do
     # first, with a message of its own since the brief went in; Called, CallAnswered,
     # InputWritten under that uuid, StopHandled.
     hold(ctx)
-    assert {:ok, %{id: id, brief: {:ok, %{uuid: u}}}} = start(ctx, "app", "unit/one")
+    assert {:ok, %{id: id, brief_uuid: u}} = start(ctx, "app", "unit/one")
     stream_row(ctx, id, &(&1.messages[u].state == :delivered))
     kill_delegate(ctx, id, [])
 
     # Sessions has not settled its row yet: it still says running, so nothing is asked.
     assert %{status: "running"} = session_row(ctx, "app-unit-one")
     cue(ctx, current(ctx))
-    # A call after the cast: Delegates has handled the cue.
-    assert {:ok, []} = Delegates.held(current(ctx), "main")
-    assert %{status: "running", resumes: 0, resume_uuid: nil} = Table.get(ctx.dtable, id)
+
+    assert %{status: "running", resumes: 0, resume_uuid: nil, report: "none"} =
+             Table.get(ctx.dtable, id)
 
     File.rm!(Path.join(ctx.dir, "hold"))
     {:ok, _} = resumed(ctx, id)
 
-    assert {:ok, %{report: "held", text: text, resumes: 1, resume_uuid: r}} =
+    assert {:ok, %{report: "taken", text: text, resumes: 1, resume_uuid: r}} =
              cue_until(ctx, id, &(&1.status == "finished"))
 
+    # The word to go on was Mailbox's row, from framework, and the report is still the reply to
+    # the brief.
     assert is_binary(r) and r != u
+    assert [%{kind: "resume", from_agent: "framework"}] = Enum.filter(rows(ctx), &(&1.uuid == r))
     assert text == "done #{r}"
+    assert {:ok, %{kind: "reply"}} = Mailbox.answer_to(ctx.mailbox, u)
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "message #{r}"]
   end
 
@@ -150,7 +172,7 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert Table.rows(ctx.dtable, "test") == []
     hold(ctx)
     options = %{"env" => %{"APP_MODE" => "review"}, "disallowed_tools" => ["WebFetch"]}
-    assert {:ok, %{id: id, session_id: sid, brief: {:ok, %{uuid: u}}}} = start.(options: options)
+    assert {:ok, %{id: id, session_id: sid, brief_uuid: u}} = start.(options: options)
     kept = Table.get(ctx.dtable, id).options
     assert {:ok, %{env: %{"APP_MODE" => "review"}}} = Options.decode(kept)
 
@@ -167,7 +189,7 @@ defmodule CodingAgentFramework.DelegatesTest do
   test "a second kill before the last reply is the report, never resumed again", ctx do
     # KillSeen twice: the first resumed, the second failed with its text held as the report.
     hold(ctx)
-    assert {:ok, %{id: id, brief: {:ok, %{uuid: u}}}} = start(ctx, "app", "unit/one")
+    assert {:ok, %{id: id, brief_uuid: u}} = start(ctx, "app", "unit/one")
     stream_row(ctx, id, &(&1.messages[u].state == :delivered))
     killed = kill_delegate(ctx, id, [])
     {:ok, %{resume_uuid: r}} = resumed(ctx, id)
@@ -175,18 +197,18 @@ defmodule CodingAgentFramework.DelegatesTest do
     stream_row(ctx, id, &(&1.messages[r].state == :delivered))
     kill_delegate(ctx, id, killed)
 
-    assert {:ok, %{report: "held", text: text, resumes: 1}} =
+    assert {:ok, %{report: "taken", text: text, resumes: 1}} =
              cue_until(ctx, id, &(&1.status == "failed"))
 
     assert text =~ "killed twice"
-    assert {:ok, [%{id: ^id, status: "failed"}]} = Delegates.held(current(ctx), "main")
+    assert {:ok, %{kind: "notice", from: "framework"}} = Mailbox.answer_to(ctx.mailbox, u)
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "message #{r}"]
   end
 
   test "a kill after the last reply is a finish, read from the transcript", ctx do
     # TranscriptRead: no result in the log, and the transcript ends with the reply.
     hold(ctx)
-    assert {:ok, %{id: id, brief: {:ok, %{uuid: u}}}} = start(ctx, "app", "unit/one")
+    assert {:ok, %{id: id, brief_uuid: u}} = start(ctx, "app", "unit/one")
     %{transcript: path} = stream_row(ctx, id, &(&1.messages[u].state == :delivered))
 
     reply = %{
@@ -204,8 +226,10 @@ defmodule CodingAgentFramework.DelegatesTest do
     kill_delegate(ctx, id, [])
 
     # Sessions' row still runs: a finish does not wait for it.
-    assert {:ok, %{report: "held", text: "all done", resumes: 0}} =
+    assert {:ok, %{report: "taken", text: "all done", resumes: 0}} =
              cue_until(ctx, id, &(&1.status == "finished"))
+
+    assert {:ok, %{kind: "reply", from: "app-unit-one"}} = Mailbox.answer_to(ctx.mailbox, u)
   end
 
   test "after a restart, a starting row is settled by Sessions' row of its call", ctx do
@@ -253,66 +277,74 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert {:ok, %{reason: "interrupted"}} = row_when(ctx, lost, &(&1.status == "refused"))
   end
 
-  test "a report a waiting call takes is answered, never held; past its deadline it is held",
+  # Delivery.tla's call transport, as run_delegate takes a report: Told; past its deadline the
+  # report stays due for its parent's other transport.
+  test "a report a waiting call takes is delivered by its word; past its deadline it stays due",
        ctx do
     hold(ctx)
-    assert {:ok, %{id: id, name: name, brief: {:ok, %{uuid: u}}}} = start(ctx, "app", "unit/one")
-    assert {:refused, {:no_delegate, ^id}} = Delegates.await_report(current(ctx), "other", id, 1)
-    assert {:unknown, :timeout} = Delegates.await_report(current(ctx), "main", id, 200)
+    assert {:ok, %{id: id, brief_uuid: u}} = start(ctx, "app", "unit/one")
+    assert {:unknown, :timeout} = Mailbox.await(ctx.mailbox, "main", u, 200)
 
-    # The wait passed while the turn ran: the report is held, for a message.
+    # The wait passed while the turn ran: the report is due, taken by no call.
     allow(ctx, id, u)
     File.rm!(Path.join(ctx.dir, "hold"))
-    {:ok, _} = cue_until(ctx, id, &(&1.status == "finished"))
-    assert {:ok, [%{id: ^id}]} = Delegates.held(current(ctx), "main")
+    {:ok, %{report: "taken"}} = cue_until(ctx, id, &(&1.status == "finished"))
+    assert {:ok, %{status: "queued", kind: "reply"}} = Mailbox.answer_to(ctx.mailbox, u)
 
     # A second delegate's report, taken by the call that waits on it.
     # The project's cap is one: the first row is set apart so a second may start.
     Table.update(ctx.dtable, id, status: "refused")
-    assert {:ok, %{id: two}} = start(ctx, "app", "unit/two")
-    wait = caller(ctx, two, 10_000)
-    assert {:ok, %{status: "finished"}} = cue_until(ctx, two, &(&1.report == "answering"))
+    assert {:ok, %{id: two, brief_uuid: u2}} = start(ctx, "app", "unit/two")
+    wait = caller(ctx, u2, 10_000)
+    {:ok, _} = cue_until(ctx, two, &(&1.report == "taken"))
+    assert_receive {:took, {:ok, %{kind: "reply", text: "done " <> ^u2}}}, 10_000
+    assert {:ok, %{status: "sending", via: "call"}} = Mailbox.answer_to(ctx.mailbox, u2)
 
-    assert_receive {:took,
-                    {:ok,
-                     %{id: ^two, name: "app-unit-two", status: "finished", text: "done " <> _}}}
-
-    assert {:ok, [%{id: ^id, name: ^name}]} = Delegates.held(current(ctx), "main")
-    assert {:refused, :answering} = Delegates.await_report(current(ctx), "main", two, 1)
-
-    # The answer reached the agent: answered, and never held, though its caller then ends.
-    assert {:ok, :answered} = settle(wait, &Delegates.answered/2)
-    assert %{report: "answered"} = Table.get(ctx.dtable, two)
-    assert {:refused, :answered} = Delegates.await_report(current(ctx), "main", two, 1)
-    assert {:refused, {:not_answering, "answered"}} = Delegates.release(current(ctx), two)
-    assert {:refused, {:not_answering, "held"}} = Delegates.answered(current(ctx), id)
-    assert {:refused, {:no_delegate, 99}} = Delegates.answered(current(ctx), 99)
-    restart(ctx)
-    assert {:ok, [%{id: ^id}]} = Delegates.held(current(ctx), "main")
+    # The answer reached the agent: delivered, though its caller then ends.
+    assert {:ok, :delivered} = settle(wait, :written)
+    assert {:ok, %{status: "delivered"}} = Mailbox.answer_to(ctx.mailbox, u2)
+    assert {:ok, %{status: "queued"}} = Mailbox.answer_to(ctx.mailbox, u)
   end
 
   test "a delegate stopped after its report is ended, and no longer holds its parent's cap",
        ctx do
-    assert {:ok, %{id: id, name: name}} = start(ctx, "app", "unit/one")
-    wait = caller(ctx, id, 10_000)
-    {:ok, _} = cue_until(ctx, id, &(&1.report == "answering"))
-    assert_receive {:took, {:ok, %{id: ^id}}}
+    assert {:ok, %{id: id, name: name, brief_uuid: u}} = start(ctx, "app", "unit/one")
+    wait = caller(ctx, u, 10_000)
+    {:ok, _} = cue_until(ctx, id, &(&1.report == "taken"))
+    assert_receive {:took, {:ok, _}}, 10_000
 
-    # Not yet answered to its agent: a stop is refused, and the row stays finished.
+    # Not yet delivered to its parent: a stop is refused, and the row stays finished.
     assert {:ok, state} = Delegates.fix_state(current(ctx), "main", name)
 
-    assert {:refused, {:report, "answering"}} =
+    assert {:refused, {:report, "sending"}} =
              Delegates.fix(current(ctx), "main", name, :stop, state)
 
-    assert {:ok, :answered} = settle(wait, &Delegates.answered/2)
+    assert {:ok, :delivered} = settle(wait, :written)
     assert {:refused, {:cap, 1}} = start(ctx, "app", "unit/two")
+
+    # A row to it still open refuses the stop too: it would be cut. The word goes in while a
+    # turn the parent's message started waits on a permission, so the row stays due.
+    hold(ctx)
+    {:ok, {:queued, busy}} = Mailbox.message(ctx.mailbox, "main", name, "Busy.")
+    {:ok, %{uuid: b}} = mailbox_until(ctx, busy, &(&1.status == "delivered"))
+    stream_row(ctx, id, &(&1.requests["req-" <> b] != nil))
+    {:ok, {:queued, open}} = Mailbox.go_on(ctx.mailbox, name, "Later.", Stream.uuid())
+    {:ok, state} = Delegates.fix_state(current(ctx), "main", name)
+
+    assert {:refused, {:open, [^open]}} =
+             Delegates.fix(current(ctx), "main", name, :stop, state)
+
+    File.rm!(Path.join(ctx.dir, "hold"))
+    allow(ctx, id, b)
+    {:ok, _} = mailbox_until(ctx, open, &(&1.status == "delivered"))
+    stream_row(ctx, id, & &1.idle)
 
     # Stopped: the process is gone, and the row is `ended` without a cue from the test, as the
     # stop's own end brings it. It is announced, and its cap is free.
     {:ok, state} = Delegates.fix_state(current(ctx), "main", name)
     assert {:ok, :stopped} = Delegates.fix(current(ctx), "main", name, :stop, state)
 
-    {:ok, %{status: "ended", report: "answered"}} =
+    {:ok, %{status: "ended", report: "taken"}} =
       await(fn ->
         case Table.get(ctx.dtable, id) do
           %{status: "ended"} = row -> {:ok, row}
@@ -330,92 +362,56 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert {:refused, _} = Delegates.fix(current(ctx), "main", name, :stop, state)
   end
 
-  test "an answering report is held again by a release, and by a restart, once", ctx do
-    assert {:ok, %{id: id}} = start(ctx, "app", "unit/one")
-    wait = caller(ctx, id, 10_000)
-    {:ok, %{mark: mark}} = cue_until(ctx, id, &(&1.report == "answering"))
-    assert_receive {:took, {:ok, %{id: ^id}}}
-    assert {:ok, []} = Delegates.held(current(ctx), "main")
+  # Delegate.tla's Report: handed once, under the brief's key, across restarts of Delegates.
+  test "a report Mailbox did not take is handed again, once taken never twice", ctx do
+    assert {:ok, %{id: id, brief_uuid: u}} = start(ctx, "app", "unit/one")
+    GenServer.stop(ctx.mailbox)
+    {:ok, %{report: "held", text: "done " <> _}} = cue_until(ctx, id, &(&1.status == "finished"))
 
-    # The answer's write failed: held again, with its own mark, for a message.
-    assert {:ok, :held} = settle(wait, &Delegates.release/2)
-    assert {:ok, [%{id: ^id, mark: ^mark}]} = Delegates.held(current(ctx), "main")
-
-    # Taken again, and the process ends before it hears how the write went.
-    assert {:ok, %{id: ^id}} = Delegates.await_report(current(ctx), "main", id, 1)
-    assert %{report: "answering"} = Table.get(ctx.dtable, id)
+    mailbox = start_mailbox(ctx)
+    Process.put(:mailbox, mailbox)
     restart(ctx)
-    assert {:ok, [%{id: ^id, mark: ^mark}]} = Delegates.held(current(ctx), "main")
-    assert {:refused, {:not_answering, "held"}} = Delegates.answered(current(ctx), id)
+    {:ok, _} = cue_until(ctx, id, &(&1.report == "taken"))
+
+    assert {:ok, %{kind: "reply", from: "app-unit-one", to: "main"}} =
+             Mailbox.answer_to(mailbox, u)
 
     restart(ctx)
-    assert {:ok, [%{id: ^id, mark: ^mark}]} = Delegates.held(current(ctx), "main")
-  end
-
-  # Delegate.tla's CallerSeen: Delegates watches the process that took a report.
-  test "an answering report is held again when the process that took it ends", ctx do
-    hold(ctx)
-    assert {:ok, %{id: id, brief: {:ok, %{uuid: u}}}} = start(ctx, "app", "unit/one")
-
-    # The caller ends while it waits: the take finds it gone, and holds the report again.
-    # A wait of 0 ms is refused as :awaited once the caller waits, and never waits itself.
-    gone = caller(ctx, id, 10_000)
-
-    awaited? = fn ->
-      Delegates.await_report(current(ctx), "main", id, 0) == {:refused, :awaited}
-    end
-
-    {:ok, _} = await(fn -> if awaited?.(), do: {:ok, 1} end)
-    assert nil == Task.shutdown(gone, :brutal_kill)
-    allow(ctx, id, u)
-    File.rm!(Path.join(ctx.dir, "hold"))
-
-    # The hold and the take are one step of Delegates, so its own answer, not the table, is read.
-    {:ok, [%{mark: mark}]} =
-      await(
-        fn ->
-          cue(ctx, current(ctx))
-
-          case Delegates.held(current(ctx), "main") do
-            {:ok, [%{id: ^id}]} = held -> held
-            other -> {:not_yet, other}
-          end
-        end,
-        10_000
-      )
-
-    assert %{report: "held"} = Table.get(ctx.dtable, id)
-
-    # It takes the report and ends before it says how its write went.
-    wait = caller(ctx, id, 10_000)
-    assert_receive {:took, {:ok, %{id: ^id}}}
-    assert %{report: "answering"} = Table.get(ctx.dtable, id)
-    assert :ended = settle(wait, nil)
-    assert {:ok, %{mark: ^mark}} = row_when(ctx, id, &(&1.report == "held"))
-    assert {:refused, {:not_answering, "held"}} = Delegates.answered(current(ctx), id)
-
-    # One that says answered first is not watched after: its end changes nothing.
-    wait = caller(ctx, id, 10_000)
-    assert_receive {:took, {:ok, %{id: ^id}}}
-    assert {:ok, :answered} = settle(wait, &Delegates.answered/2)
-    assert {:refused, :answered} = Delegates.await_report(current(ctx), "main", id, 1)
-    assert %{report: "answered"} = Table.get(ctx.dtable, id)
+    cue(ctx, current(ctx))
+    assert [_] = for(r <- Mailbox.Table.open_rows(ctx.mtable), r.reply_to == u, do: r)
   end
 
   # A caller as MCP's: one process waits on the report, sends what it took, then says how its
   # write went (`settle/2`'s function) and ends.
-  defp caller(ctx, id, timeout) do
+  defp caller(ctx, key, timeout) do
     test = self()
-    delegates = current(ctx)
+    mailbox = mailbox(ctx)
 
     Task.async(fn ->
-      send(test, {:took, Delegates.await_report(delegates, "main", id, timeout)})
+      took = Mailbox.await(mailbox, "main", key, timeout)
+      send(test, {:took, took})
 
       receive do
         {:settle, nil} -> :ended
-        {:settle, said} -> said.(delegates, id)
+        {:settle, said} -> Mailbox.told(mailbox, elem(took, 1).id, said)
       end
     end)
+  end
+
+  defp mailbox(ctx), do: Process.get(:mailbox, ctx.mailbox)
+
+  defp start_mailbox(ctx),
+    do: start_supervised!(Supervisor.child_spec({Mailbox, ctx.mopts}, id: make_ref()))
+
+  defp mailbox_until(ctx, id, ready?) do
+    await(
+      fn ->
+        cue(ctx, current(ctx))
+        row = Mailbox.Table.get(ctx.mtable, id)
+        if row && ready?.(row), do: {:ok, row}, else: row
+      end,
+      10_000
+    )
   end
 
   defp settle(wait, said) do
@@ -469,7 +465,6 @@ defmodule CodingAgentFramework.DelegatesTest do
         Sessions.cue(ctx.sessions, %{topic: "stream:test", ids: []})
         Sessions.viewer_argv(ctx.sessions, name)
         cue(ctx, current(ctx))
-        Delegates.held(current(ctx), "main")
         row = Table.get(ctx.dtable, id)
         # Without a hold the resumed process can finish before this poll reads its row.
         if row.status in ["running", "finished"] and row.resumes == 1,
@@ -480,19 +475,27 @@ defmodule CodingAgentFramework.DelegatesTest do
     )
   end
 
+  defp rows(ctx), do: Enum.reject(Enum.map(1..50, &Mailbox.Table.get(ctx.mtable, &1)), &is_nil/1)
+
   defp current(ctx), do: Process.get(:delegates, ctx.delegates)
 
   defp restart(ctx) do
     if Process.alive?(current(ctx)), do: Process.exit(current(ctx), :kill)
-    child = Supervisor.child_spec({Delegates, ctx.dopts}, id: make_ref(), restart: :temporary)
+    opts = Keyword.put(ctx.dopts, :mailbox, mailbox(ctx))
+    child = Supervisor.child_spec({Delegates, opts}, id: make_ref(), restart: :temporary)
     delegates = start_supervised!(child)
     Process.put(:delegates, delegates)
     delegates
   end
 
+  # Reads Stream, then cues Mailbox and Delegates as the embedding app's wiring would; a call
+  # after each cast answers once it is handled.
   defp cue(ctx, delegates) do
     {:ok, _} = Stream.read(ctx.stream)
+    Mailbox.cue(mailbox(ctx), %{topic: "stream:test", ids: []})
+    Mailbox.status(mailbox(ctx), 0)
     Delegates.cue(delegates, %{topic: "stream:test", ids: []})
+    :sys.get_state(delegates)
   end
 
   # Reads Stream and cues Delegates until its row satisfies `ready?`.
@@ -523,7 +526,10 @@ defmodule CodingAgentFramework.DelegatesTest do
     {:ok, row} =
       await(
         fn ->
+          # Mailbox is cued too: the brief and the word to go on are its rows.
           {:ok, _} = Stream.read(ctx.stream)
+          Mailbox.cue(mailbox(ctx), %{topic: "stream:test", ids: []})
+          Mailbox.status(mailbox(ctx), 0)
           {:ok, %{rows: rows}} = Stream.rows(ctx.stream)
           row = Enum.find(rows, &(&1.session == sid))
           if row && safe(ok?, row), do: {:ok, row}, else: row

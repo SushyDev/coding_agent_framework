@@ -45,9 +45,10 @@ defmodule CodingAgentFramework.Example do
     "registry" => [:sessions],
     "stream" => [:sessions, :delegates, :mailbox],
     "tmux" => [:sessions, :recoveries],
-    "sessions" => [:delegates],
+    "sessions" => [:delegates, :mailbox],
     "transcripts" => [:delegates],
-    "delegates" => [:mailbox, :ends]
+    "delegates" => [:mailbox, :ends],
+    "mailbox" => [:delegates]
   }
   # A delegate that holds its parent's cap, and so is in the tree `Grants` reads.
   @tree ~w(starting running resuming finished failed)
@@ -182,6 +183,17 @@ defmodule CodingAgentFramework.Example do
             notify: notify}
          end},
         {:tracker, fn _ -> {Tracker, sources: sources(w)} end},
+        # Before `Delegates`, which stores each brief and report in it.
+        {:mailbox,
+         fn pid ->
+           {Mailbox,
+            db: db,
+            grants: grants,
+            stream: pid.(:stream),
+            sessions_db: db,
+            host: host,
+            notify: notify}
+         end},
         {:delegates,
          fn pid ->
            {Delegates,
@@ -193,6 +205,7 @@ defmodule CodingAgentFramework.Example do
             usage: pid.(:usage),
             accounts: w.accounts,
             transcripts: pid.(:transcripts),
+            mailbox: pid.(:mailbox),
             launch: [claude: c.claude, env: c.env, tool_timeout: c.tool_timeout],
             projects: c.projects,
             mcp: &issue(pid.(:mcp), &1),
@@ -202,16 +215,6 @@ defmodule CodingAgentFramework.Example do
          fn _ ->
            {Grants.Claims,
             path: Config.path(c, "claims.db"), grants: grants, start_id: w.start_id}
-         end},
-        {:mailbox,
-         fn pid ->
-           {Mailbox,
-            db: db,
-            grants: grants,
-            stream: pid.(:stream),
-            delegates_db: db,
-            host: host,
-            notify: notify}
          end},
         {:copies, fn _ -> {Copies, dir: Config.path(c, "parts/copies"), programs: p} end},
         {:jobs,

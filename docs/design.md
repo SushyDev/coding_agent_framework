@@ -116,8 +116,9 @@ Each word below names one thing, and the design, the code and the views use it o
 - **Claim**: an actor's hold on one of its targets (a child, a service, a broken state), in one
   state, taken before an act, so that only one act on that state runs. Every claim is a row in
   `Acts`, whoever the actor: an agent's fix, the operator's act, a recovery.
-- **Delivery**: text the framework hands an agent (a message, a reply, a notice, a report, the
-  app's word), one row in `Mailbox`, marked before it goes and settled from evidence after. How
+- **Delivery**: text the framework hands an agent (a message, a reply, a notice, a report, a
+  delegate's brief and its word to go on after a resume, the app's word), one row in `Mailbox`,
+  marked before it goes and settled from evidence after (F-122's new-4). How
   it goes in is its **transport**: a `Stream` line, the waiter's answer, the `Inlet`'s checked
   write, or the answer of a waiting `run_delegate`.
 - **Hold**: a request held open with a deadline, answered exactly once by a named decider, and
@@ -188,7 +189,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Mover` | drains a session and moves it between accounts; its phase is a field of the agent row | — |
 | `Mains` | each project's main sessions, as agent rows of kind `main`; the pull after a landing, and the start of one for a project that has none | — |
 | `Delegates` | the delegate protocol only: its checks, the cap, the account pick, resume once, report a second kill; it hands the report to `Mailbox` as the reply to the brief | `delegates`: branch, brief uuid, resumes, whether the report was taken |
-| `Mailbox` | every delivery: messages, replies, notices, reports and the app's word, stored, delivered once, in order per sender and addressee; one mark and settle, with the transport the target's kind chooses | `messages` |
+| `Mailbox` | every delivery: messages, replies, notices, reports, briefs, the words to go on and the app's word, stored, delivered once, in order per sender and addressee; one mark and settle, with the transport the target's kind chooses | `messages` |
 | `Acts` | one ledger of acts: an actor's act on a target's state, written before it acts, once per state, settled after, closed as interrupted when a restart cut it, with a cue. Fixes, the operator's acts, recoveries, kills, resumes, starts and raised errors are its rows, and the fault ledger is a query of it | `acts` |
 | `Stacks` | the worktrees and `gh stack` chains of a main session's work | — |
 | `Copies` | a host's copy of each worktree, brought in step by rsync before each job or service, and removed with the worktree | `copies` |
@@ -437,7 +438,9 @@ one press at any level. It goes to the account with the most allowance left:
    way (its report would otherwise be written to a process the move ends). This is read after
    the drain began, so nothing can start after it; a background command is a child of the session's process and ends with it.
 3. End the session by SIGTERM to its pid, by the row's pid and start time, once its session
-   file says `idle` (F-114). Claude Code's shutdown keeps the transcript and fires SessionEnd
+   file says `idle` (F-114) and no `Mailbox` row to it is `sending`; once the row is `stopping`,
+   `Mailbox` neither marks nor hands on a row to it (F-122's new-1: a row marked before the
+   stop and handed on after it would start a turn the SIGTERM cuts). Claude Code's shutdown keeps the transcript and fires SessionEnd
    with reason `other`. A prompt through Remote Control that starts a turn between the read
    and the signal is cut off, and what it wrote is kept by the copy in step 5; `Move.tla`
    models this before `Mover` is built.
@@ -462,9 +465,11 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
 2. picks the account with the most allowance left;
 3. adds the worktree and runs the project's declared setup in it, so a fresh worktree has its
    dependencies and build state before the first command;
-4. starts `claude` headless, held by dtach, with `--session-id` set to an id the framework
-   chose and the brief as its first message, opens a viewer of its event log tagged with the
-   session, project and unit, and confirms the start by its first event naming that id;
+4. stores the brief as a row in `Mailbox` under a uuid it chose, from the parent, before the
+   session exists, so it is the first row to it; starts `claude` headless, held by dtach, with
+   `--session-id` set to an id the framework chose, opens a viewer of its event log tagged with
+   the session, project and unit, and confirms the start by its first event naming that id;
+   `Mailbox` then delivers the brief into the session's first ended turn, as any row;
 5. hands its last message to `Mailbox` when it stops, as the reply to the brief's uuid. When a
    restart lost the stop event, it hands on the transcript's last reply instead, and ends the
    delegate only after the delivery settled. The delegate's row moves from running to finished
@@ -473,8 +478,9 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
    waiting Stop hook, held while no waiter is connected, its row in `Mailbox` marked sending
    before the waiter is answered and, after a restart, settled from the parent's transcript once
    the parent's turn that took it has ended: delivered if the report is there, due again if
-   not. Each report carries a mark of its own that the transcript shows. `Delegates` keeps only
-   whether the report was taken;
+   not. The row's uuid is the mark the transcript shows. `Delegates` keeps only whether
+   `Mailbox` took the report (`held` with its text until it does, then `taken`), and hands it
+   again at each cue until then;
 6. resumes it once when it is killed before its last reply, and reports a second such kill
    instead of retrying. That report is held and delivered like a finish. A kill after the last
    reply is a finish, read from the transcript.
@@ -499,10 +505,11 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
   a letter, a digit, `_` or `-` written as `-`, so a later start of the branch finds its
   worktree.
 - `Delegates`' row is written first, as starting, with the uuid its brief will go in under,
-  before `Sessions` is called. A resume is counted in the row first, as resuming, before
-  `Sessions.resume` is asked; when the brief had gone in, the row takes a uuid of its own for
-  the resumed process's message. `Stream` refuses a uuid a second time, so a restart never
-  writes a turn's message twice. The resume is asked only once `Sessions`' row of the killed
+  then the brief's row in `Mailbox` under that uuid, before `Sessions` is called. A resume is
+  counted in the row first, as resuming, before `Sessions.resume` is asked; when the brief had
+  gone in, the row takes a uuid of its own for the resumed process's word to go on, which is
+  stored in `Mailbox` first. `Mailbox` takes one row per uuid and `Stream` refuses a uuid a
+  second time (unless found undelivered), so a restart never writes a turn's message twice. The resume is asked only once `Sessions`' row of the killed
   process has ended (`stopped`, by its settle of a running row whose process is gone), since
   `Sessions` starts a name only then; until it has, the delegate stays running.
 - A row a restart left starting or resuming is settled by `Sessions`' row of its call (one
@@ -535,7 +542,11 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
   after the write; otherwise it is due again and goes by the parent's waiter. A move's drain waits
   for no `run_delegate` call of the session to be under way.
 - A resumed process takes no turn of its own. It is given the brief again, under its uuid, when
-  the brief had not gone in, and otherwise a fixed message to go on with its brief.
+  the brief had not gone in (`Mailbox` makes the brief's row due again itself, "undelivered" being
+  final), and otherwise a fixed message to go on with its brief: a `Mailbox` row from
+  `framework`, stored before the resume, which goes before every other row due to the delegate,
+  as a resend does (F-122's new-3), so the resumed process first goes on with its brief. Its
+  turn's result is the report, the reply to the brief's uuid, across the resume.
 
 A start writes its row first, as starting, with its worktree path and socket name, before it
 acts. After a restart, a row still starting is adopted when its held process lives and its
@@ -636,18 +647,18 @@ reading for delegates:
 
   ```sh
   d=$1 f=$2; shift 2
-  printf '%s\n' "$$" > "$d/pid"
   exec 3<>"$f"
   exec "$@" <&3 3<&- >>"$d/events.jsonl" 2>>"$d/stderr.log"
   ```
 
   The delegate's stdin is the FIFO opened read-write, so it holds a writer itself and its stdin
   never reaches end of file: the framework's restarts and its writers' exits never end it.
-  `exec` makes `claude` the held process, with the pid the wrapper wrote to `pid`. That file,
-  not a session file, gives a delegate's pid: nothing shows that `-p` writes one, and a headless
-  session has no `--name` to match. `Sessions` reads it only after `Stream` has read the
-  `system`/`init` naming the session id, takes its start time from `ps`, and checks the socket
-  again. That init, with the pid alive, confirms the start. `Stream` sees an exit only of a
+  `exec` makes `claude` the held process, with the pid `Holder.Process`'s record of the hold
+  holds, with its start time (F-118's new-4; the wrapper's own `pid` file went in R7). That
+  record, not a session file, gives a delegate's pid: nothing shows that `-p` writes one, and a
+  headless session has no `--name` to match. `Sessions` reads it only after `Stream` has read
+  the `system`/`init` naming the session id, and checks the socket again. That init, with the
+  pid alive, confirms the start. `Stream` sees an exit only of a
   process it knows was started: `Sessions` tells it once it held the process, and a read or a
   write's check that finds the socket live tells it too; without that, the socket a resume
   has not yet replaced would read as the new process's exit.
@@ -747,8 +758,9 @@ stderr and exits 2, and Claude Code starts a turn with it, even when the session
 anything else, a failed post included, exits 0. Each turn's end starts the next waiter. The
 transcript holds the text as a user line (`Stop hook blocking error from command "Stop":
 <text>` in 2.1.322), which confirms the delivery: `{:ok, :sent}` says the text was written,
-not that it was read. A draft a person left in the box is not touched, so the box need not be
-empty.
+not that it was read, so the row stays `sending` until the transcript's line settles it, or
+the bound in "Delivery" passes with no line (F-123's new-1). A draft a person left in the box
+is not touched, so the box need not be empty.
 
 **The waiter's connection** (F-121's new-1). A handler waiting on Bandit is not told that its
 client closed; only a write finds it. So the response is chunked from the start: status 200 at
@@ -765,10 +777,16 @@ A session with no waiter (before its first turn ends, after a waiter's deadline,
 restart cut the waiter's connection) gets nothing that way, and `Intake` knows it
 (`Intake.waiter?`), once a heartbeat has found a connection that died. What is due is held until
 a waiter connects; a view shows a session idle with no waiter and something due, and the
-`Inlet`'s checked write reaches it, as one more transport of the same row.
+`Inlet`'s checked write reaches it, as one more transport of the same row. `Intake` cues a
+session's waiter coming and going on a topic of its own (`intake:<host>:<account>:waiters`, with
+the session ids), and `Mailbox` tries a due row on that cue, not on a timer (F-123's new-3).
 
 **Ending a session** is SIGTERM to its pid, by the row's pid and start time, once its session
-file says `idle`. It replaces a typed `/exit`. Claude Code's shutdown keeps the transcript and
+file says `idle` and no `Mailbox` row to the session is `sending`; once its row is `stopping`,
+`Mailbox` neither marks nor hands on a row to it (F-122's new-1; `Delivery.tla`'s `IdleRead`,
+`Open`). The mark and the hand-on are two steps, and an answer takes a moment to become a turn,
+so refusing a new mark alone lets a row marked before the stop start a turn the SIGTERM cuts. It
+replaces a typed `/exit`. Claude Code's shutdown keeps the transcript and
 fires SessionEnd with reason `other`, which `Sessions` and `Recoveries` read as that end. The
 session file's `status` (`busy`, `idle`, `waiting` with `waitingFor`) is not documented; it is
 checked against each pinned release, as the screen fixtures are.
@@ -919,12 +937,14 @@ ends the service, or hands it to the owner's parent when it has `keep` (F-83).
 ## Delivery
 
 Everything the framework hands an agent is one row in `Mailbox`: a message, a reply, a notice,
-a report (the reply to the brief's uuid) and the app's word (F-115, R7). There is one mark and
+a report (the reply to the brief's uuid), a delegate's brief and its word to go on after a
+resume, and the app's word (F-115, R7; F-122's new-4). There is one mark and
 one settle, and only the transport differs. `Delivery.tla` models it before `Mailbox` is
 changed (R6).
 
 - **One row in flight per addressee.** `Mailbox` picks the oldest due row per addressee, in
-  order per sender and addressee, with a row made due again by a settle going first. It marks
+  order per sender and addressee, with a row made due again by a settle going first, and a
+  resumed delegate's word to go on with them (F-122's new-3). It marks
   the row `sending` with its transport, then hands it on. Refused undoes the mark; unknown keeps
   it for the evidence. The row is the only mark: no other part keeps a delivery state.
 - **Into an ended turn only, to the current process only.** The turn state is `Sessions`'
@@ -935,9 +955,16 @@ changed (R6).
 | Transport | Target | Settled by | A row left `sending` by a restart |
 |---|---|---|---|
 | `stream` | a headless session | the replay in `Stream`'s fold; at the exit, the transcript | settled from the same evidence once read; undelivered is final, and the row is due again first, under its same uuid, to the resumed process |
-| `waiter` | an interactive session with a waiter | the transcript's `Stop hook blocking error` line, once the turn that took it has ended | settled from the transcript once that turn has ended: delivered if the line is there, due again if not |
-| `typed` | an interactive session with no waiter | the `Inlet`'s answer, then the transcript's user line once the turn has ended | as `waiter`; an unknown write is never typed again |
+| `waiter` | an interactive session with a waiter | the transcript's `Stop hook blocking error` line, once the turn that took it has ended; due again only once the take bound past its hand-on has passed with no line, or its process is gone | settled from the transcript once that turn has ended: delivered if the line is there, due again if not and the take bound has passed |
+| `typed` | an interactive session with no waiter | the `Inlet`'s answer, then the transcript's user line once the turn has ended; due again as `waiter` | as `waiter`; an unknown write is never typed again |
 | `call` | a waiting `run_delegate` | the endpoint's write, and the calling process still running after it | due again, for the parent's waiter: the call it answered is gone |
+
+**The take bound** (F-122's new-2): the time after a waiter's answer, or a typed write, by which
+Claude Code has started the turn with it or never will. Between the hand-on and the transcript's
+line nothing the framework reads tells "not yet" from "never", so a `waiter` or `typed` row is
+due again only past it (`Delivery.tla`'s `wire`, `Break_Delivery_SettleEarly`). Its value is
+checked against each pinned Claude Code release, with the transcript line's text, as the screen
+fixtures are; the waiter's unit sets and measures it.
 
 The restart policy lives with the transport, as one module per transport in `Mailbox` beside
 the one mark and settle, and `Delivery.tla` models each transport's policy as its own choice.
@@ -1517,6 +1544,11 @@ are the model before the code they describe (R5, R7 to R10).
 - **R7. `Mailbox` delivers everything**: the report as the reply to the brief; the transports
   `stream`, `waiter` and `call`; `Mailbox`'s `sending` as the only mark; `Delegates`' report
   reduced to `taken`. About +350, −350. (Item 4's delivery and `run_delegate` on this shape.)
+  In two parts (F-125's new-1). Part 1, built in F-125: the brief, the word to go on and the
+  report as rows, the transports `stream` and `call`, `Delegates`' report reduced to `taken`.
+  Part 2: the transport `waiter` with its take bound and `Intake`'s waiter cue, the waiter's
+  hook in a main session's start, and `Sessions`' idle read and delegate stop reading `Mailbox`
+  in place of `stop/4`'s word.
 - **R8. `Inlet`**: `Control` with `Screen`'s box check, the checked write for a session with no
   waiter, as the transport `typed`. It records the release each session runs, and never trusts
   one read for a turn's end (F-113's new-2, new-4). About +200, −140.

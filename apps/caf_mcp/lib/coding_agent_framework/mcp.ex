@@ -25,14 +25,15 @@ defmodule CodingAgentFramework.MCP do
     as `parent`); answers `%{delegate: name}`, or the start's refusal. The report comes later
     as a message. Both take optional `options`;
   - `run_delegate(project, branch, model, brief, timeout)`: as `start_delegate`, then the
-    delegates' `await_report/4`, all within `timeout` (ms, capped as `run`'s, and under the
-    client's tool timeout less the margin: `:tool_timeout` and `:margin`, so the client never
-    gives up first). Answers `%{delegate: name, status: status, report: text}`, or at the
-    timeout `{:unknown, %{delegate: name, reason: :timeout}}`, the report then held for a
-    message. A report it took is `answering` in `Delegates` until the answer is written: then
-    `answered/2` when the write succeeded, `release/2` (held again, for a message) when it
-    failed (`answer/5`). A call through `call/4` has its answer in hand, so it is answered at
-    once;
+    mailbox's `await/4` on the report, the answer to the brief's uuid, all within `timeout`
+    (ms, capped as `run`'s, and under the client's tool timeout less the margin:
+    `:tool_timeout` and `:margin`, so the client never gives up first). Answers `%{delegate:
+    name, status: status, report: text}`, `status` `finished` for the delegate's reply and
+    `failed` for the framework's notice, or at the timeout `{:unknown, %{delegate: name,
+    reason: :timeout}}`, the report then due for another transport. A report it took is
+    `sending` by the call in `Mailbox` until the answer is written, then `told/3` `:written`
+    when the write succeeded, or anything else (due again) when it failed (`answer/5`). A call
+    through `call/4` has its answer in hand, so it is told `:written` at once;
   - `reload()`: `Grants.may_use?/2`, then the tools' names; the endpoint sends the client
     `notifications/tools/list_changed` first;
   - the service tools, each through the services' own function, which makes its own `Grants`
@@ -404,10 +405,14 @@ defmodule CodingAgentFramework.MCP do
     end
   end
 
-  # A report taken is answered once written and held again otherwise. When `Delegates` cannot
-  # be told, the report stays `answering` until its next start holds it again.
-  defp settle(%{delegates: {mod, server}}, id, {:ok, _}), do: mod.answered(server, id)
-  defp settle(%{delegates: {mod, server}}, id, _failed), do: mod.release(server, id)
+  # A report taken is delivered once written and due again otherwise. When `Mailbox` cannot be
+  # told, the end of this process, which it watches, makes the row due again.
+  defp settle(%{mailbox: {mod, server}}, id, {:ok, _}), do: mod.told(server, id, :written)
+  defp settle(%{mailbox: {mod, server}}, id, _failed), do: mod.told(server, id, :failed)
+
+  # The report is the delegate's reply, or the framework's notice of a second kill.
+  defp status(%{kind: "reply"}), do: "finished"
+  defp status(_notice), do: "failed"
 
   defp taken({:taken, id, outcome}), do: {outcome, id}
   defp taken(outcome), do: {outcome, nil}
@@ -493,19 +498,18 @@ defmodule CodingAgentFramework.MCP do
   defp act(ctx, caller, _id, "run_delegate", %{"timeout" => t} = args)
        when is_integer(t) and t > 0 and t <= ctx.cap do
     deadline = now() + t
-    {mod, server} = ctx.delegates
+    {mod, server} = ctx.mailbox
     under = ctx.tool_timeout - ctx.margin
 
     with true <- t < under or {:refused, {:timeout, {:under, under}}},
          {:ok, [parent | _] = start} <- start_args(ctx, args, caller),
-         {:ok, %{id: id, name: name}} <- start_delegate(ctx, caller, start, min(t, @start_wait)) do
+         {:ok, %{name: name, brief_uuid: key}} <-
+           start_delegate(ctx, caller, start, min(t, @start_wait)) do
       left = deadline - now()
-
-      answer =
-        if left > 0, do: mod.await_report(server, parent, id, left), else: {:unknown, :timeout}
+      answer = if left > 0, do: mod.await(server, parent, key, left), else: {:unknown, :timeout}
 
       case answer do
-        {:ok, r} -> {:taken, id, {:ok, %{delegate: name, status: r.status, report: r.text}}}
+        {:ok, r} -> {:taken, r.id, {:ok, %{delegate: name, status: status(r), report: r.text}}}
         {:unknown, reason} -> {:unknown, %{delegate: name, reason: reason}}
         refused -> refused
       end

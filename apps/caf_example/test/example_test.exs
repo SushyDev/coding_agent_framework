@@ -220,10 +220,11 @@ defmodule CodingAgentFramework.ExampleTest do
     {:ok, %{state: "running"}} =
       MCP.call(parts.mcp, "app-unit-one", "service_start", %{"name" => "plain", "argv" => argv})
 
-    # Its report is taken and answered to its agent, as `run_delegate` does; then it is stopped.
-    {:ok, _} = row(ddb, &(&1.id == id and &1.status == "finished"))
-    assert {:ok, %{id: ^id}} = Delegates.await_report(parts.delegates, "app-main", id, 5_000)
-    assert {:ok, :answered} = Delegates.answered(parts.delegates, id)
+    # Its report, the reply to its brief, is taken and written to its agent, as `run_delegate`
+    # does; then it is stopped.
+    {:ok, %{brief_uuid: u}} = row(ddb, &(&1.id == id and &1.status == "finished"))
+    assert {:ok, %{id: r}} = Mailbox.await(parts.mailbox, "app-main", u, 5_000)
+    assert {:ok, :delivered} = Mailbox.told(parts.mailbox, r, :written)
     {:ok, state} = Delegates.fix_state(parts.delegates, "app-main", "app-unit-one")
     fix = Delegates.fix(parts.delegates, "app-main", "app-unit-one", :stop, state)
     assert {:ok, :stopped} = fix

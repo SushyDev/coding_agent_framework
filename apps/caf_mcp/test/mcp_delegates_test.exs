@@ -7,7 +7,8 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, Delegates, Grants, MCP, Sessions, SessionsSetup, Stream}
+  alias CodingAgentFramework.{Accounts, Delegates, Grants, Mailbox, MCP, Sessions, SessionsSetup}
+  alias CodingAgentFramework.Stream
   alias CodingAgentFramework.{Tracker, Transcripts, Usage}
   alias CodingAgentFramework.Delegates.Table
   alias CodingAgentFramework.Grants.Claims
@@ -37,6 +38,22 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     project = %{name: "app", repo: repo, trunk: "main", setup: [], setup_timeout: 10_000}
     project = Map.merge(project, %{env: %{"HOME" => ctx.dir}, branches: ~r/\Aunit\//, cap: 2})
 
+    {:ok, dtable} = Table.open(db)
+
+    # Until `Mains` exists, a main session is known as a parent a delegate's row names: `app-old`
+    # and `lib-old` stand for earlier delegates of `main` and `lmain`.
+    tree = fn ->
+      rows = Table.with_status(dtable, "test", ~w(starting running resuming finished failed))
+      [%{name: "app-old", parent: "main"}, %{name: "lib-old", parent: "lmain"} | rows]
+    end
+
+    grants = Grants.new(tree, operator: "op")
+
+    mailbox =
+      start_supervised!(
+        {Mailbox, db: db, grants: grants, stream: ctx.stream, sessions_db: db, host: "test"}
+      )
+
     delegates =
       start_supervised!(
         {Delegates,
@@ -48,12 +65,11 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
          usage: usage,
          accounts: accounts,
          transcripts: transcripts,
+         mailbox: mailbox,
          launch:
            SessionsSetup.headless(ctx, :at_start) |> Keyword.take([:claude, :env, :tool_timeout]),
          projects: %{"app" => project, "lib" => %{project | name: "lib"}}}
       )
-
-    {:ok, dtable} = Table.open(db)
 
     sources = [
       {Tracker.DelegatesSource, db: db, host: "test"},
@@ -66,15 +82,6 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     ]
 
     tracker = start_supervised!({Tracker, sources: sources, timer: false})
-
-    # Until `Mains` exists, a main session is known as a parent a delegate's row names: `app-old`
-    # and `lib-old` stand for earlier delegates of `main` and `lmain`.
-    tree = fn ->
-      rows = Table.with_status(dtable, "test", ~w(starting running resuming finished failed))
-      [%{name: "app-old", parent: "main"}, %{name: "lib-old", parent: "lmain"} | rows]
-    end
-
-    grants = Grants.new(tree, operator: "op")
 
     claims =
       start_supervised!(
@@ -89,7 +96,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
          grants: grants,
          claims: claims,
          start_id: "s1",
-         mailbox: {__MODULE__, :unused},
+         mailbox: {Mailbox, mailbox},
          jobs: {__MODULE__, :unused},
          delegates: {Delegates, delegates},
          services: {__MODULE__, :unused},
@@ -109,7 +116,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
         {a, JSON.decode!(File.read!(path))["mcpServers"]["caf"]["headers"]["x-caf-token"]}
       end
 
-    %{mcp: mcp, tokens: tokens, delegates: delegates, dtable: dtable}
+    %{mcp: mcp, tokens: tokens, delegates: delegates, dtable: dtable, mailbox: mailbox}
     |> Map.merge(%{tracker: tracker, transcripts: transcripts})
     |> Map.put(:claims, claims)
   end
@@ -183,16 +190,18 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     args = Map.put(start_args("unit/one"), "timeout", 60_000)
     call = Task.async(fn -> tool(ctx, "main", "run_delegate", args) end)
 
-    {:ok, row} = cue_until(ctx, &(&1.report == "answered"))
+    {:ok, row} = cue_until(ctx, &(&1.report == "taken"))
 
     assert %{"ok" => %{"delegate" => "app-unit-one", "status" => "finished", "report" => text}} =
              Task.await(call)
 
     assert text == "done #{row.brief_uuid}" and text == row.text
-    assert {:ok, []} = Delegates.held(ctx.delegates, "main")
+
+    assert {:ok, %{status: "delivered", via: "call"}} =
+             Mailbox.answer_to(ctx.mailbox, row.brief_uuid)
   end
 
-  test "a run_delegate answer whose write fails holds the report again, for a message", ctx do
+  test "a run_delegate answer whose write fails makes the report due again, first", ctx do
     args = Map.put(start_args("unit/one"), "timeout", 60_000)
     conn = request(ctx, "main", "run_delegate", args)
     conn = %{conn | adapter: {BrokenSocket, elem(conn.adapter, 1)}}
@@ -209,13 +218,14 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     {:ok, _} = cue_until(ctx, &(&1.status == "finished"))
     assert %ArgumentError{message: "closed"} = Task.await(call, 20_000)
 
-    assert %{report: "held", text: "done " <> _ = text, mark: "[report " <> _} =
+    assert %{report: "taken", brief_uuid: u} =
              List.first(Table.with_status(ctx.dtable, "test", ~w(finished)))
 
-    assert {:ok, [%{text: ^text}]} = Delegates.held(ctx.delegates, "main")
+    # Due again, for its parent's next transport, which is a later unit's.
+    assert {:ok, %{status: "queued", via: nil, kind: "reply"}} = Mailbox.answer_to(ctx.mailbox, u)
   end
 
-  test "run_delegate at its timeout answers unknown with the name; the report is held", ctx do
+  test "run_delegate at its timeout answers unknown with the name; the report stays due", ctx do
     # While the file is there, the stand-in's turn waits on a permission request.
     File.write!(Path.join(ctx.dir, "hold"), "")
     args = Map.put(start_args("unit/one"), "timeout", 10_000)
@@ -229,8 +239,8 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     {:ok, _} = await(fn -> requested(ctx, sid, "req-" <> u) end, 10_000)
     {:ok, _} = Stream.write(ctx.stream, sid, {:answer, "req-" <> u, :allow})
 
-    {:ok, %{id: id}} = cue_until(ctx, &(&1.status == "finished"))
-    assert {:ok, [%{id: ^id, text: "done " <> ^u}]} = Delegates.held(ctx.delegates, "main")
+    {:ok, _} = cue_until(ctx, &(&1.status == "finished" and &1.report == "taken"))
+    assert {:ok, %{status: "queued", from: "app-unit-one"}} = Mailbox.answer_to(ctx.mailbox, u)
   end
 
   test "a fix is the parent's, once per state, and never acts on a state that moved", ctx do
@@ -289,7 +299,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
   test "an interrupt goes in under a claim; a stop only once the report is delivered", ctx do
     args = Map.put(start_args("unit/one"), "timeout", 60_000)
     call = Task.async(fn -> tool(ctx, "main", "run_delegate", args) end)
-    {:ok, _} = cue_until(ctx, &(&1.report == "answered"))
+    {:ok, _} = cue_until(ctx, &(&1.report == "taken"))
     assert %{"ok" => %{"status" => "finished"}} = Task.await(call)
 
     File.write!(Path.join(ctx.dir, "hold"), "")
@@ -304,9 +314,9 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     assert {:ok, %{held: []}} = Delegates.fix_state(ctx.delegates, "main", "app-unit-two")
     refute "answer #{req}" in HeadlessStandIn.taken(ctx.dir)
 
-    # run_delegate's report reached its caller; the other one is held for a message.
-    assert row.report == "held"
-    assert tool(ctx, "main", "stop", two) == %{"refused" => ["report", "held"]}
+    # run_delegate's report reached its caller; the other one is due for its parent's waiter.
+    assert row.report == "taken"
+    assert tool(ctx, "main", "stop", two) == %{"refused" => ["report", "queued"]}
 
     assert %{"ok" => %{"done" => "stopped", "settled" => %{"ok" => "verified"}}} =
              tool(ctx, "main", "stop", %{"agent" => "app-unit-one"})
@@ -405,8 +415,11 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     {"req-" <> u, sid}
   end
 
+  # Mailbox is cued too: the brief is its row.
   defp requested(ctx, sid, req) do
     {:ok, _} = Stream.read(ctx.stream)
+    Mailbox.cue(ctx.mailbox, %{topic: "stream:test", ids: []})
+    Mailbox.status(ctx.mailbox, 0)
     {:ok, %{rows: rows}} = Stream.rows(ctx.stream)
     row = Enum.find(rows, &(&1.session == sid))
     if row && row.requests[req], do: {:ok, row}
@@ -418,7 +431,9 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
       fn ->
         {:ok, _} = Stream.read(ctx.stream)
         Delegates.cue(ctx.delegates, %{topic: "stream:test", ids: []})
-        Delegates.held(ctx.delegates, "main")
+        Mailbox.cue(ctx.mailbox, %{topic: "stream:test", ids: []})
+        Mailbox.status(ctx.mailbox, 0)
+        :sys.get_state(ctx.delegates)
         row = Enum.find(Table.with_status(ctx.dtable, "test", ~w(running finished)), ready?)
         if row, do: {:ok, row}
       end,
@@ -439,7 +454,9 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
       fn ->
         {:ok, _} = Stream.read(ctx.stream)
         Delegates.cue(ctx.delegates, %{topic: "stream:test", ids: []})
-        Delegates.held(ctx.delegates, "main")
+        Mailbox.cue(ctx.mailbox, %{topic: "stream:test", ids: []})
+        Mailbox.status(ctx.mailbox, 0)
+        :sys.get_state(ctx.delegates)
 
         for t <- ~w(delegates:test stream:test transcripts:test:work),
             do: Tracker.cue(ctx.tracker, %{topic: t})

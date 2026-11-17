@@ -2,18 +2,18 @@ defmodule CodingAgentFramework.Delegates.Turn do
   @moduledoc """
   The pure part of `CodingAgentFramework.Delegates`: a start's checks, its session's name, and
   what a running delegate's `Stream` row says of its turn (`model/tla/Delegate.tla`'s
-  `InputWritten`, `StopHandled` and `KillSeen`).
+  `StopHandled` and `KillSeen`).
 
       iex> alias CodingAgentFramework.Delegates.Turn
       iex> Turn.name(%{name: "app"}, "unit/f-1.fix")
       "app-unit-f-1-fix"
       iex> row = %{brief_uuid: "b1", resume_uuid: nil, brief: "do it"}
       iex> Turn.next(row, %{gone: false, idle: true, messages: %{}, last_result: nil})
-      {:write, "b1", "do it"}
+      :waiting
       iex> fold = %{gone: false, idle: true, last_result: nil,
       ...>   messages: %{"b1" => %{state: :delivered, result: %{text: "done"}}}}
       iex> Turn.next(row, fold)
-      {:finished, "done"}
+      {:finished, %{text: "done", subtype: nil, is_error: nil}}
   """
 
   alias CodingAgentFramework.Stream.Fold
@@ -71,20 +71,18 @@ defmodule CodingAgentFramework.Delegates.Turn do
 
   @doc """
   What a running delegate's `Stream` row (`fold`) says, read by `Stream.Fold.outcome/2`:
-  `{:finished, text}` once the turn's message is delivered and a `result` names it (an earlier
-  turn's result, as a resume leaves it, names another uuid);
-  `:exited` when its process is gone first; `{:write, uuid, text}` while the message has not
-  gone in, or went undelivered; `:waiting` otherwise.
+  `{:finished, result}` once the turn's message is delivered and a `result` names it (an
+  earlier turn's result, as a resume leaves it, names another uuid), with its `text`, `subtype`
+  and `is_error`; `:exited` when its process is gone first; `:waiting` otherwise. The message
+  itself is `Mailbox`'s row, which goes in, and again when found undelivered, by its own rule.
   """
-  @spec next(map, map) ::
-          {:finished, String.t()} | :exited | {:write, String.t(), String.t()} | :waiting
+  @spec next(map, map) :: {:finished, map} | :exited | :waiting
   def next(row, fold) do
-    {uuid, text} = message(row)
+    {uuid, _text} = message(row)
 
     case Fold.outcome(fold, uuid) do
-      {:result, %{text: report}} -> {:finished, report}
+      {:result, result} -> {:finished, result}
       _ when fold.gone -> :exited
-      outcome when outcome in [:none, :undelivered] -> {:write, uuid, text}
       _ -> :waiting
     end
   end
