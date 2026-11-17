@@ -72,41 +72,29 @@ defmodule CodingAgentFramework.Services do
   @ended %{state: "ended", pid: nil, started: nil, owner: nil}
   # How long a read made in `Services`' own process (its start, a cue) waits on the host.
   @settle_read 2_000
-  # $1 the pid file, $2 the log, $3 the copy, $4 wc; then argv. The pid file holds the pid and
-  # the log's size before the program writes, the start's log offset. exec keeps the pid the
-  # wrapper wrote, and the program leads the group dtach's child leads.
+  # $1 the log, $2 the copy, $3 wc, $4 the offset file; then argv. It runs after
+  # `Holder.Process`'s wrapper wrote the record, in the same process: exec keeps the pid, and the
+  # program leads the group dtach's child leads. The offset file holds the log's size before
+  # the program writes, the start's log offset.
   @wrapper ~S"""
-  p=$1 l=$2 c=$3 w=$4; shift 4
+  l=$1 c=$2 w=$3 o=$4; shift 4
   : >>"$l" && f=$("$w" -c <"$l") || exit 1
-  echo $$ $f > "$p"
+  echo $f > "$o"
   cd "$c" && exec "$@" >>"$l" 2>&1
   """
-  # $1 the pid file, $2 sleep, $3 ps, $4 tries 0.1 s apart. Prints `held <pid> <offset> <start
-  # time>`, `gone` when the pid no longer runs, or `none` with no pid file.
-  @held ~S"""
+  # $1 the offset file, $2 sleep: the wrapper writes it a moment after the record, so it is
+  # waited for, 0.1 s apart, for at most 2 s.
+  @offset ~S"""
   i=0
-  while [ ! -s "$1" ]; do [ "$i" -ge "$4" ] && { echo none; exit 0; }; i=$((i+1)); "$2" 0.1; done
-  read -r p f < "$1"; export LC_ALL=C TZ=UTC
-  t=$("$3" -o lstart= -p "$p") || { echo gone; exit 0; }
-  echo held "$p" "${f:-0}" $t
+  while [ ! -s "$1" ] && [ "$i" -lt 20 ]; do "$2" 0.1; i=$((i+1)); done
+  [ -s "$1" ] && read -r f < "$1" && echo "$f"
   """
-  # On the workstation: $1 the forward's pid file; then the ssh's argv, which keeps the pid.
-  @fwd_wrapper ~S"""
-  echo $$ > "$1"; shift; exec "$@"
-  """
-  # $1 mkdir, $2 rm, $3 the directory, $4 a pid file an earlier forward left.
-  @fwd_clear ~S"""
-  "$1" -p "$3" && "$2" -f -- "$4"
-  """
-  # $1 the forward's pid file, $2 ps, $3 lsof, $4 the local port. Prints `open <pid> <start
-  # time>` when that pid itself listens on the port, `held …` when it runs but does not (another
-  # program's listener reads the same as no listener), `gone`, or `none`.
-  @fwd_read ~S"""
-  [ -s "$1" ] || { echo none; exit 0; }
-  read -r p < "$1"; export LC_ALL=C TZ=UTC
-  t=$("$2" -o lstart= -p "$p") || { echo gone; exit 0; }
-  "$3" -n -P -a -p "$p" -iTCP@127.0.0.1:"$4" -sTCP:LISTEN -t >/dev/null 2>&1 && s=open || s=held
-  echo "$s" "$p" $t
+  # On the workstation: $1 mkdir, $2 the forwards' directory.
+  @fwd_dir ~S("$1" -p "$2")
+  # $1 lsof, $2 the forward's pid, $3 the local port: exits 0 when that pid itself listens on
+  # the port (another program's listener reads the same as no listener).
+  @fwd_listens ~S"""
+  "$1" -n -P -a -p "$2" -iTCP@127.0.0.1:"$3" -sTCP:LISTEN -t >/dev/null 2>&1
   """
   # How long a forward has to open, when no call names it.
   @fwd_timeout 10_000
@@ -114,23 +102,6 @@ defmodule CodingAgentFramework.Services do
   # pid file's clear, dtach), and the call that waits for all three.
   @hold_read 2_000
   @hold_call 3 * @hold_read + 1_000
-  # $1 the pid, $2 its start time, $3 ps, $4 kill, $5 the signal. The check and the signal run
-  # in one process, so a pid another program took is never signaled.
-  @end_script ~S"""
-  export LC_ALL=C TZ=UTC
-  t=$("$3" -o lstart= -p "$1") || { echo gone; exit 0; }
-  [ "$(echo $t)" = "$2" ] || { echo gone; exit 0; }
-  "$4" -"$5" -- "-$1" && echo sent
-  """
-  # $1 the pid, $2 its start time, $3 ps, $4 dtach, $5 the socket, $6 the input. The same check
-  # as an end's, in the process that pushes, so input never reaches a program put in its place.
-  @send_script ~S"""
-  export LC_ALL=C TZ=UTC
-  t=$("$3" -o lstart= -p "$1") || { echo gone; exit 0; }
-  [ "$(echo $t)" = "$2" ] || { echo gone; exit 0; }
-  out=$(printf '%s' "$6" | "$4" -p "$5" 2>&1) && { echo sent; exit 0; }
-  case $out in *"Connection refused"*|*"No such file"*) echo gone ;; *) echo "unknown $out" ;; esac
-  """
   # An argument carries no NUL, and a remote command line has a bounded length.
   @max_input 65_536
   # The pause between a wait's rounds of reads.
@@ -334,14 +305,10 @@ defmodule CodingAgentFramework.Services do
     with :ok <- input_ok(input),
          {:ok, row} <- fixable(services, caller, name, ~w(running)),
          {:ok, ctx} <- context(services, row, timeout) do
-      %{sh: sh, ps: ps} = ctx.programs.paths
-      socket = Path.join(ctx.dir, name <> ".sock")
-      args = ["-c", @send_script, "caf-send", "#{row.pid}", row.started, ps, ctx.holder.dtach]
-
-      case Shell.run(ctx.programs.host, sh, args ++ [socket, input], timeout: timeout) do
-        {:ok, %{status: 0, output: "sent\n"}} -> {:ok, :sent}
-        {:ok, %{status: 0, output: "gone\n"}} -> {:refused, :not_held}
-        other -> {:unknown, {:send, other}}
+      case Holder.Process.push(ctx.procs, name, record(row), input, timeout: timeout) do
+        {:ok, :sent} -> {:ok, :sent}
+        {:ok, :gone} -> {:refused, :not_held}
+        {:unknown, why} -> {:unknown, {:send, why}}
       end
     end
   end
@@ -531,7 +498,7 @@ defmodule CodingAgentFramework.Services do
 
     with {:ok, ctx} <- context(services, row, within(opts, :start_timeout, 5_000)),
          ready = [
-           clear: [ctx.pid],
+           clear: [ctx.from],
            sync_timeout: within(opts, :sync_timeout, 60_000),
            lock_wait: within(opts, :lock_wait, 30_000)
          ],
@@ -539,7 +506,7 @@ defmodule CodingAgentFramework.Services do
          until = now() + within(opts, :start_timeout, 5_000),
          fields = %{state: "starting", start_until: until, fwd: nil, opens: 0},
          {:ok, _} <- put(services, row.name, fields) do
-      args = ["caf-service", ctx.pid, ctx.log, ctx.path, ctx.programs.paths.wc]
+      args = ["caf-service", ctx.log, ctx.path, ctx.programs.paths.wc, ctx.from]
       held = Held.hold(ctx, @wrapper, args, row.argv, row.env)
 
       # Held or cut, the pid file says whether the wrapper ran.
@@ -580,22 +547,46 @@ defmodule CodingAgentFramework.Services do
     end
   end
 
+  # The held program's record (waiting up to half of `timeout` for its wrapper to write it),
+  # then the start's log offset: `{:ok, {pid, offset, start}}`, `{:ok, :gone}` when the
+  # recorded process no longer runs, or `{:ok, :none}` with no record.
   defp read_held(ctx, timeout) do
-    %{sh: sh, sleep: sleep, ps: ps} = ctx.programs.paths
-    args = ["-c", @held, "caf-held", ctx.pid, sleep, ps, "#{div(timeout, 200)}"]
+    name = ctx.name
 
-    case Shell.run(ctx.programs.host, sh, args, timeout: timeout) do
-      {:ok, %{status: 0, output: "none\n"}} -> {:ok, :none}
-      {:ok, %{status: 0, output: "gone\n"}} -> {:ok, :gone}
-      {:ok, %{status: 0, output: "held " <> rest}} -> held(rest)
-      other -> {:unknown, {:read, other}}
+    case Holder.Process.read(ctx.procs, [name], wait: div(timeout, 2), timeout: timeout) do
+      {:ok, %{^name => %{process: :live, record: %{pid: pid, start: start}}}} ->
+        with {:ok, from} <- offset(ctx), do: {:ok, {pid, from, start}}
+
+      {:ok, %{^name => %{process: gone}}} when gone in [:gone, :replaced] ->
+        {:ok, :gone}
+
+      {:ok, %{^name => %{process: :none}}} ->
+        {:ok, :none}
+
+      other ->
+        {:unknown, {:read, other}}
     end
   end
 
-  defp held(rest) do
-    [pid, from, started] = String.split(String.trim(rest), " ", parts: 3)
-    {:ok, {String.to_integer(pid), String.to_integer(from), started}}
+  defp offset(ctx) do
+    %{sh: sh, sleep: sleep} = ctx.programs.paths
+    args = ["-c", @offset, "caf-offset", ctx.from, sleep]
+
+    case Shell.run(ctx.programs.host, sh, args, timeout: @call) do
+      {:ok, %{status: 0, output: out}} ->
+        case Integer.parse(String.trim(out)) do
+          {from, ""} -> {:ok, from}
+          _ -> {:unknown, {:offset, out}}
+        end
+
+      other ->
+        {:unknown, {:offset, other}}
+    end
   end
+
+  # The record a row keeps of its held program.
+  defp record(%{pid: nil}), do: nil
+  defp record(row), do: %{pid: row.pid, start: row.started}
 
   # The service runs, and its row says its forward is starting: only now is the forward held
   # (`ForwardEarly`), and the start answers once it is open. A forward that fails at its start
@@ -662,7 +653,7 @@ defmodule CodingAgentFramework.Services do
   # it is gone, or at the deadline.
   defp forward_read(ws, row, deadline) do
     case read_forward(ws, row) do
-      {:open, _, _} ->
+      {:open, _record} ->
         :open
 
       :gone ->
@@ -678,48 +669,59 @@ defmodule CodingAgentFramework.Services do
     end
   end
 
+  # The forward's record (`Holder.Process`), then whether that ssh's own pid listens on the
+  # local port: `{:open, record}`, `{:held, record}` when it runs but does not listen, `:gone`,
+  # or `:none` with no record.
   defp read_forward(ws, row) do
-    args = ["-c", @fwd_read, "caf-forward", fwd_pid(ws, row), ws.programs.paths.ps, ws.lsof]
+    name = row.name
 
-    case Shell.run(ws.programs.host, ws.programs.paths.sh, args ++ ["#{row.local}"],
-           timeout: @call
-         ) do
-      {:ok, %{status: 0, output: "none\n"}} -> :none
-      {:ok, %{status: 0, output: "gone\n"}} -> :gone
-      {:ok, %{status: 0, output: "open " <> rest}} -> forward_pid(:open, rest)
-      {:ok, %{status: 0, output: "held " <> rest}} -> forward_pid(:held, rest)
-      other -> {:unknown, {:forward, other}}
+    case Holder.Process.read(ws.procs, [name]) do
+      {:ok, %{^name => %{process: :live, record: record}}} ->
+        args = ["-c", @fwd_listens, "caf-forward", ws.lsof, "#{record.pid}", "#{row.local}"]
+
+        case Shell.run(ws.programs.host, ws.programs.paths.sh, args, timeout: @call) do
+          {:ok, %{status: 0}} -> {:open, record}
+          {:ok, %{status: 1}} -> {:held, record}
+          other -> {:unknown, {:forward, other}}
+        end
+
+      {:ok, %{^name => %{process: gone}}} when gone in [:gone, :replaced] ->
+        :gone
+
+      {:ok, %{^name => %{process: :none}}} ->
+        :none
+
+      other ->
+        {:unknown, {:forward, other}}
     end
   end
 
-  defp forward_pid(state, rest) do
-    [pid, started] = String.split(String.trim(rest), " ", parts: 2)
-    {state, String.to_integer(pid), started}
-  end
-
-  defp fwd_pid(ws, row), do: Path.join(ws.dir, row.name <> ".fwd.pid")
-
-  # The forward's ssh by the pid its wrapper wrote and that pid's start time; done once its
-  # socket reads dead.
+  # The forward's ssh by its record: TERM, then KILL; done once it reads dead. Gone, or its
+  # wrapper not yet written: the socket says when it ends.
   defp end_forward(ws, row) do
     case Holder.state(ws.holder, row.name) do
       {:ok, dead} when dead in [:absent, :stale] ->
         :ok
 
       {:ok, :live} ->
-        with {state, pid, started} when state in [:open, :held] <- read_forward(ws, row),
-             proc = %{name: row.name, pid: pid, started: started},
-             :ok <- send_end(ws, proc, "TERM") do
-          dead_or_kill(ws, proc, now() + @kill_wait)
-        else
-          # Gone, or its wrapper not yet written: the socket says when it ends.
-          _ -> dead(ws, row.name, now() + @kill_wait)
-        end
+        record =
+          case read_forward(ws, row) do
+            {state, record} when state in [:open, :held] -> record
+            _ -> nil
+          end
+
+        ended(Holder.Process.end_held(ws.procs, row.name, record, @kill_wait, group: true))
 
       other ->
         {:unknown, {:forward, other}}
     end
   end
+
+  defp ended({:ok, :ended}), do: :ok
+  defp ended(other), do: other
+
+  defp end_of({:ok, :ended}), do: :ok
+  defp end_of({:unknown, why}), do: {:unknown, {:end, why}}
 
   defp end_forward_of(%{ws: nil}, _row), do: :ok
   defp end_forward_of(ctx, row), do: end_forward(ctx.ws, row)
@@ -734,46 +736,24 @@ defmodule CodingAgentFramework.Services do
     with {:ok, ctx} <- context(services, row, @call),
          {:ok, row} <- put(services, row.name, fields, %{state: row.state}),
          :ok <- end_forward_of(ctx, row),
-         :ok <- send_end(ctx, row, "TERM"),
-         :ok <- dead_or_kill(ctx, row, until) do
+         grace = max(until - now(), 0),
+         :ok <-
+           end_of(Holder.Process.end_held(ctx.procs, row.name, record(row), grace, group: true)) do
       put(services, row.name, after_end(row))
     end
-  end
-
-  defp dead_or_kill(ctx, row, until) do
-    with {:unknown, {:not_dead, _}} <- dead(ctx, row.name, until),
-         :ok <- send_end(ctx, row, "KILL"),
-         do: dead(ctx, row.name, now() + @kill_wait)
   end
 
   # A restart's end leaves the row asked, for its start.
   defp after_end(%{state: "restarting"}), do: %{state: "asked", pid: nil, started: nil}
   defp after_end(_), do: @ended
 
-  defp send_end(%{}, %{pid: nil}, _signal), do: :ok
+  # One signal to the group the row's record leads; a row with no record has nothing to signal.
+  defp send_end(_ctx, %{pid: nil}, _signal), do: :ok
 
   defp send_end(ctx, row, signal) do
-    %{sh: sh, ps: ps, kill: kill} = ctx.programs.paths
-    args = ["-c", @end_script, "caf-end", "#{row.pid}", row.started, ps, kill, signal]
-
-    case Shell.run(ctx.programs.host, sh, args, timeout: @call) do
-      {:ok, %{status: 0, output: out}} when out in ["sent\n", "gone\n"] -> :ok
-      other -> {:unknown, {:end, other}}
-    end
-  end
-
-  defp dead(ctx, name, deadline) do
-    case Holder.state(ctx.holder, name) do
-      {:ok, state} when state in [:absent, :stale] ->
-        :ok
-
-      other ->
-        if now() >= deadline do
-          {:unknown, {:not_dead, other}}
-        else
-          pause(min(100, deadline - now()))
-          dead(ctx, name, deadline)
-        end
+    case Holder.Process.signal(ctx.procs, record(row), signal, group: true, timeout: @call) do
+      {:ok, _sent_or_gone} -> :ok
+      {:unknown, why} -> {:unknown, {:end, why}}
     end
   end
 
@@ -781,7 +761,8 @@ defmodule CodingAgentFramework.Services do
     with {:ok, config} <- call(services, :config), do: context_of(config, row, timeout)
   end
 
-  # An earlier start of this name may have left its pid file: `Held.ready/4` clears it.
+  # An earlier start of this name may have left its offset file: `Held.ready/4` clears it, and
+  # `Holder.Process.hold/4` its record.
   defp context_of(config, row, timeout) do
     where = %{host: row.host, project: row.project, copy: row.copy, kind: "services"}
 
@@ -792,17 +773,18 @@ defmodule CodingAgentFramework.Services do
              timeout
            ),
          {:ok, ws} <- if(forwarded?(config, row), do: ws(config), else: {:ok, nil}),
-         do: {:ok, Map.merge(ctx, %{log: b <> ".log", pid: b <> ".pid", ws: ws})}
+         do: {:ok, Map.merge(ctx, %{log: b <> ".log", from: b <> ".from", ws: ws})}
   end
 
   # Where forwards are held: the workstation's services directory, each socket named for its
-  # service.
+  # service, with its record.
   defp ws(config) do
     with {:ok, %{programs: programs, dir: dir}} <- host_of(config, config.workstation),
          dir = Path.join(dir, "services"),
          {:ok, holder} <- Holder.new(programs, dir, timeout: @hold_read),
+         {:ok, procs} <- Holder.Process.new(programs, holder),
          {:ok, %{lsof: lsof}} <- Programs.take(programs, [:lsof]),
-         do: {:ok, %{programs: programs, holder: holder, dir: dir, lsof: lsof}}
+         do: {:ok, %{programs: programs, holder: holder, procs: procs, dir: dir, lsof: lsof}}
   end
 
   defp host_of(config, name) do
@@ -821,21 +803,19 @@ defmodule CodingAgentFramework.Services do
          {:ok, _} <- put_row(s, name, %{}, expect),
          :ok <- if(dead_first, do: forward_dead(ws, name), else: :ok),
          {:ok, row} <- put_row(s, name, fields, expect) do
-      %{sh: sh, mkdir: mkdir, rm: rm} = ws.programs.paths
+      %{sh: sh, mkdir: mkdir} = ws.programs.paths
       {:ssh, ssh, destination} = s.config.hosts[row.host].programs.host.reach
-      clear = ["-c", @fwd_clear, "caf-forward", mkdir, rm, ws.dir, fwd_pid(ws, row)]
       spec = "127.0.0.1:#{row.local}:127.0.0.1:#{row.port}"
       options = ["-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes"]
-      argv = [sh, "-c", @fwd_wrapper, "caf-forward", fwd_pid(ws, row), ssh, "-N" | options]
+      argv = [ssh, "-N" | options] ++ ["-L", spec, "--", destination]
       env = Map.get(s.config.hosts[row.host], :ssh_env, [])
 
       held =
-        case Shell.run(ws.programs.host, sh, clear, timeout: @hold_read) do
-          {:ok, %{status: 0}} ->
-            Holder.hold(ws.holder, name, argv ++ ["-L", spec, "--", destination], env: env)
-
-          other ->
-            {:refused, {:clear, other}}
+        case Shell.run(ws.programs.host, sh, ["-c", @fwd_dir, "caf-forward", mkdir, ws.dir],
+               timeout: @hold_read
+             ) do
+          {:ok, %{status: 0}} -> Holder.Process.hold(ws.procs, name, argv, env: env)
+          other -> {:refused, {:clear, other}}
         end
 
       {:ok, row, held}
@@ -1006,7 +986,7 @@ defmodule CodingAgentFramework.Services do
 
     with :ok <- end_forward_of(ctx, row),
          :ok <- send_end(ctx, row, signal),
-         :ok <- dead(ctx, row.name, now()),
+         :ok <- ended(Holder.Process.dead_by(ctx.procs, row.name, now())),
          do: put_row(s, row.name, @ended, %{state: row.state})
   end
 

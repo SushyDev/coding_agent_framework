@@ -283,7 +283,7 @@ defmodule CodingAgentFramework.ServicesTest do
     assert %{state: "ended", owner: nil} = row(c, "db")
     # The wrapper wrote the program's pid before the settle read the owner's end.
     {:ok, pid} = File.read(Path.join(c.dir, "box/services/db.pid"))
-    assert {:ok, :gone} = gone(String.trim(pid))
+    assert {:ok, :gone} = gone(pid |> String.split() |> hd())
 
     assert {:ok, %{state: "running", owner: "web-main", keep: true}} =
              start(c, "web-a", "web", "box", keep: true)
@@ -409,7 +409,7 @@ defmodule CodingAgentFramework.ServicesTest do
   defp fwd_sock(c), do: Path.join(c.dir, "ws/services/db.sock")
 
   defp fwd_pid(c),
-    do: c.dir |> Path.join("ws/services/db.fwd.pid") |> File.read!() |> String.trim()
+    do: c.dir |> Path.join("ws/services/db.pid") |> File.read!() |> String.split() |> hd()
 
   defp start_forwarded(c, opts \\ []) do
     {port, local} = {free_port(), free_port()}

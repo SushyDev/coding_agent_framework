@@ -7,7 +7,6 @@ defmodule CodingAgentFramework.RegistryTest do
 
   doctest CodingAgentFramework.Registry
   doctest CodingAgentFramework.Registry.SessionFile
-  doctest CodingAgentFramework.Registry.Liveness
   doctest CodingAgentFramework.Registry.Table
 
   defp start(dir, opts \\ []) do

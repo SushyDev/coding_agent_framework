@@ -43,6 +43,16 @@ defmodule CodingAgentFramework.Recoveries do
   person last cleared it ends `failed{repeating}` with no act, and that socket's losses are not
   claimed again until `clear/2`.
 
+  **The second recovery is an end owed** (F-118, `model/tla/Start.tla`'s `Kill`): the process of
+  an `orphan` row of `Sessions`, or of a stop whose deadline passed with it alive, which
+  `Sessions.ends_owed/2` names with its pid and start time. Its state is keyed by the name, the
+  pid and the start time; its row is claimed first, then the process is ended by that record
+  alone (`Holder.Process.end_held/5`: TERM, then KILL at `end_grace`, default 5 s), and the row
+  ends `recovered` once the program reads dead, or `unknown` with what was read. A row a
+  restart left `claimed` ends `unknown{interrupted}` and is not acted on. `Sessions` settles
+  its own row at the next cue, once the process is gone and its socket dead. `Sessions` itself
+  never kills.
+
   After each write it calls `notify` with `%{topic: "recoveries:<host>:<server>", ids: ids}`.
 
       iex> read = %{generation: 2, read_at: 50, rows: [
@@ -66,12 +76,13 @@ defmodule CodingAgentFramework.Recoveries do
 
   @doc """
   Starts a `Recoveries`. Options: `sampler:` (the host's `TmuxSampler`), `control:` (its
-  `Control`), `holder:` (its `Holder`), `sessions:` (its `Sessions`, which answers each
-  viewer's command), `server:` (its `Tmux` server, for the key), `db:`, and optionally
-  `notify:`, `size:` (a viewer's `{columns, rows}`, default `{200, 50}`), `max_age:`
-  (ms, default 30 000), `window:` (ms, default 60 000) and `clock:` (a function answering the
-  time in ms, by default the system's; give the sampler the same one). It fails to start with
-  `{:host_mismatch, server_host, holder_host}`.
+  `Control`), `holder:` (its `Holder`), `programs:` (its `Programs`, with ps, kill and sleep,
+  for `Holder.Process`), `sessions:` (its `Sessions`, which answers each viewer's command and
+  the ends owed), `server:` (its `Tmux` server, for the key), `db:`, and optionally `notify:`,
+  `size:` (a viewer's `{columns, rows}`, default `{200, 50}`), `max_age:` (ms, default 30 000),
+  `window:` (ms, default 60 000), `end_grace:` (ms between an end's TERM and its KILL, default
+  5 000) and `clock:` (a function answering the time in ms, by default the system's; give the
+  sampler the same one). It fails to start with `{:host_mismatch, server_host, holder_host}`.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -147,12 +158,18 @@ defmodule CodingAgentFramework.Recoveries do
     %Holder{} = holder = Keyword.fetch!(opts, :holder)
 
     with :ok <- same_host(host, holder.host.name),
+         {:ok, procs} <- Holder.Process.new(Keyword.fetch!(opts, :programs), holder),
          {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)) do
+      # An end claimed and not acted on: the restart cut it, and it is never acted on.
+      Table.interrupt_ends(db, host, server, Keyword.get(opts, :clock, &os_now/0).())
+
       {:ok,
        %{
          host: host,
          server: server,
          db: db,
+         procs: procs,
+         end_grace: Keyword.get(opts, :end_grace, 5_000),
          sampler: Keyword.fetch!(opts, :sampler),
          control: Keyword.fetch!(opts, :control),
          sessions: Keyword.fetch!(opts, :sessions),
@@ -200,6 +217,49 @@ defmodule CodingAgentFramework.Recoveries do
   end
 
   defp check_now(state) do
+    ends = end_owed(state)
+
+    case check_viewers(state) do
+      {{:ok, done}, state} -> {{:ok, Map.put(done, :ends, ends)}, state}
+      other -> other
+    end
+  end
+
+  # Each end owed, once per state: claimed, ended by the record alone, then the row ends.
+  defp end_owed(state) do
+    case Sessions.ends_owed(state.sessions) do
+      {:ok, owed} ->
+        for o <- owed, {:ok, id} <- [claim(state, end_state(state, o))] do
+          answer = Holder.Process.end_held(state.procs, o.socket, o.record, state.end_grace)
+
+          fields =
+            case answer do
+              {:ok, :ended} -> [status: "recovered", open: "ended"]
+              {:unknown, why} -> [status: "unknown", reason: why, open: "unknown"]
+            end
+
+          write(state, id, fields ++ [opened_at: now(state), ended_at: now(state)])
+          id
+        end
+
+      _unread ->
+        []
+    end
+  end
+
+  defp end_state(state, %{name: name, socket: socket, record: %{pid: pid, start: start}}) do
+    %{
+      key: "end:#{name}:#{pid}:#{Holder.Process.normal(start)}",
+      kind: "end",
+      socket: socket,
+      generation: nil,
+      since: nil,
+      host: state.host,
+      server: state.server
+    }
+  end
+
+  defp check_viewers(state) do
     case TmuxSampler.rows(state.sampler) do
       {:ok, %{failed_at: at}} when is_integer(at) ->
         {{:refused, :sample_failed}, state}
@@ -311,7 +371,7 @@ defmodule CodingAgentFramework.Recoveries do
   defp verify(state, read) do
     held = for %{kind: :held} = row <- read.rows, into: %{}, do: {row.name, row}
 
-    for row <- Table.open_rows(state.db, state.host, state.server),
+    for %{kind: "lost_viewer"} = row <- Table.open_rows(state.db, state.host, state.server),
         read.read_at > (row.opened_at || row.claimed_at) do
       {status, reason} = outcome(row, held[row.socket])
       write(state, row.id, status: status, reason: reason, ended_at: now(state))
@@ -335,4 +395,6 @@ defmodule CodingAgentFramework.Recoveries do
     do: state.notify.(%{topic: "recoveries:#{state.host}:#{state.server}", ids: ids})
 
   defp now(state), do: state.clock.()
+
+  defp os_now, do: System.os_time(:millisecond)
 end
