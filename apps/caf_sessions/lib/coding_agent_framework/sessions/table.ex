@@ -25,6 +25,11 @@ defmodule CodingAgentFramework.Sessions.Table do
   for none. `release` is the Claude Code release an interactive start launched, as its
   `--version` reads, or NULL when it was not read.
 
+  **A move** (F-133, `Mover`): `move` is the move's phase (`draining`, `stopping`, `copying`,
+  `resuming`), NULL when no move is under way; `move_from` and `move_to` the accounts it goes
+  between, `move_act` its row in `Acts`, and `move_deadline` (wall-clock ms) when a move not yet
+  past its stop is given up. A start writes none of them, so a move's resume keeps them.
+
   **Migration** (F-129): a file an earlier build made has `held_sessions`, with no kind, parent
   or project. `open/1` takes its rows into `agents`, ids kept, each of kind `delegate` when it
   ran as one and `main` otherwise, then drops it, in one transaction, so a second open takes
@@ -41,7 +46,7 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   @columns ~w(id host name kind parent project socket account role cwd resume status reason
               viewer pid session_id proc_start started_at updated_at deadline repo branch
-              worktree options release)a
+              worktree options release move move_from move_to move_act move_deadline)a
 
   @schema """
   CREATE TABLE IF NOT EXISTS agents (
@@ -49,11 +54,22 @@ defmodule CodingAgentFramework.Sessions.Table do
     parent TEXT, project TEXT, socket TEXT NOT NULL, account TEXT, role TEXT, cwd TEXT,
     resume TEXT, status TEXT NOT NULL, reason TEXT, viewer TEXT, pid INTEGER, session_id TEXT,
     proc_start TEXT, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deadline INTEGER,
-    repo TEXT, branch TEXT, worktree TEXT, options TEXT, release TEXT, UNIQUE (host, name));
+    repo TEXT, branch TEXT, worktree TEXT, options TEXT, release TEXT, move TEXT,
+    move_from TEXT, move_to TEXT, move_act INTEGER, move_deadline INTEGER, UNIQUE (host, name));
   """
 
-  # Added to `agents` after a file's table may have been made (R8), so added if missing.
-  @added [agents: ["release TEXT"]]
+  # The columns a later build added to `agents`, so added if missing: the release a session
+  # runs (R8), and a move's phase on the row (F-133).
+  @added [
+    agents: [
+      "release TEXT",
+      "move TEXT",
+      "move_from TEXT",
+      "move_to TEXT",
+      "move_act INTEGER",
+      "move_deadline INTEGER"
+    ]
+  ]
 
   # The columns an earlier build added to `held_sessions`; a file older still lacks them.
   @held_added ["deadline INTEGER", "repo TEXT", "branch TEXT", "worktree TEXT", "options TEXT"]
@@ -128,7 +144,11 @@ defmodule CodingAgentFramework.Sessions.Table do
   defp migrate(db) do
     if Store.query(db, "SELECT 1 FROM sqlite_master WHERE name = 'held_sessions'", []) != [] do
       for column <- @held_added, do: add(db, column)
-      old = @columns -- [:kind, :parent, :project, :release]
+
+      old =
+        @columns --
+          ([:kind, :parent, :project, :release] ++
+             [:move, :move_from, :move_to, :move_act, :move_deadline])
 
       Store.transaction(db, fn ->
         Store.query(
@@ -207,7 +227,8 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   @doc """
   Sets `fields` (status, reason, viewer, pid, session_id, proc_start, deadline, worktree,
-  parent, project) on row `id`.
+  parent, project, and a move's `move`, `move_from`, `move_to`, `move_act`, `move_deadline`) on
+  row `id`.
   """
   @spec update(db, integer, keyword) :: :ok
   def update(db, id, fields) do

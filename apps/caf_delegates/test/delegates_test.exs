@@ -134,6 +134,17 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}"]
   end
 
+  # Move.tla's NoStartWhileDraining: a move's drain starts no delegate under its session.
+  test "no delegate starts under a parent a move drains", ctx do
+    id = Sessions.Table.declare(ctx.table, "test", "main", "app")
+    :ok = Sessions.Table.update(ctx.table, id, move: "draining")
+    assert {:refused, {:moving, "main"}} = start(ctx, "app", "unit/one")
+    assert [] = Table.latest(ctx.dtable, "test")
+
+    :ok = Sessions.Table.update(ctx.table, id, move: nil)
+    assert {:ok, %{name: "app-unit-one"}} = start(ctx, "app", "unit/one")
+  end
+
   test "a kill before the last reply is resumed once, after Sessions' row ends, and finishes",
        ctx do
     # KillSeen waits for Sessions' row to end (RunningSettled, F-61); then the resume, counted

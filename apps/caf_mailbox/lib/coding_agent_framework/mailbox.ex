@@ -48,6 +48,12 @@ defmodule CodingAgentFramework.Mailbox do
   Without `intake:` or `inlet:` a main session's rows stay `queued`, `attempt` `:no_delivery`,
   unless a call takes them.
 
+  While a move of the addressee is under way (`Sessions.Agents.moving?/1`, F-133), no row is
+  marked by the stream or the waiter: its rows stay `queued` and go to the process the move
+  resumes, and a waiter row is settled against the transcript of the account the agent row
+  names, after the resume the copy. A waiting call still takes its answer, since the drain waits
+  for it.
+
   **Answers.** A delivered message's turn ends with a `result` that names its uuid; that
   result's text is stored as a reply from the delegate to the message's sender (to its parent,
   the sender of its brief, for a message from `framework`), `reply_to` the message's uuid, with
@@ -217,6 +223,16 @@ defmodule CodingAgentFramework.Mailbox do
   """
   def open_to(mailbox, to, opts \\ []),
     do: call(mailbox, {:open_to, to, Keyword.get(opts, :status, :open)}, opts)
+
+  @doc """
+  The keys of the calls of agent `to` that wait here now for an answer (`await/4`, a
+  `run_delegate` under way): `{:ok, keys}`. A move's drain waits until there is none, and until
+  no row to `to` is `sending` (`open_to/3`), a row a call took included.
+
+      Mailbox.awaited(mailbox, "app-main")
+      #=> {:ok, []}
+  """
+  def awaited(mailbox, to, opts \\ []), do: call(mailbox, {:awaited, to}, opts)
 
   @doc """
   Hands it a reader's cue: every open row is read again. A `waiter` row's lines are read from
@@ -404,6 +420,9 @@ defmodule CodingAgentFramework.Mailbox do
     {:reply, {:ok, ids}, s}
   end
 
+  def handle_call({:awaited, to}, _from, s),
+    do: {:reply, {:ok, for({key, %{to: ^to}} <- s.waits, do: key)}, s}
+
   # A waiter's row reached its take bound: settled now, by the transcript as it is.
   @impl true
   def handle_info(:bound, s), do: {:noreply, settle(s, true)}
@@ -545,6 +564,11 @@ defmodule CodingAgentFramework.Mailbox do
       Agents.ended?(srow) ->
         {:ended, srow.updated_at}
 
+      # A move under way (Move.tla's MarkWhileEnding): no row that would start a turn goes in
+      # until the session runs on the other account; a waiting call's answer still may.
+      Agents.moving?(srow) ->
+        :moving
+
       Agents.headless?(srow) and is_binary(srow.session_id) ->
         {:stream, srow, folds[srow.session_id]}
 
@@ -566,6 +590,7 @@ defmodule CodingAgentFramework.Mailbox do
   end
 
   defp deliver(_s, _rows, :not_started), do: :ok
+  defp deliver(_s, _rows, :moving), do: :ok
 
   # An agent that ended takes nothing: no process of it runs again (EndedNotDelivered). A brief
   # stored since its end is a later start's, stored before `Sessions` writes that start, and

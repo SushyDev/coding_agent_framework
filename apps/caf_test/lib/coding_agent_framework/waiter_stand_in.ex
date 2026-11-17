@@ -47,6 +47,13 @@ defmodule CodingAgentFramework.WaiterStandIn do
     end)
   end
 
+  @doc """
+  Writes the lines `turn_end/4` writes for `text` in `shape`, on their own: Claude Code's take of
+  a text it read some time after the hook exited, as a test orders it.
+  """
+  def take(transcript, session_id, text, shape) when shape in [:idle, :busy, :enqueued],
+    do: write(transcript, session_id, text, shape)
+
   @doc "The waiter hook's command in the settings file at `path`, or nil."
   def command(path) do
     hooks = JSON.decode!(File.read!(path)) |> Map.get("hooks", %{}) |> Map.get("Stop", [])

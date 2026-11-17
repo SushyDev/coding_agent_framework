@@ -46,6 +46,7 @@ defmodule CodingAgentFramework.Example do
     Jobs,
     Mailbox,
     MCP,
+    Mover,
     Programs,
     Recoveries,
     Registry,
@@ -103,6 +104,7 @@ defmodule CodingAgentFramework.Example do
       tracker: Tracker.reads(),
       mailbox: Mailbox.reads(),
       delegates: Delegates.reads(),
+      mover: Mover.reads(),
       ends: Ends.reads()
     ]
   end
@@ -293,6 +295,19 @@ defmodule CodingAgentFramework.Example do
             acts: pid.(:acts),
             notify: notify}
          end},
+        # After `Delegates`, whose launch a delegate's move resumes with.
+        {:mover,
+         fn pid ->
+           {Mover,
+            host: host,
+            sessions: pid.(:sessions),
+            sessions_db: db,
+            mailbox: pid.(:mailbox),
+            accounts: w.accounts,
+            usage: pid.(:usage),
+            acts: pid.(:acts),
+            launch: &launch(c, pid, &1)}
+         end},
         {:copies, fn _ -> {Copies, dir: Config.path(c, "parts/copies"), programs: p} end},
         {:jobs,
          fn pid ->
@@ -335,7 +350,8 @@ defmodule CodingAgentFramework.Example do
             instance: c.instance,
             tool_timeout: c.tool_timeout,
             margin: c.margin,
-            acts: pid.(:acts)}
+            acts: pid.(:acts),
+            mover: {Mover, pid.(:mover)}}
          end},
         {:mcp_http,
          fn pid ->
@@ -369,6 +385,22 @@ defmodule CodingAgentFramework.Example do
         {Tracker.TableSource, [table: TmuxSampler.Table] ++ on ++ [server: server]},
         {Tracker.TableSource, [table: Acts.Table] ++ on ++ [instance: c.instance]}
       ]
+  end
+
+  # A moved agent's launch on its new account: a delegate's as `Delegates` keeps it, a main
+  # session's from the config, each with a new MCP config. The row's own options are its own.
+  defp launch(c, pid, row) do
+    base =
+      if row.kind == "delegate",
+        do: Delegates.launch(pid.(:delegates), row.name),
+        else: {:ok, [role: :parent, cwd: row.cwd, claude: c.claude, env: c.env]}
+
+    # `MCP` starts after `Mover`: a resume a restart left waits for it, and is not refused.
+    mcp = if mcp = pid.(:mcp), do: issue(mcp, row.name), else: {:unknown, :no_mcp}
+
+    with {:ok, launch} <- base,
+         {:ok, mcp} <- mcp,
+         do: {:ok, Keyword.merge(launch, tool_timeout: c.tool_timeout, mcp: mcp)}
   end
 
   defp issue(nil, _agent), do: {:refused, :no_mcp}

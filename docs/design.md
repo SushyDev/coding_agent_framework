@@ -187,7 +187,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Stream` | a headless session's transport: a FIFO per process, a spool removed as the line's claim, the event log read from an offset, and its `can_use_tool` requests. Its fold of the log (each message's replay, each result) is evidence `Mailbox` and `Sessions` read; it keeps no delivery state of its own | `stream_delegates` |
 | `Intake` | hook events in; one hold, of four kinds: `permission` (a person's or an agent's `answer`), `tool` (`PreToolUse`, the app's callback), `stop` (`Stop` held for the app's callback) and `waiter` (a main session's waiting Stop hook, answered with `Mailbox`'s due text) | `intake_events` |
 | `Sessions` | the agent row: one row per agent, main session or delegate, with its kind, parent, project, account, launch options, held process and status; start, resume, and stop by SIGTERM once idle; the tree as one function of its rows; each session's turn state as one function per kind of session, from its evidence. Other parts read its rows only through `Sessions.Agents`, a pure module over a reader's own connection, which answers what each status means | `agents` |
-| `Mover` | drains a session and moves it between accounts; its phase is a field of the agent row | — |
+| `Mover` | drains a session, a main session or a delegate, and moves it between accounts; its phase is a field of the agent row (`move`, with the accounts, its act and its deadline), which `Sessions` writes for it | — |
 | `Mains` | each project's main sessions, as agent rows of kind `main`; the pull after a landing, and the start of one for a project that has none | — |
 | `Delegates` | the delegate protocol only: its checks, the cap, the account pick, resume once, report a second kill; it hands the report to `Mailbox` as the reply to the brief | `delegates`: branch, brief uuid, resumes, whether the report was taken |
 | `Mailbox` | every delivery: messages, replies, notices, reports, briefs, the words to go on and the app's word, stored, delivered once, in order per sender and addressee; one mark and settle, with the transport the target's kind chooses | `messages` |
@@ -211,13 +211,13 @@ declarations to `Cues`, and names each part's process to it as it starts; no par
 
 | Topic | Sent by | Reaches, beside the `Tracker` (which reads every topic) |
 |---|---|---|
-| `registry:<host>:<account>` | `Registry` | `Sessions` |
-| `stream:<host>` | `Stream` | `Sessions`, `Delegates`, `Mailbox` |
+| `registry:<host>:<account>` | `Registry` | `Sessions`, `Mover` (a move's stop is asked again only on this cue and the stream's) |
+| `stream:<host>` | `Stream` | `Sessions`, `Delegates`, `Mailbox`, `Mover` |
 | `tmux:<host>:<server>` | `TmuxSampler` | `Sessions`, `Recoveries` |
-| `sessions:<host>` | `Sessions` | `Delegates`, `Mailbox`, the app's end of an owner's services |
+| `sessions:<host>` | `Sessions` | `Delegates`, `Mailbox`, `Mover`, the app's end of an owner's services |
 | `transcripts:<host>:<account>` | `Transcripts` | `Delegates`, `Mailbox` (a waiter row's lines are read only on this cue, the waiters' and the take bound) |
 | `delegates:<host>` | `Delegates` | `Mailbox` |
-| `mailbox` | `Mailbox` | `Delegates` |
+| `mailbox` | `Mailbox` | `Delegates`, `Mover` |
 | `intake:<host>:<account>:waiters` | `Intake` | `Mailbox` |
 | `intake:<host>:<account>`, `usage:…`, `acts:…`, `jobs`, `services` | their parts | none |
 
@@ -529,6 +529,38 @@ one press at any level. It goes to the account with the most allowance left:
 Running delegates, jobs and services do not hold a move: each runs in its own process and
 survives the main session's end. A delegate's report is held in `Mailbox` for its main session until a
 process of it runs whose turn has ended, and the hold survives restarts of the framework.
+
+**How `Mover` does it** (F-133, `Move.tla`). A move is an act in `Acts` (act `move`, by the
+operator or a delegate's parent, as a fix is, `Grants.may_fix?`), claimed on the session's
+process and the moves of it already ended, then marked acted, then the phase written on the
+agent row, `draining`, with the accounts, the act and a deadline; a restart goes on from the
+phase. While the row has a phase, `Mailbox` marks no row to the session by the stream or the
+waiter (a waiting call still takes its answer), `Delegates` starts no delegate under it and
+takes a delegate's end for the move's, not a kill, and `Sessions` does not end it. The drain is
+clear once no `Mailbox` row to it is `sending` and no `run_delegate` call of it waits
+(`Mailbox.awaited/3`). `stopping` is `Sessions.stop` `for: :move`: an interactive session's
+SIGTERM as above; a delegate's is SIGTERM too, by its record, once `Stream`'s fold reads its
+turn ended and no row to it is sending, since an `end_session` would settle its queued rows
+ended. A stop refused while a turn runs is asked again only on a `registry:` or `stream:` cue.
+`copying` copies `<config>/projects/<cwd>/<session id>.jsonl` and the directory of that name
+beside it, each whole under a temporary name and renamed, once the row is free (its process
+gone by pid and start time and its socket dead); `resuming` is `Sessions.resume` on the other
+account with the same session id and the app's launch for the agent (a delegate's from
+`Delegates.launch/2`), the row's own options taken again. Each failure settles on one account:
+
+- the drain or the stop not done by the move's deadline while the old process runs: given up,
+  the session runs on on its account, the act `failed`;
+- the old process ending by itself during the move: the move goes on from the copy;
+- a stop whose process outlives its deadline: the row stays `stopping` for `Recoveries`, and
+  the move goes on once it is free, whatever the deadline;
+- the copy or the resume refused on the other account: the act `failed`, and the session is
+  resumed on its own account, where its transcript is;
+- that resume refused too: no process of it runs; its row says why, and the fault ledger has an
+  act `move` `failed`, reason `stranded`, for a person.
+
+A resume is asked again only while the row is free, and `Sessions` starts no name whose process
+may live, so a restart never runs two. Background commands (step 2) are not read: no reader of
+them is built (F-133's new-1).
 
 Its chat is never archived.
 
@@ -961,6 +993,7 @@ framework's tools, which are strict in how they act and narrow in whom they reac
 | `answer(agent, dialog, label)` | parent | answers a child's open request through its held hook, by label, under a claim |
 | `resume(agent)` | parent | starts a dead or wedged child again with `--resume`, once per state, under a claim |
 | `stop(agent)` | parent | ends a delegate after its report is delivered, under a claim |
+| `move(agent, to)` | parent | moves a delegate to account `to`, or the one with the most allowance left, as an act in `Acts` ("Moving it"); a main session is moved by the operator only |
 | `start_delegate(…)` | main session | starts a delegate and answers at once; the report arrives later as a message ("The delegate protocol") |
 | `run_delegate(…, timeout)` | main session | starts a delegate and holds the call for its report, up to `timeout`, for short work; at the timeout it answers `{:unknown, :timeout}` with the delegate's name, and the report then arrives as a message, as `start_delegate`'s does |
 | `start_main(project, name, brief)` | main session | starts a main session of a project under a name not in use |
@@ -1711,7 +1744,8 @@ new-2, F-113's new-2).
   routing table and its ticker go. About +200, −200. (F-102's new-3.) Built in F-131: the
   graph is in "The parts".
 - **R12. `Mover`**, on the agent row and `Delivery`, against the rewritten `Move.tla`, for
-  delegates as well as main sessions (item 5).
+  delegates as well as main sessions (item 5). Built in F-133 ("How `Mover` does it"); the
+  move at 90 % of an account's allowance is not (F-133's new-2).
 - **After R12: `Scheduler`**, against `Schedule.tla` (modeled in F-134): the `leases` table
   on `Store`, the grant transaction, the compare-and-set release, the monitor and the
   reclaimer by `Holder.Process`'s record, the queue with its classes, rotation and deadlines,

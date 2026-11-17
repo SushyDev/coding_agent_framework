@@ -24,7 +24,9 @@ defmodule CodingAgentFramework.Delegates do
 
   **A start** checks the project, the branch against the project's pattern and the parent's cap
   (`Delegates.Turn`): the parent's delegates the tree holds (`Sessions.Agents.children/3`) and
-  its starts under way here. It picks the account with the most allowance left
+  its starts under way here; a parent a move drains is refused `{:moving, parent}`. While a
+  move of a delegate is under way (`Sessions.Agents.moving?/1`), its end is the move's, not a
+  kill, and its row waits for the move. It picks the account with the most allowance left
   (`Usage.pick/2`), and writes its row first, as `starting`, with the uuid its brief will go in
   under. The brief is then stored in `Mailbox` under that uuid, before anything of the delegate
   exists, so it is the first row to it. A task starts the session through `Sessions`, role
@@ -153,6 +155,19 @@ defmodule CodingAgentFramework.Delegates do
   def cue(delegates, %{topic: _}), do: GenServer.cast(delegates, :cue)
 
   @doc """
+  The launch of delegate `name`'s next process, for a resume another part makes (`Mover`'s, on
+  another account): its role, its worktree in its project, its model and what every launch
+  shares, as its own resume has them. Not its options, which its agent row keeps and a resume
+  takes again, nor its MCP config, which the caller issues. Answers `{:ok, launch}`,
+  `{:refused, {:no_delegate, name}}` or `{:refused, {:unknown_project, project}}`.
+
+      Delegates.launch(delegates, "app-unit-review")
+      #=> {:ok, [role: :delegate, worktree: %{project: p, branch: "unit/review"}, model: "opus",
+      #=>   claude: claude, env: env, tool_timeout: 3_600_000]}
+  """
+  def launch(delegates, name), do: call(delegates, {:launch, name}, [], @step)
+
+  @doc """
   What `Delegates` reads, for `Cues`: a stream's events and a transcript's lines (a turn's end
   and its report), the agent rows (a start or an end) and `Mailbox`'s rows (a report taken).
   """
@@ -218,6 +233,8 @@ defmodule CodingAgentFramework.Delegates do
              {:refused, {:bad, :start}},
          {:ok, options} <- Options.check(options),
          {:ok, p} <- Turn.check(s.projects, project, branch),
+         # Move.tla's NoStartWhileDraining: no delegate starts under a parent a move drains.
+         false <- Agents.moving?(Agents.get(s.agents, parent)) and {:refused, {:moving, parent}},
          true <- holding(s, parent) < p.cap or {:refused, {:cap, p.cap}},
          {:ok, account} <- pick(s) do
       # StartAsked: the row first, as starting, with its brief's uuid; then the brief's row.
@@ -234,6 +251,20 @@ defmodule CodingAgentFramework.Delegates do
     else
       refused -> {:reply, refused, s}
     end
+  end
+
+  def handle_call({:launch, name}, _from, s) do
+    reply =
+      with %{} = row <- Enum.find(Table.latest(s.db, s.host), &(&1.name == name)),
+           %{project: project} <- agent(s, row),
+           {:ok, p} <- Map.fetch(s.projects, project) |> known(project) do
+        {:ok, launch(s, row, p)}
+      else
+        {:refused, _} = refused -> refused
+        _ -> {:refused, {:no_delegate, name}}
+      end
+
+    {:reply, reply, s}
   end
 
   def handle_call({:fix_state, parent, name}, _from, s) do
@@ -284,8 +315,7 @@ defmodule CodingAgentFramework.Delegates do
   # Called: Sessions writes its own row first and runs on through a restart of this process.
   # A start names the parent and the options; a resume takes the agent row's.
   defp call_sessions(s, row, p, account, start, from) do
-    launch = [role: :delegate, worktree: %{project: p, branch: row.branch}, model: row.model]
-    launch = launch ++ s.launch
+    launch = launch(s, row, p)
 
     # The config is made in the task: the embedding app's `issue` may call a part that waits.
     task =
@@ -307,6 +337,10 @@ defmodule CodingAgentFramework.Delegates do
     parent = with {parent, _} when is_binary(parent) <- start, do: parent, else: (_ -> nil)
     put_in(s.pending[task.ref], %{id: row.id, from: from, parent: parent, name: row.name})
   end
+
+  defp launch(s, row, p),
+    do:
+      [role: :delegate, worktree: %{project: p, branch: row.branch}, model: row.model] ++ s.launch
 
   # CallAnswered and Settled: a start or resume runs, and Mailbox delivers its turn's message; a
   # refused start is refused, and the rows to it end; a refused resume is the report. An
@@ -374,14 +408,17 @@ defmodule CodingAgentFramework.Delegates do
     s = if row.report == "held", do: hand(s, row, answer(row)), else: s
 
     cond do
-      Agents.ended?(agent) or not Agents.free?(agent) -> s
+      Agents.ended?(agent) or not Agents.free?(agent) or Agents.moving?(agent) -> s
       status == "failed" or delivered?(s, row) -> ended(s, row)
       true -> s
     end
   end
 
+  # A move under way ends the process and resumes it on another account itself: its end is not
+  # a kill, and nothing of the row moves until the move is done.
   defp settle_row(s, row, agent) do
-    with {:ok, fold} <- followed(s, agent) do
+    with false <- Agents.moving?(agent),
+         {:ok, fold} <- followed(s, agent) do
       case Turn.next(row, fold) do
         {:finished, r} -> finish(s, row, "finished", {:reply, r.text, r})
         :exited -> exited(s, row, agent, fold)

@@ -36,6 +36,12 @@ defmodule CodingAgentFramework.MCPTest do
       send(test, {:told, id, written})
       {:ok, if(written == :written, do: :delivered, else: :queued)}
     end
+
+    # A `Mover` that begins every move at once.
+    def move(test, actor, agent, opts) do
+      send(test, {:move, actor, agent, opts})
+      {:ok, %{act: 3, to: opts[:to]}}
+    end
   end
 
   defmodule BrokenSocket do
@@ -114,6 +120,11 @@ defmodule CodingAgentFramework.MCPTest do
     server["headers"]["x-caf-token"]
   end
 
+  defp token(path) do
+    %{"mcpServers" => %{"caf" => server}} = path |> File.read!() |> JSON.decode!()
+    server["headers"]["x-caf-token"]
+  end
+
   defp post(mcp, token, method, params) do
     body = JSON.encode!(%{jsonrpc: "2.0", id: 1, method: method, params: params})
     conn = Plug.Test.conn(:post, "/mcp", body)
@@ -157,7 +168,7 @@ defmodule CodingAgentFramework.MCPTest do
              ~w(message run start_delegate run_delegate) ++
                ~w(service_start services service_logs service_send service_wait) ++
                ~w(service_restart service_stop service_hand agents look transcript) ++
-               ~w(interrupt answer resume stop reload)
+               ~w(interrupt answer resume stop move reload)
   end
 
   test "a call is the agent's whose token it carries, whatever its arguments say",
@@ -371,6 +382,40 @@ defmodule CodingAgentFramework.MCPTest do
     assert [%{state: "answered"}, %{state: "answered"}] = Enum.take(MCP.calls(mcp), -2)
   end
 
+  # A move is a fix's act: a parent's of its delegate, never an agent's of a main session or of
+  # itself; the mover claims and settles it.
+  test "move reaches the mover only by Grants' fix check", %{mcp: mcp, tokens: t} do
+    assert tool(mcp, t["app-main"], "move", %{agent: "app-fix"}) == %{"refused" => "no_mover"}
+
+    tree = [%{name: "app-main", parent: nil}, %{name: "app-fix", parent: "app-main"}]
+    stand_in = {StandIn, self()}
+
+    opts =
+      [dir: test_dir(), port: 4792, grants: Grants.new(fn -> tree end), acts: :unused] ++
+        Enum.map(~w(mailbox jobs delegates services tracker stream mover)a, &{&1, stand_in}) ++
+        [workstation: "ws", transcripts: nil, place: fn _ -> {:refused, :no_worktree} end] ++
+        [instance: "two", tool_timeout: 600_000, margin: 60_000]
+
+    moving = start_supervised!(Supervisor.child_spec({MCP, opts}, id: :moving))
+    [main, fix] = for a <- ~w(app-main app-fix), do: token(elem(MCP.issue(moving, a), 1))
+
+    assert tool(moving, main, "move", %{agent: "app-fix", to: "spare"}) ==
+             %{"ok" => %{"act" => 3, "to" => "spare"}}
+
+    assert_received {:move, "app-main", "app-fix", [to: "spare"]}
+
+    assert tool(moving, fix, "move", %{agent: "app-main"}) ==
+             %{"refused" => "main_fixed_by_operator_only"}
+
+    assert tool(moving, fix, "move", %{agent: "app-fix"}) == %{"refused" => "no_self_fix"}
+
+    assert tool(moving, main, "move", %{agent: "app-fix", to: 3}) == %{
+             "refused" => ["bad", "args"]
+           }
+
+    refute_received {:move, _, _, _}
+  end
+
   test "reload tells the client its tools changed, then answers", %{mcp: mcp, tokens: t} do
     conn = post(mcp, t["app-main"], "tools/call", %{name: "reload"})
     assert ["text/event-stream" <> _] = Plug.Conn.get_resp_header(conn, "content-type")
@@ -389,7 +434,7 @@ defmodule CodingAgentFramework.MCPTest do
                  ~w(message run start_delegate run_delegate) ++
                    ~w(service_start services service_logs service_send service_wait) ++
                    ~w(service_restart service_stop service_hand agents look transcript) ++
-                   ~w(interrupt answer resume stop reload)
+                   ~w(interrupt answer resume stop move reload)
              }
            }
 

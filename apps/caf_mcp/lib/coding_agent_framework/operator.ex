@@ -53,6 +53,17 @@ defmodule CodingAgentFramework.Operator do
   @spec stop(GenServer.server(), String.t()) :: answer
   def stop(mcp, agent), do: fix(mcp, "stop", agent)
 
+  @doc """
+  Moves `agent`, a main session or a delegate, to account `to`, or with `nil` to the one with
+  the most allowance left: drained, ended once idle, its transcript copied, resumed there under
+  the same name and session (`CodingAgentFramework.Mover`). Answers once the drain began.
+  """
+  @spec move(GenServer.server(), String.t(), String.t() | nil) :: answer
+  def move(mcp, agent, to \\ nil) do
+    args = if to, do: %{"agent" => agent, "to" => to}, else: %{"agent" => agent}
+    MCP.operate(mcp, "move", args)
+  end
+
   @doc "Sends text or keys to service `name`'s terminal (`\\n` is Enter); never resent."
   @spec service_send(GenServer.server(), String.t(), String.t()) :: answer
   def service_send(mcp, name, input),
