@@ -106,6 +106,57 @@ defmodule CodingAgentFramework.Holder.ProcessTest do
     assert {:ok, :gone} = await(fn -> if alive?(sleeper), do: :alive, else: {:ok, :gone} end)
   end
 
+  test "a group whose members are all zombies not yet reaped is gone to a group signal",
+       %{p: p} = ctx do
+    zombie = zombie_leader!(ctx)
+    record = %{pid: zombie, start: own_start(zombie)}
+    # macOS answers EPERM for this group; another system may answer ESRCH. Either is gone.
+    assert {:ok, :gone} = Holder.Process.signal(p, record, "TERM", group: true)
+    assert {:ok, :gone} = Holder.Process.signal(p, record, "KILL", group: true)
+  end
+
+  test "a group signal that fails while a member lives stays unknown", ctx do
+    kill = Path.join(ctx.dir, "kill-eperm")
+    File.write!(kill, "#!/bin/sh\necho \"kill: ($3) - Operation not permitted\" >&2\nexit 1\n")
+    File.chmod!(kill, 0o755)
+    {:ok, holder} = Holder.new(programs(host(), %{kill: kill}), ctx.dir)
+    {:ok, p} = Holder.Process.new(programs(host(), %{kill: kill}), holder)
+
+    pid = hold!(ctx, "alive", echo_tail!(ctx.dir))
+    {:ok, %{"alive" => %{record: record}}} = Holder.Process.read(p, ["alive"])
+
+    assert {:unknown, {:signal, {:ok, %{status: 1, output: out}}}} =
+             Holder.Process.signal(p, record, "TERM", group: true)
+
+    assert out =~ "Operation not permitted"
+    assert alive?(pid)
+
+    # The same failure of a lone pid is never read from its group.
+    assert {:unknown, {:signal, _}} = Holder.Process.signal(p, record, "TERM")
+
+    zombie = zombie_leader!(ctx)
+    zombie_record = %{pid: zombie, start: own_start(zombie)}
+    assert {:ok, :gone} = Holder.Process.signal(p, zombie_record, "TERM", group: true)
+  end
+
+  # Holds a program that starts a child in its own group, and then never reaps it: once the
+  # child exits it is a zombie that leads a group of zombies. Answers the child's pid.
+  defp zombie_leader!(ctx) do
+    file = Path.join(ctx.dir, "zombie")
+    sleep = program!(:sleep)
+    script = ~s(set -m; #{sleep} 0.2 & echo $! > "#{file}"; exec #{sleep} 30)
+    hold!(ctx, "parent", script)
+    {:ok, text} = read_when(file, "1")
+    zombie = text |> String.trim() |> String.to_integer()
+    assert {:ok, :zombie} = await(fn -> zombie_state(zombie) end)
+    zombie
+  end
+
+  defp zombie_state(pid) do
+    {out, _} = System.cmd(program!(:ps), ["-o", "stat=", "-p", "#{pid}"])
+    if String.starts_with?(String.trim(out), "Z"), do: {:ok, :zombie}, else: {:waiting, out}
+  end
+
   # Holds `sh -c script` as `name` and answers the pid its record names.
   defp hold!(%{p: p, dir: dir}, name, script) do
     assert {:ok, _} =

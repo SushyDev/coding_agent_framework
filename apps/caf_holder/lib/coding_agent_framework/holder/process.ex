@@ -108,11 +108,21 @@ defmodule CodingAgentFramework.Holder.Process do
   case $out in *"Connection refused"*|*"No such file"*) echo gone ;; *) echo "unknown $out" ;; esac
   """
   # $1 ps, $2 kill, $3 the pid, $4 its start time, $5 the signal, $6 the target (the pid, or
-  # the group as -pid). The check and the signal in one process.
+  # the group as -pid). The check and the signal in one process. When a group's signal fails,
+  # its members are listed: macOS answers EPERM, not ESRCH, for a group whose members are all
+  # zombies not yet reaped, and such a group never runs again, so it is gone. A failure while any
+  # member is not a zombie, or a list that failed, is printed as it came.
   @signal ~S"""
   t=$(LC_ALL=C TZ=UTC "$1" -o lstart= -p "$3") || { echo gone; exit 0; }
   [ "$(echo $t)" = "$4" ] || { echo gone; exit 0; }
-  "$2" -"$5" -- "$6" && echo sent
+  out=$("$2" -"$5" -- "$6" 2>&1) && { echo sent; exit 0; }
+  case $6 in -*) ;; *) printf '%s\n' "$out"; exit 1 ;; esac
+  m=$(LC_ALL=C "$1" -A -o pgid=,stat= 2>&1) || { printf '%s\n' "$out"; exit 1; }
+  live=$(printf '%s\n' "$m" | while read -r g s; do
+    if [ "$g" = "$3" ]; then case $s in Z*) ;; *) echo live; break ;; esac; fi
+  done)
+  [ -z "$live" ] && { echo gone; exit 0; }
+  printf '%s\n' "$out"; exit 1
   """
   # The wait between reads while an end waits for the program to be dead.
   @round 100
@@ -272,7 +282,10 @@ defmodule CodingAgentFramework.Holder.Process do
   Sends `signal` (`"TERM"` or `"KILL"`) to the process with `record`'s pid and start time, or,
   with `group: true`, to the group it leads (a held program leads its own: dtach's child starts
   a session). Answers `{:ok, :sent}`, `{:ok, :gone}` when no process has that pid and start time
-  (nothing was sent), or `{:unknown, reason}`.
+  (nothing was sent), or `{:unknown, reason}`. A group's signal that fails while every member of
+  the group is a zombie not yet reaped, or none is left, is `{:ok, :gone}` too: macOS answers
+  EPERM for such a group, and nothing in it can run again. It stays `{:unknown, reason}` while
+  any member is not a zombie.
   """
   @spec signal(t, held, String.t(), keyword) :: {:ok, :sent | :gone} | {:unknown, term}
   def signal(%__MODULE__{holder: h} = p, %{pid: pid, start: start}, signal, opts \\ [])
