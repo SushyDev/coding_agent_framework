@@ -178,7 +178,16 @@ defmodule CodingAgentFramework.Usage do
     end
   end
 
-  defp last_good(nil), do: %{used: nil, resets_at: nil, seen_at: nil, problem: nil}
+  defp last_good(nil),
+    do: %{
+      used: nil,
+      resets_at: nil,
+      five_used: nil,
+      five_resets_at: nil,
+      seen_at: nil,
+      problem: nil
+    }
+
   defp last_good(row), do: row
 
   defp by_account(rows), do: Map.new(rows, &{&1.account, Map.take(&1, Table.data_columns())})

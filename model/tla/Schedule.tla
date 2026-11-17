@@ -13,21 +13,25 @@
 (* is in memory, so a requester waiting through a restart asks again with  *)
 (* the same id, and is handed the lease it already has, never a second.    *)
 (*                                                                         *)
-(* Models the Scheduler (planned, after R12): its `leases` table          *)
+(* Models CodingAgentFramework.Scheduler (F-135): its `leases` table      *)
 (* (durable: `leases`, whose length is the last id given out); its queue  *)
 (* per class, the rotation across modules in each class, each queued       *)
 (* request's deadline as a tick-down timer, the answer it owes each        *)
-(* requester, and the monitors on the holders' processes (all in memory,   *)
-(* gone at a restart); and Holder.Process's liveness of a lease's holder   *)
-(* by its record (pid and start time), which outlives the scheduler.       *)
+(* requester, and the monitors on the holders (all in memory, gone at a    *)
+(* restart); and the row of the work each lease admits (an agent row, a    *)
+(* job row), which its owner keeps and settles by Holder.Process's record  *)
+(* and which outlives the scheduler (Scheduler.Holders, and the owners'    *)
+(* readings in Delegates.Work and Jobs.Work).                              *)
 (*                                                                         *)
 (* The classes, in order: 1 a person's main session, 2 a landing's gates,  *)
 (* 3 a builder, 4 a heavy run. No class takes back another's lease. A      *)
 (* class is served only when no waiting request of a higher class can be   *)
-(* granted; inside a class the modules that ask take turns, and one        *)
-(* module's requests go in the order they came. Aging is left abstract:    *)
-(* it reorders only inside a class, which `ClassOrder` checks, and a       *)
-(* request that waits too long is refused at its deadline.                 *)
+(* granted, and a grant takes no unit a waiting request of a higher class  *)
+(* needs: a waiting landing holds the next free unit of each resource it   *)
+(* needs. Inside a class the modules that ask take turns, and one module's *)
+(* requests go in the order they came. Aging is left abstract: it          *)
+(* reorders only inside a class, which `ClassOrder` checks, and a request  *)
+(* that waits too long is refused at its deadline.                         *)
 (*                                                                         *)
 (* Pressure and each account's budget are the environment: they change at  *)
 (* any step, so the spec holds for every history of them, and the          *)
@@ -37,14 +41,16 @@
 (* queued request whose budget is spent is refused then. A refusal is      *)
 (* final for its id and holds nothing. Pressure that bars a request's     *)
 (* class refuses it at once as well; a queued one it bars waits for its    *)
-(* deadline. `high`'s bar on heavy runs has no property of its own: it is  *)
-(* the same guard as `severe`'s, which `NoStartUnderSevere` checks.        *)
+(* deadline. `high`'s bar on heavy runs is checked by `NoHeavyUnderHigh`. *)
 (*                                                                         *)
-(* A lease names its holder's process, here the requester's, alive from   *)
-(* before it asks and ending at any step after. The lease lasts as long as *)
-(* that process: the monitor releases it at the process's end, and after a *)
-(* restart the reclaimer reads each unreleased row, releases it if the     *)
-(* process ended and monitors it again if not.                             *)
+(* A lease names the row of the work it admits, which the requester's      *)
+(* owner writes `starting` before it asks. The owner starts the work only  *)
+(* once its requester was told `granted` (the row is then `live`), or      *)
+(* settles a start that never ran as `ended`; live work ends at any step.  *)
+(* The lease lasts as long as that row's work: the monitor releases it     *)
+(* when the owner settles the row ended, and after a restart the reclaimer *)
+(* asks the owner about each unreleased row, releases it if the work ended *)
+(* and monitors it again if not. A row still starting counts as live.      *)
 (*                                                                         *)
 (* Neither Claim nor Hold is instanced. A lease is not a claim: a claim is *)
 (* one per state of a target, acted on once while current, while a lease  *)
@@ -55,15 +61,14 @@
 (* and after a restart is asked again under its id rather than settled.    *)
 (*                                                                         *)
 (* Left abstract: the reason a refusal names and its retry time (one       *)
-(* "refused"); the landing's hold on the next free slot and any backfill   *)
-(* (a lower class may take what a higher waiting request cannot use);     *)
-(* how the scheduler reads pressure and budgets; the holder's record,      *)
-(* which here exists when the request is made.                             *)
+(* "refused"); backfill (a lower class taking a held unit it would give    *)
+(* back in time); how the scheduler reads pressure and budgets; how the    *)
+(* owner reads its row's process (Holder.Process).                         *)
 (*                                                                         *)
 (* Fairness: the scheduler's steps (Insert, Tell, Expire, Tick, Release,   *)
 (* Reclaim) and a waiting requester's asking again after a restart. First  *)
-(* requests, a process's end, pressure and budgets get none. A restart is  *)
-(* never fair, and MaxCrashes bounds it.                                   *)
+(* requests, the owner's settling of its row, pressure and budgets get     *)
+(* none. A restart is never fair, and MaxCrashes bounds it.                *)
 (*                                                                         *)
 (* Break: "none" is the design. Every other value removes one guard and    *)
 (* has a Break_Schedule_<value>.cfg that TLC must fail.                    *)
@@ -71,7 +76,7 @@
 EXTENDS Integers, Sequences, FiniteSets
 
 CONSTANTS
-    Shape,            \* the table of requests: "Safety", "Mains" or "Liveness"
+    Shape,            \* the table of requests: "Safety", "Mains", "Liveness" or "Hold"
     QueueBound,       \* the most requests one class's queue holds
     MaxWait,          \* a queued request's deadline, in ticks
     MaxCrashes,       \* the most restarts of the scheduler in one behavior
@@ -87,15 +92,18 @@ Breaks == {
     "ReclaimByTime",      \* after a restart a row is released whether or not its process ended
     "Piecemeal",          \* a landing takes the resources that are free now, the rest later
     "NoDeadline",         \* a queued request is never refused at its deadline
-    "NoClassOrder",       \* a grant does not look at higher classes
+    "NoClassOrder",       \* a grant does not look at whether a higher class could be granted
+    "NoHold",             \* a grant takes the units a waiting request of a higher class needs
     "NoSevereGate",       \* a grant does not look at severe pressure
+    "NoHighGate",         \* a grant does not look at high pressure
+    "StartingIsEnded",    \* after a restart a row still starting counts as ended
     "NoBudgetGate",       \* a grant does not look at the account's budget
     "NoReask",            \* a requester waiting through a restart does not ask again
     "NoReclaim"           \* after a restart no row is read again
 }
 
 ASSUME Break \in Breaks
-ASSUME Shape \in {"Safety", "Mains", "Liveness"}
+ASSUME Shape \in {"Safety", "Mains", "Liveness", "Hold"}
 ASSUME QueueBound \in Nat \ {0} /\ MaxWait \in Nat \ {0} /\ MaxCrashes \in Nat
 
 Main == 1
@@ -120,8 +128,14 @@ Table ==
       [] Shape = "Liveness" ->
            << [class |-> Landing, module |-> 1, account |-> "a1", units |-> Need(0, 1, 1)],
               [class |-> Heavy,   module |-> 2, account |-> "a1", units |-> Need(0, 1, 0)] >>
+      [] Shape = "Hold" ->
+           << [class |-> Landing, module |-> 1, account |-> "a1", units |-> Need(0, 1, 1)],
+              [class |-> Landing, module |-> 1, account |-> "a1", units |-> Need(0, 1, 1)],
+              [class |-> Heavy,   module |-> 2, account |-> "a1", units |-> Need(0, 1, 0)] >>
 
-Capacity == [seat |-> 1, slot |-> 1, lock |-> 1]
+\* "Hold" has two slots: a landing holds the lock and a slot, a second landing
+\* waits for the lock, and a heavy run must not take the slot it needs.
+Capacity == [seat |-> 1, slot |-> IF Shape = "Hold" THEN 2 ELSE 1, lock |-> 1]
 
 Reqs == 1..Len(Table)
 Accounts == {Table[r].account : r \in Reqs}
@@ -137,12 +151,12 @@ VARIABLES
     pending,    \* in memory: r -> the answer owed to its requester: "none", "queued", "granted", "refused"
     monitored,  \* in memory: the lease ids whose holder this run monitors
     ans,        \* the requester's: r -> the last answer it read ("asking" before any)
-    proc,       \* the holder's process: r -> "live" or "ended"
+    work,       \* the owner's row of the work r admits: "starting", "live" or "ended"
     pressure,   \* environment: "ok", "high" or "severe"
     budgetOk,   \* environment: account -> its budget has room
     crashes     \* the restarts so far
 
-vars == <<leases, queue, rot, wait, pending, monitored, ans, proc, pressure, budgetOk, crashes>>
+vars == <<leases, queue, rot, wait, pending, monitored, ans, work, pressure, budgetOk, crashes>>
 
 -----------------------------------------------------------------------------
 (* Reading the state *)
@@ -164,8 +178,20 @@ InQueue(r) == \E k \in 1..Len(queue[Table[r].class]) : queue[Table[r].class][k] 
 Queued == {r \in Reqs : InQueue(r)}
 Remove(s, r) == SelectSeq(s, LAMBDA q : q # r)
 
+\* The units of x the waiting requests of a class higher than c need: the next
+\* free units, which they hold.
+HigherNeed(x, c) ==
+    LET f[k \in 0..Len(Table)] ==
+          IF k = 0 THEN 0
+          ELSE f[k - 1] + (IF InQueue(k) /\ Table[k].class < c THEN Table[k].units[x] ELSE 0)
+    IN f[Len(Table)]
+
+\* r's units fit beside the held ones and those its higher classes hold.
+Leaves(r, held(_)) ==
+    \A x \in Resources : held(x) + Table[r].units[x] + HigherNeed(x, Table[r].class) <= Capacity[x]
+
 \* The design's own reading of whether r may be granted now.
-Fits(r) == \A x \in Resources : Held(x) + Table[r].units[x] <= Capacity[x]
+Fits(r) == Leaves(r, Held)
 SevereBars(r) == pressure = "severe" /\ Table[r].class # Main
 HighBars(r) == pressure = "high" /\ Table[r].class = Heavy
 Admitted(r) == ~SevereBars(r) /\ ~HighBars(r) /\ budgetOk[Table[r].account]
@@ -174,8 +200,9 @@ CanGrant(r) == Fits(r) /\ Admitted(r)
 \* The grant's reading, with a guard removed under a Break.
 GrantFits(r) ==
     CASE Break = "NoCapacityCheck" -> TRUE
-      [] Break = "CountInMemory" ->
-           \A x \in Resources : HeldIn(x, monitored) + Table[r].units[x] <= Capacity[x]
+      [] Break = "CountInMemory" -> Leaves(r, LAMBDA x : HeldIn(x, monitored))
+      [] Break = "NoHold" ->
+           \A x \in Resources : Held(x) + Table[r].units[x] <= Capacity[x]
       [] Break = "Piecemeal" ->
            \E x \in Resources : Table[r].units[x] > 0 /\ Held(x) + Table[r].units[x] <= Capacity[x]
       [] OTHER -> Fits(r)
@@ -188,7 +215,7 @@ Taken(r) ==
     ELSE Table[r].units
 
 GrantAdmits(r) ==
-    /\ ~HighBars(r)
+    /\ ~HighBars(r) \/ Break = "NoHighGate"
     /\ ~SevereBars(r) \/ Break = "NoSevereGate"
     /\ budgetOk[Table[r].account] \/ Break = "NoBudgetGate"
 
@@ -218,7 +245,7 @@ Init ==
     /\ pending = [r \in Reqs |-> "none"]
     /\ monitored = {}
     /\ ans = [r \in Reqs |-> "idle"]
-    /\ proc = [r \in Reqs |-> "live"]
+    /\ work = [r \in Reqs |-> "starting"]
     /\ pressure = "ok"
     /\ budgetOk = [a \in Accounts |-> TRUE]
     /\ crashes = 0
@@ -240,21 +267,21 @@ Receive(r) ==
              /\ wait' = [wait EXCEPT ![r] = MaxWait]
              /\ pending' = [pending EXCEPT ![r] = "queued"]
 
-\* A requester asks for the first time.
+\* A requester asks for the first time, its owner's row written `starting`.
 Ask(r) ==
-    /\ ans[r] = "idle" /\ proc[r] = "live"
+    /\ ans[r] = "idle" /\ work[r] = "starting"
     /\ ans' = [ans EXCEPT ![r] = "asking"]
     /\ Receive(r)
-    /\ UNCHANGED <<leases, rot, monitored, proc, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, rot, monitored, work, pressure, budgetOk, crashes>>
 
 \* A requester still waiting after a restart asks again under the same id.
 \* Only a restart leaves a waiting requester that the scheduler does not hold.
 Reask(r) ==
     /\ Break # "NoReask"
-    /\ ans[r] \in {"asking", "queued"} /\ proc[r] = "live"
+    /\ ans[r] \in {"asking", "queued"} /\ work[r] = "starting"
     /\ ~InQueue(r) /\ pending[r] = "none"
     /\ Receive(r)
-    /\ UNCHANGED <<leases, rot, monitored, ans, proc, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, rot, monitored, ans, work, pressure, budgetOk, crashes>>
 
 \* The grant: one transaction that checks capacity and inserts the row,
 \* with all of a landing's resources. Its id is the next, and its holder is
@@ -272,14 +299,14 @@ Insert(r) ==
         /\ pending' = [pending EXCEPT ![r] = "granted"]
         /\ monitored' = monitored \cup {id}
         /\ rot' = [rot EXCEPT ![c] = (Table[r].module % NModules) + 1]
-        /\ UNCHANGED <<ans, proc, pressure, budgetOk, crashes>>
+        /\ UNCHANGED <<ans, work, pressure, budgetOk, crashes>>
 
 \* The answer owed reaches the requester: one message.
 Tell(r) ==
     /\ pending[r] # "none"
     /\ ans' = [ans EXCEPT ![r] = pending[r]]
     /\ pending' = [pending EXCEPT ![r] = "none"]
-    /\ UNCHANGED <<leases, queue, rot, wait, monitored, proc, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, wait, monitored, work, pressure, budgetOk, crashes>>
 
 \* Time passes for every queued request. It cannot pass a deadline: a timer
 \* at 1 is answered first (Expire). Under NoDeadline it can.
@@ -287,7 +314,7 @@ Tick ==
     /\ Queued # {}
     /\ \A q \in Queued : wait[q] > (IF Break = "NoDeadline" THEN 0 ELSE 1)
     /\ wait' = [q \in Reqs |-> IF q \in Queued THEN wait[q] - 1 ELSE wait[q]]
-    /\ UNCHANGED <<leases, queue, rot, pending, monitored, ans, proc, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, pending, monitored, ans, work, pressure, budgetOk, crashes>>
 
 \* A queued request is refused at its deadline, or once its budget is spent.
 Expire(r) ==
@@ -297,34 +324,37 @@ Expire(r) ==
     /\ queue' = [queue EXCEPT ![Table[r].class] = Remove(@, r)]
     /\ wait' = [wait EXCEPT ![r] = 0]
     /\ pending' = [pending EXCEPT ![r] = "refused"]
-    /\ UNCHANGED <<leases, rot, monitored, ans, proc, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, rot, monitored, ans, work, pressure, budgetOk, crashes>>
 
 \* The compare-and-set on the lease id: it writes only an unreleased row.
 \* Under NoCompareAndSet it writes any.
 Unreleased(i) == ~Released(i) \/ Break = "NoCompareAndSet"
 ReleaseRow(i) == leases' = [leases EXCEPT ![i].n = @ + 1]
 
-\* The monitor sees the holder's process end, and releases its lease.
+\* The monitor sees the owner settle the work's row ended, and releases its lease.
 Release(i) ==
     /\ i \in monitored /\ Unreleased(i)
-    /\ proc[leases[i].req] = "ended"
+    /\ work[leases[i].req] = "ended"
     /\ ReleaseRow(i)
     /\ monitored' = monitored \ {i}
-    /\ UNCHANGED <<queue, rot, wait, pending, ans, proc, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<queue, rot, wait, pending, ans, work, pressure, budgetOk, crashes>>
 
-\* After a restart, the reclaimer reads a row no monitor watches: released if
-\* its process ended (by its pid and start time), else monitored again.
-\* Under ReclaimByTime it is released whatever its process.
+\* After a restart, the reclaimer asks the owner about a row no monitor
+\* watches: released if its work ended, else monitored again; a row still
+\* starting is live. Under ReclaimByTime it is released whatever its work;
+\* under StartingIsEnded a starting row counts as ended.
 Reclaim(i) ==
+    LET w == work[leases[i].req]
+    IN
     /\ Break # "NoReclaim"
     /\ i \in Ids /\ i \notin monitored /\ Unreleased(i)
-    /\ IF proc[leases[i].req] = "ended" \/ Break = "ReclaimByTime"
+    /\ IF w = "ended" \/ Break = "ReclaimByTime" \/ (w = "starting" /\ Break = "StartingIsEnded")
        THEN ReleaseRow(i) /\ UNCHANGED monitored
        ELSE monitored' = monitored \cup {i} /\ UNCHANGED leases
-    /\ UNCHANGED <<queue, rot, wait, pending, ans, proc, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<queue, rot, wait, pending, ans, work, pressure, budgetOk, crashes>>
 
 \* A restart: the queue, the timers, the answers owed and the monitors go;
-\* the rows, the requesters and the holders' processes stay.
+\* the leases, the requesters and the owners' rows stay.
 Crash ==
     /\ crashes < MaxCrashes
     /\ crashes' = crashes + 1
@@ -333,28 +363,36 @@ Crash ==
     /\ wait' = [r \in Reqs |-> 0]
     /\ pending' = [r \in Reqs |-> "none"]
     /\ monitored' = {}
-    /\ UNCHANGED <<leases, ans, proc, pressure, budgetOk>>
+    /\ UNCHANGED <<leases, ans, work, pressure, budgetOk>>
 
 -----------------------------------------------------------------------------
 (* The environment *)
 
-\* A holder's process ends, at any step after it asked.
-ProcessEnds(r) ==
-    /\ proc[r] = "live" /\ ans[r] # "idle"
-    /\ proc' = [proc EXCEPT ![r] = "ended"]
+\* The owner starts the work once its requester was told granted.
+WorkStarts(r) ==
+    /\ work[r] = "starting" /\ ans[r] = "granted"
+    /\ work' = [work EXCEPT ![r] = "live"]
+    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, pressure, budgetOk, crashes>>
+
+\* The owner settles its row ended: live work's process ended, or a start that
+\* never ran (refused, failed, or cut), at any step after it asked.
+WorkEnds(r) ==
+    /\ work[r] # "ended" /\ ans[r] # "idle"
+    /\ work' = [work EXCEPT ![r] = "ended"]
     /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, pressure, budgetOk, crashes>>
 
 Pressure(p) ==
     /\ p # pressure
     /\ pressure' = p
-    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, proc, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, budgetOk, crashes>>
 
 Budget(a) ==
     /\ budgetOk' = [budgetOk EXCEPT ![a] = ~@]
-    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, proc, pressure, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, pressure, crashes>>
 
 Next ==
-    \/ \E r \in Reqs : Ask(r) \/ Reask(r) \/ Insert(r) \/ Tell(r) \/ Expire(r) \/ ProcessEnds(r)
+    \/ \E r \in Reqs : Ask(r) \/ Reask(r) \/ Insert(r) \/ Tell(r) \/ Expire(r)
+          \/ WorkStarts(r) \/ WorkEnds(r)
     \/ Tick
     \/ \E i \in Ids : Release(i) \/ Reclaim(i)
     \/ Crash
@@ -383,7 +421,7 @@ TypeOK ==
     /\ pending \in [Reqs -> {"none", "queued", "granted", "refused"}]
     /\ monitored \subseteq Ids
     /\ ans \in [Reqs -> Answers]
-    /\ proc \in [Reqs -> {"live", "ended"}]
+    /\ work \in [Reqs -> {"starting", "live", "ended"}]
     /\ pressure \in {"ok", "high", "severe"}
     /\ budgetOk \in [Accounts -> BOOLEAN]
     /\ crashes \in 0..MaxCrashes
@@ -394,10 +432,10 @@ CapacityHolds == \A x \in Resources : Held(x) <= Capacity[x]
 \* Each request id has at most one lease, across restarts.
 NoDoubleGrant == \A i, j \in Ids : leases[i].req = leases[j].req => i = j
 
-\* Each lease is released at most once, and only after its process ended.
+\* Each lease is released at most once, and only after its work ended.
 ReleaseOnce ==
     \A i \in Ids : /\ leases[i].n <= 1
-                   /\ Released(i) => proc[leases[i].req] = "ended"
+                   /\ Released(i) => work[leases[i].req] = "ended"
 
 \* A lease holds all of its request's resources, or (released) none.
 GangAtomic == \A i \in Ids : ~Released(i) => leases[i].units = Table[leases[i].req].units
@@ -414,10 +452,17 @@ NewLease == Len(leases') > Len(leases)
 NewReq == leases'[Len(leases')].req
 
 \* A grant goes to a class only when no waiting request of a higher class
-\* could be granted.
+\* could be granted, and takes no unit a waiting request of a higher class
+\* needs: what the grant leaves free covers every such request's needs.
 ClassOrder ==
     [][NewLease =>
-         ~\E q \in Queued : Table[q].class < Table[NewReq].class /\ CanGrant(q)]_vars
+         /\ ~\E q \in Queued : Table[q].class < Table[NewReq].class /\ CanGrant(q)
+         /\ \A x \in Resources :
+              Held(x) + Table[NewReq].units[x] + HigherNeed(x, Table[NewReq].class)
+                <= Capacity[x]]_vars
+
+\* No new heavy run under high pressure.
+NoHeavyUnderHigh == [][NewLease => pressure # "high" \/ Table[NewReq].class # Heavy]_vars
 
 \* No new lease under severe pressure but a person's main session's.
 NoStartUnderSevere ==
@@ -427,14 +472,14 @@ NoStartUnderSevere ==
 NoStartWithoutBudget == [][NewLease => budgetOk[Table[NewReq].account]]_vars
 
 \* Every waiting requester is answered, granted or refused, unless its
-\* process ends first.
+\* owner settles its row ended first.
 QueuedIsAnswered ==
     \A r \in Reqs : ans[r] \in {"asking", "queued"}
-                      ~> (ans[r] \in {"granted", "refused"} \/ proc[r] = "ended")
+                      ~> (ans[r] \in {"granted", "refused"} \/ work[r] = "ended")
 
-\* Every lease whose process ended is released, by the monitor or the reclaimer.
+\* Every lease whose work ended is released, by the monitor or the reclaimer.
 EndedIsReleased ==
-    \A r \in Reqs : (\E i \in Ids : leases[i].req = r /\ ~Released(i) /\ proc[r] = "ended")
+    \A r \in Reqs : (\E i \in Ids : leases[i].req = r /\ ~Released(i) /\ work[r] = "ended")
                       ~> (\A i \in Ids : leases[i].req = r => Released(i))
 
 =============================================================================

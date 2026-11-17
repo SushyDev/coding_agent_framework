@@ -10,9 +10,9 @@ defmodule CodingAgentFramework.DelegatesTest do
   import CodingAgentFramework.TestHost
 
   alias CodingAgentFramework.{Accounts, Delegates, Grants, HeadlessStandIn, Holder, Mailbox}
-  alias CodingAgentFramework.{Sessions, SessionsSetup, Stream, Transcripts, Usage}
+  alias CodingAgentFramework.{Scheduler, Sessions, SessionsSetup, Stream, Transcripts, Usage}
   alias CodingAgentFramework.ClaudeCLI.Options
-  alias CodingAgentFramework.Delegates.Table
+  alias CodingAgentFramework.Delegates.{Table, Work}
   alias CodingAgentFramework.Sessions.Agents
 
   setup {SessionsSetup, :sessions}
@@ -135,6 +135,93 @@ defmodule CodingAgentFramework.DelegatesTest do
   end
 
   # Move.tla's NoStartWhileDraining: a move's drain starts no delegate under its session.
+  describe "a lease (Schedule.tla)" do
+    test "a start asks first; a refusal holds nothing, starts nothing and is no failed run",
+         ctx do
+      %{scheduler: scheduler} = with_scheduler(ctx, allowance: fn _ -> {:spent, 123} end)
+      assert {:refused, {:lease, {:allowance, 123}}} = start(ctx, "app", "unit/one")
+
+      assert [%{id: id, status: "refused", reason: reason}] = Table.rows(ctx.dtable, "test")
+      assert reason == ~s(["lease",["allowance",123]])
+      assert session_row(ctx, "app-unit-one") == nil
+      assert Enum.filter(rows(ctx), &(&1.kind == "brief")) == []
+
+      assert [%{outcome: "refused", holder: {"delegate", key}}] = Scheduler.leases(scheduler)
+      assert key == "test:#{id}"
+    end
+
+    test "queued: its row is live while it waits; the Scheduler's end refuses it", ctx do
+      %{scheduler: scheduler, work: work} = with_scheduler(ctx, resources: %{"seat" => 0})
+      delegates = current(ctx)
+
+      task =
+        Task.async(fn ->
+          Delegates.start_delegate(delegates, "main", "app", "unit/one", "opus", "Go.")
+        end)
+
+      {:ok, %{id: id}} =
+        await(fn -> ok(List.first(Table.with_status(ctx.dtable, "test", ["starting"]))) end)
+
+      assert Work.state(work, "test:#{id}") == :live
+      GenServer.stop(scheduler)
+      assert {:refused, {:lease, :scheduler_ended}} = Task.await(task)
+      assert %{status: "refused"} = Table.get(ctx.dtable, id)
+      assert Work.state(work, "test:#{id}") == :ended
+    end
+
+    test "queued, then refused at its deadline", ctx do
+      with_scheduler(ctx, resources: %{"seat" => 0}, max_wait: 50)
+      assert {:refused, {:lease, {:deadline, _}}} = start(ctx, "app", "unit/one")
+      assert session_row(ctx, "app-unit-one") == nil
+    end
+
+    test "granted: the start runs under a lease that names its row", ctx do
+      %{scheduler: scheduler, work: work} = with_scheduler(ctx, [])
+      assert {:ok, %{id: id}} = start(ctx, "app", "unit/one")
+
+      key = "test:#{id}"
+
+      assert [
+               %{
+                 outcome: "granted",
+                 class: "builder",
+                 module: "app",
+                 account: "work",
+                 holder: {"delegate", ^key},
+                 released_at: nil
+               }
+             ] =
+               Scheduler.leases(scheduler)
+
+      assert Work.state(work, key) == :live
+      assert Work.state(work, "other:#{id}") == {:unknown, {:not_mine, "other:#{id}"}}
+    end
+  end
+
+  # A Scheduler over a seat, and a Delegates that asks it, in place of the setup's.
+  defp with_scheduler(ctx, more) do
+    {:ok, work} = Work.open(ctx.dopts[:db], ctx.dopts[:db], "test")
+
+    sopts =
+      Keyword.merge(
+        [
+          db: Path.join(ctx.dir, "leases.db"),
+          host: "test",
+          resources: %{"seat" => 1},
+          holders: %{"delegate" => &Work.state(work, &1)}
+        ],
+        more
+      )
+
+    spec = Supervisor.child_spec({Scheduler, sopts}, id: make_ref(), restart: :temporary)
+    scheduler = start_supervised!(spec)
+    Process.exit(current(ctx), :kill)
+    opts = ctx.dopts |> Keyword.put(:mailbox, mailbox(ctx)) |> Keyword.put(:scheduler, scheduler)
+    child = Supervisor.child_spec({Delegates, opts}, id: make_ref(), restart: :temporary)
+    Process.put(:delegates, start_supervised!(child))
+    %{scheduler: scheduler, work: work}
+  end
+
   test "no delegate starts under a parent a move drains", ctx do
     id = Sessions.Table.declare(ctx.table, "test", "main", "app")
     :ok = Sessions.Table.update(ctx.table, id, move: "draining")

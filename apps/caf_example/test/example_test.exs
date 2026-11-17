@@ -10,7 +10,7 @@ defmodule CodingAgentFramework.ExampleTest do
 
   alias CodingAgentFramework.{Accounts, Cues, Example, HeadlessStandIn, Jobs, Mailbox, MCP}
   alias CodingAgentFramework.Services
-  alias CodingAgentFramework.{Delegates, Operator, Tmux}
+  alias CodingAgentFramework.{Delegates, Operator, Scheduler, Tmux, Tracker}
   alias CodingAgentFramework.Acts
   alias CodingAgentFramework.Example.Config
   alias CodingAgentFramework.Sessions.Table
@@ -65,7 +65,7 @@ defmodule CodingAgentFramework.ExampleTest do
   defp start(config) do
     parts = Example.parts(start_supervised!({Example, config}))
     keys = ~w(reaper cues inlet usage stream intake intake_http sampler sessions acts)a
-    keys = keys ++ ~w(recoveries tracker delegates mover mailbox copies jobs services)a
+    keys = keys ++ ~w(recoveries tracker scheduler delegates mover mailbox copies jobs services)a
     keys = keys ++ ~w(mcp mcp_http ends)a
 
     assert Enum.sort(Map.keys(parts)) ==
@@ -206,6 +206,27 @@ defmodule CodingAgentFramework.ExampleTest do
 
     assert %{state: "running"} = rows["kept"]
     {:ok, _} = Services.stop(parts.services, "app-main", "kept", [])
+
+    # Schedule.tla: the start's one lease, held through the resume, is released by the monitor
+    # once the delegate's work ended, and the Tracker shows it.
+    {:ok, lease} =
+      await(
+        fn ->
+          case Scheduler.leases(parts.scheduler) do
+            [%{released_by: "monitor"} = lease] -> {:ok, lease}
+            _ -> nil
+          end
+        end,
+        20_000
+      )
+
+    assert %{outcome: "granted", class: "builder", holder: {"delegate", "ws:" <> _}} = lease
+
+    {:ok, _} =
+      await(fn ->
+        {:ok, view} = Tracker.view(parts.tracker)
+        if match?(%{{"ws", "leases"} => %{leases: [_ | _]}}, view), do: {:ok, view}
+      end)
 
     # F-126's new-1: the start, `Delegates`' own resume and `Sessions`' resume are rows of
     # `Acts`, each settled by its answer; the resume claimed the state it resumed, once.
@@ -413,7 +434,7 @@ defmodule CodingAgentFramework.ExampleTest do
   # The parts the app wires and the topics each one cues on, as the parts write them.
   @topics ~w(registry:ws:work stream:ws tmux:ws:caf sessions:ws transcripts:ws:work
              delegates:ws mailbox intake:ws:work intake:ws:work:waiters acts:ws:t usage:ws:work
-             jobs services)
+             jobs services scheduler:ws)
 
   # What each part must be handed to settle (`docs/design.md`, "The parts"): beside the
   # `Tracker`, which reads every topic.
@@ -421,9 +442,10 @@ defmodule CodingAgentFramework.ExampleTest do
     "registry" => [:sessions, :mover],
     "stream" => [:sessions, :delegates, :mailbox, :mover],
     "tmux" => [:sessions, :recoveries],
-    "sessions" => [:delegates, :mailbox, :ends, :mover],
+    "sessions" => [:delegates, :mailbox, :ends, :mover, :scheduler],
     "transcripts" => [:delegates, :mailbox],
-    "delegates" => [:mailbox],
+    "delegates" => [:mailbox, :scheduler],
+    "usage" => [:scheduler],
     "mailbox" => [:delegates, :mover],
     "waiters" => [:mailbox]
   }

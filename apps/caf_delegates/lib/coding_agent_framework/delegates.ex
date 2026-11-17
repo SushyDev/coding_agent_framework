@@ -28,8 +28,12 @@ defmodule CodingAgentFramework.Delegates do
   move of a delegate is under way (`Sessions.Agents.moving?/1`), its end is the move's, not a
   kill, and its row waits for the move. It picks the account with the most allowance left
   (`Usage.pick/2`), and writes its row first, as `starting`, with the uuid its brief will go in
-  under. The brief is then stored in `Mailbox` under that uuid, before anything of the delegate
-  exists, so it is the first row to it. A task starts the session through `Sessions`, role
+  under. With a `scheduler:`, it then asks for a lease, class `:builder`, its module the
+  project, on that account, naming the row as the lease's holder (`Delegates.Work` answers
+  whether its work ended): granted, the start goes on; queued, it waits in this process for the
+  one more answer, the caller with it; refused, the row is `refused` with reason `{:lease,
+  {reason, retry_at}}`, which is never a failed run. The brief is then stored in `Mailbox` under
+  that uuid, before anything of the delegate exists, so it is the first row to it. A task starts the session through `Sessions`, role
   `:delegate`, with its parent, in the project's worktree, and its answer moves the row:
   `running` (`Mailbox` then delivers the brief into the session's first ended turn), or
   `refused`, and `Mailbox` ends the rows to it. A row a restart left `starting` is settled by
@@ -73,9 +77,10 @@ defmodule CodingAgentFramework.Delegates do
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, Acts, Mailbox, Sessions, Stream, Transcripts, Usage}
+  alias CodingAgentFramework.{Accounts, Acts, Mailbox, Scheduler, Sessions, Stream}
+  alias CodingAgentFramework.{Transcripts, Usage}
   alias CodingAgentFramework.ClaudeCLI.Options
-  alias CodingAgentFramework.Delegates.{Table, Turn}
+  alias CodingAgentFramework.Delegates.{Table, Turn, Work}
   alias CodingAgentFramework.Sessions.Agents
 
   # Sessions' own timeout for a start or a resume; its git bounds and slack come on top.
@@ -98,6 +103,8 @@ defmodule CodingAgentFramework.Delegates do
   instance's `Acts`), its own resume after a first kill is a row there, actor
   `delegates:<host>`, state the delegate's row and resumes, claimed before the row counts it
   and settled by `Sessions`' answer (`Acts.answered/4`); a claim not taken resumes nothing.
+  With `scheduler:` (the instance's `Scheduler`), each start asks it for a lease first, of the
+  units `lease:` names (default `%{"seat" => 1}`); a resume runs under the start's lease.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -200,8 +207,13 @@ defmodule CodingAgentFramework.Delegates do
           clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
           mcp: Keyword.get(opts, :mcp, fn _ -> {:ok, nil} end),
           acts: Keyword.get(opts, :acts),
+          scheduler: Keyword.get(opts, :scheduler),
+          lease: Keyword.get(opts, :lease, %{"seat" => 1}),
           pending: %{}
         })
+
+      # A start waiting for its lease when the Scheduler ends is refused: its queue is gone.
+      s = Map.put(s, :scheduler_ref, s.scheduler && Process.monitor(s.scheduler))
 
       {:ok, s, {:continue, :settle}}
     else
@@ -243,10 +255,19 @@ defmodule CodingAgentFramework.Delegates do
       id = Table.starting(s.db, row)
       announce(s, id)
       row = Table.get(s.db, id)
+      start = %{p: p, account: account, parent: parent, options: options, brief: brief}
 
-      case Mailbox.brief(s.mailbox, parent, row.name, brief, row.brief_uuid) do
-        {:ok, _} -> {:noreply, call_sessions(s, row, p, account, {parent, options}, from)}
-        not_stored -> reply(answered(s, row, {:refused, {:brief, not_stored}}))
+      # Schedule.tla: the row is the lease's holder, written before the lease is asked for.
+      case lease(s, row, project, account) do
+        {:ok, _lease} ->
+          begin(s, row, start, from)
+
+        {:queued, %{id: request}} ->
+          waiting = %{id: row.id, from: from, parent: parent, name: row.name, start: start}
+          {:noreply, put_in(s.pending[request], waiting)}
+
+        not_granted ->
+          reply(answered(s, row, {:refused, {:lease, lease_refusal(not_granted)}}))
       end
     else
       refused -> {:reply, refused, s}
@@ -304,6 +325,79 @@ defmodule CodingAgentFramework.Delegates do
   end
 
   def handle_info(:deadline, s), do: {:noreply, settle(s)}
+
+  # The one more answer to a queued lease: the start goes on, or is refused.
+  def handle_info({:lease, request, answer}, s) do
+    case Map.pop(s.pending, request) do
+      {%{start: start, from: from, id: id}, pending} ->
+        s = %{s | pending: pending}
+        row = Table.get(s.db, id)
+
+        case answer do
+          {:ok, _lease} ->
+            # The call of Sessions starts now: its agent row is told from an earlier one by it.
+            write(s, row, called_at: s.clock.(), deadline: deadline(s, start.p))
+            began(begin(s, Table.get(s.db, id), start, from), from)
+
+          {:refused, why} ->
+            began(reply(answered(s, row, {:refused, {:lease, why}})), from)
+        end
+
+      {nil, _} ->
+        {:noreply, s}
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, _, _}, %{scheduler_ref: ref} = s) do
+    waiting = for {request, %{start: _}} <- s.pending, do: request
+
+    s =
+      Enum.reduce(waiting, s, fn request, s ->
+        {:noreply, s} = handle_info({:lease, request, {:refused, :scheduler_ended}}, s)
+        s
+      end)
+
+    {:noreply, s}
+  end
+
+  # A start with its lease: the brief is stored, then Sessions is called.
+  defp begin(s, row, start, from) do
+    case Mailbox.brief(s.mailbox, start.parent, row.name, start.brief, row.brief_uuid) do
+      {:ok, _} ->
+        call = {start.parent, start.options}
+        {:noreply, call_sessions(s, row, start.p, start.account, call, from)}
+
+      not_stored ->
+        reply(answered(s, row, {:refused, {:brief, not_stored}}))
+    end
+  end
+
+  # What `begin/4` or a refusal answers, handed to a caller that waited for a queued lease.
+  defp began({:noreply, s}, _from), do: {:noreply, s}
+
+  defp began({:reply, reply, s}, from) do
+    GenServer.reply(from, reply)
+    {:noreply, s}
+  end
+
+  defp lease(%{scheduler: nil}, _row, _p, _account), do: {:ok, nil}
+
+  defp lease(s, row, project, account) do
+    key = Work.key(s.host, row.id)
+
+    Scheduler.request(s.scheduler, %{
+      # The row's start time too: a table made anew numbers its rows from 1 again.
+      id: "delegate:#{key}:#{row.created_at}",
+      class: :builder,
+      module: project,
+      account: account.name,
+      units: s.lease,
+      holder: {"delegate", key}
+    })
+  end
+
+  defp lease_refusal({:refused, why}), do: why
+  defp lease_refusal({:unknown, why}), do: {:unknown, why}
 
   # The parent's cap: its delegates the tree holds, and its starts under way here, whose agent
   # row may not be written yet. A start a restart cut before it reached `Sessions` never will.

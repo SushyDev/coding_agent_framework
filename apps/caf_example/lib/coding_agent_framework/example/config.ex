@@ -27,6 +27,13 @@ defmodule CodingAgentFramework.Example.Config do
     `tool_timeout` and `margin`, Claude Code's MCP tool timeout and what `run_delegate` keeps
     under it;
   - `interval`: ms between the reads of the readers that read on a timer.
+  - `resources`: each resource the `Scheduler` leases, name to capacity; by default
+    `%{"seat" => 4, "slot" => 2}`, an agent's seat and a heavy run's slot. Placeholders until
+    they are measured on the workstation;
+  - `lease`: the units a delegate's start asks for; `%{"seat" => 1}` by default;
+  - `pressure`: how the `Scheduler` reads the host's pressure (`Scheduler.Pressure`), as its
+    `pressure:` option; nil by default, which reads stall times where the host has them
+    (`/proc/pressure`) and nothing elsewhere;
   - `tool_hooks`: the app's tool callbacks, `%{pre_tool_use: fun, post_tool_use: fun}`, each
     optional, as `CodingAgentFramework.Intake` takes them; each one given adds its hook to
     every account's settings. None by default.
@@ -57,6 +64,9 @@ defmodule CodingAgentFramework.Example.Config do
     tool_timeout: 3_600_000,
     margin: 60_000,
     interval: 2_000,
+    resources: %{"seat" => 4, "slot" => 2},
+    lease: %{"seat" => 1},
+    pressure: nil,
     tool_hooks: %{}
   ]
 

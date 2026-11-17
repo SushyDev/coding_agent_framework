@@ -23,6 +23,7 @@ defmodule CafDelegates.MixProject do
       {:caf_stream, in_umbrella: true},
       {:caf_transcripts, in_umbrella: true},
       {:caf_usage, in_umbrella: true},
+      {:caf_scheduler, in_umbrella: true},
       {:caf_store, in_umbrella: true},
       {:caf_grants, in_umbrella: true, only: :test},
       {:caf_holder, in_umbrella: true, only: :test},
