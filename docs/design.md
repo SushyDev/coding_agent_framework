@@ -145,7 +145,9 @@ that only make sense together), under `apps/`. An app declares, directly, every 
 not compile, and the layers stay one way: base (`caf_shell`,
 `caf_tmux`, `caf_holder` with `Holder.Process`, `caf_store` with `Reader`, `caf_cues`), then
 readers and writers (`caf_registry`, `caf_transcripts`, `caf_usage`, `caf_accounts`, `caf_cli`,
-`caf_screen`, `caf_inlet`, `caf_stream`, `caf_intake`, `caf_sampler`, `caf_acts`), then
+`caf_screen`, `caf_inlet`, `caf_stream`, `caf_intake`, `caf_sampler`, `caf_acts`,
+`caf_scheduler`, which uses only `caf_store`: the owners' answers and the allowance are
+functions the embedding app hands it), then
 `caf_sessions`, then `caf_tracker` (its sources made from the tables' metadata: the readers',
 `Acts`', `Sessions`' and `Delegates`') and `caf_recoveries`, then the parts built later. The remodel adds `caf_store` (R1),
 `caf_acts` (R10, in place of `Grants.Claims` and `Recoveries`' table) and `caf_cues` (R11), and
@@ -174,7 +176,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Reader` | a pure module beside `Store`: the loop every reader runs (read on an interval or a call, diff against what it wrote, write with a reads row, cue), and a `Tracker` source made from the reader's table metadata | no table; each reader its own |
 | `Cues` | one per instance: each part declares the topics it reads, and `Cues` hands each cue to the `Tracker` and to every part that declared its topic; the order in which the system settles is the library's, not the app's | no table |
 | `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` | — |
-| `Usage` | each account's weekly allowance, from what Claude Code hands its status line; picks the account with the most left ("Allowance"); a `Reader` | its readings |
+| `Usage` | each account's allowance, its weekly and five-hour windows, from what Claude Code hands its status line; picks the account with the most left ("Allowance"); `Usage.Allowance` answers whether both windows have room, for the `Scheduler`; a `Reader` | its readings |
 | `Tmux` | sessions, panes, tags, keys and viewers on one server, and the one-command check of every write to a pane; a contract with a CLI (its fake is a test aid) | — |
 | `TmuxSampler` | samples each server's panes and each host's held sockets, reports a held agent with no viewer, and cues when a held socket goes away; a `Reader` | `tmux_samples` |
 | `Holder` | dtach: hold a process in a clean environment, open a viewer, list sockets and whether each lives | — |
@@ -192,7 +194,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Delegates` | the delegate protocol only: its checks, the cap, the account pick, resume once, report a second kill; it hands the report to `Mailbox` as the reply to the brief | `delegates`: branch, brief uuid, resumes, whether the report was taken |
 | `Mailbox` | every delivery: messages, replies, notices, reports, briefs, the words to go on and the app's word, stored, delivered once, in order per sender and addressee; one mark and settle, with the transport the target's kind chooses | `messages` |
 | `Acts` | one ledger of acts: an actor's act on a target's state, written before it acts, once per state, settled after, closed as interrupted when a restart cut it, with a cue. Fixes, the operator's acts, recoveries, kills, resumes, starts and raised errors are its rows, and the fault ledger is a query of it | `acts` |
-| `Scheduler` | one per instance, against `Schedule.tla`: every agent start, heavy run and landing asks it for a lease first ("A lease" below). A grant is one write transaction that checks each resource's capacity and inserts the row, with all of a landing's resources in one lease; a release is a compare-and-set on the lease id, so it happens once; after a restart a row is released only when its holder's process has ended by `Holder.Process`'s record, never because time passed. It reads pressure and each account's budget, never the load average | `leases`: id (the fencing token), request id, class, module, account, the units of each resource, the holder's record, granted and released times |
+| `Scheduler` | one per instance, against `Schedule.tla`: every agent start, heavy run and landing asks it for a lease first ("A lease" below). A grant is one write transaction that checks each resource's capacity and inserts the row, with all of a landing's resources in one lease; a release is a compare-and-set on the lease id, so it happens once; a lease names the row of the work it admits, and is released only when that row's owner says the work ended (by its `Holder.Process` record; a row still starting is live), never because time passed. It reads pressure and each account's budget, never the load average | `leases`: id (the fencing token), request id, outcome (granted or refused), class, module, account, the units of each resource, the holder (the work's row), asked, decided and released times, and a refusal's reason and retry time |
 | `Stacks` | the worktrees and `gh stack` chains of a main session's work | — |
 | `Copies` | a host's copy of each worktree, brought in step by rsync before each job or service, and removed with the worktree | `copies` |
 | `Jobs` | one-off commands on a host, in a copy: held, logged, ended by their exit or their timeout | `jobs` |
@@ -214,12 +216,13 @@ declarations to `Cues`, and names each part's process to it as it starts; no par
 | `registry:<host>:<account>` | `Registry` | `Sessions`, `Mover` (a move's stop is asked again only on this cue and the stream's) |
 | `stream:<host>` | `Stream` | `Sessions`, `Delegates`, `Mailbox`, `Mover` |
 | `tmux:<host>:<server>` | `TmuxSampler` | `Sessions`, `Recoveries` |
-| `sessions:<host>` | `Sessions` | `Delegates`, `Mailbox`, `Mover`, the app's end of an owner's services |
+| `sessions:<host>` | `Sessions` | `Delegates`, `Mailbox`, `Mover`, `Scheduler`, the app's end of an owner's services |
 | `transcripts:<host>:<account>` | `Transcripts` | `Delegates`, `Mailbox` (a waiter row's lines are read only on this cue, the waiters' and the take bound) |
-| `delegates:<host>` | `Delegates` | `Mailbox` |
+| `delegates:<host>` | `Delegates` | `Mailbox`, `Scheduler` (a delegate's work ended) |
 | `mailbox` | `Mailbox` | `Delegates`, `Mover` |
 | `intake:<host>:<account>:waiters` | `Intake` | `Mailbox` |
-| `intake:<host>:<account>`, `usage:…`, `acts:…`, `jobs`, `services` | their parts | none |
+| `usage:<host>:<account>` | `Usage` | `Scheduler` (a queued request's window ran out) |
+| `intake:<host>:<account>`, `acts:…`, `jobs`, `services`, `scheduler:<host>` | their parts | none |
 
 No cue says that a host's job or service changed, so `Jobs` and `Services` settle their rows on
 their own interval, as a reader reads, and `Stream` reads its logs on one; each of the three
@@ -286,23 +289,28 @@ any reply does (new-4).
   (`Acts.answered/4`): ok `verified`, refused `failed`, unknown `unknown`. A raised error is a
   part's process that crashes, as the app sees it, recorded settled `failed`; a part's
   `{:unknown, reason}` is not, since its caller holds it and an act's row settles `unknown`.
-- **A lease** (F-134, `Schedule.tla`). Nothing starts an agent, a heavy run or a landing
+- **A lease** (F-134, `Schedule.tla`; built in F-135). Nothing starts an agent, a heavy run or a landing
   without a lease from the `Scheduler`; it reads the host's own signals, so work it did not
   start still counts. A request names its request id, class, module, account and the units of
   each resource it needs (an agent's seat, a heavy slot, a lock); every lockable thing is a
-  resource with a capacity. The answer comes at once: `{:ok, lease}`; `{:queued, request_id}`,
-  after which exactly one more answer comes, the lease or a refusal, and no position updates
-  (each message to an idle session costs its whole context); or `{:refused, {reason,
-  retry_at}}`, `reason` one of `queue_full`, `deadline`, `pressure`, `allowance`. A refusal is
-  final for its request id, holds nothing, and is never a failed run. Requests are idempotent
+  resource with a capacity. A request also names its holder: the row of the work the lease
+  admits (an agent row, a job row), which its owner writes `starting` before it asks (F-134's
+  new-1). The answer comes at once: `{:ok, lease}`; `{:queued, %{id: request_id, position:
+  n}}`, its place when it was queued, after which exactly one more answer comes, the lease or a
+  refusal, as a message, and no position updates (each message to an idle session costs its
+  whole context); or `{:refused, {reason, retry_at}}`, `reason` one of `queue_full`,
+  `deadline`, `pressure`, `allowance`. A refusal is final for its request id, holds nothing,
+  is a row the `Tracker` shows, and is never a failed run. Requests are idempotent
   by request id: the lease is looked up before any refusal is decided, so a second request
   answers the lease already granted.
   - **Classes**, four and fixed, in this order: a person's main session, a landing's gates,
     builders, heavy runs. A class is served only when no waiting request of a higher class can
-    be granted, and no class takes back another's lease. Inside a class the modules that ask
-    take turns (an explicit rotation), and aging reorders only inside a class, saturating
-    below the next. A landing takes all its resources as one gang lease, in one step, never
-    one at a time.
+    be granted, a grant takes no unit a waiting request of a higher class needs (a waiting
+    landing holds the next free unit of each resource it needs, F-134's new-2), and no class
+    takes back another's lease. Inside a class the modules that ask take turns (an explicit
+    rotation), and aging reorders only inside a class: a request that waited past the age goes
+    first in its class, so it never passes the next. A landing takes all its resources as one
+    gang lease, in one step, never one at a time.
   - **Gates.** Pressure has three states, read from the host (pressure stall time where the
     host has it, a memory-pressure level where it does not): `ok`; `high`, which admits no new
     heavy run; `severe`, which admits nothing new but a person's main session, which is always
@@ -310,15 +318,23 @@ any reply does (new-4).
     weekly, from `Usage`'s readings; a request is admitted only while both have room. A spent
     budget is refused at once with `retry_at` the window's reset, never queued, and a queued
     request whose budget runs out is refused then; pressure that bars a class refuses its
-    request at once too. Gates stop new starts only: an admitted session is never shed.
-    Thresholds, reserves and the windows' figures are measured on the workstation, not modeled.
+    request at once too. An account with no reading, or a window its reading lacks, has room:
+    an account has no reading until a session on it draws its status line. `severe` is taken at
+    once; `high`, and a return to a lower state, only once asked for a whole window (F-135).
+    Gates stop new starts only: an admitted session is never shed. Thresholds, reserves and
+    the windows' figures are measured on the workstation, not modeled: each is an option with a
+    placeholder default.
   - **The queue** is bounded per class and in memory (decided): a restart loses it, and a
     requester told `queued` asks again under its request id, which answers its lease if the
     grant was written before the restart. A queued request is refused at its deadline.
-  - **The end.** The lease lasts as long as its holder's process. While the `Scheduler` runs it
-    monitors each holder and releases the lease when the process ends; after a restart it
-    reads every unreleased row, releases it if the process ended (pid gone, or its start time
-    differs) and monitors it again if not. Both release by `UPDATE … WHERE id = ? AND
+  - **The end.** The lease lasts as long as its work. The `Scheduler` asks the owner of the
+    work's row whether the work ended, which the owner answers by the row and its
+    `Holder.Process` record (`Delegates.Work` for a delegate's row: live while it may still
+    start, run or be resumed; ended once refused, or done and its agent row free); a row still
+    starting is live until its owner settles it. While it runs it monitors each lease it holds
+    and asks at each cue of the owner's rows; after a restart it asks about every unreleased
+    row, releases it if the work ended and monitors it again if not. Both release by
+    `UPDATE … WHERE id = ? AND
     released_at IS NULL`, so exactly one succeeds. A resource the lease guards (a heavy slot's
     script, a lock file) carries the lease id and refuses a holder whose id is not current.
   - **Accounts.** Holding several Claude accounts and moving work between them is allowed
@@ -1323,13 +1339,16 @@ against edits made during the job, the host side of a sync under the copy's lock
 wrapper's end of a job's group: no edit is lost, one sync writes the copy at a time, and nothing
 of a job writes in the copy once its end is read.
 
-`Schedule.tla` (F-134) models the `Scheduler` ("A lease"): durable lease rows, an in-memory
-queue, rotation, deadlines (tick-down timers) and owed answers, monitors lost at a restart,
-pressure and budgets as the environment, and bounded restarts that are never fair. Its grant
-(`Insert`) and the answer reaching the requester (`Tell`) are two steps, so a restart between
-them is checked. Invariants: `CapacityHolds`, `NoDoubleGrant` (across restarts), `ReleaseOnce`
-(and only after the process ended), `GangAtomic`, `AnsweredByDeadline`, `RefusedIsNotFailed`;
-action properties `ClassOrder`, `NoStartUnderSevere`, `NoStartWithoutBudget`; liveness
+`Schedule.tla` (F-134, F-135) models the `Scheduler` ("A lease"): durable lease rows, an
+in-memory queue, rotation, deadlines (tick-down timers) and owed answers, monitors lost at a
+restart, the owner's row of each lease's work (`starting`, `live`, `ended`, outliving a
+restart), pressure and budgets as the environment, and bounded restarts that are never fair.
+Its grant (`Insert`) and the answer reaching the requester (`Tell`) are two steps, so a
+restart between them is checked. Invariants: `CapacityHolds`, `NoDoubleGrant` (across
+restarts), `ReleaseOnce` (and only after the work ended), `GangAtomic`, `AnsweredByDeadline`,
+`RefusedIsNotFailed`; action properties `ClassOrder` (with the hold, checked by `Hold`'s
+configuration: two landings and a heavy run on two slots and one lock), `NoStartUnderSevere`,
+`NoHeavyUnderHigh`, `NoStartWithoutBudget`; liveness
 `QueuedIsAnswered` and `EndedIsReleased`. It instances neither `Claim` nor `Hold`: a lease is
 units counted against a capacity for a process's life, not one act per state, and a queued
 request has no row, may be answered twice (queued, then once more) and is asked again after a
@@ -1761,11 +1780,14 @@ new-2, F-113's new-2).
   actor, target and time (F-126's new-5, F-129's new-5).
 - **After R12: `Scheduler`**, against `Schedule.tla` (modeled in F-134): the `leases` table
   on `Store`, the grant transaction, the compare-and-set release, the monitor and the
-  reclaimer by `Holder.Process`'s record, the queue with its classes, rotation and deadlines,
-  the pressure and budget gates, and its telemetry (each grant's wait, refusals per class and
-  module), shipped together so the thresholds are set from the workstation's own readings.
-  `Usage` reads the five-hour window beside the weekly one. Every start, heavy run and
-  landing asks it first; item 14's admission is this unit.
+  reclaimer by the owner of the work's row, the queue with its classes, the hold, rotation,
+  aging and deadlines, the pressure and budget gates, and its telemetry (each grant's wait,
+  refusals per class and module), shipped together so the thresholds are set from the
+  workstation's own readings. `Usage` reads the five-hour window beside the weekly one. Every
+  start, heavy run and landing asks it first; item 14's admission is this unit. Built in
+  F-135 with `Delegates`' start; `Jobs`' start (a heavy run, its job row the holder) and a
+  landing's gang lease ask it next, then `Sessions`' start of a main session once `Mains`
+  starts one.
 
 About 3,100 lines change in all; the library ends about 1,300 lines smaller, and the model about
 the same size with each mechanism once. R6 and R7 are the riskiest: `Mailbox`'s `sending` as the

@@ -131,7 +131,7 @@ flowchart LR
   every account it holds, never by a pid or a socket, so a move to another account hides none.
 - **A lease before every start.** Every agent start, heavy run and landing asks the
   `Scheduler` first: granted, queued with one answer to follow, or refused with a reason and a
-  retry time, never a failed run. Leases are rows, released once, when their process ends.
+  retry time, never a failed run. Leases are rows, released once, when the work they admit ends.
 - **Tables are the truth.** Views and the `agents()` tool read the `Tracker`'s fold of those
   rows, so they never lag or lie. `Recoveries` acts once per broken state and checks that it
   helped.
@@ -178,11 +178,17 @@ Built, each from a checked model in `model/tla/`:
 - the cleanups the remodel left (F-136): `Mailbox` answers while a write is handed on, the
   readers store a problem by the one rule, an owner's end that ends its services is an act,
   the model is kept on the agent row for any resume, and the hot reads of tables that keep
-  every row are indexed.
+  every row are indexed;
+- the `Scheduler` (F-135), against `Schedule.tla`: a lease ledger on `Store` that every
+  delegate's start asks first. A grant is one transaction within each resource's capacity, and
+  a waiting landing holds the units it needs from lower classes; four classes, turns between
+  modules and aging inside a class; pressure (stall times, or a memory-pressure level) and both
+  of an account's windows as gates, the five-hour one now read by `Usage`; a lease released
+  once, when the owner of the work's row says the work ended, after a restart too; leases and
+  refusals on the `Tracker`, and each grant's wait and each refusal as telemetry.
 
-The remodel (F-115, taken in F-116) is done. Next, the `Scheduler`, whose model `Schedule.tla`
-is checked (F-134): one lease ledger in front of every start, heavy run and landing, with
-classes, pressure and allowance gates. Then
+The remodel (F-115, taken in F-116) is done. Next, `Jobs`' start and a landing's gang lease ask
+the `Scheduler` too. Then
 interactive delegates and main sessions, the mechanisms an app's policies stand on (an idle
 delegate's watchdog, `Stop` held for the app, clone copies, an idempotent
 start), packaging, and stacks with the LiveView components. The plan and the order of the units are in
@@ -224,6 +230,7 @@ flowchart BT
   tracker[caf_tracker]
   delegates[caf_delegates]
   mover[caf_mover]
+  scheduler[caf_scheduler]
   subgraph team["The tree's tools"]
     grants[caf_grants]
     mailbox[caf_mailbox]
@@ -274,6 +281,8 @@ flowchart BT
   delegates --> sessions
   delegates --> transcripts
   delegates --> mailbox
+  delegates --> scheduler
+  scheduler --> store
   mailbox --> sessions
   mailbox --> grants
   mailbox --> stream

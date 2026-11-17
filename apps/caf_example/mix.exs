@@ -35,6 +35,7 @@ defmodule CafExample.MixProject do
       {:caf_registry, in_umbrella: true},
       {:caf_sampler, in_umbrella: true},
       {:caf_services, in_umbrella: true},
+      {:caf_scheduler, in_umbrella: true},
       {:caf_sessions, in_umbrella: true},
       {:caf_shell, in_umbrella: true},
       {:caf_stream, in_umbrella: true},

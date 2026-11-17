@@ -5,11 +5,14 @@ defmodule CodingAgentFramework.UsageTest do
   import CodingAgentFramework.UsageSetup
 
   alias CodingAgentFramework.{Accounts, Usage, UsageSetup}
-  alias CodingAgentFramework.Usage.{Reading, Table}
+  alias CodingAgentFramework.Usage.{Allowance, Reading, Table}
 
   doctest Usage
   doctest Reading
   doctest Table
+  doctest Allowance
+
+  @windows [:used, :resets_at, :five_used, :five_resets_at]
 
   @now UsageSetup.now()
 
@@ -127,14 +130,14 @@ defmodule CodingAgentFramework.UsageTest do
               {name, nil}
 
             {:ok, reading} ->
-              assert Map.take(readings[name], [:used, :resets_at, :problem]) ==
+              assert Map.take(readings[name], [:problem | @windows]) ==
                        Map.put(reading, :problem, nil)
 
               {name, reading}
 
             {:malformed, _} ->
-              assert Map.take(readings[name], [:used, :resets_at]) ==
-                       (good[name] || %{used: nil, resets_at: nil})
+              assert Map.take(readings[name], @windows) ==
+                       (good[name] || Map.new(@windows, &{&1, nil}))
 
               assert is_binary(readings[name].problem)
               {name, good[name]}
@@ -144,5 +147,25 @@ defmodule CodingAgentFramework.UsageTest do
 
       GenServer.stop(usage)
     end
+  end
+
+  test "the five-hour window is stored beside the weekly one, and gates a start" do
+    %{accounts: accounts, usage: usage, db: db} = start(~w(a b))
+    File.mkdir_p!(Path.join(accounts.home, "usage"))
+    week = ~s("seven_day": {"used_percentage": 10, "resets_at": #{@now + 900}})
+    five = ~s("five_hour": {"used_percentage": 100, "resets_at": #{@now + 60}})
+
+    for {name, limits} <- [{"a", week <> "," <> five}, {"b", week}] do
+      {:ok, path} = Accounts.usage_file(accounts, name)
+      File.write!(path, ~s({"rate_limits": {#{limits}}}))
+    end
+
+    assert {:ok, _} = Usage.read(usage)
+    {:ok, %{readings: %{"a" => a}}} = Usage.readings(usage)
+    assert %{five_used: 100.0, five_resets_at: reset} = a
+    {:ok, conn} = Allowance.open(db)
+    assert Allowance.check(conn, "a", now: @now) == {:spent, reset * 1000}
+    assert Allowance.check(conn, "b", now: @now) == :room
+    assert Allowance.check(conn, "none", now: @now) == :room
   end
 end

@@ -99,6 +99,10 @@ defmodule CodingAgentFramework.Delegates.Table do
     end
   end
 
+  @doc "Opens the file at `path` for a reader of its own (`Delegates.Work`): it converts nothing."
+  @spec open_read(String.t()) :: {:ok, db} | {:refused, term}
+  def open_read(path), do: Store.open(path, @schema)
+
   @doc """
   What an earlier build's table holds that `Sessions` keeps now: per name, from its latest row,
   `%{name, parent, project, ended}`. `[]` for a table of this build.

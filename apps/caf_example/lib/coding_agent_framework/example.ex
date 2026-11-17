@@ -53,8 +53,8 @@ defmodule CodingAgentFramework.Example do
     Services
   }
 
-  alias CodingAgentFramework.{Sessions, Shell, Stream, Tmux, TmuxSampler, Tracker, Transcripts}
-  alias CodingAgentFramework.{Usage}
+  alias CodingAgentFramework.{Scheduler, Sessions, Shell, Stream, Tmux, TmuxSampler, Tracker}
+  alias CodingAgentFramework.{Transcripts, Usage}
   alias CodingAgentFramework.Example.{Config, Ends}
 
   require Logger
@@ -73,10 +73,14 @@ defmodule CodingAgentFramework.Example do
          {:ok, accounts} <- Accounts.new(c.home, c.accounts),
          {:ok, holder} <- Holder.new(programs, Config.path(c, "d")),
          {:ok, agents} <- Sessions.Agents.open(Config.path(c, "caf.db"), c.workstation),
+         {:ok, work} <-
+           Delegates.Work.open(Config.path(c, "caf.db"), Config.path(c, "caf.db"), c.workstation),
+         {:ok, allowance} <- Usage.Allowance.open(Config.path(c, "caf.db")),
          secret = token(),
          :ok <- prepare(c, accounts, programs, secret) do
       w = %{c: c, programs: programs, tmux: tmux, accounts: accounts, holder: holder}
       w = Map.merge(w, %{agents: agents, secret: secret, start_id: token()})
+      w = Map.merge(w, %{work: work, allowance: allowance})
       Supervisor.start_link(__MODULE__, Map.put(w, :db, Config.path(c, "caf.db")))
     end
   end
@@ -105,6 +109,7 @@ defmodule CodingAgentFramework.Example do
       mailbox: Mailbox.reads(),
       delegates: Delegates.reads(),
       mover: Mover.reads(),
+      scheduler: Scheduler.reads(),
       ends: Ends.reads()
     ]
   end
@@ -261,6 +266,20 @@ defmodule CodingAgentFramework.Example do
             acts: pid.(:acts)}
          end},
         {:tracker, fn _ -> {Tracker, sources: sources(w)} end},
+        # Before `Delegates`, which asks it for a lease before each start. The owners' answers
+        # and the allowance are read through connections of its own, never by a call.
+        {:scheduler,
+         fn _ ->
+           {Scheduler,
+            db: db,
+            host: host,
+            resources: c.resources,
+            holders: %{"delegate" => &Delegates.Work.state(w.work, &1)},
+            allowance: &Usage.Allowance.check(w.allowance, &1),
+            pressure: pressure(c),
+            interval: every,
+            notify: notify}
+         end},
         # Before `Delegates`, which stores each brief and report in it.
         {:mailbox,
          fn pid ->
@@ -293,6 +312,8 @@ defmodule CodingAgentFramework.Example do
             projects: c.projects,
             mcp: &issue(pid.(:mcp), &1),
             acts: pid.(:acts),
+            scheduler: pid.(:scheduler),
+            lease: c.lease,
             notify: notify}
          end},
         # After `Delegates`, whose launch a delegate's move resumes with.
@@ -382,6 +403,7 @@ defmodule CodingAgentFramework.Example do
         {Tracker.TableSource, [table: Stream.Table] ++ on},
         {Tracker.TableSource, [table: Sessions.Table] ++ on},
         {Tracker.TableSource, [table: Delegates.Table] ++ on},
+        {Tracker.TableSource, [table: Scheduler.Table] ++ on},
         {Tracker.TableSource, [table: TmuxSampler.Table] ++ on ++ [server: server]},
         {Tracker.TableSource, [table: Acts.Table] ++ on ++ [instance: c.instance]}
       ]
@@ -402,6 +424,13 @@ defmodule CodingAgentFramework.Example do
          {:ok, mcp} <- mcp,
          do: {:ok, Keyword.merge(launch, tool_timeout: c.tool_timeout, mcp: mcp)}
   end
+
+  # Stall times where the host has them; elsewhere no pressure gate, only the static capacities.
+  defp pressure(%Config{pressure: nil}) do
+    if File.dir?("/proc/pressure"), do: [source: :psi], else: [source: :none]
+  end
+
+  defp pressure(%Config{pressure: pressure}), do: pressure
 
   defp issue(nil, _agent), do: {:refused, :no_mcp}
   defp issue(mcp, agent), do: MCP.issue(mcp, agent)

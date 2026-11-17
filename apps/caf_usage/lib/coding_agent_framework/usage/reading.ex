@@ -1,21 +1,32 @@
 defmodule CodingAgentFramework.Usage.Reading do
   @moduledoc """
-  One account's weekly allowance, read from the JSON Claude Code hands its `statusLine` command.
-  Pure and total: any bytes give a reading or a named problem, never a raise.
+  One account's allowance, its weekly window and its five-hour one, read from the JSON Claude
+  Code hands its `statusLine` command. Pure and total: any bytes give a reading or a named
+  problem, never a raise.
 
-  In Claude Code 2.1.322 that JSON has `rate_limits.seven_day` with `used_percentage` (0 to
-  100) and `resets_at` (Unix seconds), for a subscriber, after the session's first answer from
-  the API, and only while that window's reset has not passed. A reading keeps the share used,
-  as a float, and the reset.
+  In Claude Code 2.1.322 that JSON has `rate_limits.seven_day` and `rate_limits.five_hour`,
+  each with `used_percentage` (0 to 100) and `resets_at` (Unix seconds), for a subscriber,
+  after the session's first answer from the API, and each only while that window's reset has
+  not passed. A reading keeps each window's share used, as a float, and its reset: the weekly
+  one as `used` and `resets_at`, which it must have, and the five-hour one as `five_used` and
+  `five_resets_at`, nil when the JSON has none.
 
       iex> alias CodingAgentFramework.Usage.Reading
       iex> Reading.parse(~s({"rate_limits": {"seven_day": {"used_percentage": 41, "resets_at": 1800000000}}}))
-      {:ok, %{used: 41.0, resets_at: 1800000000}}
+      {:ok, %{used: 41.0, resets_at: 1800000000, five_used: nil, five_resets_at: nil}}
+      iex> Reading.parse(~s({"rate_limits": {"seven_day": {"used_percentage": 41, "resets_at": 1800000000},
+      ...>   "five_hour": {"used_percentage": 97.5, "resets_at": 1700003600}}}))
+      {:ok, %{used: 41.0, resets_at: 1800000000, five_used: 97.5, five_resets_at: 1700003600}}
       iex> Reading.parse(~s({"rate_limits": {"five_hour": {}}}))
       {:malformed, :no_seven_day}
   """
 
-  @type t :: %{used: float, resets_at: integer}
+  @type t :: %{
+          used: float,
+          resets_at: integer,
+          five_used: float | nil,
+          five_resets_at: integer | nil
+        }
 
   @doc "The reading in `bytes`, or `{:malformed, reason}`."
   @spec parse(binary) :: {:ok, t} | {:malformed, term}
@@ -23,8 +34,9 @@ defmodule CodingAgentFramework.Usage.Reading do
     with {:ok, json} <- decode(bytes),
          %{"rate_limits" => %{"seven_day" => week}} when is_map(week) <- json,
          {:ok, used} <- number(week, "used_percentage"),
-         {:ok, resets_at} <- number(week, "resets_at") do
-      {:ok, %{used: used / 1, resets_at: trunc(resets_at)}}
+         {:ok, resets_at} <- number(week, "resets_at"),
+         {:ok, five} <- five_hour(json["rate_limits"]["five_hour"]) do
+      {:ok, Map.merge(%{used: used / 1, resets_at: trunc(resets_at)}, five)}
     else
       {:malformed, _} = bad -> bad
       _ -> {:malformed, :no_seven_day}
@@ -77,6 +89,17 @@ defmodule CodingAgentFramework.Usage.Reading do
   end
 
   def status(_, _, _), do: :unknown
+
+  # The five-hour window is absent once its reset passed; one that is there must be whole.
+  defp five_hour(nil), do: {:ok, %{five_used: nil, five_resets_at: nil}}
+
+  defp five_hour(%{} = five) do
+    with {:ok, used} <- number(five, "used_percentage"),
+         {:ok, resets_at} <- number(five, "resets_at"),
+         do: {:ok, %{five_used: used / 1, five_resets_at: trunc(resets_at)}}
+  end
+
+  defp five_hour(_), do: {:malformed, {:wrong_type, "five_hour"}}
 
   defp decode(bytes) do
     case JSON.decode(bytes) do
