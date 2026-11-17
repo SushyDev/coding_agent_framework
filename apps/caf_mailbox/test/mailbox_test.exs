@@ -39,7 +39,7 @@ defmodule CodingAgentFramework.MailboxTest do
     assert Table.open_rows(ctx.mtable) == []
     assert {:refused, :no_message} = Mailbox.status(m, 1)
 
-    # A main session's transport is a later unit's: the row stays queued, with why.
+    # With no `intake:` a main session has no transport: the row stays queued, with why.
     assert {:ok, {:queued, id}} = Mailbox.message(m, "d1", "main", "report")
     assert {:ok, %{status: "queued", attempt: ":no_delivery"}} = until(ctx, id, & &1.attempt)
   end

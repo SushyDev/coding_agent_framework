@@ -46,7 +46,10 @@ defmodule CodingAgentFramework.Intake do
     under the hook's `timeout`, the response ends empty.
 
   After each write it calls `notify` with `%{topic: "intake:<host>:<account>", ids: ids}`, a
-  cue and never the data. `CodingAgentFramework.Tracker.IntakeSource` reads the rows.
+  cue and never the data. `CodingAgentFramework.Tracker.IntakeSource` reads the rows. A
+  session's waiter coming, or going (its hold ended, whether or not another took its place), is
+  cued on `intake:<host>:<account>:waiters` with `ids: [session_id]`: `Mailbox` tries a row due
+  to that session on it.
   """
 
   use GenServer
@@ -349,6 +352,7 @@ defmodule CodingAgentFramework.Intake do
               state
 
             nil ->
+              waiters_cue(state, account, session)
               put_in(state.waiters[{account, session}], key)
           end
 
@@ -574,6 +578,10 @@ defmodule CodingAgentFramework.Intake do
         for {{:waiter, n} = k, %{account: ^account, session: ^session}} <- state.holds,
             do: {n, k}
 
+      # The session's waiter went, and another took its place or none did: either way a row
+      # due to it may go now, or must wait for the next.
+      waiters_cue(state, account, session)
+
       case Enum.max(behind, fn -> nil end) do
         {_, next} -> put_in(state.waiters[session_key], next)
         nil -> %{state | waiters: Map.delete(state.waiters, session_key)}
@@ -643,6 +651,11 @@ defmodule CodingAgentFramework.Intake do
 
   defp cue(state, account, ids),
     do: state.notify.(%{topic: "intake:#{state.host}:#{account}", ids: ids})
+
+  # F-123's new-3: a session's waiter coming or going, on a topic of its own, naming the session
+  # ids; `Mailbox` tries a row due to the session on it, and a view reloads.
+  defp waiters_cue(state, account, session),
+    do: state.notify.(%{topic: "intake:#{state.host}:#{account}:waiters", ids: [session]})
 
   defp now, do: System.os_time(:millisecond)
 end

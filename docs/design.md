@@ -693,7 +693,11 @@ reading for delegates:
 - **Delivered once, seen.** A message carries a uuid of the framework's, and with
   `--replay-user-messages` it comes back with that uuid and `isReplay`. Its sending mark, the
   row in `Mailbox`, is settled by the replay that `Stream`'s fold reads; `Stream` keeps the
-  line's claim and the replay, not a message state of its own (R7). When the delegate exits, a
+  line's claim and the replay, not a message state of its own (R7). The fold's record per
+  uuid (`writing`, `delivered`, `undelivered` at the exit, the result, `exited`) stays as the
+  claim's evidence, which `Mailbox` settles by, and as the claim's guard: `Fold.check/2`
+  refuses a uuid used before, and a message while another is `writing` or found
+  `undelivered`, as defense in depth behind `Mailbox`'s one row in flight (F-125's new-3). When the delegate exits, a
   message with no replay in the log, read to its end, is delivered if the transcript holds its
   uuid and undelivered otherwise; it is never written again blind. Since no line of an earlier
   process reaches a later one, "undelivered" is final. `Mailbox` makes it due again for the
@@ -713,9 +717,11 @@ reading for delegates:
   `answer`, a cancel or the exit. A delegate's hooks are not needed for its own turns; its
   events are the log.
 - **Ending.** An `end_session` request ends the session and cuts a running turn, so it goes in
-  only after the report is delivered and the turn has ended. `Sessions` checks the report before
-  it asks for the end: the report's row in `Mailbox` settled delivered, and no row to the
-  delegate sending or due. `Stream` refuses the end while the turn runs, and refuses a line once
+  only after the report is delivered and the turn has ended. `Delegates` checks the report
+  before it asks for the stop: the report's row in `Mailbox` settled delivered. `Sessions`
+  then reads, through the `open_to:` function the app hands it (`Mailbox.open_to/3`), that no
+  row to the delegate is sending or due (F-125's new-2): `caf_sessions` does not use
+  `caf_mailbox`, which reads `Sessions`' rows. `Stream` refuses the end while the turn runs, and refuses a line once
   an end is marked; behind the report, its turn check is defense in depth. `Sessions` sees the exit by the pid; one that does not exit within
   the stop's deadline is ended by `Recoveries`.
 - **Rate limits.** A `rate_limit_event` carries the account's windows, among them
@@ -745,8 +751,10 @@ run and reviewed, with names and paths scrubbed; no test runs the real Claude Co
 main session's launch overlay (item 11's settings overlay, for the main role) names a `command`
 Stop hook with `asyncRewake: true` and a `timeout` of 7,200 s; the account's settings do not,
 since a headless delegate's transport is `stream` (F-121's new-3). `Intake.waiter_hook/5` gives
-the fragment, as `hooks/4` gives the account's; wiring it into a main session's start is R7's
-or `Mains`'. The hook is `sh -c` around `curl` (F-121's new-2): it posts the Stop hook's input
+the fragment, as `hooks/4` gives the account's; `Sessions` puts it into an interactive
+session's overlay at its start when the app gives it `Intake`'s port and secret (`waiter:`,
+R7). An overlay's `hooks` add to the account's per event, the account's first, so the waiter
+never drops `Intake`'s own `Stop` hook (F-123's new-2). The hook is `sh -c` around `curl` (F-121's new-2): it posts the Stop hook's input
 to `/hooks/<account>/waiter` (a path of its own, so the body is not stored as a `Stop` event)
 and waits. The secret reaches curl as a config on file descriptor 3, by a here-document
 (`-K /dev/fd/3`), and the shell that reads it `exec`s, so the secret is in no process's
@@ -756,12 +764,20 @@ decider is `Mailbox`. When a row is due, `Mailbox` marks it sending by the waite
 `{:refused, :no_waiter}`, or `{:unknown, reason}` when the connection closed before the write
 was confirmed. The program writes a response that is not empty once whitespace is stripped to
 stderr and exits 2, and Claude Code starts a turn with it, even when the session is idle;
-anything else, a failed post included, exits 0. Each turn's end starts the next waiter. The
-transcript holds the text as a user line (`Stop hook blocking error from command "Stop":
-<text>` in 2.1.322), which confirms the delivery: `{:ok, :sent}` says the text was written,
-not that it was read, so the row stays `sending` until the transcript's line settles it, or
-the bound in "Delivery" passes with no line (F-123's new-1). A draft a person left in the box
-is not touched, so the box need not be empty.
+anything else, a failed post included, exits 0. Each turn's end starts the next waiter, and
+the last turn's waiter still waits while a person's prompt runs a turn. The text carries the
+row's uuid on a last line of its own (`[delivery <uuid>]`), which the transcript keeps, so
+the settle finds that row's lines and never a look-alike (F-125's new-4). Claude Code
+2.1.322 queues the text: within about a second a `queue-operation` line `enqueue` holds it;
+then an idle session takes it with a `dequeue` and a user line (`Stop hook blocking error
+from command "Stop": <text>`, inside a `task-notification` and a `system-reminder`), and a
+running turn takes it at its next tool boundary with a `remove` and an `attachment` of type
+`queued_command`, with no new user line and no new turn. The take confirms the delivery:
+`{:ok, :sent}` says the text was written, not that it was read, so the row stays `sending`
+until the transcript's take settles it, or the bound in "Delivery" passes with no line
+(F-123's new-1). `Mailbox` reads the session's transcript through `Transcripts`, from the
+offset read before the mark. A draft a person left in the box is not touched, so the box need
+not be empty.
 
 **The waiter's connection** (F-121's new-1). A handler waiting on Bandit is not told that its
 client closed; only a write finds it. So the response is chunked from the start: status 200 at
@@ -781,12 +797,17 @@ a waiter connects; a view shows a session idle with no waiter and something due,
 `Inlet`'s checked write reaches it, as one more transport of the same row. `Intake` cues a
 session's waiter coming and going on a topic of its own (`intake:<host>:<account>:waiters`, with
 the session ids), and `Mailbox` tries a due row on that cue, not on a timer (F-123's new-3).
+The cue also settles a row `sending` by the last waiter: a turn's end starts the next waiter,
+so the transcript then holds the take. `Mailbox`'s one timer is the take bound's, per row.
 
 **Ending a session** is SIGTERM to its pid, by the row's pid and start time, once its session
 file says `idle` and no `Mailbox` row to the session is `sending`; once its row is `stopping`,
 `Mailbox` neither marks nor hands on a row to it (F-122's new-1; `Delivery.tla`'s `IdleRead`,
 `Open`). The mark and the hand-on are two steps, and an answer takes a moment to become a turn,
-so refusing a new mark alone lets a row marked before the stop start a turn the SIGTERM cuts. It
+so refusing a new mark alone lets a row marked before the stop start a turn the SIGTERM cuts.
+`Sessions` reads the rows through the `open_to:` function the app hands it, in the same step as
+the idle read, and waits for a `sending` one to settle until the stop's deadline, then refuses
+with `{:sending, ids}`; a row still `queued` is not waited for (F-125's new-2). It
 replaces a typed `/exit`. Claude Code's shutdown keeps the transcript and
 fires SessionEnd with reason `other`, which `Sessions` and `Recoveries` read as that end. The
 session file's `status` (`busy`, `idle`, `waiting` with `waitingFor`) is not documented; it is
@@ -949,14 +970,17 @@ changed (R6).
   the row `sending` with its transport, then hands it on. Refused undoes the mark; unknown keeps
   it for the evidence. The row is the only mark: no other part keeps a delivery state.
 - **Into an ended turn only, to the current process only.** The turn state is `Sessions`'
-  function for the target's kind; the process is the agent row's.
+  function for the target's kind; the process is the agent row's. The waiter's row is the one
+  exception: Claude Code queues a waiter's answer and takes it into a person's turn still
+  running, at its next tool boundary, and nothing is typed, so it goes into an ended turn or
+  is queued into the running one (measured for F-127; `Delivery.tla`'s `OnlyIntoEndedTurn`).
 - **The transport is the target's**, and each transport names its evidence and what a restart
   does to a row it left `sending`:
 
 | Transport | Target | Settled by | A row left `sending` by a restart |
 |---|---|---|---|
 | `stream` | a headless session | the replay in `Stream`'s fold; at the exit, the transcript | settled from the same evidence once read; undelivered is final, and the row is due again first, under its same uuid, to the resumed process |
-| `waiter` | an interactive session with a waiter | the transcript's `Stop hook blocking error` line, once the turn that took it has ended; due again only once the take bound past its hand-on has passed with no line, or its process is gone | settled from the transcript once that turn has ended: delivered if the line is there, due again if not and the take bound has passed |
+| `waiter` | an interactive session with a waiter | the transcript's lines carrying the row's uuid: the `queue-operation` `enqueue` (it reached Claude Code's queue), then its take, a `dequeue` and the user line `Stop hook blocking error …` into an ended turn, or a `remove` and a `queued_command` attachment into a running one; delivered at the take; due again once the take bound past its hand-on has passed with no line, or its process is gone with no take | settled from the same lines: delivered if the take is there, kept while only the `enqueue` is, due again if no line is there and the take bound has passed |
 | `typed` | an interactive session with no waiter | the `Inlet`'s answer, then the transcript's user line once the turn has ended; due again as `waiter` | as `waiter`; an unknown write is never typed again |
 | `call` | a waiting `run_delegate` | the endpoint's write, and the calling process still running after it | due again, for the parent's waiter: the call it answered is gone |
 
@@ -965,7 +989,10 @@ Claude Code has started the turn with it or never will. Between the hand-on and 
 line nothing the framework reads tells "not yet" from "never", so a `waiter` or `typed` row is
 due again only past it (`Delivery.tla`'s `wire`, `Break_Delivery_SettleEarly`). Its value is
 checked against each pinned Claude Code release, with the transcript line's text, as the screen
-fixtures are; the waiter's unit sets and measures it.
+fixtures are. For the waiter it is `Mailbox`'s `take_bound:`, 10 s by default: Claude Code
+2.1.322 writes the `enqueue` line within about a second of the hook's exit, whether the session
+is idle or a turn runs (measured for F-127). The bound runs from the hand-on's wall-clock time,
+kept on the row, so a restart keeps it.
 
 The restart policy lives with the transport, as one module per transport in `Mailbox` beside
 the one mark and settle, and `Delivery.tla` models each transport's policy as its own choice.
@@ -1547,9 +1574,9 @@ are the model before the code they describe (R5, R7 to R10).
   reduced to `taken`. About +350, −350. (Item 4's delivery and `run_delegate` on this shape.)
   In two parts (F-125's new-1). Part 1, built in F-125: the brief, the word to go on and the
   report as rows, the transports `stream` and `call`, `Delegates`' report reduced to `taken`.
-  Part 2: the transport `waiter` with its take bound and `Intake`'s waiter cue, the waiter's
-  hook in a main session's start, and `Sessions`' idle read and delegate stop reading `Mailbox`
-  in place of `stop/4`'s word.
+  Part 2, built in F-127: the transport `waiter` with its take bound and `Intake`'s waiter cue,
+  the waiter's hook in a main session's start, and `Sessions`' idle read and delegate stop
+  reading `Mailbox` (`open_to:`) in place of `stop/4`'s word.
 - **R8. `Inlet`**: `Control` with `Screen`'s box check, the checked write for a session with no
   waiter, as the transport `typed`. It records the release each session runs, and never trusts
   one read for a turn's end (F-113's new-2, new-4). About +200, −140.

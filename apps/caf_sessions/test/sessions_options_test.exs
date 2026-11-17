@@ -25,7 +25,7 @@ defmodule CodingAgentFramework.SessionsOptionsTest do
     kept = Table.get(ctx.table, "test", "o1").options
     assert CodingAgentFramework.ClaudeCLI.Options.decode(kept) == {:ok, options}
 
-    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "o1", :report_delivered)
+    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "o1")
     {:ok, _} = await(fn -> if Holder.state(ctx.holder, "o1") == {:ok, :absent}, do: {:ok, 1} end)
     File.rm!(Path.join([ctx.dir, "argv", id]))
 

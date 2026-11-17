@@ -28,8 +28,16 @@ defmodule CodingAgentFramework.Mailbox do
   - `call`, for a reply or a notice a waiting `run_delegate` takes (`await/4`), only before the
     call's deadline; `told/3` settles it, and the end of the process that waits makes it due
     again;
-  - a main session's `waiter` and `typed` are later units: until then its rows stay `queued`,
-    `attempt` `:no_delivery`, unless a call takes them.
+  - `waiter`, for an interactive session (any other `Sessions` role), when `Mailbox` was
+    given `intake:`: only while its row is `running` and `Intake` holds a waiter for it, into
+    an ended turn or queued by Claude Code into a running one, handed to `Intake.deliver/5`
+    with the row's uuid on a last line (`Transport.Waiter`). `{:ok, :sent}` keeps the row
+    `sending`: the session's transcript, read through `transcripts:` at the account's
+    directory (`accounts:`), settles it, or `take_bound:` ms (10 s by default) with no line
+    makes it due again. With no waiter its rows stay `queued`, `attempt` `:no_waiter`, until
+    `Intake`'s waiter cue;
+  - `typed` is R8's. Without `intake:` a main session's rows stay `queued`, `attempt`
+    `:no_delivery`, unless a call takes them.
 
   **Answers.** A delivered message's turn ends with a `result` that names its uuid; that
   result's text is stored as a reply from the delegate to the message's sender (to its parent,
@@ -42,24 +50,30 @@ defmodule CodingAgentFramework.Mailbox do
   **Ended.** Once a delegate's session ended for good (its `end_session` went in and its
   process is gone), or its start was refused (`ended/3`), its `queued` rows are settled `ended`.
 
-  It reads every open row again at its start and at each `cue/2` (of `Stream`, `Sessions` and
-  `Delegates`); after each write `notify` gets `%{topic: "mailbox", ids: [id]}`.
+  It reads every open row again at its start, at each `cue/2` (of `Stream`, `Sessions`,
+  `Delegates` and `Intake`'s waiters) and at a waiter row's take bound; after each write
+  `notify` gets `%{topic: "mailbox", ids: [id]}`.
   """
 
   use GenServer
 
-  alias CodingAgentFramework.{Grants, Sessions, Stream}
+  alias CodingAgentFramework.{Accounts, Grants, Intake, Sessions, Stream, Transcripts}
   alias CodingAgentFramework.Mailbox.{Table, Transport}
   alias CodingAgentFramework.Stream.Fold
 
   @step 5_000
+  # The take bound (`docs/design.md`, "Delivery"): Claude Code 2.1.322 writes the `enqueue`
+  # line within about a second of the waiter's answer (measured for F-127).
+  @take_bound 10_000
   # The sender of a notice and of the words to go on; no agent has this name, as an agent's
   # name holds its project's.
   @framework "framework"
 
   @doc """
   Starts a `Mailbox`. Options: `db:`, `grants:`, `stream:` and `host:` (where the delegates
-  run), `sessions_db:` (the file of `Sessions`' table), and optionally `notify:`.
+  run), `sessions_db:` (the file of `Sessions`' table), and optionally `notify:`; for the
+  waiter transport, `intake:` with `transcripts:` and `accounts:` (an `Accounts`), and
+  `take_bound:` (ms, 10 000 by default).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -175,8 +189,17 @@ defmodule CodingAgentFramework.Mailbox do
   """
   def answer_to(mailbox, key, opts \\ []), do: call(mailbox, {:answer_to, key}, opts)
 
-  @doc "The ids of the rows to `to` still `queued` or `sending`: `{:ok, ids}`."
-  def open_to(mailbox, to, opts \\ []), do: call(mailbox, {:open_to, to}, opts)
+  @doc """
+  The ids of the rows to `to` still `queued` or `sending`: `{:ok, ids}`. With `status:
+  :sending`, only those `sending`. `Sessions` reads it before a stop, through the `open_to:`
+  function the embedding app hands it:
+
+      open_to = fn name, which -> Mailbox.open_to(mailbox, name, status: which) end
+      open_to.("app-main", :sending)
+      #=> {:ok, []}
+  """
+  def open_to(mailbox, to, opts \\ []),
+    do: call(mailbox, {:open_to, to, Keyword.get(opts, :status, :open)}, opts)
 
   @doc "Hands it a reader's cue: every open row is read again. Answers `:ok` at once."
   def cue(mailbox, %{topic: _}), do: GenServer.cast(mailbox, :cue)
@@ -198,19 +221,32 @@ defmodule CodingAgentFramework.Mailbox do
          {:ok, sdb} <- Sessions.Table.open(Keyword.fetch!(opts, :sessions_db)) do
       s = Map.new(~w(grants stream host)a, &{&1, Keyword.fetch!(opts, &1)})
       notify = Keyword.get(opts, :notify, fn _ -> :ok end)
+      # The waiter transport's parts; without `intake:` a main session has no transport here.
+      waiter =
+        if opts[:intake],
+          do: Map.new(~w(intake transcripts accounts)a, &{&1, Keyword.fetch!(opts, &1)}),
+          else: %{intake: nil}
+
+      waiter = Map.put(waiter, :bound, Keyword.get(opts, :take_bound, @take_bound))
       # `calls`: row id to the call that took it; `waits`: key to the call waiting for it.
       s = Map.merge(s, %{db: db, sdb: sdb, notify: notify, calls: %{}, waits: %{}})
-      {:ok, s, {:continue, :read}}
+      {:ok, Map.put(s, :waiter, waiter), {:continue, :read}}
     else
       {:refused, reason} -> {:stop, reason}
     end
   end
 
   # A restart settles what it finds marked, from Stream's rows read to the end of each log; a
-  # row a call took finds no call in memory, and is due again.
+  # row a call took finds no call in memory, and is due again. A waiter's row is settled at its
+  # take bound, which no timer of the last process carries over.
   @impl true
   def handle_continue(:read, s) do
     Stream.read(s.stream, timeout: @step)
+
+    for %{via: "waiter", status: "sending", sent_at: at} <- Table.open_rows(s.db),
+        is_integer(at),
+        do: bound(s, at)
+
     {:noreply, settle(s)}
   end
 
@@ -317,10 +353,19 @@ defmodule CodingAgentFramework.Mailbox do
   def handle_call({:answer_to, key}, _from, s),
     do: {:reply, shown(Table.answer(s.db, key) || {:refused, :no_answer}), s}
 
-  def handle_call({:open_to, to}, _from, s),
-    do: {:reply, {:ok, for(%{to_agent: ^to} = m <- Table.open_rows(s.db), do: m.id)}, s}
+  def handle_call({:open_to, to, which}, _from, s) do
+    ids =
+      for %{to_agent: ^to} = m <- Table.open_rows(s.db),
+          which == :open or m.status == "sending",
+          do: m.id
 
+    {:reply, {:ok, ids}, s}
+  end
+
+  # A waiter's row reached its take bound: settled now, by the transcript as it is.
   @impl true
+  def handle_info(:bound, s), do: {:noreply, settle(s)}
+
   def handle_info({:waited, key, ref}, s) do
     case s.waits[key] do
       %{ref: ^ref, from: from} ->
@@ -370,8 +415,14 @@ defmodule CodingAgentFramework.Mailbox do
     with {:ok, %{rows: rows}} <- Stream.rows(s.stream, timeout: @step) do
       folds = Map.new(rows, &{&1.session, &1})
 
-      for %{status: "sending"} = m <- Table.open_rows(s.db),
-          do: settled(s, m, Transport.settle(m, %{fold: folds[m.session_id], calls: s.calls}))
+      for %{status: "sending"} = m <- Table.open_rows(s.db) do
+        evidence = %{fold: folds[m.session_id], calls: s.calls}
+
+        evidence =
+          if m.via == "waiter", do: Map.put(evidence, :waiter, seen(s, m)), else: evidence
+
+        settled(s, m, Transport.settle(m, evidence))
+      end
 
       replies(s, folds)
 
@@ -389,7 +440,7 @@ defmodule CodingAgentFramework.Mailbox do
 
   # Due again, first, under its same uuid.
   defp again(s, m, why),
-    do: write(s, m, status: "queued", via: nil, at: nil, again: 1, attempt: why)
+    do: write(s, m, status: "queued", via: nil, at: nil, again: 1, attempt: why, sent_at: nil)
 
   # ReplyStored and NoticeStored: a delivered message's turn ended with a result that names it
   # (the fold keeps it on the message, so a later turn's never replaces it), or its process
@@ -435,8 +486,9 @@ defmodule CodingAgentFramework.Mailbox do
   defp stored_quietly(_s, nil), do: :ok
   defp stored_quietly(s, id), do: announce(s, id)
 
-  # The addressee and its transport: a headless delegate, by its `Sessions` row's role, with
-  # the fold of its session; anything else has none until the waiter's unit.
+  # The addressee and its transport, by its `Sessions` row's role: a headless delegate's
+  # stream, with the fold of its session; an interactive session's waiter, when this Mailbox
+  # was given an `Intake`. Anything else has none (the typed write is R8's).
   defp target(s, to, folds) do
     case Sessions.Table.get(s.sdb, s.host, to) do
       %{role: "delegate", session_id: sid} = srow when is_binary(sid) ->
@@ -444,6 +496,9 @@ defmodule CodingAgentFramework.Mailbox do
 
       %{role: "delegate"} ->
         :not_started
+
+      %{} = srow when s.waiter.intake != nil ->
+        {:waiter, srow}
 
       _ ->
         :none
@@ -473,6 +528,29 @@ defmodule CodingAgentFramework.Mailbox do
     end
   end
 
+  # A main session's waiter: one row in flight, to a running session that has a waiter held now
+  # (each turn's end starts one). Claude Code takes the text into an ended turn, or queues it
+  # into a running one (a person's prompt started a turn while the last turn's waiter waited);
+  # nothing is typed either way. A session with no waiter keeps its rows due, and `Intake`'s
+  # waiter cue tries them again.
+  defp deliver(s, rows, {:waiter, srow}) do
+    cond do
+      Enum.any?(rows, &(&1.status == "sending")) ->
+        :ok
+
+      srow.status != "running" or not is_integer(srow.pid) or not is_binary(srow.session_id) ->
+        :ok
+
+      Intake.waiter?(s.waiter.intake, srow.account, srow.session_id, timeout: @step) ==
+          {:ok, true} ->
+        hand(s, hd(rows), srow)
+
+      true ->
+        m = hd(rows)
+        if m.attempt != ":no_waiter", do: write(s, m, attempt: :no_waiter)
+    end
+  end
+
   # Mark, then the hand-on: refused undoes the mark (nothing was marked in Stream); unknown
   # stays sending for Stream's fold to settle.
   defp mark(s, m, sid, at) do
@@ -483,6 +561,81 @@ defmodule CodingAgentFramework.Mailbox do
       {:refused, why} -> write(s, m, status: "queued", via: nil, at: nil, attempt: why)
       {:unknown, why} -> write(s, m, attempt: why)
     end
+  end
+
+  # Mark, then the hand-on, as `mark/4`; the transcript's offset read before the mark bounds
+  # what its settle reads. Sent or unknown starts the take bound: the text may have been read.
+  defp hand(s, m, srow) do
+    from = offset(s, srow)
+    mark = [status: "sending", via: "waiter", session_id: srow.session_id, at: srow.pid]
+    write(s, m, mark ++ [from_byte: from, sent_at: nil])
+    text = Transport.Waiter.text(m.text, m.uuid)
+
+    case Intake.deliver(s.waiter.intake, srow.account, srow.session_id, text, timeout: @step) do
+      {:ok, :sent} ->
+        write(s, m, sent_at: now(), attempt: nil)
+        bound(s, now())
+
+      {:refused, why} ->
+        write(s, m, status: "queued", via: nil, at: nil, attempt: why)
+
+      {:unknown, why} ->
+        write(s, m, sent_at: now(), attempt: why)
+        bound(s, now())
+    end
+  end
+
+  defp bound(s, sent_at),
+    do: Process.send_after(self(), :bound, max(sent_at + s.waiter.bound - now(), 0) + 1)
+
+  defp now, do: System.os_time(:millisecond)
+
+  # The waiter's evidence for row `m`: its lines in the transcript of its session, read now
+  # from the offset its mark kept, and whether the process it was handed to is gone.
+  defp seen(s, m) do
+    srow = Sessions.Table.get(s.sdb, s.host, m.to_agent)
+    gone = srow == nil or srow.pid != m.at or srow.status in ["stopped", "refused"]
+
+    seen =
+      with %{} <- srow,
+           {:ok, path} <- transcript(s, srow),
+           {:ok, %{failed: []}} <-
+             Transcripts.read(s.waiter.transcripts, [{srow.account, m.session_id, path}],
+               timeout: @step
+             ),
+           {:ok, %{bytes: bytes}} <-
+             Transcripts.text(s.waiter.transcripts, srow.account, m.session_id, m.from_byte || 0,
+               timeout: @step
+             ) do
+        Transport.Waiter.seen(bytes, m.uuid)
+      else
+        {:refused, :no_file} -> :none
+        _ -> :unread
+      end
+
+    %{seen: seen, gone: gone, now: now(), bound: s.waiter.bound}
+  end
+
+  # How much of the session's transcript is read now: a row's lines come after it.
+  defp offset(s, srow) do
+    with {:ok, path} <- transcript(s, srow),
+         {:ok, _} <-
+           Transcripts.read(s.waiter.transcripts, [{srow.account, srow.session_id, path}],
+             timeout: @step
+           ),
+         {:ok, %{offset: offset}} <-
+           Transcripts.session(s.waiter.transcripts, srow.account, srow.session_id,
+             timeout: @step
+           ) do
+      offset
+    else
+      _ -> 0
+    end
+  end
+
+  defp transcript(s, srow) do
+    with {:ok, dir} <- Accounts.config_dir(s.waiter.accounts, srow.account),
+         do: Transcripts.path(dir, srow.cwd, srow.session_id)
   end
 
   # Into an ended turn of the current process only, never to a session whose row is stopping.

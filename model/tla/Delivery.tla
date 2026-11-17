@@ -18,14 +18,18 @@
 (*           leaves the claim on disk; a line not yet claimed is claimed   *)
 (*           again (Reclaim).                                              *)
 (*   waiter  the answer to an interactive session's waiting Stop hook      *)
-(*           (Hold.tla's waiter kind in Intake). Claude Code starts a turn *)
-(*           with it once its turn has ended. Settled by the transcript    *)
-(*           once the turn that took it has ended: the line there,         *)
-(*           delivered; not there and no answer still on its way to a turn,*)
-(*           due again. A restart settles it the same way.                 *)
+(*           (Hold.tla's waiter kind in Intake). Claude Code queues it and *)
+(*           takes it: into a turn of its own once its turn has ended, or  *)
+(*           into a person's turn still running, at its next tool          *)
+(*           boundary (measured for F-127). Nothing is typed, so a waiter's*)
+(*           row is marked into an ended turn or a running one. Settled by *)
+(*           the transcript's take: the line there, delivered; not there   *)
+(*           and no answer still on its way to a turn, due again. A        *)
+(*           restart settles it the same way.                              *)
 (*   typed   the Inlet's checked write, for an interactive session with no *)
-(*           waiter. Refused when the check fails; unknown keeps the mark, *)
-(*           and is never typed again; settled as waiter.                  *)
+(*           waiter, into an ended turn only. Refused when the check       *)
+(*           fails; unknown keeps the mark, and is never typed again;      *)
+(*           settled as waiter, once the turn that took it has ended.      *)
 (*   call    the answer of a waiting run_delegate, inside the turn that    *)
 (*           called. Delivered when the endpoint's write succeeded and the *)
 (*           calling process still runs; a failed write, the end of the    *)
@@ -248,17 +252,18 @@ Store(i, f, t, k) ==
 
 \* The mark: the row says sending, with its transport and the process it is
 \* for, before anything goes out. Into an ended turn only (a call answers
-\* inside the turn that called), and never to a session whose row is stopping.
+\* inside the turn that called, and Claude Code queues a waiter's answer into
+\* a running turn), and never to a session whose row is stopping.
 Mark(i, t) ==
     LET a == row[i].to IN
     /\ up /\ a \in Addrs /\ First(i) /\ pr[a] # 0 /\ ~over[a]
-    /\ idle[a] \/ t = "call" \/ Break = "IntoRunningTurn"
+    /\ idle[a] \/ t \in {"call", "waiter"} \/ Break = "IntoRunningTurn"
     /\ ~stopping[a] \/ Break = "MarkWhileStopping"
     /\ Reaches(i, t)
     /\ row' = [row EXCEPT ![i].st = "sending", ![i].via = t, ![i].at = pr[a]]
     /\ hand' = hand \cup {i}
     /\ call' = IF t = "call" /\ call[i] = "waiting" THEN [call EXCEPT ![i] = "writing"] ELSE call
-    /\ wrong' = wrong \cup (IF idle[a] \/ t = "call" THEN {} ELSE {"running turn"})
+    /\ wrong' = wrong \cup (IF idle[a] \/ t \in {"call", "waiter"} THEN {} ELSE {"running turn"})
     /\ UNCHANGED <<claimed, wire, waiter, tx, fold, rmem, last, unsure, lost>>
 
 \* The transport hands it on: a stream line claimed for its process's FIFO,
@@ -297,12 +302,13 @@ Reclaim(i) ==
 
 \* Claude Code takes a text handed to its process: it goes into the
 \* transcript and a turn starts with it (the instancing spec starts it). A
-\* stream line joins a running turn; an interactive session starts its turn
-\* once its own has ended.
+\* stream line joins a running turn, and so does a waiter's answer, queued
+\* until the turn's next tool boundary; typed keys start a turn once the
+\* session's own has ended.
 Take(i) ==
     LET a == row[i].to IN
     /\ wire[i] > 0 /\ pr[a] # 0 /\ (pr[a] = row[i].at \/ Break = "AnyProcess")
-    /\ row[i].via = "stream" \/ idle[a]
+    /\ row[i].via \in {"stream", "waiter"} \/ idle[a]
     /\ wire' = [wire EXCEPT ![i] = @ - 1]
     /\ tx' = [tx EXCEPT ![a] = Append(@, i)]
     /\ fold' = [fold EXCEPT ![i] = "turn"]
@@ -331,13 +337,15 @@ SettleExit(i, has) ==
     /\ wire' = [wire EXCEPT ![i] = 0]
     /\ UNCHANGED <<hand, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
 
-\* waiter and typed: the transcript (`has`), once the turn that took it has
+\* waiter and typed: the transcript (`has`): a waiter's take line (a dequeue
+\* or a remove) at once, a typed write's once the turn that took it has
 \* ended. There, delivered; not there, due again once no answer of it is on
 \* its way to a turn, or the process it was for is gone.
 SettleSeen(i, has) ==
     LET a == row[i].to  gone == pr[a] # row[i].at IN
     /\ up /\ row[i].st = "sending" /\ row[i].via \in {"waiter", "typed"} /\ i \notin hand
-    /\ \/ has /\ (idle[a] \/ gone) /\ row' = [row EXCEPT ![i] = Delivered(i)]
+    /\ \/ has /\ (idle[a] \/ gone \/ row[i].via = "waiter")
+          /\ row' = [row EXCEPT ![i] = Delivered(i)]
        \/ ~has /\ (wire[i] = 0 \/ gone \/ Break = "SettleEarly")
           /\ row' = [row EXCEPT ![i] = DueAgain(i)]
     /\ wire' = IF gone THEN [wire EXCEPT ![i] = 0] ELSE wire
@@ -679,8 +687,10 @@ TypeOK ==
 \* write that may have reached the agent before its row was due again.
 AtMostOnce == \A i \in Ids : Count(i) <= 1 \/ i \in unsure
 
-\* A row is marked only when its addressee's turn has ended (a call answers
-\* inside the turn that called).
+\* A row is marked only when its addressee's turn has ended, but for a call
+\* (it answers inside the turn that called) and a waiter (Claude Code queues
+\* its answer into a running turn; nothing is typed). IntoRunningTurn breaks
+\* it through the typed write and the stream.
 OnlyIntoEndedTurn == "running turn" \notin wrong
 
 \* No turn a row started is cut by a stop's SIGTERM: nothing goes into a

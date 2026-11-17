@@ -164,15 +164,49 @@ defmodule CodingAgentFramework.SessionsTest do
     # A turn runs: the file says busy, the stop is refused, and nothing was sent.
     assert {:ok, :sent} = Control.send(ctx.control, "turn", "busy")
     assert {:ok, _} = file_says(ctx, "busy")
-    assert {:refused, {:not_idle, "busy"}} = Sessions.stop(ctx.sessions, "turn", :idle)
+    assert {:refused, {:not_idle, "busy"}} = Sessions.stop(ctx.sessions, "turn")
     assert %{status: "running"} = Table.get(ctx.table, "test", "turn")
     assert alive?(pid)
 
     # The turn ends: SIGTERM, the stand-in exits 143 as Claude Code does, and the row stops.
     assert {:ok, :sent} = Control.send(ctx.control, "turn", "idle")
     assert {:ok, _} = file_says(ctx, "idle")
-    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "turn", :idle)
+    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "turn")
     refute alive?(pid)
+  end
+
+  # F-122's new-1 (Delivery.tla's IdleRead): a row Mailbox marked before the stop may still
+  # become a turn, so the idle read waits for it, read through `open_to:`; queued rows are not
+  # waited for, since Mailbox marks none to a stopping session.
+  test "a stop waits, idle, until no Mailbox row to the session is sending", ctx do
+    assert {:ok, %{pid: pid}} =
+             Sessions.start(ctx.sessions, "held", ctx.account, launch(ctx, :at_start))
+
+    Agent.update(
+      ctx.open,
+      &Map.merge(&1, %{{"held", :sending} => [4], {"held", :open} => [4, 5]})
+    )
+
+    stop = Task.async(fn -> Sessions.stop(ctx.sessions, "held") end)
+    assert {:ok, _} = row_when(ctx, "held", &(&1.status == "stopping"))
+    assert alive?(pid)
+
+    # The row settles: the SIGTERM goes, with row 5 still queued.
+    Agent.update(ctx.open, &Map.delete(&1, {"held", :sending}))
+    assert {:ok, :stopped} = Task.await(stop, 10_000)
+    refute alive?(pid)
+
+    # Past the stop's deadline with a row still sending: refused, nothing sent, running again.
+    assert {:ok, %{pid: pid}} =
+             Sessions.resume(ctx.sessions, "held", ctx.account, "s-held", launch(ctx, :at_start))
+
+    Agent.update(ctx.open, &Map.put(&1, {"held", :sending}, [6]))
+    stop = Task.async(fn -> Sessions.stop(ctx.sessions, "held") end)
+    assert {:ok, _} = row_when(ctx, "held", &(&1.status == "stopping"))
+    advance(ctx)
+    assert {:refused, {:sending, [6]}} = Task.await(stop, 10_000)
+    assert %{status: "running"} = Table.get(ctx.table, "test", "held")
+    assert alive?(pid)
   end
 
   test "new-9: StopTimedOut leaves the row stopping, late, for Recoveries", ctx do
@@ -181,7 +215,7 @@ defmodule CodingAgentFramework.SessionsTest do
 
     # Stopped by signal, it acts on its SIGTERM only once it is continued.
     assert {:ok, %{status: 0}} = kill(pid, "-STOP")
-    stop = Task.async(fn -> Sessions.stop(ctx.sessions, "deaf", :idle) end)
+    stop = Task.async(fn -> Sessions.stop(ctx.sessions, "deaf") end)
     assert {:ok, _} = row_when(ctx, "deaf", &(&1.status == "stopping"))
     advance(ctx)
     assert {:unknown, {:no_exit, {:ok, :sent}}} = Task.await(stop)
@@ -270,7 +304,7 @@ defmodule CodingAgentFramework.SessionsTest do
     assert {:ok, %{session_id: id}} =
              Sessions.start(ctx.sessions, "linger", ctx.account, lingers)
 
-    stop = Task.async(fn -> Sessions.stop(ctx.sessions, "linger", :idle) end)
+    stop = Task.async(fn -> Sessions.stop(ctx.sessions, "linger") end)
 
     # The stand-in exits 143 on SIGTERM; its wrapper keeps the socket live, so the stop is not done
     # by its deadline.

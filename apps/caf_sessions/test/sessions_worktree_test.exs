@@ -31,7 +31,7 @@ defmodule CodingAgentFramework.SessionsWorktreeTest do
     assert %{status: "running", cwd: ^path, worktree: "added"} = row(ctx, "w1")
     assert {_, 0} = git(ctx, ["-C", ctx.repo, "show-ref", "--verify", "refs/heads/unit/one"])
     assert File.read!(Path.join(path, "built.log")) == "built\n"
-    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "w1", :idle)
+    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "w1")
 
     # The build state the setup made is ignored, so the tree is clean and reused.
     assert {:ok, _} = start(ctx, "w1", "unit/one")
@@ -41,7 +41,7 @@ defmodule CodingAgentFramework.SessionsWorktreeTest do
 
   test "ReusedWasClean: a start refuses a tree with changes, and a resume takes it", ctx do
     assert {:ok, _} = start(ctx, "w2", "unit/two")
-    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "w2", :idle)
+    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "w2")
     File.write!(Path.join([ctx.root, "w2", "work.txt"]), "the killed delegate's work\n")
 
     assert {:refused, {:worktree, :dirty}} = start(ctx, "w2", "unit/two")
