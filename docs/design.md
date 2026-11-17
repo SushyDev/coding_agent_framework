@@ -167,7 +167,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Hosts` | the workstation and the other hosts, how each is reached, and its shell | — |
 | `Shell` | the only module that starts programs, locally or over ssh, each leading a process group of its own, which a timeout ends | — |
 | `Shell.Reaper` | one per host: ends a running command's group when its caller dies first or the VM dies | — |
-| `Programs` | the absolute path of tmux, dtach, claude, git, gh, rsync, ssh, flock, sh, sleep, rm, kill, env, ps, cat and tail on each host, given (from devenv, as the framework's own development and gates use) or looked up on the host's `PATH`, each checked against its supported versions at start with a clear error per one missing or out of range; no other part names a fixed path | — |
+| `Programs` | the absolute path of tmux, dtach, claude, git, gh, rsync, ssh, flock, sh, sleep, rm, kill, env, ps, cat, tail and curl (the waiter hook) on each host, given (from devenv, as the framework's own development and gates use) or looked up on the host's `PATH`, each checked against its supported versions at start with a clear error per one missing or out of range; no other part names a fixed path | — |
 | `Store` | a pure module over SQLite: open with WAL and a busy timeout, the schema and its added columns, `query`, `rows_by_id`, `update`, upsert, a reads row, and a load that fills a newer build's fields with their defaults; every table of the framework is opened through it | no table |
 | `Reader` | a pure module beside `Store`: the loop every reader runs (read on an interval or a call, diff against what it wrote, write with a reads row, cue), and a `Tracker` source made from the reader's table metadata | no table; each reader its own |
 | `Cues` | one per instance: each part declares the topics it reads, and `Cues` hands each cue to the `Tracker` and to every part that declared its topic; the order in which the system settles is the library's, not the app's | no table |
@@ -730,21 +730,42 @@ Its fixtures are captured from a real session once per pinned Claude Code releas
 run and reviewed, with names and paths scrubbed; no test runs the real Claude Code.
 
 **Delivery into a main session** (a report, a reply, a message) types nothing (F-114). Each
-main session's settings name a Stop hook with `asyncRewake: true` and a long `timeout`. Its
-program connects to `Intake` (the same port and secret as the other hooks), names its session,
-and waits: a hold of kind `waiter`, one per session, whose decider is `Mailbox`. When a row is
-due, `Mailbox` marks it sending by the waiter and `Intake` answers that waiter with the text; the program
-writes it to stderr and exits 2, and Claude Code starts a turn with it, even when the session
-is idle. Each turn's end starts the next waiter, so one waits at a time. The transcript holds
-the text as a user line (`Stop hook blocking error from command "Stop": <text>` in 2.1.322),
-which confirms the delivery. A draft a person left in the box is not touched, so the box need
-not be empty.
+main session's launch overlay (item 11's settings overlay, for the main role) names a `command`
+Stop hook with `asyncRewake: true` and a `timeout` of 7,200 s; the account's settings do not,
+since a headless delegate's transport is `stream` (F-121's new-3). `Intake.waiter_hook/5` gives
+the fragment, as `hooks/4` gives the account's; wiring it into a main session's start is R7's
+or `Mains`'. The hook is `sh -c` around `curl` (F-121's new-2): it posts the Stop hook's input
+to `/hooks/<account>/waiter` (a path of its own, so the body is not stored as a `Stop` event)
+and waits. The secret reaches curl as a config on file descriptor 3, by a here-document
+(`-K /dev/fd/3`), and the shell that reads it `exec`s, so the secret is in no process's
+arguments while it waits. `Intake` holds it: a hold of kind `waiter`, one per session, whose
+decider is `Mailbox`. When a row is due, `Mailbox` marks it sending by the waiter and calls
+`Intake.deliver`, which hands the text to the session's waiter: `{:ok, :sent}` once written,
+`{:refused, :no_waiter}`, or `{:unknown, reason}` when the connection closed before the write
+was confirmed. The program writes a response that is not empty once whitespace is stripped to
+stderr and exits 2, and Claude Code starts a turn with it, even when the session is idle;
+anything else, a failed post included, exits 0. Each turn's end starts the next waiter. The
+transcript holds the text as a user line (`Stop hook blocking error from command "Stop":
+<text>` in 2.1.322), which confirms the delivery: `{:ok, :sent}` says the text was written,
+not that it was read. A draft a person left in the box is not touched, so the box need not be
+empty.
 
-A session with no waiter (before its first turn ends, after a waiter's timeout, or after a
-restart cut the waiter's connection) gets nothing that way, and `Intake` knows it, since it
-holds each waiter's connection. What is due is held until a waiter connects; a view shows a
-session idle with no waiter and something due, and the `Inlet`'s checked write reaches it, as
-one more transport of the same row.
+**The waiter's connection** (F-121's new-1). A handler waiting on Bandit is not told that its
+client closed; only a write finds it. So the response is chunked from the start: status 200 at
+once, a newline every 5 s (the heartbeat), and the text as the last chunk; at `Intake`'s
+deadline, 2 minutes under the hook's `timeout`, it ends with no text. A failed write ends the
+hold (`Hold`'s cut). A connection can die unseen until a heartbeat fails, and text written to
+it in that time is not read; the transcript then has no line, and `Mailbox` makes the row due
+again. A second waiter for a session waits behind the first, and the first is sent a heartbeat
+at once; the second takes the first's place once the first's hold ends, by a failed write, its
+text or its deadline. A waiter is answered empty only at its deadline. `Intake.tla` models the
+waiter as `Hold`'s third instance (F-123).
+
+A session with no waiter (before its first turn ends, after a waiter's deadline, or after a
+restart cut the waiter's connection) gets nothing that way, and `Intake` knows it
+(`Intake.waiter?`), once a heartbeat has found a connection that died. What is due is held until
+a waiter connects; a view shows a session idle with no waiter and something due, and the
+`Inlet`'s checked write reaches it, as one more transport of the same row.
 
 **Ending a session** is SIGTERM to its pid, by the row's pid and start time, once its session
 file says `idle`. It replaces a typed `/exit`. Claude Code's shutdown keeps the transcript and
@@ -933,7 +954,8 @@ section.
   instance's in a header, and sets its own `timeout`. No program on the host takes part, so a
   held hook is one open request. PreToolUse and PostToolUse are written only when the app gives
   `Intake` a callback for them, and are not stored as they come: they carry every tool input,
-  and `Transcripts` reads those.
+  and `Transcripts` reads those. A main session's waiter is the one `command` hook: it posts to
+  `/hooks/<account>/waiter` ("Delivery into a main session").
 - **One hold, four kinds** (F-115, R5). A hook that waits is a hold: a key, a deadline under
   the hook's `timeout`, a named decider, exactly one response, a late answer dropped, and a
   settle when the holder or its connection dies (`lost` or `unknown` for a hold with a row,
@@ -945,7 +967,7 @@ section.
   | `permission` | `PermissionRequest` | a person, or an agent's `answer` | 570 s of 600 s | yes |
   | `tool` | `PreToolUse` | the app's callback | 5 s of 10 s | yes |
   | `stop` | `Stop` | the app's callback (item 14) | under the hook's | a decision only |
-  | `waiter` | the `asyncRewake` Stop hook | `Mailbox`'s due row | under the hook's long `timeout` | the delivery's, in `Mailbox` |
+  | `waiter` | the `asyncRewake` Stop hook | `Mailbox`'s due row, by `deliver` | 7,080 s of 7,200 s, with a heartbeat every 5 s | the delivery's, in `Mailbox` |
 
   `Hold.tla` models the hold once, and `Intake.tla` instances it per kind (R4).
 - **A held `PreToolUse`** (F-111). `Intake` asks the app's callback, in a process of its own,
@@ -956,6 +978,8 @@ section.
   keyed by `session_id` and `tool_use_id`, is written "held" when the request is held, as a
   permission's is (F-119's new-3, F-121); a decision moves it "deciding", with the actor `app`,
   before the response, then "answered"; a pass leaves it "passed" and the deadline "expired".
+  Its `data`, the tool's input, stays empty until a decision is taken, since `Transcripts`
+  holds the input (F-121's new-4).
   A second post of the key answers the row's decision, or an empty body. A PostToolUse is
   answered at once and handed to its callback, with no row.
 - **Stored, then acknowledged.** `Intake` writes the event's row, then answers 200 with an empty
@@ -1481,7 +1505,8 @@ are the model before the code they describe (R5, R7 to R10).
   `Intake.tla` instance them; the `/exit` text goes; `slow/Intake_Large.cfg` sets `MaxCalls`,
   and `bin/check-model` parses the slow configurations in the gate. Specs only, about −300 net.
 - **R5. `Intake`'s one hold**: `PermissionRequest`'s and `PreToolUse`'s holds become one
-  structure, then the `waiter` kind (F-114). About +250, −120.
+  structure, then the `waiter` kind (F-114). About +250, −120. Built: the one hold in F-121,
+  the waiter in F-123; wiring the waiter's hook into a main session's start is R7's.
 - **R6. Model**: `Delivery.tla`; `Delegate.tla`, `Team.tla` and `Stream.tla` read it; `Move.tla`
   rewritten with the end by SIGTERM, a restart, and a message in flight during a move across
   accounts: held while no waiter is connected, delivered only to the session on the new account,

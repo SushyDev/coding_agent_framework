@@ -53,6 +53,28 @@
 (* and a second post of one call, which the code answers from the row.    *)
 (* Defense in depth, with no Break: DecidedHasRow, since the row says      *)
 (* deciding before the decision is handed out.                             *)
+(*                                                                         *)
+(* The waiter (F-114, F-123): one session's asyncRewake Stop hooks. Each   *)
+(* turn's end starts a program that posts to Intake and waits; Intake      *)
+(* holds it (HW), with no row of its own: its "row" here is Intake's       *)
+(* memory of the hold, and the call that hands it text answers Mailbox     *)
+(* (mail) from it: answered is {:ok, :sent}, unknown is {:unknown, _}.     *)
+(* The decider is Mailbox's due text, one in flight per session, handed    *)
+(* only to the session's waiter (cur) while it is held; with none,         *)
+(* deliver is refused and nothing changes. The response is chunked: a      *)
+(* heartbeat of whitespace every few seconds, and the text as the last     *)
+(* chunk. The program can die unseen (a compaction, the session's exit);   *)
+(* a write to its connection may still succeed, so text written there is   *)
+(* not read, and only the transcript says what was. The next heartbeat     *)
+(* fails and cuts the hold (Hold's Cut). A second waiter of the session    *)
+(* waits behind the first, which is sent a heartbeat at once, and takes    *)
+(* its place once the first's hold ends. The deadline is hours and the     *)
+(* heartbeat seconds, so a death is found before the deadline: the         *)
+(* guard of WaiterExpires. Sessions are apart, so the spec has one.        *)
+(* Left abstract: the heartbeat's period and the one sent at a second      *)
+(* waiter's arrival (both are HeartbeatFails, enabled while a death is     *)
+(* unseen); what the text says; Mailbox's settle from the transcript       *)
+(* (Delivery.tla), so a row it was told unknown stays so here.             *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets, Sequences
 
@@ -61,6 +83,8 @@ CONSTANTS
     MaxPosts,     \* posts of one event: more than one is a duplicate
     MaxDialogs,   \* permission dialogs of the session, 1..MaxDialogs, in order
     MaxCalls,     \* tool calls of the session, each with its PreToolUse hook
+    MaxWaiters,   \* waiters of the session, started in order, each at a turn's end
+    MaxTexts,     \* texts Mailbox has due for the session
     MaxRestarts,  \* restarts of the framework
     Break         \* "none", or the guard removed (see Breaks)
 
@@ -74,14 +98,20 @@ Breaks == {
     "TrustAnswering",   \* after a restart, a row still "deciding" is taken as answered
     "TypeWhenNoHold",   \* a dialog whose hold is gone is answered by typed keys
     "TwoResponses",     \* the tool deadline fires after the decision was handed out
-    "LateSent"          \* a decision after the tool deadline is still handed out
+    "LateSent",         \* a decision after the tool deadline is still handed out
+    "NoHeartbeat",      \* a waiter's hold writes nothing until its end
+    "RefuseSecond",     \* a second waiter is answered empty while the first is held
+    "RefuseUnknown"     \* text whose write was cut is told refused, not unknown
 }
 
 ASSUME Break \in Breaks
 ASSUME MaxPosts \in Nat /\ MaxDialogs \in Nat /\ MaxCalls \in Nat /\ MaxRestarts \in Nat
+ASSUME MaxWaiters \in Nat /\ MaxTexts \in Nat
 
 Dialogs == 1..MaxDialogs
 Calls == 1..MaxCalls
+Waiters == 1..MaxWaiters
+Texts == 1..MaxTexts
 
 VARIABLES
     up,        \* the framework runs
@@ -111,12 +141,25 @@ VARIABLES
     trow,      \* table: c -> its row (Hold's Rows)
     tmarking,  \* in memory: calls whose decision went out, row not yet marked
     handed,    \* c -> what Intake handed the plug for c, in order: "decision" or "empty"
-    twrong     \* decisions that took another call's hold: none, as each names its own
+    twrong,    \* decisions that took another call's hold: none, as each names its own
+    prog,      \* w -> "none", "waiting", "woke" (read text, exit 2), "idle" (read
+               \*      nothing, exit 0), "failed" (read an error), "gone" (ended unseen)
+    \* w's hold, as Hold.tla's variables (HW)
+    wconn,     \* in memory: Intake holds w's request open
+    wrow,      \* in memory: w's hold (Hold's Rows); no table row
+    wmarking,  \* in memory: waiters whose text was written, not yet marked
+    wout,      \* w -> what was written on w's request, in order: "decision" (text) or "empty"
+    wwrong,    \* text that took another waiter's hold: none, as it takes the session's
+    cur,       \* the session's waiter in Intake's map, or 0
+    gave,      \* w -> the text handed to w, or 0
+    mail,      \* t -> "due", "sending", "sent", "unknown": Mailbox's row, by deliver's answer
+    read       \* t -> how many programs read t (and woke their session with it)
 
 eventVars == <<posts, inflight, toStore, toAck, rows, acked>>
 dialogVars == <<dialog, outcome, hook, conn, hold, written, sent, heard, typed, wrong>>
 toolVars == <<call, cb, tconn, trow, tmarking, handed, twrong>>
-vars == <<up, restarts, eventVars, dialogVars, toolVars>>
+waiterVars == <<prog, wconn, wrow, wmarking, wout, wwrong, cur, gave, mail, read>>
+vars == <<up, restarts, eventVars, dialogVars, toolVars, waiterVars>>
 
 \* PermissionRequest's holds, and PreToolUse's.
 HP == INSTANCE Hold WITH
@@ -132,6 +175,9 @@ HT == INSTANCE Hold WITH
         Break <- CASE Break = "TwoResponses" -> "TwoResponses"
                    [] Break = "LateSent" -> "LateSent"
                    [] OTHER -> "none"
+HW == INSTANCE Hold WITH
+        Reqs <- Waiters, conn <- wconn, row <- wrow, marking <- wmarking, out <- wout,
+        wrong <- wwrong, Break <- "none"
 
 -----------------------------------------------------------------------------
 Init ==
@@ -159,6 +205,16 @@ Init ==
     /\ tmarking = {}
     /\ handed = [c \in Calls |-> <<>>]
     /\ twrong = {}
+    /\ prog = [w \in Waiters |-> "none"]
+    /\ wconn = [w \in Waiters |-> FALSE]
+    /\ wrow = [w \in Waiters |-> "none"]
+    /\ wmarking = {}
+    /\ wout = [w \in Waiters |-> <<>>]
+    /\ wwrong = {}
+    /\ cur = 0
+    /\ gave = [w \in Waiters |-> 0]
+    /\ mail = [t \in Texts |-> "due"]
+    /\ read = [t \in Texts |-> 0]
 
 -----------------------------------------------------------------------------
 (* The framework: its tables survive a restart; open requests do not *)
@@ -175,11 +231,15 @@ FrameworkDies ==
     /\ hook' = [p \in Dialogs |-> IF conn[p] /\ hook[p] = "waiting" THEN "failed" ELSE hook[p]]
     /\ HT!Cut(Calls)
     /\ call' = [c \in Calls |-> IF tconn[c] /\ call[c] = "waiting" THEN "failed" ELSE call[c]]
+    /\ HW!Cut(Waiters)
+    /\ prog' = [w \in Waiters |-> IF wconn[w] /\ prog[w] = "waiting" THEN "failed" ELSE prog[w]]
+    /\ cur' = 0
     /\ UNCHANGED <<posts, rows, acked, dialog, outcome, heard, typed, cb>>
+    /\ UNCHANGED <<wrow, wout, wwrong, gave, mail, read>>
 
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
-    /\ UNCHANGED toolVars
+    /\ UNCHANGED <<toolVars, waiterVars>>
     /\ UNCHANGED <<restarts, eventVars, dialogVars>>
 
 -----------------------------------------------------------------------------
@@ -191,7 +251,7 @@ Posted(e) ==
     /\ posts[e] < MaxPosts
     /\ posts' = [posts EXCEPT ![e] = @ + 1]
     /\ inflight' = IF up THEN [inflight EXCEPT ![e] = @ + 1] ELSE inflight
-    /\ UNCHANGED toolVars
+    /\ UNCHANGED <<toolVars, waiterVars>>
     /\ UNCHANGED <<up, restarts, toStore, toAck, rows, acked, dialogVars>>
 
 \* The row is written once per event: a second post of it finds the row.
@@ -200,14 +260,14 @@ Stored(e) ==
     /\ inflight' = [inflight EXCEPT ![e] = @ - 1]
     /\ toAck' = [toAck EXCEPT ![e] = @ + 1]
     /\ rows' = [rows EXCEPT ![e] = IF @ = 0 \/ Break = "NoDedupe" THEN @ + 1 ELSE @]
-    /\ UNCHANGED toolVars
+    /\ UNCHANGED <<toolVars, waiterVars>>
     /\ UNCHANGED <<up, restarts, posts, toStore, acked, dialogVars>>
 
 Acked(e) ==
     /\ up /\ toAck[e] > 0
     /\ toAck' = [toAck EXCEPT ![e] = @ - 1]
     /\ acked' = [acked EXCEPT ![e] = @ + 1]
-    /\ UNCHANGED toolVars
+    /\ UNCHANGED <<toolVars, waiterVars>>
     /\ UNCHANGED <<up, restarts, posts, inflight, toStore, rows, dialogVars>>
 
 \* Under AckBeforeStore: the 200 goes out first, the row after.
@@ -216,14 +276,14 @@ AckedFirst(e) ==
     /\ inflight' = [inflight EXCEPT ![e] = @ - 1]
     /\ toStore' = [toStore EXCEPT ![e] = @ + 1]
     /\ acked' = [acked EXCEPT ![e] = @ + 1]
-    /\ UNCHANGED toolVars
+    /\ UNCHANGED <<toolVars, waiterVars>>
     /\ UNCHANGED <<up, restarts, posts, toAck, rows, dialogVars>>
 
 StoredLate(e) ==
     /\ up /\ toStore[e] > 0
     /\ toStore' = [toStore EXCEPT ![e] = @ - 1]
     /\ rows' = [rows EXCEPT ![e] = IF @ = 0 THEN @ + 1 ELSE @]
-    /\ UNCHANGED toolVars
+    /\ UNCHANGED <<toolVars, waiterVars>>
     /\ UNCHANGED <<up, restarts, posts, inflight, toAck, acked, dialogVars>>
 
 -----------------------------------------------------------------------------
@@ -236,7 +296,7 @@ DialogOpens(p) ==
     /\ dialog' = [dialog EXCEPT ![p] = "open"]
     /\ hook' = [hook EXCEPT ![p] = IF up THEN "waiting" ELSE "failed"]
     /\ HP!Opens(p, up)
-    /\ UNCHANGED toolVars
+    /\ UNCHANGED <<toolVars, waiterVars>>
     /\ UNCHANGED <<up, restarts, eventVars, outcome, heard, typed>>
 
 \* A person answers on the screen or by Remote Control. The hook goes on
@@ -245,7 +305,7 @@ PersonAnswers(p) ==
     /\ dialog[p] = "open"
     /\ dialog' = [dialog EXCEPT ![p] = "closed"]
     /\ outcome' = [outcome EXCEPT ![p] = "person"]
-    /\ UNCHANGED toolVars
+    /\ UNCHANGED <<toolVars, waiterVars>>
     /\ UNCHANGED <<up, restarts, eventVars, hook, conn, hold, written, sent, heard, typed, wrong>>
 
 \* Claude Code stops waiting. The framework's deadline comes first, so this
@@ -254,14 +314,14 @@ HookTimesOut(p) ==
     /\ hook[p] = "waiting"
     /\ hold[p] \notin {"none", "held", "deciding"} \/ Break \in {"NoOwnDeadline", "NoExpiry"}
     /\ hook' = [hook EXCEPT ![p] = "timedout"]
-    /\ UNCHANGED toolVars
+    /\ UNCHANGED <<toolVars, waiterVars>>
     /\ UNCHANGED <<up, restarts, eventVars, dialog, outcome, conn, hold, written, sent, heard,
                    typed, wrong>>
 
 -----------------------------------------------------------------------------
 (* Intake: a held hook, its answer, its deadline, and a restart (HP) *)
 
-PermissionOnly == UNCHANGED toolVars /\ UNCHANGED <<up, restarts, eventVars>>
+PermissionOnly == UNCHANGED <<toolVars, waiterVars>> /\ UNCHANGED <<up, restarts, eventVars>>
 
 HoldStored(p) ==
     /\ up /\ HP!Held(p)
@@ -308,13 +368,13 @@ AnswerTyped(p) ==
     /\ dialog' = [dialog EXCEPT ![p] = "closed"]
     /\ outcome' = [outcome EXCEPT ![p] = "keys"]
     /\ typed' = typed \cup {p}
-    /\ UNCHANGED toolVars
+    /\ UNCHANGED <<toolVars, waiterVars>>
     /\ UNCHANGED <<up, restarts, eventVars, hook, conn, hold, written, sent, heard, wrong>>
 
 -----------------------------------------------------------------------------
 (* PreToolUse: one response per request, the callback's decision or none (HT) *)
 
-ToolOnly == UNCHANGED <<up, restarts, eventVars, dialogVars>>
+ToolOnly == UNCHANGED <<up, restarts, eventVars, dialogVars, waiterVars>>
 
 \* What the hook reads of a response handed while its request is open.
 Reads(c, what) ==
@@ -380,6 +440,111 @@ ToolSettled(c) ==
     /\ ToolOnly /\ UNCHANGED <<call, cb>>
 
 -----------------------------------------------------------------------------
+(* The waiter: one session's asyncRewake Stop hooks, each a hold (HW) *)
+
+WaiterOnly == UNCHANGED <<up, restarts, eventVars, dialogVars, toolVars>>
+
+\* Intake keeps w as a hold: its text not yet written, or written and not
+\* yet marked. Once its hold ends, the session takes its next waiter.
+Live(w) == w # 0 /\ wrow[w] \in {"held", "deciding"}
+
+\* The waiters held behind the session's one, and the newest of a set.
+Behind == {w \in Waiters : wconn[w] /\ wrow[w] = "held" /\ w # cur}
+Newest(S) == CHOOSE w \in S : \A v \in S : v <= w
+
+\* What a program still waiting reads of an empty response: exit 0.
+Idles(w) == prog' = [prog EXCEPT ![w] = IF @ = "waiting" THEN "idle" ELSE @]
+
+\* A turn ends and Claude Code starts its waiter, which posts the Stop
+\* hook's input and waits. Each starts after the one before it, which may
+\* still run. With the framework down the post fails, and it exits 0.
+WaiterStarts(w) ==
+    /\ prog[w] = "none" /\ \A v \in Waiters : v < w => prog[v] # "none"
+    /\ prog' = [prog EXCEPT ![w] = IF up THEN "waiting" ELSE "failed"]
+    /\ HW!Opens(w, up)
+    /\ WaiterOnly /\ UNCHANGED <<cur, gave, mail, read>>
+
+\* Intake holds it: status 200 at once, then heartbeats. It is the
+\* session's waiter if the session has none; otherwise it waits behind it.
+WaiterHeld(w) ==
+    /\ up /\ HW!Held(w)
+    /\ cur' = IF Live(cur) THEN cur ELSE w
+    /\ WaiterOnly /\ UNCHANGED <<prog, gave, mail, read>>
+
+\* Under RefuseSecond: a waiter behind the session's one is answered empty.
+TurnedAway(w) ==
+    /\ Break = "RefuseSecond" /\ up /\ Live(cur) /\ w # cur /\ HW!Passed(w)
+    /\ Idles(w)
+    /\ WaiterOnly /\ UNCHANGED <<cur, gave, mail, read>>
+
+\* Claude Code ends the program (a compaction, the session's exit, its
+\* timeout), or its connection drops. Intake does not see it yet.
+ProgramDies(w) ==
+    /\ prog[w] = "waiting"
+    /\ prog' = [prog EXCEPT ![w] = "gone"]
+    /\ WaiterOnly /\ UNCHANGED <<wconn, wrow, wmarking, wout, wwrong, cur, gave, mail, read>>
+
+\* A heartbeat to a connection whose program is gone fails, and the hold is
+\* cut. One to a live program, or one that still succeeds, changes nothing.
+HeartbeatFails(w) ==
+    /\ up /\ Break # "NoHeartbeat"
+    /\ wconn[w] /\ wrow[w] = "held" /\ prog[w] = "gone"
+    /\ HW!Cut({w})
+    /\ WaiterOnly /\ UNCHANGED <<prog, cur, gave, mail, read>>
+
+\* Mailbox hands due text t to the session (deliver), one in flight. Intake
+\* takes the session's waiter while it is held. With none, deliver is
+\* refused, and nothing changes.
+TextAsked(t) ==
+    /\ up /\ mail[t] = "due" /\ \A u \in Texts : mail[u] # "sending"
+    /\ Live(cur) /\ HW!Asked(cur, cur)
+    /\ gave' = [gave EXCEPT ![cur] = t]
+    /\ mail' = [mail EXCEPT ![t] = "sending"]
+    /\ WaiterOnly /\ UNCHANGED <<prog, cur, read>>
+
+\* The text is the last chunk, and the response ends. A program still
+\* waiting reads it and exits 2, which wakes its session. To a program gone
+\* unseen the write may still succeed, and no one reads it.
+TextWritten(w) ==
+    /\ up /\ HW!Decides(w)
+    /\ IF prog[w] = "waiting"
+         THEN /\ prog' = [prog EXCEPT ![w] = "woke"]
+              /\ read' = [read EXCEPT ![gave[w]] = @ + 1]
+         ELSE UNCHANGED <<prog, read>>
+    /\ WaiterOnly /\ UNCHANGED <<cur, gave, mail>>
+
+\* The plug tells Intake the write succeeded: deliver answers {:ok, :sent}.
+TextMarked(w) ==
+    /\ up /\ HW!Marked(w)
+    /\ mail' = [mail EXCEPT ![gave[w]] = "sent"]
+    /\ WaiterOnly /\ UNCHANGED <<prog, cur, gave, read>>
+
+\* Intake's deadline, under the hook's timeout: an empty last chunk. A death
+\* is found by a heartbeat first; under NoHeartbeat only the deadline finds it.
+WaiterExpires(w) ==
+    /\ up /\ (prog[w] # "gone" \/ Break = "NoHeartbeat") /\ HW!Expires(w)
+    /\ Idles(w)
+    /\ WaiterOnly /\ UNCHANGED <<cur, gave, mail, read>>
+
+\* A cut hold ends: held is lost, and deciding unknown, since its text may
+\* have been read: deliver answers {:unknown, _}, or, after a restart, its
+\* call ended with Intake. Under RefuseUnknown it answers refused, and the
+\* text is due again.
+WaiterSettles(w) ==
+    /\ up /\ HW!Settles(w)
+    /\ mail' = IF wrow[w] = "deciding"
+                 THEN [mail EXCEPT ![gave[w]] = IF Break = "RefuseUnknown" THEN "due" ELSE "unknown"]
+                 ELSE mail
+    /\ WaiterOnly /\ UNCHANGED <<prog, cur, gave, read>>
+
+\* The session's waiter's hold ended: the newest held behind it takes its
+\* place, or the session has none.
+WaiterReplaced ==
+    /\ up /\ cur # 0 /\ ~Live(cur)
+    /\ cur' = IF Behind = {} THEN 0 ELSE Newest(Behind)
+    /\ WaiterOnly /\ UNCHANGED <<prog, wconn, wrow, wmarking, wout, wwrong, gave, mail, read>>
+
+-----------------------------------------------------------------------------
 Next ==
     \/ FrameworkDies \/ FrameworkStarts
     \/ \E c \in Calls :
@@ -392,6 +557,12 @@ Next ==
          \/ AnswerWritten(p) \/ AnswerMarked(p) \/ HoldExpires(p) \/ HoldSettled(p)
          \/ AnswerTyped(p)
          \/ \E h \in Dialogs : AnswerAsked(p, h)
+    \/ \E w \in Waiters :
+         \/ WaiterStarts(w) \/ WaiterHeld(w) \/ TurnedAway(w) \/ ProgramDies(w)
+         \/ HeartbeatFails(w) \/ TextWritten(w) \/ TextMarked(w) \/ WaiterExpires(w)
+         \/ WaiterSettles(w)
+    \/ \E t \in Texts : TextAsked(t)
+    \/ WaiterReplaced
 
 Fairness ==
     /\ WF_vars(FrameworkStarts)
@@ -403,6 +574,11 @@ Fairness ==
     /\ \A c \in Calls : WF_vars(ToolHeld(c)) /\ WF_vars(DecisionHanded(c))
                         /\ WF_vars(ToolMarked(c)) /\ WF_vars(ToolDeadline(c))
                         /\ WF_vars(ToolSettled(c))
+    /\ \A w \in Waiters : WF_vars(WaiterHeld(w)) /\ WF_vars(TurnedAway(w))
+                          /\ WF_vars(HeartbeatFails(w)) /\ WF_vars(TextWritten(w))
+                          /\ WF_vars(TextMarked(w)) /\ WF_vars(WaiterExpires(w))
+                          /\ WF_vars(WaiterSettles(w))
+    /\ WF_vars(WaiterReplaced)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -422,6 +598,12 @@ TypeOK ==
     /\ cb \in [Calls -> {"none", "asked", "decision", "pass", "used"}]
     /\ HT!TypeOK
     /\ \A c \in Calls : tconn[c] => up
+    /\ prog \in [Waiters -> {"none", "waiting", "woke", "idle", "failed", "gone"}]
+    /\ HW!TypeOK /\ cur \in 0..MaxWaiters
+    /\ gave \in [Waiters -> 0..MaxTexts]
+    /\ mail \in [Texts -> {"due", "sending", "sent", "unknown"}]
+    /\ read \in [Texts -> Nat]
+    /\ \A w \in Waiters : wconn[w] => up
 
 \* A 200 goes back only for an event whose row is written.
 AckedIsStored == \A e \in Events : acked[e] > 0 => rows[e] > 0
@@ -461,5 +643,28 @@ DecidedHasRow == \A c \in Calls : call[c] = "decided" => trow[c] \in {"deciding"
 \* Every held tool call's request ends, with or without a decision, and its
 \* row settles.
 ToolRequestsEnd == HT!RequestsEnd
+
+\* A waiter's request gets one response: its text, or an empty one.
+WaiterOneResponse == HW!OneResponse
+
+\* Text is read at most once: no text deliver was told unknown is handed again.
+ReadOnce == \A t \in Texts : read[t] <= 1
+
+\* A waiter's request ends empty only at its deadline: a second waiter is
+\* never turned away while the first is held.
+EmptyOnlyAtDeadline == \A w \in Waiters : wout[w] = <<"empty">> => wrow[w] = "expired"
+
+\* Every waiter's request ends, and its hold settles.
+WaiterRequestsEnd == HW!RequestsEnd
+
+\* A program gone unseen is found: its request ends by a heartbeat, its
+\* text or a restart, never left to the deadline.
+DeathFound == \A w \in Waiters :
+                (wconn[w] /\ prog[w] = "gone") ~> (~wconn[w] /\ wrow[w] # "expired")
+
+\* A waiter held is the session's, unless its hold ends first.
+WaiterTaken == \A w \in Waiters :
+                 (wconn[w] /\ wrow[w] = "held")
+                   ~> (cur = w \/ wrow[w] \in {"answered", "expired", "lost", "unknown"})
 
 =============================================================================
