@@ -16,13 +16,12 @@ defmodule CodingAgentFramework.Mailbox.Table do
       nil
   """
 
-  alias Exqlite.Sqlite3
+  alias CodingAgentFramework.Store
 
   @columns ~w(id from_agent to_agent text uuid status session_id attempt reply_to subtype
               is_error created_at updated_at)a
 
   @schema """
-  PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY, from_agent TEXT NOT NULL, to_agent TEXT NOT NULL,
     text TEXT NOT NULL, uuid TEXT NOT NULL, status TEXT NOT NULL, session_id TEXT,
@@ -30,34 +29,14 @@ defmodule CodingAgentFramework.Mailbox.Table do
   """
 
   # Added after a file's table may have been made (F-79, F-81), so each is added if missing.
-  @added [reply_to: "TEXT", subtype: "TEXT", is_error: "INTEGER"]
+  @added ["reply_to TEXT", "subtype TEXT", "is_error INTEGER"]
   @reply "CREATE UNIQUE INDEX IF NOT EXISTS messages_reply_to ON messages (reply_to)"
 
-  @type db :: Sqlite3.db()
+  @type db :: Store.db()
 
   @doc "Opens (and creates) the file at `path`, with the table."
   @spec open(String.t()) :: {:ok, db} | {:refused, term}
-  def open(path) do
-    with {:ok, db} <- Sqlite3.open(path),
-         :ok <- Sqlite3.set_busy_timeout(db, 5_000),
-         :ok <- Sqlite3.execute(db, @schema),
-         :ok <- add_columns(db),
-         :ok <- Sqlite3.execute(db, @reply) do
-      {:ok, db}
-    else
-      {:error, reason} -> {:refused, {:sqlite, reason}}
-    end
-  end
-
-  defp add_columns(db) do
-    Enum.reduce_while(@added, :ok, fn {name, type}, :ok ->
-      case Sqlite3.execute(db, "ALTER TABLE messages ADD COLUMN #{name} #{type}") do
-        {:error, "duplicate column name" <> _} -> {:cont, :ok}
-        :ok -> {:cont, :ok}
-        error -> {:halt, error}
-      end
-    end)
-  end
+  def open(path), do: Store.open(path, @schema, added: [messages: @added], then: @reply)
 
   @doc "Stores a message as `queued` and returns its id."
   @spec queued(db, String.t(), String.t(), String.t(), String.t()) :: integer
@@ -66,7 +45,7 @@ defmodule CodingAgentFramework.Mailbox.Table do
       "INSERT INTO messages (from_agent, to_agent, text, uuid, status, created_at, updated_at)"
 
     sql = sql <> " VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?5) RETURNING id"
-    [[id]] = query(db, sql, [from, to, text, uuid, System.os_time(:millisecond)])
+    [[id]] = Store.query(db, sql, [from, to, text, uuid, System.os_time(:millisecond)])
     id
   end
 
@@ -86,7 +65,7 @@ defmodule CodingAgentFramework.Mailbox.Table do
     error = %{true => 1, false => 0}[result[:is_error]]
     args = [from, to, text, uuid, reply_to, result[:subtype], error]
 
-    case query(db, sql, args ++ [System.os_time(:millisecond)]) do
+    case Store.query(db, sql, args ++ [System.os_time(:millisecond)]) do
       [[id]] -> id
       [] -> nil
     end
@@ -96,12 +75,7 @@ defmodule CodingAgentFramework.Mailbox.Table do
   @spec update(db, integer, keyword) :: :ok
   def update(db, id, fields) do
     fields = Keyword.put(fields, :updated_at, System.os_time(:millisecond))
-
-    sets =
-      fields |> Enum.with_index(2) |> Enum.map_join(",", fn {{k, _}, i} -> "#{k} = ?#{i}" end)
-
-    query(db, "UPDATE messages SET #{sets} WHERE id = ?1", [id | Enum.map(fields, &dump/1)])
-    :ok
+    Store.update(db, "messages", id, fields)
   end
 
   @doc "The rows still `queued` or `sending`, oldest first."
@@ -116,10 +90,9 @@ defmodule CodingAgentFramework.Mailbox.Table do
   def unanswered(_db, _session_id, []), do: []
 
   def unanswered(db, session_id, uuids) do
-    marks = Enum.map_join(2..(length(uuids) + 1)//1, ",", &"?#{&1}")
-
     where =
-      "status = 'delivered' AND session_id = ?1 AND uuid IN (#{marks}) AND NOT EXISTS " <>
+      "status = 'delivered' AND session_id = ?1 AND " <>
+        "uuid IN (#{Store.marks(length(uuids), 2)}) AND NOT EXISTS " <>
         "(SELECT 1 FROM messages a WHERE a.reply_to = messages.uuid)"
 
     select(db, where, [session_id | uuids])
@@ -129,25 +102,6 @@ defmodule CodingAgentFramework.Mailbox.Table do
   @spec get(db, integer) :: map | nil
   def get(db, id), do: List.first(select(db, "id = ?1", [id]))
 
-  defp select(db, where, args) do
-    sql = "SELECT #{Enum.join(@columns, ",")} FROM messages WHERE #{where} ORDER BY id"
-    db |> query(sql, args) |> Enum.map(&(@columns |> Enum.zip(&1) |> Map.new()))
-  end
-
-  defp dump({_, v}) when is_binary(v) or is_integer(v) or is_nil(v), do: v
-  defp dump({_, v}), do: inspect(v)
-
-  # The writer's own statements: an error is a bug or a broken file, so it raises and the
-  # supervisor restarts the writer, which reads its rows again from the file.
-  defp query(db, sql, args) do
-    {:ok, stmt} = Sqlite3.prepare(db, sql)
-
-    try do
-      :ok = Sqlite3.bind(stmt, args)
-      {:ok, rows} = Sqlite3.fetch_all(db, stmt)
-      rows
-    after
-      Sqlite3.release(db, stmt)
-    end
-  end
+  defp select(db, where, args),
+    do: Store.select(db, "messages", @columns, where <> " ORDER BY id", args)
 end

@@ -37,12 +37,11 @@ defmodule CodingAgentFramework.Grants.Claims do
   use GenServer
 
   alias CodingAgentFramework.Grants
-  alias Exqlite.Sqlite3
+  alias CodingAgentFramework.Store
 
   @timeout 5_000
 
   @schema """
-  PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS claims (
     id INTEGER PRIMARY KEY, caller TEXT NOT NULL, target BLOB NOT NULL, state BLOB NOT NULL,
     start_id TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL,
@@ -99,11 +98,9 @@ defmodule CodingAgentFramework.Grants.Claims do
     path = Keyword.fetch!(opts, :path)
     start_id = Keyword.fetch!(opts, :start_id)
 
-    with {:ok, db} <- Sqlite3.open(path),
-         :ok <- Sqlite3.set_busy_timeout(db, 5_000),
-         :ok <- Sqlite3.execute(db, @schema) do
+    with {:ok, db} <- Store.open(path, @schema) do
       # Only a row another start wrote is cut off; this start's rows are live.
-      query(
+      Store.query(
         db,
         "UPDATE claims SET status = 'interrupted', updated_at = ?2 " <>
           "WHERE status = 'claimed' AND start_id != ?1",
@@ -112,7 +109,7 @@ defmodule CodingAgentFramework.Grants.Claims do
 
       {:ok, %{db: db, grants: Keyword.fetch!(opts, :grants)}}
     else
-      {:error, reason} -> {:stop, {:sqlite, reason}}
+      {:refused, reason} -> {:stop, reason}
     end
   end
 
@@ -138,7 +135,7 @@ defmodule CodingAgentFramework.Grants.Claims do
           {:refused, :unknown_claim}
 
         %{status: "claimed"} ->
-          query(s.db, "UPDATE claims SET status = ?2, updated_at = ?3 WHERE id = ?1", [
+          Store.query(s.db, "UPDATE claims SET status = ?2, updated_at = ?3 WHERE id = ?1", [
             id,
             Atom.to_string(outcome),
             now()
@@ -180,7 +177,7 @@ defmodule CodingAgentFramework.Grants.Claims do
     t = now()
 
     [[id]] =
-      query(
+      Store.query(
         db,
         "INSERT INTO claims (caller, target, state, start_id, status, created_at, updated_at) " <>
           "VALUES (?1, ?2, ?3, ?4, 'claimed', ?5, ?5) RETURNING id",
@@ -202,7 +199,7 @@ defmodule CodingAgentFramework.Grants.Claims do
     sql =
       "SELECT id, caller, target, state, start_id, status FROM claims WHERE #{where} ORDER BY id"
 
-    for [id, caller, target, state, start_id, status] <- query(db, sql, args) do
+    for [id, caller, target, state, start_id, status] <- Store.query(db, sql, args) do
       %{
         id: id,
         caller: caller,
@@ -215,17 +212,4 @@ defmodule CodingAgentFramework.Grants.Claims do
   end
 
   defp now, do: System.os_time(:millisecond)
-
-  # An error is a bug or a broken file: it raises and the supervisor restarts the writer.
-  defp query(db, sql, args) do
-    {:ok, stmt} = Sqlite3.prepare(db, sql)
-
-    try do
-      :ok = Sqlite3.bind(stmt, args)
-      {:ok, rows} = Sqlite3.fetch_all(db, stmt)
-      rows
-    after
-      Sqlite3.release(db, stmt)
-    end
-  end
 end

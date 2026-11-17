@@ -24,7 +24,7 @@ defmodule CafRecoveries.MixProject do
       {:caf_sampler, in_umbrella: true},
       {:caf_sessions, in_umbrella: true},
       {:caf_tmux, in_umbrella: true},
-      {:exqlite, "~> 0.43.0"},
+      {:caf_store, in_umbrella: true},
       {:caf_control, in_umbrella: true, only: :test},
       {:caf_test, in_umbrella: true, only: :test}
     ]

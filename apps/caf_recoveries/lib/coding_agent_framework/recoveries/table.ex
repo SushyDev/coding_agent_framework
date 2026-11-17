@@ -21,7 +21,7 @@ defmodule CodingAgentFramework.Recoveries.Table do
       {:refused, :claimed}
   """
 
-  alias Exqlite.Sqlite3
+  alias CodingAgentFramework.Store
 
   @columns ~w(id host server key kind socket generation since status reason pane open
               claimed_at opened_at ended_at cleared_at)a
@@ -29,7 +29,6 @@ defmodule CodingAgentFramework.Recoveries.Table do
   @repeating "status = 'failed' AND reason = ':repeating' AND cleared_at IS NULL"
 
   @schema """
-  PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS recoveries (
     id INTEGER PRIMARY KEY, host TEXT NOT NULL, server TEXT NOT NULL, key TEXT NOT NULL,
     kind TEXT NOT NULL, socket TEXT NOT NULL, generation INTEGER, since INTEGER,
@@ -38,20 +37,12 @@ defmodule CodingAgentFramework.Recoveries.Table do
     UNIQUE (host, server, key));
   """
 
-  @type db :: Sqlite3.db()
+  @type db :: Store.db()
   @type row :: %{atom => term}
 
   @doc "Opens (and creates) the file at `path`, with the table. A reader opens its own."
   @spec open(String.t()) :: {:ok, db} | {:refused, term}
-  def open(path) do
-    with {:ok, db} <- Sqlite3.open(path),
-         :ok <- Sqlite3.set_busy_timeout(db, 5_000),
-         :ok <- Sqlite3.execute(db, @schema) do
-      {:ok, db}
-    else
-      {:error, reason} -> {:refused, {:sqlite, reason}}
-    end
-  end
+  def open(path), do: Store.open(path, @schema)
 
   @doc """
   Claims a state at `at`: writes its row as `claimed` and returns its id, or
@@ -77,16 +68,15 @@ defmodule CodingAgentFramework.Recoveries.Table do
     do: insert(db, state, ["skipped", at, inspect(reason)], "reason = excluded.reason")
 
   defp insert(db, state, [status, at, reason], update) do
-    names = Enum.join(@claim ++ [:status, :claimed_at, :reason], ",")
-    values = Enum.map(@claim, &state[&1]) ++ [status, at, reason]
-    marks = Enum.map_join(1..length(values), ",", &"?#{&1}")
+    fields =
+      Enum.map(@claim, &{&1, state[&1]}) ++ [status: status, claimed_at: at, reason: reason]
 
-    case query(
+    case Store.insert(
            db,
-           "INSERT INTO recoveries (#{names}) VALUES (#{marks}) " <>
-             "ON CONFLICT (host, server, key) DO UPDATE SET #{update} " <>
-             "WHERE recoveries.status = 'skipped' RETURNING id",
-           values
+           "recoveries",
+           fields,
+           "ON CONFLICT (host, server, key) DO UPDATE SET #{update} " <>
+             "WHERE recoveries.status = 'skipped' RETURNING id"
          ) do
       [[id]] -> {:ok, id}
       [] -> {:refused, :claimed}
@@ -100,7 +90,7 @@ defmodule CodingAgentFramework.Recoveries.Table do
   @spec losses(db, String.t(), String.t(), String.t(), integer) :: non_neg_integer
   def losses(db, host, server, socket, from) do
     [[n]] =
-      query(
+      Store.query(
         db,
         "SELECT COUNT(*) FROM recoveries WHERE host = ?1 AND server = ?2 AND socket = ?3 " <>
           "AND status != 'skipped' AND claimed_at >= ?4 AND claimed_at > COALESCE(" <>
@@ -116,7 +106,7 @@ defmodule CodingAgentFramework.Recoveries.Table do
   @spec repeating(db, String.t(), String.t()) :: [String.t()]
   def repeating(db, host, server) do
     for [socket] <-
-          query(
+          Store.query(
             db,
             "SELECT DISTINCT socket FROM recoveries WHERE host = ?1 AND server = ?2 " <>
               "AND #{@repeating}",
@@ -129,7 +119,7 @@ defmodule CodingAgentFramework.Recoveries.Table do
   @spec clear(db, String.t(), String.t(), String.t(), integer) :: [integer]
   def clear(db, host, server, socket, at) do
     for [id] <-
-          query(
+          Store.query(
             db,
             "UPDATE recoveries SET cleared_at = ?4 WHERE host = ?1 AND server = ?2 " <>
               "AND socket = ?3 AND #{@repeating} RETURNING id",
@@ -140,13 +130,7 @@ defmodule CodingAgentFramework.Recoveries.Table do
 
   @doc "Sets `fields` (status, reason, pane, open, opened_at, ended_at) on row `id`."
   @spec update(db, integer, keyword) :: :ok
-  def update(db, id, fields) do
-    sets =
-      fields |> Enum.with_index(2) |> Enum.map_join(",", fn {{k, _}, i} -> "#{k} = ?#{i}" end)
-
-    query(db, "UPDATE recoveries SET #{sets} WHERE id = ?1", [id | Enum.map(fields, &dump/1)])
-    :ok
-  end
+  def update(db, id, fields), do: Store.update(db, "recoveries", id, fields)
 
   @doc "A `{host, server}`'s rows that have not ended: `claimed` and `opened`."
   @spec open_rows(db, String.t(), String.t()) :: [row]
@@ -161,7 +145,7 @@ defmodule CodingAgentFramework.Recoveries.Table do
   @spec last_opened(db, String.t(), String.t()) :: %{String.t() => integer}
   def last_opened(db, host, server) do
     db
-    |> query(
+    |> Store.query(
       "SELECT socket, MAX(at) FROM (" <>
         "SELECT socket, opened_at AS at FROM recoveries WHERE host = ?1 AND server = ?2 " <>
         "AND open IN ('ok', 'exists') UNION ALL " <>
@@ -178,34 +162,8 @@ defmodule CodingAgentFramework.Recoveries.Table do
 
   @doc "The rows with these ids; an id with no row is absent."
   @spec rows_by_id(db, [integer]) :: [row]
-  def rows_by_id(_db, []), do: []
+  def rows_by_id(db, ids), do: Store.rows_by_id(db, "recoveries", @columns, ids)
 
-  def rows_by_id(db, ids),
-    do: select(db, "id IN (#{Enum.map_join(1..length(ids), ",", &"?#{&1}")})", ids)
-
-  defp select(db, where, args) do
-    db
-    |> query(
-      "SELECT #{Enum.join(@columns, ",")} FROM recoveries WHERE #{where} ORDER BY id",
-      args
-    )
-    |> Enum.map(&(@columns |> Enum.zip(&1) |> Map.new()))
-  end
-
-  defp dump({_, value}) when is_binary(value) or is_integer(value) or is_nil(value), do: value
-  defp dump({_, value}), do: inspect(value)
-
-  # The writer's own statements: an error here is a bug or a broken file, so it raises and the
-  # supervisor restarts the writer, which reads its rows again from the file.
-  defp query(db, sql, args) do
-    {:ok, stmt} = Sqlite3.prepare(db, sql)
-
-    try do
-      :ok = Sqlite3.bind(stmt, args)
-      {:ok, rows} = Sqlite3.fetch_all(db, stmt)
-      rows
-    after
-      Sqlite3.release(db, stmt)
-    end
-  end
+  defp select(db, where, args),
+    do: Store.select(db, "recoveries", @columns, where <> " ORDER BY id", args)
 end

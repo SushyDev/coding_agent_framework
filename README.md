@@ -133,9 +133,10 @@ Built, each from a checked model in `model/tla/`:
 - `Copies`, `Jobs` and `Services` on any host;
 - launch options per agent (settings, environment, directories, appended prompt, tools);
 - `PreToolUse` held while the app decides, and `PostToolUse` handed on;
-- `Screen`, reading a main session's screen from a real release's fixtures.
+- `Screen`, reading a main session's screen from a real release's fixtures;
+- the remodel's first unit: `Store`, the SQLite table code every writer shares (R1).
 
-Next, the remodel, in order (F-115, taken in F-116): a shared SQLite store (R1); one reader
+Next, the rest of the remodel, in order (F-115, taken in F-116): one reader
 loop, with one `Registry` and one `Transcripts` over every account (R2); one held-process record
 and the end by SIGTERM (R3); `Claim` and `Hold` in the model (R4); one hold in `Intake`, with the
 waiting Stop hook (R5); `Delivery` in the model, and the move rewritten with a message in flight
@@ -152,8 +153,8 @@ start), packaging, and stacks with the LiveView components. The plan and the ord
 
 The code is a Mix umbrella, one OTP app per part under `apps/`. An arrow means "uses"; each app
 declares every app it uses, directly, and `gate-deps` checks that. The chart shows the apps as
-built; the remodel changes it as R1 to R12 land (`caf_store` and `caf_cues` added, `caf_control`
-becoming `caf_inlet`).
+built; the remodel changes it as R1 to R12 land (`caf_store` added in R1, `caf_cues` added,
+`caf_control` becoming `caf_inlet`).
 
 ```mermaid
 flowchart BT
@@ -161,6 +162,7 @@ flowchart BT
     shell[caf_shell]
     tmux[caf_tmux]
     holder[caf_holder]
+    store[caf_store]
   end
   subgraph io["Readers and writers"]
     registry[caf_registry]
@@ -238,6 +240,8 @@ flowchart BT
   jobs --> shell
   jobs --> copies
   services --> shell
+  sessions & delegates & stream & mailbox & intake & jobs --> store
+  services & copies & mcp & grants & recoveries --> store
   services --> holder
   services --> grants
   services --> copies
