@@ -9,9 +9,17 @@
 (*   Stream       the host's one writer for delegates: it marks, spools   *)
 (*                and claims each line, reads the event log, and follows  *)
 (*                a resumed session again (FollowAgain);                  *)
-(*   Stream.Fold  the message and request rows, settled by the events     *)
-(*                (Handle) or at the exit (ExitSeen), and the guards of   *)
-(*                a write (Mark, EndMarked);                              *)
+(*   Stream.Fold  the request rows, and the evidence that settles a       *)
+(*                message's row: its replay (Handle), or the transcript   *)
+(*                at the exit (ExitSeen); the end's guard (EndMarked);    *)
+(*   Mailbox      the message's row, its one mark (Mark) and its settle:  *)
+(*                Delivery.tla's, instanced as D, with the stream as the  *)
+(*                transport. Stream keeps the line's claim and the        *)
+(*                replay, not a message state of its own (R6, R7). Its   *)
+(*                IntoEndedTurn and ReplayedOrFound are Delivery's        *)
+(*                OnlyIntoEndedTurn and SendingSettles, checked here on   *)
+(*                Stream's state; NoResultWait, MsgAfterEnd and           *)
+(*                LogOnlyAtExit remove Delivery's guards;                 *)
 (*   Stream.Line  the one encoder of the lines;                           *)
 (*   ClaudeCLI    the wrapper, which opens the FIFO it is given;          *)
 (*   Sessions     only as the one who starts the resumed process          *)
@@ -152,7 +160,8 @@ VARIABLES
     idle,       \* table: the delegate's turn has ended
     seen,       \* table: the current process was seen live (live_seen)
     gone,       \* table: the delegate's exit is seen
-    msg,        \* table: m -> "queued", "writing", "delivered", "undelivered"
+    row,        \* table: m -> its row in Mailbox (Delivery.tla): due, sending, delivered;
+                \*        due again (`again`) is "undelivered"
     gen,        \* table: m -> its line now: 0 before its mark, then 1, 2 on a resend
     hold,       \* table: r -> "none", "held", "answering", "answered", "canceled", "lost"
     report,     \* table: "none", "ready" (a result handled), "delivered" (to the parent)
@@ -162,11 +171,12 @@ VARIABLES
     wmem,       \* memory: a message line the framework is writing (WriteInFramework)
     begun,      \* memory: message lines the framework began this run (WriteInFramework)
     telling,    \* memory: Sessions held the process and has not yet told Stream
+    hand,       \* memory: rows Mailbox marked this run, not yet claimed (Delivery's)
     \* ghosts
     handled,    \* i -> times event i was handled
     written,    \* l -> times line l began to enter the pipe
     awritten,   \* r -> answer lines for r that entered the pipe
-    partialRead, malformed, intoRunning, wrong,
+    partialRead, malformed, dwrong, wrong,
     endCut,     \* an end was taken while a turn ran
     endEarly,   \* an end was taken before the report was delivered
     endLost,    \* an end was taken while a message was writing or found undelivered
@@ -174,13 +184,39 @@ VARIABLES
 
 cc == <<alive, lives, turn, pipe, tail, cutEnd, log, heard, turns, req, ansTaken>>
 disk == <<spool, cat, cfifo, aspool>>
-fw == <<up, restarts, resumes, offset, idle, seen, gone, msg, gen, hold, report, ending,
-        reading, mine, wmem, begun, telling>>
-ghosts == <<handled, written, awritten, partialRead, malformed, intoRunning, wrong, endCut,
+fw == <<up, restarts, resumes, offset, idle, seen, gone, row, gen, hold, report, ending,
+        reading, mine, wmem, begun, telling, hand>>
+ghosts == <<handled, written, awritten, partialRead, malformed, dwrong, wrong, endCut,
             endEarly, endLost, joined>>
 vars == <<cc, disk, fw, ghosts>>
 
-Settled == {"delivered", "undelivered"}
+Parent == "parent"
+Dg == "delegate"
+
+D == INSTANCE Delivery WITH
+       Ids <- Msgs, Addrs <- {Dg}, Headless <- {Dg}, Senders <- {Parent}, MaxSent <- 0,
+       Awaited <- {}, ClientLeaves <- FALSE, SelfTurns <- FALSE, MaxRestarts <- 0,
+       MaxEnds <- 0, MaxPrompts <- 0, MaxStops <- 0,
+       Break <- CASE Break = "NoResultWait" -> "IntoRunningTurn"
+                  [] Break = "MsgAfterEnd" -> "MarkWhileStopping"
+                  [] Break = "LogOnlyAtExit" -> "LogOnlyAtExit"
+                  [] OTHER -> "none",
+       up <- up,
+       pr <- [a \in {Dg} |-> IF alive THEN lives ELSE 0],
+       idle <- [a \in {Dg} |-> idle],
+       stopping <- [a \in {Dg} |-> ending # "none"],
+       over <- [a \in {Dg} |-> FALSE],
+       row <- row, hand <- hand, wrong <- dwrong,
+       claimed <- {}, wire <- [m \in Msgs |-> 0], waiter <- [a \in {Dg} |-> 0],
+       call <- [m \in Msgs |-> "none"], tx <- [a \in {Dg} |-> <<>>],
+       fold <- [m \in Msgs |-> "none"], rmem <- {}, last <- [a \in {Dg} |-> -1],
+       unsure <- {}, lost <- {},
+       restarts <- 0, lives <- 0, ends <- 0, prompts <- 0, stops <- 0, readAt <- 0
+
+\* A message's row: due, then sending (Stream's "writing"), then delivered;
+\* one found undelivered at an exit is due again.
+Writing(m) == row[m].st = "sending"
+Undelivered(m) == row[m].st = "due" /\ row[m].again
 Line(m) == <<m, gen[m]>>
 MsgLine(l, whole) == [k |-> "msg", id |-> l[1], u |-> UuidOf(l[1], l[2]), l |-> l,
                       whole |-> whole]
@@ -196,11 +232,13 @@ Init ==
     /\ cfifo = [l \in Lines |-> 0] /\ aspool = [r \in Reqs |-> "none"]
     /\ up = TRUE /\ restarts = 0 /\ resumes = 0 /\ offset = 0 /\ idle = TRUE
     /\ seen = FALSE /\ gone = FALSE
-    /\ msg = [m \in Msgs |-> "queued"] /\ gen = [m \in Msgs |-> 0]
+    /\ row = [m \in Msgs |-> [D!NoRow EXCEPT !.from = Parent, !.to = Dg, !.kind = "msg",
+                                              !.re = m, !.st = "due"]]
+    /\ hand = {} /\ gen = [m \in Msgs |-> 0]
     /\ hold = [r \in Reqs |-> "none"] /\ report = "none" /\ ending = "none"
     /\ reading = 0 /\ mine = {} /\ wmem = <<0, 0>> /\ begun = {} /\ telling = TRUE
     /\ handled = <<>> /\ written = [l \in Lines |-> 0] /\ awritten = [r \in Reqs |-> 0]
-    /\ partialRead = FALSE /\ malformed = FALSE /\ intoRunning = FALSE /\ wrong = {}
+    /\ partialRead = FALSE /\ malformed = FALSE /\ dwrong = {} /\ wrong = {}
     /\ endCut = FALSE /\ endEarly = FALSE /\ endLost = FALSE /\ joined = FALSE
 
 -----------------------------------------------------------------------------
@@ -223,7 +261,7 @@ Malformed ==
     /\ alive /\ Len(pipe) >= 2 /\ ~Head(pipe).whole
     /\ Die /\ malformed' = TRUE
     /\ UNCHANGED <<lives, turn, log, heard, turns, ansTaken, disk, fw, handled, written,
-                   awritten, partialRead, intoRunning, wrong, endCut, endEarly, endLost, joined>>
+                   awritten, partialRead, dwrong, wrong, endCut, endEarly, endLost, joined>>
 
 \* A message taken starts a turn, or joins the one running; it is replayed.
 TakeMsg ==
@@ -233,10 +271,8 @@ TakeMsg ==
          /\ turns' = [turns EXCEPT ![m] = @ + 1]
          /\ tail' = [k |-> "replay", id |-> m, u |-> Head(pipe).u]
     /\ heard' = heard \cup {Head(pipe).u}
-    /\ intoRunning' = (intoRunning \/ turn = "running")
     /\ turn' = "running" /\ pipe' = Tail(pipe)
-    /\ UNCHANGED <<alive, lives, cutEnd, log, req, ansTaken, disk, fw, handled, written,
-                   awritten, partialRead, malformed, wrong, endCut, endEarly, endLost, joined>>
+    /\ UNCHANGED <<alive, lives, cutEnd, log, req, ansTaken, disk, fw, ghosts>>
 
 \* A user line whose uuid the transcript holds is not run again: Claude
 \* Code acknowledges it with its replay, and starts no turn.
@@ -273,9 +309,9 @@ TakeEnd ==
     /\ Die
     /\ endCut' = (endCut \/ turn = "running")
     /\ endEarly' = (endEarly \/ report # "delivered")
-    /\ endLost' = (endLost \/ \E m \in Msgs : msg[m] \in {"writing", "undelivered"})
+    /\ endLost' = (endLost \/ \E m \in Msgs : Writing(m) \/ Undelivered(m))
     /\ UNCHANGED <<lives, turn, log, heard, turns, ansTaken, disk, fw, handled, written,
-                   awritten, partialRead, malformed, intoRunning, wrong, joined>>
+                   awritten, partialRead, malformed, dwrong, wrong, joined>>
 
 RequestOpens(r) ==
     /\ alive /\ turn = "running" /\ tail = None /\ req[r] = "none"
@@ -308,7 +344,7 @@ EventWritten ==
     /\ joined' = (joined \/ cutEnd) /\ cutEnd' = FALSE
     /\ handled' = Append(handled, 0) /\ tail' = None
     /\ UNCHANGED <<alive, lives, turn, pipe, heard, turns, req, ansTaken, disk, fw, written,
-                   awritten, partialRead, malformed, intoRunning, wrong, endCut, endEarly,
+                   awritten, partialRead, malformed, dwrong, wrong, endCut, endEarly,
                    endLost>>
 
 \* Sessions starts the resumed process, `--resume <id>`, once the row is
@@ -319,8 +355,8 @@ ProcStarts ==
     /\ alive' = TRUE /\ lives' = lives + 1 /\ turn' = "idle" /\ pipe' = <<>>
     /\ telling' = TRUE
     /\ UNCHANGED <<tail, cutEnd, log, heard, turns, req, ansTaken, disk, up, restarts, resumes,
-                   offset, idle, seen, gone, msg, gen, hold, report, ending, reading, mine, wmem,
-                   begun, ghosts>>
+                   offset, idle, seen, gone, row, hand, gen, hold, report, ending, reading, mine,
+                   wmem, begun, ghosts>>
 
 -----------------------------------------------------------------------------
 (* A claim command: started by the framework, it does not end with it *)
@@ -336,7 +372,7 @@ CatBegins(l) ==
     /\ pipe' = Append(pipe, MsgLine(l, FALSE))
     /\ written' = [written EXCEPT ![l] = @ + 1]
     /\ UNCHANGED <<alive, lives, turn, tail, cutEnd, log, heard, turns, req, ansTaken, spool,
-                   cfifo, aspool, fw, handled, awritten, partialRead, malformed, intoRunning,
+                   cfifo, aspool, fw, handled, awritten, partialRead, malformed, dwrong,
                    wrong, endCut, endEarly, endLost, joined>>
 
 \* The rest goes in: the line is whole if nothing went in after its first
@@ -364,12 +400,13 @@ FrameworkDies ==
     /\ up /\ restarts < MaxRestarts
     /\ up' = FALSE /\ restarts' = restarts + 1
     /\ reading' = 0 /\ mine' = {} /\ wmem' = <<0, 0>> /\ begun' = {} /\ telling' = FALSE
-    /\ UNCHANGED <<cc, disk, resumes, offset, idle, seen, gone, msg, gen, hold, report, ending,
+    /\ hand' = {}
+    /\ UNCHANGED <<cc, disk, resumes, offset, idle, seen, gone, row, gen, hold, report, ending,
                    ghosts>>
 
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
-    /\ UNCHANGED <<cc, disk, restarts, resumes, offset, idle, seen, gone, msg, gen, hold,
+    /\ UNCHANGED <<cc, disk, restarts, resumes, offset, idle, seen, gone, row, hand, gen, hold,
                    report, ending, reading, mine, wmem, begun, telling, ghosts>>
 
 \* A replay that names message m's line now.
@@ -378,8 +415,8 @@ Names(e) == e.k = "replay" /\ gen[e.id] > 0 /\ e.u = UuidOf(e.id, gen[e.id])
 \* What handling event e writes to the tables. A line that does not parse
 \* writes nothing.
 Handle(e) ==
-    /\ msg' = IF Names(e) /\ msg[e.id] = "writing"
-                THEN [msg EXCEPT ![e.id] = "delivered"] ELSE msg
+    /\ row' = IF Names(e) /\ Writing(e.id)
+                THEN [row EXCEPT ![e.id] = D!Delivered(e.id)] ELSE row
     /\ idle' = IF e.k = "result" THEN TRUE ELSE idle
     /\ report' = IF e.k = "result" THEN "ready" ELSE report
     /\ hold' = CASE e.k = "request" /\ hold[e.id] = "none" ->
@@ -397,38 +434,38 @@ Read ==
     /\ LET i == offset + 1 IN
          IF Break = "OffsetBeforeHandle"
            THEN /\ offset' = i /\ reading' = i
-                /\ UNCHANGED <<idle, msg, hold, report, handled>>
+                /\ UNCHANGED <<idle, row, hand, hold, report, handled>>
            ELSE /\ Handle(log[i])
                 /\ handled' = [handled EXCEPT ![i] = @ + 1]
                 /\ IF Break = "OffsetAfterHandle"
                      THEN reading' = i /\ UNCHANGED offset
                      ELSE offset' = i /\ UNCHANGED reading
     /\ UNCHANGED <<cc, disk, up, restarts, resumes, seen, gone, gen, ending, mine, wmem, begun,
-                   telling, written, awritten, partialRead, malformed, intoRunning, wrong,
-                   endCut, endEarly, endLost, joined>>
+                   hand, telling, written, awritten, partialRead, malformed, dwrong, wrong, endCut,
+                   endEarly, endLost, joined>>
 
 ReadFinished ==
     /\ up /\ reading # 0
     /\ reading' = 0
     /\ IF Break = "OffsetAfterHandle"
-         THEN offset' = reading /\ UNCHANGED <<idle, msg, hold, report, handled>>
+         THEN offset' = reading /\ UNCHANGED <<idle, row, hand, hold, report, handled>>
          ELSE /\ Handle(log[reading])
               /\ handled' = [handled EXCEPT ![reading] = @ + 1]
               /\ UNCHANGED offset
     /\ UNCHANGED <<cc, disk, up, restarts, resumes, seen, gone, gen, ending, mine, wmem, begun,
-                   telling, written, awritten, partialRead, malformed, intoRunning, wrong,
-                   endCut, endEarly, endLost, joined>>
+                   hand, telling, written, awritten, partialRead, malformed, dwrong, wrong, endCut,
+                   endEarly, endLost, joined>>
 
 \* Under ReadPartial: the reader takes the log's unfinished last line.
 ReadUnfinished ==
     /\ Break = "ReadPartial" /\ up /\ offset = Len(log) /\ (tail # None \/ cutEnd)
     /\ ~partialRead
     /\ partialRead' = TRUE
-    /\ UNCHANGED <<cc, disk, fw, handled, written, awritten, malformed, intoRunning, wrong,
+    /\ UNCHANGED <<cc, disk, fw, handled, written, awritten, malformed, dwrong, wrong,
                    endCut, endEarly, endLost, joined>>
 
 \* What sets seen leaves the rest of the framework as it was.
-SeenOnly == UNCHANGED <<cc, disk, up, restarts, resumes, offset, idle, gone, msg, gen, hold,
+SeenOnly == UNCHANGED <<cc, disk, up, restarts, resumes, offset, idle, gone, row, hand, gen, hold,
                         report, ending, reading, mine, wmem, begun, ghosts>>
 
 \* A read finds the delegate's socket live.
@@ -450,23 +487,21 @@ HeldTold ==
 \* delivered and no end is marked; one found undelivered goes again,
 \* first, as a new line under its uuid.
 Mark(m) ==
-    /\ up /\ ~gone /\ alive
-    /\ ending = "none" \/ Break = "MsgAfterEnd"
-    /\ msg[m] \in {"queued", "undelivered"} /\ gen[m] < MaxResumes + 1
-    /\ idle \/ Break = "NoResultWait"
-    /\ \A n \in Msgs : n < m => msg[n] = "delivered"
-    /\ msg' = [msg EXCEPT ![m] = "writing"] /\ gen' = [gen EXCEPT ![m] = @ + 1]
+    /\ ~gone /\ gen[m] < MaxResumes + 1
+    /\ D!Mark(m, "stream")
+    /\ gen' = [gen EXCEPT ![m] = @ + 1]
     /\ idle' = FALSE /\ report' = "none"
     /\ seen' = IF Break = "NoWriteSeen" THEN seen ELSE TRUE
     /\ mine' = mine \cup {<<m, gen[m] + 1>>}
     /\ UNCHANGED <<cc, disk, up, restarts, resumes, offset, gone, hold, ending, reading, wmem,
-                   begun, telling, ghosts>>
+                   begun, telling, handled, written, awritten, partialRead, malformed, wrong,
+                   endCut, endEarly, endLost, joined>>
 
 \* Spool the line and start its claim command, which names the FIFO of
 \* the row's resume count now. A spool already claimed is never claimed
 \* again: its line went in, or goes in, by its command.
 Claim(m) ==
-    /\ up /\ msg[m] = "writing" /\ Break # "WriteInFramework"
+    /\ up /\ Writing(m) /\ Break # "WriteInFramework"
     /\ LET l == Line(m) IN
          /\ cat[l] \notin {"running", "writing"}
          /\ \/ spool[l] = "none" /\ (Break # "NoReclaim" \/ l \in mine)
@@ -474,21 +509,22 @@ Claim(m) ==
          /\ spool' = [spool EXCEPT ![l] = "claimed"] /\ cat' = [cat EXCEPT ![l] = "running"]
          /\ cfifo' = [cfifo EXCEPT ![l] = resumes]
          /\ mine' = mine \cup {l}
-    /\ UNCHANGED <<cc, aspool, up, restarts, resumes, offset, idle, seen, gone, msg, gen, hold,
+         /\ hand' = hand \ {m}
+    /\ UNCHANGED <<cc, aspool, up, restarts, resumes, offset, idle, seen, gone, row, gen, hold,
                    report, ending, reading, wmem, begun, telling, ghosts>>
 
 \* Under WriteInFramework: the framework writes the line itself, and a
 \* restart can cut it.
 WriteBegins(m) ==
-    /\ Break = "WriteInFramework" /\ up /\ alive /\ msg[m] = "writing" /\ wmem = <<0, 0>>
+    /\ Break = "WriteInFramework" /\ up /\ alive /\ Writing(m) /\ wmem = <<0, 0>>
     /\ Line(m) \notin begun
     /\ pipe' = Append(pipe, MsgLine(Line(m), FALSE))
     /\ written' = [written EXCEPT ![Line(m)] = @ + 1]
     /\ wmem' = Line(m) /\ begun' = begun \cup {Line(m)}
     /\ UNCHANGED <<alive, lives, turn, tail, cutEnd, log, heard, turns, req, ansTaken, disk, up,
-                   restarts, resumes, offset, idle, seen, gone, msg, gen, hold, report, ending,
-                   reading, mine, telling, handled, awritten, partialRead, malformed,
-                   intoRunning, wrong, endCut, endEarly, endLost, joined>>
+                   restarts, resumes, offset, idle, seen, gone, row, hand, gen, hold, report,
+                   ending, reading, mine, telling, handled, awritten, partialRead, malformed,
+                   dwrong, wrong, endCut, endEarly, endLost, joined>>
 
 WriteEnds ==
     /\ up /\ wmem # <<0, 0>>
@@ -496,8 +532,8 @@ WriteEnds ==
                                         THEN MsgLine(wmem, TRUE) ELSE pipe[i]]
     /\ wmem' = <<0, 0>>
     /\ UNCHANGED <<alive, lives, turn, tail, cutEnd, log, heard, turns, req, ansTaken, disk, up,
-                   restarts, resumes, offset, idle, seen, gone, msg, gen, hold, report, ending,
-                   reading, mine, begun, telling, ghosts>>
+                   restarts, resumes, offset, idle, seen, gone, row, hand, gen, hold, report,
+                   ending, reading, mine, begun, telling, ghosts>>
 
 \* An answer meant for request a, which its sender saw, takes hold h: the
 \* one it names. Under ByNewest it takes whichever is held.
@@ -506,9 +542,9 @@ AnswerAsked(a, h) ==
     /\ h = a \/ (Break = "ByNewest" /\ hold[a] # "held")
     /\ hold' = [hold EXCEPT ![h] = "answering"]
     /\ wrong' = IF h # a THEN wrong \cup {<<a, h>>} ELSE wrong
-    /\ UNCHANGED <<cc, disk, up, restarts, resumes, offset, idle, seen, gone, msg, gen, report,
-                   ending, reading, mine, wmem, begun, telling, handled, written, awritten,
-                   partialRead, malformed, intoRunning, endCut, endEarly, endLost, joined>>
+    /\ UNCHANGED <<cc, disk, up, restarts, resumes, offset, idle, seen, gone, row, hand, gen,
+                   report, ending, reading, mine, wmem, begun, telling, handled, written, awritten,
+                   partialRead, malformed, dwrong, endCut, endEarly, endLost, joined>>
 
 \* The answer's line is spooled and claimed; it fits the pipe's atomic
 \* size, so it goes in whole in one write, to its own process or to none.
@@ -520,14 +556,14 @@ AnswerClaimed(r) ==
               /\ awritten' = [awritten EXCEPT ![r] = @ + 1]
          ELSE UNCHANGED <<pipe, awritten>>
     /\ UNCHANGED <<alive, lives, turn, tail, cutEnd, log, heard, turns, req, ansTaken, spool,
-                   cat, cfifo, fw, handled, written, partialRead, malformed, intoRunning, wrong,
+                   cat, cfifo, fw, handled, written, partialRead, malformed, dwrong, wrong,
                    endCut, endEarly, endLost, joined>>
 
 \* The parent's part: the report of the turn that ended is delivered.
 ReportDelivered ==
     /\ up /\ idle /\ report = "ready"
     /\ report' = "delivered"
-    /\ UNCHANGED <<cc, disk, up, restarts, resumes, offset, idle, seen, gone, msg, gen, hold,
+    /\ UNCHANGED <<cc, disk, up, restarts, resumes, offset, idle, seen, gone, row, hand, gen, hold,
                    ending, reading, mine, wmem, begun, telling, ghosts>>
 
 \* An end is asked: Sessions checks that the report is delivered; Stream
@@ -537,9 +573,9 @@ EndMarked ==
     /\ up /\ ~gone /\ alive /\ ending = "none"
     /\ idle
     /\ report = "delivered" \/ Break = "NoReportWait"
-    /\ \A m \in Msgs : msg[m] \notin {"writing", "undelivered"}
+    /\ \A m \in Msgs : ~Writing(m) /\ ~Undelivered(m)
     /\ ending' = "marked"
-    /\ UNCHANGED <<cc, disk, up, restarts, resumes, offset, idle, seen, gone, msg, gen, hold,
+    /\ UNCHANGED <<cc, disk, up, restarts, resumes, offset, idle, seen, gone, row, hand, gen, hold,
                    report, reading, mine, wmem, begun, telling, ghosts>>
 
 \* The end's line is spooled and claimed, like an answer's.
@@ -548,8 +584,8 @@ EndClaimed ==
     /\ ending' = "claimed"
     /\ pipe' = IF alive THEN Append(pipe, OtherLine("end", 0)) ELSE pipe
     /\ UNCHANGED <<alive, lives, turn, tail, cutEnd, log, heard, turns, req, ansTaken, disk, up,
-                   restarts, resumes, offset, idle, seen, gone, msg, gen, hold, report, reading,
-                   mine, wmem, begun, telling, ghosts>>
+                   restarts, resumes, offset, idle, seen, gone, row, hand, gen, hold, report,
+                   reading, mine, wmem, begun, telling, ghosts>>
 
 \* The delegate's pid is gone, after this run's claims have ended. Once
 \* the log is read to its end, a message still writing is settled by the
@@ -558,12 +594,12 @@ ExitSeen ==
     /\ up /\ ~alive /\ seen /\ ~gone /\ offset = Len(log) /\ reading = 0
     /\ \A l \in mine : cat[l] \notin {"running", "writing"}
     /\ gone' = TRUE
-    /\ msg' = [m \in Msgs |->
-                 IF msg[m] # "writing" THEN msg[m]
+    /\ row' = [m \in Msgs |->
+                 IF ~Writing(m) THEN row[m]
                  ELSE IF UuidOf(m, gen[m]) \in heard /\ Break # "LogOnlyAtExit"
-                   THEN "delivered" ELSE "undelivered"]
+                   THEN D!Delivered(m) ELSE D!DueAgain(m)]
     /\ hold' = [r \in Reqs |-> IF hold[r] \in {"held", "answering"} THEN "lost" ELSE hold[r]]
-    /\ UNCHANGED <<cc, disk, up, restarts, resumes, offset, idle, seen, gen, report, ending,
+    /\ UNCHANGED <<cc, disk, up, restarts, resumes, offset, idle, seen, gen, report, ending, hand,
                    reading, mine, wmem, begun, telling, ghosts>>
 
 \* A resume follows the row again: its offset, messages and requests stay;
@@ -579,8 +615,8 @@ FollowAgain ==
               /\ cutEnd' = FALSE
          ELSE UNCHANGED <<log, handled, cutEnd>>
     /\ UNCHANGED <<alive, lives, turn, pipe, tail, heard, turns, req, ansTaken, disk, up,
-                   restarts, offset, msg, gen, hold, report, reading, mine, wmem, begun,
-                   written, awritten, partialRead, malformed, intoRunning, wrong, endCut,
+                   restarts, offset, row, hand, gen, hold, report, reading, mine, wmem, begun,
+                   written, awritten, partialRead, malformed, dwrong, wrong, endCut,
                    endEarly, endLost, joined>>
 
 -----------------------------------------------------------------------------
@@ -615,7 +651,7 @@ TypeOK ==
     /\ alive \in BOOLEAN /\ turn \in {"idle", "running"} /\ up \in BOOLEAN
     /\ restarts \in 0..MaxRestarts /\ resumes \in 0..MaxResumes /\ lives \in 1..(resumes + 1)
     /\ offset \in 0..Len(log) /\ Len(handled) = Len(log)
-    /\ msg \in [Msgs -> {"queued", "writing", "delivered", "undelivered"}]
+    /\ D!TypeOK
     /\ gen \in [Msgs -> 0..(MaxResumes + 1)]
     /\ hold \in [Reqs -> {"none", "held", "answering", "answered", "canceled", "lost"}]
     /\ req \in [Reqs -> {"none", "pending", "answered", "canceled", "gone"}]
@@ -645,15 +681,15 @@ WrittenOnce == \A l \in Lines : written[l] <= 1
 TakenOnce == \A m \in Msgs : turns[m] <= 1
 
 \* A message goes in only after its delegate's turn ended.
-IntoEndedTurn == ~intoRunning
+IntoEndedTurn == D!OnlyIntoEndedTurn
 
 \* At most one message waits for its replay.
-OneWaiting == Cardinality({m \in Msgs : msg[m] = "writing"}) <= 1
+OneWaiting == Cardinality({m \in Msgs : Writing(m)}) <= 1
 
 \* A row's outcome is what the delegate did; an exit's "undelivered" is
 \* final, since no line waiting for an earlier process reaches a later one.
-DeliveredWasTaken == \A m \in Msgs : msg[m] = "delivered" => turns[m] = 1
-UndeliveredWasNotTaken == \A m \in Msgs : msg[m] = "undelivered" => turns[m] = 0
+DeliveredWasTaken == \A m \in Msgs : row[m].st = "delivered" => turns[m] = 1
+UndeliveredWasNotTaken == \A m \in Msgs : Undelivered(m) => turns[m] = 0
 
 \* An answer reaches only the request it names, at most once.
 OnlyNamedRequest == wrong = {}
@@ -671,7 +707,7 @@ EndLosesNoMessage == ~endLost
 NoJoinedEvent == ~joined
 
 \* A message written is replayed, or found undelivered once the delegate exits.
-ReplayedOrFound == \A m \in Msgs : msg[m] = "writing" ~> msg[m] \in Settled
+ReplayedOrFound == D!SendingSettles
 
 \* A process whose tell a restart cut, and that exited before a read saw
 \* it live: its exit is never seen (F-51's build note, new-3).
@@ -680,7 +716,7 @@ Unseen == ~alive /\ ~seen /\ ~telling /\ lives > resumes
 \* After a resume, a message found undelivered is delivered, or the
 \* delegate exits again.
 ResentOrGone == \A m \in Msgs :
-    (msg[m] = "undelivered" /\ ~gone) ~> (msg[m] = "delivered" \/ gone \/ Unseen)
+    (Undelivered(m) /\ ~gone) ~> (row[m].st = "delivered" \/ gone \/ Unseen)
 
 \* A turn the row says runs ends, waits on a held request, or the delegate exits.
 IdleReturns == (~idle /\ ~gone) ~> (idle \/ gone \/ Unseen \/ \E r \in Reqs : hold[r] = "held")
