@@ -10,6 +10,7 @@ defmodule CodingAgentFramework.GrantsTest do
   doctest Grants
 
   @projects ["app", "web"]
+  @mains for p <- @projects, do: %{name: "#{p}-main", project: p, parent: nil}
 
   # Two projects, one to three delegates per main session.
   defp tree_gen do
@@ -27,7 +28,10 @@ defmodule CodingAgentFramework.GrantsTest do
     Map.merge(mains, Map.new(tree, &{&1.name, {:delegate, &1.project}}))
   end
 
-  defp grants(tree), do: Grants.new(fn -> tree end, operator: "op")
+  # As `Sessions`' tree holds them: each main session is an entry of its own, with no parent.
+  defp grants(tree), do: Grants.new(fn -> with_mains(tree) end, operator: "op")
+
+  defp with_mains(tree), do: @mains ++ tree
 
   defp edge?(places, c, t) do
     case {places[c], places[t]} do
@@ -108,14 +112,18 @@ defmodule CodingAgentFramework.GrantsTest do
     end
   end
 
-  test "a name the tree does not hold is refused, a main session with no delegate too" do
+  test "a name the tree does not hold is refused; a main session with no delegate is held" do
     g = grants([%{name: "app-d1", project: "app", parent: "app-main"}])
     assert Grants.may_message?(g, "app-main", "nobody") == {:refused, {:unknown_agent, "nobody"}}
-
-    assert Grants.may_message?(g, "web-main", "app-main") ==
-             {:refused, {:unknown_agent, "web-main"}}
-
+    # One rule with the Tracker's (F-99's new-3): a main session is its own row of the tree.
+    assert Grants.may_message?(g, "web-main", "app-main") == :ok
     assert Grants.may_fix?(g, "app-main", "app-d1") == :ok
+
+    only =
+      Grants.new(fn -> [hd(@mains), %{name: "app-d1", project: "app", parent: "app-main"}] end)
+
+    assert Grants.may_message?(only, "web-main", "app-main") ==
+             {:refused, {:unknown_agent, "web-main"}}
   end
 
   test "any agent the tree holds may start a service; a kept one goes to the owner's parent" do
@@ -161,9 +169,16 @@ defmodule CodingAgentFramework.GrantsTest do
     assert Grants.may_use?(root, "app-main") == {:refused, {:reserved, "op"}}
 
     # With no operator, its name is any other unknown name.
-    plain = Grants.new(fn -> [%{name: "app-d1", project: "app", parent: "app-main"}] end)
+    plain =
+      Grants.new(fn -> with_mains([%{name: "app-d1", project: "app", parent: "app-main"}]) end)
+
     assert Grants.may_fix?(plain, "op", "app-d1") == {:refused, {:unknown_agent, "op"}}
     assert_raise ArgumentError, fn -> Grants.new(fn -> [] end, operator: "framework") end
+  end
+
+  test "a parent with no entry of its own is no main session" do
+    g = Grants.new(fn -> [%{name: "app-d1", project: "app", parent: "app-main"}] end)
+    assert Grants.may_start_delegate?(g, "app-main") == {:refused, {:unknown_agent, "app-main"}}
   end
 
   test "a delegate named with two parents refuses every check" do
@@ -186,7 +201,7 @@ defmodule CodingAgentFramework.GrantsTest do
         else: one ++ [%{(one |> hd()) | name: "app-d2"}]
     end
 
-    g = Grants.new(tree)
+    g = Grants.new(fn -> with_mains(tree.()) end)
     assert Grants.may_fix?(g, "app-main", "app-d2") == {:refused, {:unknown_agent, "app-d2"}}
     assert Grants.may_fix?(g, "app-main", "app-d2") == :ok
   end

@@ -146,8 +146,8 @@ not compile, and the layers stay one way: base (`caf_shell`,
 `caf_tmux`, `caf_holder` with `Holder.Process`, `caf_store` with `Reader`, `caf_cues`), then
 readers and writers (`caf_registry`, `caf_transcripts`, `caf_usage`, `caf_accounts`, `caf_cli`,
 `caf_screen`, `caf_inlet`, `caf_stream`, `caf_intake`, `caf_sampler`, `caf_acts`), then
-`caf_sessions`, then `caf_tracker` (its sources made from the readers' and `Acts`' table
-metadata) and `caf_recoveries`, then the parts built later. The remodel adds `caf_store` (R1),
+`caf_sessions`, then `caf_tracker` (its sources made from the tables' metadata: the readers',
+`Acts`', `Sessions`' and `Delegates`') and `caf_recoveries`, then the parts built later. The remodel adds `caf_store` (R1),
 `caf_acts` (R10, in place of `Grants.Claims` and `Recoveries`' table) and `caf_cues` (R11), and
 `caf_control` becomes `caf_inlet` (R8), which uses `caf_screen`'s pure reading. Shared test aids that use no part above `caf_shell` live in `caf_test`,
 used only in tests; setup a part's tests share with a higher app's tests lives in that part's
@@ -186,7 +186,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Inlet` | the checked typed write into an interactive session with no waiter: `Screen`'s box check, then `Tmux`'s one-command check, one per host; and the typed commands a session's start or a tool needs (the trust dialog, `/mcp reconnect`, the interrupt key). It is one transport of `Mailbox` | no table |
 | `Stream` | a headless session's transport: a FIFO per process, a spool removed as the line's claim, the event log read from an offset, and its `can_use_tool` requests. Its fold of the log (each message's replay, each result) is evidence `Mailbox` and `Sessions` read; it keeps no delivery state of its own | `stream_delegates` |
 | `Intake` | hook events in; one hold, of four kinds: `permission` (a person's or an agent's `answer`), `tool` (`PreToolUse`, the app's callback), `stop` (`Stop` held for the app's callback) and `waiter` (a main session's waiting Stop hook, answered with `Mailbox`'s due text) | `intake_events` |
-| `Sessions` | the agent row: one row per agent, main session or delegate, with its kind, parent, project, account, launch options, held process and status; start, resume, and stop by SIGTERM once idle; the tree as one function of its rows; each session's turn state as one function per kind of session, from its evidence | `agents` |
+| `Sessions` | the agent row: one row per agent, main session or delegate, with its kind, parent, project, account, launch options, held process and status; start, resume, and stop by SIGTERM once idle; the tree as one function of its rows; each session's turn state as one function per kind of session, from its evidence. Other parts read its rows only through `Sessions.Agents`, a pure module over a reader's own connection, which answers what each status means | `agents` |
 | `Mover` | drains a session and moves it between accounts; its phase is a field of the agent row | — |
 | `Mains` | each project's main sessions, as agent rows of kind `main`; the pull after a landing, and the start of one for a project that has none | — |
 | `Delegates` | the delegate protocol only: its checks, the cap, the account pick, resume once, report a second kill; it hands the report to `Mailbox` as the reply to the brief | `delegates`: branch, brief uuid, resumes, whether the report was taken |
@@ -234,7 +234,12 @@ any reply does (new-4).
   interactive one's from the session file's `status` and `Intake`'s waiter. Its end is SIGTERM
   once idle (or `end_session` for a headless one), and it is `stopped` once the process is gone
   and the socket dead. `Recoveries` ends an orphan by the same record, under its act in `Acts`.
-  A move is a phase on the same row.
+  A move is a phase on the same row. A main session the app declares is a row `declared`
+  until it starts; a delegate done for good is `ended`. The tree is every row of kind `main`
+  and every delegate's row with its parent (`Sessions.Agents.tree/1`): an ended delegate
+  keeps its edge, so what it kept goes to its parent and a message to it is settled ended,
+  but no longer holds its parent's cap. `Grants` reads the tree from the table, and the
+  `Tracker` folds its view's rows by the same function.
 - **A delivery.** Anything for an agent is a row in `Mailbox`. `Mailbox` picks the oldest due
   row per addressee, marks it `sending` with its transport, and hands it on: a `Stream` line
   for a headless session, the waiter's answer for an interactive one with a waiter, the
@@ -494,11 +499,17 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
   table of projects and no default cap. A delegate holds its parent's cap from its row's
   start until it ends: starting, running, resuming, finished or failed, since a finished one
   still holds its worktree and its report.
-- A delegate's life (running, finished, failed, ended) is its agent row's status in `Sessions`,
-  and which statuses hold the cap is one function there (R9). `Delegates`' own row keeps the
-  marks of its own calls (starting, resuming) and its own facts: branch, brief uuid, resumes,
-  and whether the report was taken. It reads `Sessions`' state only through `Sessions`'
-  functions.
+- A delegate's life is its agent row in `Sessions`: whether its process may live, and whether
+  it has `ended`, which `Sessions` writes when `Delegates` asks (`Sessions.ended/3`) once no
+  process of it may live: a failed one at once, since it is never resumed again, and a
+  finished one once its report was delivered, since only then is it stopped. Which rows hold
+  an agent, and so the cap, is one function there (`Sessions.Agents.holds?/1`, R9): a
+  delegate holds its parent's cap from its start (its call under way in `Delegates`, then its
+  agent row) until it has ended or its start was refused. `Delegates`' own row keeps the marks
+  of its own calls (starting, resuming), the protocol's outcome (running, finished with a
+  reply, failed with a notice, refused) and its own facts: branch, model, brief uuid, resume
+  uuid, resumes, and whether the report was taken. It reads `Sessions`' state only through
+  `Sessions.Agents`.
 - A main session is an agent row of kind `main` with no parent, written by the app until
   `Mains`, and the delegate's agent row names its parent. `Grants` reads the tree from those
   rows, so a delegate can name only one parent (F-73's new-3 and new-4 end with R9).
@@ -1546,7 +1557,9 @@ code:
 that each later unit is a few lines in one part of one shape rather than one more copy of a
 mechanism. Each unit keeps every gate green at its end. Sizes are changed lines apart from
 fixtures, estimated by F-115. R1 to R3 change no behavior and may go in any order; R4 and R6
-are the model before the code they describe (R5, R7 to R10).
+are the model before the code they describe (R5, R7 to R10). R9 goes before R8: R8's typed
+write needs R9's turn function for an interactive session, never one read alone (F-127's
+new-2, F-113's new-2).
 
 - **R1. `caf_store`**, and the writers' tables on it (`Sessions`, `Delegates`, `Stream`,
   `Mailbox`, `Intake`, `Jobs`, `Services`, `Copies`, `MCP`, `Claims`, `Recoveries`); `Tmux.Fake`
@@ -1583,7 +1596,17 @@ are the model before the code they describe (R5, R7 to R10).
 - **R9. The agent row and the tree**: `Sessions`' row takes kind, parent and project; the tree,
   the statuses that hold an agent and each session's turn state are functions there; `Grants`,
   the `Tracker`, `Mailbox` and the app read them, and no part opens another's table. A main
-  session is a row of kind `main` (most of item 6). About +300, −350.
+  session is a row of kind `main` (most of item 6). About +300, −350. Goes before R8. In two
+  parts (F-129's new-1). Part 1, built in F-129: `Sessions`' `agents` table (from
+  `held_sessions`) with kind, parent and project, a main session the app declares written
+  `declared`, a delegate done for good `ended`; `Sessions.Agents`, the read side every other
+  part uses, with the tree as one function of the rows and each status's meaning once, checked
+  when it compiles; `Delegates`' table cut to its own facts; `Grants`, the `Tracker`, `Mailbox`,
+  `Delegates` and the app reading through it; `Sessions`' and `Delegates`' `Tracker` sources
+  made from their tables' metadata (`TableSource`). Part 2: the turn state per kind of session,
+  the `Acts` rows (a start, `Delegates`' resume, a service's restart and stop, a raised
+  error), `Store.update/4`'s one rule for a term in a column, and `Stream`'s and `Intake`'s
+  sources as `TableSource`.
 - **R10. `Acts`**: `Claims`' and `Recoveries`' rows in one table with a unique index and a cue;
   the fault ledger of item 14 is its query and its topic. About +250, −300. Built in F-126:
   `Acts` writes the rows; starts and raised errors take its `record`, and wiring them into

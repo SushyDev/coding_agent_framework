@@ -13,6 +13,7 @@ defmodule CodingAgentFramework.DelegatesTest do
   alias CodingAgentFramework.{Sessions, SessionsSetup, Stream, Transcripts, Usage}
   alias CodingAgentFramework.ClaudeCLI.Options
   alias CodingAgentFramework.Delegates.Table
+  alias CodingAgentFramework.Sessions.Agents
 
   setup {SessionsSetup, :sessions}
 
@@ -81,10 +82,8 @@ defmodule CodingAgentFramework.DelegatesTest do
 
     {:ok, dtable} = Table.open(db)
     {:ok, mtable} = Mailbox.Table.open(db)
-
-    tree = fn ->
-      Table.with_status(dtable, "test", ~w(starting running resuming finished failed))
-    end
+    {:ok, agents} = Agents.open(db, "test")
+    tree = fn -> [%{name: "main", project: "app", parent: nil} | Agents.read_tree(agents)] end
 
     mopts = [db: db, grants: Grants.new(tree), stream: ctx.stream, sessions_db: db, host: "test"]
     mailbox = start_supervised!(Supervisor.child_spec({Mailbox, mopts}, id: make_ref()))
@@ -96,6 +95,7 @@ defmodule CodingAgentFramework.DelegatesTest do
      dopts: opts,
      fifo: fifo,
      dtable: dtable,
+     agents: agents,
      mailbox: mailbox,
      mopts: mopts,
      mtable: mtable}
@@ -109,8 +109,10 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert {:ok, %{id: id, name: "app-unit-one", account: "work", brief_uuid: u}} =
              start(ctx, "app", "unit/one")
 
-    # The brief is Mailbox's row, stored before the session, from the parent, under its uuid.
-    assert %{brief_uuid: ^u, brief: "Review it."} = Table.get(ctx.dtable, id)
+    # The brief is Mailbox's row, stored before the session, from the parent, under its uuid;
+    # the agent row names the parent and the project.
+    assert %{brief_uuid: ^u} = Table.get(ctx.dtable, id)
+    assert %{kind: "delegate", parent: "main", project: "app"} = session_row(ctx, "app-unit-one")
 
     assert [%{uuid: ^u, kind: "brief", from_agent: "main", to_agent: "app-unit-one"}] =
              Enum.filter(rows(ctx), &(&1.kind == "brief"))
@@ -172,8 +174,8 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert Table.rows(ctx.dtable, "test") == []
     hold(ctx)
     options = %{"env" => %{"APP_MODE" => "review"}, "disallowed_tools" => ["WebFetch"]}
-    assert {:ok, %{id: id, session_id: sid, brief_uuid: u}} = start.(options: options)
-    kept = Table.get(ctx.dtable, id).options
+    assert {:ok, %{id: id, name: name, session_id: sid, brief_uuid: u}} = start.(options: options)
+    kept = session_row(ctx, name).options
     assert {:ok, %{env: %{"APP_MODE" => "review"}}} = Options.decode(kept)
 
     stream_row(ctx, id, &(&1.messages[u].state == :delivered))
@@ -183,7 +185,7 @@ defmodule CodingAgentFramework.DelegatesTest do
     {:ok, _} = resumed(ctx, id)
     {:ok, again} = await(fn -> if a = HeadlessStandIn.argv(ctx.dir, sid), do: {:ok, a} end)
     assert ["--disallowedTools", "WebFetch", "--resume"] -- again == []
-    assert Table.get(ctx.dtable, id).options == kept
+    assert session_row(ctx, name).options == kept
   end
 
   test "a second kill before the last reply is the report, never resumed again", ctx do
@@ -254,7 +256,7 @@ defmodule CodingAgentFramework.DelegatesTest do
         10_000
       )
 
-    Delegates.cue(delegates, %{topic: "sessions:test:work", ids: []})
+    Delegates.cue(delegates, %{topic: "sessions:test", ids: []})
     assert {:ok, %{brief_uuid: u}} = cue_until(ctx, id, &(&1.status == "finished"))
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}"]
 
@@ -262,13 +264,9 @@ defmodule CodingAgentFramework.DelegatesTest do
     lost =
       Table.starting(ctx.dtable, %{
         host: "test",
-        parent: "main",
-        project: "app",
         branch: "unit/lost",
         name: "app-unit-lost",
-        account: "work",
         model: "opus",
-        brief: "b",
         brief_uuid: "x",
         deadline: Agent.get(ctx.clock, & &1)
       })
@@ -292,8 +290,9 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert {:ok, %{status: "queued", kind: "reply"}} = Mailbox.answer_to(ctx.mailbox, u)
 
     # A second delegate's report, taken by the call that waits on it.
-    # The project's cap is one: the first row is set apart so a second may start.
-    Table.update(ctx.dtable, id, status: "refused")
+    # The project's cap is one: the first agent is set apart so a second may start.
+    %{id: first} = session_row(ctx, Table.get(ctx.dtable, id).name)
+    CodingAgentFramework.Sessions.Table.update(ctx.table, first, status: "ended")
     assert {:ok, %{id: two, brief_uuid: u2}} = start(ctx, "app", "unit/two")
     wait = caller(ctx, u2, 10_000)
     {:ok, _} = cue_until(ctx, two, &(&1.report == "taken"))
@@ -339,25 +338,27 @@ defmodule CodingAgentFramework.DelegatesTest do
     {:ok, _} = mailbox_until(ctx, open, &(&1.status == "delivered"))
     stream_row(ctx, id, & &1.idle)
 
-    # Stopped: the process is gone, and the row is `ended` without a cue from the test, as the
-    # stop's own end brings it. It is announced, and its cap is free.
+    # Stopped: the process is gone, and the agent row is `ended` without a cue from the test, as
+    # the stop's own end brings it. It keeps its place in the tree, and its cap is free.
     {:ok, state} = Delegates.fix_state(current(ctx), "main", name)
     assert {:ok, :stopped} = Delegates.fix(current(ctx), "main", name, :stop, state)
 
-    {:ok, %{status: "ended", report: "taken"}} =
+    {:ok, %{status: "ended"}} =
       await(fn ->
-        case Table.get(ctx.dtable, id) do
+        case session_row(ctx, name) do
           %{status: "ended"} = row -> {:ok, row}
           _ -> :none
         end
       end)
 
+    assert %{status: "finished", report: "taken"} = Table.get(ctx.dtable, id)
+    assert Agents.children(ctx.agents, "main") == 0
     assert {:ok, %{id: two}} = start(ctx, "app", "unit/two")
     assert two != id
 
-    # A later cue does not move an ended row, and a second stop is refused.
+    # A later cue does not move an ended agent, and a second stop is refused.
     cue(ctx, current(ctx))
-    assert %{status: "ended"} = Table.get(ctx.dtable, id)
+    assert %{status: "ended"} = session_row(ctx, name)
     {:ok, state} = Delegates.fix_state(current(ctx), "main", name)
     assert {:refused, _} = Delegates.fix(current(ctx), "main", name, :stop, state)
   end
@@ -424,7 +425,7 @@ defmodule CodingAgentFramework.DelegatesTest do
 
   # A held turn waits on its permission request: answering it lets the turn end.
   defp allow(ctx, id, uuid) do
-    %{session_id: sid} = Table.get(ctx.dtable, id)
+    %{session_id: sid} = session_row(ctx, Table.get(ctx.dtable, id).name)
     stream_row(ctx, id, &(&1.requests["req-" <> uuid] != nil))
     {:ok, _} = Stream.write(ctx.stream, sid, {:answer, "req-" <> uuid, :allow})
   end
@@ -521,7 +522,7 @@ defmodule CodingAgentFramework.DelegatesTest do
   end
 
   defp stream_row(ctx, id, ok?) do
-    %{session_id: sid} = Table.get(ctx.dtable, id)
+    %{session_id: sid} = session_row(ctx, Table.get(ctx.dtable, id).name)
 
     {:ok, row} =
       await(

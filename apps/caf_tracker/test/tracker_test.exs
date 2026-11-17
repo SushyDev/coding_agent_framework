@@ -4,7 +4,7 @@ defmodule CodingAgentFramework.TrackerTest do
 
   alias CodingAgentFramework.{Registry, TestHost, Tracker}
   alias CodingAgentFramework.Registry.Table
-  alias CodingAgentFramework.Tracker.{Fold, ReaderSource}
+  alias CodingAgentFramework.Tracker.{Fold, TableSource}
   alias Exqlite.Sqlite3
 
   doctest Tracker
@@ -20,7 +20,7 @@ defmodule CodingAgentFramework.TrackerTest do
   end
 
   defp sources(db),
-    do: for({h, a} <- @scopes, do: {ReaderSource, table: Table, db: db, host: h, account: a})
+    do: for({h, a} <- @scopes, do: {TableSource, table: Table, db: db, host: h, account: a})
 
   defp start(db, clock, notify \\ fn _ -> :ok end) do
     {:ok, t} =
@@ -233,7 +233,7 @@ defmodule CodingAgentFramework.TrackerTest do
         File.mkdir_p!(Path.join(dir, "sessions"))
         File.write!(Path.join(dir, "sessions/7.json"), ~s({"pid": 7, "sessionId": "s#{n}"}))
         db = Path.join(dir, "r.db")
-        src = [{ReaderSource, table: Table, db: db, host: "test", account: "a"}]
+        src = [{TableSource, table: Table, db: db, host: "test", account: "a"}]
 
         reg = [
           programs: TestHost.programs(),
@@ -271,11 +271,10 @@ defmodule CodingAgentFramework.TrackerTest do
     dir = TestHost.test_dir()
     db = Path.join(dir, "r.db")
     {ref, now} = clock()
-    src = {ReaderSource, table: Table, db: db, host: "h", account: "a"}
+    src = {TableSource, table: Table, db: db, host: "h", account: "a"}
 
     broken =
-      {ReaderSource,
-       table: Table, db: Path.join(dir, "no/such/dir/r.db"), host: "h", account: "x"}
+      {TableSource, table: Table, db: Path.join(dir, "no/such/dir/r.db"), host: "h", account: "x"}
 
     {:ok, t} = Tracker.start_link(sources: [src, broken], clock: now)
 

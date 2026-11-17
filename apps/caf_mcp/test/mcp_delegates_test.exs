@@ -40,12 +40,14 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
 
     {:ok, dtable} = Table.open(db)
 
-    # Until `Mains` exists, a main session is known as a parent a delegate's row names: `app-old`
-    # and `lib-old` stand for earlier delegates of `main` and `lmain`.
-    tree = fn ->
-      rows = Table.with_status(dtable, "test", ~w(starting running resuming finished failed))
-      [%{name: "app-old", parent: "main"}, %{name: "lib-old", parent: "lmain"} | rows]
-    end
+    # The main sessions are agent rows, declared as the embedding app declares them until
+    # `Mains`; `app-old` and `lib-old` stand for earlier delegates of `main` and `lmain`.
+    for {name, project} <- [{"main", "app"}, {"lmain", "lib"}],
+        do: Sessions.Table.declare(ctx.table, "test", name, project)
+
+    {:ok, agents} = Sessions.Agents.open(db, "test")
+    old = [%{name: "app-old", parent: "main"}, %{name: "lib-old", parent: "lmain"}]
+    tree = fn -> old ++ Sessions.Agents.read_tree(agents) end
 
     grants = Grants.new(tree, operator: "op")
 
@@ -72,13 +74,9 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
       )
 
     sources = [
-      {Tracker.DelegatesSource, db: db, host: "test"},
+      {Tracker.TableSource, table: Transcripts.Table, db: db, host: "test", account: "work"},
+      {Tracker.TableSource, table: Sessions.Table, db: db, host: "test"},
       {Tracker.StreamSource, db: db, host: "test"}
-    ]
-
-    sources = [
-      {Tracker.ReaderSource, table: Transcripts.Table, db: db, host: "test", account: "work"}
-      | sources
     ]
 
     tracker = start_supervised!({Tracker, sources: sources, timer: false})
@@ -116,6 +114,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
       end
 
     %{mcp: mcp, tokens: tokens, delegates: delegates, dtable: dtable, mailbox: mailbox}
+    |> Map.put(:table, ctx.table)
     |> Map.merge(%{tracker: tracker, transcripts: transcripts})
     |> Map.put(:acts, acts)
   end
@@ -150,16 +149,16 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     assert tool(ctx, "main", "start_delegate", args.(%{"env" => %{"HOME" => "/x"}})) == bad
     options = %{"add_dirs" => ["/srv/docs"], "allowed_tools" => ["Read"]}
     assert %{"ok" => _} = tool(ctx, "main", "start_delegate", args.(options))
-    assert [%{options: kept}] = Table.with_status(ctx.dtable, "test", ~w(running finished))
-    assert JSON.decode!(kept) == options
+    assert [%{name: name}] = Table.with_status(ctx.dtable, "test", ~w(running finished))
+    assert JSON.decode!(agent(ctx, name).options) == options
   end
 
   test "start_delegate is the main session's, by its token, and answers the name at once", ctx do
     args = Map.put(start_args("unit/one"), "parent", "app-old")
     assert tool(ctx, "main", "start_delegate", args) == %{"ok" => %{"delegate" => "app-unit-one"}}
 
-    assert [%{parent: "main", name: "app-unit-one"}] =
-             Table.with_status(ctx.dtable, "test", ~w(running finished))
+    assert [%{name: "app-unit-one"}] = Table.with_status(ctx.dtable, "test", ~w(running finished))
+    assert %{parent: "main"} = agent(ctx, "app-unit-one")
 
     assert tool(ctx, "app-old", "start_delegate", start_args("unit/two")) ==
              %{"refused" => "main_session_only"}
@@ -232,8 +231,8 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     assert tool(ctx, "main", "run_delegate", args) ==
              %{"unknown" => %{"delegate" => "app-unit-one", "reason" => "timeout"}}
 
-    [%{session_id: sid, brief_uuid: u}] =
-      Table.with_status(ctx.dtable, "test", ~w(running finished))
+    [%{name: name, brief_uuid: u}] = Table.with_status(ctx.dtable, "test", ~w(running finished))
+    %{session_id: sid} = agent(ctx, name)
 
     {:ok, _} = await(fn -> requested(ctx, sid, "req-" <> u) end, 10_000)
     {:ok, _} = Stream.write(ctx.stream, sid, {:answer, "req-" <> u, :allow})
@@ -401,10 +400,13 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
 
   defp running(ctx, name) do
     case Enum.find(Table.with_status(ctx.dtable, "test", ~w(running)), &(&1.name == name)) do
-      %{session_id: sid} = row when is_binary(sid) -> {:ok, row}
-      _ -> nil
+      nil -> nil
+      row -> {:ok, Map.put(row, :session_id, agent(ctx, name).session_id)}
     end
   end
+
+  # The delegate's agent row, `Sessions`' own.
+  defp agent(ctx, name), do: Sessions.Table.get(ctx.table, "test", name)
 
   # Starts a delegate whose brief waits on a permission request, and answers the request's id
   # once Stream has read it.
@@ -412,7 +414,8 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     {:ok, _} = MCP.call(ctx.mcp, "main", "start_delegate", start_args(branch))
     name = "app-" <> String.replace(branch, "/", "-")
     rows = Table.with_status(ctx.dtable, "test", ~w(running))
-    %{session_id: sid, brief_uuid: u} = Enum.find(rows, &(&1.name == name))
+    %{brief_uuid: u} = Enum.find(rows, &(&1.name == name))
+    %{session_id: sid} = agent(ctx, name)
     {:ok, _} = await(fn -> requested(ctx, sid, "req-" <> u) end, 10_000)
     {"req-" <> u, sid}
   end
@@ -460,7 +463,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
         Mailbox.status(ctx.mailbox, 0)
         :sys.get_state(ctx.delegates)
 
-        for t <- ~w(delegates:test stream:test transcripts:test:work),
+        for t <- ~w(sessions:test stream:test transcripts:test:work),
             do: Tracker.cue(ctx.tracker, %{topic: t})
 
         {:ok, tree} = Tracker.agents(ctx.tracker)

@@ -4,7 +4,7 @@ defmodule CodingAgentFramework.Tracker do
 
   The caller's supervision tree starts one `Tracker` per instance, with no name, and gives it
   its sources as `{module, opts}` (`CodingAgentFramework.Tracker.Source`), such as
-  `{Tracker.ReaderSource, table: Registry.Table, db: path, host: "laptop", account: "work"}`.
+  `{Tracker.TableSource, table: Registry.Table, db: path, host: "laptop", account: "work"}`.
   At start it reads every source in full, so a restarted `Tracker` comes back from the tables
   alone.
 
@@ -22,7 +22,7 @@ defmodule CodingAgentFramework.Tracker do
       iex> dir = CodingAgentFramework.TestHost.test_dir()
       iex> me = self()
       iex> {:ok, tracker} = CodingAgentFramework.Tracker.start_link(
-      ...>   sources: [{CodingAgentFramework.Tracker.ReaderSource,
+      ...>   sources: [{CodingAgentFramework.Tracker.TableSource,
       ...>              table: CodingAgentFramework.Registry.Table,
       ...>              db: Path.join(dir, "r.db"), host: "laptop", account: "work"}],
       ...>   notify: &send(me, &1))

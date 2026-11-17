@@ -24,6 +24,7 @@ defmodule CodingAgentFramework.MCPServicesTest do
     """)
 
     tree = [
+      %{name: "app-main", project: "app", parent: nil},
       %{name: "app-fix", project: "app", parent: "app-main"},
       %{name: "app-other", project: "app", parent: "app-main"},
       %{name: "app-fix1", project: "app", parent: "app-fix"}

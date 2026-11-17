@@ -48,7 +48,7 @@ defmodule CodingAgentFramework.ActsSourceTest do
     {:ok, tracker} =
       Tracker.start_link(
         sources: [
-          {Tracker.ReaderSource, table: Acts.Table, db: ctx.db, host: "test", instance: "a"}
+          {Tracker.TableSource, table: Acts.Table, db: ctx.db, host: "test", instance: "a"}
         ],
         timer: false
       )

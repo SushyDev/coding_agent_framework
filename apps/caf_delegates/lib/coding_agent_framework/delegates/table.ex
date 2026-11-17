@@ -1,18 +1,23 @@
 defmodule CodingAgentFramework.Delegates.Table do
   @moduledoc """
-  `delegates`: one row per start of a delegate, keyed by its id, which `Delegates` alone writes;
-  anyone may open the file and read.
+  `delegates`: one row per start of a delegate, keyed by its id, which `Delegates` alone writes.
+  It keeps only the protocol's own facts (`docs/design.md`, "What `Delegates` holds"); the
+  agent's parent, project, account, session, launch options and whether it has ended are its
+  agent row in `Sessions`, read through `Sessions.Agents`.
 
   `status` is `starting` and `resuming` while a call of `Sessions` is under way (`called_at`,
-  in wall-clock ms, tells that call's `Sessions` row from an earlier one; `deadline` is the
-  wall-clock time it is settled by), then `running`, then `finished` or `failed` once, or
-  `refused` with its `reason`. A `finished` delegate whose report was delivered is `ended` once
-  its process is gone, which frees its parent's cap. `brief_uuid` and `resume_uuid` are the
-  uuids of `Mailbox`'s rows of the brief and of the word to go on, chosen before they are
-  stored. `report` is `none`, then `held` with its `text` until `Mailbox` takes it, then
-  `taken`; how it is delivered is `Mailbox`'s row, the reply to `brief_uuid`. `mark` is no
-  longer written (a row an earlier build wrote may hold one). `options` is the delegate's own
-  launch options as JSON (`ClaudeCLI.Options.encode/1`), or NULL for none.
+  in wall-clock ms, tells that call's agent row from an earlier one; `deadline` is the
+  wall-clock time it is settled by), then `running`, then `finished` (a reply is its report) or
+  `failed` (a notice is) once, or `refused` with its `reason`. `brief_uuid` and `resume_uuid`
+  are the uuids of `Mailbox`'s rows of the brief and of the word to go on, chosen before they
+  are stored. `report` is `none`, then `held` with its `text` until `Mailbox` takes it, then
+  `taken`; how it is delivered is `Mailbox`'s row, the reply to `brief_uuid`. `model` is what
+  its start and its resume launch with.
+
+  **Migration** (F-129): a file an earlier build made also has `parent`, `project`, `account`,
+  `brief`, `session_id`, `mark` and `options`, and the status `ended`. `old_tree/1` reads what
+  `Sessions` must take of them (`Sessions.adopt_tree/3`), and `rebuild/1` then rebuilds the
+  table with this build's columns, an `ended` row being `finished`, in one transaction.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "doc.db")
       iex> {:ok, db} = CodingAgentFramework.Delegates.Table.open(path)
@@ -22,33 +27,124 @@ defmodule CodingAgentFramework.Delegates.Table do
 
   alias CodingAgentFramework.Store
 
-  @columns ~w(id host parent project branch name account model brief brief_uuid resume_uuid
-              session_id status reason resumes report text mark called_at deadline created_at
-              updated_at options)a
+  @columns ~w(id host name branch model brief_uuid resume_uuid status reason resumes report
+              text called_at deadline created_at updated_at)a
 
-  @schema """
-  CREATE TABLE IF NOT EXISTS delegates (
-    id INTEGER PRIMARY KEY, host TEXT NOT NULL, parent TEXT NOT NULL, project TEXT NOT NULL,
-    branch TEXT NOT NULL, name TEXT NOT NULL, account TEXT NOT NULL, model TEXT NOT NULL,
-    brief TEXT NOT NULL, brief_uuid TEXT NOT NULL, resume_uuid TEXT, session_id TEXT,
-    status TEXT NOT NULL, reason TEXT, resumes INTEGER NOT NULL, report TEXT NOT NULL,
-    text TEXT, mark TEXT, called_at INTEGER NOT NULL, deadline INTEGER NOT NULL,
-    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, options TEXT);
+  @create """
+  (id INTEGER PRIMARY KEY, host TEXT NOT NULL, name TEXT NOT NULL, branch TEXT NOT NULL,
+    model TEXT NOT NULL, brief_uuid TEXT NOT NULL, resume_uuid TEXT, status TEXT NOT NULL,
+    reason TEXT, resumes INTEGER NOT NULL, report TEXT NOT NULL, text TEXT,
+    called_at INTEGER NOT NULL, deadline INTEGER NOT NULL, created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL)
   """
-  # The statuses of a delegate that holds its parent's cap: started and not yet ended.
-  @active ~w(starting running resuming finished failed)
+  @schema "CREATE TABLE IF NOT EXISTS delegates #{@create};"
+
+  # Every status, once, and the lists read from it, checked when the module compiles.
+  @statuses ~w(starting resuming running finished failed refused)
+  # A call of `Sessions` is under way, or was when a restart cut it.
+  @calling ~w(starting resuming)
+  # Rows that may still move.
+  @open ~w(starting resuming running finished failed)
+  # The report is the row's: a reply for `finished`, a notice for `failed`.
+  @reported ~w(finished failed)
+
+  for list <- [@calling, @open, @reported], status <- list do
+    unless status in @statuses,
+      do: raise(CompileError, description: "#{status} is not a status of delegates")
+  end
 
   @type db :: Store.db()
 
+  @doc "The statuses of a call of `Sessions` under way."
+  @spec calling() :: [String.t()]
+  def calling, do: @calling
+
+  @doc "The statuses of a row that may still move."
+  @spec open() :: [String.t()]
+  def open, do: @open
+
+  @doc "The statuses of a row whose report is its own."
+  @spec reported() :: [String.t()]
+  def reported, do: @reported
+
+  @doc """
+  The table's metadata for `CodingAgentFramework.Reader`'s `Tracker` source: a writer's table,
+  read now; topic `delegates:<host>`, scope `{host, "delegates"}`, rows of kind `:delegates`.
+  """
+  @spec meta() :: map
+  def meta do
+    %{
+      schema: @schema,
+      table: "delegates",
+      reads: nil,
+      columns: @columns,
+      scope: [],
+      filter: [:host],
+      topic: "delegates",
+      group: "delegates",
+      kind: :delegates,
+      name: nil
+    }
+  end
+
   @doc "Opens (and creates) the file at `path`, with the table."
   @spec open(String.t()) :: {:ok, db} | {:refused, term}
-  def open(path), do: Store.open(path, @schema, added: [delegates: ["options TEXT"]])
+  def open(path), do: Store.open(path, @schema)
+
+  @doc """
+  What an earlier build's table holds that `Sessions` keeps now: per name, from its latest row,
+  `%{name, parent, project, ended}`. `[]` for a table of this build.
+  """
+  @spec old_tree(db) :: [map]
+  def old_tree(db) do
+    if old?(db) do
+      db
+      |> Store.query(
+        "SELECT name, parent, project, status FROM delegates WHERE id IN " <>
+          "(SELECT max(id) FROM delegates GROUP BY host, name)",
+        []
+      )
+      |> Enum.map(fn [n, p, pr, s] -> %{name: n, parent: p, project: pr, ended: s == "ended"} end)
+    else
+      []
+    end
+  end
+
+  @doc "Rebuilds an earlier build's table with this build's columns; one of this build stays."
+  @spec rebuild(db) :: :ok
+  def rebuild(db) do
+    if old?(db) do
+      kept = Enum.map_join(@columns, ",", &if(&1 == :status, do: status_sql(), else: &1))
+
+      Store.transaction(db, fn ->
+        Store.query(db, "CREATE TABLE delegates_f129 #{@create}", [])
+
+        Store.query(
+          db,
+          "INSERT INTO delegates_f129 (#{Enum.join(@columns, ",")}) SELECT #{kept} FROM delegates",
+          []
+        )
+
+        Store.query(db, "DROP TABLE delegates", [])
+        Store.query(db, "ALTER TABLE delegates_f129 RENAME TO delegates", [])
+      end)
+    end
+
+    :ok
+  end
+
+  defp status_sql, do: "CASE status WHEN 'ended' THEN 'finished' ELSE status END"
+
+  defp old?(db),
+    do:
+      Store.query(db, "SELECT 1 FROM pragma_table_info('delegates') WHERE name = 'parent'", []) !=
+        []
 
   @doc "Writes a start's row, as `starting`, and returns its id."
   @spec starting(db, map) :: integer
   def starting(db, start) do
     now = System.os_time(:millisecond)
-    keys = ~w(host parent project branch name account model brief brief_uuid deadline options)a
+    keys = ~w(host name branch model brief_uuid deadline)a
     first = [status: "starting", resumes: 0, report: "none", called_at: now, created_at: now]
     fields = Enum.map(keys, &{&1, start[&1]}) ++ first ++ [updated_at: now]
     [[id]] = Store.insert(db, "delegates", fields, "RETURNING id")
@@ -70,33 +166,18 @@ defmodule CodingAgentFramework.Delegates.Table do
         host | statuses
       ])
 
-  @doc "How many of `parent`'s delegates hold its cap: started, or starting, and not ended."
-  @spec active(db, String.t(), String.t()) :: non_neg_integer
-  def active(db, host, parent),
-    do:
-      length(
-        select(
-          db,
-          "host = ?1 AND parent = ?2 AND status IN (#{Store.marks(length(@active), 3)})",
-          [
-            host,
-            parent | @active
-          ]
-        )
-      )
+  @doc "Each name's latest row on the host, oldest first: the delegate each name is now."
+  @spec latest(db, String.t()) :: [map]
+  def latest(db, host),
+    do: select(db, "id IN (SELECT max(id) FROM delegates WHERE host = ?1 GROUP BY name)", [host])
 
   @doc "Row `id`, or nil."
   @spec get(db, integer) :: map | nil
   def get(db, id), do: List.first(select(db, "id = ?1", [id]))
 
-  @doc "The host's rows, every status, oldest first: what the `Tracker` reads."
+  @doc "The host's rows, every status, oldest first."
   @spec rows(db, String.t()) :: [map]
   def rows(db, host), do: select(db, "host = ?1", [host])
-
-  @doc "The host's rows with these ids; an id with no row is absent."
-  @spec rows_by_id(db, String.t(), [integer]) :: [map]
-  def rows_by_id(db, host, ids),
-    do: Store.rows_by_id(db, "delegates", @columns, ids, host: host)
 
   defp select(db, where, args),
     do: Store.select(db, "delegates", @columns, where <> " ORDER BY id", args)

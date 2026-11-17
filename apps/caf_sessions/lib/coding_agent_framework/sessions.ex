@@ -111,8 +111,17 @@ defmodule CodingAgentFramework.Sessions do
   what it saw, so a row that stays `running` shows why. A name whose row is
   `unknown`, `orphan`, `starting` or `stopping` is refused to a new start: its process may live.
 
-  After each write it calls `notify` with `%{topic: "sessions:<host>:<account>", ids: [id]}`, a
-  cue that names rows, never their data (`CodingAgentFramework.Tracker.SessionsSource`).
+  **The agent row** (`docs/design.md`, "The parts"): each row is one agent of the tree, of kind
+  `main` or `delegate` (a launch's `kind:`, by default `:delegate` for role `:delegate` and
+  `:main` otherwise), with its `parent:` (a delegate's main session, which it must name; a main
+  session names none) and its `project:` (a worktree's, or the launch's). A resume keeps the
+  row's. Until `Mains`, the embedding app names its main sessions (`mains:`), each written
+  `declared` when it has no row. A delegate that is done for good is `ended` (`ended/3`, which
+  `Delegates` asks once its report went in). Other parts read the rows only through
+  `CodingAgentFramework.Sessions.Agents`: the tree, and what each status means.
+
+  After each write it calls `notify` with `%{topic: "sessions:<host>", ids: [id]}`, a cue that
+  names rows, never their data; the `Tracker` reads the rows by `Sessions.Table.meta/0`.
   """
 
   use GenServer
@@ -121,7 +130,7 @@ defmodule CodingAgentFramework.Sessions do
 
   alias CodingAgentFramework.{ClaudeCLI, Control, Holder, Programs, Registry, Shell, Stream}
   alias CodingAgentFramework.{Accounts, ClaudeCLI.Options, Intake, Transcripts}
-  alias CodingAgentFramework.Sessions.{Table, Worktree}
+  alias CodingAgentFramework.Sessions.{Agents, Table, Worktree}
 
   @timeout 30_000
   # Each git command of a worktree, and the checks and the add before a setup: three lists or
@@ -136,8 +145,6 @@ defmodule CodingAgentFramework.Sessions do
   @slack 30_000
   # Each call to Stream, within a call of Sessions.
   @stream 5_000
-  # A name is free only when no process of its row may live: Start.tla's `Ended`.
-  @ended ~w(stopped refused)
   # The held program starts in the session's directory; `$0` is the directory.
   @cd ~S(cd -- "$0" && exec "$@")
 
@@ -152,7 +159,8 @@ defmodule CodingAgentFramework.Sessions do
   `notify:`, `size:`
   (the viewer's `{columns, rows}`, default `{200, 50}`), `poll:` (ms between reads while a call
   waits, default 200), `clock:` (a function answering wall-clock ms, for the deadlines), and,
-  where the app runs `Mailbox` and `Intake`:
+  `mains:` (until `Mains`: `%{name => project}`, each main session the app declares, written
+  as a row of kind `main` when it has none), and, where the app runs `Mailbox` and `Intake`:
 
   - `open_to:`, `fn name, :open | :sending -> {:ok, ids} end`, the ids of the `Mailbox` rows to
     `name` that are open, or only `sending`, as `Mailbox.open_to/3` answers them; a stop reads
@@ -168,14 +176,17 @@ defmodule CodingAgentFramework.Sessions do
   @doc """
   Starts session `name` on `account` (from `Accounts.ready/2`). `launch` holds `role:` and
   `cwd:` (an absolute path) or `worktree:` (`%{project: project, branch: branch}`, with the
-  project as `Sessions.Worktree.project/1` reads it; `cwd:` is then not read), and
+  project as `Sessions.Worktree.project/1` reads it; `cwd:` is then not read); the agent row's
+  `kind:`, `parent:` and `project:` (the module doc's "The agent row"; a delegate with no parent
+  is refused `{:missing, :parent}`, a main session with one `{:bad, :parent}`); and
   `ClaudeCLI.session/3`'s `claude:`, `model:`, `env:`, `tool_timeout:`, `prompt:` and `mcp:` (the agent's own MCP config),
   and `options:`, kept on the row, which a resume that names none takes again. Option:
   `:timeout`, to which a worktree's start adds its setup's deadline and its git commands'
   bounds.
 
       Sessions.start(sessions, "reviewer", account,
-        role: :delegate, worktree: %{project: project, branch: "unit/review"}, claude: claude)
+        role: :delegate, parent: "app-main", worktree: %{project: project, branch: "unit/review"},
+        claude: claude)
       #=> {:ok, %{name: "reviewer", pid: 4243, session_id: "…"}}
       #=> {:refused, {:worktree, :dirty}}
   """
@@ -211,6 +222,32 @@ defmodule CodingAgentFramework.Sessions do
   """
   @spec stop(GenServer.server(), String.t(), keyword) :: outcome(:stopped)
   def stop(sessions, name, opts \\ []), do: request(sessions, {:stop, name}, opts)
+
+  @doc """
+  Delegate `name` is done for good: its report went in and no process of it may live. Its row
+  becomes `ended`, so it frees its parent's cap and what it owns ends with it; it keeps its
+  place in the tree, so what it kept goes to its parent.
+  `Delegates` asks it. Answers `{:ok, :ended}` (also for a row already `ended`), `{:refused,
+  :no_session}`, `{:refused, :main}` for a main session, which never ends, or `{:refused,
+  {:not_free, status}}` while its process may live. Option: `:timeout` (ms, default 5 000).
+
+      Sessions.ended(sessions, "app-unit-review")
+      #=> {:ok, :ended}
+  """
+  @spec ended(GenServer.server(), String.t(), keyword) :: outcome(:ended)
+  def ended(sessions, name, opts \\ []),
+    do: call(sessions, {:ended, name}, Keyword.get(opts, :timeout, @read))
+
+  @doc """
+  A migration step (F-129): the parent and project of each delegate that an earlier build kept
+  only in `Delegates`' table, which `Delegates` hands over once, before it drops them. Each
+  entry is `%{name, parent, project, ended}`; a delegate row of that name with no parent takes
+  them, and with `ended: true` is `ended` when no process of it may live. Answers `{:ok,
+  count}`, the rows that took something. Option: `:timeout`.
+  """
+  @spec adopt_tree(GenServer.server(), [map], keyword) :: outcome(non_neg_integer)
+  def adopt_tree(sessions, entries, opts \\ []),
+    do: call(sessions, {:adopt_tree, entries}, Keyword.get(opts, :timeout, @read))
 
   @doc """
   Hands `Sessions` a `Registry`'s cue (`%{topic: "registry:<host>:<account>", ids: ids}`): the
@@ -296,6 +333,7 @@ defmodule CodingAgentFramework.Sessions do
         clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
         reaper: Keyword.get(opts, :reaper),
         open_to: Keyword.get(opts, :open_to),
+        mains: Keyword.get(opts, :mains, %{}),
         waiter: waiter,
         git: Programs.fetch(programs, :git),
         worktrees: root(host, holder.sh, programs, Keyword.get(opts, :home)),
@@ -310,6 +348,11 @@ defmodule CodingAgentFramework.Sessions do
 
   @impl true
   def handle_continue(:adopt, state) do
+    for {name, project} <- state.mains do
+      id = Table.declare(state.db, state.host.name, name, project)
+      state.notify.(%{topic: topic(state), ids: [id]})
+    end
+
     settle(state, :all, true)
 
     # One wake at each starting row's deadline, when Adopt may decide; not a poll.
@@ -352,9 +395,11 @@ defmodule CodingAgentFramework.Sessions do
     with :ok <- free(state, name),
          {:ok, place} <- place(state, name, launch),
          {:ok, role} <- Keyword.fetch(launch, :role) |> required(:role),
+         {:ok, agent} <- agent(state, name, role, launch, place, resume),
          {:ok, way} <- way(state, role, account, name, place.cwd, resume, launch),
          deadline = state.clock.() + timeout + budget(place.tree),
          row = new_row(state, name, account, role, place, resume, way, deadline),
+         row = Map.merge(row, agent),
          {:ok, viewer} <- viewer_command(state, row) do
       # RowWritten: the row first, as starting, with the start's wall-clock deadline.
       row = Map.put(row, :id, Table.starting(state.db, row))
@@ -408,6 +453,42 @@ defmodule CodingAgentFramework.Sessions do
       end
 
     {:reply, {:ok, owed}, state}
+  end
+
+  def handle_call({:ended, name}, _from, state) do
+    reply =
+      case Table.get(state.db, state.host.name, name) do
+        nil ->
+          {:refused, :no_session}
+
+        %{kind: "main"} ->
+          {:refused, :main}
+
+        %{status: "ended"} ->
+          {:ok, :ended}
+
+        row ->
+          if Agents.free?(row) and not Map.has_key?(state.pending, name) do
+            write(state, row, status: "ended")
+            {:ok, :ended}
+          else
+            {:refused, {:not_free, row.status}}
+          end
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:adopt_tree, entries}, _from, state) do
+    taken =
+      for %{name: name, parent: parent} = e <- entries,
+          is_binary(parent),
+          %{kind: "delegate", parent: nil} = row <- [Table.get(state.db, state.host.name, name)] do
+        ended = if e[:ended] && Agents.free?(row), do: [status: "ended"], else: []
+        write(state, row, [parent: parent, project: e[:project]] ++ ended)
+      end
+
+    {:reply, {:ok, length(taken)}, state}
   end
 
   def handle_call({:viewer_argv, name}, _from, state) do
@@ -894,11 +975,47 @@ defmodule CodingAgentFramework.Sessions do
 
   defp free(state, name) do
     case Table.get(state.db, state.host.name, name) do
-      nil -> :ok
-      %{status: status} when status in @ended -> :ok
-      %{status: status} -> {:refused, {:exists, status}}
+      nil ->
+        :ok
+
+      %{status: status} = row ->
+        if Agents.free?(row), do: :ok, else: {:refused, {:exists, status}}
     end
   end
+
+  # The agent row's kind, parent and project, checked before the row: a resume keeps the row's
+  # unless the launch names them, and any start keeps a project the row has (a declared main).
+  defp agent(state, name, role, launch, place, resume) do
+    row = Table.get(state.db, state.host.name, name)
+    kind = launch[:kind] || (resume && kind_of(row)) || default_kind(role)
+    parent = Keyword.get(launch, :parent, resume && row && row.parent)
+    tree_project = place.tree && place.tree.project.name
+    project = launch[:project] || tree_project || (row && row.project)
+
+    case {kind, parent} do
+      {:delegate, p} when is_binary(p) and p != "" ->
+        {:ok, %{kind: "delegate", parent: p, project: project}}
+
+      {:delegate, _} ->
+        {:refused, {:missing, :parent}}
+
+      {:main, nil} ->
+        {:ok, %{kind: "main", parent: nil, project: project}}
+
+      {:main, _} ->
+        {:refused, {:bad, :parent}}
+
+      _ ->
+        {:refused, {:bad, :kind}}
+    end
+  end
+
+  defp kind_of(%{kind: "main"}), do: :main
+  defp kind_of(%{kind: "delegate"}), do: :delegate
+  defp kind_of(_), do: nil
+
+  defp default_kind(:delegate), do: :delegate
+  defp default_kind(_role), do: :main
 
   # Where a start runs: the directory it is given, or its worktree's path, which RowWritten
   # first checks no other row that has not ended holds.
@@ -1258,6 +1375,7 @@ defmodule CodingAgentFramework.Sessions do
     announce(state, row)
   end
 
-  defp announce(state, row),
-    do: state.notify.(%{topic: "sessions:#{state.host.name}:#{row.account}", ids: [row.id]})
+  defp announce(state, row), do: state.notify.(%{topic: topic(state), ids: [row.id]})
+
+  defp topic(state), do: "sessions:#{state.host.name}"
 end

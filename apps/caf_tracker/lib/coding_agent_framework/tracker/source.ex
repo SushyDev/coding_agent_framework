@@ -2,9 +2,9 @@ defmodule CodingAgentFramework.Tracker.Source do
   @moduledoc """
   A table, as the `Tracker` reads it, given as `{module, opts}`. A reader on
   `CodingAgentFramework.Reader` (`Registry`, `Transcripts`, `Usage`, `TmuxSampler`) needs no
-  module of its own: `Tracker.ReaderSource` is made from its table's metadata, and so is
-  `Acts`' (`Acts.Table.meta/0`). The other writers (`Sessions`, `Delegates`, `Stream`, `Intake`)
-  each give one module with these callbacks. The fold's contract does not change with them.
+  module of its own: `Tracker.TableSource` is made from its table's metadata, and so are the
+  writers `Acts`', `Sessions`' and `Delegates`' (each table's `meta/0`). `Stream` and `Intake`
+  still each give one module with these callbacks. The fold's contract does not change with them.
 
   A source opens its own connection to the reader's table, names the topic its reader cues on,
   and answers a read of rows by id (or `:all`) from the table, never from the cue.

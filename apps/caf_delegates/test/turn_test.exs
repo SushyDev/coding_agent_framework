@@ -9,7 +9,7 @@ defmodule CodingAgentFramework.Delegates.TurnTest do
   doctest Table
 
   @project %{name: "app", branches: ~r/\Aunit\//, cap: 2}
-  @row %{brief_uuid: "b1", resume_uuid: nil, brief: "do it"}
+  @row %{brief_uuid: "b1", resume_uuid: nil}
 
   test "a start names a project it was given and a branch its pattern takes" do
     projects = %{"app" => @project, "odd" => %{name: "odd"}, "zero" => %{@project | cap: 0}}
@@ -35,8 +35,7 @@ defmodule CodingAgentFramework.Delegates.TurnTest do
     fold = fold(%{"b1" => %{state: :delivered}}, true, result("half", "b1"))
     resumed = %{@row | resume_uuid: "r1"}
     assert :waiting = Turn.next(resumed, fold)
-    assert {"r1", text} = Turn.message(resumed)
-    assert text == Turn.resumed()
+    assert Turn.uuid(resumed) == "r1"
     assert :waiting = Turn.next(resumed, put_in(fold.messages["r1"], %{state: :writing}))
 
     assert {:finished, %{text: "r"}} =

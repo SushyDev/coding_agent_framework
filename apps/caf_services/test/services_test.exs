@@ -94,6 +94,7 @@ defmodule CodingAgentFramework.ServicesTest do
     # web-main's delegates web-a and web-b; web-a's child web-a1 (a delegate of a delegate
     # stands in for any child here: Grants reads only the parent links).
     tree = [
+      %{name: "web-main", project: "web", parent: nil},
       %{name: "web-a", project: "web", parent: "web-main"},
       %{name: "web-b", project: "web", parent: "web-main"},
       %{name: "web-a1", project: "web", parent: "web-a"}
