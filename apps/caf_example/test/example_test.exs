@@ -10,7 +10,7 @@ defmodule CodingAgentFramework.ExampleTest do
 
   alias CodingAgentFramework.{Accounts, Example, HeadlessStandIn, Jobs, Mailbox, MCP, Services}
   alias CodingAgentFramework.{Delegates, Operator, Tmux}
-  alias CodingAgentFramework.Grants.Claims
+  alias CodingAgentFramework.Acts
   alias CodingAgentFramework.Example.Config
   alias CodingAgentFramework.Sessions.Table
 
@@ -63,8 +63,9 @@ defmodule CodingAgentFramework.ExampleTest do
 
   defp start(config) do
     parts = Example.parts(start_supervised!({Example, config}))
-    keys = ~w(reaper control usage stream intake intake_http sampler sessions recoveries tracker)a
-    keys = keys ++ ~w(delegates claims mailbox copies jobs services mcp mcp_http ticker ends)a
+    keys = ~w(reaper control usage stream intake intake_http sampler sessions acts)a
+    keys = keys ++ ~w(recoveries tracker delegates mailbox copies jobs services)a
+    keys = keys ++ ~w(mcp mcp_http ticker ends)a
 
     assert Enum.sort(Map.keys(parts)) ==
              Enum.sort(keys ++ [:registry, :transcripts])
@@ -279,7 +280,10 @@ defmodule CodingAgentFramework.ExampleTest do
       )
 
     assert {:ok, %{claim: claim}} = Operator.interrupt(parts.mcp, "app-unit-one")
-    assert {:ok, %{caller: "operator", target: "app-unit-one"}} = Claims.get(parts.claims, claim)
+
+    assert {:ok, %{actor: "operator", target: "app-unit-one", act: "interrupt"}} =
+             Acts.get(parts.acts, claim)
+
     assert "interrupt" in HeadlessStandIn.taken(ctx.dir)
 
     assert for(%{agent: "operator", tool: t} <- MCP.calls(parts.mcp), do: t) ==

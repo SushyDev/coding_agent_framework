@@ -19,6 +19,7 @@ defmodule CafExample.MixProject do
   defp deps do
     [
       {:caf_accounts, in_umbrella: true},
+      {:caf_acts, in_umbrella: true},
       {:caf_control, in_umbrella: true},
       {:caf_copies, in_umbrella: true},
       {:caf_delegates, in_umbrella: true},

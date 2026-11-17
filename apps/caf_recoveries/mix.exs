@@ -20,11 +20,11 @@ defmodule CafRecoveries.MixProject do
 
   defp deps do
     [
+      {:caf_acts, in_umbrella: true},
       {:caf_holder, in_umbrella: true},
       {:caf_sampler, in_umbrella: true},
       {:caf_sessions, in_umbrella: true},
       {:caf_tmux, in_umbrella: true},
-      {:caf_store, in_umbrella: true},
       {:caf_control, in_umbrella: true, only: :test},
       {:caf_test, in_umbrella: true, only: :test}
     ]

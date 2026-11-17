@@ -4,7 +4,8 @@ defmodule CodingAgentFramework.Example.Config do
   part from the environment.
 
   - `home`: the framework home, an absolute path. Every file the app writes is under it:
-    `caf.db` (the readers' and writers' tables), `claims.db`, `accounts/`, `d/` (the dtach
+    `caf.db` (the readers' and writers' tables, `Acts`' among them), `claims.db` (the claims
+    an older build kept, which `Acts` takes once and empties), `accounts/`, `d/` (the dtach
     directory, kept short for macOS's 104-byte socket paths), `tmux.sock` (its own tmux
     server), `streams/`, `worktrees/`, `parts/` (the tables of `Copies`, `Jobs`, `Services` and
     `MCP`) and `ws/` (the workstation's copies and service logs);

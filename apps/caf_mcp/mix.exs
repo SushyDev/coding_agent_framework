@@ -17,6 +17,7 @@ defmodule CafMcp.MixProject do
 
   defp deps do
     [
+      {:caf_acts, in_umbrella: true},
       {:caf_grants, in_umbrella: true},
       {:caf_store, in_umbrella: true},
       {:exqlite, "~> 0.43.0"},

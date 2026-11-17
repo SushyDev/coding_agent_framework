@@ -23,6 +23,9 @@ defmodule CodingAgentFramework.Reader do
       row), `:dump` (a column and a value to what is stored), `:view` (rows and a source's
       options to the rows it answers) and `:failed` (the word of a read whose reads row has a
       newer `failed_at`).
+    * a writer's table (F-120's new-2) gives `reads: nil`, `columns:` (its own, in order) and
+      `scope: []`: it has no reads table, so its source reads it now, and `read_at` is the
+      time of that read.
 
   A scope with no reads row, or one whose `read_at` is nil, is `:unread`, never an empty list.
 
@@ -114,6 +117,7 @@ defmodule CodingAgentFramework.Reader do
 
   @doc "A row's columns, in the table's order."
   @spec columns(meta) :: [atom]
+  def columns(%{columns: columns}), do: columns
   def columns(meta), do: [:id | meta.scope] ++ [meta.key | meta.data] ++ [:written_at]
 
   @doc "A scope's reads row as stored, or nil before any."
@@ -232,6 +236,13 @@ defmodule CodingAgentFramework.Reader do
   """
   @spec source_read(meta, Store.db(), keyword, :all | [integer]) ::
           :unread | {:ok, map} | {:unknown, term}
+  def source_read(%{reads: nil} = meta, db, opts, ids) do
+    filter = for k <- Map.get(meta, :filter, []), do: {k, Keyword.fetch!(opts, k)}
+    rows = if ids == :all, do: select(meta, db, filter), else: rows_by_id(meta, db, ids, filter)
+    view = Map.get(meta, :view, fn rows, _ -> rows end)
+    {:ok, %{read_at: System.os_time(:millisecond), rows: view.(rows, opts)}}
+  end
+
   def source_read(meta, db, opts, ids) do
     scope = for k <- meta.scope, do: {k, Keyword.fetch!(opts, k)}
     filter = scope ++ for k <- Map.get(meta, :filter, []), do: {k, Keyword.fetch!(opts, k)}

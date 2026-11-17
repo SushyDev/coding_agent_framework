@@ -57,7 +57,7 @@ defmodule CodingAgentFramework.MCP do
     :main_fix}` until `Mains`): `interrupt(agent)`, `answer(agent, dialog, label)` (`dialog` is the open
     `can_use_tool` request's id, `label` `allow` or `deny`), `resume(agent)` (a delegate whose
     process died) and `stop(agent)` (once its report is delivered). Each reads the delegate's
-    state (`Delegates.fix_state/3`), claims it (`Grants.Claims.claim/6` with `:start_id`),
+    state (`Delegates.fix_state/3`), claims it in `Acts` (`Acts.claim/6`, act the tool's name),
     then `Delegates.fix/5` acts only while that state is still the delegate's, and the claim
     is settled `verified` when the fix answered `ok` and the state read after has moved, else
     `not_verified`. A second fix of a state is refused `{:claimed, by}` or
@@ -68,7 +68,7 @@ defmodule CodingAgentFramework.MCP do
   operator's name, so each act it makes names it as the actor; `issue/2` never makes it a
   token. The design's other tools come in later parts (`docs/build-notes/F-86.md`).
 
-      {:ok, mcp} = MCP.start_link(dir: dir, port: 4791, grants: grants, claims: claims, start_id: "s1",
+      {:ok, mcp} = MCP.start_link(dir: dir, port: 4791, grants: grants, acts: acts,
         mailbox: {Mailbox, mailbox}, jobs: {Jobs, jobs}, delegates: {Delegates, delegates},
         services: {Services, services}, workstation: "ws", tracker: {Tracker, tracker},
         stream: {Stream, stream}, transcripts: {Transcripts, t}, place: &place/1,
@@ -81,7 +81,7 @@ defmodule CodingAgentFramework.MCP do
   use GenServer
 
   alias CodingAgentFramework.Grants
-  alias CodingAgentFramework.Grants.Claims
+  alias CodingAgentFramework.Acts
   alias CodingAgentFramework.MCP.Table
 
   @step 5_000
@@ -321,8 +321,8 @@ defmodule CodingAgentFramework.MCP do
   `{CodingAgentFramework.Transcripts, pid}`, or nil), `:workstation` (the host a service starts on
   unless its call names one), and
   `:place`, a function of an agent's name that answers `{:ok, %{project: p, name: n, worktree:
-  path}}` (the copy jobs and services run in) or `{:refused, reason}`. `:claims` is a
-  `CodingAgentFramework.Grants.Claims` and `:start_id` this framework start's id in it. `:instance` (a string, required)
+  path}}` (the copy jobs and services run in) or `{:refused, reason}`. `:acts` is the
+  instance's `CodingAgentFramework.Acts`, where each fix takes its claim. `:instance` (a string, required)
   is this part's name in its jobs' ids, so two of them sharing one `Jobs` never make the same
   id. `:cap` (ms, default a day) is the most a `run`'s or a `service_wait`'s `timeout` may be.
   `:tool_timeout` (ms) is the MCP tool timeout `CodingAgentFramework.ClaudeCLI` sets for every
@@ -644,7 +644,7 @@ defmodule CodingAgentFramework.MCP do
          :ok <- Grants.may_fix?(ctx.grants, caller, agent),
          {:ok, parent} <- as_parent(ctx, caller, agent),
          {:ok, state} <- mod.fix_state(server, parent, agent),
-         {:ok, claim} <- Claims.claim(ctx.claims, caller, agent, state, ctx.start_id) do
+         {:ok, claim} <- Acts.claim(ctx.acts, caller, agent, state, tool) do
       outcome = mod.fix(server, parent, agent, fix, state)
 
       verdict =
@@ -653,7 +653,9 @@ defmodule CodingAgentFramework.MCP do
           _ -> :not_verified
         end
 
-      settled = Claims.settle(ctx.claims, claim, verdict)
+      # A fix refused when it acts let its claim go with no act (`Claim.tla`'s LetGo).
+      acted = not match?({:refused, _}, outcome)
+      settled = Acts.settle(ctx.acts, claim, verdict, answer: outcome, acted: acted)
 
       case outcome do
         {:ok, done} -> {:ok, %{done: done, claim: claim, settled: settled}}
@@ -790,7 +792,7 @@ defmodule CodingAgentFramework.MCP do
          {:ok, db} <- Table.open(Path.join(dir, "mcp.db")) do
       ctx =
         Map.new(
-          ~w(grants claims start_id mailbox jobs delegates services workstation tracker stream)a ++
+          ~w(grants acts mailbox jobs delegates services workstation tracker stream)a ++
             ~w(transcripts place instance)a,
           &{&1, Keyword.fetch!(opts, &1)}
         )
