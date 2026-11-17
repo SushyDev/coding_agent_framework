@@ -95,6 +95,7 @@ flowchart LR
   stream --> delegate
   intake -->|wakes a turn,<br/>or joins one| main
   inlet -->|one checked write| main
+  sessions -->|first row, as its<br/>start's prompt| main
   readers --> db
   sessions --> db
   mailbox --> db
@@ -185,11 +186,16 @@ Built, each from a checked model in `model/tla/`:
   modules and aging inside a class; pressure (stall times, or a memory-pressure level) and both
   of an account's windows as gates, the five-hour one now read by `Usage`; a lease released
   once, when the owner of the work's row says the work ended, after a restart too; leases and
-  refusals on the `Tracker`, and each grant's wait and each refusal as telemetry.
+  refusals on the `Tracker`, and each grant's wait and each refusal as telemetry;
+- interactive delegates (F-137): a delegate started `interactive: true` runs Claude Code's
+  terminal interface, as a main session does, so a person can attach and type; its brief goes
+  in as its start's prompt (the `launch` transport, read from a file into the last argument),
+  its start answers the folder's trust dialog by label, and its report is the reply to its
+  brief read from its transcript, never a later turn's.
 
 The remodel (F-115, taken in F-116) is done. Next, `Jobs`' start and a landing's gang lease ask
 the `Scheduler` too. Then
-interactive delegates and main sessions, the mechanisms an app's policies stand on (an idle
+main sessions, the mechanisms an app's policies stand on (an idle
 delegate's watchdog, `Stop` held for the app, clone copies, an idempotent
 start), packaging, and stacks with the LiveView components. The plan and the order of the units are in
 [docs/design.md](docs/design.md); each unit's notes are in `docs/build-notes/`.
@@ -266,6 +272,7 @@ flowchart BT
   sessions --> stream
   sessions --> transcripts
   sessions --> intake
+  sessions --> inlet
   recoveries --> tmux
   recoveries --> holder
   recoveries --> sampler
@@ -281,6 +288,7 @@ flowchart BT
   delegates --> sessions
   delegates --> transcripts
   delegates --> mailbox
+  delegates --> registry
   delegates --> scheduler
   scheduler --> store
   mailbox --> sessions

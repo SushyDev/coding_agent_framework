@@ -48,6 +48,11 @@ defmodule CodingAgentFramework.Mailbox do
     box. The transcript settles it, as a waiter's row. A row whose text the `Inlet` refused (too
     long for the box, or more than one line) is not typed again: it waits for a waiter.
 
+  - `launch` (F-137), for the first row to an interactive session's new process: marked by
+    `launch/4` before the start that carries it as its prompt, told the start's answer by
+    `launched/3` (refused, due again), and settled by the transcript's user line with its mark
+    (`Transport.Launch`).
+
   Without `intake:` or `inlet:` a main session's rows stay `queued`, `attempt` `:no_delivery`,
   unless a call takes them.
 
@@ -171,6 +176,29 @@ defmodule CodingAgentFramework.Mailbox do
 
     store(mailbox, Map.merge(row, %{to: to, uuid: Stream.uuid(), reply_to: key}))
   end
+
+  @doc """
+  Marks the first `queued` row to interactive session `to` `sending` by `launch` (F-137,
+  `Transport.Launch`): its text, with its uuid on a last line, is the prompt argument of the
+  start or resume the caller makes next, which must end by `deadline` (wall-clock ms). The
+  caller tells the start's answer with `launched/3`. Answers `{:ok, %{id, uuid, text}}`,
+  `{:ok, :none}` when no row is due, or `{:refused, reason}` with nothing marked:
+  `{:sending, ids}` while a row to `to` is in flight, `:no_transcripts` for a `Mailbox` with no
+  waiter or typed transport, which settles none.
+
+      Mailbox.launch(mailbox, "app-unit-review", deadline)
+      #=> {:ok, %{id: 3, uuid: "…", text: "Review it.\\n\\n[delivery …]"}}
+  """
+  def launch(mailbox, to, deadline, opts \\ []),
+    do: call(mailbox, {:launch, to, deadline}, opts)
+
+  @doc """
+  The answer of the start `launch/4` marked row `id` for: `{:ok, %{session_id, pid}}` keeps it
+  `sending` until the transcript shows its user line, or the take bound passes; `{:refused, _}`
+  makes it due again, under its same uuid; `{:unknown, _}` keeps it until the start's deadline
+  and the bound. Answers `{:ok, status}` or `{:refused, {:not_launched, status}}`.
+  """
+  def launched(mailbox, id, answer), do: call(mailbox, {:launched, id, answer}, [])
 
   @doc """
   Delegate `to` will never take a row: its start was refused. Its `queued` rows are settled
@@ -335,7 +363,7 @@ defmodule CodingAgentFramework.Mailbox do
       # `calls`: row id to the call that took it; `waits`: key to the call waiting for it;
       # `hands`: a hand-on's task ref to the row it hands on and what its answer writes.
       s = Map.merge(s, %{db: db, agents: agents, notify: notify, calls: %{}, waits: %{}})
-      s = Map.put(s, :hands, %{})
+      s = Map.merge(s, %{hands: %{}, launching: MapSet.new()})
       {:ok, Map.merge(s, %{waiter: waiter, typed: typed}), {:continue, :read}}
     else
       {:refused, reason} -> {:stop, reason}
@@ -350,7 +378,7 @@ defmodule CodingAgentFramework.Mailbox do
     Stream.read(s.stream, timeout: @step)
 
     for %{via: via, status: "sending", sent_at: at} <- Table.open_rows(s.db),
-        via in ["waiter", "typed"],
+        via in ["waiter", "typed", "launch"],
         is_integer(at),
         do: bound(s, at)
 
@@ -447,6 +475,59 @@ defmodule CodingAgentFramework.Mailbox do
     if Enum.all?([row.from, row.to, row.text, row.uuid], &(is_binary(&1) and &1 != "")),
       do: stored(s, Table.store(s.db, row)),
       else: {:reply, {:refused, {:bad, :message}}, s}
+  end
+
+  # The mark before a start: one row in flight per addressee, the first due, for the process
+  # the start makes; its transcript's offset now bounds what its settle reads. The row is in
+  # `launching` until the start's answer: no evidence settles it before.
+  def handle_call({:launch, to, deadline}, _from, s) do
+    rows = for %{to_agent: ^to} = m <- Table.open_rows(s.db), do: m
+
+    case {Enum.filter(rows, &(&1.status == "sending")), rows} do
+      _ when not is_map_key(s.waiter, :transcripts) ->
+        {:reply, {:refused, :no_transcripts}, s}
+
+      {[_ | _] = sending, _} ->
+        {:reply, {:refused, {:sending, Enum.map(sending, & &1.id)}}, s}
+
+      {[], []} ->
+        {:reply, {:ok, :none}, s}
+
+      {[], [m | _]} ->
+        srow = Agents.get(s.agents, to)
+        sid = srow && srow.session_id
+        from = if is_binary(sid), do: offset(s, srow), else: 0
+        mark = [status: "sending", via: "launch", session_id: sid, at: nil, attempt: nil]
+        write(s, m, mark ++ [from_byte: from, sent_at: deadline])
+        s = %{s | launching: MapSet.put(s.launching, m.id)}
+        {:reply, {:ok, %{id: m.id, uuid: m.uuid, text: Transport.Launch.text(m.text, m.uuid)}}, s}
+    end
+  end
+
+  def handle_call({:launched, id, answer}, _from, s) do
+    s = %{s | launching: MapSet.delete(s.launching, id)}
+
+    case {Table.get(s.db, id), answer} do
+      {%{status: "sending", via: "launch"} = m, {:ok, %{session_id: sid} = started}} ->
+        write(s, m, session_id: sid, at: started[:pid], sent_at: now(), attempt: nil)
+        bound(s, now())
+        {:reply, {:ok, "sending"}, s}
+
+      {%{status: "sending", via: "launch"} = m, {:refused, why}} ->
+        write(s, m, status: "queued", via: nil, at: nil, sent_at: nil, attempt: why)
+        {:reply, {:ok, "queued"}, s, {:continue, :settle}}
+
+      {%{status: "sending", via: "launch"} = m, {_unknown, why}} ->
+        write(s, m, attempt: why)
+        bound(s, m.sent_at)
+        {:reply, {:ok, "sending"}, s}
+
+      {%{status: status}, _} ->
+        {:reply, {:refused, {:not_launched, status}}, s}
+
+      {nil, _} ->
+        {:reply, {:refused, :no_message}, s}
+    end
   end
 
   def handle_call({:ended, to}, _from, s) do
@@ -613,14 +694,15 @@ defmodule CodingAgentFramework.Mailbox do
       handing = handing(s)
 
       for %{status: "sending"} = m <- Table.open_rows(s.db),
-          not MapSet.member?(handing, m.id),
-          m.via != "waiter" or transcript? do
+          not MapSet.member?(handing, m.id) and not MapSet.member?(s.launching, m.id),
+          m.via not in ["waiter", "launch"] or transcript? do
         evidence = %{fold: folds[m.session_id], calls: s.calls}
 
         evidence =
           case m.via do
             "waiter" -> Map.put(evidence, :waiter, seen(s, m))
             "typed" -> Map.put(evidence, :typed, typed_seen(s, m))
+            "launch" -> Map.put(evidence, :launch, launch_seen(s, m))
             _ -> evidence
           end
 
@@ -953,25 +1035,36 @@ defmodule CodingAgentFramework.Mailbox do
   defp seen(s, m) do
     srow = Agents.get(s.agents, m.to_agent)
     gone = srow == nil or srow.pid != m.at or Agents.free?(srow)
+    %{seen: lines(s, srow, m), gone: gone, now: now(), bound: s.waiter.bound}
+  end
 
-    seen =
-      with %{} <- srow,
-           {:ok, path} <- transcript(s, srow),
-           {:ok, %{failed: []}} <-
-             Transcripts.read(s.waiter.transcripts, [{srow.account, m.session_id, path}],
-               timeout: @step
-             ),
-           {:ok, %{bytes: bytes}} <-
-             Transcripts.text(s.waiter.transcripts, srow.account, m.session_id, m.from_byte || 0,
-               timeout: @step
-             ) do
-        Transport.Waiter.seen(bytes, m.uuid)
-      else
-        {:refused, :no_file} -> :none
-        _ -> :unread
-      end
-
+  # A launch row's evidence: before the start's answer the row names no process, and the start
+  # is gone once its agent row holds none; after it, as a waiter's row. Its session is the agent
+  # row's when the mark had none (a new session, a restart before the answer).
+  defp launch_seen(s, m) do
+    srow = Agents.get(s.agents, m.to_agent)
+    gone = srow == nil or Agents.free?(srow) or (m.at != nil and srow.pid != m.at)
+    m = %{m | session_id: m.session_id || (srow && srow.session_id)}
+    seen = if is_binary(m.session_id), do: lines(s, srow, m), else: :none
     %{seen: seen, gone: gone, now: now(), bound: s.waiter.bound}
+  end
+
+  defp lines(s, srow, m) do
+    with %{} <- srow,
+         {:ok, path} <- transcript(s, srow),
+         {:ok, %{failed: []}} <-
+           Transcripts.read(s.waiter.transcripts, [{srow.account, m.session_id, path}],
+             timeout: @step
+           ),
+         {:ok, %{bytes: bytes}} <-
+           Transcripts.text(s.waiter.transcripts, srow.account, m.session_id, m.from_byte || 0,
+             timeout: @step
+           ) do
+      Transport.Waiter.seen(bytes, m.uuid)
+    else
+      {:refused, :no_file} -> :none
+      _ -> :unread
+    end
   end
 
   # How much of the session's transcript is read now: a row's lines come after it.

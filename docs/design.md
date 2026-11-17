@@ -120,7 +120,8 @@ Each word below names one thing, and the design, the code and the views use it o
   delegate's brief and its word to go on after a resume, the app's word), one row in `Mailbox`,
   marked before it goes and settled from evidence after (F-122's new-4). How
   it goes in is its **transport**: a `Stream` line, the waiter's answer, the `Inlet`'s checked
-  write, or the answer of a waiting `run_delegate`.
+  write, the prompt argument of an interactive session's start (`launch`), or the answer of a
+  waiting `run_delegate`.
 - **Hold**: a request held open with a deadline, answered exactly once by a named decider, and
   settled when its holder dies. `Intake` keeps four kinds.
 
@@ -764,6 +765,31 @@ The answers are explicit: `started{…}` or `refused{reason}`, then `finished`, 
 `late_report`. A delegate's subagents count for tokens and as work still going for its parent,
 and one with no closing event ends after a bound.
 
+**Interactive delegates** (F-137; `Delegate.tla` with `Interactive`). `start_delegate` with
+`interactive: true` runs Claude Code's terminal interface, as a main session does, held the
+same way, so a person can attach and type: its agent row is of kind `delegate`, role `parent`,
+and `Sessions.Agents.headless?/1` is false for it, so `Mailbox` gives it a main session's
+transports. `Delegates` needs the host's `Registry` for it, and refuses a brief longer than a
+launch carries.
+
+- Its brief is stored first, as any delegate's, then marked by `launch`, and the start carries
+  it as its prompt. Its start in its worktree answers the folder's trust dialog through the
+  `Inlet` and `Screen` by label (Down to "Yes, I trust this folder", then Enter, each seen on
+  the screen first), before the start is confirmed; a screen idle or running shows a folder
+  trusted before. Its settings carry the waiter hook in its launch overlay.
+- Its report is the reply to the brief's uuid, read from its transcript: the last reply that
+  ended a message of the turn whose user line holds the brief's mark (or, after a resume, the
+  word to go on's), once that turn has ended: a later user entry began another turn, or its
+  session file reads its turn ended. Never the transcript's last reply: a person may have
+  typed a turn of their own since (`Delegate.tla`'s `ReportAnswersTheBrief`,
+  `Break_Delegate_LastReply`).
+- Its process gone with no such reply, it is resumed once, as a headless one is, and the
+  resume carries the word to go on (or the brief again) by `launch`.
+- Its stop is a main session's: SIGTERM after an `idle` read. `Mover` moves it as it moves a
+  main session (`Delegates.launch/2` answers role `parent` for it).
+- A parent's fixes that act through `Stream` (an interrupt, an answer) do not reach it
+  (F-137's new-3).
+
 ## Headless delegates
 
 A delegate runs `claude -p --verbose --input-format stream-json --output-format stream-json
@@ -926,7 +952,8 @@ waiter as `Hold`'s third instance (F-123).
 
 A session with no waiter (before its first turn ends, after a waiter's deadline, or after a
 restart cut the waiter's connection) gets nothing that way, and `Intake` knows it
-(`Intake.waiter?`), once a heartbeat has found a connection that died. What is due is held until
+(`Intake.waiter?`), once a heartbeat has found a connection that died. A start that carries
+the first row as its prompt (`launch`, "Delivery") needs none. What is due is held until
 a waiter connects; a view shows a session idle with no waiter and something due, and the
 `Inlet`'s checked write reaches it, as one more transport of the same row. It types one line, the row's
 uuid at its end, only when the session file reads idle with no waiter held and the screen shows
@@ -1136,7 +1163,21 @@ changed (R6).
 | `stream` | a headless session | the replay in `Stream`'s fold; at the exit, the transcript | settled from the same evidence once read; undelivered is final, and the row is due again first, under its same uuid, to the resumed process |
 | `waiter` | an interactive session with a waiter | the transcript's lines carrying the row's uuid: the `queue-operation` `enqueue` (it reached Claude Code's queue), then its take, a `dequeue` and the user line `Stop hook blocking error …` into an ended turn, or a `remove` and a `queued_command` attachment into a running one; delivered at the take; due again once the take bound past its hand-on has passed with no line, or its process is gone with no take | settled from the same lines: delivered if the take is there, kept while only the `enqueue` is, due again if no line is there and the take bound has passed |
 | `typed` | an interactive session with no waiter | the `Inlet`'s answer, then the transcript's user line once the turn has ended; due again as `waiter` | as `waiter`; an unknown write is never typed again |
+| `launch` | the first row to an interactive session's new process | its start: the text is the start's prompt argument, read from a file into the last argument (`ClaudeCLI.prompted/5`, at most 512 KiB); then the transcript's user line with the row's uuid, delivered at it; a start refused makes it due again; with no line, due again once no process of the start runs or the take bound has passed since the start's answer | as `waiter`, the start's deadline standing in for its answer |
 | `call` | a waiting `run_delegate` | the endpoint's write, and the calling process still running after it | due again, for the parent's waiter: the call it answered is gone |
+
+**The launch** (F-137). A waiter connects only once a turn of its process has ended, and the
+`Inlet` types only a short row, so neither carries a delegate's brief into a new interactive
+session. Claude Code takes an initial prompt as its last argument, at a start and with
+`--resume`, and runs it as the first turn. So the first row to an interactive session (a
+delegate's brief, or its word to go on, or the brief again, at a resume) is marked `sending`
+by `launch` before the start (`Mailbox.launch/4`, by the part that starts it, by the start's
+deadline), and the start's answer is told to `Mailbox` (`launched/3`). Every later row goes by
+the waiter, or by `typed` when it is short and no waiter is connected. A long row to a session
+whose waiter is gone after its turns waits for a person's prompt, whose turn's end brings the
+next waiter (`Delivery.tla`'s `Held`). An argument of about 900 000 bytes passed and one of 1
+100 000 did not on macOS (`getconf ARG_MAX` 1 048 576 for arguments and environment together),
+so a launch carries at most 512 KiB.
 
 **The take bound** (F-122's new-2): the time after a waiter's answer, or a typed write, by which
 Claude Code has started the turn with it or never will. Between the hand-on and the transcript's
@@ -1808,7 +1849,8 @@ uuid, and each spec that instances a module compares its state counts before and
 13. **What is left of the main sessions' work**, on the remodel's shape (`Screen` is built,
     F-113; the waiter is R5 and R7, the checked write R8, the end by SIGTERM R3 and R6, the
     reach across accounts R2, `Mover` R12): **interactive delegates** (`interactive: true`: an
-    agent row of kind `delegate` whose turn state and transports are an interactive session's),
+    agent row of kind `delegate` whose turn state and transports are an interactive session's;
+    built in F-137, with the `launch` transport, "Interactive delegates"),
     then **`Mains`** (item 6: what R9 leaves, the checkout, the pull after a landing and
     `start_main`; a main session's kept services end with it or go to a person, once one can
     end: F-109's new-4).

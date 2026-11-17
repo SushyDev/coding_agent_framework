@@ -28,6 +28,7 @@ defmodule CafSessions.MixProject do
       {:caf_tmux, in_umbrella: true},
       {:caf_holder, in_umbrella: true},
       {:caf_intake, in_umbrella: true},
+      {:caf_inlet, in_umbrella: true},
       {:caf_registry, in_umbrella: true},
       {:caf_shell, in_umbrella: true},
       {:caf_stream, in_umbrella: true},

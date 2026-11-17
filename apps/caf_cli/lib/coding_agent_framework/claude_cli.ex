@@ -185,6 +185,40 @@ defmodule CodingAgentFramework.ClaudeCLI do
   @spec wrapper(String.t(), String.t(), String.t(), [String.t()]) :: [String.t()]
   def wrapper(sh, dir, fifo, argv), do: [sh, "-c", @wrapper, "caf-stream", dir, fifo | argv]
 
+  # The launch's prompt from a file (F-137): read into the last argument, after `--`, so no
+  # shell string ever holds it; the file goes once read, and a read that fails starts nothing.
+  @prompted ~S"""
+  c=$1 r=$2 f=$3; shift 3
+  p=$("$c" -- "$f") || exit 1
+  "$r" -f -- "$f"
+  exec "$@" -- "$p"
+  """
+
+  # The longest prompt a launch carries, in bytes. macOS takes about 1 MiB of arguments and
+  # environment together (`getconf ARG_MAX` is 1 048 576; one argument of 900 000 bytes passed
+  # and one of 1 100 000 did not, measured for F-137), so half of it leaves room for the rest.
+  @prompt_max 524_288
+
+  @doc "The longest prompt, in bytes, a launch carries as its argument (`prompted/5`)."
+  @spec prompt_max() :: pos_integer
+  def prompt_max, do: @prompt_max
+
+  @doc """
+  `argv` (a session's, with no prompt) run by a wrapper that reads its first prompt from
+  `file`, with the host's `cat`, removes the file, and execs `argv` with `--` and the prompt as
+  its last argument. The launch's prompt (Delivery's `launch` transport) goes this way, so a
+  long or multi-line text is never part of a shell string. Pure.
+
+      iex> [sh, "-c", _script, "caf-prompt", "/bin/cat", "/bin/rm", "/d/p", "/run/bin/claude"] =
+      ...>   CodingAgentFramework.ClaudeCLI.prompted("/bin/sh", "/bin/cat", "/bin/rm", "/d/p",
+      ...>     ["/run/bin/claude"])
+      iex> sh
+      "/bin/sh"
+  """
+  @spec prompted(String.t(), String.t(), String.t(), String.t(), [String.t()]) :: [String.t()]
+  def prompted(sh, cat, rm, file, argv),
+    do: [sh, "-c", @prompted, "caf-prompt", cat, rm, file | argv]
+
   # The account's servers, then the agent's own: one value each, before `--strict-mcp-config`
   # ends the list.
   defp mcp(account, opts) do

@@ -27,9 +27,23 @@
 (*           and no answer still on its way to a turn, due again. A        *)
 (*           restart settles it the same way.                              *)
 (*   typed   the Inlet's checked write, for an interactive session with no *)
-(*           waiter, into an ended turn only. Refused when the check       *)
-(*           fails; unknown keeps the mark, and is never typed again;      *)
-(*           settled as waiter, once the turn that took it has ended.      *)
+(*           waiter, into an ended turn only, and only a short row: a row  *)
+(*           in Long (more than one line, or wider than the box) is never  *)
+(*           typed (F-132). Refused when the check fails; unknown keeps    *)
+(*           the mark, and is never typed again; settled as waiter, once   *)
+(*           the turn that took it has ended.                              *)
+(*                                                                         *)
+(* A waiter connects only once a turn of its process has ended (`turned`): *)
+(* each turn's end starts the next one, and nothing starts one before the  *)
+(* first turn. So a new interactive process has neither a waiter nor, for  *)
+(* a long row, the typed write: its first row goes by launch (F-137). A    *)
+(* long row to a session whose waiter is gone after its turns waits for a  *)
+(* person's prompt, whose turn's end brings the next waiter (`Held`).      *)
+(*   launch  the prompt argument of an interactive session's start (and of *)
+(*           its resume): the first row to it goes in as the start itself, *)
+(*           and Claude Code runs it as the session's first turn. Marked   *)
+(*           before the start; a start refused undoes the mark, under the  *)
+(*           same key; settled as waiter, by the transcript's user line.   *)
 (*   call    the answer of a waiting run_delegate, inside the turn that    *)
 (*           called. Delivered when the endpoint's write succeeded and the *)
 (*           calling process still runs; a failed write, the end of the    *)
@@ -113,6 +127,8 @@ CONSTANTS
     MaxEnds,       \* alone: processes that end by themselves (a crash, a kill)
     MaxPrompts,    \* alone: a person's prompts
     MaxStops,      \* alone: stops by SIGTERM
+    Long,          \* rows too long for the typed write
+    Launched,      \* alone: interactive sessions with no process at first, started by launch
     Break          \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -137,18 +153,21 @@ Breaks == {
     "ReplyAndNotice",        \* a notice is read from the process's end, not the fold
     "SelfReply",             \* a reply is the last result since the row, whatever it names
     "NoNotice",              \* a row whose turn ended with no result gets no notice
-    "ResumeOwnKey"           \* a resumed process's row is keyed by itself, not the brief
+    "ResumeOwnKey",          \* a resumed process's row is keyed by itself, not the brief
+    "NoLaunch",              \* a start carries no row: the first waits for a waiter or typing
+    "TypeLong"               \* the typed write takes a long row
 }
 
 ASSUME Break \in Breaks
-ASSUME Headless \subseteq Addrs /\ Awaited \subseteq Ids
+ASSUME Headless \subseteq Addrs /\ Awaited \subseteq Ids /\ Long \subseteq Ids
+ASSUME Launched \subseteq Addrs \ Headless
 ASSUME ClientLeaves \in BOOLEAN /\ SelfTurns \in BOOLEAN
 
 Framework == "framework"
 Nobody == "nobody"
 OwnTurn == 0     \* a result that names no row: a turn a session started by itself
 NoResult == -1   \* no result since the last row went in
-Transports == {"stream", "waiter", "typed", "call"}
+Transports == {"stream", "waiter", "typed", "launch", "call"}
 NoRow == [from |-> Nobody, to |-> Nobody, kind |-> "none", re |-> 0, src |-> NoResult,
           st |-> "none", via |-> "none", at |-> 0, again |-> FALSE]
 
@@ -159,6 +178,7 @@ VARIABLES
     idle,      \* a -> a's turn has ended
     stopping,  \* a -> a's row in Sessions says stopping
     over,      \* a -> a's session ended for good
+    turned,    \* a -> a turn of a's current process has ended
     \* Mailbox and its transports
     row,       \* table: i -> [from, to, kind, re (its key), src, st, via, at, again]
     hand,      \* memory: rows marked whose transport has not answered yet
@@ -181,7 +201,7 @@ VARIABLES
     restarts, lives, ends, prompts, stops, readAt
 
 dvars == <<row, hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
-avars == <<up, pr, idle, stopping, over>>
+avars == <<up, pr, idle, stopping, over, turned>>
 alone == <<restarts, lives, ends, prompts, stops, readAt>>
 vars == <<avars, dvars, alone>>
 
@@ -216,18 +236,20 @@ Reaches(i, t) ==
     LET a == row[i].to IN
     CASE t = "stream" -> a \in Headless
       [] t = "waiter" -> a \notin Headless /\ waiter[a] = pr[a]
-      [] t = "typed"  -> a \notin Headless /\ waiter[a] # pr[a]
+      [] t = "typed"  -> a \notin Headless /\ waiter[a] # pr[a] /\ (i \notin Long \/ Break = "TypeLong")
+      [] t = "launch" -> a \notin Headless /\ Break # "NoLaunch"
       [] t = "call"   -> /\ i \in Awaited
                          /\ \/ call[i] = "waiting"
                             \/ Break = "TakeAfterDeadline" /\ call[i] = "timedout"
 
 \* The hand-on is possible: the process it was marked for still takes it,
-\* and its row is not stopping.
+\* and its row is not stopping. A launch is the start: no process runs.
 Open(i) ==
     LET a == row[i].to  p == row[i].at IN
     /\ ~stopping[a] \/ Break = "MarkWhileStopping"
     /\ CASE row[i].via = "stream" -> pr[a] = p
          [] row[i].via = "waiter" -> waiter[a] = p
+         [] row[i].via = "launch" -> pr[a] = 0 /\ ~over[a]
          [] OTHER                 -> pr[a] = p /\ idle[a] /\ waiter[a] # p
 
 Due(i) == [row[i] EXCEPT !.st = "due", !.via = "none", !.at = 0]
@@ -253,10 +275,11 @@ Store(i, f, t, k) ==
 \* The mark: the row says sending, with its transport and the process it is
 \* for, before anything goes out. Into an ended turn only (a call answers
 \* inside the turn that called, and Claude Code queues a waiter's answer into
-\* a running turn), and never to a session whose row is stopping.
+\* a running turn), and never to a session whose row is stopping. A launch
+\* is marked while no process runs, for the one its start makes.
 Mark(i, t) ==
     LET a == row[i].to IN
-    /\ up /\ a \in Addrs /\ First(i) /\ pr[a] # 0 /\ ~over[a]
+    /\ up /\ a \in Addrs /\ First(i) /\ (pr[a] = 0) = (t = "launch") /\ ~over[a]
     /\ idle[a] \/ t \in {"call", "waiter"} \/ Break = "IntoRunningTurn"
     /\ ~stopping[a] \/ Break = "MarkWhileStopping"
     /\ Reaches(i, t)
@@ -275,11 +298,25 @@ Handed(i) ==
     /\ wire' = [wire EXCEPT ![i] = @ + 1]
     /\ claimed' = IF row[i].via = "stream" THEN claimed \cup {i} ELSE claimed
     /\ waiter' = IF row[i].via = "waiter" THEN [waiter EXCEPT ![a] = 0] ELSE waiter
-    /\ UNCHANGED <<row, call, tx, fold, rmem, last, unsure, lost, wrong>>
+    /\ wrong' = wrong \cup (IF row[i].via = "typed" /\ i \in Long THEN {"typed long"} ELSE {})
+    /\ UNCHANGED <<row, call, tx, fold, rmem, last, unsure, lost>>
 
-\* The transport refuses: nothing went out, and the mark is undone.
+\* launch: the start is the hand-on. The row's text is the start's prompt
+\* argument, for the process p the start makes (the instancing spec starts
+\* it in the same step: a new process, idle, no turn of it ended yet).
+Launch(i, p) ==
+    /\ up /\ i \in hand /\ row[i].via = "launch" /\ Open(i)
+    /\ hand' = hand \ {i}
+    /\ wire' = [wire EXCEPT ![i] = @ + 1]
+    /\ row' = [row EXCEPT ![i].at = p]
+    /\ UNCHANGED <<claimed, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
+
+\* The transport refuses: nothing went out, and the mark is undone. A start
+\* may be refused whatever its check read (a setup that failed, say).
 Refused(i) ==
-    /\ up /\ i \in hand /\ row[i].via \in {"stream", "waiter", "typed"} /\ ~Open(i)
+    /\ up /\ i \in hand
+    /\ \/ row[i].via \in {"stream", "waiter", "typed"} /\ ~Open(i)
+       \/ row[i].via = "launch"
     /\ hand' = hand \ {i}
     /\ row' = [row EXCEPT ![i] = Due(i)]
     /\ UNCHANGED <<claimed, wire, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
@@ -337,14 +374,16 @@ SettleExit(i, has) ==
     /\ wire' = [wire EXCEPT ![i] = 0]
     /\ UNCHANGED <<hand, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
 
-\* waiter and typed: the transcript (`has`): a waiter's take line (a dequeue
-\* or a remove) at once, a typed write's once the turn that took it has
-\* ended. There, delivered; not there, due again once no answer of it is on
-\* its way to a turn, or the process it was for is gone.
+\* waiter, typed and launch: the transcript (`has`): a waiter's take line (a
+\* dequeue or a remove) and a launch's user line at once, a typed write's
+\* once the turn that took it has ended. There, delivered; not there, due
+\* again once no answer of it is on its way to a turn, or the process it was
+\* for is gone (a launch whose start a restart cut never made it).
 SettleSeen(i, has) ==
     LET a == row[i].to  gone == pr[a] # row[i].at IN
-    /\ up /\ row[i].st = "sending" /\ row[i].via \in {"waiter", "typed"} /\ i \notin hand
-    /\ \/ has /\ (idle[a] \/ gone \/ row[i].via = "waiter")
+    /\ up /\ row[i].st = "sending" /\ row[i].via \in {"waiter", "typed", "launch"}
+    /\ i \notin hand
+    /\ \/ has /\ (idle[a] \/ gone \/ row[i].via \in {"waiter", "launch"})
           /\ row' = [row EXCEPT ![i] = Delivered(i)]
        \/ ~has /\ (wire[i] = 0 \/ gone \/ Break = "SettleEarly")
           /\ row' = [row EXCEPT ![i] = DueAgain(i)]
@@ -427,9 +466,10 @@ SettleCut(i) ==
 -----------------------------------------------------------------------------
 (* The waiter, the fold, a restart and a session's end *)
 
-\* A turn's end starts the session's next waiter, which connects.
+\* A turn's end starts the session's next waiter, which connects: never
+\* before a turn of the process has ended.
 Connects(a) ==
-    /\ up /\ a \notin Headless /\ pr[a] # 0 /\ idle[a] /\ waiter[a] # pr[a]
+    /\ up /\ a \notin Headless /\ pr[a] # 0 /\ idle[a] /\ turned[a] /\ waiter[a] # pr[a]
     /\ waiter' = [waiter EXCEPT ![a] = pr[a]]
     /\ UNCHANGED <<row, hand, claimed, wire, call, tx, fold, rmem, last, unsure, lost, wrong>>
 
@@ -468,7 +508,8 @@ Restart ==
                                           /\ row[i].st = "sending"}
     /\ rmem' = {}
     /\ row' = IF Break = "RedeliverAfterRestart"
-                THEN [i \in Ids |-> IF row[i].st = "sending" /\ row[i].via \in {"waiter", "typed"}
+                THEN [i \in Ids |-> IF row[i].st = "sending"
+                                         /\ row[i].via \in {"waiter", "typed", "launch"}
                                       THEN DueAgain(i) ELSE row[i]]
                 ELSE row
     /\ UNCHANGED <<claimed, wire, tx, fold, last, lost, wrong>>
@@ -538,9 +579,10 @@ GoOn(i) ==
 
 Init ==
     /\ up = TRUE /\ restarts = 0
-    /\ pr = [a \in Addrs |-> 1] /\ lives = [a \in Addrs |-> 1]
+    /\ pr = [a \in Addrs |-> IF a \in Launched THEN 0 ELSE 1]
+    /\ lives = [a \in Addrs |-> IF a \in Launched THEN 0 ELSE 1]
     /\ idle = [a \in Addrs |-> TRUE] /\ stopping = [a \in Addrs |-> FALSE]
-    /\ over = [a \in Addrs |-> FALSE]
+    /\ over = [a \in Addrs |-> FALSE] /\ turned = [a \in Addrs |-> FALSE]
     /\ ends = 0 /\ prompts = 0 /\ stops = 0 /\ readAt = [a \in Addrs |-> 0]
     /\ row = [i \in Ids |-> NoRow] /\ hand = {} /\ claimed = {}
     /\ wire = [i \in Ids |-> 0] /\ waiter = [a \in Addrs |-> 0]
@@ -554,43 +596,54 @@ Mailbox(A) == A /\ UNCHANGED <<avars, alone>>
 \* A sender stores a row; the first to a headless session is its brief.
 Sends(i, s, a) ==
     /\ i <= MaxSent /\ ~over[a]
-    /\ Store(i, s, a, IF a \in Headless /\ To(a) = {} THEN "brief" ELSE "msg")
+    /\ Store(i, s, a, IF a \in Headless \cup Launched /\ To(a) = {} THEN "brief" ELSE "msg")
     /\ UNCHANGED <<avars, alone>>
 
 \* A take starts a turn; a call's write goes into the turn that called.
 Takes(i) == Take(i) /\ idle' = [idle EXCEPT ![row[i].to] = FALSE]
-            /\ UNCHANGED <<up, pr, stopping, over, alone>>
+            /\ UNCHANGED <<up, pr, stopping, over, turned, alone>>
 
 Prompted(a) ==
     /\ a \notin Headless /\ pr[a] # 0 /\ idle[a] /\ prompts < MaxPrompts
     /\ idle' = [idle EXCEPT ![a] = FALSE] /\ prompts' = prompts + 1
-    /\ UNCHANGED <<up, pr, stopping, over, dvars, restarts, lives, ends, stops, readAt>>
+    /\ UNCHANGED <<up, pr, stopping, over, turned, dvars, restarts, lives, ends, stops, readAt>>
 
 SelfStarts(a) ==
     /\ SelfTurns /\ a \in Headless /\ pr[a] # 0 /\ idle[a]
     /\ idle' = [idle EXCEPT ![a] = FALSE]
-    /\ UNCHANGED <<up, pr, stopping, over, dvars, alone>>
+    /\ UNCHANGED <<up, pr, stopping, over, turned, dvars, alone>>
 
 TurnEnds(a) ==
     /\ pr[a] # 0 /\ ~idle[a]
-    /\ idle' = [idle EXCEPT ![a] = TRUE] /\ Result(a)
+    /\ idle' = [idle EXCEPT ![a] = TRUE] /\ turned' = [turned EXCEPT ![a] = TRUE] /\ Result(a)
     /\ UNCHANGED <<up, pr, stopping, over, alone>>
 
 \* The process ends, by itself (Ends) or by the stop's SIGTERM (Term).
 ProcEnds(a, term) ==
     /\ pr' = [pr EXCEPT ![a] = 0] /\ idle' = [idle EXCEPT ![a] = TRUE]
+    /\ turned' = [turned EXCEPT ![a] = FALSE]
     /\ readAt' = [readAt EXCEPT ![a] = 0] /\ Exited(a, term)
 
 Ends(a) ==
     /\ pr[a] # 0 /\ ends < MaxEnds /\ ends' = ends + 1 /\ ProcEnds(a, FALSE)
     /\ UNCHANGED <<up, stopping, over, restarts, lives, prompts, stops>>
 
-\* Sessions resumes the session: a new process, its turn not begun.
-Resumed(a) ==
-    /\ up /\ pr[a] = 0 /\ ~over[a]
+\* Sessions starts a new process of the session, its turn not begun. A
+\* launched session starts only by a launch, which carries its first row.
+NewProcess(a) ==
     /\ lives' = [lives EXCEPT ![a] = @ + 1] /\ pr' = [pr EXCEPT ![a] = lives[a] + 1]
     /\ idle' = [idle EXCEPT ![a] = TRUE] /\ stopping' = [stopping EXCEPT ![a] = FALSE]
+    /\ turned' = [turned EXCEPT ![a] = FALSE]
+
+Resumed(a) ==
+    /\ up /\ pr[a] = 0 /\ ~over[a] /\ (a \notin Launched \/ Break = "NoLaunch")
+    /\ NewProcess(a)
     /\ UNCHANGED <<up, over, dvars, restarts, ends, prompts, stops, readAt>>
+
+Launches(i) ==
+    LET a == row[i].to IN
+    /\ a \in Addrs /\ Launch(i, lives[a] + 1) /\ NewProcess(a)
+    /\ UNCHANGED <<up, over, restarts, ends, prompts, stops, readAt>>
 
 \* The stop: the row says stopping first; the idle read waits until the
 \* turn has ended and no row to the session is sending; then the SIGTERM,
@@ -598,7 +651,7 @@ Resumed(a) ==
 StopAsked(a) ==
     /\ up /\ pr[a] # 0 /\ ~stopping[a] /\ stops < MaxStops
     /\ stopping' = [stopping EXCEPT ![a] = TRUE] /\ stops' = stops + 1
-    /\ UNCHANGED <<up, pr, idle, over, dvars, restarts, lives, ends, prompts, readAt>>
+    /\ UNCHANGED <<up, pr, idle, over, turned, dvars, restarts, lives, ends, prompts, readAt>>
 
 IdleRead(a) ==
     /\ up /\ stopping[a] /\ pr[a] # 0 /\ idle[a] /\ readAt[a] = 0
@@ -621,11 +674,11 @@ FrameworkDies ==
     /\ up /\ restarts < MaxRestarts
     /\ up' = FALSE /\ restarts' = restarts + 1 /\ readAt' = [a \in Addrs |-> 0]
     /\ Restart
-    /\ UNCHANGED <<pr, idle, stopping, over, lives, ends, prompts, stops>>
+    /\ UNCHANGED <<pr, idle, stopping, over, turned, lives, ends, prompts, stops>>
 
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
-    /\ UNCHANGED <<pr, idle, stopping, over, dvars, alone>>
+    /\ UNCHANGED <<pr, idle, stopping, over, turned, dvars, alone>>
 
 \* The agent calls run_delegate in a turn, on a row stored for it.
 CallMade(i) ==
@@ -644,6 +697,7 @@ Next ==
     \/ \E i \in Ids : \/ \E s \in Senders, a \in Addrs : Sends(i, s, a)
                       \/ \E t \in Transports : Mailbox(Mark(i, t))
                       \/ Mailbox(Handed(i) \/ Refused(i) \/ Unknown(i) \/ Reclaim(i))
+                      \/ Launches(i)
                       \/ Takes(i) \/ Mailbox(Settle(i))
                       \/ CallMade(i)
                       \/ Mailbox(Deadline(i) \/ Written(i) \/ Told(i) \/ CallerEnds(i)
@@ -666,6 +720,7 @@ Fairness ==
                         /\ WF_vars(Mailbox(Connects(a)))
     /\ \A i \in Ids : /\ SF_vars(\E t \in Transports : Mailbox(Mark(i, t)))
                      /\ SF_vars(Mailbox(Handed(i))) /\ SF_vars(Takes(i))
+                     /\ SF_vars(Launches(i))
                      /\ WF_vars(RowSteps(i))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
@@ -697,6 +752,10 @@ OnlyIntoEndedTurn == "running turn" \notin wrong
 \* No turn a row started is cut by a stop's SIGTERM: nothing goes into a
 \* session whose row is stopping once its idle read is made.
 NotCutByStop == "cut" \notin wrong
+
+\* A long row is never typed: the Inlet refuses it, and it waits for a
+\* waiter or goes by launch.
+NoLongTyped == "typed long" \notin wrong
 
 \* A text reaches only the process it was marked for.
 OnlyToItsProcess == "other process" \notin wrong
@@ -732,8 +791,16 @@ AnswersTheBrief ==
 \* A row in flight settles.
 SendingSettles == \A i \in Ids : row[i].st = "sending" ~> row[i].st # "sending"
 
-\* A due row is delivered, or marked ended once its session ended.
-Arrives == \A i \in Ids : row[i].st = "due" ~> row[i].st \in {"delivered", "ended"}
+\* A long row to an interactive session that has had its turns and has no
+\* waiter now: it waits for a person's prompt, whose turn's end brings the
+\* next waiter. A view shows it (design.md, "A session with no waiter").
+Held(i) ==
+    LET a == row[i].to IN
+    /\ i \in Long /\ a \in Addrs \ Headless /\ pr[a] # 0 /\ turned[a] /\ waiter[a] # pr[a]
+
+\* A due row is delivered, marked ended once its session ended, or held
+\* for a person's prompt.
+Arrives == \A i \in Ids : row[i].st = "due" ~> (row[i].st \in {"delivered", "ended"} \/ Held(i))
 
 \* A delivered row whose turn ends, with a result or with its process's
 \* end, is answered under its key, unless its session ended for good.

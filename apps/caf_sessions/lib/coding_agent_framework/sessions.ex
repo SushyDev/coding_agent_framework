@@ -38,6 +38,15 @@ defmodule CodingAgentFramework.Sessions do
   release draws it, and the `Inlet` refuses a typed write to a session whose release is nil (not
   read) or has no reading. A headless session's is not read: nothing reads its screen.
 
+  **An interactive start's prompt** (`prompt:`, F-137: `Mailbox`'s `launch` transport) is
+  written to `<dtach dir>/<name>.prompt`, and the hold runs `ClaudeCLI.prompted/5`, which reads
+  it into the last argument, after `--`, and removes it; a prompt over `ClaudeCLI.prompt_max/0`
+  bytes is refused. Claude Code runs it as the session's first turn. With `inlet:`, an
+  interactive start in a worktree answers the folder's trust dialog before it confirms the
+  start: `Inlet.choose/5` moves to "Yes, I trust this folder" and sends Enter; a screen idle or
+  running shows a folder trusted before. A dialog still there at the deadline leaves the row
+  `unknown`, reason `trust_dialog`, for a person.
+
   **A delegate** (role `:delegate`) runs headless ("Headless delegates"): after its row, which
   keeps the session id the framework chose, `Stream.follow/5` makes its directory and FIFO under
   `<home>/streams/<session id>/`, then `ClaudeCLI.headless/2`'s argv is held inside
@@ -135,7 +144,8 @@ defmodule CodingAgentFramework.Sessions do
   require Logger
 
   alias CodingAgentFramework.{ClaudeCLI, Holder, Programs, Registry, Shell, Stream, Tmux}
-  alias CodingAgentFramework.{Accounts, Acts, ClaudeCLI.Options, Intake, Store, Transcripts}
+  alias CodingAgentFramework.{Accounts, Acts, ClaudeCLI.Options, Inlet, Intake, Store}
+  alias CodingAgentFramework.Transcripts
   alias CodingAgentFramework.Sessions.{Agents, Table, Turn, Worktree}
 
   @timeout 30_000
@@ -155,6 +165,8 @@ defmodule CodingAgentFramework.Sessions do
   @version 5_000
   # The held program starts in the session's directory; `$0` is the directory.
   @cd ~S(cd -- "$0" && exec "$@")
+  # The trust dialog's option an interactive start in a worktree answers (2.1.322's label).
+  @trusted "Yes, I trust this folder"
 
   @type outcome(ok) :: {:ok, ok} | {:refused, term} | {:unknown, term}
 
@@ -164,6 +176,8 @@ defmodule CodingAgentFramework.Sessions do
   `tmux:` (the host's tmux server, for the viewers), `registry:` (the host's `Registry`), `db:`, and optionally `stream:`
   and `home:` (the host's `Stream` and the framework home, for delegates and worktrees),
   `reaper:` (the host's `Shell.Reaper`, for worktrees; `programs:` then names git and mkdir),
+  `inlet:` (the host's `Inlet`, which answers an interactive start's trust dialog; `programs:`
+  names cat for an interactive start's prompt),
   `notify:`, `size:`
   (the viewer's `{columns, rows}`, default `{200, 50}`), `poll:` (ms between reads while a call
   waits, default 200), `clock:` (a function answering wall-clock ms, for the deadlines), and,
@@ -380,6 +394,8 @@ defmodule CodingAgentFramework.Sessions do
         mains: Keyword.get(opts, :mains, %{}),
         waiter: waiter,
         git: Programs.fetch(programs, :git),
+        cat: Programs.fetch(programs, :cat),
+        inlet: Keyword.get(opts, :inlet),
         worktrees: root(host, holder.sh, programs, Keyword.get(opts, :home)),
         pending: %{}
       }
@@ -463,7 +479,9 @@ defmodule CodingAgentFramework.Sessions do
         deadline: deadline,
         way: way,
         viewer: viewer,
-        act: act
+        act: act,
+        # An interactive start in a worktree answers the folder's trust dialog, when it shows.
+        trust: if(role == :parent and place.tree != nil and state.inlet, do: :open)
       }
 
       case place.tree do
@@ -818,6 +836,26 @@ defmodule CodingAgentFramework.Sessions do
         write(state, row, viewer: open_viewer(state, name, pending.viewer))
         send(self(), {:check, name})
         put_in(state.pending[name], pending)
+    end
+  end
+
+  # The trust dialog first, by label through the Inlet: answered, or a screen past it (a folder
+  # trusted before) ends it; anything else is read again at the next check, until the deadline.
+  defp check(state, name, %{kind: :start, trust: :open, row: row} = pending) do
+    opts = [release: row.release, timeout: @read]
+
+    case Inlet.choose(state.inlet, name, :trust, @trusted, opts) do
+      {:ok, :sent} ->
+        check(state, name, %{pending | trust: :passed})
+
+      {:refused, {:screen, %{state: past}}} when past in [:idle, :running] ->
+        check(state, name, %{pending | trust: :passed})
+
+      _not_yet ->
+        wait(state, name, pending, fn ->
+          write(state, row, status: "unknown", reason: "trust_dialog")
+          {:unknown, :trust_dialog}
+        end)
     end
   end
 
@@ -1279,12 +1317,28 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
+  # An interactive session's first prompt (Delivery's launch transport) is not in its argv: the
+  # hold's wrapper reads it from a file into the last argument (`ClaudeCLI.prompted/5`).
   defp way(state, role, account, name, _cwd, resume, launch) do
-    with {:ok, hooks} <- waiter_hooks(state, account),
+    with {:ok, prompt} <- prompt(state, launch[:prompt]),
+         {:ok, hooks} <- waiter_hooks(state, account),
          {:ok, options, own} <- own(state, role, account, name, resume, launch, hooks),
-         {:ok, cli} <- cli(role, account, name, resume, launch, own),
-         do: {:ok, %{cli: cli, options: options}}
+         {:ok, cli} <- cli(role, account, name, resume, Keyword.delete(launch, :prompt), own),
+         do: {:ok, %{cli: cli, options: options, prompt: prompt}}
   end
+
+  defp prompt(_state, nil), do: {:ok, nil}
+
+  defp prompt(state, prompt) when is_binary(prompt) and prompt != "" do
+    cond do
+      byte_size(prompt) > ClaudeCLI.prompt_max() -> {:refused, {:too_long, :prompt}}
+      not String.valid?(prompt) -> {:refused, {:bad, :prompt}}
+      not match?({:ok, _}, state.cat) -> {:refused, {:no_program, :cat}}
+      true -> {:ok, prompt}
+    end
+  end
+
+  defp prompt(_state, _prompt), do: {:refused, {:bad, :prompt}}
 
   # The start's row before it has an id.
   defp new_row(state, name, account, role, place, resume, way, deadline, launch) do
@@ -1480,6 +1534,20 @@ defmodule CodingAgentFramework.Sessions do
 
       {_, reason} ->
         {:refused, {:follow, reason}}
+    end
+  end
+
+  # The prompt's file, beside the dtach socket and owned by this user alone; the wrapper removes
+  # it once read. A file a hold that failed left is written over by the next start of the name.
+  defp prepare(state, %{prompt: prompt} = way, name) when is_binary(prompt) do
+    file = Path.join(state.holder.dir, name <> ".prompt")
+    {:ok, cat} = state.cat
+
+    with :ok <- File.write(file, prompt),
+         :ok <- File.chmod(file, 0o600) do
+      {:ok, ClaudeCLI.prompted(state.holder.sh, cat, state.holder.rm, file, way.cli.argv)}
+    else
+      {:error, reason} -> {:refused, {:prompt_file, reason}}
     end
   end
 
