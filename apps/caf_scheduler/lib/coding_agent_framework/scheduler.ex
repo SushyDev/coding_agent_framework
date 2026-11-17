@@ -105,11 +105,11 @@ defmodule CodingAgentFramework.Scheduler do
   def cue(scheduler, %{topic: _}), do: GenServer.cast(scheduler, :check)
 
   @doc """
-  What the `Scheduler` reads, for `Cues`: the agent rows and the delegates' rows (a delegate's
-  work ended), and the accounts' readings (a window's room).
+  What the `Scheduler` reads, for `Cues`: the agent rows, the delegates' rows and the job rows
+  (a delegate's or a job's work ended), and the accounts' readings (a window's room).
   """
   @spec reads() :: %{topics: [String.t()], cue: (pid, map -> :ok)}
-  def reads, do: %{topics: ~w(sessions delegates usage), cue: &cue/2}
+  def reads, do: %{topics: ~w(sessions delegates jobs usage), cue: &cue/2}
 
   defp call(scheduler, request, opts) do
     timeout = Keyword.get(opts, :timeout, @call)

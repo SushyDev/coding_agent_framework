@@ -21,7 +21,8 @@
 (* restart); and the row of the work each lease admits (an agent row, a    *)
 (* job row), which its owner keeps and settles by Holder.Process's record  *)
 (* and which outlives the scheduler (Scheduler.Holders, and the owners'    *)
-(* readings in Delegates.Work and Jobs.Work).                              *)
+(* readings in Delegates.Work and Jobs.Work); and the fence a heavy run's *)
+(* wrapper takes on its host before it runs (F-139: Jobs' wrapper).        *)
 (*                                                                         *)
 (* The classes, in order: 1 a person's main session, 2 a landing's gates,  *)
 (* 3 a builder, 4 a heavy run. No class takes back another's lease. A      *)
@@ -51,6 +52,21 @@
 (* when the owner settles the row ended, and after a restart the reclaimer *)
 (* asks the owner about each unreleased row, releases it if the work ended *)
 (* and monitors it again if not. A row still starting counts as live.      *)
+(*                                                                         *)
+(* The fence (F-139, shape "Fence": heavy runs on one slot, as Jobs runs   *)
+(* them). A heavy run's start is sent to a host and may land there late,   *)
+(* after its owner read the host and found nothing running. Before it      *)
+(* sends the start the owner writes a fence beside the job, holding the    *)
+(* lease id (`fence` "set"). The job's wrapper takes the fence before it   *)
+(* runs anything, and runs only when it took it and the id is its own; an  *)
+(* owner that would settle a start as never run takes the fence first, and *)
+(* settles it so only when it took it. The take is one step on the host    *)
+(* (mkdir), so exactly one of the two takes it. A wrapper that finds the   *)
+(* fence taken exits without running (`run` "fenced"). With the fence, a   *)
+(* job runs only under its unreleased lease (`NoRunUnleased`), and the     *)
+(* slots the running jobs use never pass the capacity (`HostCapacity`),    *)
+(* even when a start lands after its deadline, which Copy.tla assumes      *)
+(* never happens (NeverLands). In the other shapes the host is left out.   *)
 (*                                                                         *)
 (* Neither Claim nor Hold is instanced. A lease is not a claim: a claim is *)
 (* one per state of a target, acted on once while current, while a lease  *)
@@ -99,11 +115,12 @@ Breaks == {
     "StartingIsEnded",    \* after a restart a row still starting counts as ended
     "NoBudgetGate",       \* a grant does not look at the account's budget
     "NoReask",            \* a requester waiting through a restart does not ask again
-    "NoReclaim"           \* after a restart no row is read again
+    "NoReclaim",          \* after a restart no row is read again
+    "NoFence"             \* a wrapper runs without taking the fence; an owner settles without it
 }
 
 ASSUME Break \in Breaks
-ASSUME Shape \in {"Safety", "Mains", "Liveness", "Hold"}
+ASSUME Shape \in {"Safety", "Mains", "Liveness", "Hold", "Fence"}
 ASSUME QueueBound \in Nat \ {0} /\ MaxWait \in Nat \ {0} /\ MaxCrashes \in Nat
 
 Main == 1
@@ -132,12 +149,18 @@ Table ==
            << [class |-> Landing, module |-> 1, account |-> "a1", units |-> Need(0, 1, 1)],
               [class |-> Landing, module |-> 1, account |-> "a1", units |-> Need(0, 1, 1)],
               [class |-> Heavy,   module |-> 2, account |-> "a1", units |-> Need(0, 1, 0)] >>
+      [] Shape = "Fence" ->
+           << [class |-> Heavy,   module |-> 1, account |-> "a1", units |-> Need(0, 1, 0)],
+              [class |-> Heavy,   module |-> 2, account |-> "a1", units |-> Need(0, 1, 0)] >>
 
 \* "Hold" has two slots: a landing holds the lock and a slot, a second landing
 \* waits for the lock, and a heavy run must not take the slot it needs.
 Capacity == [seat |-> 1, slot |-> IF Shape = "Hold" THEN 2 ELSE 1, lock |-> 1]
 
 Reqs == 1..Len(Table)
+
+\* Whether the host's wrapper and fence are in the shape.
+Hosted == Shape = "Fence"
 Accounts == {Table[r].account : r \in Reqs}
 NModules == LET ms == {Table[r].module : r \in Reqs} IN CHOOSE m \in ms : \A k \in ms : k <= m
 
@@ -152,11 +175,13 @@ VARIABLES
     monitored,  \* in memory: the lease ids whose holder this run monitors
     ans,        \* the requester's: r -> the last answer it read ("asking" before any)
     work,       \* the owner's row of the work r admits: "starting", "live" or "ended"
+    run,        \* the host's: r's wrapper: "none", "sent", "running", "done" or "fenced"
+    fence,      \* the host's: r's fence: "none", "set" (holds its lease id), "taken" or "revoked"
     pressure,   \* environment: "ok", "high" or "severe"
     budgetOk,   \* environment: account -> its budget has room
     crashes     \* the restarts so far
 
-vars == <<leases, queue, rot, wait, pending, monitored, ans, work, pressure, budgetOk, crashes>>
+vars == <<leases, queue, rot, wait, pending, monitored, ans, work, run, fence, pressure, budgetOk, crashes>>
 
 -----------------------------------------------------------------------------
 (* Reading the state *)
@@ -246,6 +271,8 @@ Init ==
     /\ monitored = {}
     /\ ans = [r \in Reqs |-> "idle"]
     /\ work = [r \in Reqs |-> "starting"]
+    /\ run = [r \in Reqs |-> "none"]
+    /\ fence = [r \in Reqs |-> "none"]
     /\ pressure = "ok"
     /\ budgetOk = [a \in Accounts |-> TRUE]
     /\ crashes = 0
@@ -272,7 +299,7 @@ Ask(r) ==
     /\ ans[r] = "idle" /\ work[r] = "starting"
     /\ ans' = [ans EXCEPT ![r] = "asking"]
     /\ Receive(r)
-    /\ UNCHANGED <<leases, rot, monitored, work, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, rot, monitored, work, run, fence, pressure, budgetOk, crashes>>
 
 \* A requester still waiting after a restart asks again under the same id.
 \* Only a restart leaves a waiting requester that the scheduler does not hold.
@@ -281,7 +308,7 @@ Reask(r) ==
     /\ ans[r] \in {"asking", "queued"} /\ work[r] = "starting"
     /\ ~InQueue(r) /\ pending[r] = "none"
     /\ Receive(r)
-    /\ UNCHANGED <<leases, rot, monitored, ans, work, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, rot, monitored, ans, work, run, fence, pressure, budgetOk, crashes>>
 
 \* The grant: one transaction that checks capacity and inserts the row,
 \* with all of a landing's resources. Its id is the next, and its holder is
@@ -299,14 +326,14 @@ Insert(r) ==
         /\ pending' = [pending EXCEPT ![r] = "granted"]
         /\ monitored' = monitored \cup {id}
         /\ rot' = [rot EXCEPT ![c] = (Table[r].module % NModules) + 1]
-        /\ UNCHANGED <<ans, work, pressure, budgetOk, crashes>>
+        /\ UNCHANGED <<ans, work, run, fence, pressure, budgetOk, crashes>>
 
 \* The answer owed reaches the requester: one message.
 Tell(r) ==
     /\ pending[r] # "none"
     /\ ans' = [ans EXCEPT ![r] = pending[r]]
     /\ pending' = [pending EXCEPT ![r] = "none"]
-    /\ UNCHANGED <<leases, queue, rot, wait, monitored, work, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, wait, monitored, work, run, fence, pressure, budgetOk, crashes>>
 
 \* Time passes for every queued request. It cannot pass a deadline: a timer
 \* at 1 is answered first (Expire). Under NoDeadline it can.
@@ -314,7 +341,7 @@ Tick ==
     /\ Queued # {}
     /\ \A q \in Queued : wait[q] > (IF Break = "NoDeadline" THEN 0 ELSE 1)
     /\ wait' = [q \in Reqs |-> IF q \in Queued THEN wait[q] - 1 ELSE wait[q]]
-    /\ UNCHANGED <<leases, queue, rot, pending, monitored, ans, work, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, pending, monitored, ans, work, run, fence, pressure, budgetOk, crashes>>
 
 \* A queued request is refused at its deadline, or once its budget is spent.
 Expire(r) ==
@@ -324,7 +351,7 @@ Expire(r) ==
     /\ queue' = [queue EXCEPT ![Table[r].class] = Remove(@, r)]
     /\ wait' = [wait EXCEPT ![r] = 0]
     /\ pending' = [pending EXCEPT ![r] = "refused"]
-    /\ UNCHANGED <<leases, rot, monitored, ans, work, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, rot, monitored, ans, work, run, fence, pressure, budgetOk, crashes>>
 
 \* The compare-and-set on the lease id: it writes only an unreleased row.
 \* Under NoCompareAndSet it writes any.
@@ -337,7 +364,7 @@ Release(i) ==
     /\ work[leases[i].req] = "ended"
     /\ ReleaseRow(i)
     /\ monitored' = monitored \ {i}
-    /\ UNCHANGED <<queue, rot, wait, pending, ans, work, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<queue, rot, wait, pending, ans, work, run, fence, pressure, budgetOk, crashes>>
 
 \* After a restart, the reclaimer asks the owner about a row no monitor
 \* watches: released if its work ended, else monitored again; a row still
@@ -351,7 +378,7 @@ Reclaim(i) ==
     /\ IF w = "ended" \/ Break = "ReclaimByTime" \/ (w = "starting" /\ Break = "StartingIsEnded")
        THEN ReleaseRow(i) /\ UNCHANGED monitored
        ELSE monitored' = monitored \cup {i} /\ UNCHANGED leases
-    /\ UNCHANGED <<queue, rot, wait, pending, ans, work, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<queue, rot, wait, pending, ans, work, run, fence, pressure, budgetOk, crashes>>
 
 \* A restart: the queue, the timers, the answers owed and the monitors go;
 \* the leases, the requesters and the owners' rows stay.
@@ -363,36 +390,67 @@ Crash ==
     /\ wait' = [r \in Reqs |-> 0]
     /\ pending' = [r \in Reqs |-> "none"]
     /\ monitored' = {}
-    /\ UNCHANGED <<leases, ans, work, pressure, budgetOk>>
+    /\ UNCHANGED <<leases, ans, work, run, fence, pressure, budgetOk>>
 
 -----------------------------------------------------------------------------
 (* The environment *)
 
-\* The owner starts the work once its requester was told granted.
+\* The owner starts the work once its requester was told granted. On a host
+\* (shape "Fence") it writes the fence with the lease id, then sends the start.
 WorkStarts(r) ==
     /\ work[r] = "starting" /\ ans[r] = "granted"
     /\ work' = [work EXCEPT ![r] = "live"]
+    /\ IF Hosted
+       THEN run' = [run EXCEPT ![r] = "sent"] /\ fence' = [fence EXCEPT ![r] = "set"]
+       ELSE UNCHANGED <<run, fence>>
     /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, pressure, budgetOk, crashes>>
 
 \* The owner settles its row ended: live work's process ended, or a start that
-\* never ran (refused, failed, or cut), at any step after it asked.
+\* never ran (refused, failed, or cut), at any step after it asked. On a host,
+\* live work is settled ended only by its end read there, or as a start that
+\* never ran once the owner took its fence; under NoFence, also while the
+\* start is sent and has not landed yet, as a read of the host then finds.
 WorkEnds(r) ==
     /\ work[r] # "ended" /\ ans[r] # "idle"
     /\ work' = [work EXCEPT ![r] = "ended"]
+    /\ IF Hosted /\ work[r] = "live"
+       THEN \/ run[r] = "done" /\ UNCHANGED <<run, fence>>
+            \/ Break # "NoFence" /\ fence[r] = "set"
+               /\ fence' = [fence EXCEPT ![r] = "revoked"] /\ UNCHANGED run
+            \/ Break = "NoFence" /\ run[r] = "sent" /\ UNCHANGED <<run, fence>>
+       ELSE UNCHANGED <<run, fence>>
     /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, pressure, budgetOk, crashes>>
+
+\* A sent start lands on the host, at any step, however late: its wrapper
+\* takes the fence and runs, or finds it taken and exits without running.
+\* Under NoFence it runs without the fence.
+WrapperRuns(r) ==
+    /\ run[r] = "sent"
+    /\ IF Break = "NoFence"
+       THEN run' = [run EXCEPT ![r] = "running"] /\ UNCHANGED fence
+       ELSE IF fence[r] = "set"
+       THEN run' = [run EXCEPT ![r] = "running"] /\ fence' = [fence EXCEPT ![r] = "taken"]
+       ELSE run' = [run EXCEPT ![r] = "fenced"] /\ UNCHANGED fence
+    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, pressure, budgetOk, crashes>>
+
+\* The job exits, and its end is on the host for the owner to read.
+WrapperExits(r) ==
+    /\ run[r] = "running"
+    /\ run' = [run EXCEPT ![r] = "done"]
+    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, fence, pressure, budgetOk, crashes>>
 
 Pressure(p) ==
     /\ p # pressure
     /\ pressure' = p
-    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, run, fence, budgetOk, crashes>>
 
 Budget(a) ==
     /\ budgetOk' = [budgetOk EXCEPT ![a] = ~@]
-    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, pressure, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, run, fence, pressure, crashes>>
 
 Next ==
     \/ \E r \in Reqs : Ask(r) \/ Reask(r) \/ Insert(r) \/ Tell(r) \/ Expire(r)
-          \/ WorkStarts(r) \/ WorkEnds(r)
+          \/ WorkStarts(r) \/ WorkEnds(r) \/ WrapperRuns(r) \/ WrapperExits(r)
     \/ Tick
     \/ \E i \in Ids : Release(i) \/ Reclaim(i)
     \/ Crash
@@ -422,6 +480,8 @@ TypeOK ==
     /\ monitored \subseteq Ids
     /\ ans \in [Reqs -> Answers]
     /\ work \in [Reqs -> {"starting", "live", "ended"}]
+    /\ run \in [Reqs -> {"none", "sent", "running", "done", "fenced"}]
+    /\ fence \in [Reqs -> {"none", "set", "taken", "revoked"}]
     /\ pressure \in {"ok", "high", "severe"}
     /\ budgetOk \in [Accounts -> BOOLEAN]
     /\ crashes \in 0..MaxCrashes
@@ -481,5 +541,17 @@ QueuedIsAnswered ==
 EndedIsReleased ==
     \A r \in Reqs : (\E i \in Ids : leases[i].req = r /\ ~Released(i) /\ work[r] = "ended")
                       ~> (\A i \in Ids : leases[i].req = r => Released(i))
+
+\* A job runs on its host only under its own unreleased lease (shape "Fence").
+NoRunUnleased ==
+    \A r \in Reqs : run[r] = "running" => \E i \in Ids : leases[i].req = r /\ ~Released(i)
+
+\* The units the running jobs use never pass a resource's capacity.
+HostCapacity ==
+    \A x \in Resources :
+        LET f[k \in 0..Len(Table)] ==
+              IF k = 0 THEN 0
+              ELSE f[k - 1] + (IF run[k] = "running" THEN Table[k].units[x] ELSE 0)
+        IN f[Len(Table)] <= Capacity[x]
 
 =============================================================================

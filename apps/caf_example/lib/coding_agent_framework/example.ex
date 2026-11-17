@@ -81,11 +81,12 @@ defmodule CodingAgentFramework.Example do
          {:ok, work} <-
            Delegates.Work.open(Config.path(c, "caf.db"), Config.path(c, "caf.db"), c.workstation),
          {:ok, allowance} <- Usage.Allowance.open(Config.path(c, "caf.db")),
+         {:ok, jobs_work} <- Jobs.Work.open(Config.path(c, "parts/jobs")),
          secret = token(),
          :ok <- prepare(c, accounts, programs, secret) do
       w = %{c: c, programs: programs, tmux: tmux, accounts: accounts, holder: holder}
       w = Map.merge(w, %{agents: agents, secret: secret, start_id: token()})
-      w = Map.merge(w, %{work: work, allowance: allowance})
+      w = Map.merge(w, %{work: work, allowance: allowance, jobs_work: jobs_work})
       Supervisor.start_link(__MODULE__, Map.put(w, :db, Config.path(c, "caf.db")))
     end
   end
@@ -275,15 +276,18 @@ defmodule CodingAgentFramework.Example do
             acts: pid.(:acts)}
          end},
         {:tracker, fn _ -> {Tracker, sources: sources(w)} end},
-        # Before `Delegates`, which asks it for a lease before each start. The owners' answers
-        # and the allowance are read through connections of its own, never by a call.
+        # Before `Delegates` and `Jobs`, which ask it for a lease before each start. The owners'
+        # answers and the allowance are read through connections of its own, never by a call.
         {:scheduler,
          fn _ ->
            {Scheduler,
             db: db,
             host: host,
-            resources: c.resources,
-            holders: %{"delegate" => &Delegates.Work.state(w.work, &1)},
+            resources: resources(c),
+            holders: %{
+              "delegate" => &Delegates.Work.state(w.work, &1),
+              "job" => &Jobs.Work.state(w.jobs_work, &1)
+            },
             allowance: &Usage.Allowance.check(w.allowance, &1),
             pressure: pressure(c),
             interval: every,
@@ -347,7 +351,8 @@ defmodule CodingAgentFramework.Example do
               dir: Config.path(c, "parts/jobs"),
               copies: pid.(:copies),
               hosts: hosts,
-              on_late_end: &late_end(c, pid, &1)
+              on_late_end: &late_end(c, pid, &1),
+              scheduler: pid.(:scheduler)
             ] ++ notify_every}
          end},
         {:services,
@@ -383,7 +388,8 @@ defmodule CodingAgentFramework.Example do
             margin: c.margin,
             acts: pid.(:acts),
             mover: {Mover, pid.(:mover)},
-            sessions: {Sessions, pid.(:sessions)}}
+            sessions: {Sessions, pid.(:sessions)},
+            lease: &job_units(c, &1, &2)}
          end},
         {:mcp_http,
          fn pid ->
@@ -434,6 +440,45 @@ defmodule CodingAgentFramework.Example do
     with {:ok, launch} <- base,
          {:ok, mcp} <- mcp,
          do: {:ok, Keyword.merge(launch, tool_timeout: c.tool_timeout, mcp: mcp)}
+  end
+
+  @doc """
+  What the `Scheduler` leases: the config's `resources` (an agent's seat, a heavy run's slot),
+  and each project's landing lock, `land:<project>`, one at a time.
+
+      iex> {:ok, c} = CodingAgentFramework.Example.Config.new(home: "/srv/caf", instance: "a",
+      ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
+      ...>   env: %{}, projects: %{"web" => %{}})
+      iex> CodingAgentFramework.Example.resources(c)
+      %{"land:web" => 1, "seat" => 4, "slot" => 2}
+  """
+  @spec resources(Config.t()) :: %{String.t() => pos_integer}
+  def resources(%Config{} = c),
+    do: Map.merge(Map.new(Map.keys(c.projects), &{"land:" <> &1, 1}), c.resources)
+
+  @doc """
+  The units a job asks for, by the class its caller names: the config's `job_lease` for the
+  class, and for a landing also its project's landing lock, all in one gang lease.
+
+      iex> {:ok, c} = CodingAgentFramework.Example.Config.new(home: "/srv/caf", instance: "a",
+      ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
+      ...>   env: %{}, projects: %{"web" => %{}})
+      iex> CodingAgentFramework.Example.job_units(c, :landing, "web")
+      {:ok, %{"land:web" => 1, "slot" => 1}}
+      iex> CodingAgentFramework.Example.job_units(c, :heavy, "web")
+      {:ok, %{"slot" => 1}}
+      iex> CodingAgentFramework.Example.job_units(c, :landing, "mobile")
+      {:refused, {:no_project, "mobile"}}
+  """
+  @spec job_units(Config.t(), atom, String.t()) :: {:ok, map} | {:refused, term}
+  def job_units(%Config{} = c, class, project) do
+    units = Map.fetch!(c.job_lease, class)
+
+    cond do
+      class != :landing -> {:ok, units}
+      Map.has_key?(c.projects, project) -> {:ok, Map.put(units, "land:" <> project, 1)}
+      true -> {:refused, {:no_project, project}}
+    end
   end
 
   # Stall times where the host has them; elsewhere no pressure gate, only the static capacities.
