@@ -30,7 +30,9 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     db = Path.join(ctx.dir, "caf.db")
     usage = start_supervised!({Usage, accounts: accounts, host: "test", db: db})
     {:ok, _} = Usage.read(usage)
-    transcripts = start_supervised!({Transcripts, programs: programs(), account: "work", db: db})
+
+    transcripts =
+      start_supervised!({Transcripts, programs: programs(), accounts: ["work"], db: db})
 
     project = %{name: "app", repo: repo, trunk: "main", setup: [], setup_timeout: 10_000}
     project = Map.merge(project, %{env: %{"HOME" => ctx.dir}, branches: ~r/\Aunit\//, cap: 2})
@@ -45,7 +47,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
          stream: ctx.stream,
          usage: usage,
          accounts: accounts,
-         transcripts: %{"work" => transcripts},
+         transcripts: transcripts,
          launch:
            SessionsSetup.headless(ctx, :at_start) |> Keyword.take([:claude, :env, :tool_timeout]),
          projects: %{"app" => project, "lib" => %{project | name: "lib"}}}
@@ -58,7 +60,11 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
       {Tracker.StreamSource, db: db, host: "test"}
     ]
 
-    sources = [{Tracker.TranscriptsSource, db: db, host: "test", account: "work"} | sources]
+    sources = [
+      {Tracker.ReaderSource, table: Transcripts.Table, db: db, host: "test", account: "work"}
+      | sources
+    ]
+
     tracker = start_supervised!({Tracker, sources: sources, timer: false})
 
     # Until `Mains` exists, a main session is known as a parent a delegate's row names: `app-old`
@@ -90,7 +96,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
          workstation: "ws",
          tracker: {Tracker, tracker},
          stream: {Stream, ctx.stream},
-         transcripts: %{"work" => {Transcripts, transcripts}},
+         transcripts: {Transcripts, transcripts},
          place: fn _ -> {:refused, :none} end,
          instance: "d",
          tool_timeout: 600_000,
@@ -476,7 +482,7 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     [one, two] = for p <- ~w(p1 p2), do: ~s({"type":"user","promptId":"#{p}","message":{}}\n)
     File.mkdir_p!(Path.dirname(path))
     File.write!(path, one <> two <> ~s({"type":"us))
-    {:ok, %{failed: []}} = Transcripts.read(ctx.transcripts, [{sid, path}])
+    {:ok, %{failed: []}} = Transcripts.read(ctx.transcripts, [{"work", sid, path}])
     {args, size} = {%{"agent" => "app-unit-one", "from" => 0}, byte_size(one <> two)}
 
     assert tool(ctx, "main", "transcript", args) ==

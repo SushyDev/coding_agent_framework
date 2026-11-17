@@ -31,7 +31,7 @@ defmodule CodingAgentFramework.Usage do
 
   use GenServer
 
-  alias CodingAgentFramework.Accounts
+  alias CodingAgentFramework.{Accounts, Reader}
   alias CodingAgentFramework.Usage.{Reading, Table}
 
   @doc """
@@ -97,17 +97,8 @@ defmodule CodingAgentFramework.Usage do
           :unread | {:ok, map} | {:refused, term} | {:unknown, term}
   def readings(usage, opts \\ []), do: call(usage, :readings, opts)
 
-  defp call(usage, request, opts) do
-    timeout = Keyword.get(opts, :timeout, 10_000)
-
-    try do
-      GenServer.call(usage, request, timeout)
-    catch
-      :exit, {:noproc, _} -> {:refused, :no_usage}
-      :exit, {:timeout, _} -> {:unknown, {:timeout, timeout}}
-      :exit, {reason, _} -> {:unknown, {:exit, reason}}
-    end
-  end
+  defp call(usage, request, opts),
+    do: Reader.call(usage, request, Keyword.get(opts, :timeout, 10_000), :no_usage)
 
   @impl true
   def init(opts) do
@@ -122,13 +113,10 @@ defmodule CodingAgentFramework.Usage do
         accounts: Keyword.fetch!(opts, :accounts),
         host: Keyword.fetch!(opts, :host),
         db: db,
-        cache: cache,
-        notify: Keyword.get(opts, :notify, fn _ -> :ok end),
-        interval: Keyword.get(opts, :interval)
+        cache: cache
       }
 
-      if state.interval, do: send(self(), :tick)
-      {:ok, state}
+      {:ok, Map.merge(state, Reader.loop(opts))}
     else
       {:refused, reason} -> {:stop, reason}
     end
@@ -150,11 +138,7 @@ defmodule CodingAgentFramework.Usage do
   end
 
   @impl true
-  def handle_info(:tick, state) do
-    {_, state} = read_now(state)
-    Process.send_after(self(), :tick, state.interval)
-    {:noreply, state}
-  end
+  def handle_info(:tick, state), do: {:noreply, Reader.tick(state, &read_now/1)}
 
   defp read_now(state) do
     rows =
@@ -165,17 +149,12 @@ defmodule CodingAgentFramework.Usage do
           into: %{},
           do: {name, row}
 
-    changes =
-      for({name, row} <- rows, state.cache[name] != row, do: {:put, name, row}) ++
-        for name <- Map.keys(state.cache), not Map.has_key?(rows, name), do: {:delete, name}
-
     {:ok, %{ids: ids, first: first}} =
-      Table.write(state.db, changes, System.os_time(:millisecond))
+      Table.write(state.db, Reader.diff(state.cache, rows), System.os_time(:millisecond))
 
     for name <- state.accounts.names,
         mine <- [for({^name, id} <- ids, do: id)],
-        mine != [] or first,
-        do: state.notify.(%{topic: "usage:#{state.host}:#{name}", ids: mine})
+        do: Reader.cue(state.notify, "usage:#{state.host}:#{name}", %{ids: mine, first: first})
 
     problems = Enum.count(rows, fn {_, row} -> row.problem end)
     {{:ok, %{readings: map_size(rows), problems: problems, ids: ids}}, %{state | cache: rows}}

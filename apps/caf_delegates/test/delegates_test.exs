@@ -41,7 +41,10 @@ defmodule CodingAgentFramework.DelegatesTest do
     db = Path.join(ctx.dir, "caf.db")
     usage = start_supervised!({Usage, accounts: accounts, host: "test", db: db})
     {:ok, _} = Usage.read(usage)
-    transcripts = start_supervised!({Transcripts, programs: programs(), account: "work", db: db})
+
+    transcripts =
+      start_supervised!({Transcripts, programs: programs(), accounts: ["work"], db: db})
+
     fifo = Path.join(ctx.dir, "setup.fifo")
     {_, 0} = System.cmd(program!(:mkfifo), [fifo])
 
@@ -67,7 +70,7 @@ defmodule CodingAgentFramework.DelegatesTest do
       stream: ctx.stream,
       usage: usage,
       accounts: accounts,
-      transcripts: %{"work" => transcripts},
+      transcripts: transcripts,
       launch: launch,
       clock: fn -> Agent.get(ctx.clock, & &1) end,
       projects: %{

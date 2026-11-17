@@ -17,8 +17,7 @@ defmodule CodingAgentFramework.RegistryTest do
       Keyword.merge(
         [
           programs: TestHost.programs(),
-          account: "a",
-          config_dir: dir,
+          accounts: %{"a" => dir},
           db: Path.join(dir, "registry.db"),
           notify: &send(me, {:cue, &1})
         ],
@@ -42,7 +41,7 @@ defmodule CodingAgentFramework.RegistryTest do
   end
 
   defp by_file(reg) do
-    {:ok, %{rows: rows}} = Registry.rows(reg)
+    {:ok, %{rows: rows}} = Registry.rows(reg, "a")
     Map.new(rows, &{&1.file, &1})
   end
 
@@ -53,14 +52,13 @@ defmodule CodingAgentFramework.RegistryTest do
       {:ok, reg} =
         Registry.start_link(
           programs: TestHost.programs(),
-          account: "a",
-          config_dir: dir,
+          accounts: %{"a" => dir},
           db: Path.join(dir, "r.db")
         )
 
-      assert Registry.rows(reg) == :unread
+      assert Registry.rows(reg, "a") == :unread
       assert {:ok, %{files: 0, problems: 0, ids: []}} = Registry.read(reg)
-      assert {:ok, %{rows: [], files: 0}} = Registry.rows(reg)
+      assert {:ok, %{rows: [], files: 0}} = Registry.rows(reg, "a")
     end
 
     test "liveness by pid and start time: live, replaced, gone" do
@@ -131,7 +129,7 @@ defmodule CodingAgentFramework.RegistryTest do
 
       File.rm!(Path.join(dir, "sessions/7.json"))
       assert {:ok, %{files: 0, ids: [^id]}} = Registry.read(reg)
-      assert {:ok, %{rows: []}} = Registry.rows(reg)
+      assert {:ok, %{rows: []}} = Registry.rows(reg, "a")
     end
 
     test "a restarted Registry resumes from its table; two accounts in one file stay apart" do
@@ -142,13 +140,41 @@ defmodule CodingAgentFramework.RegistryTest do
       GenServer.stop(reg)
 
       again = start(dir)
-      assert {:ok, %{files: 1, rows: [%{session_id: "s7"}]}} = Registry.rows(again)
+      assert {:ok, %{files: 1, rows: [%{session_id: "s7"}]}} = Registry.rows(again, "a")
       assert {:ok, %{ids: []}} = Registry.read(again)
+      GenServer.stop(again)
 
-      other = start(dir, account: "b", config_dir: Path.join(dir, "b"))
-      assert Registry.rows(other) == :unread
-      assert {:ok, %{files: 0}} = Registry.read(other)
-      assert {:ok, %{files: 1}} = Registry.rows(again)
+      b = Path.join(dir, "b")
+      File.mkdir_p!(b)
+      both = start(dir, accounts: %{"a" => dir, "b" => b})
+      assert Registry.rows(both, "b") == :unread
+      assert {:ok, %{files: 1}} = Registry.read(both)
+      assert {:ok, %{files: 0}} = Registry.rows(both, "b")
+      assert {:ok, %{files: 1}} = Registry.rows(both, "a")
+    end
+
+    test "one Registry over every account: a session moved between accounts stays found" do
+      dir = TestHost.test_dir()
+      {a, b} = {Path.join(dir, "a"), Path.join(dir, "b")}
+      Enum.each([a, b], &File.mkdir_p!(Path.join(&1, "sessions")))
+      reg = start(dir, accounts: %{"a" => a, "b" => b})
+      file = JSON.encode!(%{pid: 7, sessionId: "s7", name: "alpha"})
+      put(a, "7.json", file)
+
+      assert {:ok, %{files: 1, ids: [id]}} = Registry.read(reg)
+      assert_receive {:cue, %{topic: "registry:test:a", ids: [^id]}}
+      assert_receive {:cue, %{topic: "registry:test:b", ids: []}}
+
+      # The move: the file leaves one account's directory and lands in the other's.
+      File.rm!(Path.join([a, "sessions", "7.json"]))
+      put(b, "7.json", file)
+
+      assert {:ok, %{files: 1, ids: ids}} = Registry.read(reg)
+      assert_receive {:cue, %{topic: "registry:test:a", ids: [^id]}}
+      assert_receive {:cue, %{topic: "registry:test:b", ids: [moved]}}
+      assert Enum.sort(ids) == Enum.sort([id, moved])
+      assert {:ok, %{rows: []}} = Registry.rows(reg, "a")
+      assert {:ok, %{rows: [%{name: "alpha", account: "b"}]}} = Registry.rows(reg, "b")
     end
   end
 
@@ -187,7 +213,7 @@ defmodule CodingAgentFramework.RegistryTest do
             ) do
         dir = TestHost.test_dir()
         reg = start(dir)
-        assert Registry.rows(reg) == :unread
+        assert Registry.rows(reg, "a") == :unread
         {:ok, db} = Table.open(Path.join(dir, "registry.db"))
 
         Enum.reduce(gens, {%{}, true}, fn files, {before, first} ->
@@ -199,7 +225,7 @@ defmodule CodingAgentFramework.RegistryTest do
           assert {:ok, %{files: n, problems: ^bad, ids: ids}} = Registry.read(reg)
           assert n == map_size(files)
 
-          {:ok, %{rows: rows}} = Registry.rows(reg)
+          {:ok, %{rows: rows}} = Registry.rows(reg, "a")
 
           assert Enum.sort(Enum.map(rows, & &1.file)) ==
                    Enum.sort(Enum.map(files, &"#{elem(&1, 0)}.json"))

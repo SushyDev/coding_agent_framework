@@ -34,7 +34,7 @@ defmodule CodingAgentFramework.TmuxSampler do
 
   use GenServer
 
-  alias CodingAgentFramework.{Holder, Tmux}
+  alias CodingAgentFramework.{Holder, Reader, Tmux}
   alias CodingAgentFramework.TmuxSampler.{Join, Table}
 
   @timeout 10_000
@@ -65,17 +65,8 @@ defmodule CodingAgentFramework.TmuxSampler do
           :unread | {:ok, map} | {:refused, term} | {:unknown, term}
   def rows(sampler, opts \\ []), do: call(sampler, :rows, opts)
 
-  defp call(sampler, request, opts) do
-    timeout = Keyword.get(opts, :timeout, 2 * @timeout)
-
-    try do
-      GenServer.call(sampler, request, timeout)
-    catch
-      :exit, {:noproc, _} -> {:refused, :no_sampler}
-      :exit, {:timeout, _} -> {:unknown, {:timeout, timeout}}
-      :exit, {reason, _} -> {:unknown, {:exit, reason}}
-    end
-  end
+  defp call(sampler, request, opts),
+    do: Reader.call(sampler, request, Keyword.get(opts, :timeout, 2 * @timeout), :no_sampler)
 
   @impl true
   def init(opts) do
@@ -100,13 +91,10 @@ defmodule CodingAgentFramework.TmuxSampler do
         last: last,
         cache: cache,
         failing: is_integer((Table.last_read(db, host, name) || %{})[:failed_at]),
-        notify: Keyword.get(opts, :notify, fn _ -> :ok end),
-        interval: Keyword.get(opts, :interval),
         clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end)
       }
 
-      if state.interval, do: send(self(), :tick)
-      {:ok, state}
+      {:ok, Map.merge(state, Reader.loop(opts))}
     else
       {:refused, reason} -> {:stop, reason}
     end
@@ -130,11 +118,7 @@ defmodule CodingAgentFramework.TmuxSampler do
   end
 
   @impl true
-  def handle_info(:tick, state) do
-    {_, state} = sample_now(state)
-    Process.send_after(self(), :tick, state.interval)
-    {:noreply, state}
-  end
+  def handle_info(:tick, state), do: {:noreply, Reader.tick(state, &sample_now/1)}
 
   defp sample_now(state) do
     # Stamped before the reads: a sample stamped after an act was read after it (`Recoveries`).
@@ -157,22 +141,18 @@ defmodule CodingAgentFramework.TmuxSampler do
 
   defp fail(state, reason) do
     :ok = Table.failed(state.db, state.host, state.name, state.clock.(), reason)
-    cue(state, [])
+    state.notify.(%{topic: topic(state), ids: []})
     {{:unknown, reason}, %{state | failing: true}}
   end
 
   defp write(state, join, at) do
-    changes =
-      for({key, row} <- join.rows, state.cache[key] != row, do: {:put, key, row}) ++
-        for key <- Map.keys(state.cache), not Map.has_key?(join.rows, key), do: {:delete, key}
-
     read = Map.put(Map.take(join, [:up, :generation, :start, :ids]), :read_at, at)
 
-    {:ok, %{ids: ids, first: first}} =
-      Table.write(state.db, state.host, state.name, changes, read)
+    {:ok, %{ids: ids} = result} =
+      Table.write(state.db, state.host, state.name, Reader.diff(state.cache, join.rows), read)
 
     # A good sample after a failed one clears the failure the source shows: that is a change too.
-    if ids != [] or first or state.failing, do: cue(state, ids)
+    Reader.cue(state.notify, topic(state), result, state.failing)
 
     statuses = join.rows |> Map.values() |> Enum.frequencies_by(&{&1.kind, &1.status})
     count = fn kind -> Enum.sum(for {{^kind, _}, n} <- statuses, do: n) end
@@ -190,6 +170,5 @@ defmodule CodingAgentFramework.TmuxSampler do
     {{:ok, summary}, %{state | cache: join.rows, last: join, failing: false}}
   end
 
-  defp cue(state, ids),
-    do: state.notify.(%{topic: "tmux:#{state.host}:#{state.name}", ids: ids})
+  defp topic(state), do: "tmux:#{state.host}:#{state.name}"
 end

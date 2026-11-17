@@ -6,12 +6,12 @@ defmodule CodingAgentFramework.Delegates do
   `deliver/2` is refused as `:no_delivery`.
 
   The caller's supervision tree starts one per host, with no name, and gives it the host's
-  `Sessions`, `Stream` and a `Transcripts` per account, the instance's `Usage` and `Accounts`,
+  `Sessions`, `Stream` and `Transcripts`, the instance's `Usage` and `Accounts`,
   the projects as data, and what every launch shares:
 
       {:ok, delegates} = Delegates.start_link(host: "laptop", db: db, sessions_db: db,
         sessions: sessions, stream: stream, usage: usage, accounts: accounts,
-        transcripts: %{"work" => transcripts}, launch: [claude: claude, env: env, tool_timeout: 3_600_000],
+        transcripts: transcripts, launch: [claude: claude, env: env, tool_timeout: 3_600_000],
         projects: %{"app" => %{name: "app", repo: "/src/app", trunk: "main", setup: [],
           setup_timeout: 60_000, env: %{}, branches: ~r/\\Aunit\\//, cap: 3}})
       Delegates.start_delegate(delegates, "main", "app", "unit/review", "opus", "Review it.")
@@ -73,7 +73,7 @@ defmodule CodingAgentFramework.Delegates do
   @doc """
   Starts a `Delegates`. Options: `host:` (the name of the host `sessions:` and `stream:` run
   on), `db:`, `sessions_db:` (the file `Sessions`' table is in), `usage:`, `accounts:`,
-  `transcripts:` (account to its `Transcripts`), `projects:` (name to a project as
+  `transcripts:` (the host's `Transcripts`), `projects:` (name to a project as
   `Sessions.Worktree.project/1` reads it, with `branches:` and `cap:`), `launch:` (`claude:`,
   `env:` and `tool_timeout:` for `ClaudeCLI`), and optionally `notify:`, `clock:` (wall-clock
   ms) and `mcp:`, a function of the delegate's name that answers `{:ok, path}`, its own MCP
@@ -463,10 +463,11 @@ defmodule CodingAgentFramework.Delegates do
   # which its settle and cue bring (Sessions refuses to start a name whose row runs). A read
   # that fails decides nothing.
   defp exited(s, row, fold) do
-    with {:ok, t} <- Map.fetch(s.transcripts, row.account),
-         {:ok, %{failed: []}} <-
-           Transcripts.read(t, [{row.session_id, fold.transcript}], timeout: @step),
-         {:ok, tr} <- Transcripts.session(t, row.session_id, timeout: @step) do
+    t = s.transcripts
+    session = {row.account, row.session_id, fold.transcript}
+
+    with {:ok, %{failed: []}} <- Transcripts.read(t, [session], timeout: @step),
+         {:ok, tr} <- Transcripts.session(t, row.account, row.session_id, timeout: @step) do
       cond do
         tr.ends_with_reply -> hold(s, row, "finished", tr.last_reply.text)
         row.resumes > 0 -> hold(s, row, "failed", @twice)

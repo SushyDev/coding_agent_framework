@@ -70,7 +70,7 @@ defmodule CodingAgentFramework.MCP do
       {:ok, mcp} = MCP.start_link(dir: dir, port: 4791, grants: grants, claims: claims, start_id: "s1",
         mailbox: {Mailbox, mailbox}, jobs: {Jobs, jobs}, delegates: {Delegates, delegates},
         services: {Services, services}, workstation: "ws", tracker: {Tracker, tracker},
-        stream: {Stream, stream}, transcripts: %{"work" => {Transcripts, t}}, place: &place/1,
+        stream: {Stream, stream}, transcripts: {Transcripts, t}, place: &place/1,
         instance: "a", tool_timeout: 3_600_000, margin: 60_000)
       {:ok, config} = MCP.issue(mcp, "app-fix")
       MCP.call(mcp, "app-fix", "message", %{"to" => "app-main", "text" => "Done."})
@@ -316,8 +316,8 @@ defmodule CodingAgentFramework.MCP do
   `{CodingAgentFramework.Mailbox, pid}`, `{CodingAgentFramework.Jobs, pid}`,
   `{CodingAgentFramework.Delegates, pid}`, `{CodingAgentFramework.Services, pid}`,
   `{CodingAgentFramework.Tracker, pid}`, `{CodingAgentFramework.Stream, pid}`, or a stand-in
-  module with the same functions), `:transcripts` (an account's name to its
-  `{CodingAgentFramework.Transcripts, pid}`), `:workstation` (the host a service starts on
+  module with the same functions), `:transcripts` (the host's
+  `{CodingAgentFramework.Transcripts, pid}`, or nil), `:workstation` (the host a service starts on
   unless its call names one), and
   `:place`, a function of an agent's name that answers `{:ok, %{project: p, name: n, worktree:
   path}}` (the copy jobs and services run in) or `{:refused, reason}`. `:claims` is a
@@ -607,7 +607,9 @@ defmodule CodingAgentFramework.MCP do
     with {:ok, a} <- close(ctx, caller, agent, :no_screen),
          {:ok, {tmod, t}} <- transcripts(ctx, a) do
       events = mod.log(server, a.session_id, {:last, @window}, timeout: @step)
-      transcript = tmod.text(t, a.session_id, {:last, @window}, timeout: @step, max: @read_max)
+
+      transcript =
+        tmod.text(t, a.account, a.session_id, {:last, @window}, timeout: @step, max: @read_max)
 
       [events, transcript] =
         Enum.map([events, transcript], &with({:ok, l} <- lines(&1, true), do: l.text))
@@ -620,7 +622,11 @@ defmodule CodingAgentFramework.MCP do
        when is_binary(agent) and is_integer(from) and from >= 0 do
     with {:ok, a} <- close(ctx, caller, agent, :no_session),
          {:ok, {mod, t}} <- transcripts(ctx, a),
-         do: lines(mod.text(t, a.session_id, from, timeout: @step, max: @read_max), false)
+         do:
+           lines(
+             mod.text(t, a.account, a.session_id, from, timeout: @step, max: @read_max),
+             false
+           )
   end
 
   # Team.tla's ClaimTaken, then FixActs or FixRefused (in `Delegates`, which reads the state
@@ -693,8 +699,8 @@ defmodule CodingAgentFramework.MCP do
 
   defp transcripts(ctx, %{account: account}) do
     case ctx.transcripts do
-      %{^account => reader} -> {:ok, reader}
-      _ -> {:refused, {:no_transcripts, account}}
+      nil -> {:refused, {:no_transcripts, account}}
+      reader -> {:ok, reader}
     end
   end
 

@@ -67,7 +67,7 @@ defmodule CodingAgentFramework.ExampleTest do
     keys = keys ++ ~w(delegates claims mailbox copies jobs services mcp mcp_http ticker ends)a
 
     assert Enum.sort(Map.keys(parts)) ==
-             Enum.sort(keys ++ [{:registry, "work"}, {:transcripts, "work"}])
+             Enum.sort(keys ++ [:registry, :transcripts])
 
     assert Enum.all?(Map.values(parts), &(is_pid(&1) and Process.alive?(&1)))
     parts

@@ -83,7 +83,7 @@ defmodule CodingAgentFramework.Example do
          do: Tmux.CLI.new(programs, {:socket, Config.path(c, "tmux.sock")})
   end
 
-  @doc "Each part's process, by its key (`:sessions`, `{:registry, account}`, …)."
+  @doc "Each part's process, by its key (`:sessions`, `:registry`, …)."
   @spec parts(Supervisor.supervisor()) :: %{term => pid}
   def parts(sup), do: Map.new(Supervisor.which_children(sup), fn {k, pid, _, _} -> {k, pid} end)
 
@@ -114,23 +114,21 @@ defmodule CodingAgentFramework.Example do
     %{c: c, programs: p, db: db} = w
     grants = Grants.new(tree(w), operator: c.operator)
     {host, every} = {c.workstation, c.interval}
-    accounts = fn pid, kind -> Map.new(c.accounts, &{&1, pid.({kind, &1})}) end
-    at = fn pid, kind -> Map.new(accounts.(pid, kind), fn {a, x} -> {a, {Transcripts, x}} end) end
     hosts = Map.put(c.hosts, host, %{programs: p, dir: Config.path(c, "ws")})
 
-    readers =
+    # One Registry and one Transcripts on the host, over every account: a move hides no agent.
+    dirs =
       for a <- c.accounts,
           {:ok, dir} = Accounts.config_dir(w.accounts, a),
-          part <- [
-            {{:registry, a},
-             fn _ ->
-               {Registry,
-                programs: p, account: a, config_dir: dir, db: db, notify: notify, interval: every}
-             end},
-            {{:transcripts, a},
-             fn _ -> {Transcripts, programs: p, account: a, db: db, notify: notify} end}
-          ],
-          do: part
+          into: %{},
+          do: {a, dir}
+
+    read = [programs: p, db: db, notify: notify, interval: every]
+
+    readers = [
+      {:registry, fn _ -> {Registry, [accounts: dirs] ++ read} end},
+      {:transcripts, fn _ -> {Transcripts, [accounts: c.accounts] ++ read} end}
+    ]
 
     [
       {:reaper, fn _ -> {Shell.Reaper, programs: p} end},
@@ -165,7 +163,7 @@ defmodule CodingAgentFramework.Example do
             programs: p,
             dir: Config.path(c, "d"),
             control: pid.(:control),
-            registries: accounts.(pid, :registry),
+            registry: pid.(:registry),
             stream: pid.(:stream),
             home: c.home,
             db: db,
@@ -194,7 +192,7 @@ defmodule CodingAgentFramework.Example do
             stream: pid.(:stream),
             usage: pid.(:usage),
             accounts: w.accounts,
-            transcripts: accounts.(pid, :transcripts),
+            transcripts: pid.(:transcripts),
             launch: [claude: c.claude, env: c.env, tool_timeout: c.tool_timeout],
             projects: c.projects,
             mcp: &issue(pid.(:mcp), &1),
@@ -247,7 +245,7 @@ defmodule CodingAgentFramework.Example do
             workstation: host,
             tracker: {Tracker, pid.(:tracker)},
             stream: {Stream, pid.(:stream)},
-            transcripts: at.(pid, :transcripts),
+            transcripts: {Transcripts, pid.(:transcripts)},
             place: place(w),
             instance: c.instance,
             tool_timeout: c.tool_timeout,
@@ -260,7 +258,7 @@ defmodule CodingAgentFramework.Example do
            plug = {MCP.Plug, mcp: pid.(:mcp)}
            {Bandit, plug: plug, ip: @local, port: c.ports.mcp, startup_log: false}
          end},
-        {:ticker, fn pid -> {Ticker, interval: every, tick: fn -> tick(c, pid) end} end},
+        {:ticker, fn pid -> {Ticker, interval: every, tick: fn -> tick(pid) end} end},
         {:ends,
          fn pid ->
            {Ends, ended: ended_ids(w), act: &owner_ended(pid.(:services), &1)}
@@ -268,11 +266,10 @@ defmodule CodingAgentFramework.Example do
       ]
   end
 
-  # The readers with no timer of their own, and the settles of `Jobs` and `Services`, which
+  # The reader with no timer of its own, and the settles of `Jobs` and `Services`, which
   # wait on hosts rather than on a reader's cue. `pid` looks each part up at the tick.
-  defp tick(c, pid) do
+  defp tick(pid) do
     Stream.read(pid.(:stream))
-    for a <- c.accounts, do: Transcripts.read(pid.({:transcripts, a}))
     Jobs.cue(pid.(:jobs), %{topic: "tick"})
     Services.cue(pid.(:services), %{topic: "tick"})
   end
@@ -282,18 +279,18 @@ defmodule CodingAgentFramework.Example do
     on = [db: db, host: c.workstation]
 
     kinds = [
-      Tracker.RegistrySource,
-      Tracker.SessionsSource,
-      Tracker.TranscriptsSource,
-      Tracker.UsageSource,
-      Tracker.IntakeSource
+      {Tracker.ReaderSource, table: Registry.Table},
+      {Tracker.SessionsSource, []},
+      {Tracker.ReaderSource, table: Transcripts.Table},
+      {Tracker.ReaderSource, table: Usage.Table},
+      {Tracker.IntakeSource, []}
     ]
 
-    for(a <- c.accounts, k <- kinds, do: {k, on ++ [account: a]}) ++
+    for(a <- c.accounts, {k, table} <- kinds, do: {k, table ++ on ++ [account: a]}) ++
       [
         {Tracker.StreamSource, on},
         {Tracker.DelegatesSource, on},
-        {Tracker.TmuxSamplerSource, on ++ [server: server]},
+        {Tracker.ReaderSource, [table: TmuxSampler.Table] ++ on ++ [server: server]},
         {Tracker.RecoveriesSource, on ++ [server: server]}
       ]
   end

@@ -38,7 +38,6 @@ defmodule CodingAgentFramework.RecoveriesSetup do
         programs: programs(),
         dir: Path.join(dir, "d"),
         control: control,
-        registries: %{},
         home: dir,
         db: db
       )
