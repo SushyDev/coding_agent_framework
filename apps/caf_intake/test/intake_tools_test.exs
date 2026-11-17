@@ -74,6 +74,10 @@ defmodule CodingAgentFramework.IntakeToolsTest do
 
     assert JSON.decode!(r2.decision)["hookSpecificOutput"]["permissionDecisionReason"] ==
              "not here"
+
+    # A row keeps the tool's input only once a decision is taken (F-121's new-4).
+    assert JSON.decode!(r1.data)["tool_input"] == %{"x" => 1}
+    assert r4.data == nil
   end
 
   test "a second post of one call answers the row's decision, and asks no one",

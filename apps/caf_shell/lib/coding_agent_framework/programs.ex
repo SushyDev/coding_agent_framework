@@ -3,8 +3,8 @@ defmodule CodingAgentFramework.Programs do
   The absolute path of every program the framework runs on one host: tmux, dtach, claude, git
   and gh, rsync, ssh and flock (a copy's sync), and the POSIX tools sh, sleep, rm, kill, env,
   ps, cat, tail, head, mkdir and mkfifo (a headless delegate's stdin is a FIFO), wc (a service's log
-  offset at its start), nc (a service's port wait) and lsof (whether a forward's own ssh holds
-  its local port).
+  offset at its start), nc (a service's port wait), lsof (whether a forward's own ssh holds
+  its local port) and curl (a main session's waiter hook, `Intake.waiter_hook/5`).
 
   The paths are found once, by the host's own shell (`command -v`), so no later call looks a
   program up through a `PATH`: a long `PATH` searched on the VM's file server slowed every file
@@ -54,6 +54,7 @@ defmodule CodingAgentFramework.Programs do
           | :nc
           | :wc
           | :lsof
+          | :curl
   @type t :: %__MODULE__{host: Host.t(), paths: %{name => String.t()}}
 
   @names [
@@ -78,7 +79,8 @@ defmodule CodingAgentFramework.Programs do
     :mkfifo,
     :nc,
     :wc,
-    :lsof
+    :lsof,
+    :curl
   ]
   # The one fixed path in the library: `find/3` needs a shell to find the rest, sh included.
   @sh "/bin/sh"

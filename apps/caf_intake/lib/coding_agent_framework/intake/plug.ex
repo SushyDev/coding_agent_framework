@@ -4,11 +4,18 @@ defmodule CodingAgentFramework.Intake.Plug do
   or by the name the embedding app gave it) and `secret:` (the instance's secret, given by the
   embedding app). See `CodingAgentFramework.Intake` for how the embedding app serves it.
 
-  It answers only `POST /hooks/<account>` from 127.0.0.1 with the secret in `x-caf-secret`,
-  compared in constant time. Anything else is refused with a status and writes no row: 404 for
-  another path, 405 for another method, 403 from another address, 401 for a wrong secret, 503
-  when the `Intake` does not answer. A stored event gets 200 with an empty body; a held
-  `PermissionRequest` or `PreToolUse` gets its decision, or an empty body at its deadline.
+  It answers only `POST /hooks/<account>` and `POST /hooks/<account>/waiter` from 127.0.0.1
+  with the secret in `x-caf-secret`, compared in constant time. Anything else is refused with a
+  status and writes no row: 404 for another path, 405 for another method, 403 from another
+  address, 401 for a wrong secret, 503 when the `Intake` does not answer. A stored event gets
+  200 with an empty body; a held `PermissionRequest` or `PreToolUse` gets its decision, or an
+  empty body at its deadline.
+
+  A waiter (`Intake.waiter_hook/5`) gets 200 at once and a chunked response: a newline every
+  `beat` ms, and one at once on `{ref, :beat}`, then its text as the last chunk, or nothing
+  more at its deadline. A failed write ends the hold (`Intake.closed/3`): Bandit tells a
+  handler that its connection closed only when it writes (F-121). A body that names no session
+  gets 400.
 
       iex> plug = CodingAgentFramework.Intake.Plug
       iex> opts = plug.init(intake: self(), secret: "s3")
@@ -40,13 +47,15 @@ defmodule CodingAgentFramework.Intake.Plug do
     given = get_req_header(conn, @header)
     conn = delete_req_header(conn, @header)
 
-    with {:path, ["hooks", account]} <- {:path, conn.path_info},
+    with {:path, {account, kind}} <- {:path, route(conn.path_info)},
          {:method, "POST"} <- {:method, conn.method},
          {:account, true} <- {:account, account =~ @account},
          {:from, {127, 0, 0, 1}} <- {:from, conn.remote_ip},
          {:secret, true} <- {:secret, secret?(given, opts.secret.())},
          {:ok, body, conn} <- read_body(conn, length: @max_body) do
-      post(conn, opts.intake, account, body)
+      if kind == :waiter,
+        do: waiter(conn, opts.intake, account, body),
+        else: post(conn, opts.intake, account, body)
     else
       {:path, _} -> send_resp(conn, 404, "")
       {:account, _} -> send_resp(conn, 404, "")
@@ -57,6 +66,10 @@ defmodule CodingAgentFramework.Intake.Plug do
       {:error, _} -> send_resp(conn, 400, "")
     end
   end
+
+  defp route(["hooks", account]), do: {account, :event}
+  defp route(["hooks", account, "waiter"]), do: {account, :waiter}
+  defp route(_), do: nil
 
   defp secret?([given], secret), do: Plug.Crypto.secure_compare(given, secret)
   defp secret?(_, _), do: false
@@ -100,6 +113,66 @@ defmodule CodingAgentFramework.Intake.Plug do
         send_resp(conn, 200, "")
     after
       wait -> send_resp(conn, 200, "")
+    end
+  end
+
+  defp waiter(conn, intake, account, body) do
+    case Intake.wait(intake, account, body) do
+      {:ok, {:waiting, key, ref, wait, beat}} ->
+        mon = Process.monitor(GenServer.whereis(intake) || self())
+        conn = conn |> put_resp_content_type("text/plain") |> send_chunked(200)
+        until = System.monotonic_time(:millisecond) + wait
+        beats(conn, %{intake: intake, key: key, ref: ref, mon: mon, beat: beat, until: until})
+
+      {:refused, _} ->
+        send_resp(conn, 400, "")
+
+      _ ->
+        send_resp(conn, 503, "")
+    end
+  end
+
+  defp beats(conn, w) do
+    %{ref: ref, mon: mon} = w
+    left = w.until - System.monotonic_time(:millisecond)
+
+    receive do
+      {^ref, {:decision, text}} ->
+        # Spec actions TextWritten and TextMarked: the text is the last chunk; then Intake is
+        # told whether its write succeeded.
+        case chunk(conn, text) do
+          {:ok, conn} ->
+            Intake.written(w.intake, w.key, ref)
+            conn
+
+          {:error, _} ->
+            Intake.closed(w.intake, w.key, ref)
+            conn
+        end
+
+      {^ref, :release} ->
+        conn
+
+      {^ref, :beat} ->
+        beat(conn, w)
+
+      # The `Intake` stopped: the hold is gone with it.
+      {:DOWN, ^mon, :process, _, _} ->
+        conn
+    after
+      max(min(w.beat, left), 0) -> if left <= 0, do: conn, else: beat(conn, w)
+    end
+  end
+
+  # A heartbeat. Its failure is how a connection that closed is found.
+  defp beat(conn, w) do
+    case chunk(conn, "\n") do
+      {:ok, conn} ->
+        beats(conn, w)
+
+      {:error, _} ->
+        Intake.closed(w.intake, w.key, w.ref)
+        conn
     end
   end
 end
