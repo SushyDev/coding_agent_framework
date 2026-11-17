@@ -27,10 +27,6 @@ defmodule CodingAgentFramework.Intake.Plug do
   @account ~r/\A[a-z0-9][a-z0-9_-]{0,31}\z/
   # Bodies past this are not hook inputs the framework reads; they are refused, not cut.
   @max_body 8_000_000
-  # How long past the `Intake`'s own deadline the request waits, if the `Intake` stops answering.
-  @margin 5_000
-  # The same for a PreToolUse, whose deadline is at most 8 s under the hook's 10 s timeout.
-  @tool_margin 1_500
 
   @impl true
   def init(opts) do
@@ -70,11 +66,9 @@ defmodule CodingAgentFramework.Intake.Plug do
       {:ok, stored} when stored in [:stored, :seen, :not_read, :handed] ->
         send_resp(conn, 200, "")
 
+      # `wait` is past the hold's own deadline, in case the `Intake` stops answering.
       {:ok, {:held, id, ref, wait}} ->
-        hold(conn, intake, id, ref, wait + @margin)
-
-      {:ok, {:tool, ref, wait}} ->
-        hold(conn, intake, nil, ref, wait + @tool_margin)
+        hold(conn, intake, id, ref, wait)
 
       {:ok, {:decided, body}} ->
         decision(conn, body)
@@ -92,10 +86,10 @@ defmodule CodingAgentFramework.Intake.Plug do
 
     receive do
       {^ref, {:decision, body}} ->
-        # Spec actions AnswerWritten and ToolAnswered: the decision is the response, and the
-        # request closes. A PreToolUse (no id) has nothing to mark.
+        # Spec actions AnswerWritten and DecisionHanded: the decision is the response, and the
+        # request closes; then the row is marked.
         conn = decision(conn, body)
-        if id, do: Intake.written(intake, id, ref)
+        Intake.written(intake, id, ref)
         conn
 
       {^ref, :release} ->

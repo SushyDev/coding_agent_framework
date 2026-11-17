@@ -5,9 +5,9 @@ defmodule CodingAgentFramework.Intake.Table do
 
   `CodingAgentFramework.Intake` is the one writer. A host whose `Intake` never started is
   `:unread`, never an empty list. A row's `hold` is nil for an event that is not held, and
-  otherwise one of `held`, `answering`, `answered`, `expired`, `lost` and `unknown`. A
-  PreToolUse row is written only for a decision: its `decision` is the response, and its
-  `actor` who decided (`app`).
+  otherwise one of `held`, `deciding`, `answered`, `expired`, `passed`, `lost` and `unknown`
+  (`model/tla/Hold.tla`'s rows). A decided row's `decision` is the response, and its `actor`
+  who decided (`app` for a PreToolUse).
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "intake.db")
       iex> {:ok, db} = CodingAgentFramework.Intake.Table.open(path)
@@ -34,48 +34,9 @@ defmodule CodingAgentFramework.Intake.Table do
   def open(path), do: Store.open(path, @schema, added: [intake_events: ["actor TEXT"]])
 
   @doc """
-  Writes a PreToolUse decision's row, with the response `body` as its decision and the actor
-  `app`, unless a row with its key is there. Returns the row's id and the decision it holds.
-  """
-  @spec decide(db, String.t(), String.t(), map, String.t(), integer) :: {integer, String.t()}
-  def decide(db, host, account, row, body, at) do
-    sql =
-      "INSERT INTO intake_events (host, account, key, event, session_id, data, decision, " <>
-        "actor, written_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'app', ?8) " <>
-        "ON CONFLICT (host, account, key) DO NOTHING RETURNING id"
-
-    case Store.query(db, sql, [
-           host,
-           account,
-           row.key,
-           row.event,
-           row.session_id,
-           row.data,
-           body,
-           at
-         ]) do
-      [[id]] -> {id, body}
-      [] -> List.to_tuple(by_key(db, host, account, row.key))
-    end
-  end
-
-  @doc "The decision of the row with this key, or nil when there is none."
-  @spec decision(db, String.t(), String.t(), String.t()) :: String.t() | nil
-  def decision(db, host, account, key) do
-    case by_key(db, host, account, key) do
-      [_id, decision] -> decision
-      nil -> nil
-    end
-  end
-
-  defp by_key(db, host, account, key) do
-    sql = "SELECT id, decision FROM intake_events WHERE host = ?1 AND account = ?2 AND key = ?3"
-    db |> Store.query(sql, [host, account, key]) |> List.first()
-  end
-
-  @doc """
   Records a start of `host`'s `Intake`, and settles the holds the last one left: a `held` row
-  becomes `lost` and an `answering` one `unknown`. Returns the settled rows' ids and accounts.
+  becomes `lost` and a `deciding` one `unknown`. Returns the settled rows' ids and accounts.
+  A row an older build left `answering`, the earlier name of `deciding`, settles as one.
   """
   @spec start(db, String.t(), integer) :: [{integer, String.t()}]
   def start(db, host, at) do
@@ -85,7 +46,8 @@ defmodule CodingAgentFramework.Intake.Table do
     db
     |> Store.query(
       "UPDATE intake_events SET hold = CASE hold WHEN 'held' THEN 'lost' ELSE 'unknown' END, " <>
-        "written_at = ?2 WHERE host = ?1 AND hold IN ('held', 'answering') RETURNING id, account",
+        "written_at = ?2 WHERE host = ?1 AND hold IN ('held', 'deciding', 'answering') " <>
+        "RETURNING id, account",
       [host, at]
     )
     |> Enum.map(fn [id, account] -> {id, account} end)
@@ -93,10 +55,10 @@ defmodule CodingAgentFramework.Intake.Table do
 
   @doc """
   Writes an event's row, unless a row with its key is there. Returns `{:new, id}` or
-  `{:seen, id, hold}`, the row a post before wrote.
+  `{:seen, id, hold, decision}`, the row a post before wrote.
   """
   @spec insert(db, String.t(), String.t(), map, integer) ::
-          {:new, integer} | {:seen, integer, String.t() | nil}
+          {:new, integer} | {:seen, integer, String.t() | nil, String.t() | nil}
   def insert(db, host, account, row, at) do
     values =
       [host, account, row.key, row.event, row.session_id, row.data] ++
@@ -112,25 +74,27 @@ defmodule CodingAgentFramework.Intake.Table do
         {:new, id}
 
       [] ->
-        [[id, hold]] =
-          Store.query(
-            db,
-            "SELECT id, hold FROM intake_events WHERE host = ?1 AND account = ?2 AND key = ?3",
-            [host, account, row.key]
-          )
+        sql =
+          "SELECT id, hold, decision FROM intake_events " <>
+            "WHERE host = ?1 AND account = ?2 AND key = ?3"
 
-        {:seen, id, hold}
+        [[id, hold, decision]] = Store.query(db, sql, [host, account, row.key])
+        {:seen, id, hold, decision}
     end
   end
 
-  @doc "Moves row `id` from hold `from` to `to`, with `decision` when given. False when it was not `from`."
-  @spec move(db, integer, String.t(), String.t(), String.t() | nil, integer) :: boolean
-  def move(db, id, from, to, decision, at) do
+  @doc """
+  Moves row `id` from hold `from` to `to`, with `decision` and `actor` when given. False when
+  it was not `from`.
+  """
+  @spec move(db, integer, String.t(), String.t(), String.t() | nil, integer, String.t() | nil) ::
+          boolean
+  def move(db, id, from, to, decision, at, actor \\ nil) do
     sql =
-      "UPDATE intake_events SET hold = ?3, decision = coalesce(?4, decision), written_at = ?5 " <>
-        "WHERE id = ?1 AND hold = ?2 RETURNING id"
+      "UPDATE intake_events SET hold = ?3, decision = coalesce(?4, decision), written_at = ?5, " <>
+        "actor = coalesce(?6, actor) WHERE id = ?1 AND hold = ?2 RETURNING id"
 
-    Store.query(db, sql, [id, from, to, decision, at]) != []
+    Store.query(db, sql, [id, from, to, decision, at, actor]) != []
   end
 
   @doc "A host's account's rows, and `read_at`: its last start or newest row; `:unread` before a start."

@@ -62,13 +62,14 @@ defmodule CodingAgentFramework.IntakeToolsTest do
              tool_use_id: "t1"
            }
 
-    # A pass writes no row; each decision's row names the app as its actor.
-    assert [r1, r2, r3] = rows(db)
+    # Each call's row is its hold's: a decision's names the app as its actor; a pass has none.
+    assert [r1, r2, r3, r4] = rows(db)
 
-    assert Enum.map([r1, r2, r3], &{&1.key, &1.actor, &1.hold}) == [
-             {"PreToolUse:s1:t1", "app", nil},
-             {"PreToolUse:s1:t2", "app", nil},
-             {"PreToolUse:s1:t3", "app", nil}
+    assert Enum.map([r1, r2, r3, r4], &{&1.key, &1.actor, &1.hold}) == [
+             {"PreToolUse:s1:t1", "app", "answered"},
+             {"PreToolUse:s1:t2", "app", "answered"},
+             {"PreToolUse:s1:t3", "app", "answered"},
+             {"PreToolUse:s1:t4", nil, "passed"}
            ]
 
     assert JSON.decode!(r2.decision)["hookSpecificOutput"]["permissionDecisionReason"] ==
@@ -85,6 +86,27 @@ defmodule CodingAgentFramework.IntakeToolsTest do
     assert [%{actor: "app"}] = rows(db)
   end
 
+  test "a second post of a call that passed is answered empty, and asks no one",
+       %{db: db, start: start} do
+    intake = start.(pre_tool_use: telling(self(), fn _ -> :pass end))
+    assert %{status: 200, resp_body: ""} = post(intake, tool("PreToolUse", "t1"))
+    assert %{status: 200, resp_body: ""} = post(intake, tool("PreToolUse", "t1"))
+    assert_received {:asked, _}
+    refute_received {:asked, _}
+    assert [%{hold: "passed"}] = rows(db)
+  end
+
+  test "the row says deciding before the decision is handed out", %{db: db, start: start} do
+    # The decision's response is written by a stand-in for the plug, which reads the row first.
+    intake = start.(pre_tool_use: fn _ -> :allow end)
+    assert {:ok, {:held, id, ref, _}} = Intake.post(intake, "work", tool("PreToolUse", "t1"))
+    assert_receive {^ref, {:decision, _}}, 5_000
+    assert [%{id: ^id, hold: "deciding", actor: "app"}] = rows(db)
+    Intake.written(intake, id, ref)
+    :sys.get_state(intake)
+    assert [%{hold: "answered"}] = rows(db)
+  end
+
   test "at the deadline the response is empty, and a later decision is dropped",
        %{db: db, start: start} do
     intake = start.(pre_tool_use: waiting(self()), tool_deadline: 50)
@@ -95,9 +117,9 @@ defmodule CodingAgentFramework.IntakeToolsTest do
     mon = Process.monitor(worker)
     send(worker, {:answer, {:deny, "late"}})
     assert_receive {:DOWN, ^mon, :process, _, :normal}, 5_000
-    # The late answer reached the Intake before this call: it wrote nothing and still serves.
+    # The late answer reached the Intake before this call: it changed nothing and still serves.
     :sys.get_state(intake)
-    assert rows(db) == []
+    assert [%{hold: "expired", decision: nil}] = rows(db)
     assert Process.alive?(intake)
   end
 
@@ -111,7 +133,7 @@ defmodule CodingAgentFramework.IntakeToolsTest do
     intake = start.(pre_tool_use: callback)
     assert %{status: 200, resp_body: ""} = post(intake, tool("PreToolUse", "t1"))
     assert %{status: 200, resp_body: ""} = post(intake, tool("PreToolUse", "t2"))
-    assert rows(db) == []
+    assert [%{hold: "passed"}, %{hold: "passed"}] = rows(db)
   end
 
   test "a slow callback blocks neither the Intake nor another call", %{start: start} do
@@ -127,13 +149,31 @@ defmodule CodingAgentFramework.IntakeToolsTest do
     assert %{"permissionDecision" => "allow"} = decision(Task.await(task))
   end
 
-  test "a restart ends the open request with no decision", %{db: db, start: start} do
+  test "a restart ends the open request with no decision, and its row is lost",
+       %{db: db, start: start} do
     intake = start.(pre_tool_use: waiting(self()))
     task = Task.async(fn -> post(intake, tool("PreToolUse", "t1")) end)
     assert_receive {:asked, _, _}, 5_000
     stop_supervised!(Intake)
     assert %{status: 200, resp_body: ""} = Task.await(task)
-    assert rows(db) == []
+    start.([])
+    assert_receive %{topic: "intake:h:work", ids: [_]}, 5_000
+    assert [%{hold: "lost"}] = rows(db)
+  end
+
+  test "a request that closes while held is lost, and the late decision dropped",
+       %{db: db, start: start} do
+    intake = start.(pre_tool_use: waiting(self()))
+    # A stand-in for the plug that posts and goes, as a request cut while held does.
+    spawn(fn -> Intake.post(intake, "work", tool("PreToolUse", "t1")) end)
+    assert_receive {:asked, worker, _}, 5_000
+    assert_receive %{topic: "intake:h:work"}, 5_000
+    assert_receive %{topic: "intake:h:work"}, 5_000
+    mon = Process.monitor(worker)
+    send(worker, {:answer, :allow})
+    assert_receive {:DOWN, ^mon, :process, _, :normal}, 5_000
+    :sys.get_state(intake)
+    assert [%{hold: "lost", decision: nil}] = rows(db)
   end
 
   test "a PostToolUse is answered at once and handed on, with no row", %{db: db, start: start} do

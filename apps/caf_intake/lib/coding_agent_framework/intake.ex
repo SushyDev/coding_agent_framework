@@ -1,7 +1,7 @@
 defmodule CodingAgentFramework.Intake do
   @moduledoc """
   Where Claude Code's hook events reach the framework, on the node's own host: the one writer
-  of `CodingAgentFramework.Intake.Table`, and the holder of each open `PermissionRequest`.
+  of `CodingAgentFramework.Intake.Table`, and the holder of each hook that waits.
   `model/tla/Intake.tla` models it, and comments name the spec's actions where the code does
   them.
 
@@ -20,18 +20,20 @@ defmodule CodingAgentFramework.Intake do
 
   - An event's row is written, then the plug answers 200 with an empty body. A second post of
     one key (`CodingAgentFramework.Intake.Event`) writes no second row.
-  - A `PermissionRequest`'s row is written `held` and its request stays open. `answer/4` moves
-    it `answering`, sends the decision as the response, then marks it `answered`. At the
-    deadline (option `deadline:`, 570 s by default, before the hook's 600 s timeout) the
-    request is answered with an empty body, no decision, and the row is `expired`.
-  - When this process starts, a row still `held` becomes `lost` and one `answering` becomes
-    `unknown`: the requests ended with the process that held them.
-  - A `PreToolUse` is held while the app's `pre_tool_use:` callback is asked, in a process of
-    its own, with a deadline (option `tool_deadline:`, 5 s by default, under the hook's 10 s
-    timeout). Exactly one response goes out: its decision, or an empty body for `:pass`, a
-    crash, an exit, a value that is not a decision, or the deadline. A decision after that is
-    dropped. A decision's row, keyed by `session_id` and `tool_use_id`, is written before the
-    response, with the actor `app`; a second post of its key answers the row's decision again.
+  - A hook that waits is a hold (`model/tla/Hold.tla`), one structure for every kind: its row
+    is written `held` and its request stays open. A decision moves the row `deciding`, goes out
+    as the response, and the row is then `answered`. At the kind's deadline, or for a pass, the
+    response is an empty body and the row `expired` or `passed`. Exactly one response goes out,
+    and a decision after it is dropped. A request that closes first settles its row: `held`
+    becomes `lost` and `deciding` becomes `unknown`, since its decision may have gone out; when
+    this process starts, it settles the rows the last one left the same way. The kinds differ
+    only in their decider, deadline and response:
+  - `PermissionRequest`: decided by `answer/4`, which names the row; deadline `deadline:`, 570 s
+    by default, before the hook's 600 s timeout. The dialog stays on the screen for a person.
+  - `PreToolUse`: decided by the app's `pre_tool_use:` callback, in a process of its own;
+    deadline `tool_deadline:`, 5 s by default, under the hook's 10 s timeout. `:pass`, a crash,
+    an exit or a value that is not a decision is a pass. A decision's row has the actor `app`,
+    and a second post of the call's key answers the row's decision again, or an empty body.
   - A `PostToolUse` is answered 200 at once and handed to the `post_tool_use:` callback in a
     process of its own, with no row.
 
@@ -45,6 +47,9 @@ defmodule CodingAgentFramework.Intake do
 
   @deadline 570_000
   @tool_deadline 5_000
+  # How long past a kind's deadline the plug waits, if the `Intake` stops answering: a
+  # PreToolUse's deadline is at most 8 s under the hook's 10 s timeout.
+  @margins %{permission: 5_000, tool: 1_500}
   @timeout 5_000
   @tools %{pre_tool_use: "PreToolUse", post_tool_use: "PostToolUse"}
 
@@ -106,12 +111,12 @@ defmodule CodingAgentFramework.Intake do
 
   @doc """
   Stores one post's body for `account`, as the plug does. Returns `{:ok, :stored}` or
-  `{:ok, :seen}` (a row with its key was there), or `{:ok, {:held, id, ref, wait}}`: the caller
-  holds the request and waits up to `wait` ms for `{ref, {:decision, body}}` or
-  `{ref, :release}`, and after writing a decision calls `written/3`. A PreToolUse is
-  `{:ok, {:tool, ref, wait}}`, held the same way with nothing to call after, or
-  `{:ok, {:decided, body}}` when its row is there. A tool event with no callback is
-  `{:ok, :not_read}`, and a PostToolUse handed to its callback `{:ok, :handed}`.
+  `{:ok, :seen}` (a row with its key was there), or `{:ok, {:held, id, ref, wait}}` for a
+  hold of any kind: the caller holds the request and waits up to `wait` ms for
+  `{ref, {:decision, body}}` or `{ref, :release}`, and after writing a decision calls
+  `written/3`. A PreToolUse whose row has a decision is `{:ok, {:decided, body}}`. A tool event
+  with no callback is `{:ok, :not_read}`, and a PostToolUse handed to its callback
+  `{:ok, :handed}`.
   """
   @spec post(GenServer.server(), String.t(), binary, keyword) ::
           {:ok,
@@ -120,7 +125,6 @@ defmodule CodingAgentFramework.Intake do
            | :not_read
            | :handed
            | {:held, integer, reference, pos_integer}
-           | {:tool, reference, pos_integer}
            | {:decided, binary}}
           | {:refused, term}
           | {:unknown, term}
@@ -162,13 +166,14 @@ defmodule CodingAgentFramework.Intake do
           host: host,
           db: db,
           notify: Keyword.get(opts, :notify, fn _ -> :ok end),
-          deadline: Keyword.get(opts, :deadline, @deadline),
+          deadlines: %{
+            permission: Keyword.get(opts, :deadline, @deadline),
+            tool: Keyword.get(opts, :tool_deadline, @tool_deadline)
+          },
           pre_tool_use: Keyword.get(opts, :pre_tool_use),
           post_tool_use: Keyword.get(opts, :post_tool_use),
           agent: Keyword.get(opts, :agent, fn _, _ -> nil end),
-          tool_deadline: Keyword.get(opts, :tool_deadline, @tool_deadline),
-          holds: %{},
-          tools: %{}
+          holds: %{}
         }
 
         settled = Table.start(db, host, now())
@@ -186,44 +191,20 @@ defmodule CodingAgentFramework.Intake do
   @impl true
   def handle_call({:post, account, body}, from, state) do
     case Event.parse(body) do
-      %{event: "PreToolUse"} = row -> pre_tool_use(row, account, from, state)
+      %{event: "PreToolUse"} when state.pre_tool_use == nil -> {:reply, {:ok, :not_read}, state}
       %{event: "PostToolUse"} = row -> post_tool_use(row, account, state)
       row -> store(row, account, from, state)
     end
   end
 
   def handle_call({:answer, id, decision}, from, state) do
-    with {:ok, body} <- response(decision),
-         %{} = hold <- state.holds[id],
-         true <- Table.move(state.db, id, "held", "answering", body, now()) do
-      # Spec action AnswerAsked: the row says answering before the decision goes out.
-      send(hold.pid, {hold.ref, {:decision, body}})
-      cue(state, hold.account, [id])
-      {:noreply, put_in(state.holds[id], Map.put(hold, :from, from))}
+    with {:ok, body} <- permission_response(decision),
+         %{kind: :permission} <- state.holds[id],
+         {:ok, state} <- decide(state, id, body, nil) do
+      {:noreply, put_in(state.holds[id][:from], from)}
     else
       {:refused, _} = refused -> {:reply, refused, state}
       _ -> {:reply, {:refused, {:not_held, hold_of(state, id)}}, state}
-    end
-  end
-
-  defp pre_tool_use(_row, _account, _from, %{pre_tool_use: nil} = state),
-    do: {:reply, {:ok, :not_read}, state}
-
-  defp pre_tool_use(row, account, {pid, _}, state) do
-    case Table.decision(state.db, state.host, account, row.key) do
-      body when is_binary(body) ->
-        {:reply, {:ok, {:decided, body}}, state}
-
-      nil ->
-        # Spec action ToolHeld: an entry, its deadline, and the callback asked on its own.
-        ref = make_ref()
-        {me, %{pre_tool_use: callback, agent: agent}} = {self(), state}
-        ask = fn -> send(me, {:tool_answer, ref, callback.(tool_event(row, account, agent))}) end
-        {_, wmon} = spawn_monitor(ask)
-        timer = Process.send_after(self(), {:tool_deadline, ref}, state.tool_deadline)
-        mon = Process.monitor(pid)
-        entry = %{account: account, row: row, pid: pid, mon: mon, wmon: wmon, timer: timer}
-        {:reply, {:ok, {:tool, ref, state.tool_deadline}}, put_in(state.tools[ref], entry)}
     end
   end
 
@@ -257,16 +238,33 @@ defmodule CodingAgentFramework.Intake do
 
   defp store(row, account, {pid, _}, state) do
     case Table.insert(state.db, state.host, account, row, now()) do
-      {:seen, _id, _hold} ->
+      # A second post of a PreToolUse answers the row's decision, or none.
+      {:seen, _id, _hold, decision} when row.event == "PreToolUse" and decision != nil ->
+        {:reply, {:ok, {:decided, decision}}, state}
+
+      {:seen, _id, _hold, _decision} ->
         {:reply, {:ok, :seen}, state}
 
       {:new, id} when row.hold ->
-        # Spec action HoldStored: the row says held while the plug keeps the request open.
-        ref = make_ref()
-        timer = Process.send_after(self(), {:expire, id}, state.deadline)
-        hold = %{account: account, pid: pid, ref: ref, mon: Process.monitor(pid), timer: timer}
+        # Spec actions HoldStored and ToolHeld (Hold's Held): the row says held while the plug
+        # keeps the request open, and the deadline starts.
+        kind = if row.event == "PreToolUse", do: :tool, else: :permission
+
+        hold = %{
+          kind: kind,
+          account: account,
+          pid: pid,
+          ref: make_ref(),
+          mon: Process.monitor(pid)
+        }
+
+        hold =
+          Map.put(hold, :timer, Process.send_after(self(), {:expire, id}, state.deadlines[kind]))
+
+        hold = if kind == :tool, do: ask(state, id, hold, row), else: hold
         cue(state, account, [id])
-        {:reply, {:ok, {:held, id, ref, state.deadline}}, put_in(state.holds[id], hold)}
+        wait = state.deadlines[kind] + @margins[kind]
+        {:reply, {:ok, {:held, id, hold.ref, wait}}, put_in(state.holds[id], hold)}
 
       {:new, id} ->
         # Spec action Stored: the row is written before the plug's 200 (Acked).
@@ -275,13 +273,42 @@ defmodule CodingAgentFramework.Intake do
     end
   end
 
+  # Spec action ToolHeld: the app's callback is asked in a process of its own.
+  defp ask(state, id, hold, row) do
+    {me, %{pre_tool_use: callback, agent: agent}} = {self(), state}
+    ask = fn -> send(me, {:tool_answer, id, callback.(tool_event(row, hold.account, agent))}) end
+    {_, wmon} = spawn_monitor(ask)
+    Map.put(hold, :wmon, wmon)
+  end
+
+  # Hold's Asked: the row says deciding, with the response it carries, before the response is
+  # handed to the plug (Decides). Only a held row moves, so a late decision is dropped.
+  defp decide(state, id, body, actor) do
+    hold = state.holds[id]
+
+    if Table.move(state.db, id, "held", "deciding", body, now(), actor) do
+      send(hold.pid, {hold.ref, {:decision, body}})
+      cue(state, hold.account, [id])
+      {:ok, put_in(state.holds[id], hold |> Map.put(:deciding, true) |> unwatch())}
+    else
+      :not_held
+    end
+  end
+
+  # An empty response to a held request, and its row's end: Hold's Empty.
+  defp release(state, id, hold, row_end) do
+    Table.move(state.db, id, "held", row_end, nil, now())
+    send(hold.pid, {hold.ref, :release})
+    drop(state, id, hold)
+  end
+
   @impl true
   def handle_cast({:written, id, ref}, state) do
     case state.holds[id] do
-      %{ref: ^ref, from: from} = hold ->
-        # Spec action AnswerMarked: the plug wrote the decision (AnswerWritten).
-        Table.move(state.db, id, "answering", "answered", nil, now())
-        GenServer.reply(from, {:ok, :sent})
+      %{ref: ^ref, deciding: true} = hold ->
+        # Spec actions AnswerMarked and ToolMarked (Hold's Marked): the plug wrote the decision.
+        Table.move(state.db, id, "deciding", "answered", nil, now())
+        if hold[:from], do: GenServer.reply(hold.from, {:ok, :sent})
         {:noreply, drop(state, id, hold)}
 
       _ ->
@@ -292,84 +319,69 @@ defmodule CodingAgentFramework.Intake do
   @impl true
   def handle_info({:expire, id}, state) do
     case state.holds[id] do
-      %{from: _} ->
-        {:noreply, state}
-
-      %{} = hold ->
-        # Spec action HoldExpires: no decision, and the dialog waits for a person.
-        Table.move(state.db, id, "held", "expired", nil, now())
-        send(hold.pid, {hold.ref, :release})
-        {:noreply, drop(state, id, hold)}
-
-      nil ->
-        {:noreply, state}
+      # Spec actions HoldExpires and ToolDeadline: no decision. A deciding hold is past it.
+      %{deciding: true} -> {:noreply, state}
+      %{} = hold -> {:noreply, release(state, id, hold, "expired")}
+      nil -> {:noreply, state}
     end
   end
 
-  def handle_info({:tool_answer, ref, answer}, state) do
-    case state.tools[ref] do
+  def handle_info({:tool_answer, id, answer}, state) do
+    case {state.holds[id], tool_response(answer)} do
       # A decision after the deadline, or for a request gone: dropped, never sent (LateDropped).
-      nil -> {:noreply, state}
-      entry -> {:noreply, hand(state, ref, entry, tool_response(answer))}
-    end
-  end
-
-  def handle_info({:tool_deadline, ref}, state) do
-    case state.tools[ref] do
-      # Spec action ToolDeadline: an empty body, and no row.
-      %{} = entry -> {:noreply, hand(state, ref, entry, :pass)}
-      nil -> {:noreply, state}
+      {nil, _} -> {:noreply, state}
+      {%{deciding: true}, _} -> {:noreply, state}
+      {hold, :pass} -> {:noreply, release(state, id, hold, "passed")}
+      {_, {:decision, body}} -> {:noreply, decided(state, decide(state, id, body, "app"))}
     end
   end
 
   def handle_info({:DOWN, mon, :process, _, reason}, state) do
-    case Enum.find(state.tools, fn {_, e} -> mon in [e.mon, e.wmon] end) do
+    case Enum.find(state.holds, fn {_, h} -> mon in [h.mon, h[:wmon]] end) do
       # The callback crashed or exited before it answered: no decision.
-      {ref, %{wmon: ^mon} = entry} -> {:noreply, hand(state, ref, entry, :pass)}
-      # The request closed first: nothing can carry a response, so nothing is written.
-      {ref, entry} -> {:noreply, drop_tool(state, ref, entry)}
-      nil -> down(mon, reason, state)
+      {id, %{wmon: ^mon} = hold} -> {:noreply, release(state, id, hold, "passed")}
+      # Spec actions HoldSettled and ToolSettled (Hold's Cut, then Settles): the request
+      # closed before its response was written.
+      {id, hold} -> {:noreply, settle(state, id, hold, reason)}
+      nil -> {:noreply, state}
     end
   end
 
-  defp down(mon, reason, state) do
-    case Enum.find(state.holds, fn {_, hold} -> hold.mon == mon end) do
-      {id, %{from: from} = hold} ->
-        # Spec action HoldSettled: the request closed before the answer was written.
-        Table.move(state.db, id, "answering", "unknown", nil, now())
-        GenServer.reply(from, {:unknown, {:request_closed, reason}})
-        {:noreply, drop(state, id, hold)}
+  defp settle(state, id, %{deciding: true} = hold, reason) do
+    Table.move(state.db, id, "deciding", "unknown", nil, now())
+    if hold[:from], do: GenServer.reply(hold.from, {:unknown, {:request_closed, reason}})
+    drop(state, id, hold)
+  end
 
-      {id, hold} ->
-        # Spec action HoldSettled: the request closed while held.
-        Table.move(state.db, id, "held", "lost", nil, now())
-        {:noreply, drop(state, id, hold)}
+  defp settle(state, id, hold, _reason) do
+    Table.move(state.db, id, "held", "lost", nil, now())
+    drop(state, id, hold)
+  end
 
-      nil ->
-        {:noreply, state}
+  defp decided(_state, {:ok, state}), do: state
+  defp decided(state, :not_held), do: state
+
+  defp unwatch(%{wmon: wmon} = hold) do
+    Process.demonitor(wmon, [:flush])
+    Map.delete(hold, :wmon)
+  end
+
+  defp unwatch(hold), do: hold
+
+  # One drop for every kind: whatever comes for this hold after it is dropped.
+  defp drop(state, id, hold) do
+    hold = unwatch(hold)
+    Process.demonitor(hold.mon, [:flush])
+    Process.cancel_timer(hold.timer)
+    cue(state, hold.account, [id])
+    %{state | holds: Map.delete(state.holds, id)}
+  end
+
+  defp hold_of(state, id) do
+    case is_integer(id) && Table.rows_by_id(state.db, [id]) do
+      [%{host: host, hold: hold}] when host == state.host -> hold
+      _ -> :no_row
     end
-  end
-
-  # Spec actions DecisionHanded and PassHanded: the entry goes, so whatever comes after it is
-  # dropped. A decision's row is written first; if another post of its key decided before, the
-  # row's decision is the one handed out.
-  defp hand(state, ref, entry, :pass) do
-    send(entry.pid, {ref, :release})
-    drop_tool(state, ref, entry)
-  end
-
-  defp hand(state, ref, entry, {:decision, body}) do
-    {id, body} = Table.decide(state.db, state.host, entry.account, entry.row, body, now())
-    send(entry.pid, {ref, {:decision, body}})
-    cue(state, entry.account, [id])
-    drop_tool(state, ref, entry)
-  end
-
-  defp drop_tool(state, ref, entry) do
-    Process.demonitor(entry.mon, [:flush])
-    Process.demonitor(entry.wmon, [:flush])
-    Process.cancel_timer(entry.timer)
-    %{state | tools: Map.delete(state.tools, ref)}
   end
 
   # The PreToolUse output in the shape Claude Code 2.1.322 reads. It keeps a reason only beside
@@ -389,22 +401,8 @@ defmodule CodingAgentFramework.Intake do
     {:decision, JSON.encode!(%{"hookSpecificOutput" => output})}
   end
 
-  defp drop(state, id, hold) do
-    Process.demonitor(hold.mon, [:flush])
-    Process.cancel_timer(hold.timer)
-    cue(state, hold.account, [id])
-    %{state | holds: Map.delete(state.holds, id)}
-  end
-
-  defp hold_of(state, id) do
-    case is_integer(id) && Table.rows_by_id(state.db, [id]) do
-      [%{host: host, hold: hold}] when host == state.host -> hold
-      _ -> :no_row
-    end
-  end
-
   # The PermissionRequest output in the shape Claude Code 2.1.322 reads (F-24).
-  defp response(decision) do
+  defp permission_response(decision) do
     with {:ok, d} <- decision(decision) do
       output = %{"hookEventName" => "PermissionRequest", "decision" => d}
       {:ok, JSON.encode!(%{"hookSpecificOutput" => output})}

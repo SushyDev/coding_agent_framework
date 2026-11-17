@@ -19,6 +19,8 @@ defmodule CodingAgentFramework.Intake.Event do
             UserPromptSubmit PermissionRequest PermissionDenied)
   # Posted only when the app gives `Intake` a callback for them.
   @tools ~w(PreToolUse PostToolUse)
+  # The events whose request `Intake` holds open: each is a kind of its one hold.
+  @held ~w(PermissionRequest PreToolUse)
   @ids %{
     "PreToolUse" => "tool_use_id",
     "PostToolUse" => "tool_use_id",
@@ -35,8 +37,8 @@ defmodule CodingAgentFramework.Intake.Event do
   def names, do: @names
 
   @doc """
-  The tool events, posted only when the app gives `Intake` a callback for them. Neither is stored
-  as it comes: PreToolUse's row is its decision's, and PostToolUse has none.
+  The tool events, posted only when the app gives `Intake` a callback for them. PreToolUse's row
+  is its hold's, and PostToolUse has none.
   """
   @spec tool_names() :: [String.t()]
   def tool_names, do: @tools
@@ -80,7 +82,7 @@ defmodule CodingAgentFramework.Intake.Event do
       key: key,
       data: data,
       problem: problem,
-      hold: name == "PermissionRequest" and is_nil(problem)
+      hold: name in @held and is_nil(problem)
     }
   end
 

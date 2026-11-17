@@ -943,7 +943,7 @@ section.
   | Kind | Hook | Decider | Deadline | Row |
   |---|---|---|---|---|
   | `permission` | `PermissionRequest` | a person, or an agent's `answer` | 570 s of 600 s | yes |
-  | `tool` | `PreToolUse` | the app's callback | 5 s of 10 s | a decision only |
+  | `tool` | `PreToolUse` | the app's callback | 5 s of 10 s | yes |
   | `stop` | `Stop` | the app's callback (item 14) | under the hook's | a decision only |
   | `waiter` | the `asyncRewake` Stop hook | `Mailbox`'s due row | under the hook's long `timeout` | the delivery's, in `Mailbox` |
 
@@ -952,11 +952,12 @@ section.
   with a deadline of 5 s under the hook's 10 s timeout, and gives exactly one response: the
   decision (`hookSpecificOutput.permissionDecision` `allow`, `deny` or `ask`, with
   `permissionDecisionReason` beside a deny), or an empty body for a pass, a crash or the
-  deadline, so Claude Code goes on as without the hook. A later decision is dropped. A decision
-  writes its row, keyed by `session_id` and `tool_use_id`, with the actor `app`, before the
-  response, and a second post of the key answers the row's decision. A pass writes no row,
-  since every tool call posts this hook. A PostToolUse is answered at once and handed to its
-  callback, with no row.
+  deadline, so Claude Code goes on as without the hook. A later decision is dropped. Its row,
+  keyed by `session_id` and `tool_use_id`, is written "held" when the request is held, as a
+  permission's is (F-119's new-3, F-121); a decision moves it "deciding", with the actor `app`,
+  before the response, then "answered"; a pass leaves it "passed" and the deadline "expired".
+  A second post of the key answers the row's decision, or an empty body. A PostToolUse is
+  answered at once and handed to its callback, with no row.
 - **Stored, then acknowledged.** `Intake` writes the event's row, then answers 200 with an empty
   body. A row is keyed by Claude Code's own ids where the event has them (`session_id` with
   `tool_use_id`, `prompt_id` or the start's `source`), and a second post of one key writes no
@@ -969,7 +970,7 @@ section.
   pid, a SessionStart by the session file.
 - **A held `PermissionRequest`.** `Intake` writes its row "held", with the request's id, and
   keeps the request open. `answer(agent, dialog, label)` names that id. The row says
-  "answering" before the decision goes out as the response (`hookSpecificOutput.decision`:
+  "deciding" before the decision goes out as the response (`hookSpecificOutput.decision`:
   `{"behavior": "allow"}`, with `updatedPermissions` for "don't ask again", or `{"behavior":
   "deny", "message": …}`), then "answered". An answer to a row that is not "held" is refused. It
   never goes to another dialog of the agent, and never becomes typed keys.
@@ -977,7 +978,7 @@ section.
   decision, at 570 s and marks the row "expired". The dialog stays on the screen for a person.
   So no answer goes to a request Claude Code no longer reads.
 - **A restart.** The open requests end with the node. Claude Code reads an error, and the dialog
-  stays for a person. After the restart a row still "held" is "lost", and one "answering" is
+  stays for a person. After the restart a row still "held" is "lost", and one "deciding" is
   "unknown", since its answer may not have gone out; a view shows both. A dialog whose hold is
   lost is answered by a person, on the screen or through Remote Control.
 - **A person first.** Claude Code shows the dialog while the hook runs, the first answer closes
