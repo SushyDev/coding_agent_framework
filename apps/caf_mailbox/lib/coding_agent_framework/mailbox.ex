@@ -833,10 +833,9 @@ defmodule CodingAgentFramework.Mailbox do
   defp settled(_s, _m, :keep), do: :ok
 
   defp settled(s, m, :delivered) do
+    # A pointer's file stays: the line is taken before the agent reads the file, in the turn it
+    # starts, and nothing tells when that read is done. The framework keeps its data.
     write(s, m, status: "delivered", attempt: nil)
-
-    # A pointer's file is due no longer.
-    if (m.via == "typed" and s.typed) && s.typed.home, do: File.rm(due_path(s, m.to_agent, m))
   end
 
   defp settled(s, m, :again), do: again(s, m, nil)

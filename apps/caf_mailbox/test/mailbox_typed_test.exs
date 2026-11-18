@@ -96,7 +96,8 @@ defmodule CodingAgentFramework.MailboxTypedTest do
 
     user_line(main, line1)
     assert {:ok, %{status: "delivered"}} = until(ctx, one, &(&1.status == "delivered"))
-    refute File.exists?(file)
+    # The file stays after delivery: the agent reads it in the turn the line starts.
+    assert File.read!(file) == long
 
     %{uuid: u2} = Table.get(ctx.mtable, two)
     file2 = Path.join(due, "#{two}.md")
