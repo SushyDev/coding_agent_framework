@@ -98,10 +98,9 @@ to `one`, the first name, and its status line gives the first real reading.
   to allow a `caf` tool or `Bash` later. The console answers such a request: `requests(caf,
   "demo-main")` lists each held request with its tool, and `answer_request(caf, "demo-main",
   "<id>", "allow")` answers one. The dialog stays on this screen meanwhile, and a person may
-  answer it there first; the console's answer then changes nothing. Copy the id `requests`
-  prints: an answer refused for a wrong id keeps that state claimed, and the next answer of it
-  is refused `already_claimed` until the state moves (F-147's finding new-1); answer it on the
-  screen then.
+  answer it there first; the console's answer then changes nothing. An id the session does not
+  hold is refused `{:not_held, id}` and takes nothing, so the next answer, with the id
+  `requests` prints, is taken.
 - **Passed when** the dialog leaves the screen after the console's answer (and not before),
   the brief runs as the first turn, `agents(caf)` shows `demo-main` on account `one`, `idle`,
   `dialogs(caf)` shows none, and `look(caf, "demo-main")` shows the brief and its one-line reply.

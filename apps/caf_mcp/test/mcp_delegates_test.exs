@@ -295,6 +295,34 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     assert "answer #{req_two}" in HeadlessStandIn.taken(ctx.dir)
   end
 
+  # F-147's new-1: a claim settled refused kept its state, so the answer with the right id
+  # waited for the state to move. The id is now checked before the claim, as the label is.
+  test "an answer's request is checked before its claim, so a wrong id takes nothing", ctx do
+    File.write!(Path.join(ctx.dir, "hold"), "")
+    {req, _} = stuck(ctx, "unit/one")
+    answer = &%{"agent" => "app-unit-one", "dialog" => &1, "label" => "allow"}
+    unheld = req <> "-nope"
+
+    assert tool(ctx, "main", "answer", answer.(unheld)) == %{"refused" => ["not_held", unheld]}
+    assert tool(ctx, "main", "answer", answer.("")) == %{"refused" => ["not_held", ""]}
+    assert {:ok, []} = Acts.rows(ctx.acts)
+
+    # The state was never claimed: the answer with the right id is taken, and moves it.
+    assert %{"ok" => %{"claim" => claim, "settled" => %{"ok" => "verified"}}} =
+             tool(ctx, "main", "answer", answer.(req))
+
+    assert {:ok, [%{id: ^claim, act: "answer", outcome: "verified"}]} = Acts.rows(ctx.acts)
+    assert "answer #{req}" in HeadlessStandIn.taken(ctx.dir)
+
+    # The request is answered, so it is held no more: refused again, with no second claim.
+    assert tool(ctx, "main", "answer", answer.(req)) == %{"refused" => ["not_held", req]}
+    assert {:ok, [_]} = Acts.rows(ctx.acts)
+
+    # Each call is written and answered, a refused one too.
+    assert for(%{tool: "answer", state: state} <- MCP.calls(ctx.mcp), do: state) ==
+             List.duplicate("answered", 4)
+  end
+
   test "an interrupt goes in under a claim; a stop only once the report is delivered", ctx do
     args = Map.put(start_args("unit/one"), "timeout", 60_000)
     call = Task.async(fn -> tool(ctx, "main", "run_delegate", args) end)

@@ -584,7 +584,9 @@ none: the start's lease lives while a move of its session is under way.
 session, as an interactive delegate's is (F-146's new-5, built in F-147). The operator's
 `answer` of one claims its state (`Mains.fix_state/3`, which also names the requests held) and
 calls `Mains.answer/5` with it, which goes to `Intake.answer/4` only while that state is still
-the session's and the request is held. A person may answer the dialog on its screen first.
+the session's and the request is held. `MCP` checks the id against that state's `held` before
+the claim (F-148), so an id the session does not hold is refused `{:not_held, id}` and leaves
+its state unclaimed. A person may answer the dialog on its screen first.
 
 **Its end** (F-143, `Team.tla`'s `MainEnds`) is the operator's act alone: `end_main(name)`, the
 operator's tool, `Mains.end_main/3`, which `Sessions.end_main/3` does. It is refused while a
@@ -1176,7 +1178,11 @@ framework's tools, which are strict in how they act and narrow in whom they reac
   retried. A state once claimed stays claimed, whatever the claim's end: a second claim of it
   is refused (`{:already_claimed, by}`), so a fix acts once per state; a unique index on the
   target's state keeps it so, with no scan. A caller whose claim was answered unknown reads the
-  act's row before it decides anything (F-75).
+  act's row before it decides anything (F-75). What a fix's arguments name is checked against
+  the state read before the claim, never after it, since a claim refused later still keeps its
+  state: an answer's label, and the request id it names, which the state must hold (`Team.tla`'s
+  `AnswerClaimed`, F-148); an id it does not hold is refused `{:not_held, id}` and takes no claim,
+  so the next answer, with the right id, is taken.
 - No agent fixes or moves a main session; only a person does, a move with one press.
 - An agent may not fix itself. A stuck agent cannot be relied on to see that it is stuck.
 - Jobs and services: a main session and its delegates may run jobs and start services on any
