@@ -140,8 +140,8 @@ defmodule CodingAgentFramework.Sessions do
   `main` or `delegate` (a launch's `kind:`, by default `:delegate` for role `:delegate` and
   `:main` otherwise), with its `parent:` (a delegate's main session, which it must name; a main
   session names none) and its `project:` (a worktree's, or the launch's). A resume keeps the
-  row's. Until `Mains`, the embedding app names its main sessions (`mains:`), each written
-  `declared` when it has no row. A delegate that is done for good is `ended` (`ended/3`, which
+  row's. `Mains` names each project's main sessions (`declare/4`), each written `declared`
+  when it has no row. A delegate that is done for good is `ended` (`ended/3`, which
   `Delegates` asks once its report went in). Other parts read the rows only through
   `CodingAgentFramework.Sessions.Agents`: the tree, and what each status means.
 
@@ -194,8 +194,7 @@ defmodule CodingAgentFramework.Sessions do
   `notify:`, `size:`
   (the viewer's `{columns, rows}`, default `{200, 50}`), `poll:` (ms between reads while a call
   waits, default 200), `clock:` (a function answering wall-clock ms, for the deadlines), and,
-  `mains:` (until `Mains`: `%{name => project}`, each main session the app declares, written
-  as a row of kind `main` when it has none), `acts:` (the instance's `Acts`: each start and
+  `acts:` (the instance's `Acts`: each start and
   resume is a row there, actor `sessions:<host>`, written before the agent row and settled by
   the call's answer, `Acts.answered/4`; a start whose row cannot be written is refused
   `{:acts, answer}`), and, where the app runs `Mailbox` and `Intake`:
@@ -318,6 +317,21 @@ defmodule CodingAgentFramework.Sessions do
     do: call(sessions, {:move_phase, name, phase, fields}, Keyword.get(opts, :timeout, @read))
 
   @doc """
+  Declares main session `name` of `project` (`Mains`' call, F-141): a row of kind `main` with
+  no parent, `declared`, when the host has no row of that name, so the tree holds it before it
+  has a process and it can start its first delegate. A row it has keeps its status and takes
+  the project when it has none. Answers `{:ok, row}`, `{:refused, {:bad, :name}}` for a name
+  that cannot be a session's, or `{:refused, {:not_main, kind}}` for another kind's name.
+  Option: `:timeout` (ms, default 5 000).
+
+      Sessions.declare(sessions, "app-main", "app")
+      #=> {:ok, %{name: "app-main", kind: "main", status: "declared", ...}}
+  """
+  @spec declare(GenServer.server(), String.t(), String.t(), keyword) :: outcome(map)
+  def declare(sessions, name, project, opts \\ []),
+    do: call(sessions, {:declare, name, project}, Keyword.get(opts, :timeout, @read))
+
+  @doc """
   Delegate `name` is done for good: its report went in and no process of it may live. Its row
   becomes `ended`, so it frees its parent's cap and what it owns ends with it; it keeps its
   place in the tree, so what it kept goes to its parent.
@@ -433,7 +447,6 @@ defmodule CodingAgentFramework.Sessions do
         reaper: Keyword.get(opts, :reaper),
         open_to: Keyword.get(opts, :open_to),
         acts: Keyword.get(opts, :acts),
-        mains: Keyword.get(opts, :mains, %{}),
         waiter: waiter,
         git: Programs.fetch(programs, :git),
         cat: Programs.fetch(programs, :cat),
@@ -444,11 +457,6 @@ defmodule CodingAgentFramework.Sessions do
         worktrees: root(host, holder.sh, programs, Keyword.get(opts, :home)),
         pending: %{}
       }
-
-      # The declared main sessions are rows before `start_link` returns: a tool call the app
-      # sends right after its start may name one, and `Grants` reads the tree from these rows.
-      ids = for {name, project} <- state.mains, do: Table.declare(db, host.name, name, project)
-      if ids != [], do: state.notify.(%{topic: topic(state), ids: ids})
 
       {:ok, state, {:continue, :adopt}}
     else
@@ -585,6 +593,19 @@ defmodule CodingAgentFramework.Sessions do
       end
 
     {:reply, {:ok, owed}, state}
+  end
+
+  def handle_call({:declare, name, project}, _from, state) do
+    reply =
+      with true <- (Worktree.name?(name) and is_binary(project)) or {:refused, {:bad, :name}},
+           row = Table.get(state.db, state.host.name, name),
+           true <- row == nil or row.kind == "main" or {:refused, {:not_main, row.kind}} do
+        id = Table.declare(state.db, state.host.name, name, project)
+        state.notify.(%{topic: topic(state), ids: [id]})
+        {:ok, Table.get(state.db, state.host.name, name)}
+      end
+
+    {:reply, reply, state}
   end
 
   def handle_call({:ended, name}, _from, state) do

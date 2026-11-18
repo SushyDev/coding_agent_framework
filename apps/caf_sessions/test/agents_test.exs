@@ -61,13 +61,17 @@ defmodule CodingAgentFramework.AgentsTest do
   end
 
   test "a declared main session is a row of the tree; a delegate names its parent", ctx do
-    opts = Keyword.put(ctx.opts, :mains, %{"main" => "app"})
-    sessions = start_supervised!(Supervisor.child_spec({Sessions, opts}, id: :declared))
+    sessions = start_supervised!(Supervisor.child_spec({Sessions, ctx.opts}, id: :declared))
     {:ok, agents} = Agents.open(ctx.opts[:db], "test")
-    _ = Sessions.viewer_argv(sessions, "main")
+    assert {:ok, %{status: "declared"}} = Sessions.declare(sessions, "main", "app")
 
     assert [%{name: "main", kind: "main", project: "app", status: "declared"}] =
              Agents.read_tree(agents)
+
+    assert Agents.declared?(Agents.get(agents, "main"))
+
+    # A name that cannot be a session's is never declared.
+    assert {:refused, {:bad, :name}} = Sessions.declare(sessions, "../x", "app")
 
     assert {:refused, {:missing, :parent}} =
              Sessions.start(

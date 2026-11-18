@@ -32,6 +32,19 @@ defmodule CodingAgentFramework.Operator do
     MCP.operate(mcp, "start_delegate", Map.merge(args, %{"model" => model, "brief" => brief}))
   end
 
+  @doc """
+  Starts main session `name` of `project` in its checkout, with `brief` from the operator as
+  its first message (F-141, `CodingAgentFramework.Mains`).
+
+      Operator.start_main(mcp, "app", "app-epic", "Plan the epic.")
+      #=> {:ok, %{main: "app-epic"}}
+  """
+  @spec start_main(GenServer.server(), String.t(), String.t(), String.t()) :: answer
+  def start_main(mcp, project, name, brief) do
+    args = %{"project" => project, "name" => name, "brief" => brief}
+    MCP.operate(mcp, "start_main", args)
+  end
+
   @doc "Sends `text` to agent `to`, stored first and typed into an ended turn, as any message."
   @spec message(GenServer.server(), String.t(), String.t()) :: answer
   def message(mcp, to, text), do: MCP.operate(mcp, "message", %{"to" => to, "text" => text})

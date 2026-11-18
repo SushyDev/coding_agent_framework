@@ -98,6 +98,17 @@ defmodule CodingAgentFramework.Sessions.Agents do
   def free?(nil), do: true
   def free?(%{status: status}), do: status in Table.free()
 
+  @doc """
+  Whether the row is a main session declared and not started since (F-141): `Mains` may start
+  a main session under its name.
+
+      iex> CodingAgentFramework.Sessions.Agents.declared?(%{kind: "main", status: "declared"})
+      true
+  """
+  @spec declared?(row | nil) :: boolean
+  def declared?(%{kind: "main", status: "declared"}), do: true
+  def declared?(_), do: false
+
   @doc "Whether the row's process runs, as its start or a settle confirmed it."
   @spec running?(row | nil) :: boolean
   def running?(%{status: "running"}), do: true

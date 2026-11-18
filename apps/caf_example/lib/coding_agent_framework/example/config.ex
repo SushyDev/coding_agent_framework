@@ -7,7 +7,7 @@ defmodule CodingAgentFramework.Example.Config do
     `caf.db` (the readers' and writers' tables, `Acts`' among them), `claims.db` (the claims
     an older build kept, which `Acts` takes once and empties), `accounts/`, `d/` (the dtach
     directory, kept short for macOS's 104-byte socket paths), `tmux.sock` (its own tmux
-    server), `streams/`, `worktrees/`, `parts/` (the tables of `Copies`, `Jobs`, `Services` and
+    server), `streams/`, `checkouts/` (each project's checkout), `worktrees/`, `parts/` (the tables of `Copies`, `Jobs`, `Services` and
     `MCP`) and `ws/` (the workstation's copies and service logs);
   - `instance`: this framework instance's name, in each job id `MCP` makes;
   - `workstation`: the workstation's host name, and `programs`, the absolute path of each
@@ -15,10 +15,16 @@ defmodule CodingAgentFramework.Example.Config do
   - `hosts`: the other hosts, name to `%{programs: programs, dir: dir}` as `Jobs` and `Services`
     read them; none by default;
   - `accounts`: the Claude accounts' names;
-  - `projects`: name to the project as `Sessions` and `Delegates` read it: `repo`, `trunk`,
-    `setup`, `setup_timeout`, `env`, `branches` and `cap` (the name is filled in);
-  - `mains`: each project's main session, project to its name; the tree holds each as a root
-    (no parent), so it can start its first delegate. None by default;
+  - `projects`: name to the project, as `CodingAgentFramework.Mains` takes it: its `origin`
+    (the repository its stacks land on, which its checkout is cloned from), `trunk`, `setup`,
+    `setup_timeout`, `env`, `branches` and `cap`. Its `name` and its `repo`, the checkout
+    `<home>/checkouts/<project>`, are filled in, so `Sessions` and `Delegates` read it as
+    `Mains.project/3` answers it;
+  - `mains`: the main sessions the app declares, name to project, through `Mains`: the tree
+    holds each as a root (no parent), so it can start its first delegate. A project may have
+    several. None by default;
+  - `main_model`: the model a main session `Mains` starts runs (`--model`); `"opus"` by
+    default. A move's resume takes the agent row's;
   - `operator`: the name the operator acts under (`CodingAgentFramework.Operator`), a person or
     this app acting from outside the tree; `"operator"` by default. It is no agent's name, nor
     `framework`;
@@ -51,6 +57,8 @@ defmodule CodingAgentFramework.Example.Config do
       {:refused, {:bad, :home}}
   """
 
+  alias CodingAgentFramework.Mains
+
   @enforce_keys [:home, :instance, :programs, :accounts, :ports, :claude, :env]
   defstruct [
     :home,
@@ -64,6 +72,7 @@ defmodule CodingAgentFramework.Example.Config do
     hosts: %{},
     projects: %{},
     mains: %{},
+    main_model: "opus",
     operator: "operator",
     tool_timeout: 3_600_000,
     margin: 60_000,
@@ -98,13 +107,14 @@ defmodule CodingAgentFramework.Example.Config do
 
       true ->
         c = struct!(__MODULE__, fields)
-        {:ok, %{c | projects: Map.new(c.projects, fn {n, p} -> {n, Map.put(p, :name, n)} end)}}
+        projects = Map.new(c.projects, fn {n, p} -> {n, Mains.project(c.home, n, p)} end)
+        {:ok, %{c | projects: projects}}
     end
   end
 
   defp operator?(fields) do
     op = Map.get(fields, :operator, "operator")
-    is_binary(op) and op not in ["", "framework" | Map.values(Map.get(fields, :mains, %{}))]
+    is_binary(op) and op not in ["", "framework" | Map.keys(Map.get(fields, :mains, %{}))]
   end
 
   @doc "A path under the home."

@@ -172,7 +172,7 @@ defmodule CodingAgentFramework.MCPTest do
              rpc.("initialize")
 
     assert rpc.("tools/list")["tools"] |> Enum.map(& &1["name"]) ==
-             ~w(message run start_delegate run_delegate) ++
+             ~w(message run start_delegate run_delegate start_main) ++
                ~w(service_start services service_logs service_send service_wait) ++
                ~w(service_restart service_stop service_hand agents look transcript) ++
                ~w(interrupt answer resume stop move answer_startup ask reload)
@@ -222,8 +222,14 @@ defmodule CodingAgentFramework.MCPTest do
 
     assert tool(mcp, t["app-fix"], "message", %{"to" => 1}) == %{"refused" => ["bad", "args"]}
 
-    assert tool(mcp, t["app-fix"], "start_main", %{}) == %{
-             "refused" => ["unknown_tool", "start_main"]
+    assert tool(mcp, t["app-fix"], "start_main", %{}) == %{"refused" => ["bad", "args"]}
+
+    # A delegate starts no main session (`Grants.may_start_main?/2`).
+    start = %{"project" => "app", "name" => "app-b", "brief" => "Go."}
+    assert tool(mcp, t["app-fix"], "start_main", start) == %{"refused" => "main_session_only"}
+
+    assert tool(mcp, t["app-fix"], "end_main", %{}) == %{
+             "refused" => ["unknown_tool", "end_main"]
            }
   end
 
@@ -484,7 +490,7 @@ defmodule CodingAgentFramework.MCPTest do
     assert JSON.decode!(text) == %{
              "ok" => %{
                "tools" =>
-                 ~w(message run start_delegate run_delegate) ++
+                 ~w(message run start_delegate run_delegate start_main) ++
                    ~w(service_start services service_logs service_send service_wait) ++
                    ~w(service_restart service_stop service_hand agents look transcript) ++
                    ~w(interrupt answer resume stop move answer_startup ask reload)

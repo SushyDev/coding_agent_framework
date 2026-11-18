@@ -32,7 +32,9 @@ defmodule CodingAgentFramework.Example do
 
   **The tree.** It opens no part's table: the tree `Grants` reads, an agent's worktree, the
   agent a hook names and whether an agent has ended are `Sessions.Agents`' functions over the
-  agent rows. Until `Mains`, it hands `Sessions` the main sessions the config declares.
+  agent rows. `Mains` declares the main sessions the config names, holds each project's
+  checkout and its pull, and starts a main session (`start_main`): the app calls
+  `Mains.landed/2` when something landed in a project's trunk.
 
   **Once per start.** `start_link/1` makes `Acts`' `start_id` and the hooks' secret, and
   writes each account's files with that secret, before any part starts.
@@ -50,6 +52,7 @@ defmodule CodingAgentFramework.Example do
     Intake,
     Jobs,
     Mailbox,
+    Mains,
     MCP,
     Mover,
     Programs,
@@ -82,11 +85,14 @@ defmodule CodingAgentFramework.Example do
            Delegates.Work.open(Config.path(c, "caf.db"), Config.path(c, "caf.db"), c.workstation),
          {:ok, allowance} <- Usage.Allowance.open(Config.path(c, "caf.db")),
          {:ok, jobs_work} <- Jobs.Work.open(Config.path(c, "parts/jobs")),
+         {:ok, mains_work} <-
+           Mains.Work.open(Config.path(c, "caf.db"), Config.path(c, "caf.db"), c.workstation),
          secret = token(),
          :ok <- prepare(c, accounts, programs, secret) do
       w = %{c: c, programs: programs, tmux: tmux, accounts: accounts, holder: holder}
       w = Map.merge(w, %{agents: agents, secret: secret, start_id: token()})
       w = Map.merge(w, %{work: work, allowance: allowance, jobs_work: jobs_work})
+      w = Map.put(w, :mains_work, mains_work)
       Supervisor.start_link(__MODULE__, Map.put(w, :db, Config.path(c, "caf.db")))
     end
   end
@@ -116,6 +122,7 @@ defmodule CodingAgentFramework.Example do
       delegates: Delegates.reads(),
       mover: Mover.reads(),
       scheduler: Scheduler.reads(),
+      mains: Mains.reads(),
       ends: Ends.reads()
     ]
   end
@@ -245,7 +252,7 @@ defmodule CodingAgentFramework.Example do
            {
              Sessions,
              # Mailbox starts after Sessions: it is looked up at each read.
-             # Until `Mains`: each main session the config declares, as an agent row.
+             # `Mains` declares the main sessions the config names, as agent rows.
              # A startup dialog waits on a person (F-140): the app answers none on its own,
              # and the operator answers through `Operator.answer_startup/4`.
              reaper: pid.(:reaper),
@@ -261,8 +268,7 @@ defmodule CodingAgentFramework.Example do
              dialog: &Sessions.Dialog.ask/2,
              open_to: &Mailbox.open_to(pid.(:mailbox), &1, status: &2),
              waiter: %{port: c.ports.intake, secret: w.secret},
-             acts: pid.(:acts),
-             mains: Map.new(c.mains, fn {project, name} -> {name, project} end)
+             acts: pid.(:acts)
            }
          end},
         {:recoveries,
@@ -286,7 +292,8 @@ defmodule CodingAgentFramework.Example do
             resources: resources(c),
             holders: %{
               "delegate" => &Delegates.Work.state(w.work, &1),
-              "job" => &Jobs.Work.state(w.jobs_work, &1)
+              "job" => &Jobs.Work.state(w.jobs_work, &1),
+              "main" => &Mains.Work.state(w.mains_work, &1)
             },
             allowance: &Usage.Allowance.check(w.allowance, &1),
             pressure: pressure(c),
@@ -343,6 +350,36 @@ defmodule CodingAgentFramework.Example do
             acts: pid.(:acts),
             launch: &launch(c, pid, &1)}
          end},
+        # After `Sessions`, `Mailbox` and the `Scheduler`, and before `MCP`, whose `start_main`
+        # it serves: it declares the config's main sessions before it answers its start.
+        {:mains,
+         fn pid ->
+           {Mains,
+            host: host,
+            home: c.home,
+            db: db,
+            sessions_db: db,
+            programs: p,
+            reaper: pid.(:reaper),
+            sessions: pid.(:sessions),
+            mailbox: pid.(:mailbox),
+            usage: pid.(:usage),
+            accounts: w.accounts,
+            projects: c.projects,
+            mains: c.mains,
+            launch: [
+              claude: c.claude,
+              env: c.env,
+              tool_timeout: c.tool_timeout,
+              model: c.main_model
+            ],
+            mcp: &issue(pid.(:mcp), &1),
+            scheduler: pid.(:scheduler),
+            lease: c.lease,
+            operator: c.operator,
+            interval: every,
+            notify: notify}
+         end},
         {:copies, fn _ -> {Copies, dir: Config.path(c, "parts/copies"), programs: p} end},
         {:jobs,
          fn pid ->
@@ -389,6 +426,7 @@ defmodule CodingAgentFramework.Example do
             acts: pid.(:acts),
             mover: {Mover, pid.(:mover)},
             sessions: {Sessions, pid.(:sessions)},
+            mains: {Mains, pid.(:mains)},
             lease: &job_units(c, &1, &2)}
          end},
         {:mcp_http,
@@ -421,6 +459,7 @@ defmodule CodingAgentFramework.Example do
         {Tracker.TableSource, [table: Sessions.Table] ++ on},
         {Tracker.TableSource, [table: Delegates.Table] ++ on},
         {Tracker.TableSource, [table: Scheduler.Table] ++ on},
+        {Tracker.TableSource, [table: Mains.Table] ++ on},
         {Tracker.TableSource, [table: TmuxSampler.Table] ++ on ++ [server: server]},
         {Tracker.TableSource, [table: Acts.Table] ++ on ++ [instance: c.instance]}
       ]

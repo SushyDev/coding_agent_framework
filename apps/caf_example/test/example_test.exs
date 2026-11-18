@@ -10,7 +10,7 @@ defmodule CodingAgentFramework.ExampleTest do
   import CodingAgentFramework.TestHost
 
   alias CodingAgentFramework.{Accounts, Cues, Example, HeadlessStandIn, Jobs, Mailbox, MCP}
-  alias CodingAgentFramework.Services
+  alias CodingAgentFramework.{Mains, Services}
   alias CodingAgentFramework.{Delegates, Operator, Scheduler, Tmux, Tracker}
   alias CodingAgentFramework.Acts
   alias CodingAgentFramework.Example.Config
@@ -24,7 +24,8 @@ defmodule CodingAgentFramework.ExampleTest do
     commit = ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "i"]
     {_, 0} = System.cmd(program!(:git), commit ++ ["--allow-empty"], env: git)
 
-    project = %{repo: repo, trunk: "main", setup: [], setup_timeout: 10_000}
+    # The project's repository: Mains clones its checkout from it, under the home.
+    project = %{origin: repo, trunk: "main", setup: [], setup_timeout: 10_000}
     project = Map.merge(project, %{env: %{"HOME" => dir}, branches: ~r/\Aunit\//, cap: 2})
     home = Path.join(dir, "home")
 
@@ -35,7 +36,7 @@ defmodule CodingAgentFramework.ExampleTest do
         programs: programs().paths,
         accounts: ["work"],
         projects: %{"app" => project},
-        mains: %{"app" => "app-main"},
+        mains: %{"app-main" => "app"},
         ports: %{intake: free_port(), mcp: free_port()},
         claude: HeadlessStandIn.write!(dir, :at_start),
         env: %{home: dir, path: "/nonexistent", term: "xterm-256color", lang: "C.UTF-8"},
@@ -67,12 +68,20 @@ defmodule CodingAgentFramework.ExampleTest do
     parts = Example.parts(start_supervised!({Example, config}))
     keys = ~w(reaper cues inlet usage stream intake intake_http sampler sessions acts)a
     keys = keys ++ ~w(recoveries tracker scheduler delegates mover mailbox copies jobs services)a
-    keys = keys ++ ~w(mcp mcp_http ends)a
+    keys = keys ++ ~w(mains mcp mcp_http ends)a
 
     assert Enum.sort(Map.keys(parts)) ==
              Enum.sort(keys ++ [:registry, :transcripts])
 
     assert Enum.all?(Map.values(parts), &(is_pid(&1) and Process.alive?(&1)))
+
+    # The project's checkout, cloned at the start, before a delegate's worktree is made from it.
+    ready = fn ->
+      with {:ok, %{state: state}} = r when state != "ready" <- Mains.checkout(parts.mains, "app"),
+           do: {:not_ready, r}
+    end
+
+    assert {:ok, _} = await(ready, 20_000)
     parts
   end
 
@@ -502,10 +511,31 @@ defmodule CodingAgentFramework.ExampleTest do
     assert_receive {:after, %{tool_name: "Read", agent: nil}}, 5_000
   end
 
+  # The checkout is the framework's own clone, and `start_main` goes through `MCP` to `Mains`:
+  # a reserved name is refused for a main session and for the operator alike.
+  test "Mains holds the project's checkout and serves start_main", ctx do
+    parts = start(ctx.config)
+    checkout = Path.join([ctx.home, "checkouts", "app"])
+
+    assert {:ok, %{path: ^checkout, branch: "main", clean: "true"}} =
+             Mains.checkout(parts.mains, "app")
+
+    args = %{"project" => "app", "name" => "framework", "brief" => "Go."}
+
+    assert {:refused, {:running, "framework"}} =
+             MCP.call(parts.mcp, "app-main", "start_main", args)
+
+    assert {:refused, {:running, "operator"}} =
+             Operator.start_main(parts.mcp, "app", "operator", "Go.")
+
+    assert {:refused, {:unknown_project, "web"}} =
+             Operator.start_main(parts.mcp, "web", "web-main", "Go.")
+  end
+
   # The parts the app wires and the topics each one cues on, as the parts write them.
   @topics ~w(registry:ws:work stream:ws tmux:ws:caf sessions:ws transcripts:ws:work
              delegates:ws mailbox intake:ws:work intake:ws:work:waiters acts:ws:t usage:ws:work
-             jobs services scheduler:ws)
+             jobs services scheduler:ws mains:ws)
 
   # What each part must be handed to settle (`docs/design.md`, "The parts"): beside the
   # `Tracker`, which reads every topic.
@@ -513,7 +543,8 @@ defmodule CodingAgentFramework.ExampleTest do
     "registry" => [:sessions, :mover],
     "stream" => [:sessions, :delegates, :mailbox, :mover],
     "tmux" => [:sessions, :recoveries],
-    "sessions" => [:delegates, :mailbox, :ends, :mover, :scheduler],
+    "sessions" => [:delegates, :mailbox, :ends, :mover, :scheduler, :mains],
+    "mains" => [:scheduler],
     "transcripts" => [:delegates, :mailbox],
     "delegates" => [:mailbox, :scheduler],
     "usage" => [:scheduler],

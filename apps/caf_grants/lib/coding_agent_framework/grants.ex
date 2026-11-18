@@ -29,6 +29,7 @@ defmodule CodingAgentFramework.Grants do
   | `may_read?/3` (`look`, `transcript`) | the target itself, its parent, its children, for a main session the other main sessions, and the operator | `:close_read_along_edges` |
   | `may_fix?/3` | a parent on its own child; the operator on any agent | `:no_self_fix`, `:main_fixed_by_operator_only`, `:only_parent_fixes` |
   | `may_start_delegate?/3` | a main session, for itself; the operator, for any main session | `:main_session_only`, `:parent_or_operator` |
+  | `may_start_main?/2` | a main session, or the operator | `:main_session_only` |
   | `may_use?/2` | any agent the tree holds, and the operator | `{:unknown_agent, name}` |
   | `may_start_service?/2` | any agent the tree holds | `{:unknown_agent, name}`, `:operator_owns_nothing` |
   | `may_fix_service?/3` | the service's owner, the owner's parent, or the operator | `:service_fixed_by_owner_or_parent` |
@@ -136,6 +137,26 @@ defmodule CodingAgentFramework.Grants do
         caller == parent or operator?(tree, caller) -> :ok
         true -> {:refused, :parent_or_operator}
       end
+    end)
+  end
+
+  @doc """
+  May `caller` start a main session (`start_main`)? A main session or the operator; never a
+  delegate, which works on its parent's work only.
+
+      iex> grants = CodingAgentFramework.Grants.new(fn -> [%{name: "app-main", project: "app", parent: nil},
+      ...>   %{name: "app-fix", project: "app", parent: "app-main"}] end, operator: "op")
+      iex> CodingAgentFramework.Grants.may_start_main?(grants, "op")
+      :ok
+      iex> CodingAgentFramework.Grants.may_start_main?(grants, "app-fix")
+      {:refused, :main_session_only}
+  """
+  @spec may_start_main?(t, String.t()) :: answer
+  def may_start_main?(grants, caller) do
+    check(grants, [caller], fn tree ->
+      if main?(tree, caller) or operator?(tree, caller),
+        do: :ok,
+        else: {:refused, :main_session_only}
     end)
   end
 

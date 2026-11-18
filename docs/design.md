@@ -191,7 +191,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Intake` | hook events in; one hold, of four kinds: `permission` (a person's or an agent's `answer`), `tool` (`PreToolUse`, the app's callback), `stop` (`Stop` held for the app's callback) and `waiter` (a main session's waiting Stop hook, answered with `Mailbox`'s due text) | `intake_events` |
 | `Sessions` | the agent row: one row per agent, main session or delegate, with its kind, parent, project, account, launch options and model, held process and status; start, resume, and stop by SIGTERM once idle; the tree as one function of its rows; each session's turn state as one function per kind of session, from its evidence. Other parts read its rows only through `Sessions.Agents`, a pure module over a reader's own connection, which answers what each status means | `agents` |
 | `Mover` | drains a session, a main session or a delegate, and moves it between accounts; its phase is a field of the agent row (`move`, with the accounts, its act and its deadline), which `Sessions` writes for it | — |
-| `Mains` | each project's main sessions, as agent rows of kind `main`; the pull after a landing, and the start of one for a project that has none | — |
+| `Mains` | each project's main sessions, as agent rows of kind `main` it declares in `Sessions`; the project's checkout, made once, and the pull after a landing; the start of one (`start_main`), through the `Scheduler` and the startup dialogs (F-141, `Checkout.tla`) | `checkouts`: each checkout's reading, for a view; `main_starts`: each start, the holder of its lease |
 | `Delegates` | the delegate protocol only: its checks, the cap, the account pick, resume once, report a second kill; it hands the report to `Mailbox` as the reply to the brief | `delegates`: branch, brief uuid, resumes, whether the report was taken |
 | `Mailbox` | every delivery: messages, replies, notices, reports, briefs, the words to go on and the app's word, stored, delivered once, in order per sender and addressee; one mark and settle, with the transport the target's kind chooses | `messages` |
 | `Acts` | one ledger of acts: an actor's act on a target's state, written before it acts, once per state, settled after, closed as interrupted when a restart cut it, with a cue. Fixes, the operator's acts, recoveries, kills, resumes, starts and raised errors are its rows, and the fault ledger is a query of it | `acts` |
@@ -217,7 +217,8 @@ declarations to `Cues`, and names each part's process to it as it starts; no par
 | `registry:<host>:<account>` | `Registry` | `Sessions`, `Mover` (a move's stop is asked again only on this cue and the stream's) |
 | `stream:<host>` | `Stream` | `Sessions`, `Delegates`, `Mailbox`, `Mover` |
 | `tmux:<host>:<server>` | `TmuxSampler` | `Sessions`, `Recoveries` |
-| `sessions:<host>` | `Sessions` | `Delegates`, `Mailbox`, `Mover`, `Scheduler`, the app's end of an owner's services |
+| `sessions:<host>` | `Sessions` | `Delegates`, `Mailbox`, `Mover`, `Scheduler`, `Mains` (a start that runs or is refused), the app's end of an owner's services |
+| `mains:<host>` | `Mains` | `Scheduler` (a main session's start ended) |
 | `transcripts:<host>:<account>` | `Transcripts` | `Delegates`, `Mailbox` (a waiter row's lines are read only on this cue, the waiters' and the take bound) |
 | `delegates:<host>` | `Delegates` | `Mailbox`, `Scheduler` (a delegate's work ended) |
 | `mailbox` | `Mailbox` | `Delegates`, `Mover` |
@@ -239,9 +240,10 @@ it makes the hook secret and the `start_id` of `Acts` once per start. It routes 
 each part declares the topics it reads, `Cues` routes them, and `Jobs` and `Services` cue like
 every other part, so no ticker sends a made-up topic (R11). It opens no part's table: the tree,
 an agent's worktree and the agent a hook names are `Sessions`' functions (R9). What it still
-wires that the parts do not offer (F-102's findings): until `Mains`, it declares each project's
-main session, written as an agent row of kind `main` with no parent, so a main session can
-start its first delegate; `Delegates` launches each delegate with its own MCP config, from a
+wires that the parts do not offer (F-102's findings): it hands `Mains` its projects, each
+naming its repository (`origin`), and the main sessions it declares, which `Mains` writes as
+agent rows of kind `main` with no parent, so a main session can start its first delegate, and
+the projects' `repo` is their checkout (F-141); `Delegates` launches each delegate with its own MCP config, from a
 function of the agent's name the app gives it (`MCP.issue/2`); a job's late end goes to its
 caller through `Mailbox` as a message from `framework`, once per job, the caller read from
 `MCP`'s call log by the job's id (from the file: `Jobs` hands the ends it owes as it starts,
@@ -527,6 +529,34 @@ A person or the app starts a main session, and a main session can start one with
 `{:refused, {:running, name}}`, as is the reserved name `framework`. The new main session's
 brief is its first message.
 
+**How `Mains` does it** (F-141, `Checkout.tla`). The app hands `Mains` its projects, each
+naming its repository (`origin`), and the main sessions it declares (name to project), which
+`Mains` declares in `Sessions` before it answers its start. A project's checkout is cloned on
+trunk under `<home>/checkouts/.<project>.clone` and renamed into place once whole, so a
+checkout at its path is always whole, and a start of `Mains` removes a clone a restart cut. A
+pull is owed after a landing (`Mains.landed/2`, which the app calls; `Stacks` will) and at each
+start of `Mains`, since a landing while it was down told nobody. It is cleared before its
+fetch, so a landing during the pull owes the next; it goes only from a reading on trunk, clean
+and not ahead, and is `git merge --ff-only`, which refuses a local commit and an edit it would
+overwrite and carries any other, so an edit made between the check and the merge is never lost.
+Any other reading holds the pull back, still owed, and the read after a person cleans the
+checkout pulls; a clone or a fetch that failed waits for the next landing or start. The reading
+(trunk, branch, clean, ahead and behind `origin/<trunk>` as the last fetch left it, and a state
+word) is a row of `checkouts`, read on an interval and at each pull, which the `Tracker` shows.
+`start_main` refuses a name any agent row holds but a declared main session of that project, a
+start of that name under way, and the reserved names (`framework`, the operator's), all as
+`{:running, name}`, and a project whose checkout is not made yet (`{:checkout, state}`). It
+picks the account with the most allowance left, declares the agent row, writes its own row
+(`main_starts`) `starting`, asks the `Scheduler` for a lease of class main session with that
+row as its holder (`Mains.Work`: live while the start is under way and while its agent row may
+hold a process or a move of it is under way), stores the brief from the caller, marks it by
+`launch` and starts the session interactively in the checkout with the app's MCP config. A new
+checkout is a folder Claude Code has not seen, so the trust dialog waits on a person ("Startup
+dialogs"): the start answers `{:unknown, {:dialog, kind}}`, and its row runs once the agent row
+does. A row a restart left `starting` is settled by the agent row of its call, or refused
+`interrupted` at its deadline. A main session still never ends (`Team.tla`): what ends one, and
+what its kept services and its delegates are told then, is F-141's new-1.
+
 A main session holds, and a view shows:
 
 - its account, tmux session and pane, and whether its MCP tools are connected;
@@ -670,8 +700,8 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
   reply, failed with a notice, refused) and its own facts: branch, model, brief uuid, resume
   uuid, resumes, and whether the report was taken. It reads `Sessions`' state only through
   `Sessions.Agents`.
-- A main session is an agent row of kind `main` with no parent, written by the app until
-  `Mains`, and the delegate's agent row names its parent. `Grants` reads the tree from those
+- A main session is an agent row of kind `main` with no parent, declared by `Mains`, and the
+  delegate's agent row names its parent. `Grants` reads the tree from those
   rows, so a delegate can name only one parent (F-73's new-3 and new-4 end with R9).
 - A delegate's session is named `<project>-<branch>`, each character of the branch other than
   a letter, a digit, `_` or `-` written as `-`, so a later start of the branch finds its
@@ -1436,6 +1466,16 @@ press is unknown, or cut by a restart, is never pressed again), `NotEndedOnDialo
 dialog is never an orphan), `LeaseWhileLive`; liveness `DialogShown` (the next dialog becomes
 the row's after an answer) and `GoesOn`. Each has a `Break_Dialog_*` configuration.
 
+`Checkout.tla` (F-141) models a project's checkout ("Main sessions"): the clone made once under
+a temporary name and renamed whole, the pull owed after a landing and at each start of `Mains`,
+cleared before its fetch, held back while the checkout is not clean and owed still, and git's
+`merge --ff-only` against an edit or a commit a person makes at any step, with restarts in the
+middle of a clone or a pull. Invariants: `NoLostEdit` (a pull discards nothing a person left),
+`WholeCheckout` (nothing uses a cut clone), `Forward` (trunk only fast-forwards); liveness
+`Made` and `CaughtUp` (once landings stop and the checkout stays clean, it holds the remote's
+trunk). Each has a `Break_Checkout_*` configuration: `CloneInPlace`, `ResetHard`, `ClearAfter`
+(a landing during a pull lost), `NoPullAtStart`, `ClearOnDirty`.
+
 `Schedule.tla` (F-134, F-135) models the `Scheduler` ("A lease"): durable lease rows, an
 in-memory queue, rotation, deadlines (tick-down timers) and owed answers, monitors lost at a
 restart, the owner's row of each lease's work (`starting`, `live`, `ended`, outliving a
@@ -1891,8 +1931,8 @@ new-2, F-113's new-2).
   workstation's own readings. `Usage` reads the five-hour window beside the weekly one. Every
   start, heavy run and landing asks it first; item 14's admission is this unit. Built in
   F-135 with `Delegates`' start; `Jobs`' start (its job row the holder), the heavy slot's
-  fence and a landing's gang lease in F-139; then `Sessions`' start of a main session once
-  `Mains` starts one.
+  fence and a landing's gang lease in F-139; a main session's start by `Mains`, class main
+  session, in F-141.
 
 About 3,100 lines change in all; the library ends about 1,300 lines smaller, and the model about
 the same size with each mechanism once. R6 and R7 are the riskiest: `Mailbox`'s `sending` as the
@@ -1905,8 +1945,9 @@ uuid, and each spec that instances a module compares its state counts before and
     agent row of kind `delegate` whose turn state and transports are an interactive session's;
     built in F-137, with the `launch` transport, "Interactive delegates"),
     then **`Mains`** (item 6: what R9 leaves, the checkout, the pull after a landing and
-    `start_main`; a main session's kept services end with it or go to a person, once one can
-    end: F-109's new-4).
+    `start_main`; built in F-141, against `Checkout.tla`). A main session's end is not built:
+    nothing in the design ends one, so its kept services (F-109's new-4) and its delegates have
+    nothing to be told yet (F-141's new-1).
 14. **Mechanisms an app's policies stand on**, on the remodel's shape, in this order:
     - a delegate idle with no report, a value of `Sessions`' turn function that `Delegates`
       tells its parent, in `Delegate.tla`;

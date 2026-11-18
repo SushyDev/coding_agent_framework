@@ -37,6 +37,11 @@ defmodule CodingAgentFramework.MCP do
     `sending` by the call in `Mailbox` until the answer is written, then `told/3` `:written`
     when the write succeeded, or anything else (due again) when it failed (`answer/5`). A call
     through `call/4` has its answer in hand, so it is told `:written` at once;
+  - `start_main(project, name, brief)` (F-141): `Grants.may_start_main?/2` (a main session, or
+    the operator), then the mains' `start_main/5`, the brief from the caller; answers `%{main:
+    name}` once the session runs, `{:unknown, {:dialog, kind}}` while its start waits on a
+    person's answer to a startup dialog, or the start's refusal (`{:running, name}` for a name
+    in use or reserved);
   - `ask(questions)`: the mailbox's `ask/4`, which checks the questions and the caller and
     stores the ask for the app; answers `%{ask: id}` at once. The person's answer comes later
     as a message (`Mailbox.answer/4`);
@@ -179,6 +184,17 @@ defmodule CodingAgentFramework.MCP do
             description: "ms, under the framework's tool timeout less its margin"
           }),
         required: ["project", "branch", "model", "brief", "timeout"]
+      }
+    },
+    %{
+      name: "start_main",
+      description:
+        "Starts a main session of a project under a name not in use, in its checkout; " <>
+          "the brief is its first message. Answers its name.",
+      inputSchema: %{
+        type: "object",
+        properties: %{project: @str, name: @name, brief: @str},
+        required: ["project", "name", "brief"]
       }
     },
     %{
@@ -414,7 +430,9 @@ defmodule CodingAgentFramework.MCP do
   instance's `CodingAgentFramework.Acts`, where each fix takes its claim. `:mover` (optional)
   is `{CodingAgentFramework.Mover, pid}`, which the `move` tool calls; without it `move` is
   refused `:no_mover`. `:sessions` (optional) is `{CodingAgentFramework.Sessions, pid}`, which
-  `answer_startup` calls; without it that tool is refused `:no_sessions`. `:lease` (optional) is
+  `answer_startup` calls; without it that tool is refused `:no_sessions`. `:mains` (optional) is
+  `{CodingAgentFramework.Mains, pid}`, which `start_main` calls; without it that tool is refused
+  `:no_mains`. `:lease` (optional) is
   a function of a job's class (`:heavy`, `:builder`, `:landing`) and the caller's project that
   answers `{:ok, units}`, the units of each resource the `Scheduler` leases that the job needs,
   or `{:refused, reason}`; without it `run` names no lease. `:instance` (a string, required)
@@ -611,6 +629,17 @@ defmodule CodingAgentFramework.MCP do
         refused -> refused
       end
     end
+  end
+
+  # A main session's start answers once its session runs, or once it waits on a person.
+  defp act(ctx, caller, _id, "start_main", %{"project" => p, "name" => n, "brief" => b})
+       when is_binary(p) and is_binary(n) and is_binary(b) do
+    with :ok <- Grants.may_start_main?(ctx.grants, caller),
+         true <- ctx.mains != nil or {:refused, :no_mains},
+         {mod, server} = ctx.mains,
+         {:ok, %{name: name}} <-
+           mod.start_main(server, p, n, b, from: caller, timeout: @start_wait),
+         do: {:ok, %{main: name}}
   end
 
   # A move is a fix's act (`Grants.may_fix?/3`: a parent's of its delegate, the operator's of
@@ -946,6 +975,7 @@ defmodule CodingAgentFramework.MCP do
       ctx = Map.merge(ctx, %{cap: cap, tool_timeout: tool_timeout, margin: margin})
       ctx = Map.put(ctx, :mover, Keyword.get(opts, :mover))
       ctx = Map.put(ctx, :sessions, Keyword.get(opts, :sessions))
+      ctx = Map.put(ctx, :mains, Keyword.get(opts, :mains))
       ctx = Map.put(ctx, :lease, Keyword.get(opts, :lease))
       {:ok, %{db: db, dir: dir, port: Keyword.fetch!(opts, :port), ctx: ctx}}
     else
