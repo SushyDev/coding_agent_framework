@@ -5,10 +5,14 @@ defmodule CodingAgentFramework.Mailbox.Table do
 
   `kind` is `msg` (a message, or the app's word), `brief`, `resume` (a resumed delegate's word to
   go on with its brief), `reply`, `notice`, `ask` (an agent's questions to the operator, as
-  JSON, kept for the app) or `answer` (the operator's answer to an ask, `reply_to` its uuid). `status` is `queued` (due), `sending` (marked
+  JSON, kept for the app) or `answer` (the operator's answer to an ask, `reply_to` its uuid, and
+  the answers themselves, labels and text, as JSON in `answer`, F-138's new-3). `status` is
+  `queued` (due), `sending` (marked
   before it goes, with its transport `via`, `stream`, `waiter` or `call`, the `session_id` and
   the process `at` it is for), then `delivered` or `ended`, or `queued` again if it did not go
   in, under the `uuid` it was stored with; `again` says it was made due again, so it goes first.
+  A row to the operator (a reply, a notice or an ask) is `kept` from its store: it is no
+  session's, and no settle reads it (F-138's new-1, `Delivery.tla`'s `StoreRow`).
   A `waiter` row keeps `sent_at`, the wall-clock ms its text was handed on (the take bound runs
   from it), and `from_byte`, how much of the session's transcript was read before its mark.
   `attempt` is why the last delivery did not go in. A reply or a notice names the uuid of the
@@ -25,7 +29,7 @@ defmodule CodingAgentFramework.Mailbox.Table do
   alias CodingAgentFramework.Store
 
   @columns ~w(id from_agent to_agent text uuid status session_id attempt reply_to subtype
-              is_error kind via at again sent_at from_byte created_at updated_at)a
+              is_error kind via at again sent_at from_byte answer created_at updated_at)a
 
   @schema """
   CREATE TABLE IF NOT EXISTS messages (
@@ -34,7 +38,8 @@ defmodule CodingAgentFramework.Mailbox.Table do
     attempt TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
   """
 
-  # Added after a file's table may have been made (F-79, F-81, R7), so each is added if missing.
+  # Added after a file's table may have been made (F-79, F-81, R7, F-142), so each is added
+  # if missing.
   @added [
     "reply_to TEXT",
     "subtype TEXT",
@@ -44,7 +49,8 @@ defmodule CodingAgentFramework.Mailbox.Table do
     "at INTEGER",
     "again INTEGER NOT NULL DEFAULT 0",
     "sent_at INTEGER",
-    "from_byte INTEGER"
+    "from_byte INTEGER",
+    "answer TEXT"
   ]
   @indexes """
   CREATE UNIQUE INDEX IF NOT EXISTS messages_reply_to ON messages (reply_to);
@@ -66,9 +72,10 @@ defmodule CodingAgentFramework.Mailbox.Table do
   end
 
   @doc """
-  Stores a row as `queued` and returns its id; or nil, storing nothing, when a row with its
-  `uuid`, or an answer with its `reply_to`, is stored already. `row` holds `from`, `to`, `text`,
-  `uuid` and `kind`, and may hold `reply_to`, `again` and a result's `subtype` and `is_error`.
+  Stores a row as `queued` (or as its `status`, `kept` for one to the operator) and returns its
+  id; or nil, storing nothing, when a row with its `uuid`, or an answer with its `reply_to`, is
+  stored already. `row` holds `from`, `to`, `text`, `uuid` and `kind`, and may hold `status`,
+  `reply_to`, `again`, `answer` and a result's `subtype` and `is_error`.
   """
   @spec store(db, map) :: integer | nil
   def store(db, row) do
@@ -81,8 +88,9 @@ defmodule CodingAgentFramework.Mailbox.Table do
       text: row.text,
       uuid: row.uuid,
       kind: row.kind,
-      status: "queued",
+      status: row[:status] || "queued",
       reply_to: row[:reply_to],
+      answer: row[:answer],
       subtype: row[:subtype],
       is_error: error,
       again: if(row[:again], do: 1, else: 0),

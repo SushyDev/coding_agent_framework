@@ -123,7 +123,10 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     {:ok, dir} = Accounts.config_dir(ctx.accounts, "work")
     {:ok, path} = Transcripts.path(dir, cwd, sid)
 
+    before = %{"type" => "summary", "summary" => "A line before the brief."}
+
     lines(path, [
+      before,
       user(text),
       reply("m1", "Done."),
       user("And something else?"),
@@ -132,6 +135,10 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
 
     assert {:ok, %{status: "finished", text: "Done.", report: "taken"}} =
              cue_until(ctx, id, &(&1.status == "finished" and &1.report == "taken"))
+
+    # F-137's new-4: the brief's marked line, once found, is read from its offset.
+    at = byte_size(JSON.encode!(before)) + 1
+    assert %{{^sid, ^u} => ^at} = :sys.get_state(ctx.delegates).marks
 
     assert {:ok, %{status: "delivered"}} = brief(ctx, u)
     assert {:ok, %{kind: "reply", from: ^name, to: "main"}} = Mailbox.answer_to(ctx.mailbox, u)

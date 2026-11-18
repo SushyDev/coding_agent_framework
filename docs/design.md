@@ -1217,8 +1217,9 @@ starts by itself never replaces a reply or a report.
 **The operator** acts through these same tools and checks, as the parent of every main session
 (F-109). No agent messages the operator: it is no agent's addressee, and an agent reaches a
 person through `ask`. A reply to the operator's message, or the notice in its place, is stored
-addressed to the operator and never delivered: the app reads it by the message's id
-(`Mailbox.reply/2`). The operator's `run_delegate` hands the report to the operator, who
+addressed to the operator, `kept` from its store (F-138's new-1, as `Delivery.tla`'s `StoreRow`
+keeps a row to no session), so no settle reads it again, and never delivered: the app reads it
+by the message's id (`Mailbox.reply/2`, built in F-142). The operator's `run_delegate` hands the report to the operator, who
 waited for it. Either way the main session sees the act as it sees any act on its child: in the
 log, not as a message.
 
@@ -1226,9 +1227,12 @@ log, not as a message.
 for the app as a reply to the operator is: stored, never delivered. The app reads the open asks
 and one by id (`Mailbox.open_asks/2`, `Mailbox.asked/3`) and answers through one function,
 `Mailbox.answer/4`, each answer the label or labels the person chose and the person's own text.
+Those answers are kept as JSON beside the text the agent gets, and `asked/3` shows them
+(F-138's new-3).
 The answer is a row from the operator to the agent that asked, keyed by the ask's uuid, so the
 table's unique key keeps the first answer and refuses a second (`:answered`). It is delivered
-as any row is, by the agent's transport, one line per question, so an idle agent wakes to it.
+as any row is, by the agent's transport, one line per question, so an idle agent wakes to it;
+with no waiter, its several lines go as the typed pointer to its file (F-138's new-2, F-142).
 To an agent that ended first it is stored and settled `ended`, never delivered.
 
 **Services** belong to the agent that started them. When the owner ends, its services end too,

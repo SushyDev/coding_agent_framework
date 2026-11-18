@@ -165,6 +165,32 @@ defmodule CodingAgentFramework.Transcripts.Fold do
     end
   end
 
+  @doc """
+  The byte offset in `bytes` of the first user line that carries `mark`, or nil: where a reader
+  that found it reads from next time (F-137's new-4). Only whole lines count.
+
+      iex> alias CodingAgentFramework.Transcripts.Fold
+      iex> other = ~s({"type":"user","message":{"content":"Hi."}}\\n)
+      iex> brief = ~s({"type":"user","message":{"content":"Review it. [delivery b-1]"}}\\n)
+      iex> Fold.marked_at(other <> brief, "[delivery b-1]") == byte_size(other)
+      true
+      iex> Fold.marked_at(other, "[delivery b-1]")
+      nil
+  """
+  @spec marked_at(binary, String.t()) :: non_neg_integer | nil
+  def marked_at(bytes, mark) do
+    bytes
+    |> String.split("\n")
+    |> Enum.drop(-1)
+    |> Enum.reduce_while(0, fn line, at ->
+      if marked?(line, mark), do: {:halt, {:at, at}}, else: {:cont, at + byte_size(line) + 1}
+    end)
+    |> case do
+      {:at, at} -> at
+      _ -> nil
+    end
+  end
+
   defp marked?(line, mark) do
     case JSON.decode(line) do
       {:ok, %{"type" => "user"} = e} -> Enum.any?(texts(e), &String.contains?(&1, mark))

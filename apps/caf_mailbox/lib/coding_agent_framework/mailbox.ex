@@ -242,9 +242,10 @@ defmodule CodingAgentFramework.Mailbox do
 
   @doc """
   Ask `id`, for the app: `{:ok, %{id, from, questions, asked_at, answer}}`, `answer` nil until
-  it is answered, then `%{id, text, status}`, the text the agent gets and its row's status
-  (`queued`, `sending`, `delivered`, or `ended` when the agent ended first); or `{:refused,
-  :no_ask}`.
+  it is answered, then `%{id, text, status, answers}`, the text the agent gets, its row's status
+  (`queued`, `sending`, `delivered`, or `ended` when the agent ended first) and the answers as
+  `answer/4` took them, labels and text (nil for an answer an earlier build stored); or
+  `{:refused, :no_ask}`.
   """
   def asked(mailbox, id, opts \\ []), do: call(mailbox, {:asked, id}, opts)
 
@@ -293,7 +294,7 @@ defmodule CodingAgentFramework.Mailbox do
 
   @doc """
   What became of row `id`: `{:ok, %{id, from, to, kind, status, via, attempt, reply_to, subtype,
-  is_error}}`, `status` being `queued`, `sending`, `delivered` or `ended`, `reply_to` the uuid
+  is_error}}`, `status` being `queued`, `sending`, `delivered`, `ended` or `kept` (a row to the operator, never delivered), `reply_to` the uuid
   of the row an answer answers (`key:<key>` for a `notify/4` stored under a key, nil for any
   other), and `subtype` and `is_error` a reply's result's; or `{:refused, :no_message}`.
   """
@@ -304,6 +305,17 @@ defmodule CodingAgentFramework.Mailbox do
   answers a row, or `{:refused, :no_answer}`.
   """
   def answer_to(mailbox, key, opts \\ []), do: call(mailbox, {:answer_to, key}, opts)
+
+  @doc """
+  The reply to message `id`, or the notice in its place, as `status/3` answers a row: how the
+  app reads the answer to the operator's message, which is `kept` for it and never delivered
+  ("Agents working together"). `{:refused, :no_message}` for no such row, `{:refused,
+  :no_answer}` while none has come.
+
+      Mailbox.reply(mailbox, 12)
+      #=> {:ok, %{id: 14, from: "app-unit", to: "operator", kind: "reply", status: "kept", …}}
+  """
+  def reply(mailbox, id), do: call(mailbox, {:reply, id}, [])
 
   @doc """
   The ids of the rows to `to` still `queued` or `sending`: `{:ok, ids}`. With `status:
@@ -395,6 +407,7 @@ defmodule CodingAgentFramework.Mailbox do
   @impl true
   def handle_continue(:read, s) do
     Stream.read(s.stream, timeout: @step)
+    s = keep_operators(s)
 
     for %{via: via, status: "sending", sent_at: at} <- Table.open_rows(s.db),
         via in ["waiter", "typed", "launch"],
@@ -416,7 +429,7 @@ defmodule CodingAgentFramework.Mailbox do
              {:refused, {:bad, :message}},
          :ok <- Grants.may_message?(s.grants, from, to) do
       row = %{from: from, to: to, text: text, uuid: Stream.uuid(), kind: "msg"}
-      stored(s, Table.store(s.db, row))
+      stored(s, put(s, row))
     else
       refused -> {:reply, refused, s}
     end
@@ -432,7 +445,7 @@ defmodule CodingAgentFramework.Mailbox do
          # The operator is no agent: nothing would deliver to it.
          true <- to != Grants.operator(s.grants) or {:refused, {:not_an_agent, to}} do
       row = %{from: @framework, to: to, text: text, uuid: Stream.uuid(), kind: "msg"}
-      stored(s, Table.store(s.db, Map.put(row, :reply_to, key && "key:" <> key)))
+      stored(s, put(s, Map.put(row, :reply_to, key && "key:" <> key)))
     else
       refused -> {:reply, refused, s}
     end
@@ -448,7 +461,7 @@ defmodule CodingAgentFramework.Mailbox do
          :ok <- Grants.may_use?(s.grants, from) do
       row = %{from: from, to: operator, text: JSON.encode!(questions), kind: "ask"}
 
-      case Table.store(s.db, Map.put(row, :uuid, Stream.uuid())) do
+      case put(s, Map.put(row, :uuid, Stream.uuid())) do
         nil ->
           {:reply, {:unknown, :not_stored}, s}
 
@@ -479,8 +492,10 @@ defmodule CodingAgentFramework.Mailbox do
          {:ok, answers} <- Ask.answers(questions, answers) do
       row = %{from: m.to_agent, to: m.from_agent, text: Ask.text(id, questions, answers)}
       row = Map.merge(row, %{uuid: Stream.uuid(), kind: "answer", reply_to: m.uuid})
+      # The labels as the app gave them, beside the agent's text (F-138's new-3).
+      row = Map.put(row, :answer, JSON.encode!(answers))
 
-      case Table.store(s.db, row) do
+      case put(s, row) do
         nil -> {:reply, {:refused, :answered}, s}
         answer -> stored(s, answer)
       end
@@ -492,7 +507,7 @@ defmodule CodingAgentFramework.Mailbox do
 
   def handle_call({:store, row}, _from, s) do
     if Enum.all?([row.from, row.to, row.text, row.uuid], &(is_binary(&1) and &1 != "")),
-      do: stored(s, Table.store(s.db, row)),
+      do: stored(s, put(s, row)),
       else: {:reply, {:refused, {:bad, :message}}, s}
   end
 
@@ -632,6 +647,13 @@ defmodule CodingAgentFramework.Mailbox do
   def handle_call({:answer_to, key}, _from, s),
     do: {:reply, shown(Table.answer(s.db, key) || {:refused, :no_answer}), s}
 
+  def handle_call({:reply, id}, _from, s) do
+    case Table.get(s.db, id) do
+      %{uuid: uuid} -> {:reply, shown(Table.answer(s.db, uuid) || {:refused, :no_answer}), s}
+      nil -> {:reply, {:refused, :no_message}, s}
+    end
+  end
+
   def handle_call({:open_to, to, which}, _from, s) do
     ids =
       for %{to_agent: ^to} = m <- Table.open_rows(s.db),
@@ -688,6 +710,24 @@ defmodule CodingAgentFramework.Mailbox do
     end
   end
 
+  # The one store: a row to the operator is no session's, so it is `kept` from the start and
+  # out of `Table.open_rows/1`: no settle reads it again (F-138's new-1).
+  defp put(s, row) do
+    operator = Grants.operator(s.grants)
+    row = if operator && row.to == operator, do: Map.put(row, :status, "kept"), else: row
+    Table.store(s.db, row)
+  end
+
+  # Rows to the operator an earlier build stored `queued` are kept, once, at the start.
+  defp keep_operators(s) do
+    operator = Grants.operator(s.grants)
+
+    for %{to_agent: ^operator, status: "queued"} = m <- Table.open_rows(s.db),
+        do: Table.update(s.db, m.id, status: "kept", attempt: nil)
+
+    s
+  end
+
   defp stored(s, nil), do: {:reply, {:ok, :stored_before}, s}
 
   defp stored(s, id) do
@@ -710,8 +750,11 @@ defmodule CodingAgentFramework.Mailbox do
   defp shown_ask(s, m) do
     answer =
       case Table.answer(s.db, m.uuid) do
-        nil -> nil
-        a -> %{id: a.id, text: a.text, status: a.status}
+        nil ->
+          nil
+
+        a ->
+          %{id: a.id, text: a.text, status: a.status, answers: a.answer && JSON.decode!(a.answer)}
       end
 
     %{
@@ -830,12 +873,12 @@ defmodule CodingAgentFramework.Mailbox do
   defp reply_row(s, m, to, {:result, r}) do
     row = %{from: m.to_agent, to: to, text: r.text, uuid: Stream.uuid(), kind: "reply"}
     row = Map.merge(row, %{reply_to: m.uuid, subtype: r.subtype, is_error: r.is_error})
-    stored_quietly(s, Table.store(s.db, row))
+    stored_quietly(s, put(s, row))
   end
 
   defp reply_row(s, m, to, :exited) do
     row = %{from: @framework, to: to, text: notice(m), uuid: Stream.uuid(), kind: "notice"}
-    stored_quietly(s, Table.store(s.db, Map.put(row, :reply_to, m.uuid)))
+    stored_quietly(s, put(s, Map.put(row, :reply_to, m.uuid)))
   end
 
   defp notice(m),

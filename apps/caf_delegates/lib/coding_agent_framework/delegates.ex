@@ -225,7 +225,9 @@ defmodule CodingAgentFramework.Delegates do
           scheduler: Keyword.get(opts, :scheduler),
           lease: Keyword.get(opts, :lease, %{"seat" => 1}),
           registry: Keyword.get(opts, :registry),
-          pending: %{}
+          pending: %{},
+          # An interactive delegate's marked lines found: {session id, uuid} to its byte offset.
+          marks: %{}
         })
 
       # A start waiting for its lease when the Scheduler ends is refused: its queue is gone.
@@ -586,9 +588,15 @@ defmodule CodingAgentFramework.Delegates do
   # transcript's last reply, which a person's later turn gives. Its process gone with no such
   # reply, it is resumed once, as a headless one is. A read that fails decides nothing.
   defp settle_interactive(s, row, agent) do
-    with {:ok, brief} <- turn_of(s, agent, row.brief_uuid),
-         {:ok, turn} <-
-           if(row.resume_uuid, do: turn_of(s, agent, row.resume_uuid), else: {:ok, brief}) do
+    {brief, s} = turn_of(s, agent, row.brief_uuid)
+
+    {turn, s} =
+      if row.resume_uuid && match?({:ok, _}, brief),
+        do: turn_of(s, agent, row.resume_uuid),
+        else: {brief, s}
+
+    with {:ok, brief} <- brief,
+         {:ok, turn} <- turn do
       reply = with {:ok, %{reply: text}} when is_binary(text) <- turn, do: text, else: (_ -> nil)
 
       cond do
@@ -612,22 +620,45 @@ defmodule CodingAgentFramework.Delegates do
     end
   end
 
-  # What the transcript holds of the turn the row `uuid` began (`Transcripts.Fold.reply_to/2`).
+  # What the transcript holds of the turn the row `uuid` began (`Transcripts.Fold.reply_to/2`),
+  # read from its marked line once that is found (F-137's new-4): the transcript is read from
+  # byte 0 only until then. A mark no longer at its offset (a file rewritten) is looked for again.
   defp turn_of(s, %{session_id: sid} = agent, uuid) when is_binary(sid) do
+    key = {sid, uuid}
+    from = Map.get(s.marks, key, 0)
+
+    case turn_from(s, agent, uuid, from) do
+      {:ok, :absent} when from > 0 -> turn_of(%{s | marks: Map.delete(s.marks, key)}, agent, uuid)
+      {:ok, turn, at} -> {{:ok, turn}, put_in(s.marks[key], at)}
+      other -> {other, s}
+    end
+  end
+
+  defp turn_of(s, _agent, _uuid), do: {{:unread, :no_session}, s}
+
+  defp turn_from(s, agent, uuid, from) do
     t = s.transcripts
+    sid = agent.session_id
 
     with {:ok, dir} <- Accounts.config_dir(s.accounts, agent.account),
          {:ok, path} <- Transcripts.path(dir, agent.cwd, sid),
          {:ok, %{failed: []}} <- Transcripts.read(t, [{agent.account, sid, path}], timeout: @step),
-         {:ok, %{bytes: bytes}} <- Transcripts.text(t, agent.account, sid, 0, timeout: @step) do
-      {:ok, Fold.reply_to(bytes, Waiter.mark(uuid))}
+         {:ok, %{bytes: bytes, from: start}} <-
+           Transcripts.text(t, agent.account, sid, from, timeout: @step) do
+      mark = Waiter.mark(uuid)
+
+      case Fold.marked_at(bytes, mark) do
+        nil ->
+          {:ok, :absent}
+
+        at ->
+          {:ok, Fold.reply_to(binary_part(bytes, at, byte_size(bytes) - at), mark), start + at}
+      end
     else
       {:refused, :no_file} -> {:ok, :absent}
       other -> {:unread, other}
     end
   end
-
-  defp turn_of(_s, _agent, _uuid), do: {:unread, :no_session}
 
   # The session file of its process reads its turn ended (`Sessions.Turn.interactive/3`).
   defp turn_ended?(s, agent) do

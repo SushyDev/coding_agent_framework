@@ -77,11 +77,14 @@ defmodule CodingAgentFramework.MailboxAskTest do
            ] =
              asked.questions
 
-    # The ask goes to no agent: it stays with the operator, as a reply to the operator does.
+    # The ask goes to no agent: it is kept for the operator from its store, as a reply to the
+    # operator is, and no settle reads it again (F-138's new-1).
     cue(ctx)
 
-    assert %{to_agent: "operator", kind: "ask", attempt: "no_delivery"} =
+    assert %{to_agent: "operator", kind: "ask", status: "kept", attempt: nil} =
              Table.get(ctx.mtable, id)
+
+    assert Table.open_rows(ctx.mtable) == []
 
     assert {:refused, :no_ask} = Mailbox.asked(m, 999)
   end
@@ -119,9 +122,28 @@ defmodule CodingAgentFramework.MailboxAskTest do
                "Ask #{id}, Do: Merge, Wait; the person wrote: after the release"
 
     until_taken(ctx, ["message #{brief}", "message #{u}"])
-    assert {:ok, %{answer: %{id: ^a, status: "delivered"}}} = Mailbox.asked(ctx.mailbox, id)
+    # The labels as the app gave them are kept beside the agent's text (F-138's new-3).
+    assert {:ok, %{answer: %{id: ^a, status: "delivered", answers: ^answers}}} =
+             Mailbox.asked(ctx.mailbox, id)
+
     assert {:ok, []} = Mailbox.open_asks(ctx.mailbox)
     assert {:ok, _} = Stream.end_session(ctx.stream, sid)
+  end
+
+  # F-138's new-1: the reply to the operator's message is kept for it from its store, out of
+  # the open rows, and the app reads it by the message's id (`reply/2`).
+  test "a reply to the operator is kept, and read by its message's id", ctx do
+    {_sid, brief} = started(ctx, "d1")
+    until_taken(ctx, ["message #{brief}"])
+    assert {:refused, :no_message} = Mailbox.reply(ctx.mailbox, 999)
+    assert {:ok, {:queued, id}} = Mailbox.message(ctx.mailbox, "operator", "d1", "why?")
+    assert {:refused, :no_answer} = Mailbox.reply(ctx.mailbox, id)
+    assert {:ok, %{uuid: u}} = until(ctx, id, &(&1.status == "delivered"))
+
+    assert {:ok, %{from: "d1", to: "operator", kind: "reply", status: "kept"}} =
+             await(fn -> cue(ctx) && Mailbox.reply(ctx.mailbox, id) end, 10_000)
+
+    refute Enum.any?(Table.open_rows(ctx.mtable), &(&1.reply_to == u))
   end
 
   # An ask whose agent ended: answered and kept, settled ended, never delivered.
