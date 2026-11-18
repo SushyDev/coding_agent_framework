@@ -97,8 +97,10 @@ settle made it due again. Read it in the order of one row:
   ended (`idle`; a `"call"` answers inside the turn that called) and its row is not stopping;
   `hand` holds the rows whose transport has not answered. `Reaches` says which transport fits:
   `"stream"` for a headless session, `"waiter"` while a waiter of the current process is
-  connected (`waiter[a] = pr[a]`), `"typed"` when none is, `"call"` while a `run_delegate`
-  waits.
+  connected (`waiter[a] = pr[a]`), `"typed"` when none is (a row in `Long` is typed as a
+  pointer to its file, F-142; `NoPointer` refuses it, and `Arrives` fails), `"call"` while a
+  `run_delegate` waits. `turned` says a turn of the current process has ended, so a waiter may
+  connect; `Move.tla`, `Team.tla` and `Delegate.tla` give it from their own state.
 - `Handed` sends it on (`wire[i]`, copies on their way to a turn); `Refused` undoes the mark when
   the transport can no longer reach the process (`Open`); `Unknown` is the `Inlet`'s unknown
   answer. `Reclaim` claims a stream line again after a restart. `Take` is Claude Code taking
@@ -186,9 +188,9 @@ A main session moves from account `Home` to the other one. Read it in the order 
 - `Copied` then `Resumed` start a new process on `target` from the copied transcript, its
   `turned` false. `LaunchMarked` marks the first due row by `launch` once the old process is
   gone, and `ResumedWith` carries it as the resume's prompt; `ResumedBare` resumes with none
-  only when no row is due or in flight. `bare` remembers such a resume: a row stored after it
-  waits for a person's prompt (`Waits`), since the new process has no waiter until a turn of
-  it ends and any row may be long (`Long` is every row).
+  only when no row is due or in flight. A row stored after such a resume goes by the typed
+  write, as a pointer to its file when it is long (`Long` is every row), since the new process
+  has no waiter until a turn of it ends.
 - Rows to the session are `Delivery.tla`'s (`D`): a delegate's report (`DelegateReports`) and
   a message (`MessageSent`). `Takes` puts a row in the transcript of the account its process
   runs on; `Has(i)` reads the transcript of the account the session's row names, so after the

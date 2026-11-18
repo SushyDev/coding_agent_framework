@@ -594,7 +594,12 @@ A main session holds, and a view shows:
 
 **Moving it** starts on its own when the account reaches 90 % of its weekly allowance, or with
 one press at any level. It goes to the account with the most allowance left:
-1. Drain: no new delegates, background commands or tool calls start.
+1. Drain: no new delegates, background commands or tool calls start. The drain stops what the
+   framework starts (decided, F-142's new-2): `Mailbox` and `Delegates` start nothing, and while
+   the agent row has a move phase the framework's `PreToolUse` callback (`Mover.pre_tool_use/2`,
+   ahead of the app's own) denies a `Bash` call with `run_in_background` and the `Monitor`
+   tool, with a reason that says a move is under way. Every account's settings therefore name
+   the `PreToolUse` hook.
 2. Wait until no background command runs and no `run_delegate` call of the session is under
    way (its report would otherwise be written to a process the move ends). This is read after
    the drain began, so nothing can start after it; a background command is a child of the session's process and ends with it.
@@ -1058,9 +1063,18 @@ a waiter connects; a view shows a session idle with no waiter and something due,
 `Inlet`'s checked write reaches it, as one more transport of the same row. It types one line, the row's
 uuid at its end, only when the session file reads idle with no waiter held and the screen shows
 an empty box, both read again in the write's own step, and sends Enter as its own command once
-the box shows the text. The limit (F-132): a text of more than one line, or longer than the
-pane's width less four columns, is refused untyped and waits for a waiter, since no fixture shows
-how a release draws a wrapped box (F-113's new-1). `Intake` cues a
+the box shows the text. The limit (F-132): the `Inlet` refuses a text of more than one line, or
+longer than the pane's width less four columns, since no fixture shows how a release draws a
+wrapped box (F-113's new-1). So a row too long to type (more than one line, a control
+character, or a line longer than 76 characters with its mark, which fits an 80-column pane) is
+typed as a pointer (F-142, decided): `Mailbox` writes its whole text to
+`<home>/due/<agent>/<row id>.md` (`Sessions.due_dir/2`), and types one line, "A message for
+you is in <path>; read it.", with the row's uuid at its end. Each interactive start of the
+agent passes that directory by `--add-dir`, so reading the file never asks permission, and it
+holds only the agent's due texts: the file goes once its row is delivered. The transcript's
+user line settles it as any typed row, and its turn's end brings the next waiter, so no row
+waits for a person's prompt. A pointer line the box still cannot hold is refused, and its row
+waits for a waiter. `Intake` cues a
 session's waiter coming and going on a topic of its own (`intake:<host>:<account>:waiters`, with
 the session ids), and `Mailbox` tries a due row on that cue, not on a timer (F-123's new-3).
 The cue also settles a row `sending` by the last waiter: a turn's end starts the next waiter,
@@ -1277,9 +1291,10 @@ delegate's brief, or its word to go on, or the brief again, at a resume; the fir
 move's resume, F-142) is marked `sending`
 by `launch` before the start (`Mailbox.launch/4`, by the part that starts it, by the start's
 deadline), and the start's answer is told to `Mailbox` (`launched/3`). Every later row goes by
-the waiter, or by `typed` when it is short and no waiter is connected. A long row to a session
-whose waiter is gone after its turns waits for a person's prompt, whose turn's end brings the
-next waiter (`Delivery.tla`'s `Held`). An argument of about 900 000 bytes passed and one of 1
+the waiter, or by `typed` when no waiter is connected: a short row as its own line, a long one
+or one of several lines as a pointer to the file that holds it ("A session with no waiter",
+F-142), so no row waits for a person's prompt after a bare resume, a restart that cut the
+waiter, or the waiter's deadline (`Delivery.tla`'s `NoPointer`). An argument of about 900 000 bytes passed and one of 1
 100 000 did not on macOS (`getconf ARG_MAX` 1 048 576 for arguments and environment together),
 so a launch carries at most 512 KiB.
 

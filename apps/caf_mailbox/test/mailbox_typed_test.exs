@@ -40,11 +40,12 @@ defmodule CodingAgentFramework.MailboxTypedTest do
       registry: ctx.registry,
       transcripts: transcripts,
       accounts: accounts,
-      take_bound: 1_000
+      take_bound: 1_000,
+      home: ctx.dir
     ]
 
     {:ok, mtable} = Table.open(db)
-    {:ok, mailbox: start_supervised!({Mailbox, mopts}), mtable: mtable}
+    {:ok, mailbox: start_supervised!({Mailbox, mopts}), mtable: mtable, mopts: mopts}
   end
 
   # OnlyIntoEndedTurn, InOrder, SettleSeen: each row is typed on one line with its uuid, one at
@@ -73,23 +74,53 @@ defmodule CodingAgentFramework.MailboxTypedTest do
     assert {:ok, %{via: "typed", again: 0}} = until(ctx, two, &(&1.status == "delivered"))
   end
 
-  # A text the box cannot hold is never typed, and waits for a waiter, first among its rows
-  # (InOrder).
-  test "a text too long for the box is not typed, and waits", ctx do
+  # NoLongTyped, Arrives (F-142): a row too long to type, or of several lines, is written whole
+  # to the session's due directory, which its start may read by `--add-dir`, and the line typed
+  # names that file; its user line settles it, and the file goes. Rows keep their order.
+  test "a row too long to type is written to a file the typed line names", ctx do
+    main = main(ctx)
+    {args, 0} = System.cmd(program!(:ps), ["-ww", "-o", "args=", "-p", "#{main.pid}"])
+    due = Sessions.due_dir(ctx.dir, "main")
+    assert args =~ "--add-dir #{due}"
+
+    long = String.duplicate("x", 300)
+    {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "d1", "main", long)
+    {:ok, {:queued, two}} = Mailbox.message(ctx.mailbox, "d1", "main", "line one\nline two")
+
+    file = Path.join(due, "#{one}.md")
+    %{uuid: u1} = Table.get(ctx.mtable, one)
+    line1 = "A message for you is in #{file}; read it. [delivery #{u1}]"
+    assert {:ok, [^line1]} = submitted(ctx, 1)
+    assert File.read!(file) == long
+    assert %{status: "sending", via: "typed"} = Table.get(ctx.mtable, one)
+
+    user_line(main, line1)
+    assert {:ok, %{status: "delivered"}} = until(ctx, one, &(&1.status == "delivered"))
+    refute File.exists?(file)
+
+    %{uuid: u2} = Table.get(ctx.mtable, two)
+    file2 = Path.join(due, "#{two}.md")
+    assert {:ok, [^line1, "A message for you is in " <> _ = line2]} = submitted(ctx, 2)
+    assert line2 =~ "[delivery #{u2}]"
+    assert File.read!(file2) == "line one\nline two"
+  end
+
+  # With no framework home there is nowhere to write the file: the row is not typed, and waits
+  # for a waiter.
+  test "a row too long to type, with no home, waits", ctx do
     main(ctx)
+    stop_supervised!(Mailbox)
+    spec = Supervisor.child_spec({Mailbox, Keyword.delete(ctx.mopts, :home)}, id: :no_home)
+    mailbox = start_supervised!(spec)
+    {:ok, {:queued, long}} = Mailbox.message(mailbox, "d1", "main", String.duplicate("x", 300))
 
-    {:ok, {:queued, long}} =
-      Mailbox.message(ctx.mailbox, "d1", "main", String.duplicate("x", 300))
+    assert {:ok, %{status: "queued", attempt: ~s(["too_long","no_home"])}} =
+             await(fn ->
+               Mailbox.status(mailbox, 0)
+               row = Table.get(ctx.mtable, long)
+               if row.attempt, do: {:ok, row}, else: row
+             end)
 
-    {:ok, {:queued, short}} = Mailbox.message(ctx.mailbox, "d1", "main", "short")
-
-    # The viewer is 200 columns wide: 196 is the longest text the Inlet types.
-    assert {:ok, %{status: "queued", attempt: ~s(["too_long",196])}} =
-             until(ctx, long, &(&1.attempt != nil))
-
-    cue(ctx)
-    assert %{status: "queued", attempt: ~s(["too_long",196])} = Table.get(ctx.mtable, long)
-    assert %{status: "queued"} = Table.get(ctx.mtable, short)
     assert ScreenStandIn.submitted(ctx.dir) == []
   end
 

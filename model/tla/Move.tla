@@ -29,13 +29,12 @@
 (*            Claude Code 2.1.322), so the read waits for `bg`;            *)
 (*   Mailbox  rows to the session, by the waiter, the typed write or the   *)
 (*            launch (Delivery.tla, instanced as D). Any row may be long   *)
-(*            (a report), so none is typed, and a waiter connects only     *)
-(*            once a turn of the current process has ended (`turned`).     *)
+(*            (a report): it is typed as a pointer to its file. A waiter   *)
+(*            connects only once a turn of the current process has ended   *)
+(*            (`turned`).                                                  *)
 (*                                                                         *)
 (* A resumed process has no waiter until a turn of it ends, so the first   *)
-(* row due at the resume goes in as its prompt. A row stored after a       *)
-(* resume that carried none, none being due, waits for a person's prompt   *)
-(* (`Waits`; F-142's new-1).                                               *)
+(* row due at the resume goes in as its prompt; a later one is typed.      *)
 (*                                                                         *)
 (* A prompt through Remote Control may start a turn between the idle read *)
 (* and the SIGTERM. The SIGTERM cuts it; what it wrote stays in the old   *)
@@ -80,7 +79,6 @@ Breaks == {
     "NoDrain",           \* draining does not stop new background commands and delegates
     "NoIdleRead",        \* the SIGTERM is sent without an idle read
     "ShellIsIdle",       \* the idle read takes the file's `shell` for `idle`
-    "NoResumeLaunch",    \* the resume carries no row: the first waits for a waiter
     "LateEndEndsNew",    \* a SessionEnd ends the row whatever process it names
     "ResumeBeforeEnd",   \* the copy and resume do not wait for the old process to exit
     "CopyBeforeEnd",     \* the transcript is copied before the process is ended
@@ -125,14 +123,13 @@ VARIABLES
     ends,          \* SessionEnd hooks sent and not yet handled: the pids they name
     lost,          \* ghost: work a move cut off: [kind, id]
     turned,        \* a turn of the current process has ended
-    bare,          \* ghost: the resume carried no row, none being due
     \* Delivery's, for the rows to the session
     row, hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, dlost, wrong
 
 dvars == <<row, hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, dlost, wrong>>
 work == <<level, procs, nextPid, turn, bg, bgCount, delegates, prompts, msgs, crashes>>
-mover == <<transcript, phase, target, copied, resumedWith, record, readAt, ends, lost, turned,
-           bare>>
+mover == <<transcript, phase, target, copied, resumedWith, record, readAt, ends, lost, turned>>
+
 vars == <<up, restarts, work, mover, dvars>>
 
 Live == {p \in procs : ~p.ending}
@@ -176,7 +173,7 @@ Init ==
     /\ transcript = [a \in Accounts |-> <<>>]
     /\ phase = "idle" /\ target = Home /\ copied = FALSE /\ resumedWith = <<>>
     /\ record = [pid |-> 1, account |-> Home, status |-> "running"]
-    /\ readAt = 0 /\ ends = {} /\ lost = {} /\ turned = TRUE /\ bare = FALSE
+    /\ readAt = 0 /\ ends = {} /\ lost = {} /\ turned = TRUE
     /\ row = [i \in Ids |-> D!NoRow] /\ hand = {} /\ claimed = {}
     /\ wire = [i \in Ids |-> 0] /\ waiter = [a \in {Main} |-> 0]
     /\ call = [i \in Ids |-> "none"]
@@ -192,7 +189,7 @@ FrameworkDies ==
     /\ up' = FALSE /\ restarts' = restarts + 1 /\ readAt' = 0
     /\ D!Restart
     /\ UNCHANGED <<work, transcript, phase, target, copied, resumedWith, record, ends, lost,
-                   turned, bare>>
+                   turned>>
 
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
@@ -217,7 +214,7 @@ PromptSent(p) ==
     /\ transcript' = [transcript EXCEPT ![p.account] = Append(@, PromptMark)]
     /\ UNCHANGED <<up, restarts, level, procs, nextPid, bg, bgCount, delegates, msgs, crashes,
                    phase, target, copied, resumedWith, record, readAt, ends, lost, turned,
-                   bare, dvars>>
+                   dvars>>
 
 TurnEnds(p) ==
     /\ turn = p.pid /\ turn' = 0
@@ -225,7 +222,7 @@ TurnEnds(p) ==
     /\ D!Result(Main)
     /\ UNCHANGED <<up, restarts, level, procs, nextPid, bg, bgCount, delegates, prompts, msgs,
                    crashes, transcript, phase, target, copied, resumedWith, record, readAt, ends,
-                   lost, bare>>
+                   lost>>
 
 BgStarted(p) ==
     /\ bgCount < MaxBg /\ turn = p.pid /\ level[p.account] < Limit /\ ~Draining
@@ -272,7 +269,7 @@ Takes(i) ==
     /\ transcript' = [transcript EXCEPT ![AccountOf(Current)] = Append(@, i)]
     /\ UNCHANGED <<up, restarts, level, procs, nextPid, bg, bgCount, delegates, prompts, msgs,
                    crashes, phase, target, copied, resumedWith, record, readAt, ends, lost,
-                   turned, bare>>
+                   turned>>
 
 \* The transcript the framework reads for a row: the one on the account the
 \* session's row names, which after the resume is the copy.
@@ -288,7 +285,7 @@ Drain ==
     /\ \E a \in Accounts \ {Here} : level[a] = Ok /\ target' = a
     /\ phase' = "draining"
     /\ UNCHANGED <<up, restarts, work, transcript, copied, resumedWith, record, readAt, ends,
-                   lost, turned, bare, dvars>>
+                   lost, turned, dvars>>
 
 \* The drain is clear: no run_delegate call of the session waits (left
 \* abstract). Background commands are read by the stop's idle read. Under
@@ -301,7 +298,7 @@ Cleared ==
               /\ copied' = TRUE
          ELSE UNCHANGED <<transcript, copied>>
     /\ UNCHANGED <<up, restarts, work, target, resumedWith, record, readAt, ends, lost, turned,
-                   bare, dvars>>
+                   dvars>>
 
 \* Sessions' stop: the row says stopping first.
 StopAsked ==
@@ -309,7 +306,7 @@ StopAsked ==
     /\ record' = [record EXCEPT !.status = "stopping"]
     /\ phase' = "stopping"
     /\ UNCHANGED <<up, restarts, work, transcript, target, copied, resumedWith, readAt, ends,
-                   lost, turned, bare, dvars>>
+                   lost, turned, dvars>>
 
 \* The idle read: the session file says idle, so the turn and every
 \* background command have ended (`shell` while one runs), and no row to the
@@ -322,7 +319,7 @@ IdleRead ==
           /\ Break = "StopWhileSending" \/ ~\E i \in Ids : row[i].st = "sending"
     /\ readAt' = Current
     /\ UNCHANGED <<up, restarts, work, transcript, phase, target, copied, resumedWith, record,
-                   ends, lost, turned, bare, dvars>>
+                   ends, lost, turned, dvars>>
 
 \* The SIGTERM, a step of its own after the read, by the row's pid.
 Term ==
@@ -331,7 +328,7 @@ Term ==
     /\ phase' = "ending" /\ readAt' = 0
     /\ UNCHANGED <<up, restarts, level, nextPid, turn, bg, bgCount, delegates, prompts, msgs,
                    crashes, transcript, target, copied, resumedWith, record, ends, lost,
-                   turned, bare, dvars>>
+                   turned, dvars>>
 
 \* The process exits: by the SIGTERM, with whatever runs in it, or by a
 \* crash once its stop was asked. A turn the SIGTERM cuts is lost to the
@@ -351,7 +348,7 @@ Exits(p, why) ==
     /\ ends' = ends \cup {p.pid}
     /\ IF p.pid = Current THEN D!Exited(Main, why = "term") ELSE UNCHANGED dvars
     /\ UNCHANGED <<up, restarts, level, nextPid, bgCount, delegates, prompts, msgs, transcript,
-                   phase, target, copied, resumedWith, record, readAt, turned, bare>>
+                   phase, target, copied, resumedWith, record, readAt, turned>>
 
 \* The old process has exited, so its transcript is final: copy it.
 Copied ==
@@ -360,13 +357,12 @@ Copied ==
     /\ transcript' = [transcript EXCEPT ![target] = transcript[Here]]
     /\ copied' = TRUE
     /\ UNCHANGED <<up, restarts, work, phase, target, resumedWith, record, readAt, ends, lost,
-                   turned, bare, dvars>>
+                   turned, dvars>>
 
 \* The first row due is marked by launch before the resume (Mailbox.launch),
 \* once the old process is gone: the row is free, no longer stopping.
 LaunchMarked(i) ==
     /\ up /\ phase \in {"stopping", "ending"} /\ copied /\ procs = {}
-    /\ Break # "NoResumeLaunch"
     /\ Mailbox(D!Mark(i, "launch"))
 
 \* Resume on the target, with --resume; the row names the new process, whose
@@ -384,16 +380,15 @@ NewProc ==
 ResumedWith(i) ==
     /\ up /\ phase \in {"stopping", "ending"} /\ copied /\ procs = {}
     /\ D!Launch(i, nextPid + 1)
-    /\ NewProc /\ bare' = FALSE
+    /\ NewProc
 
 \* A resume with no prompt, when no row to the session is due or in flight.
-\* Under NoResumeLaunch, whatever is due.
 ResumedBare ==
     /\ up /\ phase \in {"stopping", "ending"} /\ copied
     /\ procs = {} \/ Break = "ResumeBeforeEnd"
-    /\ \/ Break \in {"NoResumeLaunch", "ResumeBeforeEnd"}
+    /\ \/ Break \in {"ResumeBeforeEnd"}
        \/ ~\E i \in Ids : row[i].st \in {"due", "sending"}
-    /\ NewProc /\ bare' = ~\E i \in Ids : row[i].st = "due"
+    /\ NewProc
     /\ UNCHANGED dvars
 
 Resumed == ResumedBare \/ \E i \in Ids : ResumedWith(i)
@@ -405,7 +400,7 @@ SessionEndArrives(pid) ==
     /\ record' = IF pid = record.pid \/ Break = "LateEndEndsNew"
                    THEN [record EXCEPT !.status = "ended"] ELSE record
     /\ UNCHANGED <<up, restarts, work, transcript, phase, target, copied, resumedWith, readAt,
-                   lost, turned, bare, dvars>>
+                   lost, turned, dvars>>
 
 -----------------------------------------------------------------------------
 Next ==
@@ -453,7 +448,7 @@ TypeOK ==
     /\ turn \in 0..nextPid
     /\ delegates \in [Delegates -> {"none", "running", "reported"}]
     /\ phase \in Phases /\ target \in Accounts /\ copied \in BOOLEAN
-    /\ turned \in BOOLEAN /\ bare \in BOOLEAN
+    /\ turned \in BOOLEAN
     /\ record.status \in {"running", "stopping", "ended"}
     /\ D!TypeOK
 
@@ -491,15 +486,9 @@ DeliveredIsKept == \A i \in Ids : row[i].st = "delivered" => Has(i)
 \* A drained session moves.
 DrainedParentMoves == phase = "draining" ~> phase = "moved"
 
-\* A row stored after a resume that carried none, none being due: the new
-\* process has had no turn, so no waiter, and any row may be long. It waits
-\* for a person's prompt (F-142's new-1).
-Waits(i) == bare /\ ~turned /\ Current # 0 /\ waiter[Main] # Current
-
 \* Every row to the session is delivered, held through the move: a row due
-\* at the resume goes in as its prompt. NoResumeLaunch leaves it waiting.
-RowsArrive ==
-    \A i \in Ids : row[i].st = "due" ~> (row[i].st \in {"delivered", "ended"} \/ D!Held(i)
-                                         \/ Waits(i))
+\* at the resume goes in as its prompt, a later one by the waiter or, long as
+\* it may be, the typed pointer.
+RowsArrive == D!Arrives
 
 =============================================================================

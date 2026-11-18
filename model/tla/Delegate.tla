@@ -19,7 +19,11 @@
 (*   Mailbox   the report's row, to the parent (Delivery.tla);             *)
 (*   Parents   whether a parent process runs and whether its turn runs;    *)
 (*             a move (Move.tla) is the parent's process ending and a new  *)
-(*             one running later;                                          *)
+(*             one running later, which has no waiter until a turn of it   *)
+(*             ends (`parentTurned`). A report may be long (Delivery's     *)
+(*             Long is every report), so it reaches a parent with no       *)
+(*             waiter as the typed pointer to its file (F-142);            *)
+(*             NoPointer leaves it waiting for a person's prompt;          *)
 (*   Sessions  the start and the resume of a delegate, which write their   *)
 (*             own row first and run on through a restart of Delegates     *)
 (*             (Start.tla models them);                                    *)
@@ -103,7 +107,8 @@ Breaks == {
     "SettleEarly",           \* after a restart, a row is settled while Sessions' call still runs
     "ResumeBeforeRow",       \* the resume is asked before the row counts it
     "NewUuid",               \* the turn's message is written again under a new uuid
-    "LastReply"              \* an interactive delegate's report is its transcript's last reply
+    "LastReply",             \* an interactive delegate's report is its transcript's last reply
+    "NoPointer"              \* a report too long to type waits for a waiter (F-132), never typed
 }
 
 ASSUME Break \in Breaks
@@ -119,6 +124,7 @@ VARIABLES
     parentRuns,   \* a parent process runs
     turn,         \* the parent's turn runs
     parentStops,  \* the parent's process ended so far
+    parentTurned, \* a turn of the parent's current process has ended
     status,       \* table: d -> "none", "refused", "starting", "running", "resuming",
                   \*          "finished", "failed", "ended"
     held,         \* in memory: delegates whose report waits to be stored (HeldInMemory only)
@@ -144,7 +150,7 @@ VARIABLES
     \* Delivery's, for the reports: row d is d's report
     row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, lost, wrong
 
-parentVars == <<parentRuns, turn, parentStops>>
+parentVars == <<parentRuns, turn, parentStops, parentTurned>>
 delegateVars == <<status, held, resumes, proc, reply, kills, persons, rsrc>>
 callVars == <<call, sess, marked, pipe, taken, resumed>>
 dvars == <<row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, lost, wrong>>
@@ -156,13 +162,14 @@ ParentProc == IF parentRuns THEN parentStops + 1 ELSE 0
 D == INSTANCE Delivery WITH
        Ids <- Delegates, Addrs <- {Parent}, Headless <- {}, Senders <- Delegates,
        MaxSent <- 0, Awaited <- Awaited, ClientLeaves <- ClientLeaves, SelfTurns <- FALSE,
-       MaxRestarts <- 0, MaxEnds <- 0, MaxPrompts <- 0, MaxStops <- 0, Break <- "none",
+       MaxRestarts <- 0, MaxEnds <- 0, MaxPrompts <- 0, MaxStops <- 0,
+       Break <- IF Break = "NoPointer" THEN "NoPointer" ELSE "none",
        up <- up,
        pr <- [a \in {Parent} |-> ParentProc],
        idle <- [a \in {Parent} |-> ~turn],
        stopping <- [a \in {Parent} |-> FALSE],
        over <- [a \in {Parent} |-> FALSE],
-       turned <- [a \in {Parent} |-> TRUE], Long <- {}, Launched <- {},
+       turned <- [a \in {Parent} |-> parentTurned], Long <- Delegates, Launched <- {},
        call <- dcall,
        restarts <- 0, lives <- 0, ends <- 0, prompts <- 0, stops <- 0, readAt <- 0
 
@@ -178,7 +185,7 @@ Stored(d) == row[d].st # "none"
 -----------------------------------------------------------------------------
 Init ==
     /\ up = TRUE /\ restarts = 0
-    /\ parentRuns = TRUE /\ turn = FALSE /\ parentStops = 0
+    /\ parentRuns = TRUE /\ turn = FALSE /\ parentStops = 0 /\ parentTurned = TRUE
     /\ status = [d \in Delegates |-> "none"]
     /\ held = {}
     /\ resumes = [d \in Delegates |-> 0]
@@ -224,20 +231,22 @@ FrameworkStarts ==
 
 PromptSent ==
     /\ parentRuns /\ ~turn /\ turn' = TRUE
-    /\ UNCHANGED <<up, restarts, parentRuns, parentStops, delegateVars, stops, callVars, dvars>>
+    /\ UNCHANGED <<up, restarts, parentRuns, parentStops, parentTurned, delegateVars, stops,
+                   callVars, dvars>>
 
 TurnEnds ==
-    /\ turn /\ turn' = FALSE
+    /\ turn /\ turn' = FALSE /\ parentTurned' = TRUE
     /\ UNCHANGED <<up, restarts, parentRuns, parentStops, delegateVars, stops, callVars, dvars>>
 
 ParentStops ==
     /\ parentRuns /\ parentStops < MaxParentStops
     /\ parentRuns' = FALSE /\ turn' = FALSE /\ parentStops' = parentStops + 1
     /\ D!Exited(Parent, FALSE)
-    /\ UNCHANGED <<up, restarts, delegateVars, stops, callVars>>
+    /\ UNCHANGED <<up, restarts, parentTurned, delegateVars, stops, callVars>>
 
 ParentRuns ==
     /\ ~parentRuns /\ parentRuns' = TRUE
+    /\ parentTurned' = FALSE
     /\ UNCHANGED <<up, restarts, turn, parentStops, delegateVars, stops, callVars, dvars>>
 
 -----------------------------------------------------------------------------
@@ -444,7 +453,8 @@ Mailbox(A) == A /\ UNCHANGED <<up, restarts, parentVars, delegateVars, stops, ca
 \* Claude Code takes the report: a turn of the parent starts with it.
 Takes(d) ==
     /\ D!Take(d) /\ turn' = TRUE
-    /\ UNCHANGED <<up, restarts, parentRuns, parentStops, delegateVars, stops, callVars>>
+    /\ UNCHANGED <<up, restarts, parentRuns, parentStops, parentTurned, delegateVars, stops,
+                   callVars>>
 
 \* In a turn, the agent calls run_delegate on a delegate it started, whose
 \* report is not yet in flight.
@@ -502,7 +512,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 (* What must hold *)
 
 TypeOK ==
-    /\ up \in BOOLEAN /\ parentRuns \in BOOLEAN /\ turn \in BOOLEAN
+    /\ up \in BOOLEAN /\ parentRuns \in BOOLEAN /\ turn \in BOOLEAN /\ parentTurned \in BOOLEAN
     /\ status \in [Delegates -> {"none", "refused", "starting", "running", "resuming",
                                  "finished", "failed", "ended"}]
     /\ held \subseteq Delegates

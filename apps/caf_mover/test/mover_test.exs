@@ -142,6 +142,16 @@ defmodule CodingAgentFramework.MoverTest do
 
     # A background command runs: the stop is refused at each reading, and nothing is sent.
     assert {:ok, _} = row_when(ctx, "main", &(&1.move == "stopping"))
+
+    # NoDrain: while the row has a move phase, the framework's PreToolUse callback denies a new
+    # background command or monitor; any other call goes to the app's callback.
+    pre = Mover.pre_tool_use(ctx.agents, fn _event -> :allow end)
+    bash = fn input -> %{agent: "main", tool_name: "Bash", tool_input: input} end
+    assert {:deny, why} = pre.(bash.(%{"command" => "make", "run_in_background" => true}))
+    assert why =~ "moving"
+    assert {:deny, _} = pre.(%{agent: "main", tool_name: "Monitor", tool_input: %{}})
+    assert pre.(bash.(%{"command" => "make"})) == :allow
+    assert Mover.pre_tool_use(ctx.agents).(bash.(%{"command" => "make"})) == :pass
     {:ok, _} = CodingAgentFramework.Registry.read(ctx.registry)
     :sys.get_state(mover())
     assert alive?(main.pid)
@@ -150,6 +160,10 @@ defmodule CodingAgentFramework.MoverTest do
     assert {:ok, :sent} = MoverSetup.type(ctx, "main", "idle")
     assert {:ok, _} = row_when(ctx, "main", &moved?(&1, "spare"))
     refute alive?(main.pid)
+
+    # Moved: background commands start again.
+    background = %{"command" => "make", "run_in_background" => true}
+    assert pre.(bash.(background)) == :allow
 
     copy = Path.join([ctx.dirs["spare"], "session-env", main.sid, "hook-1.sh"])
     assert File.read!(copy) == "export A=1\n"

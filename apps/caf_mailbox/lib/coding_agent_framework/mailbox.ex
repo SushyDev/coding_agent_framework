@@ -45,8 +45,13 @@ defmodule CodingAgentFramework.Mailbox do
     session file reads idle, handed to `Inlet.type/4` as one line with the row's uuid at its end
     (`Transport.Typed`). The `Inlet` reads the turn again in its own step, with the screen as
     the session's recorded release draws it, and types only into an ended turn with an empty
-    box. The transcript settles it, as a waiter's row. A row whose text the `Inlet` refused (too
-    long for the box, or more than one line) is not typed again: it waits for a waiter.
+    box. The transcript settles it, as a waiter's row. A row too long to type (more than one
+    line, a control character, or longer than `Transport.Typed.short/0`) is written whole to
+    `<home>/due/<agent>/<id>.md` (`Sessions.due_dir/2`, which each interactive start of the agent
+    may read by `--add-dir`), and the line typed names that file (`Transport.Typed.pointer/2`);
+    the file goes once the row is delivered. A row whose line the `Inlet` refused anyway (the
+    box narrower than the line), or one too long with no `home:`, is not typed again: it waits
+    for a waiter.
 
   - `launch` (F-137), for the first row to an interactive session's new process: marked by
     `launch/4` before the start that carries it as its prompt, told the start's answer by
@@ -87,7 +92,7 @@ defmodule CodingAgentFramework.Mailbox do
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, Grants, Inlet, Intake, Registry, Store, Stream}
+  alias CodingAgentFramework.{Accounts, Grants, Inlet, Intake, Registry, Sessions, Store, Stream}
   alias CodingAgentFramework.Transcripts
   alias CodingAgentFramework.Sessions.{Agents, Turn}
   alias CodingAgentFramework.Mailbox.{Ask, Table, Transport}
@@ -109,7 +114,8 @@ defmodule CodingAgentFramework.Mailbox do
   optionally `notify:`; for the
   waiter transport, `intake:` with `transcripts:` and `accounts:` (an `Accounts`), and
   `take_bound:` (ms, 10 000 by default); for the typed transport, `inlet:` with `registry:` (the
-  host's `Registry`), `transcripts:` and `accounts:`.
+  host's `Registry`), `transcripts:` and `accounts:`, and `home:`, the framework home `Sessions`
+  was given, whose due directories carry a row too long to type.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -370,7 +376,8 @@ defmodule CodingAgentFramework.Mailbox do
       waiter = Map.merge(waiter, %{intake: opts[:intake], bound: bound})
 
       typed =
-        if opts[:inlet], do: %{inlet: opts[:inlet], registry: Keyword.fetch!(opts, :registry)}
+        if opts[:inlet],
+          do: %{inlet: opts[:inlet], registry: Keyword.fetch!(opts, :registry), home: opts[:home]}
 
       # `calls`: row id to the call that took it; `waits`: key to the call waiting for it;
       # `hands`: a hand-on's task ref to the row it hands on and what its answer writes.
@@ -781,7 +788,14 @@ defmodule CodingAgentFramework.Mailbox do
   end
 
   defp settled(_s, _m, :keep), do: :ok
-  defp settled(s, m, :delivered), do: write(s, m, status: "delivered", attempt: nil)
+
+  defp settled(s, m, :delivered) do
+    write(s, m, status: "delivered", attempt: nil)
+
+    # A pointer's file is due no longer.
+    if (m.via == "typed" and s.typed) && s.typed.home, do: File.rm(due_path(s, m.to_agent, m))
+  end
+
   defp settled(s, m, :again), do: again(s, m, nil)
 
   # Due again, first, under its same uuid.
@@ -1001,27 +1015,66 @@ defmodule CodingAgentFramework.Mailbox do
   defp type(s, m, srow) do
     case turn_now(s, srow.name, srow.pid) do
       :ok ->
-        from = offset(s, srow)
-        mark = [status: "sending", via: "typed", session_id: srow.session_id, at: srow.pid]
-        write(s, m, mark ++ [from_byte: from, sent_at: now() + @inlet])
-        text = Transport.Typed.text(m.text, m.uuid)
-        reads = Map.take(s, [:agents, :typed, :waiter])
-        turn = fn -> turn_now(reads, srow.name, srow.pid) end
-        inlet = s.typed.inlet
-
-        hand_on(
-          s,
-          m,
-          fn ->
-            Inlet.type(inlet, srow.name, text, release: srow.release, turn: turn, timeout: @inlet)
-          end,
-          &sent/3
-        )
+        type_line(s, m, srow, line(s, m, srow))
 
       {:refused, why} ->
         if m.attempt != Store.text(why), do: write(s, m, attempt: why)
         s
     end
+  end
+
+  # The line typed: the row's own, or for a row too long to type, one that names the file its
+  # text is written to in the agent's due directory, which its start may read (F-142).
+  defp line(s, m, srow) do
+    cond do
+      Transport.Typed.short?(m.text, m.uuid) ->
+        {:ok, Transport.Typed.text(m.text, m.uuid)}
+
+      is_nil(s.typed.home) ->
+        {:refused, {:too_long, :no_home}}
+
+      true ->
+        path = due_path(s, srow.name, m)
+
+        with :ok <- File.mkdir_p(Path.dirname(path)),
+             :ok <- File.write(path <> ".tmp", m.text),
+             :ok <- File.rename(path <> ".tmp", path) do
+          {:ok, Transport.Typed.pointer(path, m.uuid)}
+        else
+          {:error, why} -> {:unknown, {:due_file, why}}
+        end
+    end
+  end
+
+  defp due_path(s, name, m),
+    do: Path.join(Sessions.due_dir(s.typed.home, name), "#{m.id}.md")
+
+  defp type_line(s, m, _srow, {:refused, why}) do
+    write(s, m, attempt: why)
+    s
+  end
+
+  defp type_line(s, m, _srow, {:unknown, why}) do
+    if m.attempt != Store.text(why), do: write(s, m, attempt: why)
+    s
+  end
+
+  defp type_line(s, m, srow, {:ok, text}) do
+    from = offset(s, srow)
+    mark = [status: "sending", via: "typed", session_id: srow.session_id, at: srow.pid]
+    write(s, m, mark ++ [from_byte: from, sent_at: now() + @inlet])
+    reads = Map.take(s, [:agents, :typed, :waiter])
+    turn = fn -> turn_now(reads, srow.name, srow.pid) end
+    inlet = s.typed.inlet
+
+    hand_on(
+      s,
+      m,
+      fn ->
+        Inlet.type(inlet, srow.name, text, release: srow.release, turn: turn, timeout: @inlet)
+      end,
+      &sent/3
+    )
   end
 
   # The turn of `name`'s process `pid` read now: its row, its session file and its waiter.

@@ -56,8 +56,13 @@
 (* ReplyOrNoticeComes, and their Breaks. This spec still checks them on    *)
 (* its own state, with the edges (AlongEdges) and MessageDelivered.        *)
 (*                                                                         *)
+(* Every row may be long (Delivery's Long is every row), and a main       *)
+(* session's turns say when its waiter could connect (`turned`), so a row  *)
+(* to a main session with no waiter, after a restart cut it, is typed as   *)
+(* a pointer to its file (F-142); NoPointer leaves it waiting.             *)
+(*                                                                         *)
 (* Left abstract: the text of a message, and how its sender reads its row; *)
-(* a main session's waiter (Delivery.tla, Delegate.tla);                   *)
+(* a main session's waiter itself (Delivery.tla, Delegate.tla);            *)
 (* reading tools, which change nothing; the answer tool (Intake.tla);      *)
 (* subagents, which the framework does not reach, so a delegate has no     *)
 (* child here; a service's own                                             *)
@@ -143,7 +148,8 @@ Breaks == {
     "EndWithDelegates",      \* a main session's end is not refused while a delegate of it lives
     "EndBusy",               \* a main session's end does not wait for it to be idle
     "EndByAgent",            \* a main session may end another main session
-    "MainKeeps"              \* a kept service of an ended main session is kept, for no one
+    "MainKeeps",             \* a kept service of an ended main session is kept, for no one
+    "NoPointer"              \* a row too long to type waits for a waiter (F-132), never typed
 }
 
 Agents == UNION Projects
@@ -202,6 +208,7 @@ VARIABLES
     epoch,     \* a -> the number of a's state
     life,      \* a -> the number of a's process
     faults,    \* sticks and deaths so far
+    turned,    \* a -> a turn of a's current process has ended
     \* The claims, as Claim.tla's variables (Cl)
     claims,    \* table: the claims, [by (an actor), t, s (t's epoch), act (the fix), n]
     done,      \* table: the claims whose call has ended
@@ -216,7 +223,7 @@ VARIABLES
     \* Delivery's, for the messages, replies and notices
     row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, dlost, dwrong
 
-agentVars == <<proc, epoch, life, faults>>
+agentVars == <<proc, epoch, life, faults, turned>>
 claimVars == <<claims, done, calls, fixed, twice, cut>>
 svcVars == <<svc, owner, keep>>
 dvars == <<row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, dlost, dwrong>>
@@ -229,13 +236,14 @@ Live(a) == IF a \in Operators THEN TRUE ELSE proc[a] # "ended"
 D == INSTANCE Delivery WITH
        Ids <- Ids, Addrs <- Agents, Headless <- Delegates, Senders <- Actors, MaxSent <- 0,
        Awaited <- {}, ClientLeaves <- FALSE, SelfTurns <- SelfTurns, MaxRestarts <- 0,
-       MaxEnds <- 0, MaxPrompts <- 0, MaxStops <- 0, Break <- "none",
+       MaxEnds <- 0, MaxPrompts <- 0, MaxStops <- 0,
+       Break <- IF Break = "NoPointer" THEN "NoPointer" ELSE "none",
        up <- up,
        pr <- [a \in Agents |-> IF proc[a] \in {"dead", "ended"} THEN 0 ELSE life[a]],
        idle <- [a \in Agents |-> proc[a] = "idle"],
        stopping <- [a \in Agents |-> FALSE],
        over <- [a \in Agents |-> proc[a] = "ended"],
-       turned <- [a \in Agents |-> TRUE], Long <- {}, Launched <- {},
+       turned <- turned, Long <- Ids, Launched <- {},
        call <- dcall, lost <- dlost, wrong <- dwrong,
        restarts <- 0, lives <- 0, ends <- 0, prompts <- 0, stops <- 0, readAt <- 0
 
@@ -260,6 +268,7 @@ Init ==
     /\ up = TRUE /\ restarts = 0
     /\ proc = [a \in Agents |-> IF a \in Mains THEN "idle" ELSE "working"]
     /\ epoch = [a \in Agents |-> 0] /\ life = [a \in Agents |-> 1] /\ faults = 0
+    /\ turned = [a \in Agents |-> TRUE]
     /\ claims = {} /\ done = {} /\ calls = {} /\ fixed = {} /\ twice = FALSE /\ cut = {}
     /\ svc = [s \in Services |-> "none"] /\ owner = [s \in Services |-> None]
     /\ keep = [s \in Services |-> FALSE]
@@ -292,17 +301,18 @@ FrameworkStarts ==
 \* resumes, and turns it starts by itself.
 Prompted(a) ==
     /\ a \in Mains /\ proc[a] = "idle" /\ proc' = [proc EXCEPT ![a] = "working"]
-    /\ UNCHANGED <<up, restarts, epoch, life, faults, claimVars, svcVars, wrong, dvars>>
+    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, claimVars, svcVars, wrong, dvars>>
 
 \* A delegate starts a turn by itself (F-31's new-2): its result names no row.
 SelfStarts(d) ==
     /\ SelfTurns /\ d \in Delegates /\ proc[d] = "idle"
     /\ proc' = [proc EXCEPT ![d] = "working"]
-    /\ UNCHANGED <<up, restarts, epoch, life, faults, claimVars, svcVars, wrong, dvars>>
+    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, claimVars, svcVars, wrong, dvars>>
 
 \* `a`'s turn ends with a result, which names the rows whose turn it is.
 TurnEnds(a) ==
     /\ proc[a] = "working" /\ proc' = [proc EXCEPT ![a] = "idle"]
+    /\ turned' = [turned EXCEPT ![a] = TRUE]
     /\ D!Result(a)
     /\ UNCHANGED <<up, restarts, epoch, life, faults, claimVars, svcVars, wrong>>
 
@@ -315,14 +325,14 @@ Faults(a) ==
        \/ /\ proc[a] \in {"working", "idle", "stuck"} /\ proc' = [proc EXCEPT ![a] = "dead"]
           /\ D!Exited(a, FALSE)
     /\ epoch' = [epoch EXCEPT ![a] = @ + 1] /\ faults' = faults + 1
-    /\ UNCHANGED <<up, restarts, life, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, life, turned, claimVars, svcVars, wrong>>
 
 \* A delegate ends once its report is delivered (Delegate.tla).
 DelegateEnds(d) ==
     /\ d \in Delegates /\ proc[d] = "idle"
     /\ proc' = [proc EXCEPT ![d] = "ended"] /\ epoch' = [epoch EXCEPT ![d] = @ + 1]
     /\ D!Exited(d, FALSE)
-    /\ UNCHANGED <<up, restarts, life, faults, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, life, faults, turned, claimVars, svcVars, wrong>>
 
 \* A main session's end (F-143), the operator's alone: refused while any of
 \* its delegates has not ended, so none is left with no parent; SIGTERM once
@@ -339,7 +349,7 @@ MainEnds(c, m) ==
     /\ wrong' = wrong \cup (IF c \in Operators THEN {} ELSE {"end by agent"})
                        \cup (IF proc[m] \in {"idle", "dead"} THEN {} ELSE {"end busy"})
     /\ IF proc[m] = "dead" THEN UNCHANGED dvars ELSE D!Exited(m, FALSE)
-    /\ UNCHANGED <<up, restarts, life, faults, claimVars, svcVars>>
+    /\ UNCHANGED <<up, restarts, life, faults, turned, claimVars, svcVars>>
 
 -----------------------------------------------------------------------------
 (* Mailbox: a message along an edge, stored, then into an ended turn, once *)
@@ -377,7 +387,7 @@ Takes(i) ==
     LET a == row[i].to IN
     /\ D!Take(i)
     /\ proc' = [proc EXCEPT ![a] = IF @ = "idle" THEN "working" ELSE @]
-    /\ UNCHANGED <<up, restarts, epoch, life, faults, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, claimVars, svcVars, wrong>>
 
 \* The transport by the target: the stream to a delegate, the typed write to
 \* a main session. Its waiter is Delivery.tla's and Delegate.tla's; one
@@ -428,10 +438,14 @@ FixActs(r) ==
                                              [] OTHER -> "ended"]
           /\ epoch' = [epoch EXCEPT ![r.t] = @ + 1]
           /\ life' = [life EXCEPT ![r.t] = IF r.act = "resume" THEN @ + 1 ELSE @]
+          \* A resume's new process has had no turn yet; an interrupt ends one.
+          /\ turned' = [turned EXCEPT ![r.t] = CASE r.act = "resume" -> FALSE
+                                                 [] r.act = "interrupt" -> TRUE
+                                                 [] OTHER -> @]
           /\ CASE r.act = "interrupt" -> D!Result(r.t)
                [] r.act = "stop" -> D!Exited(r.t, FALSE)
                [] OTHER -> UNCHANGED dvars
-       \/ (r.act # "stop" /\ UNCHANGED <<proc, epoch, life, dvars>>)
+       \/ (r.act # "stop" /\ UNCHANGED <<proc, epoch, life, turned, dvars>>)
     /\ wrong' = wrong \cup (IF epoch[r.t] = r.s THEN {} ELSE {"stale"})
     /\ UNCHANGED <<up, restarts, faults, svcVars>>
 
@@ -520,7 +534,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 
 TypeOK ==
     /\ proc \in [Agents -> {"working", "idle", "stuck", "dead", "ended"}]
-    /\ epoch \in [Agents -> 0..MaxEpoch]
+    /\ epoch \in [Agents -> 0..MaxEpoch] /\ turned \in [Agents -> BOOLEAN]
     /\ claims \subseteq [by : Actors, t : Agents, s : 0..MaxEpoch, act : Kinds, n : 1..2]
     /\ calls \subseteq claims \ done /\ done \subseteq claims
     /\ twice \in BOOLEAN /\ cut \subseteq Agents \X (0..MaxEpoch)

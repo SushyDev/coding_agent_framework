@@ -96,6 +96,41 @@ defmodule CodingAgentFramework.Mover do
   def move(mover, actor, name, opts \\ []),
     do: call(mover, {:move, actor, name, Keyword.get(opts, :to)})
 
+  @doc """
+  The framework's `PreToolUse` callback, for `Intake`'s `pre_tool_use:` (F-142's new-2). The
+  drain stops what the framework starts; a background command is the session's own, so while
+  the agent's row has a move phase this denies a `Bash` call with `run_in_background` and the
+  `Monitor` tool, with a reason the agent reads. Any other call goes to `then`, the app's own
+  callback (`:pass` with none). It reads the agent rows through `agents`
+  (`Sessions.Agents.open/2`), in the callback's own process.
+
+      Intake.start_link(db: db, host: "laptop", agent: &Agents.by_session(agents, &1, &2),
+        pre_tool_use: Mover.pre_tool_use(agents, &MyApp.pre_tool_use/1))
+  """
+  @spec pre_tool_use(Agents.t(), (map -> term) | nil) :: (map -> term)
+  def pre_tool_use(agents, then \\ nil) do
+    fn event ->
+      row = is_binary(event[:agent]) && Agents.get(agents, event.agent)
+
+      cond do
+        row && Agents.moving?(row) && background?(event) ->
+          {:deny,
+           "This session is moving to another Claude account. Start no background command " <>
+             "or monitor now: run it in the foreground, or after the move."}
+
+        then ->
+          then.(event)
+
+        true ->
+          :pass
+      end
+    end
+  end
+
+  defp background?(%{tool_name: "Bash", tool_input: %{"run_in_background" => true}}), do: true
+  defp background?(%{tool_name: "Monitor"}), do: true
+  defp background?(_event), do: false
+
   @doc "Hands it a cue; every move under way on the host takes its next step that can."
   @spec cue(GenServer.server(), map) :: :ok
   def cue(mover, %{topic: topic}), do: GenServer.cast(mover, {:cue, evidence?(topic)})
