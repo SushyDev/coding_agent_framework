@@ -21,6 +21,8 @@
     {"file": "exited.txt", "state": "exited", "escapes": false, "description": "The last screen after /exit.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:24:10Z"},
     {"file": "exited.ansi", "state": "exited", "escapes": true, "description": "The last screen after /exit.", "width": 120, "height": 40, "captured_at": "2026-11-16T14:24:10Z"},
     {"file": "imports-dialog.txt", "state": "imports-dialog", "escapes": false, "description": "The external CLAUDE.md imports dialog, after the trust dialog, in a folder whose CLAUDE.md imports a file outside it (F-140).", "width": 120, "height": 40, "captured_at": "2026-11-17T20:49:00Z"},
-    {"file": "imports-dialog.ansi", "state": "imports-dialog", "escapes": true, "description": "The external CLAUDE.md imports dialog, after the trust dialog, in a folder whose CLAUDE.md imports a file outside it (F-140).", "width": 120, "height": 40, "captured_at": "2026-11-17T20:49:00Z"}
+    {"file": "imports-dialog.ansi", "state": "imports-dialog", "escapes": true, "description": "The external CLAUDE.md imports dialog, after the trust dialog, in a folder whose CLAUDE.md imports a file outside it (F-140).", "width": 120, "height": 40, "captured_at": "2026-11-17T20:49:00Z"},
+    {"file": "imports-long-path.txt", "state": "imports-long-path", "escapes": false, "description": "The external CLAUDE.md imports dialog listing one path longer than the pane: 2.1.322 shortens it in the middle with … on one line and never wraps it (F-144). Paths scrubbed to /work.", "width": 120, "height": 40, "captured_at": "2026-11-18T00:39:00Z"},
+    {"file": "imports-long-path.ansi", "state": "imports-long-path", "escapes": true, "description": "The external CLAUDE.md imports dialog listing one path longer than the pane: 2.1.322 shortens it in the middle with … on one line and never wraps it (F-144). Paths scrubbed to /work.", "width": 120, "height": 40, "captured_at": "2026-11-18T00:39:00Z"}
   ]
 }

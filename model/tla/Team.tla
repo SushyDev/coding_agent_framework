@@ -26,7 +26,11 @@
 (* stop ends a main session: only its end does (`end_main`, F-143), the    *)
 (* operator's act alone, refused while any of its delegates has not ended, *)
 (* taken once the main session is idle (SIGTERM, as any stop) or its       *)
-(* process is gone. A service is owned by one agent, fixed by its owner or *)
+(* process is gone. The row keeps the end asked (a mark, durable, F-144):  *)
+(* a stop that answered unknown, its process outliving the stop's          *)
+(* deadline, leaves the mark, and the settle ends the row once the process *)
+(* is gone, with no second call; no resume takes a row with the mark, and  *)
+(* Mailbox marks no row to it, as to any row stopping. A service is owned by one agent, fixed by its owner or *)
 (* the owner's parent, handed to the owner's parent or a child, and ended  *)
 (* or kept when its owner ends: kept for a delegate's main session, and    *)
 (* ended with a main session, kept or not, since the operator owns nothing.*)
@@ -122,6 +126,7 @@ CONSTANTS
     MaxRestarts,  \* restarts of the framework
     SelfTurns,    \* a delegate may start a turn by itself
     Operators,    \* {} or {the operator}: a person or the app, outside the tree
+    StopsUnknown, \* a main session's stop may answer unknown: its process outlives the deadline
     Break         \* "none", or the guard made wrong (see Breaks)
 
 Breaks == {
@@ -149,7 +154,9 @@ Breaks == {
     "EndBusy",               \* a main session's end does not wait for it to be idle
     "EndByAgent",            \* a main session may end another main session
     "MainKeeps",             \* a kept service of an ended main session is kept, for no one
-    "NoPointer"              \* a row too long to type waits for a waiter (F-132), never typed
+    "NoPointer",             \* a row too long to type waits for a waiter (F-132), never typed
+    "EndInMemory",           \* the end asked is held by its call only, so a restart forgets it
+    "ResumeEnding"           \* a resume takes a main session whose end is asked
 }
 
 Agents == UNION Projects
@@ -160,7 +167,7 @@ ASSUME Break \in Breaks
 ASSUME \A P \in Projects : Cardinality(P \cap Mains) = 1
 ASSUME \A P, Q \in Projects : P # Q => P \cap Q = {}
 ASSUME Mains \subseteq Agents
-ASSUME MaxMsgs \in Nat /\ MaxAsks \in Nat /\ MaxFaults \in Nat /\ MaxRestarts \in Nat /\ SelfTurns \in BOOLEAN
+ASSUME MaxMsgs \in Nat /\ MaxAsks \in Nat /\ MaxFaults \in Nat /\ MaxRestarts \in Nat /\ SelfTurns \in BOOLEAN /\ StopsUnknown \in BOOLEAN
 \* The operator's name is reserved: no agent holds it.
 ASSUME Cardinality(Operators) <= 1 /\ Operators \cap Agents = {}
 
@@ -220,6 +227,7 @@ VARIABLES
     owner,     \* table: s -> its owner, or None
     keep,      \* table: s -> kept for the owner's parent when the owner ends
     wrong,     \* ghost: what a guard should have refused
+    ending,    \* table: the main sessions whose end is asked and whose row is not ended yet
     \* Delivery's, for the messages, replies and notices
     row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, dlost, dwrong
 
@@ -227,7 +235,7 @@ agentVars == <<proc, epoch, life, faults, turned>>
 claimVars == <<claims, done, calls, fixed, twice, cut>>
 svcVars == <<svc, owner, keep>>
 dvars == <<row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, dlost, dwrong>>
-vars == <<up, restarts, agentVars, claimVars, svcVars, wrong, dvars>>
+vars == <<up, restarts, agentVars, claimVars, svcVars, wrong, ending, dvars>>
 
 \* The operator is outside the tree, and never ends. An IF, since TLC splits a
 \* disjunction in an action and would read `proc` of the operator.
@@ -241,7 +249,7 @@ D == INSTANCE Delivery WITH
        up <- up,
        pr <- [a \in Agents |-> IF proc[a] \in {"dead", "ended"} THEN 0 ELSE life[a]],
        idle <- [a \in Agents |-> proc[a] = "idle"],
-       stopping <- [a \in Agents |-> FALSE],
+       stopping <- [a \in Agents |-> a \in ending],
        over <- [a \in Agents |-> proc[a] = "ended"],
        turned <- turned, Long <- Ids, Launched <- {},
        call <- dcall, lost <- dlost, wrong <- dwrong,
@@ -272,7 +280,7 @@ Init ==
     /\ claims = {} /\ done = {} /\ calls = {} /\ fixed = {} /\ twice = FALSE /\ cut = {}
     /\ svc = [s \in Services |-> "none"] /\ owner = [s \in Services |-> None]
     /\ keep = [s \in Services |-> FALSE]
-    /\ wrong = {}
+    /\ wrong = {} /\ ending = {}
     /\ row = [i \in Ids |-> D!NoRow] /\ hand = {} /\ claimed = {}
     /\ wire = [i \in Ids |-> 0] /\ waiter = [a \in Agents |-> 0]
     /\ dcall = [i \in Ids |-> "none"]
@@ -288,11 +296,12 @@ FrameworkDies ==
     /\ up' = FALSE /\ restarts' = restarts + 1
     /\ Cl("none")!Restart
     /\ D!Restart
+    /\ ending' = IF Break = "EndInMemory" THEN {} ELSE ending
     /\ UNCHANGED <<agentVars, svcVars, wrong>>
 
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
-    /\ UNCHANGED <<restarts, agentVars, claimVars, svcVars, wrong, dvars>>
+    /\ UNCHANGED <<restarts, agentVars, claimVars, svcVars, wrong, ending, dvars>>
 
 -----------------------------------------------------------------------------
 (* The agents: turns, a person's prompt to a main session; sticking, dying, ending *)
@@ -301,20 +310,20 @@ FrameworkStarts ==
 \* resumes, and turns it starts by itself.
 Prompted(a) ==
     /\ a \in Mains /\ proc[a] = "idle" /\ proc' = [proc EXCEPT ![a] = "working"]
-    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, claimVars, svcVars, wrong, dvars>>
+    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, claimVars, svcVars, wrong, ending, dvars>>
 
 \* A delegate starts a turn by itself (F-31's new-2): its result names no row.
 SelfStarts(d) ==
     /\ SelfTurns /\ d \in Delegates /\ proc[d] = "idle"
     /\ proc' = [proc EXCEPT ![d] = "working"]
-    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, claimVars, svcVars, wrong, dvars>>
+    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, claimVars, svcVars, wrong, ending, dvars>>
 
 \* `a`'s turn ends with a result, which names the rows whose turn it is.
 TurnEnds(a) ==
     /\ proc[a] = "working" /\ proc' = [proc EXCEPT ![a] = "idle"]
     /\ turned' = [turned EXCEPT ![a] = TRUE]
     /\ D!Result(a)
-    /\ UNCHANGED <<up, restarts, epoch, life, faults, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, epoch, life, faults, claimVars, svcVars, wrong, ending>>
 
 \* An agent sticks, or its process ends. A row whose turn it was then has
 \* no result, and never will: the fold reads the exit.
@@ -325,14 +334,14 @@ Faults(a) ==
        \/ /\ proc[a] \in {"working", "idle", "stuck"} /\ proc' = [proc EXCEPT ![a] = "dead"]
           /\ D!Exited(a, FALSE)
     /\ epoch' = [epoch EXCEPT ![a] = @ + 1] /\ faults' = faults + 1
-    /\ UNCHANGED <<up, restarts, life, turned, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, life, turned, claimVars, svcVars, wrong, ending>>
 
 \* A delegate ends once its report is delivered (Delegate.tla).
 DelegateEnds(d) ==
     /\ d \in Delegates /\ proc[d] = "idle"
     /\ proc' = [proc EXCEPT ![d] = "ended"] /\ epoch' = [epoch EXCEPT ![d] = @ + 1]
     /\ D!Exited(d, FALSE)
-    /\ UNCHANGED <<up, restarts, life, faults, turned, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, life, faults, turned, claimVars, svcVars, wrong, ending>>
 
 \* A main session's end (F-143), the operator's alone: refused while any of
 \* its delegates has not ended, so none is left with no parent; SIGTERM once
@@ -341,20 +350,42 @@ DelegateEnds(d) ==
 MayEnd(c, m) == c \in Operators \/ (Break = "EndByAgent" /\ c \in Mains /\ c # m)
 LiveDelegates(m) == {d \in Delegates : Main(d) = m /\ proc[d] # "ended"}
 
+\* The end asked: the checks and the mark in one step, then the SIGTERM. The
+\* row is ended in that step when the process is gone, or exits within the
+\* stop's deadline; else the stop answers unknown and the row keeps the mark.
 MainEnds(c, m) ==
-    /\ up /\ m \in Mains /\ Live(c) /\ MayEnd(c, m)
+    /\ up /\ m \in Mains /\ m \notin ending /\ Live(c) /\ MayEnd(c, m)
     /\ LiveDelegates(m) = {} \/ Break = "EndWithDelegates"
     /\ proc[m] \in {"idle", "dead"} \/ (Break = "EndBusy" /\ proc[m] \in {"working", "stuck"})
-    /\ proc' = [proc EXCEPT ![m] = "ended"] /\ epoch' = [epoch EXCEPT ![m] = @ + 1]
     /\ wrong' = wrong \cup (IF c \in Operators THEN {} ELSE {"end by agent"})
                        \cup (IF proc[m] \in {"idle", "dead"} THEN {} ELSE {"end busy"})
-    /\ IF proc[m] = "dead" THEN UNCHANGED dvars ELSE D!Exited(m, FALSE)
+    /\ \/ /\ proc' = [proc EXCEPT ![m] = "ended"] /\ epoch' = [epoch EXCEPT ![m] = @ + 1]
+          /\ IF proc[m] = "dead" THEN UNCHANGED dvars ELSE D!Exited(m, FALSE)
+          /\ UNCHANGED ending
+       \/ /\ StopsUnknown /\ proc[m] # "dead"
+          /\ ending' = ending \cup {m}
+          /\ UNCHANGED <<proc, epoch, dvars>>
     /\ UNCHANGED <<up, restarts, life, faults, turned, claimVars, svcVars>>
+
+\* The SIGTERM that outlived the stop's deadline takes, or Recoveries ends
+\* the process by its record (`no_exit`): it exits.
+EndTerm(m) ==
+    /\ m \in ending /\ proc[m] \in {"working", "idle", "stuck"}
+    /\ proc' = [proc EXCEPT ![m] = "dead"] /\ epoch' = [epoch EXCEPT ![m] = @ + 1]
+    /\ D!Exited(m, FALSE)
+    /\ UNCHANGED <<up, restarts, life, faults, turned, claimVars, svcVars, wrong, ending>>
+
+\* Sessions' settle: a row whose end is asked is ended once its process is gone.
+EndSettled(m) ==
+    /\ up /\ m \in ending /\ proc[m] = "dead"
+    /\ proc' = [proc EXCEPT ![m] = "ended"]
+    /\ ending' = ending \ {m}
+    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, claimVars, svcVars, wrong, dvars>>
 
 -----------------------------------------------------------------------------
 (* Mailbox: a message along an edge, stored, then into an ended turn, once *)
 
-Mailbox(A) == A /\ UNCHANGED <<up, restarts, agentVars, claimVars, svcVars, wrong>>
+Mailbox(A) == A /\ UNCHANGED <<up, restarts, agentVars, claimVars, svcVars, wrong, ending>>
 
 Send(c, t) ==
     /\ Live(c)
@@ -387,7 +418,7 @@ Takes(i) ==
     LET a == row[i].to IN
     /\ D!Take(i)
     /\ proc' = [proc EXCEPT ![a] = IF @ = "idle" THEN "working" ELSE @]
-    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, claimVars, svcVars, wrong>>
+    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, claimVars, svcVars, wrong, ending>>
 
 \* The transport by the target: the stream to a delegate, the typed write to
 \* a main session. Its waiter is Delivery.tla's and Delegate.tla's; one
@@ -421,10 +452,13 @@ ClaimTaken(c, t) ==
     /\ proc[t] \in {"stuck", "dead", "idle"}
     /\ MayFix(c, t) /\ Stoppable(t)
     /\ Cl(ClaimBreak(c))!Take(c, t, Kind(t))
-    /\ UNCHANGED <<up, restarts, agentVars, svcVars, wrong, dvars>>
+    /\ UNCHANGED <<up, restarts, agentVars, svcVars, wrong, ending, dvars>>
 
 \* The claim is current, and the target is in the state its fix needs.
-CanAct(r) == Cl(ClaimBreak(r.by))!Current(r) /\ proc[r.t] = Needs[r.act]
+\* A row whose end is asked is never resumed: Sessions starts no name stopping or ended.
+CanAct(r) == /\ Cl(ClaimBreak(r.by))!Current(r) /\ proc[r.t] = Needs[r.act]
+             /\ r.t \notin ending \/ Break = "ResumeEnding"
+
 
 \* The fix acts on the state it claimed. An interrupt or a resume may not
 \* help; the state is then still claimed. An interrupt that helps ends the
@@ -447,22 +481,23 @@ FixActs(r) ==
                [] OTHER -> UNCHANGED dvars
        \/ (r.act # "stop" /\ UNCHANGED <<proc, epoch, life, turned, dvars>>)
     /\ wrong' = wrong \cup (IF epoch[r.t] = r.s THEN {} ELSE {"stale"})
-    /\ UNCHANGED <<up, restarts, faults, svcVars>>
+                       \cup (IF r.t \in ending THEN {"resume ending"} ELSE {})
+    /\ UNCHANGED <<up, restarts, faults, svcVars, ending>>
 
 FixRefused(r) ==
     /\ up /\ ~CanAct(r) /\ Cl("none")!LetGo(r)
-    /\ UNCHANGED <<up, restarts, agentVars, svcVars, wrong, dvars>>
+    /\ UNCHANGED <<up, restarts, agentVars, svcVars, wrong, ending, dvars>>
 
 \* A restart cut off the call: the claim ends, and its fix is never sent again.
 ClaimSettled(r) ==
     /\ up /\ Cl("none")!Settle(r)
-    /\ UNCHANGED <<up, restarts, agentVars, svcVars, wrong, dvars>>
+    /\ UNCHANGED <<up, restarts, agentVars, svcVars, wrong, ending, dvars>>
 
 -----------------------------------------------------------------------------
 (* Services: one owner; fixed by it or its parent; handed along an edge; *)
 (* ended with the owner, or kept for its parent                          *)
 
-svcOthers == <<up, restarts, agentVars, claimVars, dvars>>
+svcOthers == <<up, restarts, agentVars, claimVars, ending, dvars>>
 
 ServiceStarts(a, s) ==
     /\ up /\ svc[s] = "none" /\ Live(a)
@@ -509,6 +544,7 @@ Next ==
     \/ \E c \in Agents, o \in Operators : Send(c, o)
     \/ \E a \in Agents : Ask(a)
     \/ \E c \in Actors, m \in Mains : MainEnds(c, m)
+    \/ \E m \in Mains : EndTerm(m) \/ EndSettled(m)
     \/ \E o \in Operators, i \in Ids, t \in Agents : Answers(o, i, t)
     \/ \E i \in Ids : Mailboxes(i)
     \/ \E r \in calls : FixActs(r) \/ FixRefused(r)
@@ -526,6 +562,7 @@ Fairness ==
     /\ WF_vars(\E r \in calls : FixActs(r) \/ FixRefused(r))
     /\ WF_vars(\E r \in claims : ClaimSettled(r))
     /\ \A s \in Services : WF_vars(ServiceOwnerEnded(s))
+    /\ \A m \in Mains : WF_vars(EndTerm(m)) /\ WF_vars(EndSettled(m))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -540,6 +577,7 @@ TypeOK ==
     /\ twice \in BOOLEAN /\ cut \subseteq Agents \X (0..MaxEpoch)
     /\ svc \in [Services -> {"none", "running", "ended"}]
     /\ owner \in [Services -> Agents \cup {None}]
+    /\ ending \subseteq Mains
     /\ \A i \in Ids : row[i].st # "none" => row[i].from \in Actors \cup {D!Framework} \cup Agents
     /\ D!TypeOK
 
@@ -603,6 +641,12 @@ MainFixedByOperatorOnly == \A r \in claims : r.t \in Mains => r.by \in Operators
 MainEndedByOperator == "end by agent" \notin wrong
 MainEndedIdle == "end busy" \notin wrong
 NoDelegateWithoutParent == \A d \in Delegates : proc[Main(d)] = "ended" => proc[d] = "ended"
+
+\* No resume takes a main session whose end is asked.
+NoResumeOfEnding == "resume ending" \notin wrong
+
+\* An end asked ends the row, with no second call, across a restart.
+EndAskedEnds == \A m \in Mains : m \in ending ~> proc[m] = "ended"
 
 \* A running service has one owner; an ended one has none.
 OneOwner ==

@@ -28,14 +28,19 @@ defmodule CodingAgentFramework.Sessions.Table do
   recovery gives the same launch (F-133's new-3). `release` is the Claude Code release an
   interactive start launched, as its `--version` reads, or NULL when it was not read.
   `dialog` is the startup dialog the start's pane shows, or showed last, as JSON (`kind`,
-  `options`, `selected`, and the imports dialog's `paths`), and `answers` each kind's answer as
-  JSON (`kind => {label, mark}`, `mark` one of `pressing`, `sent`, `unknown`); both NULL until a
-  start meets a dialog (`CodingAgentFramework.Sessions.Dialog`).
+  `options`, `selected`, and the imports dialog's `paths` and `shortened`), and `answers` each
+  kind's answer as JSON (`kind => {label, mark, act, cleared}`, `mark` one of `pressing`, `sent`,
+  `unknown`, `cut` and `cleared`, F-144); both NULL until a start meets a dialog
+  (`CodingAgentFramework.Sessions.Dialog`).
 
   **A move** (F-133, `Mover`): `move` is the move's phase (`draining`, `stopping`, `copying`,
   `resuming`), NULL when no move is under way; `move_from` and `move_to` the accounts it goes
   between, `move_act` its row in `Acts`, and `move_deadline` (wall-clock ms) when a move not yet
   past its stop is given up. A start writes none of them, so a move's resume keeps them.
+
+  **An end** (F-143's new-4): `end_asked` is when a main session's end (`Sessions.end_main/3`)
+  asked its stop, wall-clock ms, NULL otherwise; a stop of it that answered unknown leaves it,
+  so the settle ends the row once its process is gone.
 
   **Indexes.** Nothing is pruned (an ended delegate keeps its row), so each hot read has one:
   by name (the unique key), by status (each settle), by cwd (a start's check that no other
@@ -58,7 +63,7 @@ defmodule CodingAgentFramework.Sessions.Table do
   @columns ~w(id host name kind parent project socket account role cwd resume status reason
               viewer pid session_id proc_start started_at updated_at deadline repo branch
               worktree options model release move move_from move_to move_act move_deadline
-              dialog answers)a
+              dialog answers end_asked)a
 
   @schema """
   CREATE TABLE IF NOT EXISTS agents (
@@ -68,7 +73,7 @@ defmodule CodingAgentFramework.Sessions.Table do
     proc_start TEXT, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deadline INTEGER,
     repo TEXT, branch TEXT, worktree TEXT, options TEXT, model TEXT, release TEXT, move TEXT,
     move_from TEXT, move_to TEXT, move_act INTEGER, move_deadline INTEGER, dialog TEXT,
-    answers TEXT, UNIQUE (host, name));
+    answers TEXT, end_asked INTEGER, UNIQUE (host, name));
   CREATE INDEX IF NOT EXISTS agents_status ON agents (host, status);
   CREATE INDEX IF NOT EXISTS agents_cwd ON agents (host, cwd);
   CREATE INDEX IF NOT EXISTS agents_parent ON agents (host, parent);
@@ -77,7 +82,7 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   # The columns a later build added to `agents`, so added if missing: the release a session
   # runs (R8), a move's phase on the row (F-133), the model (F-136), and a startup dialog and
-  # its answers (F-140).
+  # its answers (F-140), and an end asked (F-144).
   @added [
     agents: [
       "release TEXT",
@@ -88,7 +93,8 @@ defmodule CodingAgentFramework.Sessions.Table do
       "move_act INTEGER",
       "move_deadline INTEGER",
       "dialog TEXT",
-      "answers TEXT"
+      "answers TEXT",
+      "end_asked INTEGER"
     ]
   ]
 
@@ -169,7 +175,16 @@ defmodule CodingAgentFramework.Sessions.Table do
       old =
         @columns --
           ([:kind, :parent, :project, :release, :model] ++
-             [:move, :move_from, :move_to, :move_act, :move_deadline, :dialog, :answers])
+             [
+               :move,
+               :move_from,
+               :move_to,
+               :move_act,
+               :move_deadline,
+               :dialog,
+               :answers,
+               :end_asked
+             ])
 
       Store.transaction(db, fn ->
         Store.query(
@@ -216,7 +231,7 @@ defmodule CodingAgentFramework.Sessions.Table do
 
     reset =
       "reason = NULL, viewer = NULL, pid = NULL, proc_start = NULL, worktree = NULL, " <>
-        "dialog = NULL, answers = NULL"
+        "dialog = NULL, answers = NULL, end_asked = NULL"
 
     sets =
       Enum.map_join(keys -- [:host, :name], ",", &"#{&1} = excluded.#{&1}") <>
@@ -250,7 +265,7 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   @doc """
   Sets `fields` (status, reason, viewer, pid, session_id, proc_start, deadline, worktree,
-  parent, project, dialog, answers, and a move's `move`, `move_from`, `move_to`, `move_act`, `move_deadline`) on
+  parent, project, dialog, answers, end_asked, and a move's `move`, `move_from`, `move_to`, `move_act`, `move_deadline`) on
   row `id`.
   """
   @spec update(db, integer, keyword) :: :ok
