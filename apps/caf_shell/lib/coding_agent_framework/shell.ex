@@ -69,7 +69,7 @@ defmodule CodingAgentFramework.Shell do
   """
   @spec command(Host.t(), String.t(), [String.t()]) ::
           {:ok, {String.t(), [String.t()]}} | {:refused, term}
-  def command(%Host{reach: reach}, path, args) do
+  def command(%Host{reach: reach} = host, path, args) do
     cond do
       Path.type(path) != :absolute ->
         {:refused, {:not_absolute, path}}
@@ -80,7 +80,7 @@ defmodule CodingAgentFramework.Shell do
       true ->
         {:ssh, ssh, destination} = reach
         remote = Enum.map_join([path | args], " ", &shell_quote/1)
-        {:ok, {ssh, ["-o", "BatchMode=yes", "--", destination, remote]}}
+        {:ok, {ssh, Host.ssh_options(host) ++ ["-o", "BatchMode=yes", "--", destination, remote]}}
     end
   end
 

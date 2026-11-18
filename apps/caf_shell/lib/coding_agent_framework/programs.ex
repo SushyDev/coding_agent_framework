@@ -4,7 +4,8 @@ defmodule CodingAgentFramework.Programs do
   and gh, rsync, ssh and flock (a copy's sync), and the POSIX tools sh, sleep, rm, kill, env,
   ps, cat, tail, head, mkdir and mkfifo (a headless delegate's stdin is a FIFO), wc (a service's log
   offset at its start), nc (a service's port wait), lsof (whether a forward's own ssh holds
-  its local port) and curl (a main session's waiter hook, `Intake.waiter_hook/5`).
+  its local port), curl (a main session's waiter hook, `Intake.waiter_hook/5`) and ssh_keygen
+  (`ssh-keygen`, which git signs and checks a commit with, `CodingAgentFramework.ToolHome`).
 
   The paths are found once, by the host's own shell (`command -v`), so no later call looks a
   program up through a `PATH`: a long `PATH` searched on the VM's file server slowed every file
@@ -60,6 +61,7 @@ defmodule CodingAgentFramework.Programs do
           | :wc
           | :lsof
           | :curl
+          | :ssh_keygen
   @type os :: :darwin | :linux | :unknown
   @type t :: %__MODULE__{host: Host.t(), paths: %{name => String.t()}, os: os}
 
@@ -86,7 +88,8 @@ defmodule CodingAgentFramework.Programs do
     :nc,
     :wc,
     :lsof,
-    :curl
+    :curl,
+    :ssh_keygen
   ]
   # The one fixed path in the library: `find/3` needs a shell to find the rest, sh included.
   @sh "/bin/sh"
@@ -153,6 +156,9 @@ defmodule CodingAgentFramework.Programs do
     end
   end
 
+  # A name's program on the host: `ssh_keygen` is `ssh-keygen`.
+  defp command(name), do: name |> Atom.to_string() |> String.replace("_", "-")
+
   # What `uname -s` prints on each kernel the framework knows.
   defp os_named("Darwin"), do: :darwin
   defp os_named("Linux"), do: :linux
@@ -174,7 +180,7 @@ defmodule CodingAgentFramework.Programs do
   def find(%Host{} = host, names, opts \\ [timeout: 10_000]) do
     with [] <- names -- @names,
          {:ok, %{status: 0, output: out}} <-
-           Shell.run(host, @sh, ["-c", @find, "sh" | Enum.map(names, &Atom.to_string/1)], opts) do
+           Shell.run(host, @sh, ["-c", @find, "sh" | Enum.map(names, &command/1)], opts) do
       lines = for l <- String.split(out, "\n", trim: true), do: String.split(l, "\t", parts: 2)
       os = Enum.find_value(lines, :unknown, fn l -> with ["os", os] <- l, do: os_named(os) end)
 
@@ -183,7 +189,7 @@ defmodule CodingAgentFramework.Programs do
             name != "os",
             absolute?(path),
             into: %{},
-            do: {String.to_existing_atom(name), path}
+            do: {String.to_existing_atom(String.replace(name, "-", "_")), path}
 
       case Enum.reject(names, &Map.has_key?(found, &1)) do
         [] -> {:ok, %__MODULE__{host: host, paths: found, os: os}}

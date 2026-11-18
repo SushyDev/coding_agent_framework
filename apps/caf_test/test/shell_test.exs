@@ -45,6 +45,12 @@ defmodule CodingAgentFramework.ShellTest do
              Shell.command(box, "/run/x", ["a;b", "$HOME", "K=v w"])
 
     assert remote == "'/run/x' 'a;b' '$HOME' 'K=v w'"
+
+    # F-155: the home's ssh config and known hosts go before the destination.
+    home = ["-F", "/caf/ssh/config", "-o", "UserKnownHostsFile=/caf/ssh/known_hosts"]
+    box = Host.ssh("box", "/run/bin/ssh", "agent@box", program!(:kill), options: home)
+    assert {:ok, {"/run/bin/ssh", args}} = Shell.command(box, "/run/x", [])
+    assert args == home ++ ["-o", "BatchMode=yes", "--", "agent@box", "'/run/x'"]
   end
 
   test "programs are found as absolute paths by the host's shell" do

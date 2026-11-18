@@ -41,6 +41,7 @@ defmodule CafExample.MixProject do
       {:caf_shell, in_umbrella: true},
       {:caf_stream, in_umbrella: true},
       {:caf_tmux, in_umbrella: true},
+      {:caf_tool_home, in_umbrella: true},
       {:caf_tracker, in_umbrella: true},
       {:caf_transcripts, in_umbrella: true},
       {:caf_usage, in_umbrella: true},

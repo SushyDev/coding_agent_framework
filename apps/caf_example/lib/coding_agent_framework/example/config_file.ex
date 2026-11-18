@@ -18,7 +18,8 @@ defmodule CodingAgentFramework.Example.ConfigFile do
             "cap": 2
           }
         },
-        "scheduler": {"resources": {"seat": 4, "slot": 2}}
+        "scheduler": {"resources": {"seat": 4, "slot": 2}},
+        "git": {"name": "Demo Bot", "email": "1234+me@users.noreply.github.com"}
       }
 
   - `home` (required): the framework home, an absolute path. Each account's Claude config
@@ -29,15 +30,24 @@ defmodule CodingAgentFramework.Example.ConfigFile do
     cloned from, never the person's own clone), its `trunk`, the `branches` a delegate's branch
     must match (a regular expression) and `cap` (how many of one parent's delegates at once),
     and optionally `mains` (the main session names it declares), `setup` (argvs, each program
-    an absolute path; none by default), `setup_timeout` (ms, 600 000 by default) and `env` (the
-    environment git and the setup run in, built from nothing; by default `HOME` from the
-    environment and `PATH` `/usr/bin:/bin`, so git finds `ssh`).
+    an absolute path; none by default), `setup_timeout` (ms, 600 000 by default), `env` (the
+    environment git and the setup run in, built from nothing, beside the home's tool state; by
+    default `HOME` from the environment and `PATH` devenv's programs' directories, then
+    `/usr/bin:/bin`) and `git`, an override of the home's `git` author: any of `name`, `email`
+    and `signing_key`.
+  - `git`: the author every agent commits as (F-155), `name` and `email`, distinct from the
+    person, who pushes with their own GitHub login (`bin/caf-login --gh`); and `signing_key`,
+    the file name of the key in `<home>/git/` its commits are signed with (`signing_key` by
+    default, which `bin/caf-login --git` makes). GitHub shows a commit Verified when that key
+    is a signing key of the account and `email` one of its verified emails. Without it, git
+    refuses an agent's commit.
   - `scheduler`: `resources` (name to capacity, `seat` 4 and `slot` 2 by default), `lease` (a
     delegate's start, `{"seat": 1}`), `job_lease` (by class `heavy`, `builder`, `landing`, a
     slot each). A landing's lock `land:<project>` is the app's, so no resource may take that name.
   - `launch`: what every agent's launch shares: `claude` (by default devenv's, `CAF_CLAUDE`),
-    `model` (a main session's, `opus`), and its environment, `home` (`HOME`), `path`
-    (`/usr/bin:/bin:/usr/sbin:/sbin`, so Claude Code finds macOS's `security` for its Keychain),
+    `model` (a main session's, `opus`), and its environment, `home` (`HOME`), `path` (devenv's
+    programs' directories, then `/usr/bin:/bin:/usr/sbin:/sbin`, so a session's tools are
+    devenv's and Claude Code still finds macOS's `security` for its Keychain),
     `term` (`xterm-256color`) and `lang` (`en_US.UTF-8`).
   - `instance` (`example`), `operator` (`operator`) and `interval` (ms, 2 000).
 
@@ -63,10 +73,11 @@ defmodule CodingAgentFramework.Example.ConfigFile do
   """
 
   alias CodingAgentFramework.Example.Config
-  alias CodingAgentFramework.Programs
+  alias CodingAgentFramework.{Programs, ToolHome}
 
-  @top ~w(home instance accounts ports projects scheduler launch operator interval)
-  @project ~w(origin trunk mains branches cap setup setup_timeout env)
+  @top ~w(home instance accounts ports projects scheduler launch operator interval git)
+  @project ~w(origin trunk mains branches cap setup setup_timeout env git)
+  @git ~w(name email signing_key)
   @launch ~w(claude model home path term lang)
   @scheduler ~w(resources lease job_lease)
   @classes %{"heavy" => :heavy, "builder" => :builder, "landing" => :landing}
@@ -104,11 +115,13 @@ defmodule CodingAgentFramework.Example.ConfigFile do
          {:ok, instance} <- name(data, "instance", "example", @short),
          {:ok, operator} <- name(data, "operator", "operator", @agent),
          {:ok, interval} <- positive(data, "interval", 2_000),
-         {:ok, projects} <- projects(Map.get(data, "projects", %{}), env),
+         {:ok, projects} <- projects(Map.get(data, "projects", %{}), env, home),
          {:ok, mains} <- mains(projects, operator),
          :ok <- reserved(scheduler.resources),
+         {:ok, author} <- git(Map.get(data, "git"), home, "git", true),
          {:ok, programs} <- programs(env) do
-      projects = Map.new(projects, fn {n, p} -> {n, Map.delete(p, :mains)} end)
+      git = %{author: author, projects: for({n, %{git: g}} <- projects, g, into: %{}, do: {n, g})}
+      projects = Map.new(projects, fn {n, p} -> {n, Map.drop(p, [:mains, :git])} end)
 
       Config.new(
         home: home,
@@ -121,6 +134,7 @@ defmodule CodingAgentFramework.Example.ConfigFile do
         main_model: launch.model,
         projects: projects,
         mains: mains,
+        git: git,
         operator: operator,
         interval: interval,
         resources: scheduler.resources,
@@ -182,7 +196,7 @@ defmodule CodingAgentFramework.Example.ConfigFile do
       "claude" => env["CAF_CLAUDE"],
       "model" => "opus",
       "home" => env["HOME"],
-      "path" => "/usr/bin:/bin:/usr/sbin:/sbin",
+      "path" => devenv_path(env, ~w(/usr/bin /bin /usr/sbin /sbin)),
       "term" => "xterm-256color",
       "lang" => "en_US.UTF-8"
     }
@@ -260,20 +274,20 @@ defmodule CodingAgentFramework.Example.ConfigFile do
     end
   end
 
-  defp projects(projects, env) when is_map(projects) do
+  defp projects(projects, env, home) when is_map(projects) do
     Enum.reduce_while(Enum.sort(projects), {:ok, %{}}, fn {name, p}, {:ok, acc} ->
-      case project(name, p, env) do
+      case project(name, p, env, home) do
         {:ok, p} -> {:cont, {:ok, Map.put(acc, name, p)}}
         refused -> {:halt, refused}
       end
     end)
   end
 
-  defp projects(_, _env), do: {:refused, {"projects", :not_an_object}}
+  defp projects(_, _env, _home), do: {:refused, {"projects", :not_an_object}}
 
-  defp project(name, p, env) do
+  defp project(name, p, env, home) do
     at = "projects.#{name}."
-    default_env = %{"HOME" => env["HOME"], "PATH" => "/usr/bin:/bin"}
+    default_env = %{"HOME" => env["HOME"], "PATH" => devenv_path(env, ~w(/usr/bin /bin))}
 
     with true <- name =~ @short or {:refused, {"projects." <> name, :not_a_name}},
          :ok <- known(p, @project, at),
@@ -284,6 +298,7 @@ defmodule CodingAgentFramework.Example.ConfigFile do
          {:ok, setup} <- setup(Map.get(p, "setup", []), at),
          {:ok, timeout} <- positive(p, "setup_timeout", 600_000, at),
          {:ok, project_env} <- project_env(Map.get(p, "env", default_env), at),
+         {:ok, git} <- git(p["git"], home, at <> "git", false),
          {:ok, mains} <- names(Map.get(p, "mains", []), at <> "mains") do
       {:ok,
        %{
@@ -294,7 +309,8 @@ defmodule CodingAgentFramework.Example.ConfigFile do
          setup: setup,
          setup_timeout: timeout,
          env: project_env,
-         mains: mains
+         mains: mains,
+         git: git
        }}
     end
   end
@@ -363,6 +379,59 @@ defmodule CodingAgentFramework.Example.ConfigFile do
 
   # The project that names `name` last, where the refusal points.
   defp project_of(all, name), do: all |> Enum.reverse() |> List.keyfind(name, 0) |> elem(1)
+
+  # The author agents commit as (F-155): the home's, whole, or a project's override of any of
+  # its fields. A signing key is a file name in `<home>/git/`, `signing_key` for the home's.
+  defp git(nil, _home, _at, _whole), do: {:ok, nil}
+
+  defp git(git, home, at, whole) do
+    defaults = if whole, do: %{"signing_key" => "signing_key"}, else: %{}
+
+    with :ok <- known(git, @git, at <> "."),
+         git = Map.merge(defaults, git),
+         true <-
+           (whole and Map.has_key?(git, "name")) or not whole or
+             {:refused, {at <> ".name", :missing}},
+         true <-
+           (whole and Map.has_key?(git, "email")) or not whole or
+             {:refused, {at <> ".email", :missing}} do
+      Enum.reduce_while(git, {:ok, %{}}, fn {key, v}, {:ok, acc} ->
+        case {key, v} do
+          {"signing_key", v} when is_binary(v) ->
+            if v =~ ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/,
+              do: {:cont, {:ok, Map.put(acc, :signing_key, ToolHome.signing_key(home, v))}},
+              else: {:halt, {:refused, {at <> ".signing_key", :not_a_file_name}}}
+
+          {"email", v} when is_binary(v) ->
+            if v =~ ~r/\A[^\s<>@]+@[^\s<>@]+\z/,
+              do: {:cont, {:ok, Map.put(acc, :email, v)}},
+              else: {:halt, {:refused, {at <> ".email", :not_an_email}}}
+
+          {"name", v} ->
+            if text?(v),
+              do: {:cont, {:ok, Map.put(acc, :name, v)}},
+              else: {:halt, {:refused, {at <> ".name", :not_a_string}}}
+
+          {key, _} ->
+            {:halt, {:refused, {at <> "." <> key, :not_a_string}}}
+        end
+      end)
+    end
+  end
+
+  # The directories of devenv's programs, first on a launch's and a project's `PATH`, so a
+  # session's Bash tool, git and the setup run devenv's programs, never the system's (F-155).
+  # The system's own directories come last: macOS's `security`, which Claude Code reads its
+  # login with, is in none of devenv's.
+  defp devenv_path(env, system) do
+    Programs.names()
+    |> Enum.map(&env["CAF_" <> String.upcase(to_string(&1))])
+    |> Enum.filter(&absolute?/1)
+    |> Enum.map(&Path.dirname/1)
+    |> Kernel.++(system)
+    |> Enum.uniq()
+    |> Enum.join(":")
+  end
 
   # The CA bundle every launch passes on (F-151): what devenv sets in the app's own environment,
   # since Claude Code's Node finds devenv's certificates in none of its own places.

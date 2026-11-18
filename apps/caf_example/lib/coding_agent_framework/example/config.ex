@@ -13,7 +13,8 @@ defmodule CodingAgentFramework.Example.Config do
   - `workstation`: the workstation's host name, and `programs`, the absolute path of each
     program there (`CodingAgentFramework.Programs`);
   - `hosts`: the other hosts, name to `%{programs: programs, dir: dir}` as `Jobs` and `Services`
-    read them; none by default;
+    read them, each host reached by `Host.ssh/5` with the home's `ToolHome.ssh_options/1`;
+    none by default;
   - `accounts`: the Claude accounts' names;
   - `projects`: name to the project, as `CodingAgentFramework.Mains` takes it: its `origin`
     (the repository its stacks land on, which its checkout is cloned from), `trunk`, `setup`,
@@ -29,7 +30,13 @@ defmodule CodingAgentFramework.Example.Config do
     this app acting from outside the tree; `"operator"` by default. It is no agent's name, nor
     `framework`;
   - `ports`: `%{intake: port, mcp: port}` on 127.0.0.1;
-  - `claude` and `env`: what every agent's launch shares (`CodingAgentFramework.ClaudeCLI`);
+  - `git`: `%{author: author, projects: %{project => override}}`, the author every agent
+    commits as and signs with, and a project's own (`CodingAgentFramework.ToolHome.prepare/2`,
+    F-155); no author by default, when git refuses an agent's commit;
+  - `claude` and `env`: what every agent's launch shares (`CodingAgentFramework.ClaudeCLI`); at
+    its start the app adds `env`'s `:tools`, where gh, git and ssh keep their state in the home
+    (`ToolHome.env/2`), to every launch, every project's `env` and the workstation's jobs and
+    services;
     `tool_timeout` and `margin`, Claude Code's MCP tool timeout and what `run_delegate` keeps
     under it;
   - `interval`: ms between the reads of the readers that read on a timer.
@@ -74,6 +81,7 @@ defmodule CodingAgentFramework.Example.Config do
     hosts: %{},
     projects: %{},
     mains: %{},
+    git: %{author: nil, projects: %{}},
     main_model: "opus",
     operator: "operator",
     tool_timeout: 3_600_000,

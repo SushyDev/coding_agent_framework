@@ -25,7 +25,8 @@ defmodule CodingAgentFramework.ClaudeCLI do
   The environment is exactly:
 
   - `CLAUDE_CONFIG_DIR`: the account's own directory, so nothing comes from `~/.claude`;
-  - `HOME`: where Claude Code and the tools it runs (git, gh, ssh) find a person's own files;
+  - `HOME`: the person's home, where macOS's `security` finds the Keychain; gh, git and ssh
+    keep their state in the framework home instead (`:tools` below);
   - `PATH`: how its Bash tool finds the programs a session runs, and on macOS how Claude Code
     finds `security`, which reads its login from the Keychain (in 2.1.322), so the launch's
     `PATH` must hold `/usr/bin`. No `USER` is passed: the Keychain entry is named by `USER`,
@@ -37,6 +38,11 @@ defmodule CodingAgentFramework.ClaudeCLI do
     which reads its own bundle, and a machine whose certificates come from devenv or Nix has them
     in none of the places Node looks, so without it no session reaches the API
     (`UNABLE_TO_GET_ISSUER_CERT_LOCALLY`, F-151). The library never reads its own environment;
+  - where the tools a session runs keep their state, the launch env's `:tools`, as the app gives
+    them (`{name, value}` pairs in order, from `CodingAgentFramework.ToolHome.env/2`):
+    `GH_CONFIG_DIR`, `GIT_CONFIG_GLOBAL`, the `XDG_*_HOME` directories and `GIT_SSH_COMMAND`, all
+    under the framework home, so gh, git and ssh write nothing in the person's own folders
+    (F-155). None may be a name the launch sets itself;
   - `MCP_TOOL_TIMEOUT` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`, both the launch's
     `:tool_timeout` (ms): how long Claude Code waits on one MCP tool call before it gives up,
     in all and with no byte or progress from the server. Claude Code 2.1.322 reads both from
@@ -311,15 +317,36 @@ defmodule CodingAgentFramework.ClaudeCLI do
   defp env(account, opts, options) do
     with {:ok, given} <- given_env(Keyword.get(opts, :env)),
          {:ok, ca} <- ca(Map.get(given, :ca, %{})),
+         {:ok, tools} <- tools(Map.get(given, :tools, [])),
          {:ok, ms} <- tool_timeout(Keyword.get(opts, :tool_timeout)) do
       timeouts = [{"MCP_TOOL_TIMEOUT", ms}, {"CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", ms}]
 
       {:ok,
        [{"CLAUDE_CONFIG_DIR", account.config_dir}] ++
          Enum.map(@env, fn {k, v} -> {v, given[k]} end) ++
-         ca ++ timeouts ++ Enum.sort(Map.get(options, :env, %{})) ++ @fixed}
+         ca ++ tools ++ timeouts ++ Enum.sort(Map.get(options, :env, %{})) ++ @fixed}
     end
   end
+
+  # The names the launch sets itself, which the tools' state may not set again.
+  @own ~w(CLAUDE_CONFIG_DIR HOME PATH TERM LANG MCP_TOOL_TIMEOUT
+          CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT DISABLE_AUTOUPDATER)
+
+  # Where the tools an agent runs keep their state (F-155), as the app gives it: `{name, value}`
+  # pairs, in order, each name of capitals, digits and `_` and none the launch sets itself.
+  defp tools(tools) when is_list(tools) do
+    if Enum.all?(tools, fn
+         {k, v} when is_binary(k) and is_binary(v) ->
+           k =~ ~r/\A[A-Z][A-Z0-9_]*\z/ and k not in @own and not (v =~ ~r/[[:cntrl:]]/)
+
+         _ ->
+           false
+       end),
+       do: {:ok, tools},
+       else: {:refused, {:bad, :tools}}
+  end
+
+  defp tools(_), do: {:refused, {:bad, :tools}}
 
   # The CA bundle's variables, as the app gives them: a name of capitals, digits and `_`, and an
   # absolute path with no control character.

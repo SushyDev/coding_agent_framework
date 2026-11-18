@@ -51,8 +51,10 @@ defmodule CodingAgentFramework.Copies.Held do
   a `Holder` of `<dir>/<kind>` on the host whose shell runs wait `timeout` ms and its records
   (`procs`, a `Holder.Process`; the host's programs then name ps, kill and sleep), `dir` and `base`
   (`<dir>/<kind>/<name>`, for the caller's own files). `config` holds `:hosts`, each host's
-  name to `%{programs: programs, dir: dir}`, and `:copies`, the `Copies` server. `run` names
-  the copy's turn; `name` the socket.
+  name to `%{programs: programs, dir: dir}` and optionally `env`, the environment every
+  program held on that host runs in before its own (`{name, value}` pairs: the home's tool
+  state, `CodingAgentFramework.ToolHome.env/2`, and the host's `PATH`, F-155), and `:copies`,
+  the `Copies` server. `run` names the copy's turn; `name` the socket.
 
       iex> {:refused, {:no_host, "box"}} =
       ...>   CodingAgentFramework.Copies.Held.context(%{hosts: %{}, copies: nil},
@@ -60,7 +62,7 @@ defmodule CodingAgentFramework.Copies.Held do
   """
   @spec context(map, where, timeout :: pos_integer) :: {:ok, ctx} | {:refused, term}
   def context(%{hosts: hosts, copies: copies}, where, timeout) do
-    with {:ok, %{programs: programs, dir: dir}} <- host(hosts, where.host),
+    with {:ok, %{programs: programs, dir: dir} = on} <- host(hosts, where.host),
          copy = %{programs: programs, dir: dir, project: where.project, name: where.copy},
          {:ok, {path, _lock}} <- Copies.place(copy),
          kind_dir = Path.join(dir, where.kind),
@@ -71,6 +73,7 @@ defmodule CodingAgentFramework.Copies.Held do
          copies: copies,
          copy: copy,
          programs: programs,
+         env: Map.get(on, :env, []),
          holder: holder,
          procs: procs,
          path: path,
@@ -150,7 +153,8 @@ defmodule CodingAgentFramework.Copies.Held do
 
   @doc """
   Holds `sh -c script args… argv…` on the context's socket under `Holder.Process.hold/4`, which
-  writes the record of its pid and start time first, in the environment `env`, and
+  writes the record of its pid and start time first, in the host's environment and then `env`
+  (a name in both takes `env`'s value), and
   answers dtach's reply as `CodingAgentFramework.Holder.hold/4` does. `args` begins with the
   script's `$0`.
   """
@@ -158,7 +162,9 @@ defmodule CodingAgentFramework.Copies.Held do
           {:ok, String.t()} | {:refused, term} | {:unknown, term}
   def hold(ctx, script, args, argv, env) do
     wrapper = [ctx.programs.paths.sh, "-c", script | args]
-    Holder.Process.hold(ctx.procs, ctx.name, wrapper ++ argv, env: env)
+    names = MapSet.new(env, &elem(&1, 0))
+    host = Enum.reject(Map.get(ctx, :env, []), &MapSet.member?(names, elem(&1, 0)))
+    Holder.Process.hold(ctx.procs, ctx.name, wrapper ++ argv, env: host ++ env)
   end
 
   @doc """

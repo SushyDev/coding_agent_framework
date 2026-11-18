@@ -52,7 +52,7 @@ defmodule CodingAgentFramework.Services do
 
   use GenServer
 
-  alias CodingAgentFramework.{Acts, Grants, Holder, Programs, Reader, Shell}
+  alias CodingAgentFramework.{Acts, Grants, Holder, Host, Programs, Reader, Shell}
   alias CodingAgentFramework.Copies.Held
   alias CodingAgentFramework.Services.Table
 
@@ -870,9 +870,12 @@ defmodule CodingAgentFramework.Services do
          :ok <- if(dead_first, do: forward_dead(ws, name), else: :ok),
          {:ok, row} <- put_row(s, name, fields, expect) do
       %{sh: sh, mkdir: mkdir} = ws.programs.paths
-      {:ssh, ssh, destination} = s.config.hosts[row.host].programs.host.reach
+      %{reach: {:ssh, ssh, destination}} = host = s.config.hosts[row.host].programs.host
       spec = "127.0.0.1:#{row.local}:127.0.0.1:#{row.port}"
-      options = ["-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes"]
+
+      options =
+        Host.ssh_options(host) ++ ["-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes"]
+
       argv = [ssh, "-N" | options] ++ ["-L", spec, "--", destination]
       env = Map.get(s.config.hosts[row.host], :ssh_env, [])
 
