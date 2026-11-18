@@ -98,6 +98,39 @@ defmodule CodingAgentFramework.MailboxTest do
     assert %{status: "queued"} = Table.get(ctx.mtable, next)
   end
 
+  # F-165: "since the end" is read from the agent row's end time, never its last write. A brief
+  # stored in the end's own millisecond, and a write to the row after both (as the migration's
+  # hand-over writes a parent to a row that ended), leave a later start's brief queued.
+  test "a brief stored since the end waits, whatever writes the agent row after it", ctx do
+    {sid, brief} = started(ctx, "d1")
+    until_taken(ctx, ["message #{brief}"])
+    {:ok, _} = Stream.end_session(ctx.stream, sid)
+
+    {:ok, _} =
+      await(fn ->
+        Sessions.cue(ctx.sessions, %{topic: "stream:test", ids: []})
+        ok_ended(Sessions.ended(ctx.sessions, "d1"))
+      end)
+
+    %{id: row, ended_at: at} = Sessions.Table.get(ctx.table, "test", "d1")
+    {:ok, {:queued, next}} = Mailbox.brief(mailbox(ctx), "main", "d1", "Again.", Stream.uuid())
+    Table.update(ctx.mtable, next, created_at: at)
+    Sessions.Table.update(ctx.table, row, parent: "main", project: "app")
+    assert %{ended_at: ^at, updated_at: later} = Sessions.Table.get(ctx.table, "test", "d1")
+    assert later >= at
+
+    # The message is ended at a cue that read the brief again; the brief still waits.
+    assert {:ok, {:queued, m}} = Mailbox.message(ctx.mailbox, "main", "d1", "later")
+    {:ok, _} = until(ctx, m, &(&1.status == "ended"))
+    assert %{status: "queued"} = Table.get(ctx.mtable, next)
+
+    # A brief stored before the end is the ended start's: ended.
+    old = %{from: "main", to: "d1", text: "Old.", uuid: Stream.uuid(), kind: "brief"}
+    early = Table.store(ctx.mtable, old)
+    Table.update(ctx.mtable, early, created_at: at - 1)
+    {:ok, _} = until(ctx, early, &(&1.status == "ended"))
+  end
+
   # Sessions settles the stopped row at a cue; until then the end is refused.
   defp ok_ended({:ok, :ended} = ok), do: ok
   defp ok_ended(_), do: nil

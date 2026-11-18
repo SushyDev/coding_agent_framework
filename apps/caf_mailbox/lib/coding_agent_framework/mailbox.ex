@@ -957,7 +957,7 @@ defmodule CodingAgentFramework.Mailbox do
 
     cond do
       Agents.ended?(srow) ->
-        {:ended, srow.updated_at}
+        {:ended, srow.ended_at}
 
       # A move under way (Move.tla's MarkWhileEnding): no row that would start a turn goes in
       # until the session runs on the other account; a waiting call's answer still may.
@@ -991,10 +991,11 @@ defmodule CodingAgentFramework.Mailbox do
 
   # An agent that ended takes nothing: no process of it runs again (EndedNotDelivered). A brief
   # stored since its end is a later start's, stored before `Sessions` writes that start, and
-  # waits for it.
+  # waits for it. "Since" is read from the end's own time, which only the end writes, never the
+  # row's last write (F-165).
   defp deliver(s, rows, {:ended, at}) do
     for %{status: "queued"} = m <- rows,
-        m.kind != "brief" or m.created_at <= at,
+        m.kind != "brief" or before_end?(m, at),
         do: write(s, m, status: "ended")
 
     s
@@ -1036,6 +1037,14 @@ defmodule CodingAgentFramework.Mailbox do
         interactive(s, m, srow, waiter?(s, srow))
     end
   end
+
+  # Both times are wall-clock milliseconds, so within the end's own millisecond the order is
+  # not known. A brief there waits: a later start's brief may follow its end that closely, and
+  # a start's own brief cannot go unsent and its start end within one millisecond (a refused
+  # start's brief is settled by `ended/3` instead). An end with no time yet (a file an earlier
+  # build wrote, until `Sessions` opens it) ends no brief.
+  defp before_end?(m, at) when is_integer(at), do: m.created_at < at
+  defp before_end?(_m, nil), do: false
 
   defp interactive(s, m, srow, {:ok, true}), do: hand(s, m, srow)
 
