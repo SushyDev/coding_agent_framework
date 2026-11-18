@@ -333,15 +333,21 @@ defmodule CodingAgentFramework.Mailbox.Transport.Launch do
   start that runs, or one whose answer is unknown, waits for the transcript.
 
   The text carries the row's uuid on a last line of its own, as a waiter's does
-  (`Transport.Waiter.text/2`), and the transcript's user line with it is the delivery. With no
-  such line, the row is due again once the process of the start is gone, or the take bound
-  has passed since the start's answer (`sent_at`; at the mark, the start's own deadline, so a
-  restart before the answer waits for it). A transcript that could not be read decides nothing.
+  (`Transport.Waiter.text/2`). The delivery is the launch's own line (`seen/2`): a user line
+  whose text is the prompt, its mark last, as Claude Code 2.1.322 writes the first turn of a
+  start (`promptSource` `typed`); never a waiter's `Stop hook blocking error` line, which would
+  be a second delivery.
+
+  With no such line, the row is due again only once no process of the start runs. No bound
+  stands for the take: a startup dialog (the trust dialog, the imports dialog) holds the first
+  turn until a person answers it, minutes or more, and the row is never handed to another
+  transport while its process lives (F-153's new-1; `Delivery.tla`'s `SettleSeen` and
+  `Break_Delivery_LaunchBound`). A transcript that could not be read decides nothing.
 
       iex> alias CodingAgentFramework.Mailbox.Transport.Launch
       iex> Launch.settle(%{sent_at: 0}, %{seen: :taken, gone: true, now: 0, bound: 10_000})
       :delivered
-      iex> Launch.settle(%{sent_at: 0}, %{seen: :none, gone: false, now: 5_000, bound: 10_000})
+      iex> Launch.settle(%{sent_at: 0}, %{seen: :none, gone: false, now: 3_600_000, bound: 10_000})
       :keep
       iex> Launch.settle(%{sent_at: 0}, %{seen: :none, gone: true, now: 5_000, bound: 10_000})
       :again
@@ -354,14 +360,52 @@ defmodule CodingAgentFramework.Mailbox.Transport.Launch do
   def text(text, uuid), do: Waiter.text(text, uuid)
 
   @doc """
-  Settles `row` by `evidence`: `%{seen: Waiter.seen/2's answer | :unread, gone: whether no
-  process of the start runs, now: wall-clock ms, bound: the take bound}`.
+  What the transcript `bytes` (whole lines) show of the launch of the row under `uuid`:
+  `:taken` for a user line whose text ends with its mark, else `:none`. A queued line or a
+  waiter's line (its mark inside a `system-reminder`) is not the launch's.
+
+      iex> alias CodingAgentFramework.Mailbox.Transport.Launch
+      iex> line = ~s({"type":"user","message":{"role":"user","content":"Go.\\\\n\\\\n[delivery u1]"}}\\n)
+      iex> Launch.seen(line, "u1")
+      :taken
+      iex> Launch.seen(String.replace(line, "u1]", "u1]\\\\n\\\\n</system-reminder>"), "u1")
+      :none
+  """
+  @spec seen(binary, String.t()) :: :taken | :none
+  def seen(bytes, uuid) do
+    mark = Waiter.mark(uuid)
+
+    bytes
+    |> String.split("\n")
+    |> Enum.filter(&String.contains?(&1, uuid))
+    |> Enum.any?(&launch?(&1, mark))
+    |> if(do: :taken, else: :none)
+  end
+
+  defp launch?(line, mark) do
+    case JSON.decode(line) do
+      {:ok, %{"type" => "user", "message" => %{"content" => c}}} ->
+        c |> text_of() |> String.trim_trailing() |> String.ends_with?(mark)
+
+      _ ->
+        false
+    end
+  end
+
+  defp text_of(c) when is_binary(c), do: c
+
+  defp text_of(c) when is_list(c),
+    do: Enum.map_join(c, "\n", &if(is_map(&1), do: to_string(&1["text"]), else: ""))
+
+  defp text_of(_), do: ""
+
+  @doc """
+  Settles `row` by `evidence`: `%{seen: seen/2's answer | :unread, gone: whether no process of
+  the start runs}`. Any other key (`now`, `bound`) decides nothing.
   """
   @spec settle(map, map) :: :keep | :delivered | :again
   def settle(_row, %{seen: :unread}), do: :keep
   def settle(_row, %{seen: :taken}), do: :delivered
   def settle(_row, %{gone: true}), do: :again
-
-  def settle(row, %{now: now, bound: bound}),
-    do: if(now >= row.sent_at + bound, do: :again, else: :keep)
+  def settle(_row, _evidence), do: :keep
 end

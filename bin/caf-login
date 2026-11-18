@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # Logs one account of a framework home in, with Claude Code's own login, in this terminal:
 #
-#   bin/caf-login <home> <account>           # claude auth login, with the account's directory
-#   bin/caf-login --check <home> <account>   # claude auth status, with the same directory
+#   bin/caf-login <home> <account>           # claude auth login, then Claude Code's first run
+#   bin/caf-login --check <home> <account>   # claude auth status, and whether the first run passed
 #
 # The account's Claude config directory is <home>/accounts/<account>/claude, the one the
 # framework sets as CLAUDE_CONFIG_DIR at every launch on that account (docs/design.md,
 # "Claude Code"). Give <home> spelled as the config file's `home`: the directory is named by
 # that path. The framework never reads a credential, so whether an account is logged in is
 # unknown to it until a session on the account starts or fails; --check asks Claude Code.
+#
+# Claude Code's first run on an account shows its onboarding (a theme picker, then more
+# screens) before anything else, and no session the framework starts reads those screens. So
+# after the login this runs Claude Code once, in a scratch folder it removes after, for the
+# person to pass the onboarding there; then the folder's trust dialog; then /exit. The account's
+# .claude.json records the onboarding passed (hasCompletedOnboarding), which --check reads. An
+# account that passed it is not run again.
 #
 # It runs devenv's pinned Claude Code (CAF_CLAUDE), with the updater off; outside devenv it
 # runs itself again through `devenv shell`. Nothing of a Claude Code session this was typed in
@@ -50,14 +57,44 @@ while IFS= read -r name; do
 done < <(compgen -e)
 export CLAUDE_CONFIG_DIR="$dir" DISABLE_AUTOUPDATER=1
 
+# Whether Claude Code's first-run onboarding was passed on the account.
+onboarded() { grep -Eqs '"hasCompletedOnboarding": *true' "$dir/.claude.json"; }
+
 if ((check)); then
   echo "caf-login: account $account, $dir:"
-  exec "$CAF_CLAUDE" auth status --text
+  status=0
+  "$CAF_CLAUDE" auth status --text || status=$?
+  if onboarded; then
+    echo "caf-login: Claude Code's first-run onboarding: passed"
+  else
+    echo "caf-login: Claude Code's first-run onboarding: not passed; run bin/caf-login $home $account"
+    ((status)) || status=1
+  fi
+  exit "$status"
 fi
 
 mkdir -p "$dir"
 echo "caf-login: logging account $account in, with $dir"
 "$CAF_CLAUDE" auth login
 echo
+
+if onboarded; then
+  echo "caf-login: Claude Code's first-run onboarding was passed on $account before"
+else
+  scratch="$(mktemp -d "${TMPDIR:-/tmp}/caf-login.XXXXXX")"
+  echo "caf-login: now Claude Code's first run on $account, in a scratch folder, $scratch."
+  echo "caf-login: pass its onboarding (the theme, then each screen after it) and the folder's"
+  echo "caf-login: trust dialog, then type /exit."
+  (cd "$scratch" && "$CAF_CLAUDE") || true
+  rm -rf -- "$scratch"
+  echo
+  if onboarded; then
+    echo "caf-login: Claude Code's first-run onboarding: passed"
+  else
+    echo "caf-login: Claude Code's first-run onboarding: not passed; run bin/caf-login $home $account again" >&2
+    exit 1
+  fi
+fi
+
 echo "caf-login: to check it, run: bin/caf-login --check $home $account"
 echo "caf-login: the first session the framework starts on $account is the real check."

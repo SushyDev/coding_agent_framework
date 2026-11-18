@@ -211,9 +211,10 @@ defmodule CodingAgentFramework.Mailbox do
 
   @doc """
   The answer of the start `launch/4` marked row `id` for: `{:ok, %{session_id, pid}}` keeps it
-  `sending` until the transcript shows its user line, or the take bound passes; `{:refused, _}`
-  makes it due again, under its same uuid; `{:unknown, _}` keeps it until the start's deadline
-  and the bound. Answers `{:ok, status}` or `{:refused, {:not_launched, status}}`.
+  `sending` until the transcript shows its user line, or no process of the start runs, however
+  long a startup dialog holds the first turn (F-153); `{:refused, _}` makes it due again, under
+  its same uuid; `{:unknown, _}` keeps it as `{:ok, _}` does. Answers `{:ok, status}` or
+  `{:refused, {:not_launched, status}}`.
 
   A `stream` row a headless start was handed (F-152) is settled by its session's fold from the
   answer on, whatever the answer: a start refused after its hold may have written the line,
@@ -418,16 +419,16 @@ defmodule CodingAgentFramework.Mailbox do
   end
 
   # A restart settles what it finds marked, from Stream's rows read to the end of each log; a
-  # row a call took finds no call in memory, and is due again. A waiter's row is settled at its
-  # take bound, which no timer of the last process carries over; a headless start's first line,
-  # at its start's deadline.
+  # row a call took finds no call in memory, and is due again. A waiter's or typed row is settled
+  # at its take bound, which no timer of the last process carries over; a headless start's first
+  # line, at its start's deadline; a launch row has none.
   @impl true
   def handle_continue(:read, s) do
     Stream.read(s.stream, timeout: @step)
     s = keep_operators(s)
 
     for %{via: via, status: "sending", sent_at: at} <- Table.open_rows(s.db),
-        via in ["waiter", "typed", "launch", "stream"],
+        via in ["waiter", "typed", "stream"],
         is_integer(at),
         do: bound(s, at)
 
@@ -590,7 +591,6 @@ defmodule CodingAgentFramework.Mailbox do
 
       {%{status: "sending", via: "launch"} = m, {:ok, %{session_id: sid} = started}} ->
         write(s, m, session_id: sid, at: started[:pid], sent_at: now(), attempt: nil)
-        bound(s, now())
         {:reply, {:ok, "sending"}, s}
 
       {%{status: "sending", via: "launch"} = m, {:refused, why}} ->
@@ -599,7 +599,6 @@ defmodule CodingAgentFramework.Mailbox do
 
       {%{status: "sending", via: "launch"} = m, {_unknown, why}} ->
         write(s, m, attempt: why)
-        bound(s, m.sent_at)
         {:reply, {:ok, "sending"}, s}
 
       {%{status: status}, _} ->
@@ -822,7 +821,8 @@ defmodule CodingAgentFramework.Mailbox do
 
   # Every open row, read against Stream's rows and Sessions' rows; a failed read decides nothing.
   # A waiter's row is read against its transcript only when `transcript?` (F-127's new-1): on a
-  # cue of the transcripts or the waiters, at its take bound and at the start.
+  # cue of the transcripts or the waiters, at its take bound and at the start. A launch row is
+  # read at every cue, as a typed one is: its process's end, a `sessions` cue, is its evidence too.
   defp settle(s, transcript? \\ false) do
     with {:ok, %{rows: rows}} <- Stream.rows(s.stream, timeout: @step) do
       folds = Map.new(rows, &{&1.session, &1})
@@ -831,7 +831,7 @@ defmodule CodingAgentFramework.Mailbox do
 
       for %{status: "sending"} = m <- Table.open_rows(s.db),
           not MapSet.member?(handing, m.id) and not MapSet.member?(s.launching, m.id),
-          m.via not in ["waiter", "launch"] or transcript? do
+          m.via != "waiter" or transcript? do
         evidence = %{fold: folds[m.session_id || session_of(s, m)], calls: s.calls, now: now()}
 
         evidence =
@@ -1226,18 +1226,24 @@ defmodule CodingAgentFramework.Mailbox do
     %{seen: lines(s, srow, m), gone: gone, now: now(), bound: s.waiter.bound}
   end
 
-  # A launch row's evidence: before the start's answer the row names no process, and the start
-  # is gone once its agent row holds none; after it, as a waiter's row. Its session is the agent
-  # row's when the mark had none (a new session, a restart before the answer).
+  # A launch row's evidence: its own user line (`Transport.Launch.seen/2`), and whether the
+  # start's process is gone: before the start's answer the row names no process, and the start
+  # is gone once its agent row holds none. Its session is the agent row's when the mark had none
+  # (a new session, a restart before the answer).
   defp launch_seen(s, m) do
     srow = Agents.get(s.agents, m.to_agent)
     gone = srow == nil or Agents.free?(srow) or (m.at != nil and srow.pid != m.at)
     m = %{m | session_id: m.session_id || (srow && srow.session_id)}
-    seen = if is_binary(m.session_id), do: lines(s, srow, m), else: :none
-    %{seen: seen, gone: gone, now: now(), bound: s.waiter.bound}
+
+    seen =
+      if is_binary(m.session_id),
+        do: lines(s, srow, m, &Transport.Launch.seen/2),
+        else: :none
+
+    %{seen: seen, gone: gone}
   end
 
-  defp lines(s, srow, m) do
+  defp lines(s, srow, m, seen \\ &Transport.Waiter.seen/2) do
     with %{} <- srow,
          {:ok, path} <- transcript(s, srow),
          {:ok, %{failed: []}} <-
@@ -1248,7 +1254,7 @@ defmodule CodingAgentFramework.Mailbox do
            Transcripts.text(s.waiter.transcripts, srow.account, m.session_id, m.from_byte || 0,
              timeout: @step
            ) do
-      Transport.Waiter.seen(bytes, m.uuid)
+      seen.(bytes, m.uuid)
     else
       {:refused, :no_file} -> :none
       _ -> :unread

@@ -8,7 +8,9 @@ defmodule CodingAgentFramework.Screen.Reading.V2_1_322 do
   space, so it never reads as the box. The trust dialog's options are bare labels one column in;
   the imports dialog's two columns in, under the external paths it lists, one a line: a path
   wider than the pane is shortened in its middle with `…` and never wrapped (F-144's capture);
-  a permission dialog's are numbered.
+  a permission dialog's are numbered. A session started with `--name` draws its name inside the
+  rule above the box, one space either side and one `─` after it, at any width (F-153's capture
+  of a main session at 120 and 400 columns).
   """
 
   @behaviour CodingAgentFramework.Screen.Reading
@@ -18,6 +20,7 @@ defmodule CodingAgentFramework.Screen.Reading.V2_1_322 do
     %{
       box: "❯\u00a0",
       prompt: "❯",
+      named_rule: ~r/\A─+ \S(?:.*\S)? ─\z/u,
       placeholder: ~r/\ATry ".*"\z/u,
       running: "esc to interrupt",
       exited: "Resume this session with:",

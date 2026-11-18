@@ -27,9 +27,12 @@ defmodule CodingAgentFramework.Tracker.Fold do
   @type t :: %__MODULE__{}
 
   @alive [:live, :replaced, :gone, :unknown]
-  # The columns a session entry shows, each with the check its value must pass.
+  # The columns a session entry shows, each with the check its value must pass. `proc_start`
+  # with `pid` names the process, as `Sessions.Turn.file/2` matches an agent row's (F-153).
   @fields [pid: &is_integer/1, updated_at: &is_integer/1] ++
-            Enum.map([:session_id, :name, :status, :cwd, :file], fn k -> {k, &is_binary/1} end)
+            Enum.map([:session_id, :name, :status, :cwd, :file, :proc_start], fn k ->
+              {k, &is_binary/1}
+            end)
 
   @doc "An empty fold."
   @spec new() :: t

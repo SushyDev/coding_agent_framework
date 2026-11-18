@@ -134,7 +134,12 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
     send_line(port, ~s|attach(caf, "app-main")|)
 
     {:ok, _} =
-      read_until(port, "#{program!(:tmux)} -S #{config.home}/tmux.sock attach -t =app-main")
+      read_until(port, "#{program!(:tmux)} -S #{config.home}/tmux.sock attach -t '=app-main'")
+
+    # A new shell evaluates the dot file again, as after IEx's interrupt (F-153's new-5): the
+    # app started once is `caf` again, and the VM runs on.
+    send_line(port, ~s|import_file("apps/caf_example/console.iex.exs")|)
+    {:ok, _} = read_until(port, "caf: this shell's app runs, started once")
 
     # Each reading reaches its part and prints what is there, nothing yet.
     readings = [
@@ -239,6 +244,36 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
       assert {out, 2} = System.cmd(login, args, stderr_to_stdout: true)
       assert out =~ why
     end
+  end
+
+  # F-153's new-3: `--check` says whether Claude Code's first-run onboarding was passed on the
+  # account, as its `.claude.json` records it. A stand-in answers `claude auth status`.
+  test "bin/caf-login --check names the onboarding passed or not", ctx do
+    login = Path.join(@root, "bin/caf-login")
+    claude = Path.join(ctx.dir, "claude-auth")
+    File.write!(claude, "#!#{program!(:bash)}\necho \"auth: $*\"\n")
+    File.chmod!(claude, 0o755)
+    home = Path.join(ctx.dir, "login-home")
+    env = [{"CAF_CLAUDE", claude}]
+
+    assert {out, 1} =
+             System.cmd(login, ["--check", home, "one"], env: env, stderr_to_stdout: true)
+
+    assert out =~ "auth: auth status --text"
+    assert out =~ "onboarding: not passed; run bin/caf-login #{home} one"
+
+    dir = Path.join(home, "accounts/one/claude")
+    File.mkdir_p!(dir)
+
+    File.write!(
+      Path.join(dir, ".claude.json"),
+      ~s|{"theme": "dark", "hasCompletedOnboarding": true}|
+    )
+
+    assert {out, 0} =
+             System.cmd(login, ["--check", home, "one"], env: env, stderr_to_stdout: true)
+
+    assert out =~ "onboarding: passed"
   end
 
   # The script as a person runs it, in this VM's devenv environment, compiled for tests.
