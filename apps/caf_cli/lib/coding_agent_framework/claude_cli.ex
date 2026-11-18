@@ -32,6 +32,11 @@ defmodule CodingAgentFramework.ClaudeCLI do
     else by the OS user name, which is the same one;
   - `TERM`: the terminal type its screen is drawn for, which dtach does not set;
   - `LANG`: a UTF-8 locale, so text past ASCII is read and drawn as it is;
+  - the CA bundle the embedding app gives as the launch env's `:ca` (a map of variable name to
+    an absolute path, such as `NODE_EXTRA_CA_CERTS`), sorted by name: Claude Code runs on Node,
+    which reads its own bundle, and a machine whose certificates come from devenv or Nix has them
+    in none of the places Node looks, so without it no session reaches the API
+    (`UNABLE_TO_GET_ISSUER_CERT_LOCALLY`, F-151). The library never reads its own environment;
   - `MCP_TOOL_TIMEOUT` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`, both the launch's
     `:tool_timeout` (ms): how long Claude Code waits on one MCP tool call before it gives up,
     in all and with no byte or progress from the server. Claude Code 2.1.322 reads both from
@@ -287,15 +292,29 @@ defmodule CodingAgentFramework.ClaudeCLI do
 
   defp env(account, opts, options) do
     with {:ok, given} <- given_env(Keyword.get(opts, :env)),
+         {:ok, ca} <- ca(Map.get(given, :ca, %{})),
          {:ok, ms} <- tool_timeout(Keyword.get(opts, :tool_timeout)) do
       timeouts = [{"MCP_TOOL_TIMEOUT", ms}, {"CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", ms}]
 
       {:ok,
        [{"CLAUDE_CONFIG_DIR", account.config_dir}] ++
          Enum.map(@env, fn {k, v} -> {v, given[k]} end) ++
-         timeouts ++ Enum.sort(Map.get(options, :env, %{})) ++ @fixed}
+         ca ++ timeouts ++ Enum.sort(Map.get(options, :env, %{})) ++ @fixed}
     end
   end
+
+  # The CA bundle's variables, as the app gives them: a name of capitals, digits and `_`, and an
+  # absolute path with no control character.
+  defp ca(ca) when is_map(ca) do
+    if Enum.all?(ca, fn {k, v} ->
+         is_binary(k) and k =~ ~r/\A[A-Z][A-Z0-9_]*\z/ and is_binary(v) and
+           String.starts_with?(v, "/") and not (v =~ ~r/[[:cntrl:]]/)
+       end),
+       do: {:ok, Enum.sort(ca)},
+       else: {:refused, {:bad, :ca}}
+  end
+
+  defp ca(_), do: {:refused, {:bad, :ca}}
 
   defp given_env(given) when is_map(given) do
     case Enum.reject(@env, fn {key, _} -> is_binary(given[key]) and given[key] != "" end) do

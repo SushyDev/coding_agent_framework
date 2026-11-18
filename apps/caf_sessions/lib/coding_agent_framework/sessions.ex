@@ -1038,6 +1038,11 @@ defmodule CodingAgentFramework.Sessions do
   def handle_info(:look, state) do
     state = %{state | looking: false}
     for row <- settling(state, :all, "dialog"), do: settle_row(state, row, false)
+
+    for row <- settling(state, :all, "unknown"),
+        row.role == "parent",
+        do: settle_row(state, row, false)
+
     {:noreply, look_later(state)}
   end
 
@@ -1268,7 +1273,10 @@ defmodule CodingAgentFramework.Sessions do
   defp look_later(%{looking: true} = state), do: state
 
   defp look_later(state) do
-    if Table.with_status(state.db, state.host.name, "dialog") == [] do
+    unknown =
+      Enum.filter(Table.with_status(state.db, state.host.name, "unknown"), &(&1.role == "parent"))
+
+    if Table.with_status(state.db, state.host.name, "dialog") == [] and unknown == [] do
       state
     else
       Process.send_after(self(), :look, state.look)
@@ -1353,12 +1361,15 @@ defmodule CodingAgentFramework.Sessions do
 
   # ReRead: an unknown row is running once its file names its live process, an orphan while
   # that process runs on a dead socket, and stopped once its socket is dead with no such file.
+  # Else its pane is read: a start that met a screen `Screen` does not read (Claude Code's first
+  # run on a new account, say) went unknown, and the startup dialog after it becomes the row's
+  # (F-151).
   defp settle_row(state, %{status: "unknown"} = row, read?) do
     case confirm(state, row, read?) do
       {:ok, file} -> running(state, row, file)
       {:unheld, file} -> orphan(state, row, file)
       {:dead, _} -> write(state, row, status: "stopped")
-      _ -> :ok
+      _ -> look_at(state, row)
     end
   end
 
