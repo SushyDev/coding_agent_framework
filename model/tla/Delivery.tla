@@ -38,7 +38,9 @@
 (* each turn's end starts the next one, and nothing starts one before the  *)
 (* first turn. A new interactive process's first row goes by launch        *)
 (* (F-137); a row to a session with no waiter, long or not, goes by the    *)
-(* typed write, so none waits for a person's prompt.                       *)
+(* typed write, so none waits for a person's prompt. Since the pointer     *)
+(* (F-142) a first row would arrive by the typed write too: the launch is  *)
+(* the quicker path, with no screen to read, and no Break of its own.      *)
 (*   launch  the prompt argument of an interactive session's start (and of *)
 (*           its resume): the first row to it goes in as the start itself, *)
 (*           and Claude Code runs it as the session's first turn. Marked   *)
@@ -154,7 +156,6 @@ Breaks == {
     "SelfReply",             \* a reply is the last result since the row, whatever it names
     "NoNotice",              \* a row whose turn ended with no result gets no notice
     "ResumeOwnKey",          \* a resumed process's row is keyed by itself, not the brief
-    "NoLaunch",              \* a start carries no row: the first waits for a waiter or typing
     "NoPointer"              \* a long row is not typed: it waits for a waiter (F-132)
 }
 
@@ -238,7 +239,7 @@ Reaches(i, t) ==
       [] t = "waiter" -> a \notin Headless /\ waiter[a] = pr[a]
       [] t = "typed"  -> a \notin Headless /\ waiter[a] # pr[a]
                          /\ (i \notin Long \/ Break # "NoPointer")
-      [] t = "launch" -> a \notin Headless /\ Break # "NoLaunch"
+      [] t = "launch" -> a \notin Headless
       [] t = "call"   -> /\ i \in Awaited
                          /\ \/ call[i] = "waiting"
                             \/ Break = "TakeAfterDeadline" /\ call[i] = "timedout"
@@ -636,7 +637,7 @@ NewProcess(a) ==
     /\ turned' = [turned EXCEPT ![a] = FALSE]
 
 Resumed(a) ==
-    /\ up /\ pr[a] = 0 /\ ~over[a] /\ (a \notin Launched \/ Break = "NoLaunch")
+    /\ up /\ pr[a] = 0 /\ ~over[a] /\ a \notin Launched
     /\ NewProcess(a)
     /\ UNCHANGED <<up, over, dvars, restarts, ends, prompts, stops, readAt>>
 

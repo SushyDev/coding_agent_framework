@@ -1295,8 +1295,10 @@ changed (R6).
 | `call` | a waiting `run_delegate` | the endpoint's write, and the calling process still running after it | due again, for the parent's waiter: the call it answered is gone |
 
 **The launch** (F-137). A waiter connects only once a turn of its process has ended, and the
-`Inlet` types only a short row, so neither carries a delegate's brief into a new interactive
-session. Claude Code takes an initial prompt as its last argument, at a start and with
+`Inlet` types only a short line, so neither carries a delegate's brief into a new interactive
+session but as the typed pointer to its file (F-142), which needs the screen idle with an empty
+box. The launch needs no screen: since the pointer it is the quicker path, not the only one, and
+`Delivery.tla` has no Break for it. Claude Code takes an initial prompt as its last argument, at a start and with
 `--resume`, and runs it as the first turn. So the first row to an interactive session (a
 delegate's brief, or its word to go on, or the brief again, at a resume; the first row due at a
 move's resume, F-142) is marked `sending`
