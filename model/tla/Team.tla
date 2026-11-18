@@ -52,7 +52,9 @@
 (*             and ask, each with its caller's fixed identity; the         *)
 (*             operator's acts                                             *)
 (*             (`Operator`) go through the same calls under its name, and  *)
-(*             its answer to an ask through `Mailbox.answer`.              *)
+(*             its answer to an ask through `Mailbox.answer`; each fix's   *)
+(*             check of the state it claims (`Delegates.fix_check/2`,     *)
+(*             `Mains.fix_check/2`).                                       *)
 (*                                                                         *)
 (* What moved to Delivery.tla (R6): the sending mark and its settle, the  *)
 (* typed write (DeliveryTyped), the order, the ended mark, the replies and *)
@@ -124,6 +126,16 @@
 (* of those held and leaves the process as it is. MaxRequests is 0 in the  *)
 (* configurations that do not check it, to keep their state small.         *)
 (*                                                                         *)
+(* The caller names its fix. What the fix needs of the state it claims is  *)
+(* checked before the claim is taken (Needed, F-149), as the answer's id   *)
+(* is: an interrupt a stuck agent, a resume a dead one whose end is not    *)
+(* asked, a stop an idle one. A fix refused that way takes no claim, so    *)
+(* the next fix of that state is taken. A fix refused when it acts, by     *)
+(* what it meets then (a stop whose agent took a turn since: the code's    *)
+(* report not yet delivered), still lets its claim go and keeps the state. *)
+(* ClaimBeforeCheck claims any fix on any state, and leaves the check to   *)
+(* the act.                                                                *)
+(*                                                                         *)
 (* Defense in depth, with no Break: FixActs' check of the target's process *)
 (* for an interrupt or a resume, behind its check of the claimed state's   *)
 (* number (stuck and dead are left only by steps that move it). For a stop *)
@@ -173,7 +185,8 @@ Breaks == {
     "NoPointer",             \* a row too long to type waits for a waiter (F-132), never typed
     "EndInMemory",           \* the end asked is held by its call only, so a restart forgets it
     "ResumeEnding",          \* a resume takes a main session whose end is asked
-    "AnswerNotHeld"          \* an answer's claim is taken on a request its state does not hold
+    "AnswerNotHeld",         \* an answer's claim is taken on a request its state does not hold
+    "ClaimBeforeCheck"       \* a fix is claimed before its check of the claimed state
 }
 
 Agents == UNION Projects
@@ -476,20 +489,26 @@ Mailboxes(i) ==
 -----------------------------------------------------------------------------
 (* Grants: a parent's fix takes a claim on its child's current state first *)
 
-Kind(t) == CASE proc[t] = "stuck" -> "interrupt"
-             [] proc[t] = "dead" -> "resume"
-             [] OTHER -> "stop"
-
 \* A stop ends a delegate only: a main session's end is a person's, outside Grants.
-Stoppable(t) == t \in Delegates \/ Kind(t) # "stop" \/ Break = "OperatorStopsMain"
+Stoppable(t, k) == t \in Delegates \/ k # "stop" \/ Break = "OperatorStopsMain"
 
-\* The claim on t's state now, for the fix that state needs (Cl!Take).
-ClaimTaken(c, t) ==
+\* What fix k needs of t's state, read from the state it claims (`Delegates.fix_check/2`,
+\* `Mains.fix_check/2`): a resume of a delegate refused `:live`, of a main session
+\* `{:not_stopped, status}` (a row whose end is asked is `stopping`); a stop refused for its
+\* report; an interrupt of a process that is gone.
+Needed(t, k) == /\ proc[t] = Needs[k]
+                /\ k # "resume" \/ t \notin ending \/ Break = "ResumeEnding"
+
+\* The claim on t's state now, for the fix k its caller names (Cl!Take), taken only once the
+\* state needs it (F-149): a claim kept after a refusal would refuse the state's next fix, the
+\* one it needs, as already claimed until the state moved. ClaimBeforeCheck takes it on any.
+ClaimTaken(c, t, k) ==
     /\ up /\ Live(c)
-    /\ proc[t] \in {"stuck", "dead", "idle"}
-    /\ MayFix(c, t) /\ Stoppable(t)
-    /\ Cl(ClaimBreak(c))!Take(c, t, Kind(t))
-    /\ UNCHANGED <<up, restarts, agentVars, svcVars, wrong, ending, dvars>>
+    /\ Needed(t, k) \/ Break = "ClaimBeforeCheck"
+    /\ MayFix(c, t) /\ Stoppable(t, k)
+    /\ Cl(ClaimBreak(c))!Take(c, t, k)
+    /\ wrong' = wrong \cup (IF Needed(t, k) THEN {} ELSE {"claim before check"})
+    /\ UNCHANGED <<up, restarts, agentVars, svcVars, ending, dvars>>
 
 \* The answer of request i of t, as the operator or t's parent makes it (`answer`, F-147), claimed
 \* on t's state now. The request it names must be one the state holds, checked before the claim
@@ -595,7 +614,7 @@ Next ==
     \/ FrameworkDies \/ FrameworkStarts
     \/ \E a \in Agents : \/ Prompted(a) \/ SelfStarts(a) \/ TurnEnds(a) \/ Faults(a)
                          \/ DelegateEnds(a) \/ Requests(a) \/ PersonAnswers(a)
-    \/ \E c \in Actors, t \in Agents : Send(c, t) \/ ClaimTaken(c, t)
+    \/ \E c \in Actors, t \in Agents : Send(c, t) \/ \E k \in Kinds : ClaimTaken(c, t, k)
     \/ \E c \in Actors, t \in Agents, i \in Reqs : AnswerClaimed(c, t, i)
     \/ \E c \in Agents, o \in Operators : Send(c, o)
     \/ \E a \in Agents : Ask(a)
@@ -691,6 +710,13 @@ FixOnClaimedState == "stale" \notin wrong
 AnswerClaimsHeld == "answer not held" \notin wrong
 AnswerStateHoldsRequest ==
     \A r \in claims : r.act = "answer" /\ epoch[r.t] = r.s => held[r.t] # {}
+
+\* A fix is claimed only on a state that needs it (F-149), so one the state refuses takes no
+\* claim; and no claim of an interrupt or a resume stands on a state now that does not need it.
+\* A stop's idle may pass with no move of the state, so a stop refused when it acts is not one.
+FixClaimsChecked == "claim before check" \notin wrong
+ClaimedStateNeedsFix ==
+    \A r \in claims : r.act \in {"interrupt", "resume"} /\ epoch[r.t] = r.s => proc[r.t] = Needs[r.act]
 
 \* Only a parent fixes, and only its own child; the operator is a parent of
 \* every main session, and so of every agent.

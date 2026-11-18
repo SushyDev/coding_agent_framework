@@ -531,14 +531,14 @@ defmodule CodingAgentFramework.ExampleTest do
              Operator.start_main(parts.mcp, "web", "web-main", "Go.")
 
     # The operator's resume of a main session (F-143's new-1) claims its state and goes to
-    # `Mains`, which resumes only one whose process ended: a declared one has none.
+    # `Mains`, which resumes only one whose process ended: a declared one has none. That is
+    # checked on the state before the claim (F-149), so no claim is taken and a second resume
+    # is refused the same way. An answer's request is checked against the state's held before
+    # any claim too (F-148): a declared one holds none.
     assert {:refused, {:not_stopped, "declared"}} = Operator.resume(parts.mcp, "app-main")
-
-    # That state stays claimed, by the refused resume: a second fix of it acts nothing. An
-    # answer's request is checked against the state's held before any claim (F-148), so a
-    # declared one, which holds none, is refused as that, claimed state or not.
-    assert {:refused, {:already_claimed, "operator"}} = Operator.resume(parts.mcp, "app-main")
+    assert {:refused, {:not_stopped, "declared"}} = Operator.resume(parts.mcp, "app-main")
     assert {:refused, {:not_held, "1"}} = Operator.answer(parts.mcp, "app-main", "1", "allow")
+    assert {:ok, []} = Acts.rows(parts.acts, target: "app-main")
 
     assert {:refused, {:not_built, :main_fix}} = Operator.interrupt(parts.mcp, "app-main")
 

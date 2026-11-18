@@ -577,7 +577,8 @@ writes a start's row and asks the `Scheduler` for a lease of its own, class main
 model its row keeps (F-141's new-5); its row in `main_starts` names the session id it resumed
 (`resume`, F-143's new-5). The operator's `resume` tool of a main session claims its state in
 `Acts` (`Mains.fix_state/3`: its status, session id and last process) and calls `resume_main`
-with it, which acts only while that state is still the row's (F-144). A move's resume needs
+with it, which acts only while that state is still the row's (F-144). A state not `stopped` is
+refused `{:not_stopped, status}` before the claim (F-149), and leaves it unclaimed. A move's resume needs
 none: the start's lease lives while a move of its session is under way.
 
 **A permission request** of a main session is the `PermissionRequest` `Intake` holds for its
@@ -1182,7 +1183,15 @@ framework's tools, which are strict in how they act and narrow in whom they reac
   the state read before the claim, never after it, since a claim refused later still keeps its
   state: an answer's label, and the request id it names, which the state must hold (`Team.tla`'s
   `AnswerClaimed`, F-148); an id it does not hold is refused `{:not_held, id}` and takes no claim,
-  so the next answer, with the right id, is taken.
+  so the next answer, with the right id, is taken. So is what each fix needs of the state it
+  claims, by the part that acts (`Delegates.fix_check/2`, `Mains.fix_check/2`; `Team.tla`'s
+  `Needed`, F-149): a resume of a delegate whose process is not gone (`:live`), already resumed,
+  not running or whose agent row is not free, or of a main session not `stopped` (`{:not_stopped,
+  status}`); a stop whose report is not handed to `Mailbox` (`{:report, status}`); an interrupt of
+  a process that is gone. A fix refused that way takes no claim, so the next fix of that state is
+  taken. A fix refused by what it meets only when it acts (a stop whose report is handed but not
+  delivered, or with a row to it still open; an interactive delegate's interrupt with no turn on
+  its screen) still settles its claim and keeps the state.
 - No agent fixes or moves a main session; only a person does, a move with one press.
 - An agent may not fix itself. A stuck agent cannot be relied on to see that it is stuck.
 - Jobs and services: a main session and its delegates may run jobs and start services on any
