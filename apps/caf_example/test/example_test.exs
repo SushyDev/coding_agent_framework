@@ -534,9 +534,11 @@ defmodule CodingAgentFramework.ExampleTest do
     # `Mains`, which resumes only one whose process ended: a declared one has none.
     assert {:refused, {:not_stopped, "declared"}} = Operator.resume(parts.mcp, "app-main")
 
-    # That state stays claimed, by the refused resume: a second fix of it acts nothing.
-    assert {:refused, {:already_claimed, "operator"}} =
-             Operator.answer(parts.mcp, "app-main", "1", "allow")
+    # That state stays claimed, by the refused resume: a second fix of it acts nothing. An
+    # answer's request is checked against the state's held before any claim (F-148), so a
+    # declared one, which holds none, is refused as that, claimed state or not.
+    assert {:refused, {:already_claimed, "operator"}} = Operator.resume(parts.mcp, "app-main")
+    assert {:refused, {:not_held, "1"}} = Operator.answer(parts.mcp, "app-main", "1", "allow")
 
     assert {:refused, {:not_built, :main_fix}} = Operator.interrupt(parts.mcp, "app-main")
 
@@ -548,7 +550,9 @@ defmodule CodingAgentFramework.ExampleTest do
     assert {:ok, :ended} = Operator.end_main(parts.mcp, "app-main")
 
     # The operator's answer of a main session's held permission request goes to `Mains`, and
-    # through `Intake` (F-146's new-5), on a state of its own: an ended one holds none.
+    # through `Intake` (F-146's new-5), on a state of its own: an ended one holds none, and the
+    # refusal takes no claim, so the same answer is refused the same way again.
+    assert {:refused, {:not_held, "1"}} = Operator.answer(parts.mcp, "app-main", "1", "allow")
     assert {:refused, {:not_held, "1"}} = Operator.answer(parts.mcp, "app-main", "1", "allow")
 
     assert {:refused, {:running, "app-main"}} =

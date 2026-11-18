@@ -73,8 +73,10 @@ defmodule CodingAgentFramework.MCP do
     `PermissionRequest` row `Intake` holds for an interactive delegate or a main session;
     `label` `allow` or `deny`), `resume(agent)` (a delegate whose
     process died) and `stop(agent)` (once its report is delivered). Each reads the delegate's
-    state (`Delegates.fix_state/3`), claims it in `Acts` (`Acts.claim/6`, act the tool's name),
-    then `Delegates.fix/5` acts only while that state is still the delegate's, and the claim
+    state (`Delegates.fix_state/3`), checks an answer's `dialog` against that state's `held`
+    (an id it does not hold is refused `{:not_held, id}` with no claim, F-148, so the next
+    answer, with the right id, is taken), claims it in `Acts` (`Acts.claim/6`, act the tool's
+    name), then `Delegates.fix/5` acts only while that state is still the delegate's, and the claim
     is settled `verified` when the fix answered `ok` and the state read after has moved, else
     `not_verified`. A second fix of a state is refused `{:claimed, by}` or
     `{:already_claimed, by}`. Answers `%{done: value, claim: id, settled: settle's answer}`,
@@ -823,13 +825,17 @@ defmodule CodingAgentFramework.MCP do
   # again), then the claim settled by the state read after: verified when the fix took and the
   # state moved. A claim left open by an unknown settle is a restart's to close as interrupted.
   # The operator's resume of a main session (F-143's new-1) claims its state read from
-  # `Mains`, which resumes it only while that state is still its own.
+  # `Mains`, which resumes it only while that state is still its own. An answer's request is
+  # checked against the state's `held` before the claim, as its label is (F-148): a settled
+  # claim keeps its state, so one taken for a request the state does not hold would refuse the
+  # next answer, with the right id, until the state moved.
   defp act(ctx, caller, _id, tool, %{"agent" => agent} = a)
        when tool in @fixes and is_binary(agent) do
     with {:ok, fix} <- fix(tool, a),
          :ok <- Grants.may_fix?(ctx.grants, caller, agent),
          {:ok, by} <- fixer(ctx, caller, agent, tool),
          {:ok, state} <- by.state.(),
+         :ok <- held(fix, state),
          {:ok, claim} <- Acts.claim(ctx.acts, caller, agent, state, tool) do
       outcome = by.fix.(fix, state)
 
@@ -862,6 +868,14 @@ defmodule CodingAgentFramework.MCP do
 
   defp fix("answer", _args), do: {:refused, {:bad, :args}}
   defp fix(tool, _args), do: {:ok, String.to_existing_atom(tool)}
+
+  # `Team.tla`'s AnswerClaimed: the id an answer names is one the state holds, else no claim is
+  # taken. A state that names no `held` holds none.
+  defp held({:answer, request, _label}, state) do
+    if request in Map.get(state, :held, []), do: :ok, else: {:refused, {:not_held, request}}
+  end
+
+  defp held(_fix, _state), do: :ok
 
   defp job_class(nil), do: {:ok, :heavy}
   defp job_class("heavy"), do: {:ok, :heavy}
