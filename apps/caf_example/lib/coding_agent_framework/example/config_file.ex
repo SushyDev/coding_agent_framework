@@ -117,7 +117,7 @@ defmodule CodingAgentFramework.Example.ConfigFile do
         accounts: accounts,
         ports: ports,
         claude: launch.claude,
-        env: Map.take(launch, [:home, :path, :term, :lang]),
+        env: Map.put(Map.take(launch, [:home, :path, :term, :lang]), :ca, ca_bundle(env)),
         main_model: launch.model,
         projects: projects,
         mains: mains,
@@ -363,6 +363,12 @@ defmodule CodingAgentFramework.Example.ConfigFile do
 
   # The project that names `name` last, where the refusal points.
   defp project_of(all, name), do: all |> Enum.reverse() |> List.keyfind(name, 0) |> elem(1)
+
+  # The CA bundle every launch passes on (F-151): what devenv sets in the app's own environment,
+  # since Claude Code's Node finds devenv's certificates in none of its own places.
+  @ca_names ~w(NODE_EXTRA_CA_CERTS NIX_SSL_CERT_FILE SSL_CERT_FILE)
+  defp ca_bundle(env),
+    do: for(name <- @ca_names, absolute?(env[name]), into: %{}, do: {name, env[name]})
 
   defp programs(env) do
     vars = for name <- Programs.names(), do: {name, "CAF_" <> String.upcase(to_string(name))}

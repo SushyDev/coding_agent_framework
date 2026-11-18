@@ -89,6 +89,25 @@ defmodule CodingAgentFramework.ClaudeCLITest do
     assert env == expected
   end
 
+  # F-151: Claude Code's Node finds devenv's certificates only through these variables.
+  test "the CA bundle the app gives is passed on after the four, sorted; a bad one is refused" do
+    ca = %{"SSL_CERT_FILE" => "/etc/ca.crt", "NODE_EXTRA_CA_CERTS" => "/etc/ca.crt"}
+    env = Map.put(@env, :ca, ca)
+
+    for role <- [:parent, :delegate] do
+      assert {:ok, %{env: got}} =
+               ClaudeCLI.session(role, account(), opts(env: env, prompt: "p"))
+
+      assert Enum.slice(got, 5, 2) ==
+               [{"NODE_EXTRA_CA_CERTS", "/etc/ca.crt"}, {"SSL_CERT_FILE", "/etc/ca.crt"}]
+    end
+
+    for bad <- [%{"NODE_EXTRA_CA_CERTS" => "ca.crt"}, %{"lower" => "/x"}, :none] do
+      assert ClaudeCLI.session(:parent, account(), opts(env: Map.put(@env, :ca, bad))) ==
+               {:refused, {:bad, :ca}}
+    end
+  end
+
   test "a launch with no account directory is refused, never falling back" do
     for account <- [nil, "work", %{config_dir: @dir}, %{account() | config_dir: "rel/claude"}] do
       assert ClaudeCLI.session(:parent, account, opts([])) == {:refused, :no_account_dir}

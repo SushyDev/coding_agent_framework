@@ -726,7 +726,8 @@ defmodule CodingAgentFramework.Mains do
   end
 
   # A name is free for a new main session when no agent row has it, or a declared one of this
-  # project never started since, and no start of it is under way here.
+  # project never started since, or one of this project whose start never ran (stopped or
+  # refused with no session id: nothing to resume, F-151), and no start of it is under way here.
   defp free(s, project, name) do
     agent = Agents.get(s.agents, name)
     starting = Enum.any?(Starts.starting_rows(s.starts, s.host), &(&1.name == name))
@@ -734,7 +735,9 @@ defmodule CodingAgentFramework.Mains do
     cond do
       starting -> {:refused, {:running, name}}
       agent == nil -> :ok
-      Agents.declared?(agent) and agent.project == project -> :ok
+      agent.project != project -> {:refused, {:running, name}}
+      Agents.declared?(agent) -> :ok
+      agent.status in ["stopped", "refused"] and not is_binary(agent.session_id) -> :ok
       true -> {:refused, {:running, name}}
     end
   end
