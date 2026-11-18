@@ -200,7 +200,17 @@ Built, each from a checked model in `model/tla/`:
   it) told to its parent once, as a notice, never as the report, against `Delegate.tla`; every
   tool's state in the home (gh's login, git's config with the app's own commit author and SSH
   signing with the home's own key, ssh's config and known hosts, the XDG directories), with
-  `bin/caf-login --gh` and `--git`; and cloudflared in devenv.
+  `bin/caf-login --gh` and `--git`; and cloudflared in devenv;
+- the box contracts and the first of B1 (F-163, F-164, F-167): `Boxes.tla` composing the
+  boxes' contracts, a restart per agent that keeps a refused start's seat while its process
+  lives, and `Prompt.tla`, one inbox of prompts for every depth of the tree;
+- app tools and app metadata (F-154): an app's extension bundle gives its agents tools of its
+  own, each prefixed by the bundle's name and listed only to the roles and projects it names,
+  each call logged with an explicit outcome; and the app's own keys kept on an agent row;
+- a start whose caller gave up never runs later (F-166, against `Delegate.tla`): a start
+  carries its caller's deadline, and one taken past it is refused and starts nothing;
+- gh's token kept as a file in the home, and every program `bin/caf-login` runs taken from
+  devenv (F-168).
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
