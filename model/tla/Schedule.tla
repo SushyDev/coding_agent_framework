@@ -100,8 +100,9 @@
 (* of its work runs. Boxes.tla's Start and Release are Insert with Tell    *)
 (* and Release, its WorkEnded this spec's `work`; its SeatsHold is         *)
 (* CapacityHolds with that assumption. The assumption is checked in        *)
-(* Dialog.tla for a start on a dialog and in Boxes.tla for its statuses,   *)
-(* but not for every status an owner answers ended (F-163's new-1).        *)
+(* Dialog.tla for a start on a dialog, in Boxes.tla for its statuses, and  *)
+(* in Delegate.tla for every status Delegates.Work answers ended           *)
+(* (WorkEndedIsFree, F-163's new-1, F-164).                                *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 

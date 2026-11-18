@@ -26,7 +26,10 @@
 (*             NoPointer leaves it waiting for a person's prompt;          *)
 (*   Sessions  the start and the resume of a delegate, which write their   *)
 (*             own row first and run on through a restart of Delegates     *)
-(*             (Start.tla models them);                                    *)
+(*             (Start.tla models them), and are cut by a restart of the    *)
+(*             delegate's own agent process, whose row is then adopted;    *)
+(*   Recoveries the end of an orphan, a process held with no line;         *)
+(*   Delegates.Work what the row's owner answers the Scheduler;            *)
 (*   Stream    the turn's message (the brief, or what a resumed process    *)
 (*             takes), marked in its table under the uuid Delegates chose  *)
 (*             and wrote in its row first, and refused a second time       *)
@@ -116,19 +119,31 @@
 (* (CapHeld), nothing held for a refused start (RefusedHoldsNothing),      *)
 (* every call settled (CallSettles), an idle delegate told once            *)
 (* (IdleToldOnce, IdleNoticed). Boxes.tla takes a delegate's start and     *)
-(* resume as Sessions' and leaves the report to Delivery.tla. Not          *)
-(* implied: here a start is one step standing for Start.tla, and a         *)
-(* refused start holds nothing, while Start.tla lets a row be refused      *)
-(* with its process still live; Delegates.Work answers a refused row       *)
-(* ended at once, so the Scheduler may release the lease of a live         *)
-(* process (F-163's new-1).                                                *)
+(* resume as Sessions' and leaves the report to Delivery.tla. The owner's  *)
+(* promise the Scheduler's release rests on is checked here, where the     *)
+(* owner's statuses are (F-163's new-1): work the owner says ended has no  *)
+(* process (WorkEndedIsFree). Delegates.Work answers a refused, finished   *)
+(* or failed row ended only once Sessions' row of it is free; with the     *)
+(* status alone (StatusEndsWork) a finished delegate's lease goes while    *)
+(* its process lives. Not implied: here a call Delegates gave up on never  *)
+(* reaches Sessions later, so a refused row holds nothing                  *)
+(* (RefusedHoldsNothing); in the code a start may still be taken after its *)
+(* row was refused at its deadline (F-164's new-1).                        *)
+(*                                                                         *)
+(* Restarts (F-164): the whole framework's (FrameworkDies, Delegates' own  *)
+(* memory: Sessions is another process and its calls run on), and an       *)
+(* agent's own process's (B4): a delegate's (RestartAgent), which cuts     *)
+(* Delegates' call of it and Sessions' start or resume under way, and the  *)
+(* parent's (RestartParent), which cuts a hand of a report to it. Each     *)
+(* re-adopts from the row and starts nothing; all are bounded together by *)
+(* MaxRestarts.                                                            *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
 CONSTANTS
     Delegates,       \* the delegates the parent may start
     Cap,             \* delegates of the parent at once, not yet ended
-    MaxRestarts,     \* restarts of the framework
+    MaxRestarts,     \* restarts of the framework and of an agent's process
     MaxKills,        \* kills of delegate processes
     MaxParentStops,  \* times the parent's process ends: a move, or an exit
     Awaited,         \* the delegates a run_delegate call waits on, once each
@@ -155,7 +170,8 @@ Breaks == {
     "IdleInMemory",          \* the idle notice's mark is kept in memory, not as Mailbox's key
     "IdlePerDelegate",       \* the idle notice's key names the delegate, not its idle state
     "StartOverLive",         \* a second start of a branch goes on while its session is live
-    "BriefAfterInit"         \* a headless start waits for its init before its message
+    "BriefAfterInit",        \* a headless start waits for its init before its message
+    "StatusEndsWork"         \* the lease's owner says a refused, finished or failed row ended
 }
 
 ASSUME Break \in Breaks
@@ -192,7 +208,8 @@ VARIABLES
     call,         \* in memory: d -> "none", "start", "resume": Delegates' call of Sessions
     sess,         \* Sessions: d -> its row of the latest call: "none", "start" or "resume"
                   \*           (written, under way), "held" (a headless process held,
-                  \*           its init not read), "running", "refused"
+                  \*           its init not read), "running", "refused" (free), "orphan"
+                  \*           (a process held with no line, for Recoveries)
     marked,       \* Stream's table: d -> the turn's message is marked under the row's uuid
     pipe,         \* d -> message lines in the current process's FIFO, not yet taken
     taken,        \* d -> turn messages the delegate's processes took
@@ -251,6 +268,15 @@ Idle(d) == status[d] = "running" /\ call[d] = "none" /\ proc[d] = "stalled" /\ p
 \* state, which Mailbox takes once. IdlePerDelegate names the delegate only.
 IdleKey(d) == IF Break = "IdlePerDelegate" THEN <<d, 0>> ELSE <<d, idles[d]>>
 
+\* What Delegates.Work answers the Scheduler of a delegate's lease (F-163's
+\* new-1): ended once the row never called (none) or ended, or once it is
+\* refused, finished or failed and Sessions' row of it is free, so no
+\* process of it may live. Under StatusEndsWork the status alone answers.
+SessionsFree(d) == sess[d] \in {"none", "refused"}
+WorkEnded(d) ==
+    \/ status[d] \in {"none", "ended"}
+    \/ status[d] \in {"refused", "finished", "failed"} /\ (SessionsFree(d) \/ Break = "StatusEndsWork")
+
 -----------------------------------------------------------------------------
 Init ==
     /\ up = TRUE /\ restarts = 0
@@ -303,6 +329,47 @@ FrameworkDies ==
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
     /\ UNCHANGED <<restarts, parentVars, delegateVars, stops, callVars, policyVars, dvars>>
+
+\* A delegate's agent process crashes and its supervisor starts it again
+\* (B4), in one step: nothing reads its memory in between. Delegates' call
+\* of it under way answers {:unknown, :restarted}, so the row waits for
+\* Settled; a Stop event of it not yet passed on may be lost, for the
+\* transcript's reply. Sessions' start or resume under way is cut, and its
+\* row adopted at its deadline (Start.tla's Adopt): refused with nothing
+\* held, or confirmed once its message went in with the hold, which
+\* SessionsDecides and Confirmed still stand for; or an orphan, a headless
+\* process held with no line when the crash fell between the hold and the
+\* write, which never confirms and which Recoveries ends (OrphanEnded).
+RestartAgent(d) ==
+    /\ up /\ restarts < MaxRestarts
+    /\ restarts' = restarts + 1
+    /\ call' = [call EXCEPT ![d] = "none"]
+    /\ stops' \in {stops, stops \ {d}}
+    /\ \/ UNCHANGED <<sess, proc, resumed>>
+       \/ /\ sess[d] \in {"start", "resume"} /\ d \notin Interactive
+          /\ sess' = [sess EXCEPT ![d] = "orphan"]
+          /\ proc' = [proc EXCEPT ![d] = "waiting"]
+          /\ resumed' = [resumed EXCEPT ![d] = IF sess[d] = "resume" THEN @ + 1 ELSE @]
+    /\ UNCHANGED <<up, parentVars, status, held, resumes, reply, kills, persons, rsrc, marked,
+                   pipe, taken, policyVars, dvars>>
+
+\* The parent's agent process crashes and its supervisor starts it again: a
+\* hand of a report to the parent under way is cut, its mark kept
+\* (Delivery.tla's AgentCut). Its turn and its process outside run on.
+RestartParent ==
+    /\ up /\ restarts < MaxRestarts
+    /\ restarts' = restarts + 1
+    /\ \E went \in BOOLEAN : D!AgentCut(Parent, went)
+    /\ UNCHANGED <<up, parentVars, delegateVars, stops, callVars, policyVars>>
+
+\* Recoveries ends an orphan's process by its record, or finds it gone;
+\* Sessions' row is then stopped, free.
+OrphanEnded(d) ==
+    /\ up /\ sess[d] = "orphan"
+    /\ sess' = [sess EXCEPT ![d] = "refused"]
+    /\ proc' = [proc EXCEPT ![d] = "dead"]
+    /\ UNCHANGED <<up, restarts, parentVars, stops, policyVars, dvars, status, held, resumes,
+                   reply, kills, persons, rsrc, call, marked, pipe, taken, resumed>>
 
 -----------------------------------------------------------------------------
 (* The parent: its turns, and its process ending and running again (a move) *)
@@ -637,12 +704,13 @@ Framework(d) ==
     \/ DelegateEnds(d) \/ BoundPasses(d) \/ IdleTold(d)
 
 Next ==
-    \/ FrameworkDies \/ FrameworkStarts
+    \/ FrameworkDies \/ FrameworkStarts \/ RestartParent
     \/ PromptSent \/ TurnEnds \/ ParentStops \/ ParentRuns
     \/ Mailbox(D!Connects(Parent))
     \/ \E d \in Delegates : StartAsked(d) \/ StartAgain(d) \/ SessionsDecides(d) \/ Confirmed(d)
                             \/ InputTaken(d) \/ PersonTypes(d) \/ DelegateFinishes(d)
                             \/ TurnEndsBare(d) \/ DelegateKilled(d)
+                            \/ RestartAgent(d) \/ OrphanEnded(d)
                             \/ Framework(d)
                             \/ Mailboxes(d)
 
@@ -654,6 +722,7 @@ Fairness ==
     /\ SF_vars(Mailbox(D!Connects(Parent)))
     /\ \A d \in Delegates :
          /\ WF_vars(Called(d)) /\ WF_vars(SessionsDecides(d)) /\ WF_vars(Confirmed(d))
+         /\ WF_vars(OrphanEnded(d))
          /\ WF_vars(CallAnswered(d))
          /\ WF_vars(Settled(d)) /\ WF_vars(InputWritten(d)) /\ WF_vars(InputTaken(d))
          /\ WF_vars(StopHandled(d)) /\ WF_vars(TranscriptRead(d)) /\ WF_vars(HeldStored(d))
@@ -677,7 +746,7 @@ TypeOK ==
     /\ reply \in [Delegates -> {"none", "brief", "person"}]
     /\ rsrc \in [Delegates -> {"none", "brief", "person"}]
     /\ call \in [Delegates -> {"none", "start", "resume"}]
-    /\ sess \in [Delegates -> {"none", "start", "resume", "held", "running", "refused"}]
+    /\ sess \in [Delegates -> {"none", "start", "resume", "held", "running", "refused", "orphan"}]
     /\ stops \subseteq Delegates
     /\ idles \in [Delegates -> Nat] /\ overdue \in [Delegates -> BOOLEAN]
     /\ told \in [Delegates -> Nat] /\ keys \subseteq Delegates \X Nat /\ againStarts \in Nat
@@ -715,6 +784,11 @@ ReportAnswersTheBrief == \A d \in Delegates : rsrc[d] # "person"
 \* always has a row that reports it.
 RefusedHoldsNothing ==
     \A d \in Delegates : status[d] = "refused" => proc[d] \in {"none", "dead"}
+
+\* The owner's promise the Scheduler's release rests on (Schedule.tla's
+\* `work`, Boxes.tla's SeatsHold): work it says ended has no process. A
+\* finished delegate's process lives until it ends, so StatusEndsWork fails.
+WorkEndedIsFree == \A d \in Delegates : WorkEnded(d) => proc[d] \in {"none", "dead"}
 
 \* Each process takes one turn's message: the brief, or a resumed one's.
 OneMessagePerProcess == \A d \in Delegates : taken[d] <= resumed[d] + 1

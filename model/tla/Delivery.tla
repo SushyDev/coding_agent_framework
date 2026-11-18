@@ -135,12 +135,19 @@
 (* Assumed of Sessions: the addressee's process, turn and stopping row,    *)
 (* read and changed by the instancing spec. Boxes.tla's Mark, Hand,        *)
 (* Answered and SettleRow are this spec's mark, hand-on and settle, every  *)
-(* transport one hand. Not implied: here a hand is cut only by a restart   *)
-(* of the whole framework, since Mailbox is one process; once each agent   *)
-(* has its own process (B4) the transport's write runs in the addressee's  *)
-(* agent process, whose crash alone cuts it and answers {:unknown,         *)
-(* :restarted}. Boxes.tla checks that the mark is kept then (Break         *)
-(* UnknownUndoes); this spec does not have the step (F-163's new-2).       *)
+(* transport one hand.                                                     *)
+(*                                                                         *)
+(* A hand cut by its addressee's own restart (F-163's new-2, F-164). Once  *)
+(* each agent has its own process (B4), the write of a stream, waiter,     *)
+(* typed or launch row runs in the addressee's agent process, whose crash  *)
+(* alone cuts it and answers {:unknown, :restarted}: AgentCut, beside the  *)
+(* whole Restart. The write may have gone out before the crash, so the    *)
+(* mark is kept and the evidence settles the row, as for any unknown;     *)
+(* Mailbox's own memory, the calls' connections and every other           *)
+(* addressee's hands run on. Mailbox stays one process (design,            *)
+(* "Processes and restarts"): its own restart is the whole one. Boxes.tla's *)
+(* CutCalls and its Break UnknownUndoes are this step at the contract       *)
+(* level; AgentCutUndoes here breaks it against the transports.            *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -153,7 +160,7 @@ CONSTANTS
     Awaited,       \* rows a run_delegate call may wait on
     ClientLeaves,  \* the client may give up on a call before its deadline
     SelfTurns,     \* alone: a headless session may start a turn by itself
-    MaxRestarts,   \* alone: restarts of the framework
+    MaxRestarts,   \* alone: restarts of the framework and of an addressee's agent process
     MaxEnds,       \* alone: processes that end by themselves (a crash, a kill)
     MaxPrompts,    \* alone: a person's prompts
     MaxStops,      \* alone: stops by SIGTERM
@@ -186,7 +193,8 @@ Breaks == {
     "ResumeOwnKey",          \* a resumed process's row is keyed by itself, not the brief
     "NoPointer",             \* a long row is not typed: it waits for a waiter (F-132)
     "BriefAfterInit",        \* a headless start waits for its init before its first row
-    "LaunchBound"            \* a launch with no line is due again while its process lives (F-153)
+    "LaunchBound",           \* a launch with no line is due again while its process lives (F-153)
+    "AgentCutUndoes"         \* a hand its addressee's agent process's crash cut is due again
 }
 
 ASSUME Break \in Breaks
@@ -572,6 +580,29 @@ Restart ==
                 ELSE row
     /\ UNCHANGED <<claimed, wire, tx, fold, last, lost, wrong>>
 
+\* What a restart of a's agent process does to Mailbox (B4): the hand of a
+\* row to a under way there is cut, and answers {:unknown, :restarted}. Its
+\* write went out before the crash, or not (`went`): a stream line claimed, a
+\* waiter answered, keys typed, each only while the hand-on was possible; a
+\* launch's start that was made is Launch's step, and one not made made no
+\* process. Either way the mark is kept, for the evidence. One row at most
+\* is in flight to a. Under AgentCutUndoes the cut row is due again.
+AgentCut(a, went) ==
+    LET cut == {i \in hand : row[i].to = a /\ row[i].via # "call"}
+        out == IF went
+                 THEN {i \in cut : row[i].via \in {"stream", "waiter", "typed"} /\ ~ForStart(i)
+                                   /\ Open(i)}
+                 ELSE {}
+    IN
+    /\ hand' = hand \ cut
+    /\ wire' = [i \in Ids |-> IF i \in out THEN wire[i] + 1 ELSE wire[i]]
+    /\ claimed' = claimed \cup {i \in out : row[i].via = "stream"}
+    /\ waiter' = IF \E i \in out : row[i].via = "waiter" THEN [waiter EXCEPT ![a] = 0] ELSE waiter
+    /\ row' = IF Break = "AgentCutUndoes"
+                THEN [i \in Ids |-> IF i \in cut THEN DueAgain(i) ELSE row[i]]
+                ELSE row
+    /\ UNCHANGED <<call, tx, fold, rmem, last, unsure, lost, wrong>>
+
 \* A due row to a session that ended for good is marked ended: it never went
 \* in. Under EndedUnsettled a row still sending is marked too.
 EndedFirst(i) ==
@@ -742,6 +773,15 @@ FrameworkStarts ==
     /\ ~up /\ up' = TRUE
     /\ UNCHANGED <<pr, idle, stopping, over, turned, dvars, alone>>
 
+\* a's agent process crashes and its supervisor starts it again, in one step
+\* (nothing reads its memory in between): the hand under way to a is cut,
+\* and the stop's idle read made there is lost; its row and process stay.
+AgentRestart(a) ==
+    /\ up /\ restarts < MaxRestarts
+    /\ restarts' = restarts + 1 /\ readAt' = [readAt EXCEPT ![a] = 0]
+    /\ \E went \in BOOLEAN : AgentCut(a, went)
+    /\ UNCHANGED <<up, pr, idle, stopping, over, turned, lives, ends, prompts, stops>>
+
 \* The agent calls run_delegate in a turn, on a row stored for it.
 CallMade(i) ==
     /\ row[i].st \in {"due", "sending"} /\ row[i].to \notin Headless
@@ -756,6 +796,7 @@ Next ==
     \/ \E a \in Addrs : \/ Prompted(a) \/ SelfStarts(a) \/ TurnEnds(a) \/ Ends(a)
                         \/ Resumed(a) \/ StopAsked(a) \/ IdleRead(a) \/ Term(a) \/ Over(a)
                         \/ Mailbox(Connects(a)) \/ Mailbox(WaiterEnds(a))
+                        \/ AgentRestart(a)
     \/ \E i \in Ids : \/ \E s \in Senders, a \in Addrs : Sends(i, s, a)
                       \/ \E t \in Transports : Mailbox(Mark(i, t))
                       \/ Mailbox(Handed(i) \/ Refused(i) \/ Unknown(i) \/ Reclaim(i))
