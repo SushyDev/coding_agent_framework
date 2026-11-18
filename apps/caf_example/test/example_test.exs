@@ -621,7 +621,7 @@ defmodule CodingAgentFramework.ExampleTest do
   defp late_end_waiting(mailbox) do
     {:messages, messages} = Process.info(mailbox, :messages)
 
-    Enum.find(messages, &match?({:"$gen_call", _, {:notify, _, _, "job:" <> _}}, &1))
+    Enum.find(messages, &match?({:"$gen_call", _, {:notify, _, _, "job:" <> _, _}}, &1))
   end
 
   # Kills the delegate's current process, once the stand-in has taken `n` messages.
