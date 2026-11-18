@@ -55,6 +55,31 @@ defmodule CodingAgentFramework.Example.Console do
     end
   end
 
+  @doc """
+  The start the shell of `bin/caf-example` makes (its dot file, `console.iex.exs`), once per VM
+  (F-153's new-5). IEx evaluates the dot file again in each new shell it starts, as after an
+  interrupt (Ctrl+G, then `i` and `c`), and a second start fails on the ports the first one
+  holds: that shell gets the app the first one started, and nothing starts twice. Answers
+  `start/2`'s answer the first time, then `{:ok, caf}` of that start, whether it still runs or
+  not, and says which. The one start is the VM's, so it is kept in `:persistent_term`; `start/2`
+  keeps nothing, and a test VM starts as many as it likes.
+  """
+  @spec shell(String.t(), %{String.t() => String.t()}) :: {:ok, pid} | {:refused | :unknown, term}
+  def shell(path, env \\ System.get_env()) do
+    case :persistent_term.get({__MODULE__, :shell}, nil) do
+      nil ->
+        with {:ok, caf} <- start(path, env) do
+          :persistent_term.put({__MODULE__, :shell}, caf)
+          {:ok, caf}
+        end
+
+      caf ->
+        runs = if Process.alive?(caf), do: "runs", else: "has stopped"
+        say("caf: this shell's app #{runs}, started once; `caf` names it again")
+        {:ok, caf}
+    end
+  end
+
   @doc "Stops the app. The held agents run on; the next start adopts them."
   @spec stop(pid) :: :ok
   def stop(caf), do: Run.stop(caf)
@@ -352,12 +377,14 @@ defmodule CodingAgentFramework.Example.Console do
 
   @doc """
   The command that opens `agent`'s viewer in another terminal: a main session's own screen, or
-  a headless delegate's event log. Detach with tmux's prefix and `d`; the agent runs on.
+  a headless delegate's event log. Detach with tmux's prefix and `d`; the agent runs on. The
+  target is quoted, `-t '=name'`: zsh reads a word that starts with `=` as a command's path
+  (F-153's new-4).
   """
   @spec attach(pid, String.t()) :: :ok
   def attach(caf, agent) do
     c = info(caf).config
-    say("#{c.programs.tmux} -S #{Config.path(c, "tmux.sock")} attach -t =#{agent}")
+    say("#{c.programs.tmux} -S #{Config.path(c, "tmux.sock")} attach -t '=#{agent}'")
   end
 
   defp banner(caf, c) do

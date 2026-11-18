@@ -517,6 +517,7 @@ defmodule CodingAgentFramework.Sessions do
         dialog: Keyword.get(opts, :dialog, &Dialog.ask/2),
         look: Keyword.get(opts, :look, 5_000),
         looking: false,
+        peeking: %{},
         worktrees: root(host, holder.sh, programs, Keyword.get(opts, :home)),
         pending: %{}
       }
@@ -1099,6 +1100,50 @@ defmodule CodingAgentFramework.Sessions do
     {:noreply, pressed(state, press, answer)}
   end
 
+  # An unknown row's look asked by a settle (`peek/2`): one look per name at a time, in a task
+  # linked to this process, so a pane read (up to `@read` ms) never holds the other calls.
+  def handle_info({:peek, name}, state) do
+    row = Table.get(state.db, state.host.name, name)
+
+    if Map.has_key?(state.peeking, name) or Map.has_key?(state.pending, name) or
+         not match?(%{status: "unknown", role: "parent"}, row) do
+      {:noreply, state}
+    else
+      {inlet, release, started} = {state.inlet, row.release, row.started_at}
+
+      task =
+        Task.async(fn ->
+          answer =
+            try do
+              Inlet.look(inlet, name, release, timeout: @read)
+            catch
+              how, _ -> {:unknown, {how, :look}}
+            end
+
+          {:looked, name, started, answer}
+        end)
+
+      {:noreply, look_later(%{state | peeking: Map.put(state.peeking, name, task.ref)})}
+    end
+  end
+
+  # That look answered: it is the row's only while the row is still the same start, unknown,
+  # and no call is under way for its name.
+  def handle_info({ref, {:looked, name, started, answer}}, state) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    state = %{state | peeking: Map.delete(state.peeking, name)}
+
+    case Table.get(state.db, state.host.name, name) do
+      %{status: "unknown", started_at: ^started} = row ->
+        unless Map.has_key?(state.pending, name), do: shown(state, row, answer)
+
+      _ ->
+        :ok
+    end
+
+    {:noreply, look_later(state)}
+  end
+
   # A worktree's task answered: the start goes on to the hold, or is refused with nothing held.
   def handle_info({ref, prepared}, state) when is_reference(ref) do
     Process.demonitor(ref, [:flush])
@@ -1255,8 +1300,15 @@ defmodule CodingAgentFramework.Sessions do
     # A row whose press is under way is read once its answer comes back (`pressed/3`): the
     # Inlet is busy with that press, and a read now would hold this process until it is done.
     # The row as written now: a caller's copy (a start's) may predate the mark.
-    with true <- not Dialog.pressing?(Table.get(state.db, row.host, row.name) || row) || :pressed,
-         {:ok, screen} <- Inlet.look(state.inlet, row.name, row.release, timeout: @read),
+    if Dialog.pressing?(Table.get(state.db, row.host, row.name) || row),
+      do: :pressed,
+      else: shown(state, row, Inlet.look(state.inlet, row.name, row.release, timeout: @read))
+  end
+
+  # What a read of the row's pane showed: a startup dialog becomes the row's, as `look_at/2`
+  # says; anything else, or a failed read, decides nothing.
+  defp shown(state, row, look) do
+    with {:ok, screen} <- look,
          true <- Dialog.startup?(screen) do
       now = Table.get(state.db, row.host, row.name) || row
       shown = Dialog.encode(screen)
@@ -1267,10 +1319,15 @@ defmodule CodingAgentFramework.Sessions do
       now = Table.get(state.db, row.host, row.name)
       decide(state, now, screen)
     else
-      :pressed -> :pressed
       _ -> :none
     end
   end
+
+  # An unknown row's pane is read in a task (`{:peek, name}`), never in this process: at each
+  # settle and each look, so a slow pane read cannot starve the calls.
+  defp peek(%{inlet: nil}, _row), do: :none
+  defp peek(_state, %{role: role}) when role != "parent", do: :none
+  defp peek(_state, row), do: send(self(), {:peek, row.name})
 
   # The app's callback, for a dialog no answer has been marked for: an answer it gives is
   # pressed, as a person's is; anything else leaves the dialog to a person.
@@ -1450,15 +1507,15 @@ defmodule CodingAgentFramework.Sessions do
 
   # ReRead: an unknown row is running once its file names its live process, an orphan while
   # that process runs on a dead socket, and stopped once its socket is dead with no such file.
-  # Else its pane is read: a start that met a screen `Screen` does not read (Claude Code's first
-  # run on a new account, say) went unknown, and the startup dialog after it becomes the row's
-  # (F-151).
+  # Else its pane is read, in a task (`peek/2`, F-153): a start that met a screen `Screen` does
+  # not read (Claude Code's first run on a new account, say) went unknown, and the startup
+  # dialog after it becomes the row's (F-151).
   defp settle_row(state, %{status: "unknown"} = row, read?) do
     case confirm(state, row, read?) do
       {:ok, file} -> running(state, row, file)
       {:unheld, file} -> orphan(state, row, file)
       {:dead, _} -> write(state, row, status: "stopped")
-      _ -> look_at(state, row)
+      _ -> peek(state, row)
     end
   end
 

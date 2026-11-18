@@ -17,7 +17,14 @@ defmodule CodingAgentFramework.ScreenStandIn do
     first draws each startup dialog's screen in turn, its first option selected, as 2.1.322
     does: `trust-dialog`'s, then `imports-dialog`'s. Down and Up move the selection, Enter
     answers: "Yes, I trust this folder" goes on (and writes `<dir>/trusted`), "No, exit" exits;
-    either imports option goes on, and writes it to `<dir>/imports` (`yes` or `no`).
+    either imports option goes on, and writes it to `<dir>/imports` (`yes` or `no`);
+  - written with `transcript: true`, the start's prompt also goes into its transcript
+    (`$CLAUDE_CONFIG_DIR/projects/<cwd>/<session>.jsonl`) as 2.1.322 writes a start's first
+    turn, past its startup dialogs and not before: the session's title, agent name and modes,
+    a file-history snapshot, then the user line whose `content` is the prompt, with
+    `promptSource` `typed` (from the first end-to-end run's transcript, F-153);
+  - with `--name`, the rule above the box carries the name, as 2.1.322 draws a session started
+    with `--name` (`──── name ─`, F-153's capture).
 
   Started by `Sessions` (`CLAUDE_CONFIG_DIR` set), it writes its session file as
   `CodingAgentFramework.ClaudeStandIn` does, once its startup dialogs are answered (2.1.322
@@ -41,7 +48,10 @@ defmodule CodingAgentFramework.ScreenStandIn do
     File.mkdir_p!(Path.join(dir, "pids"))
     File.mkdir_p!(Path.join(dir, "prompts"))
     {top, bottom} = split_at_box(File.read!(Path.join(fixtures(release), "text-typed.txt")))
-    File.write!(Path.join(screens, "top"), top)
+    # The rule above the box is drawn by the script, with the session's name when it has one.
+    {top, [rule]} = Enum.split(top, -1)
+    File.write!(Path.join(screens, "top"), Enum.map_join(top, &(&1 <> "\n")))
+    File.write!(Path.join(screens, "rule"), rule <> "\n")
     File.write!(Path.join(screens, "bottom"), bottom)
     running = File.read!(Path.join(fixtures(release), "turn-running.txt"))
     File.write!(Path.join(screens, "running"), String.trim_trailing(running, "\n"))
@@ -58,10 +68,11 @@ defmodule CodingAgentFramework.ScreenStandIn do
     )
 
     dialogs = Keyword.get(opts, :dialogs, if(opts[:trust], do: [:trust], else: []))
-    suffix = Enum.map_join(dialogs, &"-#{&1}")
+    transcript = if opts[:transcript], do: "1", else: ""
+    suffix = Enum.map_join(dialogs, &"-#{&1}") <> if(opts[:transcript], do: "-tx", else: "")
     path = Path.join(dir, "claude-screen#{suffix}-#{release}")
     tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
-    File.write!(tmp, script(dir, screens, release, idle, Enum.join(dialogs, " ")))
+    File.write!(tmp, script(dir, screens, release, idle, Enum.join(dialogs, " "), transcript))
     File.chmod!(tmp, 0o755)
     # Renamed into place, as `ClaudeStandIn.write!/3` does: a start may be running the path.
     File.rename!(tmp, path)
@@ -104,13 +115,17 @@ defmodule CodingAgentFramework.ScreenStandIn do
     lines = text |> String.trim_trailing("\n") |> String.split("\n")
     at = Enum.find_index(lines, &String.starts_with?(&1, "❯ "))
     {before, [_box | rest]} = Enum.split(lines, at)
-    {Enum.map_join(before, &(&1 <> "\n")), Enum.join(rest, "\n")}
+    {before, Enum.join(rest, "\n")}
   end
 
-  defp script(dir, screens, release, idle, dialogs) do
+  # The fixture's width, which a named rule fills as the plain one does.
+  defp width(screens),
+    do: screens |> Path.join("rule") |> File.read!() |> String.trim() |> String.length()
+
+  defp script(dir, screens, release, idle, dialogs, transcript) do
     ~s"""
     #!#{program!(:bash)}
-    name='' resume='' screen=idle prompt='' dialogs='#{dialogs}' choice=no
+    name='' resume='' screen=idle prompt='' dialogs='#{dialogs}' choice=no transcript='#{transcript}'
     while [ $# -gt 0 ]; do
       case $1 in
         --version) printf '%s (Claude Code)\\n' '#{release}'; exit 0 ;;
@@ -135,6 +150,35 @@ defmodule CodingAgentFramework.ScreenStandIn do
         $$ "${resume:-stand-in-$$}" "$name" "$PWD" "$start" "$1" > "$file.tmp"
       #{program!(:mv)} -f "$file.tmp" "$file"
     }
+    # The rule above the box: the fixture's, or with --name the name in it, as 2.1.322 draws it.
+    rule() {
+      if [ -z "$name" ]; then #{program!(:cat)} "#{screens}/rule"; return; fi
+      r='' i=0
+      while [ $i -lt $((#{width(screens)} - ${#name} - 3)) ]; do r="$r─"; i=$((i + 1)); done
+      printf '%s %s ─\\n' "$r" "$name"
+    }
+    # A string as JSON's string body: backslash, quote, newline and tab escaped.
+    json() {
+      local s=$1
+      s=${s//\\\\/\\\\\\\\}; s=${s//\\"/\\\\\\"}; s=${s//$'\\n'/\\\\n}; s=${s//$'\\t'/\\\\t}
+      printf '%s' "$s"
+    }
+    # The first turn's lines in the transcript, as 2.1.322 writes a start's prompt.
+    tx() {
+      [ -n "$transcript" ] && [ -n "$CLAUDE_CONFIG_DIR" ] || return 0
+      sid=${resume:-stand-in-$$} at='2026-11-18T09:42:50.291Z'
+      d="$CLAUDE_CONFIG_DIR/projects/${PWD//[^a-zA-Z0-9]/-}"
+      #{program!(:mkdir)} -p "$d"
+      {
+        printf '{"type":"custom-title","customTitle":"%s","sessionId":"%s"}\\n' "$name" "$sid"
+        printf '{"type":"agent-name","agentName":"%s","sessionId":"%s"}\\n' "$name" "$sid"
+        printf '{"type":"mode","mode":"normal","sessionId":"%s"}\\n' "$sid"
+        printf '{"type":"permission-mode","permissionMode":"auto","sessionId":"%s"}\\n' "$sid"
+        printf '{"type":"file-history-snapshot","messageId":"m-%s","snapshot":{"messageId":"m-%s","trackedFileBackups":{},"timestamp":"%s"},"isSnapshotUpdate":false}\\n' $$ $$ "$at"
+        printf '{"parentUuid":null,"isSidechain":false,"promptId":"p-%s","type":"user","message":{"role":"user","content":"%s"},"uuid":"m-%s","timestamp":"%s","permissionMode":"auto","origin":{"kind":"human"},"promptSource":"typed","turnOrigin":"human","turnPosition":{"promptIndex":1,"turnIndex":1},"userType":"external","entrypoint":"cli","cwd":"%s","sessionId":"%s","version":"#{release}","gitBranch":"main"}\\n' \\
+          $$ "$(json "$prompt")" $$ "$at" "$(json "$PWD")" "$sid"
+      } >> "$d/$sid.jsonl"
+    }
     draw() {
       printf '\\033[H\\033[2J'
       if [ $screen = running ]; then
@@ -143,6 +187,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
         #{program!(:cat)} "#{screens}/$screen-$choice"
       else
         #{program!(:cat)} "#{screens}/top"
+        rule
         printf '❯ %s\\n' "$box"
         #{program!(:cat)} "#{screens}/bottom"
       fi
@@ -157,6 +202,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
       announce idle
       [ -n "$prompt" ] || return 0
       printf '%s' "$prompt" > "#{dir}/prompts/$$"
+      tx
       announce busy
       announce idle
     }

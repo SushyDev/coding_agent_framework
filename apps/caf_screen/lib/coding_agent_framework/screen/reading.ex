@@ -11,6 +11,7 @@ defmodule CodingAgentFramework.Screen.Reading do
 
     * `box`: what starts the input box's line, the prompt mark and what follows it;
     * `prompt`: the prompt mark alone, which is an empty box too;
+    * `named_rule`: the rule above the box of a session that has a name, with the name in it;
     * `placeholder`: the hint an empty box shows, which is not typed text;
     * `running`: the words in the footer under the box while a turn runs;
     * `exited`: the line Claude Code leaves on the screen when it exits;
@@ -33,6 +34,7 @@ defmodule CodingAgentFramework.Screen.Reading do
   @type t :: %{
           box: String.t(),
           prompt: String.t(),
+          named_rule: Regex.t(),
           placeholder: Regex.t(),
           running: String.t(),
           exited: String.t(),

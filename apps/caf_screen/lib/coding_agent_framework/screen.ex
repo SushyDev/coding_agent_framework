@@ -32,6 +32,11 @@ defmodule CodingAgentFramework.Screen do
   A screen the release's reading cannot place, or places only by a guess, is unrecognized: a
   box of more than one line while no turn runs, a dialog of an unknown kind, options with no
   one selected or a label twice. This module starts no process and reads no file.
+
+  Nothing it reads depends on the pane's width: a rule is a line of `─` alone, however long, and
+  the rule above the box may carry the session's name (`──── name ─`, a session started with
+  `--name`). A person who attaches to a viewer redraws it at their own width, so the same
+  session is read at 80 columns and at 400 (F-153's new-2).
   """
 
   alias CodingAgentFramework.Screen.Reading
@@ -131,8 +136,11 @@ defmodule CodingAgentFramework.Screen do
   end
 
   # The box sits between two rules; its footer, under the lower one, is the last thing drawn.
+  # The upper rule carries the session's name when it has one (`--name`).
   defp box(above, footer, reading) do
-    with {:ok, _, [first | _] = inside} <- split_at_last_rule(above),
+    upper? = &(rule?(&1) or Regex.match?(reading.named_rule, &1))
+
+    with {:ok, _, [first | _] = inside} <- split_at_last_rule(above, upper?),
          true <- first == reading.prompt or String.starts_with?(first, reading.box) do
       cond do
         Enum.any?(footer, &String.contains?(&1, reading.running)) -> {:ok, %{state: :running}}
@@ -232,8 +240,8 @@ defmodule CodingAgentFramework.Screen do
     |> Enum.all?(fn {{_, text}, n} -> String.starts_with?(text, "#{n}. ") end)
   end
 
-  defp split_at_last_rule(lines) do
-    case lines |> Enum.reverse() |> Enum.find_index(&rule?/1) do
+  defp split_at_last_rule(lines, rule? \\ &rule?/1) do
+    case lines |> Enum.reverse() |> Enum.find_index(rule?) do
       nil ->
         :error
 

@@ -35,6 +35,14 @@
 (* or kept when its owner ends: kept for a delegate's main session, and    *)
 (* ended with a main session, kept or not, since the operator owns nothing.*)
 (*                                                                         *)
+(* A delegate's start may be refused once its call reached Sessions        *)
+(* (StartsRefused): its process ran and was stopped before its first turn  *)
+(* took anything, as a headless start whose init never came in the first   *)
+(* end-to-end run (F-153), and none of it runs again. It has no report and *)
+(* no process, so no fix takes it, a stop among them; Delegates' settle    *)
+(* ends its row, as a failed delegate's, and its main session's end waits  *)
+(* on it no more (RefusedEnds; RefusedKept leaves it refused).             *)
+(*                                                                         *)
 (* Models these modules of CodingAgentFramework (only Grants' checks are   *)
 (* built, F-73):                                                           *)
 (*   Grants    the tree's edges, by which it decides whether a caller may  *)
@@ -47,6 +55,7 @@
 (*             and its end with its owner (durable);                       *)
 (*   Sessions  a main session's end (`end_main`): its check of the         *)
 (*             delegates and its stop, in one process;                     *)
+(*   Delegates a refused start's end, at its settle;                       *)
 (*   MCP       the calls: message, interrupt, answer, resume, stop,        *)
 (*             service_start, service_restart, service_stop, service_hand  *)
 (*             and ask, each with its caller's fixed identity; the         *)
@@ -155,6 +164,7 @@ CONSTANTS
     SelfTurns,    \* a delegate may start a turn by itself
     Operators,    \* {} or {the operator}: a person or the app, outside the tree
     StopsUnknown, \* a main session's stop may answer unknown: its process outlives the deadline
+    StartsRefused, \* a delegate's start may be refused once its call reached Sessions (F-153)
     Break         \* "none", or the guard made wrong (see Breaks)
 
 Breaks == {
@@ -186,7 +196,8 @@ Breaks == {
     "EndInMemory",           \* the end asked is held by its call only, so a restart forgets it
     "ResumeEnding",          \* a resume takes a main session whose end is asked
     "AnswerNotHeld",         \* an answer's claim is taken on a request its state does not hold
-    "ClaimBeforeCheck"       \* a fix is claimed before its check of the claimed state
+    "ClaimBeforeCheck",      \* a fix is claimed before its check of the claimed state
+    "RefusedKept"            \* a delegate whose start was refused is never ended (F-153)
 }
 
 Agents == UNION Projects
@@ -198,6 +209,7 @@ ASSUME \A P \in Projects : Cardinality(P \cap Mains) = 1
 ASSUME \A P, Q \in Projects : P # Q => P \cap Q = {}
 ASSUME Mains \subseteq Agents
 ASSUME MaxMsgs \in Nat /\ MaxAsks \in Nat /\ MaxRequests \in Nat /\ MaxFaults \in Nat /\ MaxRestarts \in Nat /\ SelfTurns \in BOOLEAN /\ StopsUnknown \in BOOLEAN
+ASSUME StartsRefused \in BOOLEAN
 \* The operator's name is reserved: no agent holds it.
 ASSUME Cardinality(Operators) <= 1 /\ Operators \cap Agents = {}
 
@@ -242,7 +254,7 @@ MayHand(c, o, b) == /\ c = o \/ Break = "HandByOther"
 VARIABLES
     up,        \* the framework runs
     restarts,  \* restarts so far
-    proc,      \* a -> "working", "idle", "stuck", "dead", "ended"
+    proc,      \* a -> "working", "idle", "stuck", "dead", "ended", "refused" (a delegate's start)
     epoch,     \* a -> the number of a's state
     life,      \* a -> the number of a's process
     faults,    \* sticks and deaths so far
@@ -271,8 +283,12 @@ dvars == <<row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure
 vars == <<up, restarts, agentVars, claimVars, svcVars, wrong, ending, dvars>>
 
 \* The operator is outside the tree, and never ends. An IF, since TLC splits a
-\* disjunction in an action and would read `proc` of the operator.
-Live(a) == IF a \in Operators THEN TRUE ELSE proc[a] # "ended"
+\* disjunction in an action and would read `proc` of the operator. A delegate
+\* whose start was refused has no process to call from.
+Live(a) == IF a \in Operators THEN TRUE ELSE proc[a] \notin {"ended", "refused"}
+
+\* No process of the agent runs again: it ended, or its start was refused.
+Over(a) == proc[a] \in {"ended", "refused"}
 
 D == INSTANCE Delivery WITH
        Ids <- Ids, Addrs <- Agents, Headless <- Delegates, Senders <- Actors, MaxSent <- 0,
@@ -280,10 +296,10 @@ D == INSTANCE Delivery WITH
        MaxEnds <- 0, MaxPrompts <- 0, MaxStops <- 0,
        Break <- IF Break = "NoPointer" THEN "NoPointer" ELSE "none",
        up <- up,
-       pr <- [a \in Agents |-> IF proc[a] \in {"dead", "ended"} THEN 0 ELSE life[a]],
+       pr <- [a \in Agents |-> IF proc[a] \in {"dead", "ended", "refused"} THEN 0 ELSE life[a]],
        idle <- [a \in Agents |-> proc[a] = "idle"],
        stopping <- [a \in Agents |-> a \in ending],
-       over <- [a \in Agents |-> proc[a] = "ended"],
+       over <- [a \in Agents |-> Over(a)],
        turned <- turned, Long <- Ids, Launched <- {},
        call <- dcall, lost <- dlost, wrong <- dwrong,
        restarts <- 0, lives <- 0, ends <- 0, prompts <- 0, stops <- 0, readAt <- 0
@@ -392,6 +408,25 @@ DelegateEnds(d) ==
     /\ proc' = [proc EXCEPT ![d] = "ended"] /\ epoch' = [epoch EXCEPT ![d] = @ + 1]
     /\ D!Exited(d, FALSE)
     /\ UNCHANGED <<up, restarts, life, faults, turned, held, reqs, claimVars, svcVars, wrong, ending>>
+
+\* A delegate's start refused once its call reached Sessions (F-153): its
+\* process ran and was stopped before its first turn took anything (a
+\* headless start whose init never came), and none of it runs again. It has
+\* no report, and no fix takes it: it has no process. Rows due to it are
+\* marked ended, as to one that ended (`Over`).
+StartRefused(d) ==
+    /\ StartsRefused /\ d \in Delegates /\ proc[d] = "working" /\ life[d] = 1
+    /\ epoch[d] = 0 /\ tx[d] = <<>>
+    /\ proc' = [proc EXCEPT ![d] = "refused"] /\ epoch' = [epoch EXCEPT ![d] = @ + 1]
+    /\ UNCHANGED <<up, restarts, life, faults, turned, held, reqs, claimVars, svcVars, wrong, ending, dvars>>
+
+\* Delegates' settle: a refused start's agent row is ended once no process of
+\* it may live, as a failed delegate's is, so it holds its main session's end
+\* no more. RefusedKept leaves it, as the first end-to-end run's code did.
+RefusedEnded(d) ==
+    /\ up /\ proc[d] = "refused" /\ Break # "RefusedKept"
+    /\ proc' = [proc EXCEPT ![d] = "ended"]
+    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, held, reqs, claimVars, svcVars, wrong, ending, dvars>>
 
 \* A main session's end (F-143), the operator's alone: refused while any of
 \* its delegates has not ended, so none is left with no parent; SIGTERM once
@@ -614,6 +649,7 @@ Next ==
     \/ FrameworkDies \/ FrameworkStarts
     \/ \E a \in Agents : \/ Prompted(a) \/ SelfStarts(a) \/ TurnEnds(a) \/ Faults(a)
                          \/ DelegateEnds(a) \/ Requests(a) \/ PersonAnswers(a)
+                         \/ StartRefused(a) \/ RefusedEnded(a)
     \/ \E c \in Actors, t \in Agents : Send(c, t) \/ \E k \in Kinds : ClaimTaken(c, t, k)
     \/ \E c \in Actors, t \in Agents, i \in Reqs : AnswerClaimed(c, t, i)
     \/ \E c \in Agents, o \in Operators : Send(c, o)
@@ -638,6 +674,7 @@ Fairness ==
     /\ WF_vars(\E r \in claims : ClaimSettled(r))
     /\ \A s \in Services : WF_vars(ServiceOwnerEnded(s))
     /\ \A m \in Mains : WF_vars(EndTerm(m)) /\ WF_vars(EndSettled(m))
+    /\ \A d \in Delegates : WF_vars(RefusedEnded(d))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -645,7 +682,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 (* What must hold *)
 
 TypeOK ==
-    /\ proc \in [Agents -> {"working", "idle", "stuck", "dead", "ended"}]
+    /\ proc \in [Agents -> {"working", "idle", "stuck", "dead", "ended", "refused"}]
     /\ epoch \in [Agents -> 0..MaxEpoch] /\ turned \in [Agents -> BOOLEAN]
     /\ held \in [Agents -> SUBSET Reqs] /\ reqs \in 0..MaxRequests
     /\ claims \subseteq
@@ -737,6 +774,10 @@ NoResumeOfEnding == "resume ending" \notin wrong
 
 \* An end asked ends the row, with no second call, across a restart.
 EndAskedEnds == \A m \in Mains : m \in ending ~> proc[m] = "ended"
+
+\* A delegate whose start was refused ends, so its main session may end: none
+\* is left neither running nor ended, which the end would wait on forever.
+RefusedEnds == \A d \in Delegates : proc[d] = "refused" ~> proc[d] = "ended"
 
 \* A running service has one owner; an ended one has none.
 OneOwner ==

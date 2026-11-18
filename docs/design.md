@@ -788,8 +788,12 @@ is told at most once per idle state across restarts.
   still holds its worktree and its report.
 - A delegate's life is its agent row in `Sessions`: whether its process may live, and whether
   it has `ended`, which `Sessions` writes when `Delegates` asks (`Sessions.ended/3`) once no
-  process of it may live: a failed one at once, since it is never resumed again, and a
-  finished one once its report was delivered, since only then is it stopped. Which rows hold
+  process of it may live: a failed one at once, since it is never resumed again, one whose
+  start was refused after its call reached `Sessions` at once too (its process ran and was
+  stopped, as a headless start whose init never came; it has no report and no process, so a
+  stop refuses it, and with its agent row left `stopped` its parent's `end_main` waited on it
+  forever: F-153's new-7, `Team.tla`'s `RefusedEnds`), and a finished one once its report was
+  delivered, since only then is it stopped. Which rows hold
   an agent, and so the cap, is one function there (`Sessions.Agents.holds?/1`, R9): a
   delegate holds its parent's cap from its start (its call under way in `Delegates`, then its
   agent row) until it has ended or its start was refused. `Delegates`' own row keeps the marks
@@ -1099,7 +1103,11 @@ reading for delegates:
 A main session stays interactive. `Screen` reads only a main session's screen: its dialogs by
 label, a typed command's result line, and whether its input box is empty before a typed write.
 Its fixtures are captured from a real session once per pinned Claude Code release by a script,
-run and reviewed, with names and paths scrubbed; no test runs the real Claude Code.
+run and reviewed, with names and paths scrubbed; no test runs the real Claude Code. They include
+a session launched as the framework launches a main session (`--name`, `--remote-control`),
+whose name 2.1.322 draws inside the rule above the box, at 120 and 400 columns. Nothing `Screen`
+reads depends on the width: a viewer's window takes the size of whoever attaches, so a person's
+attach redraws the screen at their width (F-153's new-2).
 
 **Delivery into a main session** (a report, a reply, a message) types nothing (F-114). Each
 main session's launch overlay (item 11's settings overlay, for the main role) names a `command`
@@ -1250,7 +1258,7 @@ framework's tools, which are strict in how they act and narrow in whom they reac
 
 | Tool | Who | What it does |
 |---|---|---|
-| `agents(all)` | any agent | the tree: each agent's name, kind, project, parent, account, state (working, waiting, idle, stuck, gone; `starting` while a start or resume is under way, `unread` while nothing has read its session yet; a main session's from its session file alone), what it waits on, and its subagents, read from the `Tracker`'s view, never a copy (F-99). A delegate that ended keeps its place but shows only with `all: true` (F-129's new-5) |
+| `agents(all)` | any agent | the tree: each agent's name, kind, project, parent, account, state (working, waiting, idle, stuck, gone; `starting` while a start or resume is under way, `unread` while nothing has read its session yet; a main session's and an interactive delegate's from its session file alone, the one its pid and start time name, F-153's new-6), what it waits on, and its subagents, read from the `Tracker`'s view, never a copy (F-99). A delegate that ended keeps its place but shows only with `all: true` (F-129's new-5) |
 | `message(to, text)` | along an edge | stores a message and delivers it to the target when its turn has ended; answers `queued{id}`, then the sender learns `delivered` |
 | `look(agent)` | parent, child, main sessions | a main session's screen as text, or a delegate's rendered event log; its open dialog or request; its last transcript lines |
 | `transcript(agent, from)` | parent, child, main sessions | the agent's transcript from an offset |
@@ -1386,7 +1394,7 @@ changed (R6).
 | `stream` | a headless session | the replay in `Stream`'s fold; at the exit, the transcript. Its first row to a new process is marked before the start and written right after the hold (F-152) | settled from the same evidence once read; undelivered is final, and the row is due again first, under its same uuid, to the resumed process; a start's first row with no line in the fold waits for the start's deadline |
 | `waiter` | an interactive session with a waiter | the transcript's lines carrying the row's uuid: the `queue-operation` `enqueue` (it reached Claude Code's queue), then its take, a `dequeue` and the user line `Stop hook blocking error …` into an ended turn, or a `remove` and a `queued_command` attachment into a running one; delivered at the take; due again once the take bound past its hand-on has passed with no line, or its process is gone with no take | settled from the same lines: delivered if the take is there, kept while only the `enqueue` is, due again if no line is there and the take bound has passed |
 | `typed` | an interactive session with no waiter | the `Inlet`'s answer, then the transcript's user line once the turn has ended; due again as `waiter` | as `waiter`; an unknown write is never typed again |
-| `launch` | the first row to an interactive session's new process | its start: the text is the start's prompt argument, read from a file into the last argument (`ClaudeCLI.prompted/5`, at most 512 KiB); then the transcript's user line with the row's uuid, delivered at it; a start refused makes it due again; with no line, due again once no process of the start runs or the take bound has passed since the start's answer | as `waiter`, the start's deadline standing in for its answer |
+| `launch` | the first row to an interactive session's new process | its start: the text is the start's prompt argument, read from a file into the last argument (`ClaudeCLI.prompted/5`, at most 512 KiB); then the transcript's first user line whose text is the prompt, its mark last (the launch's own line, never a waiter's), delivered at it; a start refused makes it due again; with no line, due again only once no process of the start runs: a startup dialog holds the first turn for as long as a person takes, so no take bound stands for it, and the row is handed to no other transport while its process lives (F-153's new-1, `Break_Delivery_LaunchBound`) | settled from the same evidence |
 | `call` | a waiting `run_delegate` | the endpoint's write, and the calling process still running after it | due again, for the parent's waiter: the call it answered is gone |
 
 **The launch** (F-137). A waiter connects only once a turn of its process has ended, and the

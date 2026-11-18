@@ -579,6 +579,30 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert {:refused, _} = Delegates.fix(current(ctx), "main", name, :stop, state)
   end
 
+  # F-153's new-7 (`Team.tla`'s RefusedEnded): a start refused once its call reached Sessions,
+  # its process gone with no report, as the first end-to-end run left one whose init never
+  # came. No process of it runs again, so its agent row is ended, and it holds its parent's end
+  # and cap no more. The refusal is written here as the late answer wrote it.
+  test "a start refused after its process ran is ended, and frees its parent", ctx do
+    hold(ctx)
+    assert {:ok, %{id: id, name: name}} = start(ctx, "app", "unit/one")
+    Table.update(ctx.dtable, id, status: "refused", reason: "ended")
+    kill_delegate(ctx, id, [])
+
+    {:ok, _} =
+      await(fn ->
+        Sessions.cue(ctx.sessions, %{topic: "stream:test", ids: []})
+        Sessions.viewer_argv(ctx.sessions, name)
+        cue(ctx, current(ctx))
+        with %{status: "ended"} = row <- session_row(ctx, name), do: {:ok, row}
+      end)
+
+    assert %{status: "refused", resumes: 0, report: "none"} = Table.get(ctx.dtable, id)
+    assert Agents.children(ctx.agents, "main") == 0
+    assert {:ok, %{id: two}} = start(ctx, "app", "unit/two")
+    assert two != id
+  end
+
   # Delegate.tla's Report: handed once, under the brief's key, across restarts of Delegates.
   test "a report Mailbox did not take is handed again, once taken never twice", ctx do
     assert {:ok, %{id: id, brief_uuid: u}} = start(ctx, "app", "unit/one")

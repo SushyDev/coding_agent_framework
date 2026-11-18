@@ -40,7 +40,8 @@
 (* (F-137); a row to a session with no waiter, long or not, goes by the    *)
 (* typed write, so none waits for a person's prompt. Since the pointer     *)
 (* (F-142) a first row would arrive by the typed write too: the launch is  *)
-(* the quicker path, with no screen to read, and no Break of its own.      *)
+(* the quicker path, with no screen to read, and its one Break is its      *)
+(* settle's (LaunchBound).                                                 *)
 (*                                                                         *)
 (* A headless process in Launched (F-152) writes its system/init only      *)
 (* after it read its first line, and Sessions says its row running, so     *)
@@ -53,7 +54,9 @@
 (*           its resume): the first row to it goes in as the start itself, *)
 (*           and Claude Code runs it as the session's first turn. Marked   *)
 (*           before the start; a start refused undoes the mark, under the  *)
-(*           same key; settled as waiter, by the transcript's user line.   *)
+(*           same key; settled as waiter, by the transcript's user line,   *)
+(*           and with no line due again only once its process is gone: no  *)
+(*           bound stands for its take (LaunchBound, F-153).               *)
 (*   call    the answer of a waiting run_delegate, inside the turn that    *)
 (*           called. Delivered when the endpoint's write succeeded and the *)
 (*           calling process still runs; a failed write, the end of the    *)
@@ -165,7 +168,8 @@ Breaks == {
     "NoNotice",              \* a row whose turn ended with no result gets no notice
     "ResumeOwnKey",          \* a resumed process's row is keyed by itself, not the brief
     "NoPointer",             \* a long row is not typed: it waits for a waiter (F-132)
-    "BriefAfterInit"         \* a headless start waits for its init before its first row
+    "BriefAfterInit",        \* a headless start waits for its init before its first row
+    "LaunchBound"            \* a launch with no line is due again while its process lives (F-153)
 }
 
 ASSUME Break \in Breaks
@@ -408,14 +412,21 @@ SettleExit(i, has) ==
 \* dequeue or a remove) and a launch's user line at once, a typed write's
 \* once the turn that took it has ended. There, delivered; not there, due
 \* again once no answer of it is on its way to a turn, or the process it was
-\* for is gone (a launch whose start a restart cut never made it).
+\* for is gone (a launch whose start a restart cut never made it). The code
+\* reads "on its way" by a take bound for the waiter and the typed write; a
+\* launch has none, since a startup dialog holds its first turn for as long
+\* as a person takes, so its prompt is on its way while its process lives.
+\* LaunchBound reads a bound for it too, as the first end-to-end run's code
+\* did (F-153): the bound passed while the trust dialog waited, the row was
+\* due again, and the waiter gave it once more after the first turn.
 SettleSeen(i, has) ==
     LET a == row[i].to  gone == pr[a] # row[i].at IN
     /\ up /\ row[i].st = "sending" /\ row[i].via \in {"waiter", "typed", "launch"}
     /\ i \notin hand
     /\ \/ has /\ (idle[a] \/ gone \/ row[i].via \in {"waiter", "launch"})
           /\ row' = [row EXCEPT ![i] = Delivered(i)]
-       \/ ~has /\ (wire[i] = 0 \/ gone \/ Break = "SettleEarly")
+       \/ ~has /\ (wire[i] = 0 \/ gone \/ Break = "SettleEarly"
+                   \/ (Break = "LaunchBound" /\ row[i].via = "launch"))
           /\ row' = [row EXCEPT ![i] = DueAgain(i)]
     /\ wire' = IF gone THEN [wire EXCEPT ![i] = 0] ELSE wire
     /\ UNCHANGED <<hand, claimed, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>

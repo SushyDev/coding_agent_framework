@@ -9,10 +9,13 @@ defmodule CodingAgentFramework.MailboxLaunchTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, Grants, Mailbox, ScreenStandIn, Sessions, SessionsSetup}
-  alias CodingAgentFramework.Transcripts
+  alias CodingAgentFramework.{Accounts, Grants, Inlet, Mailbox, Registry, ScreenStandIn, Sessions}
+  alias CodingAgentFramework.{SessionsSetup, Transcripts}
   alias CodingAgentFramework.Mailbox.{Table, Transport}
   alias CodingAgentFramework.MailboxLaunchTest.NoWaiter
+  alias CodingAgentFramework.Sessions.Agents
+
+  @trust "Yes, I trust this folder"
 
   doctest Transport.Launch
 
@@ -96,6 +99,58 @@ defmodule CodingAgentFramework.MailboxLaunchTest do
     GenServer.stop(m)
     Process.put(:mailbox, restart(ctx.mopts))
     assert {:ok, %{status: "queued", uuid: ^uuid}} = until(ctx, one, &(&1.status == "queued"))
+  end
+
+  # F-153's new-1 (`Delivery.tla`'s SettleSeen, `Break_Delivery_LaunchBound`): the trust
+  # dialog holds the first turn for as long as a person takes, here past the start's deadline
+  # and the take bound, and the row stays `sending` by launch, handed to no other transport,
+  # until the transcript's first user line, drawn by the stand-in as 2.1.322 writes it, settles
+  # it delivered by launch.
+  test "a first turn a startup dialog holds is the launch's, however late", ctx do
+    m = mailbox(ctx)
+    {:ok, {:queued, one}} = Mailbox.message(m, "d1", "main", "Review it.\nTwo lines.")
+    past = System.os_time(:millisecond) - 60_000
+
+    assert {:ok, %{id: ^one, uuid: uuid, text: text}} = Mailbox.launch(m, "main", past)
+
+    inlet = start_supervised!({Inlet, tmux: ctx.server})
+    spec = {Sessions, ctx.opts ++ [inlet: inlet]}
+    sessions = start_supervised!(Supervisor.child_spec(spec, id: make_ref()))
+
+    claude =
+      ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), trust: true, transcript: true)
+
+    launch = SessionsSetup.launch(ctx, :at_start) |> Keyword.merge(claude: claude, prompt: text)
+
+    answer = Sessions.start(sessions, "main", ctx.account, launch)
+    assert {:unknown, {:dialog, :trust}} = answer
+    assert {:ok, "sending"} = Mailbox.launched(m, one, answer)
+
+    # Past the deadline and the bound, with no line: read at a transcripts cue and at the bound.
+    send(m, :bound)
+    {:ok, row} = until(ctx, one, &(&1.status != "queued"))
+    assert %{status: "sending", via: "launch", uuid: ^uuid} = row
+    assert ScreenStandIn.prompts(ctx.dir) == []
+
+    assert {:ok, :sent} = Sessions.answer_dialog(sessions, "main", :trust, @trust)
+    {:ok, agents} = Agents.open(Path.join(ctx.dir, "caf.db"), "test")
+
+    # Past the dialog the session file names the process, and Sessions' row runs.
+    {:ok, %{session_id: sid}} =
+      await(fn ->
+        {:ok, _} = Registry.read(ctx.registry)
+        Sessions.cue(sessions, %{topic: "registry:test:work", ids: []})
+        with %{status: "running"} = row <- Agents.get(agents, "main"), do: {:ok, row}
+      end)
+
+    assert {:ok, %{status: "delivered", via: "launch"}} =
+             until(ctx, one, &(&1.status == "delivered"))
+
+    # The first turn's user line is the one line with the mark: it went in once.
+    {:ok, path} = Transcripts.path(ctx.account.config_dir, ctx.dir, sid)
+    lines = path |> File.read!() |> String.split("\n", trim: true)
+    assert [user] = Enum.filter(lines, &String.contains?(&1, "[delivery #{uuid}]"))
+    assert %{"type" => "user", "promptSource" => "typed"} = JSON.decode!(user)
   end
 
   defp user(path, text) do

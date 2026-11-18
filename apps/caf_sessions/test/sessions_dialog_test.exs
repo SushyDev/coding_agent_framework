@@ -199,6 +199,35 @@ defmodule CodingAgentFramework.SessionsDialogTest do
              Sessions.answer_dialog(sessions, "alpha", :imports, @no_imports, by: "operator")
   end
 
+  # An unknown main session's pane is read in a task (F-151's look, F-153): while the Inlet is
+  # held up, Sessions answers other calls, and the dialog the look finds becomes the row's.
+  test "an unknown row's look runs in a task, and its dialog becomes the row's", ctx do
+    sessions = sessions(ctx, look: 600_000)
+
+    assert {:unknown, {:dialog, :trust}} =
+             Sessions.start(sessions, "alpha", ctx.account, ctx.launch)
+
+    # As a start that met a screen `Screen` does not read: unknown, no dialog shown.
+    row = Agents.get(ctx.agents, "alpha")
+    Table.update(ctx.table, row.id, status: "unknown", dialog: nil)
+
+    :sys.suspend(ctx.inlet)
+    send(sessions, :look)
+
+    assert {:ok, _} =
+             await(fn ->
+               peeking = :sys.get_state(sessions).peeking
+               if Map.has_key?(peeking, "alpha"), do: {:ok, peeking}, else: :none
+             end)
+
+    assert {:ok, []} = Sessions.ends_owed(sessions, timeout: 1_000)
+    assert Agents.get(ctx.agents, "alpha").status == "unknown"
+
+    :sys.resume(ctx.inlet)
+    assert {:ok, %{kind: :trust, answers: %{}}} = await(fn -> shown(ctx, "alpha", :trust) end)
+    assert Agents.get(ctx.agents, "alpha").status == "dialog"
+  end
+
   # The app's choice: a callback that answers the trust dialog presses it, marked first, and
   # leaves the imports dialog to a person.
   test "the app's callback answers the kinds it chooses, and asks for the rest", ctx do

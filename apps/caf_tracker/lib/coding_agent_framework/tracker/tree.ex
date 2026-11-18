@@ -9,15 +9,18 @@ defmodule CodingAgentFramework.Tracker.Tree do
   how fresh their read is (F-99's new-3).
 
   - **A main session** is a row of kind `main`, with its project and account. Its state is its
-    session file's, as `Sessions.Turn.file_state/1` reads it from the view's `Registry` rows:
-    `working`, `waiting`, `idle`, `gone`, `unread`; `starting` while its start is under way and
-    `gone` while no process of it may live (`declared`, `stopped`). The view holds no waiter, so
-    this is one read, for a person to see, and never what decides a write (F-113's new-2).
-  - **A delegate**'s state is its `Stream` row's (by session), as `Sessions.Turn.stream/1` reads
-    it: `gone`, `waiting` while a `can_use_tool` request is held (`waits_on` names each),
-    `working` or `idle`; `starting` while its agent row's start or resume is under way, `ended`
-    once no process of it will run again (its start refused, or done for good), `unread` with
-    no `Stream` row.
+    session file's, as `Sessions.Turn.file_state/1` reads it from the view's `Registry` rows
+    of its `{host, account}`, the file whose pid and start time are the row's: `working`,
+    `waiting`, `idle`, `gone`, `unread`; `starting` while its start is under way and `gone`
+    while no process of it may live (`declared`, `stopped`). The view holds no waiter, so this
+    is one read, for a person to see, and never what decides a write (F-113's new-2).
+  - **A headless delegate**'s state is its `Stream` row's (by session), as
+    `Sessions.Turn.stream/1` reads it: `gone`, `waiting` while a `can_use_tool` request is held
+    (`waits_on` names each), `working` or `idle`; `starting` while its agent row's start or
+    resume is under way, `ended` once no process of it will run again (its start refused, or
+    done for good), `unread` with no `Stream` row.
+  - **An interactive delegate** (role `parent`) has no `Stream` row: its state is its session
+    file's, as a main session's is (F-153's new-6).
   - Each agent's subagents are its transcript's.
 
   A delegate that ended keeps its place in the tree, but `agents/2` leaves it out unless asked
@@ -31,7 +34,7 @@ defmodule CodingAgentFramework.Tracker.Tree do
       iex> m = %{id: 1, host: "h", name: "main", kind: "main", parent: nil, project: "app",
       ...>   account: "work", session_id: nil, status: "running"}
       iex> d = %{id: 2, host: "h", name: "app-fix", kind: "delegate", parent: "main",
-      ...>   project: "app", account: "work", status: "running", session_id: "s1"}
+      ...>   project: "app", account: "work", status: "running", session_id: "s1", role: "delegate"}
       iex> s = %{session: "s1", gone: false, idle: false, requests: %{}}
       iex> view = %{{"h", "agents"} => %{agents: [%{key: 1, row: m}, %{key: 2, row: d}], sources: %{}},
       ...>   {"h", "stream"} => %{stream: [%{key: 1, row: s}], sources: %{}}}
@@ -58,8 +61,13 @@ defmodule CodingAgentFramework.Tracker.Tree do
     streams = for %{row: r} <- entries.(:stream), into: %{}, do: {r[:session], r}
     transcripts = for %{row: r} <- entries.(:transcripts), into: %{}, do: {key(r), r}
 
+    # The session files by `{host, account}`, the scope the view keys them by: a session entry
+    # is the fold's own (`Tracker.Fold`), with no row inside it and no scope of its own.
     files =
-      Enum.group_by(for(%{row: r} <- entries.(:sessions), do: r), &{&1[:host], &1[:account]})
+      for {{_, _} = scope, %{sessions: entries}} <- view,
+          is_list(entries),
+          into: %{},
+          do: {scope, Enum.filter(entries, &is_map/1)}
 
     full = Map.new(good, &{{&1.row.host, &1.row.name}, &1.row})
     ev = %{streams: streams, transcripts: transcripts, files: files, full: full}
@@ -102,14 +110,14 @@ defmodule CodingAgentFramework.Tracker.Tree do
       Agents.starting?(row) ->
         {"starting", []}
 
-      row.kind == "main" and Agents.free?(row) ->
+      Agents.headless?(row) ->
+        stream(ev.streams[row[:session_id]])
+
+      Agents.free?(row) ->
         {"gone", []}
 
-      row.kind == "main" ->
-        {word(Turn.file_state(Turn.file(row, ev.files[{row[:host], row[:account]}] || []))), []}
-
       true ->
-        stream(ev.streams[row[:session_id]])
+        {word(Turn.file_state(Turn.file(row, ev.files[{row[:host], row[:account]}] || []))), []}
     end
   end
 

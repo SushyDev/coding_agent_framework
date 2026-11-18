@@ -75,8 +75,10 @@ defmodule CodingAgentFramework.Delegates do
   `held`, with its text, and handed again at each cue.
 
   **An ended delegate**: once no process of it may live, a failed one at once (it is never
-  resumed again) and a finished one once its report was delivered (only then is it stopped, by
-  `stop` or `end_session`), a cue asks `Sessions.ended/3`, and its agent row is `ended`: it
+  resumed again), one whose start was refused after its call reached `Sessions` at once too
+  (its process ran and was stopped, and it has no report; F-153's new-7), and a finished one
+  once its report was delivered (only then is it stopped, by `stop` or `end_session`), a cue
+  asks `Sessions.ended/3`, and its agent row is `ended`: it
   frees its parent's cap, and what it owns ends (what it kept goes to its parent, its edge in
   the tree staying). Its report stays its parent's.
 
@@ -658,7 +660,7 @@ defmodule CodingAgentFramework.Delegates do
   defp answered(s, %{status: "starting"} = row, {:refused, why} = refused) do
     write(s, row, status: "refused", reason: why)
     Mailbox.ended(s.mailbox, row.name)
-    {refused, s}
+    {refused, settle_row(s, Table.get(s.db, row.id), agent(s, row))}
   end
 
   defp answered(s, row, {:refused, why} = refused) do
@@ -683,7 +685,7 @@ defmodule CodingAgentFramework.Delegates do
     busy = MapSet.new(Map.values(s.pending), & &1.id)
 
     Table.latest(s.db, s.host)
-    |> Enum.filter(&(&1.status in Table.open()))
+    |> Enum.filter(&(&1.status in Table.open() or &1.status == "refused"))
     |> Enum.reject(&MapSet.member?(busy, &1.id))
   end
 
@@ -797,6 +799,19 @@ defmodule CodingAgentFramework.Delegates do
       status == "failed" or delivered?(s, row) -> ended(s, row)
       true -> s
     end
+  end
+
+  # A start refused after its call reached Sessions, its process gone (its init never came, and
+  # Sessions stopped it): no process of it runs again, as of a failed one, so its agent row is
+  # ended once free, and it no longer holds its parent's end or cap (F-153's new-7, `Team.tla`'s
+  # RefusedEnded). A row Sessions itself refused is ended already; one whose call never reached
+  # Sessions has no agent row of its own.
+  defp settle_row(s, %{status: "refused"} = row, agent) do
+    own? = is_integer(row.called_at) and Agents.since?(agent, row.called_at)
+
+    if own? and Agents.free?(agent) and not Agents.ended?(agent) and not Agents.moving?(agent),
+      do: ended(s, row),
+      else: s
   end
 
   # A move under way ends the process and resumes it on another account itself: its end is not

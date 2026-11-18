@@ -17,6 +17,11 @@ session's or an interactive delegate's own screen, or a headless delegate's even
 viewer with tmux's prefix and `d`; the agent runs on. A person may type into a main session's
 or an interactive delegate's screen; never into a headless delegate's.
 
+Never interrupt the console's shell (Ctrl+C, or Ctrl+G and a new shell) to get past a slow
+call: wait for it, or run a long one as a task (`Task.async(fn -> checkout(caf) end)`). A new
+shell gets the app the first one started, as `caf`, and starts nothing again; the first run met
+a shell that started the app a second time, failed on its ports and stopped the VM (F-153).
+
 ## 0. Before the run
 
 The paths below use `/Users/me`; use your own home directory, spelled the same way everywhere.
@@ -63,7 +68,15 @@ The framework home must be short: macOS cuts a socket path at 104 bytes.
    bin/caf-login --check /Users/me/caf-e2e two
    ```
 
-   Passed when each check names the account you logged in with.
+   After each login, `bin/caf-login` runs Claude Code once on that account, in a scratch
+   folder it removes after: Claude Code's first run on a new account shows its onboarding (a
+   theme picker, then more screens) before anything else, and no session the framework starts
+   reads those screens. Pass each screen, then the scratch folder's trust dialog, then type
+   `/exit`. An account that passed it before is not run again.
+
+   Passed when each check names the account you logged in with and reads `Claude Code's
+   first-run onboarding: passed`. A check that reads `not passed` ends with status 1: run
+   `bin/caf-login` for that account again.
 
 No reading of either account's allowance is written by hand. A start picks the account with
 the most allowance left, and an account with no reading counts as 0 % used, assumed, as a reset
