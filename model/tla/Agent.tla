@@ -78,6 +78,18 @@
 (* for OneReopenPerLoss: a second claim of one loss needs the first's row  *)
 (* gone, and only a reading that names a new loss takes it out (Passes),   *)
 (* which also clears what was acted on.                                    *)
+(*                                                                         *)
+(* Sessions' contract, its panes and viewers (F-163): a write reaches      *)
+(* only the pane of the session it names, an old pane id never another's   *)
+(* (WriteReachesItsSession, OldPaneIdNeverReachesAnother); one process     *)
+(* per socket (OneProcessPerSocket); an agent outlives its tmux server     *)
+(* (AgentOutlivesServer). Boxes.tla folds the typed write into Sessions'   *)
+(* hand, which these make reach only its session, and takes the process    *)
+(* outside the BEAM, which a restart never ends, from                      *)
+(* AgentOutlivesServer. Recoveries' reopen (OneReopenPerLoss,              *)
+(* LostViewerReopened) is a remedy of the Watch under the Ledger's claim;  *)
+(* its allow-list and cap are Heal.tla's. A reopen touches no turn, so     *)
+(* NeverWorking holds of it. No gap for Boxes.tla.                         *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 

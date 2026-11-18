@@ -75,6 +75,16 @@
 (* waiter's arrival (both are HeartbeatFails, enabled while a death is     *)
 (* unseen); what the text says; Mailbox's settle from the transcript       *)
 (* (Delivery.tla), so a row it was told unknown stays so here.             *)
+(*                                                                         *)
+(* Sessions' contract for hooks (F-163): an event acknowledged only once   *)
+(* stored, stored once (AckedIsStored, StoredOnce); each hold one          *)
+(* response, only to the request it names, a late decision dropped, and    *)
+(* every hold settles (Hold.tla's, instanced: SentAtMostOnce,              *)
+(* OnlyNamedDialog, LateDropped, HoldSettles, and the tool and waiter      *)
+(* kinds' own); a waiter's text read at most once (ReadOnce). Boxes.tla    *)
+(* folds the waiter into Sessions' hand; the held permission request is a  *)
+(* prompt of Prompt.tla's (B1), which instances Hold. No gap for           *)
+(* Boxes.tla.                                                              *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets, Sequences
 

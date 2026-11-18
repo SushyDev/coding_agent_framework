@@ -2117,6 +2117,24 @@ units counted against a capacity for a process's life, not one act per state, an
 request has no row, may be answered twice (queued, then once more) and is asked again after a
 restart rather than settled; the spec's header says so.
 
+`Boxes.tla` (F-163) composes the seven boxes by their contracts ("Contracts and one composed
+spec"). Each box is only what it promises and what it assumes: `Sessions`' agent row, its
+process outside the BEAM, its turn, its stop, its `hand` and its press, and the agent process's
+memory and budget; `Mailbox`'s mark and settle by evidence; `Prompts`' row of a dialog's
+prompt and of a `restarts` prompt; the `Scheduler`'s seats; the `Ledger` as `Claim.tla`,
+instanced whole; a parent's fix through `Team`, and the `Watch`'s healer through the same
+claim. `Hosts` adds nothing to the interactions named, and is left out. One addressee lives the
+whole life; any other agent only takes a seat, runs and ends, and shares nothing else. It
+checks a delivery during a move (`NotCutByStop`, `OnlyToItsProcess`), a lease across a dialog
+(`LeaseWhileLive`, `SeatsHold`), a prompt across a restart (`OneAnswer`, `KeptAcrossRestart`),
+a remedy racing a fix (`OneActPerState`, `NeverWorking`), and one agent's restart and the whole
+one (`OneProcess`, `AtMostOnce`, `OwnBudget`; liveness `Escalated`), each with a
+`Break_Boxes_*` configuration, and liveness that a dialog passes, an ended lease is released,
+a row in flight settles and every claim ends. Each contract spec's header names the
+properties it exports as its box's contract and how they imply what `Boxes.tla` assumes, or
+where they do not (F-163's findings). Its `Restart(a)`, its prompts and its healer are the
+seams of B1's later parts.
+
 **The remodel's model** (F-115). Each mechanism is written once, and the specs above are
 reshaped around three new ones, in R4 and R6, before the code they describe:
 
@@ -2617,7 +2635,7 @@ model before the code it describes (B4, B6, B8, B9, B11); B2 and B3 change no be
   stated in its spec's header and as the properties it exports, and `Boxes.tla` (about +400),
   composing the boxes by their contracts: a delivery during a move, a lease across a dialog, a
   prompt across a restart, a remedy racing a fix, one agent's restart and the whole one
-  (decided). Then the restart as a step per agent
+  (decided; built in F-163, "The model"). Then the restart as a step per agent
   (`Restart(a)`) beside the whole one in `Start.tla`, `Delegate.tla`, `Dialog.tla` and
   `Move.tla`, bounded by `MaxRestarts`, with state counts compared before and after (about
   +200); `Prompt.tla` (about +300), instancing `Hold` and `Claim`, with `Dialog.tla`'s answer and

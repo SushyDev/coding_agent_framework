@@ -50,6 +50,11 @@
 (*                                                                         *)
 (* Break: "none" is the design. Every other value removes one guard and    *)
 (* has a Break_Shell_<value>.cfg that TLC must fail.                       *)
+(*                                                                         *)
+(* A base mechanism under Sessions and Hosts, not a box (F-163): a         *)
+(* command's group ended by a timeout, its owner's death or the VM's       *)
+(* (GroupEnded, Ends), a kill only of our own processes (KillsOwnOnly).    *)
+(* Start.tla and Copy.tla rely on it; Boxes.tla does not reach it.         *)
 (***************************************************************************)
 
 CONSTANTS Break

@@ -128,6 +128,15 @@
 (* failed and is taken as a new loss (RetryFailed) is refused by the       *)
 (* claim's row on its state, and then waits for no one: ForwardReopened    *)
 (* finds it.                                                               *)
+(*                                                                         *)
+(* The Hosts box's contract (F-163): a run only on a synced copy           *)
+(* (StartsOnSyncedCopy), one sync writing at a time, an answer only what   *)
+(* the host holds (AnswerIsReal), fetches only named paths after the end   *)
+(* with no edit lost, one process per service and none once ended, a       *)
+(* forward only to the current service, every call answered and a job      *)
+(* ended at its timeout. Assumed of the Scheduler: a start never lands     *)
+(* after its deadline (NeverLands), which Schedule.tla's fence makes hold  *)
+(* (NoRunUnleased). Boxes.tla needs nothing more of Hosts. No gap.         *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 

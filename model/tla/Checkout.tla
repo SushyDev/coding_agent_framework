@@ -34,6 +34,12 @@
 (*                                                                         *)
 (* Break: "none" is the design. Every other value removes one guard and    *)
 (* has a Break_Checkout_<value>.cfg that TLC must fail.                    *)
+(*                                                                         *)
+(* The Team box's contract for a project's checkout (F-163): no edit       *)
+(* lost, a whole checkout only, trunk only forward, made once and caught   *)
+(* up (NoLostEdit, WholeCheckout, Forward, Made, CaughtUp). Boxes.tla      *)
+(* leaves the checkout inside a start; no interaction it checks needs      *)
+(* more. No gap.                                                           *)
 (***************************************************************************)
 EXTENDS Naturals
 
