@@ -38,7 +38,7 @@ defmodule CodingAgentFramework.ExampleTest do
         projects: %{"app" => project},
         mains: %{"app-main" => "app"},
         ports: %{intake: free_port(), mcp: free_port()},
-        claude: HeadlessStandIn.write!(dir, :at_start),
+        claude: HeadlessStandIn.write!(dir, :on_message),
         env: %{home: dir, path: "/nonexistent", term: "xterm-256color", lang: "C.UTF-8"},
         interval: 200
       )

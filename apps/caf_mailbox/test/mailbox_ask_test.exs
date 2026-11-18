@@ -168,8 +168,22 @@ defmodule CodingAgentFramework.MailboxAskTest do
   defp started(ctx, name) do
     brief = Stream.uuid()
     {:ok, {:queued, _}} = Mailbox.brief(ctx.mailbox, "main", name, "Review it.", brief)
-    launch = SessionsSetup.headless(ctx, :at_start)
-    {:ok, %{session_id: sid}} = Sessions.start(ctx.sessions, name, ctx.account, launch)
+
+    # As Delegates does (F-152): the brief is marked by stream for the start, which writes it
+    # right after its hold, and the start's answer is told.
+    deadline = System.os_time(:millisecond) + 60_000
+    {:ok, first} = Mailbox.launch(ctx.mailbox, name, deadline, via: :stream)
+
+    launch =
+      Keyword.put(
+        SessionsSetup.headless(ctx, :on_message),
+        :first,
+        Map.take(first, [:uuid, :text])
+      )
+
+    answer = Sessions.start(ctx.sessions, name, ctx.account, launch)
+    {:ok, _} = Mailbox.launched(ctx.mailbox, first.id, answer)
+    {:ok, %{session_id: sid}} = answer
     {sid, brief}
   end
 

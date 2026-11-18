@@ -69,7 +69,8 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
          transcripts: transcripts,
          mailbox: mailbox,
          launch:
-           SessionsSetup.headless(ctx, :at_start) |> Keyword.take([:claude, :env, :tool_timeout]),
+           SessionsSetup.headless(ctx, :on_message)
+           |> Keyword.take([:claude, :env, :tool_timeout]),
          projects: %{"app" => project, "lib" => %{project | name: "lib"}}}
       )
 

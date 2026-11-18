@@ -116,7 +116,9 @@ defmodule CodingAgentFramework.SessionsSetup do
 
   @doc """
   The launch options of a delegate of main session `main`: a headless stand-in that writes its
-  init in `mode`.
+  init in `mode`. In `:on_message`, the real release's shape (F-152), the launch carries the
+  first line the start writes right after its hold, `first:` (`first/1`), as `Delegates` hands
+  it the row `Mailbox` marked; without it such a start is never confirmed.
   """
   def headless(ctx, mode) do
     claude = HeadlessStandIn.write!(ctx.dir, mode)
@@ -129,8 +131,11 @@ defmodule CodingAgentFramework.SessionsSetup do
       model: "opus",
       env: env(ctx),
       tool_timeout: 3_600_000
-    ]
+    ] ++ if(mode == :on_message, do: [first: first()], else: [])
   end
+
+  @doc "A first line for a headless start: the text `brief` under a uuid of its own."
+  def first, do: %{uuid: CodingAgentFramework.Stream.uuid(), text: "brief"}
 
   defp env(ctx),
     do: %{home: ctx.dir, path: "/nonexistent", term: "xterm-256color", lang: "C.UTF-8"}

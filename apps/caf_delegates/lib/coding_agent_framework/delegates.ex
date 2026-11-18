@@ -33,12 +33,17 @@ defmodule CodingAgentFramework.Delegates do
   whether its work ended): granted, the start goes on; queued, it waits in this process for the
   one more answer, the caller with it; refused, the row is `refused` with reason `{:lease,
   {reason, retry_at}}`, which is never a failed run. The brief is then stored in `Mailbox` under
-  that uuid, before anything of the delegate exists, so it is the first row to it. A task starts the session through `Sessions`, role
-  `:delegate`, with its parent, in the project's worktree, and its answer moves the row:
-  `running` (`Mailbox` then delivers the brief into the session's first ended turn), or
-  `refused`, and `Mailbox` ends the rows to it. A row a restart left `starting` is settled by
-  the agent row of its call, once that row is settled; with no such row by the row's deadline,
-  the call never reached `Sessions`, and the row is refused as `interrupted`.
+  that uuid, before anything of the delegate exists, so it is the first row to it, and marked
+  `sending` by `stream` for the start (`Mailbox.launch/4`, `via: :stream`; F-152): a headless
+  process writes its `system`/`init` only after it read a line, so `Sessions` writes the brief
+  (`first:`) right after the hold, before it waits for that init. A task starts the session
+  through `Sessions`, role `:delegate`, with its parent, in the project's worktree, and its
+  answer moves the row, and is told to `Mailbox` (`launched/3`): `running` (the brief's replay
+  then settles its row), or `refused`, and `Mailbox` ends the rows to it. A row a restart left
+  `starting` is settled by the agent row of its call, once that row is settled; with no such
+  row by the row's deadline, the call never reached `Sessions`, and the row is refused as
+  `interrupted`. A row still `starting` takes one fix, `:stop` (`Sessions.stop/3` ends its held
+  program by its record), and its start then settles refused.
 
   **A running delegate** is read from its `Stream` row at each cue: once the turn's message is
   delivered and a `result` names it, the row is `finished` with that result as its report.
@@ -47,9 +52,10 @@ defmodule CodingAgentFramework.Delegates do
   process of it may live): the row counts the resume first, as `resuming`, then
   `Sessions.resume/6` follows it again, with the agent row's own options. When the brief had
   gone in, `Mailbox` is first given the word to go on (`go_on/4`, under the row's
-  `resume_uuid`), which goes before any other row to it; when it had not, `Mailbox` sends the
-  brief again itself. A second such kill, or a refused resume, is `failed`, and that is the
-  report, a notice from `framework`. A row leaves `running` once.
+  `resume_uuid`), which goes before any other row to it; when it had not, `Mailbox` has the
+  brief due again itself. That first row is marked and carried as the start's is; with none due
+  yet, the resume waits for the next cue. A second such kill, or a refused resume, is `failed`,
+  and that is the report, a notice from `framework`. A row leaves `running` once.
 
   **An interactive delegate** (`interactive: true`, F-137; `docs/design.md`, "Interactive
   delegates") runs Claude Code's terminal interface: role `:parent`, kind `:delegate`. Its brief
@@ -151,9 +157,11 @@ defmodule CodingAgentFramework.Delegates do
   interactive delegate, which has no `Stream` row, `offset` is the id of the newest hook event
   `Intake` stored for its session, `held` the ids of the `PermissionRequest` rows it holds, and
   `gone` whether its agent row is not running. A fix of one state acts once; any event, exit,
-  end, answer, resume or report moves it. The latest row of that name is the delegate. Answers
-  `{:ok, state}`, or `{:refused, {:no_delegate, name}}`, `{:refused, {:not_started, status}}`,
-  `{:unknown, :no_intake}` for an interactive one with no `intake:`, or `Stream`'s.
+  end, answer, resume or report moves it. The latest row of that name is the delegate. A row
+  still `starting` has no process read yet: its state is its row's, with `offset` nil, and it
+  takes only `:stop` (F-152). Answers `{:ok, state}`, or `{:refused, {:no_delegate, name}}`,
+  `{:refused, {:not_started, "refused"}}`, `{:unknown, :no_intake}` for an interactive one with
+  no `intake:`, or `Stream`'s.
 
       Delegates.fix_state(delegates, "app-main", "app-unit-review")
       #=> {:ok, %{id: 1, status: "running", resumes: 0, report: "none", offset: 812,
@@ -180,6 +188,9 @@ defmodule CodingAgentFramework.Delegates do
   - `:stop`: `Sessions.stop/3`, which writes `end_session` through
     `Stream`, only once `Mailbox` has the report delivered and no row to the delegate still
     `queued` or `sending`; else `{:refused, {:report, status}}` or `{:refused, {:open, ids}}`.
+    Of a row still `starting` (F-152): `Sessions.stop/3` ends its held program by SIGTERM to
+    its record, `{:ok, :stopped}` once it is gone, and the start settles refused. Any other fix
+    of such a row is `{:refused, {:not_started, "starting"}}`.
   """
   def fix(delegates, parent, name, fix, state),
     do: call(delegates, {:fix, parent, name, fix, state}, [], 2 * @call)
@@ -325,20 +336,34 @@ defmodule CodingAgentFramework.Delegates do
 
   def handle_call({:fix_state, parent, name}, _from, s) do
     reply =
-      with {:ok, row, agent, fold} <- child(s, parent, name),
-           do: {:ok, claimed(row, agent, fold)}
+      case child(s, parent, name) do
+        {:ok, row, agent, fold} -> {:ok, claimed(row, agent, fold)}
+        {:starting, row} -> {:ok, starting(row)}
+        refused -> refused
+      end
 
     {:reply, reply, s}
   end
 
-  # The act only while the claimed state is the delegate's, read again in this step.
+  # The act only while the claimed state is the delegate's, read again in this step. A row
+  # still starting takes only a stop.
   def handle_call({:fix, parent, name, fix, state}, from, s) do
-    with {:ok, row, agent, fold} <- child(s, parent, name),
-         now = claimed(row, agent, fold),
-         true <- now == state or {:refused, {:moved, now}} do
-      act(s, row, agent, fold, fix, from)
-    else
-      refused -> {:reply, refused, s}
+    case child(s, parent, name) do
+      {:ok, row, agent, fold} ->
+        now = claimed(row, agent, fold)
+        if now == state, do: act(s, row, agent, fold, fix, from), else: moved(now, s)
+
+      {:starting, row} ->
+        now = starting(row)
+
+        cond do
+          now != state -> moved(now, s)
+          fix == :stop -> stop_starting(s, row, from)
+          true -> {:reply, {:refused, {:not_started, "starting"}}, s}
+        end
+
+      refused ->
+        {:reply, refused, s}
     end
   end
 
@@ -395,8 +420,9 @@ defmodule CodingAgentFramework.Delegates do
     {:noreply, s}
   end
 
-  # A start with its lease: the brief is stored, then Sessions is called. An interactive
-  # delegate's brief goes in as its start's prompt: marked by launch first.
+  # A start with its lease: the brief is stored and marked for the start (`launch_first/3`),
+  # then Sessions is called, which carries it: an interactive one's as its prompt, a headless
+  # one's as the line it writes right after the hold.
   defp begin(s, row, start, from) do
     with {:ok, _} <-
            Mailbox.brief(s.mailbox, start.parent, row.name, start.brief, row.brief_uuid)
@@ -444,11 +470,19 @@ defmodule CodingAgentFramework.Delegates do
   end
 
   # Called: Sessions writes its own row first and runs on through a restart of this process.
-  # A start names the parent and the options; a resume takes the agent row's. An interactive
-  # one carries the row `launch_first/3` marked as its prompt, and `Mailbox` is told the answer.
-  defp call_sessions(s, row, p, account, start, from, launched) do
-    launch = launch(s, row, p, if(launched, do: :interactive, else: :headless))
-    launch = if launched, do: launch ++ [prompt: launched.text], else: launch
+  # A start names the parent and the options; a resume takes the agent row's. It carries the
+  # row `launch_first/3` marked: an interactive one as its prompt, a headless one as the line
+  # it writes right after the hold (F-152). `Mailbox` is told the answer.
+  defp call_sessions(s, row, p, account, start, from, {how, launched}) do
+    launch = launch(s, row, p, how)
+
+    launch =
+      case how do
+        _ when launched == nil -> launch
+        :interactive -> launch ++ [prompt: launched.text]
+        :headless -> launch ++ [first: Map.take(launched, [:uuid, :text])]
+      end
+
     mailbox = s.mailbox
 
     # The config is made in the task: the embedding app's `issue` may call a part that waits.
@@ -498,13 +532,16 @@ defmodule CodingAgentFramework.Delegates do
   defp stored({:ok, _} = ok), do: ok
   defp stored(other), do: {:brief, other}
 
-  # The first row due to an interactive delegate, marked by launch for the start the caller
-  # makes next, by the row's deadline. A headless one's goes by its stream after the start.
-  defp launch_first(_s, _row, :headless), do: {:ok, nil}
+  # The first row due to the delegate, marked for the start the caller makes next, by the
+  # row's deadline: by launch for an interactive one, and by stream for a headless one, which
+  # writes its system/init only after it read a line (F-152; Delivery.tla's stream row for a
+  # start). An interactive start may go with no row; a headless one would never be confirmed.
+  defp launch_first(s, row, how) do
+    via = if how == :interactive, do: :launch, else: :stream
 
-  defp launch_first(s, row, :interactive) do
-    case Mailbox.launch(s.mailbox, row.name, row.deadline) do
-      {:ok, %{id: _, text: _} = launched} -> {:ok, launched}
+    case Mailbox.launch(s.mailbox, row.name, row.deadline, via: via) do
+      {:ok, %{id: _, text: _} = launched} -> {:ok, {how, launched}}
+      {:ok, :none} when how == :interactive -> {:ok, {how, nil}}
       other -> {:launch, other}
     end
   end
@@ -807,11 +844,16 @@ defmodule CodingAgentFramework.Delegates do
     agent = row && agent(s, row)
     own? = agent != nil and agent.parent == parent and Agents.since?(agent, row.created_at)
 
+    mine? = own? or (row != nil and pending_parent(s, row) == parent)
+
     cond do
       row == nil ->
         {:refused, {:no_delegate, name}}
 
-      row.status in ~w(starting refused) and (own? or pending_parent(s, row) == parent) ->
+      row.status == "starting" and mine? ->
+        {:starting, row}
+
+      row.status == "refused" and mine? ->
         {:refused, {:not_started, row.status}}
 
       own? ->
@@ -907,6 +949,25 @@ defmodule CodingAgentFramework.Delegates do
       {:ok, %{status: status}} -> {:reply, {:refused, {:report, status}}, s}
       other -> {:reply, other, s}
     end
+  end
+
+  # A row still starting: nothing of its process is read yet, and only its row moves it.
+  defp starting(row) do
+    state = Map.take(row, [:id, :status, :resumes, :report])
+    Map.merge(state, %{offset: nil, gone: false, ending: false, held: [], ended: false})
+  end
+
+  defp moved(now, s), do: {:reply, {:refused, {:moved, now}}, s}
+
+  # A start stuck before its confirm (a headless process whose init never came, F-152): its
+  # held program ends by SIGTERM to its record, through `Sessions.stop/3`, and the start's own
+  # answer, or the settle of its agent row, makes the row refused. This process does not wait.
+  defp stop_starting(s, row, from) do
+    Task.start(fn ->
+      GenServer.reply(from, Sessions.stop(s.sessions, row.name, timeout: @call))
+    end)
+
+    {:noreply, s}
   end
 
   defp row_session(s, row), do: agent(s, row).session_id

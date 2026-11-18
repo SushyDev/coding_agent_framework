@@ -734,10 +734,12 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
 3. adds the worktree and runs the project's declared setup in it, so a fresh worktree has its
    dependencies and build state before the first command;
 4. stores the brief as a row in `Mailbox` under a uuid it chose, from the parent, before the
-   session exists, so it is the first row to it; starts `claude` headless, held by dtach, with
-   `--session-id` set to an id the framework chose, opens a viewer of its event log tagged with
-   the session, project and unit, and confirms the start by its first event naming that id;
-   `Mailbox` then delivers the brief into the session's first ended turn, as any row;
+   session exists, so it is the first row to it, and has `Mailbox` mark it `sending` by
+   `stream` for the start; starts `claude` headless, held by dtach, with `--session-id` set to
+   an id the framework chose, writes the brief into its stdin right after the hold, opens a
+   viewer of its event log tagged with the session, project and unit, and confirms the start
+   by its first event naming that id, which Claude Code writes only after it read that line
+   (F-152); the brief's row settles by its replay, as any `stream` row;
 5. hands its last message to `Mailbox` when it stops, as the reply to the brief's uuid. When a
    restart lost the stop event, it hands on the transcript's last reply instead, and ends the
    delegate only after the delivery settled. The delegate's row moves from running to finished
@@ -820,7 +822,28 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
   final), and otherwise a fixed message to go on with its brief: a `Mailbox` row from
   `framework`, stored before the resume, which goes before every other row due to the delegate,
   as a resend does (F-122's new-3), so the resumed process first goes on with its brief. Its
-  turn's result is the report, the reply to the brief's uuid, across the resume.
+  turn's result is the report, the reply to the brief's uuid, across the resume. That row is
+  the resume's first line, marked and written as the start's brief is (F-152).
+- **The first line** (F-152; `Delivery.tla`'s stream row for a start, `Delegate.tla`'s
+  `Confirmed`, `Break_*_BriefAfterInit`). A headless process writes its `system`/`init` only
+  after it read a line, and `Sessions` confirms the start only by that init, while `Mailbox`
+  hands a row by `stream` only to a running row: each would wait on the other. So the first
+  row due to the delegate (the brief, the word to go on, or the brief again) is marked
+  `sending` by `stream` before `Sessions` is called (`Mailbox.launch/4`, `via: :stream`), by the
+  start's deadline, and carried to `Sessions` (`first:`), which writes it through `Stream`
+  under the row's uuid right after the hold, before it waits for the init. The start's answer
+  is told to `Mailbox` (`launched/3`), and from then the session's fold settles the row as any
+  `stream` row's: its replay, at the exit the transcript, and no line of it at all makes it due
+  again (a start refused before its hold wrote nothing); before the answer, a fold with no line
+  of it decides nothing until the start's deadline. The write is made once: one refused leaves the start to its deadline. A
+  start or resume with no row due is not made, since it would never be confirmed.
+- **A start that is never confirmed can be stopped** (F-152). `stop_delegate` of a row still
+  starting goes to `Sessions.stop/3`, which ends the held program by SIGTERM to its record, as
+  a start on a dialog is given up (F-144), once the start is past its hold; the start then
+  answers `refused{stopped}` once the process is gone and its socket dead, and `Sessions`' row,
+  and so `Delegates`' row, is refused. A start still in its worktree or setup holds nothing yet,
+  and the stop is refused. With no start under way (a restart, or an unknown answer), the stop
+  writes the row refused the same way.
 
 A start writes its row first, as starting, with its worktree path and socket name, before it
 acts. After a restart, a row still starting is adopted when its held process lives and its
@@ -1041,9 +1064,12 @@ reading for delegates:
   its socket, so a stop is done only when the pid is gone and the socket has ended; a resume
   before that is refused, and the caller resumes after the stop's answer.
 - **Checked against each pinned release**, with the flags: whether `-p` writes a session file
-  (which could stand in for `pid`), and whether `system`/`init` comes before the first line is
-  read. If the init comes only with the first turn, the start writes the brief through `Stream`
-  right after the hold, before it waits for the init. And the drop of a user line whose uuid the
+  (which could stand in for `pid`), and the init's order: whether `system`/`init` comes before
+  the first line is read. Claude Code 2.1.322 writes it only after it read its first line (the
+  end-to-end run of 18 November: no event in 3 minutes with nothing on its stdin), so the start
+  writes its first line through `Stream` right after the hold, before it waits for the init
+  ("The first line"); the tests' stand-in runs in that shape (`:on_message`), and a release
+  that writes it at once needs no change. And the drop of a user line whose uuid the
   transcript holds, with a turn cut off at the exit: 2.1.322 may run such a line again
   (F-51's build note, new-4). The framework does not rely on the drop.
 
@@ -1326,7 +1352,7 @@ changed (R6).
 
 | Transport | Target | Settled by | A row left `sending` by a restart |
 |---|---|---|---|
-| `stream` | a headless session | the replay in `Stream`'s fold; at the exit, the transcript | settled from the same evidence once read; undelivered is final, and the row is due again first, under its same uuid, to the resumed process |
+| `stream` | a headless session | the replay in `Stream`'s fold; at the exit, the transcript. Its first row to a new process is marked before the start and written right after the hold (F-152) | settled from the same evidence once read; undelivered is final, and the row is due again first, under its same uuid, to the resumed process; a start's first row with no line in the fold waits for the start's deadline |
 | `waiter` | an interactive session with a waiter | the transcript's lines carrying the row's uuid: the `queue-operation` `enqueue` (it reached Claude Code's queue), then its take, a `dequeue` and the user line `Stop hook blocking error …` into an ended turn, or a `remove` and a `queued_command` attachment into a running one; delivered at the take; due again once the take bound past its hand-on has passed with no line, or its process is gone with no take | settled from the same lines: delivered if the take is there, kept while only the `enqueue` is, due again if no line is there and the take bound has passed |
 | `typed` | an interactive session with no waiter | the `Inlet`'s answer, then the transcript's user line once the turn has ended; due again as `waiter` | as `waiter`; an unknown write is never typed again |
 | `launch` | the first row to an interactive session's new process | its start: the text is the start's prompt argument, read from a file into the last argument (`ClaudeCLI.prompted/5`, at most 512 KiB); then the transcript's user line with the row's uuid, delivered at it; a start refused makes it due again; with no line, due again once no process of the start runs or the take bound has passed since the start's answer | as `waiter`, the start's deadline standing in for its answer |

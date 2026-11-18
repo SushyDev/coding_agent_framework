@@ -41,6 +41,14 @@
 (* typed write, so none waits for a person's prompt. Since the pointer     *)
 (* (F-142) a first row would arrive by the typed write too: the launch is  *)
 (* the quicker path, with no screen to read, and no Break of its own.      *)
+(*                                                                         *)
+(* A headless process in Launched (F-152) writes its system/init only      *)
+(* after it read its first line, and Sessions says its row running, so     *)
+(* Mailbox marks to it, only after that init (`Ready`). So its first row   *)
+(* is marked by stream before its start, while no process runs, and the    *)
+(* start writes it right after the hold, as launch's start carries its     *)
+(* prompt; it settles by the replay as any stream row. BriefAfterInit      *)
+(* starts it bare and waits for the init first: nothing ever goes in.      *)
 (*   launch  the prompt argument of an interactive session's start (and of *)
 (*           its resume): the first row to it goes in as the start itself, *)
 (*           and Claude Code runs it as the session's first turn. Marked   *)
@@ -130,7 +138,7 @@ CONSTANTS
     MaxPrompts,    \* alone: a person's prompts
     MaxStops,      \* alone: stops by SIGTERM
     Long,          \* rows too long for the typed write
-    Launched,      \* alone: interactive sessions with no process at first, started by launch
+    Launched,      \* alone: sessions with no process at first, started with their first row
     Break          \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -156,12 +164,13 @@ Breaks == {
     "SelfReply",             \* a reply is the last result since the row, whatever it names
     "NoNotice",              \* a row whose turn ended with no result gets no notice
     "ResumeOwnKey",          \* a resumed process's row is keyed by itself, not the brief
-    "NoPointer"              \* a long row is not typed: it waits for a waiter (F-132)
+    "NoPointer",             \* a long row is not typed: it waits for a waiter (F-132)
+    "BriefAfterInit"         \* a headless start waits for its init before its first row
 }
 
 ASSUME Break \in Breaks
 ASSUME Headless \subseteq Addrs /\ Awaited \subseteq Ids /\ Long \subseteq Ids
-ASSUME Launched \subseteq Addrs \ Headless
+ASSUME Launched \subseteq Addrs
 ASSUME ClientLeaves \in BOOLEAN /\ SelfTurns \in BOOLEAN
 
 Framework == "framework"
@@ -226,6 +235,15 @@ Precedes(j, i) ==
     /\ \/ row[j].again /\ ~row[i].again
        \/ row[j].again = row[i].again /\ row[j].from = row[i].from /\ j < i
 
+\* Sessions says a's row running, so Mailbox marks to it by stream: for a
+\* headless process in Launched, once it wrote its init, which comes only
+\* after it read its first line (a row taken by the process that runs).
+Ready(a) == a \notin Launched \/ \E i \in To(a) : row[i].at = pr[a] /\ InTx(i)
+
+\* A row marked for a start: launch's, or stream's first row to a headless
+\* session in Launched, marked while no process runs (`at` is 0).
+ForStart(i) == row[i].via = "launch" \/ (row[i].via = "stream" /\ row[i].at = 0)
+
 \* The row Mailbox picks for its addressee: no row to it in flight, none before it.
 First(i) ==
     /\ row[i].st = "due"
@@ -245,13 +263,13 @@ Reaches(i, t) ==
                             \/ Break = "TakeAfterDeadline" /\ call[i] = "timedout"
 
 \* The hand-on is possible: the process it was marked for still takes it,
-\* and its row is not stopping. A launch is the start: no process runs.
+\* and its row is not stopping. A row for a start: no process runs.
 Open(i) ==
     LET a == row[i].to  p == row[i].at IN
     /\ ~stopping[a] \/ Break = "MarkWhileStopping"
-    /\ CASE row[i].via = "stream" -> pr[a] = p
+    /\ CASE ForStart(i)            -> pr[a] = 0 /\ ~over[a]
+         [] row[i].via = "stream" -> pr[a] = p
          [] row[i].via = "waiter" -> waiter[a] = p
-         [] row[i].via = "launch" -> pr[a] = 0 /\ ~over[a]
          [] OTHER                 -> pr[a] = p /\ idle[a] /\ waiter[a] # p
 
 Due(i) == [row[i] EXCEPT !.st = "due", !.via = "none", !.at = 0]
@@ -277,11 +295,16 @@ Store(i, f, t, k) ==
 \* The mark: the row says sending, with its transport and the process it is
 \* for, before anything goes out. Into an ended turn only (a call answers
 \* inside the turn that called, and Claude Code queues a waiter's answer into
-\* a running turn), and never to a session whose row is stopping. A launch
-\* is marked while no process runs, for the one its start makes.
+\* a running turn), and never to a session whose row is stopping. A launch,
+\* or the first stream row to a headless session in Launched, is marked
+\* while no process runs, for the one its start makes; a later stream row
+\* only once that process is Ready.
 Mark(i, t) ==
-    LET a == row[i].to IN
-    /\ up /\ a \in Addrs /\ First(i) /\ (pr[a] = 0) = (t = "launch") /\ ~over[a]
+    LET a == row[i].to
+        start == t = "launch" \/ (t = "stream" /\ a \in Launched /\ Break # "BriefAfterInit")
+    IN
+    /\ up /\ a \in Addrs /\ First(i) /\ ~over[a]
+    /\ IF pr[a] = 0 THEN start ELSE t # "launch" /\ (t # "stream" \/ Ready(a))
     /\ idle[a] \/ t \in {"call", "waiter"} \/ Break = "IntoRunningTurn"
     /\ ~stopping[a] \/ Break = "MarkWhileStopping"
     /\ Reaches(i, t)
@@ -295,7 +318,8 @@ Mark(i, t) ==
 \* a waiter of its process answered, or the Inlet's write done.
 Handed(i) ==
     LET a == row[i].to IN
-    /\ up /\ i \in hand /\ row[i].via \in {"stream", "waiter", "typed"} /\ Open(i)
+    /\ up /\ i \in hand /\ row[i].via \in {"stream", "waiter", "typed"} /\ ~ForStart(i)
+    /\ Open(i)
     /\ hand' = hand \ {i}
     /\ wire' = [wire EXCEPT ![i] = @ + 1]
     /\ claimed' = IF row[i].via = "stream" THEN claimed \cup {i} ELSE claimed
@@ -304,20 +328,25 @@ Handed(i) ==
 
 \* launch: the start is the hand-on. The row's text is the start's prompt
 \* argument, for the process p the start makes (the instancing spec starts
-\* it in the same step: a new process, idle, no turn of it ended yet).
+\* it in the same step: a new process, idle, no turn of it ended yet). A
+\* stream row for a start is written into the new process's FIFO right
+\* after the hold, before the start waits for the init: one step here. A
+\* restart between the two leaves a process with no init, which Sessions
+\* never confirms and Recoveries ends (Start.tla).
 Launch(i, p) ==
-    /\ up /\ i \in hand /\ row[i].via = "launch" /\ Open(i)
+    /\ up /\ i \in hand /\ ForStart(i) /\ Open(i)
     /\ hand' = hand \ {i}
     /\ wire' = [wire EXCEPT ![i] = @ + 1]
     /\ row' = [row EXCEPT ![i].at = p]
-    /\ UNCHANGED <<claimed, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
+    /\ claimed' = IF row[i].via = "stream" THEN claimed \cup {i} ELSE claimed
+    /\ UNCHANGED <<waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
 
 \* The transport refuses: nothing went out, and the mark is undone. A start
 \* may be refused whatever its check read (a setup that failed, say).
 Refused(i) ==
     /\ up /\ i \in hand
-    /\ \/ row[i].via \in {"stream", "waiter", "typed"} /\ ~Open(i)
-       \/ row[i].via = "launch"
+    /\ \/ row[i].via \in {"stream", "waiter", "typed"} /\ ~ForStart(i) /\ ~Open(i)
+       \/ ForStart(i)
     /\ hand' = hand \ {i}
     /\ row' = [row EXCEPT ![i] = Due(i)]
     /\ UNCHANGED <<claimed, wire, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
@@ -568,7 +597,8 @@ NoticeStored(i) ==
 \* to go on, under the brief's key, so its result is the report.
 GoOn(i) ==
     LET a == row[i].to IN
-    /\ Answerable(i) /\ row[i].kind = "brief" /\ fold[i] = "exited" /\ pr[a] # 0
+    /\ Answerable(i) /\ row[i].kind = "brief" /\ fold[i] = "exited"
+    /\ pr[a] # 0 \/ (a \in Launched /\ ~over[a])
     /\ ~\E j \in To(a) : row[j].kind = "resume" /\ row[j].re = row[i].re
     /\ Answered(row[i].re) = {}
     /\ StoreRow(NextId, Framework, a, "resume",
@@ -636,8 +666,11 @@ NewProcess(a) ==
     /\ idle' = [idle EXCEPT ![a] = TRUE] /\ stopping' = [stopping EXCEPT ![a] = FALSE]
     /\ turned' = [turned EXCEPT ![a] = FALSE]
 
+\* A launched session starts only with its first row; under BriefAfterInit
+\* a headless one starts bare.
 Resumed(a) ==
-    /\ up /\ pr[a] = 0 /\ ~over[a] /\ a \notin Launched
+    /\ up /\ pr[a] = 0 /\ ~over[a]
+    /\ a \notin Launched \/ (a \in Headless /\ Break = "BriefAfterInit")
     /\ NewProcess(a)
     /\ UNCHANGED <<up, over, dvars, restarts, ends, prompts, stops, readAt>>
 
