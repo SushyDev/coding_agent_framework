@@ -8,6 +8,7 @@ defmodule CodingAgentFramework.GrantsTest do
   alias CodingAgentFramework.Grants
 
   doctest Grants
+  doctest CodingAgentFramework.Extension
 
   @projects ["app", "web"]
   @mains for p <- @projects, do: %{name: "#{p}-main", project: p, parent: nil}

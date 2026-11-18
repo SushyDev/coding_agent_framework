@@ -457,6 +457,13 @@ flooded:
 - **scope**: roles (main session, delegate, reviewer) and projects, so an agent sees only the
   verbs, skills and context its work needs.
 
+Built so far (F-154): the bundle in the config as `CodingAgentFramework.Extension` (a name,
+a scope, and its tools, each a name under the bundle's, a schema, a description and a function
+of the caller and the arguments), served on the agents' MCP endpoint beside the framework's
+tools, listed and called only where its scope holds the agent (`Grants.may_call?/3`), each call
+a row in `mcp_calls`, its crash and its deadline answered `unknown`. Several tools per bundle
+stand until B5 makes the verbs (F-154's new-1).
+
 An extension adds no protocol of its own: its events go through `Mailbox`'s subscriptions, its
 acts through `Team`'s claims, its questions to a person through `Prompts`, and its context is a
 pure function of the brief or the prompt. One that needs a protocol over time models it first,
@@ -2810,7 +2817,9 @@ without them.
     launch's `PATH`; no `USER`, since the OS user name stands in for it, F-146's new-3). Each
     pinned release's check confirms both from a held session's login.
 16. **What the app reads and drives**: structured reports with a schema and several per
-    delegate; app metadata and names on agents; status with the last activity, cost and tokens,
+    delegate; app metadata and names on agents (the metadata built in F-154: `meta:` at a
+    start, `Sessions.put_meta/4` after, `Sessions.Agents.meta/1` to read); status with the
+    last activity, cost and tokens,
     and a needs-input state; one activity feed per agent; an urgent message (interrupt, then
     message, as one checked step); one-off headless turns; the agent's identity for the app's own
     MCP servers; worktree base, reuse and removal; the source checkout's path for setup; a stable

@@ -47,6 +47,11 @@ defmodule CodingAgentFramework.Sessions.Table do
   never `updated_at`, which every write moves (F-165). `open/1` gives a done row of an earlier
   file, which has none, its `updated_at`.
 
+  **The app's metadata** (F-154): `meta` is a map of the embedding app's own keys as JSON
+  (`meta_text/1`), given at a start (`Sessions.start/5`'s `meta:`) or set since
+  (`Sessions.put_meta/4`), NULL for none. The framework never reads it; the app reads it back
+  through `CodingAgentFramework.Sessions.Agents.meta/1`.
+
   **Indexes.** Nothing is pruned (an ended delegate keeps its row), so each hot read has one:
   by name (the unique key), by status (each settle), by cwd (a start's check that no other
   process holds it), by parent (a parent's delegates) and by move (the moves under way).
@@ -68,7 +73,7 @@ defmodule CodingAgentFramework.Sessions.Table do
   @columns ~w(id host name kind parent project socket account role cwd resume status reason
               viewer pid session_id proc_start started_at updated_at deadline repo branch
               worktree options model release move move_from move_to move_act move_deadline
-              dialog answers end_asked ended_at)a
+              dialog answers end_asked ended_at meta)a
 
   @schema """
   CREATE TABLE IF NOT EXISTS agents (
@@ -78,7 +83,7 @@ defmodule CodingAgentFramework.Sessions.Table do
     proc_start TEXT, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deadline INTEGER,
     repo TEXT, branch TEXT, worktree TEXT, options TEXT, model TEXT, release TEXT, move TEXT,
     move_from TEXT, move_to TEXT, move_act INTEGER, move_deadline INTEGER, dialog TEXT,
-    answers TEXT, end_asked INTEGER, ended_at INTEGER, UNIQUE (host, name));
+    answers TEXT, end_asked INTEGER, ended_at INTEGER, meta TEXT, UNIQUE (host, name));
   CREATE INDEX IF NOT EXISTS agents_status ON agents (host, status);
   CREATE INDEX IF NOT EXISTS agents_cwd ON agents (host, cwd);
   CREATE INDEX IF NOT EXISTS agents_parent ON agents (host, parent);
@@ -87,7 +92,8 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   # The columns a later build added to `agents`, so added if missing: the release a session
   # runs (R8), a move's phase on the row (F-133), the model (F-136), and a startup dialog and
-  # its answers (F-140), an end asked (F-144), and the end's own time (F-165).
+  # its answers (F-140), an end asked (F-144), the end's own time (F-165), and the app's own
+  # metadata (F-154).
   @added [
     agents: [
       "release TEXT",
@@ -100,7 +106,8 @@ defmodule CodingAgentFramework.Sessions.Table do
       "dialog TEXT",
       "answers TEXT",
       "end_asked INTEGER",
-      "ended_at INTEGER"
+      "ended_at INTEGER",
+      "meta TEXT"
     ]
   ]
 
@@ -120,6 +127,9 @@ defmodule CodingAgentFramework.Sessions.Table do
     unless status in @statuses,
       do: raise(CompileError, description: "#{name} names #{status}, not a status of agents")
   end
+
+  # The most bytes the app's metadata takes on a row: facts about an agent, not a store.
+  @meta_max 65_536
 
   @type db :: Store.db()
   @type row :: %{atom => term}
@@ -202,7 +212,8 @@ defmodule CodingAgentFramework.Sessions.Table do
                :dialog,
                :answers,
                :end_asked,
-               :ended_at
+               :ended_at,
+               :meta
              ])
 
       Store.transaction(db, fn ->
@@ -243,7 +254,7 @@ defmodule CodingAgentFramework.Sessions.Table do
 
     keys =
       ~w(host name kind parent project socket account role cwd resume session_id deadline repo
-         branch options model release)a
+         branch options model release meta)a
 
     fields =
       Enum.map(keys, &{&1, start[&1]}) ++ [status: "starting", started_at: now, updated_at: now]
@@ -269,6 +280,23 @@ defmodule CodingAgentFramework.Sessions.Table do
   end
 
   @doc """
+  The app's metadata as the row stores it: `{:ok, json}` for a map whose JSON is at most
+  64 KiB, else `{:refused, {:bad, :meta}}`.
+
+      iex> CodingAgentFramework.Sessions.Table.meta_text(%{"team" => "core", ticket: 41})
+      {:ok, ~s({"team":"core","ticket":41})}
+      iex> CodingAgentFramework.Sessions.Table.meta_text([ticket: 41])
+      {:refused, {:bad, :meta}}
+  """
+  @spec meta_text(term) :: {:ok, String.t()} | {:refused, {:bad, :meta}}
+  def meta_text(meta) when is_map(meta) and not is_struct(meta) do
+    text = Store.text(meta)
+    if byte_size(text) <= @meta_max, do: {:ok, text}, else: {:refused, {:bad, :meta}}
+  end
+
+  def meta_text(_meta), do: {:refused, {:bad, :meta}}
+
+  @doc """
   Writes a main session the embedding app declares, `declared`, of kind `main` with no parent,
   when `{host, name}` has no row; a row it has keeps its status and takes the project when it
   has none. Answers the row's id.
@@ -284,7 +312,7 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   @doc """
   Sets `fields` (status, reason, viewer, pid, session_id, proc_start, deadline, worktree,
-  parent, project, dialog, answers, end_asked, and a move's `move`, `move_from`, `move_to`,
+  parent, project, dialog, answers, end_asked, meta, and a move's `move`, `move_from`, `move_to`,
   `move_act`, `move_deadline`) on row `id`, with `updated_at`, and `ended_at` as the module
   doc says: a first done status stamps it, any other status clears it.
   """

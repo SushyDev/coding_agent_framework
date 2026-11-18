@@ -99,6 +99,11 @@ defmodule CodingAgentFramework.MCP do
     (`{:delegates, names}`), else the session stopped once idle and its agent row `ended`, so
     the app ends what it owns. Answers `Mains`' answer.
 
+  **The app's tools** (F-154, `extensions:`) are served beside these, each under its bundle's
+  name, and each call is a row as any other's. A start's `meta` (the app's own metadata on
+  the agent row, `start_delegate`, `run_delegate` and `start_main`) is the operator's alone:
+  an agent's call that names it is refused `{:operator_only, :meta}`.
+
   **The operator** calls the same tools through `operate/3`, which writes its row under the
   operator's name, so each act it makes names it as the actor; `issue/2` never makes it a
   token. The design's other tools come in later parts (`docs/build-notes/F-86.md`).
@@ -115,8 +120,7 @@ defmodule CodingAgentFramework.MCP do
 
   use GenServer
 
-  alias CodingAgentFramework.Grants
-  alias CodingAgentFramework.Acts
+  alias CodingAgentFramework.{Acts, Extension, Grants}
   alias CodingAgentFramework.MCP.Table
 
   @step 5_000
@@ -462,14 +466,37 @@ defmodule CodingAgentFramework.MCP do
   id. `:cap` (ms, default a day) is the most a `run`'s or a `service_wait`'s `timeout` may be.
   `:tool_timeout` (ms) is the MCP tool timeout `CodingAgentFramework.ClaudeCLI` sets for every
   agent at launch, and `:margin` (ms, under it) how far under it a `run_delegate`'s `timeout`
-  must stay: both required, positive integers.
+  must stay: both required, positive integers. `:extensions` (optional, F-154) is the app's
+  bundles (`CodingAgentFramework.Extension`), checked whole at start, which stops with the
+  first refusal: their tools are served beside the framework's, each listed and called only
+  where its scope holds the caller (`Grants.may_call?/3`), and called as `Extension.run/4`
+  within its `timeout`, or `:tool_timeout` less `:margin`.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
-  @doc "The tools, as `tools/list` answers them."
+  @doc "The framework's own tools, as `tools/list` answers them."
   @spec tools() :: [map]
   def tools, do: @tools
+
+  @doc """
+  The tools `agent` sees, as its `tools/list` answers them: the framework's, then the app's
+  that its scope holds (`Grants.may_call?/3`), in the order the app gave them. An agent the tree
+  does not hold sees none of the app's.
+
+      MCP.tools(mcp, "app-fix") |> Enum.map(& &1.name) |> Enum.take(-1)
+      #=> ["board_cards"]
+  """
+  @spec tools(GenServer.server(), String.t()) :: [map] | {:refused, term} | {:unknown, term}
+  def tools(mcp, agent) do
+    with {:ok, ctx} <- ask(mcp, :ctx), do: @tools ++ app_tools(ctx, agent)
+  end
+
+  defp app_tools(ctx, agent) do
+    for t <- ctx.app_tools,
+        Grants.may_call?(ctx.grants, agent, t.scope) == :ok,
+        do: %{name: t.name, description: t.description, inputSchema: t.schema}
+  end
 
   @doc """
   Makes `agent` a new token, in place of any earlier one, and writes its MCP config. Answers
@@ -657,10 +684,11 @@ defmodule CodingAgentFramework.MCP do
   defp act(ctx, caller, _id, "start_main", %{"project" => p, "name" => n, "brief" => b} = a)
        when is_binary(p) and is_binary(n) and is_binary(b) do
     with true <- is_nil(a["model"]) or is_binary(a["model"]) or {:refused, {:bad, :args}},
+         {:ok, meta} <- app_meta(ctx, caller, a),
          :ok <- Grants.may_start_main?(ctx.grants, caller),
          true <- ctx.mains != nil or {:refused, :no_mains},
          {mod, server} = ctx.mains,
-         opts = [from: caller, model: a["model"], timeout: @start_wait],
+         opts = [from: caller, model: a["model"], timeout: @start_wait, meta: meta],
          {:ok, %{name: name}} <- mod.start_main(server, p, n, b, opts),
          do: {:ok, %{main: name}}
   end
@@ -709,7 +737,7 @@ defmodule CodingAgentFramework.MCP do
 
   defp act(ctx, caller, _id, "reload", _args) do
     with :ok <- Grants.may_use?(ctx.grants, caller),
-         do: {:ok, %{tools: Enum.map(@tools, & &1.name)}}
+         do: {:ok, %{tools: Enum.map(@tools ++ app_tools(ctx, caller), & &1.name)}}
   end
 
   defp act(_ctx, _caller, _id, "service_start", %{"opts" => o}) when not is_map(o),
@@ -862,6 +890,15 @@ defmodule CodingAgentFramework.MCP do
     end
   end
 
+  # An app's tool (F-154): its scope's check, then its function within its deadline, the
+  # client's tool timeout less the margin unless the tool names a shorter one.
+  defp act(%{app: app} = ctx, caller, _id, tool, args) when is_map_key(app, tool) do
+    %{^tool => t} = app
+
+    with :ok <- Grants.may_call?(ctx.grants, caller, t.scope),
+         do: Extension.run(t, caller, args, t.timeout || ctx.tool_timeout - ctx.margin)
+  end
+
   defp act(_ctx, _caller, _id, tool, _args) do
     if Enum.any?(@tools, &(&1.name == tool)),
       do: {:refused, {:bad, :args}},
@@ -963,15 +1000,26 @@ defmodule CodingAgentFramework.MCP do
     parent = if caller == Grants.operator(ctx.grants), do: args["parent"], else: caller
     start = [parent | Enum.map(~w(project branch model brief), &Map.get(args, &1))]
 
-    if Enum.all?(start, &is_binary/1),
-      do: {:ok, start ++ [Map.get(args, "options"), Map.get(args, "interactive") == true]},
-      else: {:refused, {:bad, :args}}
+    with true <- Enum.all?(start, &is_binary/1) or {:refused, {:bad, :args}},
+         {:ok, meta} <- app_meta(ctx, caller, args),
+         do:
+           {:ok, start ++ [Map.get(args, "options"), Map.get(args, "interactive") == true, meta]}
   end
 
-  # The start's own wait is at most `wait`. `Delegates` checks the options.
-  defp start_delegate(ctx, caller, [parent, project, branch, model, brief, options, i], wait) do
+  # The app's metadata on the agent a start makes (F-154) is the operator's to give, never an
+  # agent's: an agent's call that names it is refused, not run without it.
+  defp app_meta(ctx, caller, args) do
+    cond do
+      not Map.has_key?(args, "meta") -> {:ok, nil}
+      caller == Grants.operator(ctx.grants) -> {:ok, args["meta"]}
+      true -> {:refused, {:operator_only, :meta}}
+    end
+  end
+
+  # The start's own wait is at most `wait`. `Delegates` checks the options and the metadata.
+  defp start_delegate(ctx, caller, [parent, project, branch, model, brief, options, i, m], wait) do
     {mod, server} = ctx.delegates
-    opts = [timeout: wait, options: options, interactive: i]
+    opts = [timeout: wait, options: options, interactive: i, meta: m]
 
     with :ok <- Grants.may_start_delegate?(ctx.grants, caller, parent),
          do: mod.start_delegate(server, parent, project, branch, model, brief, opts)
@@ -1055,6 +1103,9 @@ defmodule CodingAgentFramework.MCP do
     with true <-
            (is_integer(margin) and is_integer(tool_timeout) and margin > 0 and
               margin < tool_timeout) or {:refused, {:bad, :tool_timeout}},
+         names = Enum.map(@tools, & &1.name),
+         ext = Keyword.get(opts, :extensions, []),
+         {:ok, app} <- Extension.check(ext, names, tool_timeout - margin),
          :ok <- File.mkdir_p(Path.join(dir, "agents")),
          {:ok, db} <- Table.open(Path.join(dir, "mcp.db")) do
       ctx =
@@ -1070,6 +1121,7 @@ defmodule CodingAgentFramework.MCP do
       ctx = Map.put(ctx, :sessions, Keyword.get(opts, :sessions))
       ctx = Map.put(ctx, :mains, Keyword.get(opts, :mains))
       ctx = Map.put(ctx, :lease, Keyword.get(opts, :lease))
+      ctx = Map.merge(ctx, %{app_tools: app, app: Map.new(app, &{&1.name, &1})})
       {:ok, %{db: db, dir: dir, port: Keyword.fetch!(opts, :port), ctx: ctx}}
     else
       {:error, reason} -> {:stop, {:mkdir, reason}}
@@ -1130,4 +1182,5 @@ defmodule CodingAgentFramework.MCP do
     do: {:reply, Table.answered(s.db, id, outcome), s}
 
   def handle_call(:calls, _from, s), do: {:reply, Table.calls(s.db), s}
+  def handle_call(:ctx, _from, s), do: {:reply, {:ok, s.ctx}, s}
 end

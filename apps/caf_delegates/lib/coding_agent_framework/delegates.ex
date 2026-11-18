@@ -167,14 +167,16 @@ defmodule CodingAgentFramework.Delegates do
   delegate, and `{:delegate, %{name, status, session}}` for one neither live nor gone.
   Options: `:timeout`, what the caller waits (default 300 000 ms; the start goes on past it),
   and `:options` (`ClaudeCLI.Options`), checked before the row and kept on the agent row,
-  which its resume takes again; and `interactive: true` for the terminal interface, refused
+  which its resume takes again; `:meta`, a map of the app's own keys kept on the agent row
+  (`Sessions.start/5`; refused `{:bad, :meta}` when not a map), never read by the framework;
+  and `interactive: true` for the terminal interface, refused
   `:no_registry` by a `Delegates` given no `registry:`. A brief longer than a launch's argument
   carries goes as a pointer to its file (`Mailbox.launch/4`, F-155).
   """
   def start_delegate(delegates, parent, project, branch, model, brief, opts \\ []) do
     how = if Keyword.get(opts, :interactive, false), do: :interactive, else: :headless
-    start = {:start, parent, project, branch, model, brief, Keyword.get(opts, :options), how}
-    call(delegates, start, opts, 300_000)
+    own = {Keyword.get(opts, :options), Keyword.get(opts, :meta)}
+    call(delegates, {:start, parent, project, branch, model, brief, own, how}, opts, 300_000)
   end
 
   @doc """
@@ -346,12 +348,13 @@ defmodule CodingAgentFramework.Delegates do
   def handle_cast(:cue, s), do: {:noreply, settle(s)}
 
   @impl true
-  def handle_call({:start, parent, project, branch, model, brief, options, how}, from, s) do
+  def handle_call({:start, parent, project, branch, model, brief, {options, meta}, how}, from, s) do
     with true <-
            Enum.all?([parent, model, brief], &(is_binary(&1) and &1 != "")) or
              {:refused, {:bad, :start}},
          :ok <- interactive_ok(s, how),
          {:ok, options} <- Options.check(options),
+         true <- meta == nil or is_map(meta) or {:refused, {:bad, :meta}},
          {:ok, p} <- Turn.check(s.projects, project, branch),
          name = Turn.name(p, branch),
          old = Enum.find(Table.latest(s.db, s.host), &(&1.name == name)),
@@ -370,6 +373,7 @@ defmodule CodingAgentFramework.Delegates do
       if again, do: write(s, old, reason: "replaced")
       row = Table.get(s.db, id)
       start = %{p: p, account: account, parent: parent, options: options, brief: brief, how: how}
+      start = Map.put(start, :meta, meta)
 
       # Schedule.tla: the row is the lease's holder, written before the lease is asked for.
       case lease(s, row, project, account) do
@@ -503,7 +507,7 @@ defmodule CodingAgentFramework.Delegates do
            Mailbox.brief(s.mailbox, start.parent, row.name, start.brief, row.brief_uuid)
            |> stored(),
          {:ok, launched} <- launch_first(s, row, start.how) do
-      call = {start.parent, start.options}
+      call = {start.parent, start.options, start.meta}
       {:noreply, call_sessions(s, row, start.p, start.account, call, from, launched)}
     else
       not_started -> reply(answered(s, row, {:refused, not_started}))
@@ -610,8 +614,10 @@ defmodule CodingAgentFramework.Delegates do
               {:resume, session_id} ->
                 Sessions.resume(s.sessions, row.name, account, session_id, launch, timeout: @call)
 
-              {parent, options} ->
+              # A start that names no metadata keeps the row's (`Sessions.start/5`).
+              {parent, options, meta} ->
                 launch = launch ++ [parent: parent, options: options]
+                launch = if meta, do: launch ++ [meta: meta], else: launch
                 Sessions.start(s.sessions, row.name, account, launch, timeout: @call)
             end
           end

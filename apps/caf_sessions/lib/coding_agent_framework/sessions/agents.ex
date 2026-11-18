@@ -176,6 +176,24 @@ defmodule CodingAgentFramework.Sessions.Agents do
 
   def move(_), do: nil
 
+  @doc """
+  The embedding app's own metadata on the row (F-154): the map its start's `meta:` gave or
+  `Sessions.put_meta/4` set since, as JSON gives it back (string keys), or `%{}` for none. The
+  framework never reads it.
+
+      iex> CodingAgentFramework.Sessions.Agents.meta(%{meta: ~s({"ticket":41})})
+      %{"ticket" => 41}
+  """
+  @spec meta(row | nil) :: map
+  def meta(%{meta: text}) when is_binary(text) do
+    case JSON.decode(text) do
+      {:ok, %{} = meta} -> meta
+      _ -> %{}
+    end
+  end
+
+  def meta(_), do: %{}
+
   @doc "Whether the row runs headless (a delegate's stream), not Claude Code's terminal interface."
   @spec headless?(row | nil) :: boolean
   def headless?(%{role: "delegate"}), do: true

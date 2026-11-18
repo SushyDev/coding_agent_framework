@@ -74,8 +74,13 @@ defmodule CodingAgentFramework.MCP.Plug do
 
   defp answer(conn, _mcp, _agent, "ping", %{"id" => id}), do: reply(conn, id, %{})
 
-  defp answer(conn, _mcp, _agent, "tools/list", %{"id" => id}),
-    do: reply(conn, id, %{tools: MCP.tools()})
+  # The caller's own list: the framework's tools and the app's its scope holds.
+  defp answer(conn, mcp, agent, "tools/list", %{"id" => id}) do
+    case MCP.tools(mcp, agent) do
+      tools when is_list(tools) -> reply(conn, id, %{tools: tools})
+      _not_read -> send_resp(conn, 503, "")
+    end
+  end
 
   # The answer is written through `MCP.answer/5`, so a report `run_delegate` took is answered
   # only once the write returned, and held again when it raised. The adapter's write returns

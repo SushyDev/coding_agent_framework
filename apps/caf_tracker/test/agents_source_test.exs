@@ -10,7 +10,7 @@ defmodule CodingAgentFramework.AgentsSourceTest do
   import CodingAgentFramework.TestHost
 
   alias CodingAgentFramework.{Sessions, SessionsSetup, Tracker}
-  alias CodingAgentFramework.Sessions.Table
+  alias CodingAgentFramework.Sessions.{Agents, Table}
   alias CodingAgentFramework.Tracker.TableSource
 
   setup {SessionsSetup, :sessions}
@@ -39,6 +39,36 @@ defmodule CodingAgentFramework.AgentsSourceTest do
     assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "alpha")
     refute alive?(pid)
     assert %{status: "stopped"} = Table.get(ctx.table, "test", "alpha")
+  end
+
+  test "the app's metadata given at a start is read back through Agents and the source", ctx do
+    meta = %{"ticket" => 41, "labels" => ["ui"]}
+    launch = launch(ctx, :at_start) ++ [meta: meta]
+
+    assert {:refused, {:bad, :meta}} =
+             Sessions.start(
+               ctx.sessions,
+               "alpha",
+               ctx.account,
+               launch(ctx, :at_start) ++ [meta: [ticket: 41]]
+             )
+
+    assert {:ok, _} = Sessions.start(ctx.sessions, "alpha", ctx.account, launch)
+
+    {:ok, agents} = Agents.open(ctx.opts[:db], "test")
+    assert Agents.meta(Agents.get(agents, "alpha")) == meta
+
+    {:ok, source} = TableSource.open(table: Table, db: ctx.opts[:db], host: "test")
+    {:ok, %{rows: [row]}} = TableSource.read(source, :all)
+    assert Agents.meta(row) == meta
+
+    # Set later by the app, in place of what it had; a start that names none keeps it.
+    assert {:ok, _} = Sessions.put_meta(ctx.sessions, "alpha", %{"ticket" => 42})
+    assert {:refused, :no_session} = Sessions.put_meta(ctx.sessions, "nobody", %{})
+    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "alpha")
+    assert {:ok, _} = Sessions.start(ctx.sessions, "alpha", ctx.account, launch(ctx, :at_start))
+    assert Agents.meta(Agents.get(agents, "alpha")) == %{"ticket" => 42}
+    assert Agents.meta(Agents.get(agents, "nobody")) == %{}
   end
 
   test "the Tracker's tree holds what Sessions' tree holds: the main and its delegate", ctx do

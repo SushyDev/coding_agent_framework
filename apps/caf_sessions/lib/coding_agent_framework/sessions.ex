@@ -236,7 +236,9 @@ defmodule CodingAgentFramework.Sessions do
   is refused `{:missing, :parent}`, a main session with one `{:bad, :parent}`); and
   `ClaudeCLI.session/3`'s `claude:`, `model:`, `env:`, `tool_timeout:`, `prompt:` and `mcp:` (the agent's own MCP config),
   and `options:`, kept on the row with the model, each of which a resume that names none takes
-  again. Option:
+  again; and `meta:`, a map of the app's own keys kept on the row (refused `{:bad, :meta}`
+  otherwise, `Table.meta_text/1`), which any start that names none keeps from the row (F-154).
+  Option:
   `:timeout`, to which a worktree's start adds its setup's deadline and its git commands'
   bounds.
 
@@ -400,6 +402,19 @@ defmodule CodingAgentFramework.Sessions do
   @spec declare(GenServer.server(), String.t(), String.t(), keyword) :: outcome(map)
   def declare(sessions, name, project, opts \\ []),
     do: call(sessions, {:declare, name, project}, Keyword.get(opts, :timeout, @read))
+
+  @doc """
+  Sets the embedding app's own metadata on agent `name`'s row (F-154), in place of what it
+  had: the app's call, never an agent's (no tool reaches it). Answers `{:ok, row}`, `{:refused,
+  :no_session}` for a name with no row, or `{:refused, {:bad, :meta}}` (`Table.meta_text/1`).
+  Option: `:timeout` (ms, default 5 000).
+
+      Sessions.put_meta(sessions, "app-fix", %{"ticket" => 41})
+      #=> {:ok, %{name: "app-fix", meta: ~s({"ticket":41}), ...}}
+  """
+  @spec put_meta(GenServer.server(), String.t(), map, keyword) :: outcome(map)
+  def put_meta(sessions, name, meta, opts \\ []),
+    do: call(sessions, {:put_meta, name, meta}, Keyword.get(opts, :timeout, @read))
 
   @doc """
   Delegate `name` is done for good: its report went in and no process of it may live. Its row
@@ -700,6 +715,18 @@ defmodule CodingAgentFramework.Sessions do
            true <- row == nil or row.kind == "main" or {:refused, {:not_main, row.kind}} do
         id = Table.declare(state.db, state.host.name, name, project)
         state.notify.(%{topic: topic(state), ids: [id]})
+        {:ok, Table.get(state.db, state.host.name, name)}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:put_meta, name, meta}, _from, state) do
+    reply =
+      with {:ok, text} <- Table.meta_text(meta),
+           %{} = row <- Table.get(state.db, state.host.name, name) || {:refused, :no_session} do
+        Table.update(state.db, row.id, meta: text)
+        announce(state, row)
         {:ok, Table.get(state.db, state.host.name, name)}
       end
 
@@ -1727,9 +1754,24 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   # The agent row's kind, parent and project, checked before the row: a resume keeps the row's
-  # unless the launch names them, and any start keeps a project the row has (a declared main).
+  # unless the launch names them, and any start keeps a project the row has (a declared main),
+  # and the app's metadata the row has unless the launch names its own (F-154).
   defp agent(state, name, role, launch, place, resume) do
     row = Table.get(state.db, state.host.name, name)
+
+    with {:ok, meta} <- launched_meta(launch, row),
+         {:ok, agent} <- tree_place(state, row, role, launch, place, resume),
+         do: {:ok, Map.put(agent, :meta, meta)}
+  end
+
+  defp launched_meta(launch, row) do
+    case Keyword.fetch(launch, :meta) do
+      {:ok, meta} -> Table.meta_text(meta)
+      :error -> {:ok, row && row.meta}
+    end
+  end
+
+  defp tree_place(state, row, role, launch, place, resume) do
     kind = launch[:kind] || (resume && kind_of(row)) || default_kind(role)
     parent = Keyword.get(launch, :parent, resume && row && row.parent)
     tree_project = place.tree && place.tree.project.name
