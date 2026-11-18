@@ -887,13 +887,20 @@ launch carries.
   word to go on's), once that turn has ended: a later user entry began another turn, or its
   session file reads its turn ended. Never the transcript's last reply: a person may have
   typed a turn of their own since (`Delegate.tla`'s `ReportAnswersTheBrief`,
-  `Break_Delegate_LastReply`).
+  `Break_Delegate_LastReply`). Once its marked line is found, `Delegates` keeps that line's
+  byte offset in memory and reads the transcript from it (F-137's new-4, F-142); a restart reads
+  from byte 0 once, and a mark no longer at its offset is looked for again.
 - Its process gone with no such reply, it is resumed once, as a headless one is, and the
   resume carries the word to go on (or the brief again) by `launch`.
 - Its stop is a main session's: SIGTERM after an `idle` read. `Mover` moves it as it moves a
   main session (`Delegates.launch/2` answers role `parent` for it).
-- A parent's fixes that act through `Stream` (an interrupt, an answer) do not reach it
-  (F-137's new-3).
+- A parent's fixes reach it as they reach a main session (F-137's new-3, built in F-142). Its
+  interrupt is Escape through the `Inlet` (`Inlet.interrupt/3`), checked: the screen shows a
+  turn running, the press lands as its own tmux command, and the screen then shows the turn
+  ended. Its permission request is the `PermissionRequest` `Intake` holds for its session, and
+  the answer goes there (`Intake.answer/4`), never as keys. The state a fix claims is read from
+  `Intake`'s rows of its session in place of a `Stream` row: the newest event's id (any hook
+  event moves it), the held requests' ids, and whether its process runs.
 
 ## Headless delegates
 

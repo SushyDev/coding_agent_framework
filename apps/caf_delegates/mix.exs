@@ -26,9 +26,10 @@ defmodule CafDelegates.MixProject do
       {:caf_scheduler, in_umbrella: true},
       {:caf_registry, in_umbrella: true},
       {:caf_store, in_umbrella: true},
+      {:caf_inlet, in_umbrella: true},
+      {:caf_intake, in_umbrella: true},
       {:caf_grants, in_umbrella: true, only: :test},
       {:caf_holder, in_umbrella: true, only: :test},
-      {:caf_inlet, in_umbrella: true, only: :test},
       {:caf_test, in_umbrella: true, only: :test}
     ]
   end

@@ -8,7 +8,8 @@ defmodule CodingAgentFramework.ScreenStandIn do
     Enter (an empty box is `❯` and a no-break space);
   - at Enter it appends the box's text, as one line, to `<dir>/submitted` (`submitted/2`), and
     runs a turn that ends at once: its session file says `busy`, then `idle`;
-  - started with `--screen running`, it draws `turn-running`'s screen and never leaves it;
+  - started with `--screen running`, it draws `turn-running`'s screen until Escape, which ends
+    the turn: it writes `<dir>/interrupted` and draws the idle screen;
   - `--version` prints the release as Claude Code does (`2.1.322 (Claude Code)`) and exits;
   - the argument after `--` is the start's prompt, run as its first turn: written to
     `<dir>/prompts/<pid>` (`prompts/1`), its session file `busy`, then `idle`;
@@ -178,6 +179,11 @@ defmodule CodingAgentFramework.ScreenStandIn do
             shift; choice=no
             if [ $# -gt 0 ]; then screen=$1; else screen=idle; first; fi ;;
         esac
+      elif [ $screen = running ] && [ "$key" = $'\\e' ]; then
+        # Escape interrupts the turn: the idle screen, as 2.1.322 shows after it.
+        screen=idle
+        : > "#{dir}/interrupted"
+        announce idle
       elif [ "$key" = $'\\n' ] || [ "$key" = $'\\r' ]; then
         [ $screen = running ] && continue
         printf '%s\\n' "$box" >> "#{dir}/submitted"
