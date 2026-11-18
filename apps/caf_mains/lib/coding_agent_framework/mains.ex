@@ -221,7 +221,7 @@ defmodule CodingAgentFramework.Mains do
     s = Map.new(keys, &{&1, Keyword.fetch!(opts, &1)})
 
     with {:ok, run} <- Programs.take(s.programs, [:git, :env]),
-         {:ok, intake} <- intake(opts),
+         {:ok, intake} <- Intake.reader(opts),
          {:ok, projects} <- projects(s.home, s.projects),
          {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)),
          {:ok, starts} <- Starts.open(Keyword.fetch!(opts, :db)),
@@ -433,19 +433,6 @@ defmodule CodingAgentFramework.Mains do
   defp claimed(s, agent, state) do
     {:ok, now} = fix_state_of(s, agent)
     if now == state, do: :ok, else: {:refused, {:moved, now}}
-  end
-
-  defp intake(opts) do
-    case {opts[:intake], opts[:intake_db]} do
-      {nil, _} ->
-        {:ok, nil}
-
-      {pid, path} when is_binary(path) ->
-        with {:ok, db} <- IntakeTable.open(path), do: {:ok, %{pid: pid, db: db}}
-
-      _ ->
-        {:refused, {:bad, :intake_db}}
-    end
   end
 
   # `resume` is the session id a resume takes up, nil for a start (F-143's new-5).

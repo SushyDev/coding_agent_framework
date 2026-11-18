@@ -225,7 +225,7 @@ defmodule CodingAgentFramework.Delegates do
          {:ok, agents} <- Agents.open(Keyword.fetch!(opts, :sessions_db), s.host),
          {:ok, _} <- hand_over(s.sessions, Table.old_tree(db)),
          :ok <- Table.rebuild(db),
-         {:ok, intake} <- intake(opts) do
+         {:ok, intake} <- Intake.reader(opts) do
       s =
         Map.merge(s, %{
           db: db,
@@ -931,19 +931,6 @@ defmodule CodingAgentFramework.Delegates do
   end
 
   defp agent(s, row), do: Agents.get(s.agents, row.name)
-
-  defp intake(opts) do
-    case {opts[:intake], opts[:intake_db]} do
-      {nil, _} ->
-        {:ok, nil}
-
-      {pid, path} when is_binary(path) ->
-        with {:ok, db} <- IntakeTable.open(path), do: {:ok, %{pid: pid, db: db}}
-
-      _ ->
-        {:refused, {:bad, :intake_db}}
-    end
-  end
 
   # What a fix reads of a delegate: Stream's row of a headless one's process; for an
   # interactive one, what Intake holds of its session: the newest hook event's id (any event

@@ -2,8 +2,8 @@ defmodule CodingAgentFramework.Example.Run do
   @moduledoc """
   The process that holds one running example app for a console
   (`CodingAgentFramework.Example.Console`): it starts the tree (`CodingAgentFramework.Example`)
-  from a config and keeps it, with the config and a reader of the agent rows
-  (`Sessions.Agents`). It is started unlinked, so an error in the shell that typed a command
+  from a config and keeps it, with the config and readers of the agent rows
+  (`Sessions.Agents`) and of the hook events (`Intake.Table`). It is started unlinked, so an error in the shell that typed a command
   never takes the tree down; it traps the tree's exit, so a tree that gave up is a reading, not
   a crash.
 
@@ -16,6 +16,7 @@ defmodule CodingAgentFramework.Example.Run do
 
   alias CodingAgentFramework.Example
   alias CodingAgentFramework.Example.Config
+  alias CodingAgentFramework.Intake.Table, as: IntakeTable
   alias CodingAgentFramework.Sessions.Agents
 
   # A first start clones each project's checkout before it answers: minutes, not forever.
@@ -37,8 +38,8 @@ defmodule CodingAgentFramework.Example.Run do
   end
 
   @doc """
-  What the console reads: `%{config, agents, parts, down}`, `parts` each part's process by its
-  key, `down` nil while the tree runs, else why it ended.
+  What the console reads: `%{config, agents, intake, parts, down}`, `parts` each part's
+  process by its key, `down` nil while the tree runs, else why it ended.
   """
   @spec info(pid) :: map
   def info(run), do: GenServer.call(run, :info, @step)
@@ -57,8 +58,9 @@ defmodule CodingAgentFramework.Example.Run do
 
     # After the tree, which makes the home and its tables.
     with {:ok, sup} <- Example.start_link(config),
-         {:ok, agents} <- Agents.open(Config.path(config, "caf.db"), config.workstation) do
-      {:ok, %{config: config, agents: agents, sup: sup, down: nil}}
+         {:ok, agents} <- Agents.open(Config.path(config, "caf.db"), config.workstation),
+         {:ok, intake} <- IntakeTable.open(Config.path(config, "caf.db")) do
+      {:ok, %{config: config, agents: agents, intake: intake, sup: sup, down: nil}}
     else
       {:error, reason} -> {:stop, reason}
       other -> {:stop, other}
@@ -68,7 +70,8 @@ defmodule CodingAgentFramework.Example.Run do
   @impl true
   def handle_call(:info, _from, s) do
     parts = if s.sup, do: Example.parts(s.sup), else: %{}
-    {:reply, %{config: s.config, agents: s.agents, parts: parts, down: s.down}, s}
+    info = %{config: s.config, agents: s.agents, intake: s.intake, parts: parts, down: s.down}
+    {:reply, info, s}
   end
 
   @impl true

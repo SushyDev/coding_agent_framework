@@ -18,6 +18,8 @@ defmodule CodingAgentFramework.Example.Console do
       message(caf, "demo-main", "Say hello.")        # then status(caf, id)
       look(caf, "demo-main")                         # its last transcript lines
       answer_request(caf, "demo-unit-readme", "req-1", "allow")   # a delegate's permission
+      requests(caf, "demo-main")                     # a main session's held requests
+      answer_request(caf, "demo-main", "41", "allow")             # and the answer to one
       stop_delegate(caf, "demo-unit-readme")         # once its report is delivered
       asks(caf)                                      # then answer_ask(caf, id, ["Rebase"])
       move(caf, "demo-main", "two")
@@ -27,12 +29,13 @@ defmodule CodingAgentFramework.Example.Console do
       checkout(caf)                                  # each project's checkout
       attach(caf, "demo-main")                       # the command that opens its viewer
 
-  It reads the agent rows through `Sessions.Agents` and the rest through each part's own
-  functions; it opens no part's table.
+  It reads the agent rows through `Sessions.Agents`, the held hook events through
+  `Intake.Table`, and the rest through each part's own functions; it opens no part's table.
   """
 
   alias CodingAgentFramework.{Acts, Mailbox, Mains, MCP, Operator, Scheduler, Sessions}
   alias CodingAgentFramework.Example.{Config, ConfigFile, Run}
+  alias CodingAgentFramework.Intake.Table, as: IntakeTable
   alias CodingAgentFramework.Sessions.Agents
 
   @doc """
@@ -103,12 +106,40 @@ defmodule CodingAgentFramework.Example.Console do
     do: show(Operator.answer_startup(mcp(caf), agent, kind, label))
 
   @doc """
-  Answers delegate `agent`'s held permission request `request` (`agents/2` names each) with
-  `"allow"` or `"deny"`, under a claim. A main session's requests are a person's, on its screen.
+  Answers `agent`'s held permission request `request` with `"allow"` or `"deny"`, under a
+  claim: a delegate's (`agents/2` names a headless one's), or a main session's, which goes to
+  the request `Intake` holds for it (`requests/2` names each). A person may answer it on the
+  screen first.
   """
   @spec answer_request(pid, String.t(), String.t(), String.t()) :: :ok
   def answer_request(caf, agent, request, label),
     do: show(Operator.answer(mcp(caf), agent, request, label))
+
+  @doc """
+  The permission requests main session `agent` holds: each request's id, its tool and input,
+  and how to answer it.
+  """
+  @spec requests(pid, String.t()) :: :ok
+  def requests(caf, agent) do
+    case Mains.fix_state(part(caf, :mains), agent) do
+      {:ok, %{held: []}} ->
+        say("#{agent} holds no permission request")
+
+      {:ok, %{held: held}} ->
+        rows = IntakeTable.rows_by_id(info(caf).intake, Enum.map(held, &String.to_integer/1))
+
+        for r <- rows do
+          {tool, input} = asked(r.data)
+          say("request #{r.id}: #{tool} #{input}")
+          say(~s|  answer_request(caf, "#{agent}", "#{r.id}", "allow")  # or "deny"|)
+        end
+
+        :ok
+
+      other ->
+        show(other)
+    end
+  end
 
   @doc "Ends delegate `agent` once its report is delivered, under a claim."
   @spec stop_delegate(pid, String.t()) :: :ok
@@ -158,7 +189,7 @@ defmodule CodingAgentFramework.Example.Console do
     end
   end
 
-  @doc "Where message `id` is (its status and transport), and its reply."
+  @doc "Where message `id` is (its status and transport), and its reply with the reply's text."
   @spec status(pid, integer) :: :ok
   def status(caf, id) do
     mailbox = part(caf, :mailbox)
@@ -172,9 +203,15 @@ defmodule CodingAgentFramework.Example.Console do
           do: say("  typed as a pointer to #{pointer}")
 
         case Mailbox.reply(mailbox, id) do
-          {:ok, r} -> say("  #{r.kind} #{r.id} from #{r.from}: #{r.status}")
-          {:refused, :no_answer} -> say("  no reply yet")
-          other -> say("  reply: #{text(other)}")
+          {:ok, r} ->
+            say("  #{r.kind} #{r.id} from #{r.from}: #{r.status}")
+            for line <- lines(r.text), do: say("  | " <> line)
+
+          {:refused, :no_answer} ->
+            say("  no reply yet")
+
+          other ->
+            say("  reply: #{text(other)}")
         end
 
       other ->
@@ -370,6 +407,17 @@ defmodule CodingAgentFramework.Example.Console do
       refused?(l) -> "#{head}: refused #{l.reason}, retry at #{l[:retry_at]}"
       open?(l) -> "#{head}: held by #{holder}"
       true -> "#{head}: released by #{l[:released_by]}"
+    end
+  end
+
+  # The tool and input of a held request, from the hook's body as Intake keeps it.
+  defp asked(data) do
+    case is_binary(data) && JSON.decode(data) do
+      {:ok, %{"tool_name" => tool} = body} ->
+        {tool, inspect(body["tool_input"], limit: 10, printable_limit: 300)}
+
+      _ ->
+        {"(no tool named)", ""}
     end
   end
 

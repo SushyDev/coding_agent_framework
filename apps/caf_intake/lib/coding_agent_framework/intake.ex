@@ -191,6 +191,26 @@ defmodule CodingAgentFramework.Intake do
   end
 
   @doc """
+  Another part's hold on the host's `Intake`, from that part's `intake:` (the process) and
+  `intake_db:` (its file) options, as `Delegates` and `Mains` take them: `{:ok, %{pid: pid, db:
+  db}}`, `db` a reader of the part's own (`Intake.Table`); `{:ok, nil}` without `intake:`; or
+  `{:refused, {:bad, :intake_db}}` when the file is not named.
+  """
+  @spec reader(keyword) :: {:ok, %{pid: GenServer.server(), db: term} | nil} | {:refused, term}
+  def reader(opts) do
+    case {opts[:intake], opts[:intake_db]} do
+      {nil, _} ->
+        {:ok, nil}
+
+      {pid, path} when is_binary(path) ->
+        with {:ok, db} <- Table.open(path), do: {:ok, %{pid: pid, db: db}}
+
+      _ ->
+        {:refused, {:bad, :intake_db}}
+    end
+  end
+
+  @doc """
   The hooks' secret kept at `path`, a file under the framework home: read at every start, and
   made at the first, readable only by its user (mode 0600). A session held across a restart
   was started with the hooks of an earlier start, and its settings are written again only at

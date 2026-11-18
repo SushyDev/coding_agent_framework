@@ -218,7 +218,11 @@ Built, each from a checked model in `model/tla/`:
   shown as `locked` until a person clears it;
 - the example app run for real (F-146): it starts from a config file checked whole, an
   operator's console in IEx (`bin/caf-example`), an account's login (`bin/caf-login`), and the
-  end-to-end run as steps for a person and a main session ([docs/e2e.md](docs/e2e.md)).
+  end-to-end run as steps for a person and a main session ([docs/e2e.md](docs/e2e.md));
+- what that run needs first (F-147): a new home's first start, an account with no reading
+  counting as 0 % used; the hooks' secret kept per home, so a session held across a restart
+  keeps its hooks; the text of a reply to the operator; and the operator's answer of a main
+  session's held permission request, through `Intake` under a claim.
 
 The remodel (F-115, taken in F-116) is done. Next,
 F-140's follow-ups on startup dialogs, the mechanisms an app's policies stand on (an idle
@@ -420,16 +424,20 @@ Code:
    login (`claude auth login`) in your terminal with that account's config directory,
    `<home>/accounts/<account>/claude`, and `bin/caf-login --check <home> <account>` asks Claude
    Code whether it worked. Spell `<home>` as the config file does. The framework itself never
-   reads a credential: the first session it starts on an account is the real check.
+   reads a credential: the first session it starts on an account is the real check. No reading
+   of an account's allowance is needed first: one with none counts as 0 % used until its first
+   session's status line gives one.
 3. Start it with `bin/caf-example <config>`. It runs in devenv's environment (running itself
    through `devenv shell` when it is not), starts the app, and opens an IEx shell with the
    operator's console imported and the app named `caf`: `agents(caf)`, `dialogs(caf)`,
    `answer_dialog(caf, …)`, `start_main(caf, …)`, `start_delegate(caf, …)`,
-   `run_delegate(caf, …)`, `message(caf, …)`, `asks(caf)`, `move(caf, …)`, `end_main(caf, …)`,
-   `leases(caf)`, `faults(caf)` and the rest (`h CodingAgentFramework.Example.Console`). Each
-   acts as the operator, through the same tools and checks as an agent's, and prints a short
-   reading. Quitting the shell stops the framework; the agents run on under dtach, and the
-   next start adopts them.
+   `run_delegate(caf, …)`, `message(caf, …)` and `status(caf, id)` (with the reply's text),
+   `requests(caf, …)` and `answer_request(caf, …)` (a main session's or a delegate's held
+   permission request), `asks(caf)`, `move(caf, …)`, `end_main(caf, …)`, `leases(caf)`,
+   `faults(caf)` and the rest (`h CodingAgentFramework.Example.Console`). Each acts as the
+   operator, through the same tools and checks as an agent's, and prints a short reading.
+   Quitting the shell stops the framework; the agents run on under dtach, and the next start
+   adopts them, with the hooks' secret the first start wrote to `<home>/intake.secret`.
 
 [docs/e2e.md](docs/e2e.md) is the end-to-end run, step by step, that a person and a main
 session follow together with it.
