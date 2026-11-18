@@ -210,6 +210,49 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     assert {:ok, %{kind: "reply", from: ^name, to: "main"}} = Mailbox.answer_to(ctx.mailbox, u)
   end
 
+  # Delegate.tla's OwnWakes, OwnTurnEnds and TurnTold for an interactive delegate (F-155): a turn
+  # a background command of its own began is told to its parent once, by its reply's uuid; a
+  # row the framework delivered and a person's turn are not its own, and none is the report.
+  test "an interactive delegate's turn of its own after its report is told once", ctx do
+    assert {:ok, %{id: id, name: name, brief_uuid: u, session_id: sid}} =
+             Delegates.start_delegate(ctx.delegates, "main", "app", "unit/one", "opus", "Look.",
+               interactive: true
+             )
+
+    text = "Look.\n\n[delivery #{u}]"
+    assert {:ok, [^text]} = await(fn -> nonempty(ScreenStandIn.prompts(ctx.dir)) end)
+    {:ok, dir} = Accounts.config_dir(ctx.accounts, "work")
+    {:ok, path} = Transcripts.path(dir, Agents.get(ctx.agents, name).cwd, sid)
+    wake = "<task-notification>\n<status>completed</status>\n</task-notification>"
+    waiter = "<task-notification>\n<summary>Stop hook feedback</summary>\n[delivery x-1]"
+
+    lines(path, [
+      user(text),
+      reply("m1", "Done."),
+      user(wake),
+      Map.put(reply("m2", "It passed."), "uuid", "r-own"),
+      user(waiter),
+      Map.put(reply("m3", "A reply."), "uuid", "r-waiter"),
+      user("And now?"),
+      Map.put(reply("m4", "Other."), "uuid", "r-person")
+    ])
+
+    assert {:ok, %{text: "Done.", report: "taken"}} =
+             cue_until(ctx, id, &(&1.status == "finished" and &1.report == "taken"))
+
+    {:ok, [notice]} =
+      await(fn ->
+        Delegates.cue(ctx.delegates, %{topic: "transcripts:test:work"})
+        nonempty(turn_notices(ctx))
+      end)
+
+    assert %{to_agent: "main", reply_to: "key:turn:test:r-own", text: told} = notice
+    assert told == "Delegate #{name}, in a turn of its own after its report:\n\nIt passed."
+    Delegates.cue(ctx.delegates, %{topic: "transcripts:test:work"})
+    :sys.get_state(ctx.delegates)
+    assert [_] = turn_notices(ctx)
+  end
+
   # TurnEndsBare and IdleTold, by an interactive delegate's rule: the brief's turn ended with no
   # reply, its session file reads idle, and nothing is due to it.
   test "an interactive delegate idle with no report is told to its parent once", ctx do
@@ -298,6 +341,12 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
   defp lines(path, entries) do
     File.mkdir_p!(Path.dirname(path))
     File.write!(path, Enum.map(entries, &[JSON.encode!(&1), "\n"]), [:append])
+  end
+
+  defp turn_notices(ctx) do
+    {:ok, mtable} = Mailbox.Table.open(Path.join(ctx.dir, "caf.db"))
+    rows = Enum.reject(Enum.map(1..20, &Mailbox.Table.get(mtable, &1)), &is_nil/1)
+    Enum.filter(rows, &(&1.kind == "notice" and String.starts_with?(&1.reply_to, "key:turn:")))
   end
 
   defp nonempty([]), do: :empty

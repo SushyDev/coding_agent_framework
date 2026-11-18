@@ -1788,6 +1788,16 @@ or a notice goes in, never both. Its sender is `framework`, a name reserved for 
 itself: no agent may hold it (F-81). `Stream`'s fold keeps each result on the messages it names, so a turn the delegate
 starts by itself never replaces a reply or a report.
 
+That turn of its own (a background command of the delegate's own woke it, and it answers no
+message) is told to its parent once its report is taken (F-155, `Delegate.tla`'s TurnToldOnce,
+TurnNotReport, TurnNoticed): `Delegates` stores its last reply as a `notice` from `framework`
+(`Mailbox.notify/4` with `kind: :notice`, a word no turn answers), keyed `turn:<host>:<uuid>`
+by the turn's result uuid, which `Mailbox` takes once, so no restart tells it twice; a
+headless delegate's `Stream` fold keeps each such result in `own`, and an interactive one's is
+the turn its transcript shows begun by a `<task-notification>` with no delivery mark, keyed by
+its reply line's uuid. A person's turn in an interactive delegate is not told. A turn with no
+reply text tells nothing.
+
 **The operator** acts through these same tools and checks, as the parent of every main session
 (F-109). No agent messages the operator: it is no agent's addressee, and an agent reaches a
 person through `ask`. A reply to the operator's message, or the notice in its place, is stored

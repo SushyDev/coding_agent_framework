@@ -82,6 +82,16 @@
 (* IdleToldOnce and IdleNoticed. Left abstract: a person's turn and a     *)
 (* message into an idle delegate (Team.tla), which also end the state.    *)
 (*                                                                         *)
+(* A delegate's own turn after its report (F-155): a background command   *)
+(* of its own wakes it (OwnWakes) and its turn answers no message. Its    *)
+(* last reply goes to the parent as a notice in Mailbox, once per such    *)
+(* turn, stored under the turn's key (its result's uuid), which Mailbox   *)
+(* takes once (`keys`, as F-150's idle notice is); never as the report,   *)
+(* which stays the reply of the brief's turn. The notice comes only once  *)
+(* the report is handed on, so it never goes before it. TurnToldOnce,     *)
+(* TurnNotReport and TurnNoticed. TurnNotReport's guard is ReplyTurn's,    *)
+(* which Break_Delegate_LastReply removes.                                *)
+(*                                                                         *)
 (* A start idempotent per branch (F-150): a second start of a delegate    *)
 (* whose session is live answers that delegate and writes nothing, so it  *)
 (* is no step here. One whose row has no report and whose process is gone *)
@@ -152,6 +162,7 @@ CONSTANTS
     MaxPersonTurns,  \* turns a person starts in an interactive delegate
     Stalls,          \* the delegates whose turn may end with no report (F-150)
     MaxAgain,        \* starts of a branch again, its row with no report and its process gone
+    MaxWakes,        \* turns of a delegate's own, a background command's wake (F-155)
     Break            \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -171,14 +182,15 @@ Breaks == {
     "IdlePerDelegate",       \* the idle notice's key names the delegate, not its idle state
     "StartOverLive",         \* a second start of a branch goes on while its session is live
     "BriefAfterInit",        \* a headless start waits for its init before its message
-    "StatusEndsWork"         \* the lease's owner says a refused, finished or failed row ended
+    "StatusEndsWork",        \* the lease's owner says a refused, finished or failed row ended
+    "TurnInMemory"           \* an own turn's notice mark is kept in memory, not as Mailbox's key
 }
 
 ASSUME Break \in Breaks
 ASSUME Interactive \subseteq Delegates /\ MaxPersonTurns \in Nat
 ASSUME Cap \in Nat /\ MaxRestarts \in Nat /\ MaxKills \in Nat /\ MaxParentStops \in Nat
 ASSUME Awaited \subseteq Delegates /\ ClientLeaves \in BOOLEAN
-ASSUME Stalls \subseteq Delegates /\ MaxAgain \in Nat
+ASSUME Stalls \subseteq Delegates /\ MaxAgain \in Nat /\ MaxWakes \in Nat
 
 Parent == "parent"
 
@@ -196,10 +208,10 @@ VARIABLES
     proc,         \* d -> the delegate's process: "none", "waiting" (held, no message taken),
                   \*      "working" (the turn of its message), "person" (a person's turn),
                   \*      "idle" (after its last reply), "stalled" (its turn ended with no
-                  \*      report), "dead"
+                  \*      report), "own" (a turn its own background command woke), "dead"
     reply,        \* d -> the transcript's last reply, by the turn it ends: "none" (the
                   \*      current message's turn has not replied), "brief" (that turn's),
-                  \*      "person" (a person's later turn's)
+                  \*      "person" (a person's later turn's), "own" (its own turn's)
     kills,        \* kills so far
     persons,      \* a person's turns so far
     rsrc,         \* table: d -> the turn its report was read from: "none" (a notice),
@@ -219,6 +231,9 @@ VARIABLES
     told,         \* d -> notices told in the current idle state
     keys,         \* Mailbox's table: the keys the idle notices are stored under
     againStarts,  \* starts of a branch again so far
+    woken,        \* d -> its own turns begun so far: the current one's number
+    ownDone,      \* the log or transcript: <<d, n>> whose own turn n ended, with its result
+    ownTold,      \* <<d, n>> -> notices told of that own turn
     \* Delivery's, for the reports: row d is d's report
     row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, lost, wrong
 
@@ -226,7 +241,7 @@ parentVars == <<parentRuns, turn, parentStops, parentTurned>>
 delegateVars == <<status, held, resumes, proc, reply, kills, persons, rsrc>>
 callVars == <<call, sess, marked, pipe, taken, resumed>>
 \* Item 14's: the idle notice and the start idempotent per branch (F-150).
-policyVars == <<idles, overdue, told, keys, againStarts>>
+policyVars == <<idles, overdue, told, keys, againStarts, woken, ownDone, ownTold>>
 dvars == <<row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, lost, wrong>>
 vars == <<up, restarts, parentVars, delegateVars, stops, callVars, policyVars, dvars>>
 
@@ -277,6 +292,10 @@ WorkEnded(d) ==
     \/ status[d] \in {"none", "ended"}
     \/ status[d] \in {"refused", "finished", "failed"} /\ (SessionsFree(d) \/ Break = "StatusEndsWork")
 
+\* The key an own turn's notice is stored under: its result's uuid.
+TurnKey(d, n) == <<"turn", d, n>>
+Turns == Delegates \X (1..MaxWakes)
+
 -----------------------------------------------------------------------------
 Init ==
     /\ up = TRUE /\ restarts = 0
@@ -300,6 +319,7 @@ Init ==
     /\ told = [d \in Delegates |-> 0]
     /\ keys = {}
     /\ againStarts = 0
+    /\ woken = [d \in Delegates |-> 0] /\ ownDone = {} /\ ownTold = [t \in Turns |-> 0]
     /\ row =[d \in Delegates |-> D!NoRow] /\ hand = {} /\ claimed = {}
     /\ wire = [d \in Delegates |-> 0] /\ waiter = [a \in {Parent} |-> 0]
     /\ dcall = [d \in Delegates |-> "none"]
@@ -313,7 +333,8 @@ Init ==
 \* Sessions is another process: a call it took runs on. Under HeldInMemory
 \* the reports not yet stored go with the memory. The wake at an idle
 \* delegate's bound is in memory, so the bound starts again; under
-\* IdleInMemory the notices' marks go too.
+\* IdleInMemory the notices' marks go too, and under TurnInMemory the own
+\* turns' notices' marks.
 FrameworkDies ==
     /\ up /\ restarts < MaxRestarts
     /\ up' = FALSE /\ restarts' = restarts + 1
@@ -321,10 +342,13 @@ FrameworkDies ==
     /\ call' = [d \in Delegates |-> "none"]
     /\ held' = {}
     /\ overdue' = [d \in Delegates |-> FALSE]
-    /\ keys' = IF Break = "IdleInMemory" THEN {} ELSE keys
+    /\ keys' = CASE Break = "IdleInMemory" -> {}
+                 [] Break = "TurnInMemory" -> {k \in keys : k[1] # "turn"}
+                 [] OTHER -> keys
     /\ D!Restart
     /\ UNCHANGED <<parentVars, status, resumes, proc, reply, kills, persons, rsrc,
-                   sess, marked, pipe, taken, resumed, idles, told, againStarts>>
+                   sess, marked, pipe, taken, resumed, idles, told, againStarts, woken, ownDone,
+                   ownTold>>
 
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
@@ -582,8 +606,29 @@ TurnEndsBare(d) ==
     /\ UNCHANGED <<up, restarts, parentVars, status, held, resumes, reply, kills, persons, rsrc,
                    stops, callVars, keys, againStarts, dvars>>
 
+\* A background command of its own ends and wakes it: a turn that answers no
+\* message (F-155). Its row may still be running, its report not yet read.
+OwnWakes(d) ==
+    /\ proc[d] = "idle" /\ status[d] \in {"running", "finished"} /\ woken[d] < MaxWakes
+    /\ proc' = [proc EXCEPT ![d] = "own"]
+    /\ woken' = [woken EXCEPT ![d] = @ + 1]
+    /\ UNCHANGED <<up, restarts, parentVars, status, held, resumes, reply, kills, persons, rsrc,
+                   stops, callVars, idles, overdue, told, keys, againStarts, ownDone, ownTold,
+                   dvars>>
+
+\* That turn ends with its last reply and its result, which the log or the
+\* transcript keeps, and its Stop event comes.
+OwnTurnEnds(d) ==
+    /\ proc[d] = "own"
+    /\ proc' = [proc EXCEPT ![d] = "idle"]
+    /\ reply' = [reply EXCEPT ![d] = "own"]
+    /\ ownDone' = ownDone \cup {<<d, woken[d]>>}
+    /\ stops' = IF up THEN stops \cup {d} ELSE stops
+    /\ UNCHANGED <<up, restarts, parentVars, status, held, resumes, kills, persons, rsrc, callVars,
+                   idles, overdue, told, keys, againStarts, woken, ownTold, dvars>>
+
 DelegateKilled(d) ==
-    /\ proc[d] \in {"waiting", "working", "person", "idle", "stalled"} /\ kills < MaxKills
+    /\ proc[d] \in {"waiting", "working", "person", "idle", "stalled", "own"} /\ kills < MaxKills
     /\ proc' = [proc EXCEPT ![d] = "dead"]
     /\ kills' = kills + 1
     /\ UNCHANGED <<others, status, held, resumes, reply, persons, rsrc, callVars>>
@@ -658,6 +703,15 @@ IdleTold(d) ==
     /\ UNCHANGED <<up, restarts, parentVars, delegateVars, stops, callVars, idles, overdue,
                    againStarts, dvars>>
 
+\* An own turn's last reply goes to the parent once the report is handed
+\* on: a notice stored under the turn's key, which Mailbox takes once.
+TurnTold(d, n) ==
+    /\ up /\ <<d, n>> \in ownDone /\ Stored(d) /\ TurnKey(d, n) \notin keys
+    /\ keys' = keys \cup {TurnKey(d, n)}
+    /\ ownTold' = [ownTold EXCEPT ![<<d, n>>] = @ + 1]
+    /\ UNCHANGED <<up, restarts, parentVars, delegateVars, stops, callVars, idles, overdue, told,
+                   againStarts, woken, ownDone, dvars>>
+
 \* The delegate ends, its process with it, only once its report is delivered.
 DelegateEnds(d) ==
     /\ up /\ status[d] \in {"finished", "failed"}
@@ -702,6 +756,7 @@ Framework(d) ==
     \/ Called(d) \/ CallAnswered(d) \/ Settled(d) \/ InputWritten(d)
     \/ StopHandled(d) \/ TranscriptRead(d) \/ HeldStored(d) \/ KillSeen(d)
     \/ DelegateEnds(d) \/ BoundPasses(d) \/ IdleTold(d)
+    \/ \E n \in 1..MaxWakes : TurnTold(d, n)
 
 Next ==
     \/ FrameworkDies \/ FrameworkStarts \/ RestartParent
@@ -711,6 +766,7 @@ Next ==
                             \/ InputTaken(d) \/ PersonTypes(d) \/ DelegateFinishes(d)
                             \/ TurnEndsBare(d) \/ DelegateKilled(d)
                             \/ RestartAgent(d) \/ OrphanEnded(d)
+                            \/ OwnWakes(d) \/ OwnTurnEnds(d)
                             \/ Framework(d)
                             \/ Mailboxes(d)
 
@@ -728,6 +784,7 @@ Fairness ==
          /\ WF_vars(StopHandled(d)) /\ WF_vars(TranscriptRead(d)) /\ WF_vars(HeldStored(d))
          /\ WF_vars(KillSeen(d)) /\ WF_vars(DelegateEnds(d))
          /\ WF_vars(BoundPasses(d)) /\ WF_vars(IdleTold(d))
+         /\ \A n \in 1..MaxWakes : WF_vars(TurnTold(d, n))
          /\ SF_vars(\E t \in {"waiter", "typed", "call"} : Mailbox(D!Mark(d, t)))
          /\ SF_vars(Mailbox(D!Handed(d))) /\ SF_vars(Takes(d))
          /\ SF_vars(RowSteps(d))
@@ -742,14 +799,17 @@ TypeOK ==
     /\ status \in [Delegates -> {"none", "refused", "starting", "running", "resuming",
                                  "finished", "failed", "ended"}]
     /\ held \subseteq Delegates
-    /\ proc \in [Delegates -> {"none", "waiting", "working", "person", "idle", "stalled", "dead"}]
-    /\ reply \in [Delegates -> {"none", "brief", "person"}]
-    /\ rsrc \in [Delegates -> {"none", "brief", "person"}]
+    /\ proc \in [Delegates -> {"none", "waiting", "working", "person", "idle", "stalled", "own",
+                               "dead"}]
+    /\ reply \in [Delegates -> {"none", "brief", "person", "own"}]
+    /\ rsrc \in [Delegates -> {"none", "brief", "person", "own"}]
     /\ call \in [Delegates -> {"none", "start", "resume"}]
     /\ sess \in [Delegates -> {"none", "start", "resume", "held", "running", "refused", "orphan"}]
     /\ stops \subseteq Delegates
     /\ idles \in [Delegates -> Nat] /\ overdue \in [Delegates -> BOOLEAN]
-    /\ told \in [Delegates -> Nat] /\ keys \subseteq Delegates \X Nat /\ againStarts \in Nat
+    /\ told \in [Delegates -> Nat] /\ againStarts \in Nat
+    /\ keys \subseteq (Delegates \X Nat) \cup ({"turn"} \X Delegates \X Nat)
+    /\ woken \in [Delegates -> Nat] /\ ownDone \subseteq Turns /\ ownTold \in [Turns -> Nat]
     /\ turn => parentRuns
     /\ D!TypeOK
 
@@ -821,5 +881,15 @@ IdleToldOnce == \A d \in Delegates : told[d] <= 1
 \* ... and always once the bound passes while the state lasts: it is told,
 \* or the state ends (a turn starts, a report, or the delegate ends).
 IdleNoticed == \A d \in Delegates : Idle(d) ~> (told[d] >= 1 \/ ~Idle(d))
+
+\* A delegate's own turn is told to its parent at most once, whatever
+\* restarts come (F-155) ...
+TurnToldOnce == \A t \in Turns : ownTold[t] <= 1
+
+\* ... never as its report: the report is the brief's turn's reply ...
+TurnNotReport == \A d \in Delegates : rsrc[d] # "own"
+
+\* ... and always: every own turn that ended is told.
+TurnNoticed == \A t \in Turns : t \in ownDone ~> ownTold[t] >= 1
 
 =============================================================================

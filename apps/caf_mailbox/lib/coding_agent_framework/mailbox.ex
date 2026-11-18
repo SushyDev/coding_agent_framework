@@ -137,14 +137,22 @@ defmodule CodingAgentFramework.Mailbox do
   Stores `text` as a message from `framework` to agent `to`, delivered as any message is: the
   embedding app's word to an agent, such as a job's late end. `to` must be an agent the tree
   holds (`Grants.may_use?/2`), not the operator. Option `:key`: a message stored under the same key before is
-  not stored again, so a repeat of one event (a late end handed twice) is dropped. Answers
-  `{:ok, {:queued, id}}`, `{:ok, :stored_before}`, or `{:refused, reason}` with no row.
+  not stored again, so a repeat of one event (a late end handed twice) is dropped. Option
+  `:kind`: `:msg` (the default) or `:notice`, a word no turn answers, so the addressee's next
+  result is never read as a reply to it: a delegate's turn of its own told to its parent
+  (F-155). Answers `{:ok, {:queued, id}}`, `{:ok, :stored_before}`, or `{:refused, reason}` with
+  no row (`{:bad, :kind}` for another kind).
 
       Mailbox.notify(mailbox, "app-main", "Job mcp-a-7 ended: exit 0.", key: "job:mcp-a-7")
       #=> {:ok, {:queued, 9}}
   """
   def notify(mailbox, to, text, opts \\ []),
-    do: call(mailbox, {:notify, to, text, Keyword.get(opts, :key)}, opts)
+    do:
+      call(
+        mailbox,
+        {:notify, to, text, Keyword.get(opts, :key), Keyword.get(opts, :kind, :msg)},
+        opts
+      )
 
   @doc """
   Stores delegate `to`'s brief from its parent `from` under `uuid`, the uuid `Delegates` chose
@@ -463,14 +471,22 @@ defmodule CodingAgentFramework.Mailbox do
 
   # The key goes in `reply_to`, whose unique index takes one row per key; a key is never a
   # row's uuid, since it carries its own prefix.
-  def handle_call({:notify, to, text, key}, _from, s) do
-    with true <-
+  def handle_call({:notify, to, text, key, kind}, _from, s) do
+    with true <- kind in [:msg, :notice] or {:refused, {:bad, :kind}},
+         true <-
            (Enum.all?([to, text], &(is_binary(&1) and &1 != "")) and
               (is_nil(key) or is_binary(key))) or {:refused, {:bad, :message}},
          :ok <- Grants.may_use?(s.grants, to),
          # The operator is no agent: nothing would deliver to it.
          true <- to != Grants.operator(s.grants) or {:refused, {:not_an_agent, to}} do
-      row = %{from: @framework, to: to, text: text, uuid: Stream.uuid(), kind: "msg"}
+      row = %{
+        from: @framework,
+        to: to,
+        text: text,
+        uuid: Stream.uuid(),
+        kind: Atom.to_string(kind)
+      }
+
       stored(s, put(s, Map.put(row, :reply_to, key && "key:" <> key)))
     else
       refused -> {:reply, refused, s}

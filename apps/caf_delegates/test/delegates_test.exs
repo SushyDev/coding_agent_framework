@@ -175,6 +175,37 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "message #{mu}"]
   end
 
+  # Delegate.tla's OwnWakes, OwnTurnEnds and TurnTold (F-155): TurnToldOnce and TurnNotReport.
+  # The stand-in's `self` ends the brief's turn and then a turn of its own, as a background
+  # command's end wakes it, whose result names no message.
+  test "a turn of a delegate's own after its report is told to its parent once", ctx do
+    assert {:ok, %{id: id, name: name, brief_uuid: u}} =
+             Delegates.start_delegate(current(ctx), "main", "app", "unit/one", "opus", "self go")
+
+    assert {:ok, %{report: "taken", text: report}} =
+             cue_until(ctx, id, &(&1.status == "finished"))
+
+    assert report == "done #{u}"
+    key = "key:turn:test:r-self-#{u}"
+
+    {:ok, _} =
+      await(fn ->
+        cue(ctx, current(ctx))
+        if turn_notices(ctx) != [], do: {:ok, :told}
+      end)
+
+    assert [%{to_agent: "main", reply_to: ^key, text: text}] = turn_notices(ctx)
+    assert text == "Delegate #{name}, in a turn of its own after its report:\n\non its own"
+
+    # Never the report, and once: a later cue and a restart tell it no more.
+    assert [%{kind: "reply", from_agent: ^name, text: ^report}] =
+             Enum.filter(rows(ctx), &(&1.reply_to == u))
+
+    cue(ctx, current(ctx))
+    cue(ctx, restart(ctx))
+    assert [_] = turn_notices(ctx)
+  end
+
   # Delegate.tla's StartAgain: a start idempotent per branch.
   test "a second start of a branch answers its live delegate; one gone with no report starts again",
        ctx do
@@ -747,6 +778,14 @@ defmodule CodingAgentFramework.DelegatesTest do
   # The framework's notices that a delegate is idle with no report.
   defp notices(ctx),
     do: Enum.filter(rows(ctx), &(&1.from_agent == "framework" and &1.kind == "msg"))
+
+  # The framework's notices of a delegate's turns of its own (F-155).
+  defp turn_notices(ctx),
+    do:
+      Enum.filter(
+        rows(ctx),
+        &(&1.kind == "notice" and String.starts_with?(&1.reply_to, "key:turn:"))
+      )
 
   defp tick(ctx, ms), do: Agent.update(ctx.clock, &(&1 + ms))
 
