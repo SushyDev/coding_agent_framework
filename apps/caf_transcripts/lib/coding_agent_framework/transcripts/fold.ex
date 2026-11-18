@@ -150,6 +150,63 @@ defmodule CodingAgentFramework.Transcripts.Fold do
     end
   end
 
+  @doc """
+  The turns of an interactive delegate's own after the turn that `bytes` (whole lines of a
+  transcript, from that turn's first line) begins: each a turn a background command of its own
+  began (F-155), its first entry a `<task-notification>` that `marked?` finds no delivery of the
+  framework's in. A person's prompt, or a row the framework delivered, begins a turn that is not
+  its own. Each with a reply: `%{uuid, text, closed}`, the uuid of the reply's line (the turn's
+  key), its text, and whether a later turn closed it; a turn not closed may still be running.
+
+      iex> alias CodingAgentFramework.Transcripts.Fold
+      iex> brief = ~s({"type":"user","message":{"content":"Look. [delivery b-1]"}}\\n)
+      iex> wake = ~s({"type":"user","message":{"content":"<task-notification>done"}}\\n)
+      iex> reply = ~s({"type":"assistant","uuid":"r-1","message":{"id":"m1",) <>
+      ...>   ~s("stop_reason":"end_turn","content":[{"type":"text","text":"It passed."}]}}\\n)
+      iex> marked? = &String.contains?(&1, "[delivery ")
+      iex> Fold.own_turns(brief <> reply <> wake <> reply, marked?)
+      [%{uuid: "r-1", text: "It passed.", closed: false}]
+      iex> Fold.own_turns(brief <> reply <> brief <> reply, marked?)
+      []
+  """
+  @spec own_turns(binary, (String.t() -> boolean)) :: [
+          %{uuid: String.t(), text: String.t(), closed: boolean}
+        ]
+  def own_turns(bytes, marked?) do
+    turns =
+      bytes
+      |> String.split("\n")
+      |> Enum.drop(-1)
+      |> Enum.drop(1)
+      |> Enum.reduce([], fn l, turns ->
+        cond do
+          opens?(l) -> [[l] | turns]
+          turns == [] -> turns
+          true -> [[l | hd(turns)] | tl(turns)]
+        end
+      end)
+      |> Enum.map(&Enum.reverse/1)
+
+    count = length(turns)
+
+    for {[first | _] = turn, i} <- Enum.with_index(Enum.reverse(turns)),
+        own?(first, marked?),
+        %{uuid: uuid, text: text} <- [Enum.reduce(turn, new(), &line(&2, &1)).last_reply],
+        is_binary(uuid),
+        do: %{uuid: uuid, text: text, closed: i < count - 1}
+  end
+
+  defp own?(line, marked?) do
+    case JSON.decode(line) do
+      {:ok, %{"type" => "user"} = e} ->
+        texts = texts(e)
+        Enum.any?(texts, &notification/1) and not Enum.any?(texts, marked?)
+
+      _ ->
+        false
+    end
+  end
+
   defp line(fold, l), do: lines(fold, l <> "\n")
 
   # A user entry that is not a tool's result nor meta begins a turn: a person's prompt, or a

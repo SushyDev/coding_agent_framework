@@ -307,7 +307,11 @@ defmodule CodingAgentFramework.Copies do
   end
 
   defp reach(%Host{reach: :local}, shim), do: {shim, "localhost"}
-  defp reach(%Host{reach: {:ssh, ssh, dest}}, _), do: {ssh <> " -o BatchMode=yes", dest}
+  # rsync splits `-e` on whitespace and honors quotes, so each word goes quoted.
+  defp reach(%Host{reach: {:ssh, ssh, dest}} = host, _) do
+    words = [ssh | Host.ssh_options(host)] ++ ["-o", "BatchMode=yes"]
+    {Enum.map_join(words, " ", &Shell.shell_quote/1), dest}
+  end
 
   defp key(copy), do: {copy.programs.host.name, copy.project, copy.name}
 

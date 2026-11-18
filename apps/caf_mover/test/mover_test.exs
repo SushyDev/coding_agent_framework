@@ -29,6 +29,9 @@ defmodule CodingAgentFramework.MoverTest do
   test "a main session moves: ended once idle, copied after its exit, resumed on the other",
        ctx do
     main = main(ctx)
+    # F-155: what the session keeps in its memory on one account.
+    memory = Path.join(Path.dirname(main.transcript), "memory")
+    File.write!(Path.join(memory, "MEMORY.md"), "- the trunk is main\n")
     assert {:ok, :sent} = MoverSetup.type(ctx, "main", "busy")
     assert {:ok, _} = file_says(ctx, "work", "busy")
     # What a turn the SIGTERM cuts writes goes into its transcript as the process ends.
@@ -61,6 +64,13 @@ defmodule CodingAgentFramework.MoverTest do
 
     assert File.read!(Path.join([Path.rootname(spare.transcript), "subagents", "a.jsonl"])) ==
              "{}\n"
+
+    # F-155: the memory is the checkout's one, in the home, on the other account too.
+    moved_memory = Path.join(Path.dirname(spare.transcript), "memory")
+    assert File.read!(Path.join(moved_memory, "MEMORY.md")) == "- the trunk is main\n"
+    assert {:ok, shared} = File.read_link(moved_memory)
+    assert {:ok, ^shared} = File.read_link(memory)
+    assert String.starts_with?(shared, Path.join(ctx.dir, "memory"))
 
     # Its name, Remote Control and its waiter, on the new account.
     {args, 0} = System.cmd(program!(:ps), ["-ww", "-o", "args=", "-p", "#{moved.pid}"])

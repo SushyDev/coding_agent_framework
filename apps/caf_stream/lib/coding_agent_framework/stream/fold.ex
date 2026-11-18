@@ -10,7 +10,10 @@ defmodule CodingAgentFramework.Stream.Fold do
   replay answers it, a cancel cancels it. It also keeps the session id of `system`/`init` and the
   latest `rate_limit_event`, and the last `result` with its text. Each result is also kept on the
   messages it names (`messages[uuid].result`), so a later one, such as a turn the delegate starts
-  by itself, never replaces it. It is total: a line that is not a JSON object is counted as a
+  by itself, never replaces it. A result that names none of the framework's messages ends such a
+  turn of the delegate's own (a background command of its own woke it, F-155): it is kept in
+  `own`, in order, with its uuid, for `Delegates` to tell the parent once per turn; one with no
+  uuid is counted as a problem. It is total: a line that is not a JSON object is counted as a
   problem.
 
       iex> alias CodingAgentFramework.Stream.Fold
@@ -32,6 +35,7 @@ defmodule CodingAgentFramework.Stream.Fold do
           requests: %{String.t() => map},
           lines: %{String.t() => map},
           last_result: map | nil,
+          own: [map],
           rate_limit: map | nil,
           events: non_neg_integer,
           problems: non_neg_integer
@@ -52,6 +56,7 @@ defmodule CodingAgentFramework.Stream.Fold do
       requests: %{},
       lines: %{},
       last_result: nil,
+      own: [],
       rate_limit: nil,
       events: 0,
       problems: 0
@@ -101,7 +106,8 @@ defmodule CodingAgentFramework.Stream.Fold do
     result = %{subtype: e["subtype"], is_error: e["is_error"], user_message_uuids: uuids}
     result = Map.put(result, :text, text)
     messages = Enum.reduce(uuids, fold.messages, &keep(&2, &1, result))
-    %{fold | idle: true, last_result: result, messages: messages}
+    fold = %{fold | idle: true, last_result: result, messages: messages}
+    if Enum.any?(uuids, &Map.has_key?(messages, &1)), do: fold, else: own(fold, e["uuid"], result)
   end
 
   def event(fold, %{"type" => "control_request", "request_id" => id, "request" => r})
@@ -130,6 +136,12 @@ defmodule CodingAgentFramework.Stream.Fold do
     do: %{fold | rate_limit: info}
 
   def event(fold, _event), do: fold
+
+  # `Delegate.tla`'s OwnTurnEnds: the turn of its own, by its result's uuid.
+  defp own(fold, uuid, result) when is_binary(uuid),
+    do: %{fold | own: fold.own ++ [Map.put(result, :uuid, uuid)]}
+
+  defp own(fold, _uuid, _result), do: %{fold | problems: fold.problems + 1}
 
   # The first result that names a message is its own; a later one never replaces it.
   defp keep(messages, uuid, result) do

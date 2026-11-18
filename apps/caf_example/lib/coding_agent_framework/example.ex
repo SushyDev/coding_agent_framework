@@ -64,7 +64,7 @@ defmodule CodingAgentFramework.Example do
   }
 
   alias CodingAgentFramework.{Scheduler, Sessions, Shell, Stream, Tmux, TmuxSampler, Tracker}
-  alias CodingAgentFramework.{Transcripts, Usage}
+  alias CodingAgentFramework.{ToolHome, Transcripts, Usage}
   alias CodingAgentFramework.Example.{Config, Ends}
 
   require Logger
@@ -79,6 +79,7 @@ defmodule CodingAgentFramework.Example do
   def start_link(%Config{} = c) do
     with :ok <- mkdirs(c),
          {:ok, programs} <- programs(c),
+         {:ok, c} <- tools(c, programs),
          {:ok, tmux} <- server(c),
          {:ok, accounts} <- Accounts.new(c.home, c.accounts),
          {:ok, holder} <- Holder.new(programs, Config.path(c, "d")),
@@ -191,7 +192,9 @@ defmodule CodingAgentFramework.Example do
     %{c: c, programs: p, db: db} = w
     grants = Grants.new(fn -> Sessions.Agents.read_tree(w.agents) end, operator: c.operator)
     {host, every} = {c.workstation, c.interval}
-    hosts = Map.put(c.hosts, host, %{programs: p, dir: Config.path(c, "ws")})
+    # A job or service on the workstation runs with the home's tool state and devenv's PATH.
+    held_env = c.env.tools ++ [{"PATH", c.env.path}]
+    hosts = Map.put(c.hosts, host, %{programs: p, dir: Config.path(c, "ws"), env: held_env})
 
     # One Registry and one Transcripts on the host, over every account: a move hides no agent.
     dirs =
@@ -319,6 +322,7 @@ defmodule CodingAgentFramework.Example do
             inlet: pid.(:inlet),
             registry: pid.(:registry),
             home: c.home,
+            os: Programs.os(p),
             notify: notify}
          end},
         {:delegates,
@@ -590,6 +594,31 @@ defmodule CodingAgentFramework.Example do
         other -> {:halt, other}
       end
     end)
+  end
+
+  # Every tool's state lives in the home (F-155): its git config with the author and signing,
+  # its ssh files, then the variables that point gh, git, ssh and the XDG directories there, in
+  # every launch and every project's environment (git and the setup).
+  defp tools(c, programs) do
+    projects =
+      for {name, git} <- c.git.projects, into: %{} do
+        {name, Map.put(git, :checkout, Map.fetch!(c.projects, name).repo)}
+      end
+
+    with {:ok, %{ssh: ssh, gh: gh, ssh_keygen: keygen}} <-
+           Programs.take(programs, [:ssh, :gh, :ssh_keygen]),
+         :ok <-
+           ToolHome.prepare(c.home,
+             author: c.git.author,
+             projects: projects,
+             gh: gh,
+             ssh_keygen: keygen
+           ) do
+      tools = ToolHome.env(c.home, ssh)
+      named = Map.new(tools)
+      projects = Map.new(c.projects, fn {n, p} -> {n, %{p | env: Map.merge(named, p.env)}} end)
+      {:ok, %{c | env: Map.put(c.env, :tools, tools), projects: projects}}
+    end
   end
 
   defp programs(c) do

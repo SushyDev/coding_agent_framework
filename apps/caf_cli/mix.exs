@@ -17,6 +17,7 @@ defmodule CafCli.MixProject do
     [
       {:caf_accounts, in_umbrella: true},
       {:caf_holder, in_umbrella: true, only: :test},
+      {:caf_tool_home, in_umbrella: true, only: :test},
       {:caf_test, in_umbrella: true, only: :test}
     ]
   end

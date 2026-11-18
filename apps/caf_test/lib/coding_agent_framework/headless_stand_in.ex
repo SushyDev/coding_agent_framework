@@ -13,7 +13,7 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     `req-<uuid>`), and ends its turn when the answer comes; so does every message while a file
     `<dir>/hold` exists; the answer is replayed. `half` ends its turn with half a
     `rate_limit_event` line, and the next message finishes it; `self` ends its turn, then
-    starts one of its own at once, whose `result` (`on its own`) names no message; `quiet`
+    starts one of its own at once, whose `result` (`on its own`, uuid `r-self-<uuid>`) names no message; `quiet`
     ends its turn with an empty `result` that names no message, so no report is read from it;
   - for `interrupt`: a cancel of the request pending, and a `result`;
   - `end_session` ends it; a line that is not a JSON object ends it with status 1.
@@ -85,7 +85,7 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     turn_end() {
       ev '{"type":"assistant","session_id":"'"$sid"'","uuid":"a-'"$1"'","message":{"content":[]}}'
       ev '{"type":"rate_limit_event","session_id":"'"$sid"'","rate_limit_info":{"status":"allowed","unifiedWindows":{"seven_day":{"utilization":0.25,"resetsAt":1900000000}}}}'
-      ev '{"type":"result","subtype":"'"${2:-success}"'","is_error":false,"result":"done '"$1"'","session_id":"'"$sid"'","user_message_uuids":["'"$1"'"]}'
+      ev '{"type":"result","subtype":"'"${2:-success}"'","is_error":false,"result":"done '"$1"'","session_id":"'"$sid"'","uuid":"r-'"$1"'","user_message_uuids":["'"$1"'"]}'
     }
     init() { ev '{"type":"system","subtype":"init","session_id":"'"$sid"'","uuid":"init"}'; }
     mode=MODE
@@ -107,9 +107,9 @@ defmodule CodingAgentFramework.HeadlessStandIn do
               ev '{"type":"control_request","request_id":"'"$pending"'","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"true"},"tool_use_id":"tu-'"$u"'"}}' ;;
             *'"content":"self'*)
               turn_end "$u"
-              ev '{"type":"result","subtype":"success","is_error":false,"result":"on its own","session_id":"'"$sid"'","user_message_uuids":[]}' ;;
+              ev '{"type":"result","subtype":"success","is_error":false,"result":"on its own","session_id":"'"$sid"'","uuid":"r-self-'"$u"'","user_message_uuids":[]}' ;;
             *'"content":"quiet'*)
-              ev '{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"'"$sid"'","user_message_uuids":[]}' ;;
+              ev '{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"'"$sid"'","uuid":"r-quiet-'"$u"'","user_message_uuids":[]}' ;;
             *'"content":"half'*)
               turn_end "$u"; half=1
               printf '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed",' ;;

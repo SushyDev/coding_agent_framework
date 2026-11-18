@@ -108,7 +108,12 @@ Each word below names one thing, and the design, the code and the views use it o
 - **Framework home**: one directory per framework instance, on the workstation, given by the
   embedding app. It holds each account's Claude config directory, the dtach directory, the checkouts,
   the worktrees and the SQLite files. The framework never reads or writes `~/.claude` or any config directory
-  outside it.
+  outside it. Every tool the framework runs keeps its state there too (F-155, the operator's
+  rule: the framework needs only a system with nix; devenv brings every program, and every
+  program's data stays in the home, never in the person's own folders): the GitHub CLI's login
+  (`<home>/gh`), git's global config with the author agents commit as and its signing key
+  (`<home>/git/`), ssh's config and known hosts (`<home>/ssh/`), the XDG directories
+  (`<home>/xdg/`), and each checkout's agent memory (`<home>/memory/`). `ToolHome` names them.
 - **Server**: a tmux server, `tmux -L <name>`. Pane ids are unique only within one server, and a
   restarted server counts from `%0` again.
 - **Viewer**: the tmux pane that shows a held agent: a main session's own screen (`dtach -a`),
@@ -593,7 +598,8 @@ The repository is a Mix umbrella with one OTP application per part (or per small
 that only make sense together), under `apps/`. An app declares, directly, every app it uses and only those; `gate-deps` checks it
 (Elixir alone accepts a module from any app in the dependency tree), a use outside the tree does
 not compile, and the layers stay one way: base (`caf_shell`,
-`caf_tmux`, `caf_holder` with `Holder.Process`, `caf_store` with `Reader`, `caf_cues`), then
+`caf_tmux`, `caf_holder` with `Holder.Process`, `caf_store` with `Reader`, `caf_cues`,
+`caf_tool_home`), then
 readers and writers (`caf_registry`, `caf_transcripts`, `caf_usage`, `caf_accounts`, `caf_cli`,
 `caf_screen`, `caf_inlet`, `caf_stream`, `caf_intake`, `caf_sampler`, `caf_acts`,
 `caf_scheduler`, which uses only `caf_store`: the owners' answers and the allowance are
@@ -621,7 +627,8 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Hosts` | the workstation and the other hosts, how each is reached, and its shell | — |
 | `Shell` | the only module that starts programs, locally or over ssh, each leading a process group of its own, which a timeout ends | — |
 | `Shell.Reaper` | one per host: ends a running command's group when its caller dies first or the VM dies | — |
-| `Programs` | the absolute path of tmux, dtach, claude, git, gh, rsync, ssh, flock, sh, sleep, rm, kill, env, ps, cat, tail and curl (the waiter hook) on each host, given (from devenv, as the framework's own development and gates use) or looked up on the host's `PATH`, each checked against its supported versions at start with a clear error per one missing or out of range; no other part names a fixed path | — |
+| `Programs` | the absolute path of tmux, dtach, claude, git, gh, rsync, ssh, flock, sh, sleep, rm, kill, env, ps, cat, tail, curl (the waiter hook) and ssh-keygen (git's signing) on each host, given (from devenv, as the framework's own development and gates use) or looked up on the host's `PATH`, each checked against its supported versions at start with a clear error per one missing or out of range; no other part names a fixed path. It also names the host's operating system (`uname -s` beside the lookup, the VM's own for a local host), which bounds a launch's argument (F-155) | — |
+| `ToolHome` | where every tool the framework runs keeps its state, in the home (F-155): the environment every launch, job and service sets (`GH_CONFIG_DIR`, `GIT_CONFIG_GLOBAL` with `GIT_CONFIG_NOSYSTEM`, the four `XDG_*_HOME`, `GIT_SSH_COMMAND`), the options every ssh to a host takes (`-F <home>/ssh/config -o UserKnownHostsFile=<home>/ssh/known_hosts`), and the git config it writes at the app's start: the author it is given, SSH signing with the home's own key, `gh` as GitHub's credential helper, and each project's override for every repository under its checkout. A pure module | — |
 | `Store` | a pure module over SQLite: open with WAL and a busy timeout, the schema and its added columns, `query`, `rows_by_id`, `update`, upsert, a reads row, and a load that fills a newer build's fields with their defaults; every table of the framework is opened through it. A term in a column is stored by one rule (`Store.text/1`): an atom as its name, any other term as canonical JSON, never `inspect` text; a writer converts what an earlier build stored when it opens its file (`Store.convert/3`) | no table |
 | `Reader` | a pure module beside `Store`: the loop every reader runs (read on an interval or a call, diff against what it wrote, write with a reads row, cue), and a `Tracker` source made from the reader's table metadata | no table; each reader its own |
 | `Cues` | one per instance: each part declares the topics it reads, and `Cues` hands each cue to the `Tracker` and to every part that declared its topic; the order in which the system settles is the library's, not the app's | no table |
@@ -1117,6 +1124,14 @@ account with the same session id and the app's launch for the agent (a delegate'
 `Delegates.launch/2`), the row's own options and model taken again. An interactive session's
 first due row goes in as the resume's prompt (`launch`, "Delivery"; F-137's new-1), since the
 resumed process has no waiter until a turn of it ends; a row still `sending` settles first.
+The copy leaves the memory: Claude Code keeps a working directory's agent memory once per
+account, in `<config>/projects/<cwd>/memory/`, and a move would leave it behind. So the memory
+lives once per checkout or worktree in the home, `<home>/memory/<cwd as Claude Code names
+it>/`, and before every start or resume on an account `Sessions` makes that account's `memory`
+a symlink to it (`Sessions.Memory.link/3`, F-155): a folder already there is moved in once
+when the home's holds nothing, never written over, and a start whose account and home both
+hold files is refused `{:memory, {:both, …}}` for a person to merge; a file or a link elsewhere
+is refused and left as it is.
 Each failure settles on one account:
 
 - the drain or the stop not done by the move's deadline while the old process runs: given up,
@@ -1406,8 +1421,8 @@ and one with no closing event ends after a bound.
 `interactive: true` runs Claude Code's terminal interface, as a main session does, held the
 same way, so a person can attach and type: its agent row is of kind `delegate`, role `parent`,
 and `Sessions.Agents.headless?/1` is false for it, so `Mailbox` gives it a main session's
-transports. `Delegates` needs the host's `Registry` for it, and refuses a brief longer than a
-launch carries.
+transports. `Delegates` needs the host's `Registry` for it. A brief longer than a launch
+carries goes as a pointer to its file (F-155, "The launch").
 
 - Its brief is stored first, as any delegate's, then marked by `launch`, and the start carries
   it as its prompt. A startup dialog its start meets (the folder's trust dialog in a new
@@ -1773,6 +1788,16 @@ or a notice goes in, never both. Its sender is `framework`, a name reserved for 
 itself: no agent may hold it (F-81). `Stream`'s fold keeps each result on the messages it names, so a turn the delegate
 starts by itself never replaces a reply or a report.
 
+That turn of its own (a background command of the delegate's own woke it, and it answers no
+message) is told to its parent once its report is taken (F-155, `Delegate.tla`'s TurnToldOnce,
+TurnNotReport, TurnNoticed): `Delegates` stores its last reply as a `notice` from `framework`
+(`Mailbox.notify/4` with `kind: :notice`, a word no turn answers), keyed `turn:<host>:<uuid>`
+by the turn's result uuid, which `Mailbox` takes once, so no restart tells it twice; a
+headless delegate's `Stream` fold keeps each such result in `own`, and an interactive one's is
+the turn its transcript shows begun by a `<task-notification>` with no delivery mark, keyed by
+its reply line's uuid. A person's turn in an interactive delegate is not told. A turn with no
+reply text tells nothing.
+
 **The operator** acts through these same tools and checks, as the parent of every main session
 (F-109). No agent messages the operator: it is no agent's addressee, and an agent reaches a
 person through `ask`. A reply to the operator's message, or the notice in its place, is stored
@@ -1844,7 +1869,7 @@ changed (R6).
 | `stream` | a headless session | the replay in `Stream`'s fold; at the exit, the transcript. Its first row to a new process is marked before the start and written right after the hold (F-152) | settled from the same evidence once read; undelivered is final, and the row is due again first, under its same uuid, to the resumed process; a start's first row with no line in the fold waits for the start's deadline |
 | `waiter` | an interactive session with a waiter | the transcript's lines carrying the row's uuid: the `queue-operation` `enqueue` (it reached Claude Code's queue), then its take, a `dequeue` and the user line `Stop hook blocking error …` into an ended turn, or a `remove` and a `queued_command` attachment into a running one; delivered at the take; due again once the take bound past its hand-on has passed with no line, or its process is gone with no take | settled from the same lines: delivered if the take is there, kept while only the `enqueue` is, due again if no line is there and the take bound has passed |
 | `typed` | an interactive session with no waiter | the `Inlet`'s answer, then the transcript's user line once the turn has ended; due again as `waiter` | as `waiter`; an unknown write is never typed again |
-| `launch` | the first row to an interactive session's new process | its start: the text is the start's prompt argument, read from a file into the last argument (`ClaudeCLI.prompted/5`, at most 512 KiB); then the transcript's first user line whose text is the prompt, its mark last (the launch's own line, never a waiter's), delivered at it; a start refused makes it due again; with no line, due again only once no process of the start runs: a startup dialog holds the first turn for as long as a person takes, so no take bound stands for it, and the row is handed to no other transport while its process lives (F-153's new-1, `Break_Delivery_LaunchBound`) | settled from the same evidence |
+| `launch` | the first row to an interactive session's new process | its start: the text is the start's prompt argument, read from a file into the last argument (`ClaudeCLI.prompted/5`, at most `ClaudeCLI.prompt_max/1` for the host's operating system; a longer row's text is written to the agent's due directory and the prompt is one line naming it, with the row's uuid, F-155); then the transcript's first user line whose text is the prompt, its mark last (the launch's own line, never a waiter's), delivered at it; a start refused makes it due again; with no line, due again only once no process of the start runs: a startup dialog holds the first turn for as long as a person takes, so no take bound stands for it, and the row is handed to no other transport while its process lives (F-153's new-1, `Break_Delivery_LaunchBound`) | settled from the same evidence |
 | `call` | a waiting `run_delegate` | the endpoint's write, and the calling process still running after it | due again, for the parent's waiter: the call it answered is gone |
 
 **The launch** (F-137). A waiter connects only once a turn of its process has ended, and the
@@ -1862,7 +1887,16 @@ or one of several lines as a pointer to the file that holds it ("A session with 
 F-142), so no row waits for a person's prompt after a bare resume, a restart that cut the
 waiter, or the waiter's deadline (`Delivery.tla`'s `NoPointer`). An argument of about 900 000 bytes passed and one of 1
 100 000 did not on macOS (`getconf ARG_MAX` 1 048 576 for arguments and environment together),
-so a launch carries at most 512 KiB.
+so a launch there carries at most 512 KiB. Linux refuses any one argument over 131 072 bytes
+(`MAX_ARG_STRLEN`, with its closing NUL), whatever room is left in all, so a launch there
+carries at most 124 KiB, 4 KiB under it. The cap is the host's operating system's
+(`Programs.os/1`, `ClaudeCLI.prompt_max/1`; an operating system never measured has none, and its
+launch with a prompt is refused). A first row longer than the cap goes as the typed transport's
+long rows do (F-155): `Mailbox.launch/4` writes its text to `<home>/due/<agent>/<row id>.md`,
+which every interactive start may read by `--add-dir`, and the prompt is one line, "A message
+for you is in <path>; read it.", with the row's uuid on its last line, settled as any launch by
+the transcript's user line. With no home it is refused, and nothing is marked. So neither
+`Delegates` nor `Mains` refuses a long brief.
 
 **The take bound** (F-122's new-2): the time after a waiter's answer, or a typed write, by which
 Claude Code has started the turn with it or never will. Between the hand-on and the transcript's
@@ -2344,6 +2378,17 @@ without it.
   ("Headless delegates").
 - Every launch sets `DISABLE_AUTOUPDATER=1`, because devenv pins Claude Code and a session that
   updates itself runs a version the lock does not name.
+- Every launch, job and service sets `ToolHome`'s environment, and every ssh to a host takes
+  its options (F-155): an agent's git, gh and ssh then read and write only the home, not the
+  person's `~/.gitconfig`, `~/.config/gh` or `~/.ssh`, so a home moves whole to another machine.
+  Its `PATH` puts devenv's programs first, so a session's own Bash tool runs devenv's git, not
+  the system's; macOS's `/usr/bin` comes after, for `security`. Agents commit as the app's
+  author (`git.name`, `git.email`, per home with an override per project), distinct from the
+  person, and sign with the home's own key, never one of the person's; `gh` pushes with the
+  person's own login, kept in the home (`bin/caf-login --gh`). GitHub shows such a commit
+  Verified when the key is a signing key of the person's account (`bin/caf-login --git` offers
+  to add it) and the commit's email is one of that account's verified emails, its noreply
+  address included, whatever the name.
 
 ## Allowance
 

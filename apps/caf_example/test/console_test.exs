@@ -69,8 +69,21 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
     assert Regex.match?(c.projects["app"].branches, "unit/one")
     assert c.resources == %{"seat" => 4, "slot" => 2} and c.lease == %{"seat" => 1}
     assert c.job_lease.landing == %{"slot" => 1}
-    assert %{home: _, path: "/usr/bin:/bin:/usr/sbin:/sbin", term: _, lang: _} = c.env
+    # F-155: devenv's programs first on a launch's and a project's PATH, the system's last.
+    assert %{home: _, path: path, term: _, lang: _} = c.env
+    assert [git_dir | _] = String.split(path, ":")
+    assert git_dir in Enum.map([program!(:tmux), program!(:dtach)], &Path.dirname/1)
+    assert String.ends_with?(path, ":/usr/bin:/bin:/usr/sbin:/sbin")
     assert c.programs.tmux == program!(:tmux) and c.programs.git == program!(:git)
+    assert c.git == %{author: nil, projects: %{}}
+
+    # The author agents commit as, and a project's own.
+    data = Map.put(ctx.data, "git", %{"name" => "App Bot", "email" => "bot@example.com"})
+    data = put_in(data, ["projects", "app", "git"], %{"signing_key" => "app_key"})
+    assert {:ok, %Config{git: git}} = ConfigFile.read(write!(ctx, data), ctx.env)
+    key = Path.join([home, "git", "signing_key"])
+    assert git.author == %{name: "App Bot", email: "bot@example.com", signing_key: key}
+    assert git.projects == %{"app" => %{signing_key: Path.join([home, "git", "app_key"])}}
   end
 
   test "each refusal names its key", ctx do
@@ -102,7 +115,14 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
          "resources" => %{"seat" => 1, "slot" => 1, "land:app" => 1}
        }), {"scheduler.resources.land:app", :reserved}},
       {put_in(ctx.data, ["launch", "claude"], "claude"), {"launch.claude", :not_absolute}},
-      {Map.put(ctx.data, "operator", "app-main"), {"projects.app.mains", {:reserved, "app-main"}}}
+      {Map.put(ctx.data, "operator", "app-main"),
+       {"projects.app.mains", {:reserved, "app-main"}}},
+      {Map.put(ctx.data, "git", %{"name" => "Bot"}), {"git.email", :missing}},
+      {Map.put(ctx.data, "git", %{"name" => "Bot", "email" => "bot"}),
+       {"git.email", :not_an_email}},
+      {project.(%{"git" => %{"signing_key" => "../key"}}),
+       {"projects.app.git.signing_key", :not_a_file_name}},
+      {project.(%{"git" => %{"author" => "x"}}), {"projects.app.git.author", :unknown_key}}
     ]
 
     for {data, refusal} <- cases,
@@ -244,6 +264,31 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
       assert {out, 2} = System.cmd(login, args, stderr_to_stdout: true)
       assert out =~ why
     end
+
+    for {args, why} <- [
+          {["--git", "/srv/caf", "--key", "../k"], "../k is not a key file's name"},
+          {["--check", "--git", "/srv/caf"], "usage:"},
+          {["--gh"], "usage:"}
+        ] do
+      assert {out, 2} = System.cmd(login, args, stderr_to_stdout: true)
+      assert out =~ why
+    end
+  end
+
+  # F-155: the home's own signing key, made once and never written over; declining the offer
+  # to add it to GitHub runs no gh.
+  test "bin/caf-login --git makes the home's signing key once", ctx do
+    login = Path.join(@root, "bin/caf-login")
+    home = Path.join(ctx.dir, "home")
+    run = fn -> System.cmd(program!(:sh), ["-c", ~s(echo n | "$0" --git "$1"), login, home]) end
+
+    assert {out, 0} = run.()
+    key = Path.join([home, "git", "signing_key"])
+    assert out =~ "made #{key}" and out =~ "ssh-ed25519 "
+    pub = File.read!(key <> ".pub")
+
+    assert {out, 0} = run.()
+    assert out =~ "is there already" and File.read!(key <> ".pub") == pub
   end
 
   # F-153's new-3: `--check` says whether Claude Code's first-run onboarding was passed on the

@@ -78,6 +78,18 @@ defmodule CodingAgentFramework.Mailbox.Transport.Waiter do
   def mark(uuid), do: "[delivery " <> uuid <> "]"
 
   @doc """
+  Whether `text` carries a row's mark, of any uuid: a delivery of the framework's, which a
+  turn of a delegate's own never begins with (F-155).
+
+      iex> CodingAgentFramework.Mailbox.Transport.Waiter.marked?("Hi. [delivery u1]")
+      true
+      iex> CodingAgentFramework.Mailbox.Transport.Waiter.marked?("<task-notification>")
+      false
+  """
+  @spec marked?(String.t()) :: boolean
+  def marked?(text), do: String.contains?(text, "[delivery ")
+
+  @doc """
   What the transcript `bytes` (whole lines) show of the row stored under `uuid`: `:taken` (a
   `dequeue` or `remove`, a user line or a `queued_command` attachment carrying its mark),
   `:queued` (only its `enqueue`), or `:none`.
@@ -398,6 +410,17 @@ defmodule CodingAgentFramework.Mailbox.Transport.Launch do
     do: Enum.map_join(c, "\n", &if(is_map(&1), do: to_string(&1["text"]), else: ""))
 
   defp text_of(_), do: ""
+
+  @doc """
+  The prompt a start carries for a row longer than the host's argument holds: one line that
+  names the file its whole text is in (the agent's due directory, which each interactive start
+  may read), and its uuid, as `text/2` (F-155).
+
+      iex> CodingAgentFramework.Mailbox.Transport.Launch.pointer("/h/due/main/7.md", "u1")
+      "A message for you is in /h/due/main/7.md; read it.\\n\\n[delivery u1]"
+  """
+  @spec pointer(Path.t(), String.t()) :: String.t()
+  def pointer(path, uuid), do: text("A message for you is in #{path}; read it.", uuid)
 
   @doc """
   Settles `row` by `evidence`: `%{seen: seen/2's answer | :unread, gone: whether no process of

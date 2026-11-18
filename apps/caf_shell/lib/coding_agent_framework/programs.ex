@@ -4,7 +4,8 @@ defmodule CodingAgentFramework.Programs do
   and gh, rsync, ssh and flock (a copy's sync), and the POSIX tools sh, sleep, rm, kill, env,
   ps, cat, tail, head, mkdir and mkfifo (a headless delegate's stdin is a FIFO), wc (a service's log
   offset at its start), nc (a service's port wait), lsof (whether a forward's own ssh holds
-  its local port) and curl (a main session's waiter hook, `Intake.waiter_hook/5`).
+  its local port), curl (a main session's waiter hook, `Intake.waiter_hook/5`) and ssh_keygen
+  (`ssh-keygen`, which git signs and checks a commit with, `CodingAgentFramework.ToolHome`).
 
   The paths are found once, by the host's own shell (`command -v`), so no later call looks a
   program up through a `PATH`: a long `PATH` searched on the VM's file server slowed every file
@@ -15,6 +16,11 @@ defmodule CodingAgentFramework.Programs do
   the store paths devenv exports as `CAF_<NAME>`, such as `CAF_TMUX` or `CAF_SH` (see
   `devenv.nix`). A remote host has its own programs, so `find/3` looks them up there, with that
   host's shell, over ssh.
+
+  It also names the host's operating system (`os/1`), which bounds what one launch's argument
+  carries (`CodingAgentFramework.ClaudeCLI.prompt_max/1`): `find/3` reads it with `uname -s`
+  beside the paths, and `new/3` takes it as `os:`, a local host's being this VM's own
+  (`local_os/0`).
 
       iex> host = CodingAgentFramework.Host.local("laptop", "/run/bin/kill")
       iex> {:ok, programs} = CodingAgentFramework.Programs.new(host, %{tmux: "/run/bin/tmux"})
@@ -29,7 +35,7 @@ defmodule CodingAgentFramework.Programs do
   alias CodingAgentFramework.{Host, Shell}
 
   @enforce_keys [:host, :paths]
-  defstruct [:host, :paths]
+  defstruct [:host, :paths, os: :unknown]
 
   @type name ::
           :tmux
@@ -55,7 +61,9 @@ defmodule CodingAgentFramework.Programs do
           | :wc
           | :lsof
           | :curl
-  @type t :: %__MODULE__{host: Host.t(), paths: %{name => String.t()}}
+          | :ssh_keygen
+  @type os :: :darwin | :linux | :unknown
+  @type t :: %__MODULE__{host: Host.t(), paths: %{name => String.t()}, os: os}
 
   @names [
     :tmux,
@@ -80,11 +88,13 @@ defmodule CodingAgentFramework.Programs do
     :nc,
     :wc,
     :lsof,
-    :curl
+    :curl,
+    :ssh_keygen
   ]
   # The one fixed path in the library: `find/3` needs a shell to find the rest, sh included.
   @sh "/bin/sh"
   @find ~S"""
+  printf 'os\t%s\n' "$(uname -s)"
   for n do
     p=$(command -v "$n") || p=
     case $p in
@@ -109,15 +119,50 @@ defmodule CodingAgentFramework.Programs do
   def names, do: @names
 
   @doc """
-  Takes paths given outright. Each must be absolute; nothing is run.
+  Takes paths given outright. Each must be absolute; nothing is run. Option `os:` names the
+  host's operating system (`os/1`); unless given, a local host's is this VM's own
+  (`local_os/0`) and a remote host's `:unknown`.
   """
-  @spec new(Host.t(), %{name => String.t()}) :: {:ok, t} | {:refused, term}
-  def new(%Host{} = host, paths) when is_map(paths) do
+  @spec new(Host.t(), %{name => String.t()}, keyword) :: {:ok, t} | {:refused, term}
+  def new(%Host{} = host, paths, opts \\ []) when is_map(paths) do
+    os =
+      Keyword.get_lazy(opts, :os, fn ->
+        if host.reach == :local, do: local_os(), else: :unknown
+      end)
+
     case Enum.reject(paths, fn {name, path} -> name in @names and absolute?(path) end) do
-      [] -> {:ok, %__MODULE__{host: host, paths: paths}}
+      [] -> {:ok, %__MODULE__{host: host, paths: paths, os: os}}
       bad -> {:refused, {:bad_paths, Map.new(bad)}}
     end
   end
+
+  @doc """
+  The host's operating system: `:darwin`, `:linux`, or `:unknown` (another kernel, or a remote
+  host whose paths were given without it).
+  """
+  @spec os(t) :: os
+  def os(%__MODULE__{os: os}), do: os
+
+  @doc """
+  This VM's operating system, as `os/1` names it. Every agent runs on the workstation, which is
+  where the framework's VM runs.
+  """
+  @spec local_os() :: os
+  def local_os do
+    case :os.type() do
+      {:unix, :darwin} -> :darwin
+      {:unix, :linux} -> :linux
+      _other -> :unknown
+    end
+  end
+
+  # A name's program on the host: `ssh_keygen` is `ssh-keygen`.
+  defp command(name), do: name |> Atom.to_string() |> String.replace("_", "-")
+
+  # What `uname -s` prints on each kernel the framework knows.
+  defp os_named("Darwin"), do: :darwin
+  defp os_named("Linux"), do: :linux
+  defp os_named(_other), do: :unknown
 
   @doc """
   Finds `names` with the host's `/bin/sh`. Every name must resolve to an absolute path.
@@ -135,16 +180,19 @@ defmodule CodingAgentFramework.Programs do
   def find(%Host{} = host, names, opts \\ [timeout: 10_000]) do
     with [] <- names -- @names,
          {:ok, %{status: 0, output: out}} <-
-           Shell.run(host, @sh, ["-c", @find, "sh" | Enum.map(names, &Atom.to_string/1)], opts) do
+           Shell.run(host, @sh, ["-c", @find, "sh" | Enum.map(names, &command/1)], opts) do
+      lines = for l <- String.split(out, "\n", trim: true), do: String.split(l, "\t", parts: 2)
+      os = Enum.find_value(lines, :unknown, fn l -> with ["os", os] <- l, do: os_named(os) end)
+
       found =
-        for line <- String.split(out, "\n", trim: true),
-            [name, path] <- [String.split(line, "\t", parts: 2)],
+        for [name, path] <- lines,
+            name != "os",
             absolute?(path),
             into: %{},
-            do: {String.to_existing_atom(name), path}
+            do: {String.to_existing_atom(String.replace(name, "-", "_")), path}
 
       case Enum.reject(names, &Map.has_key?(found, &1)) do
-        [] -> {:ok, %__MODULE__{host: host, paths: found}}
+        [] -> {:ok, %__MODULE__{host: host, paths: found, os: os}}
         missing -> {:refused, {:not_found, missing}}
       end
     else

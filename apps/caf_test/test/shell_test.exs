@@ -45,6 +45,12 @@ defmodule CodingAgentFramework.ShellTest do
              Shell.command(box, "/run/x", ["a;b", "$HOME", "K=v w"])
 
     assert remote == "'/run/x' 'a;b' '$HOME' 'K=v w'"
+
+    # F-155: the home's ssh config and known hosts go before the destination.
+    home = ["-F", "/caf/ssh/config", "-o", "UserKnownHostsFile=/caf/ssh/known_hosts"]
+    box = Host.ssh("box", "/run/bin/ssh", "agent@box", program!(:kill), options: home)
+    assert {:ok, {"/run/bin/ssh", args}} = Shell.command(box, "/run/x", [])
+    assert args == home ++ ["-o", "BatchMode=yes", "--", "agent@box", "'/run/x'"]
   end
 
   test "programs are found as absolute paths by the host's shell" do
@@ -52,5 +58,14 @@ defmodule CodingAgentFramework.ShellTest do
     assert {:ok, "/" <> _} = Programs.fetch(programs, :tmux)
     assert {:refused, {:unknown_names, [:vim]}} = Programs.find(host(), [:tmux, :vim])
     assert {:refused, {:bad_paths, %{tmux: "tmux"}}} = Programs.new(host(), %{tmux: "tmux"})
+
+    # F-155: the host's operating system, which bounds a launch's argument, read beside the
+    # paths by `uname -s`, and a local host's given paths take this VM's own.
+    assert Programs.os(programs) == Programs.local_os()
+    assert Programs.local_os() in [:darwin, :linux]
+    assert {:ok, given} = Programs.new(host(), %{})
+    assert Programs.os(given) == Programs.local_os()
+    assert {:ok, linux} = Programs.new(host(), %{}, os: :linux)
+    assert Programs.os(linux) == :linux
   end
 end

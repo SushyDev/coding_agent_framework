@@ -108,6 +108,23 @@ defmodule CodingAgentFramework.ClaudeCLITest do
     end
   end
 
+  # F-155: gh, git and ssh keep their state in the framework home, by these variables.
+  test "the tools' state the app gives is passed on after the CA bundle, in order" do
+    tools = CodingAgentFramework.ToolHome.env("/caf", "/run/bin/ssh")
+    env = Map.merge(@env, %{ca: %{"SSL_CERT_FILE" => "/etc/ca.crt"}, tools: tools})
+
+    for role <- [:parent, :delegate] do
+      assert {:ok, %{env: got}} = ClaudeCLI.session(role, account(), opts(env: env, prompt: "p"))
+      assert Enum.slice(got, 6, length(tools)) == tools
+      assert {"GH_CONFIG_DIR", "/caf/gh"} in got
+    end
+
+    for bad <- [[{"HOME", "/x"}], [{"lower", "/x"}], [{"GH_CONFIG_DIR", "a\nb"}], :none] do
+      assert ClaudeCLI.session(:parent, account(), opts(env: Map.put(@env, :tools, bad))) ==
+               {:refused, {:bad, :tools}}
+    end
+  end
+
   test "a launch with no account directory is refused, never falling back" do
     for account <- [nil, "work", %{config_dir: @dir}, %{account() | config_dir: "rel/claude"}] do
       assert ClaudeCLI.session(:parent, account, opts([])) == {:refused, :no_account_dir}
