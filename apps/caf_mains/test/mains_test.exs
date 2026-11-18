@@ -149,7 +149,10 @@ defmodule CodingAgentFramework.MainsTest do
     File.rm!(edit)
     assert {:ok, %{owed: "false"}} = level(ctx, mains)
 
-    # A commit on trunk in the checkout: ahead, and git's fast-forward is never forced.
+    # A commit on trunk in the checkout: ahead, and git's fast-forward is never forced. It goes
+    # in as a person's would while Mains reads every 100 ms: a read takes no index lock (F-145),
+    # and the row just read, ready and owing nothing, was written once the pull's merge, the one
+    # git command of Mains that takes the lock, had ended; none starts until the next landing.
     commit!(ctx, ctx.checkout, "local")
     commit!(ctx, ctx.origin, "three")
     assert :ok = Mains.landed(mains, "app")

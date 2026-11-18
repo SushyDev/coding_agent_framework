@@ -89,7 +89,10 @@ defmodule CodingAgentFramework.Sessions.Worktree do
   @doc "git's arguments: `:list`, `{:status, path}`, `{:branch?, b}`, `{:add, …}`, `{:remove, path}`."
   @spec git(project, term) :: [String.t()]
   def git(p, :list), do: ["-C", p.repo, "worktree", "list", "--porcelain", "-z"]
-  def git(_p, {:status, path}), do: ["-C", path, "status", "--porcelain", "--untracked-files=all"]
+  # `--no-optional-locks`: a read writes nothing back, so an agent's git in that worktree never
+  # meets this read's `index.lock` (F-145).
+  def git(_p, {:status, path}),
+    do: ["--no-optional-locks", "-C", path, "status", "--porcelain", "--untracked-files=all"]
 
   def git(p, {:branch?, b}),
     do: ["-C", p.repo, "show-ref", "--verify", "--quiet", "refs/heads/" <> b]

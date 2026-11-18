@@ -50,12 +50,15 @@ defmodule CodingAgentFramework.Mains.Checkout do
 
   @doc """
   git's arguments for each step: `{:clone, origin, trunk, to}`, `{:head, path, trunk}`,
-  `{:branch, path}`, `{:status, path}`, `{:counts, path, trunk}`, `{:fetch, path, trunk}` and
-  `{:merge, path, trunk}` (`--ff-only`: a local commit refuses it, and an edit it would
-  overwrite; any other edit is carried, never lost).
+  `{:branch, path}`, `{:status, path}` (`--no-optional-locks`: a read writes nothing back, so
+  it never holds the index lock a person's git in the checkout needs), `{:counts, path, trunk}`,
+  `{:fetch, path, trunk}` and `{:merge, path, trunk}` (`--ff-only`: a local commit refuses it,
+  and an edit it would overwrite; any other edit is carried, never lost).
 
       iex> CodingAgentFramework.Mains.Checkout.git({:merge, "/c", "main"})
       ["-C", "/c", "merge", "--ff-only", "--quiet", "refs/remotes/origin/main"]
+      iex> CodingAgentFramework.Mains.Checkout.git({:status, "/c"}) |> Enum.take(4)
+      ["--no-optional-locks", "-C", "/c", "status"]
   """
   @spec git(tuple) :: [String.t()]
   def git({:clone, origin, trunk, to}),
@@ -65,7 +68,10 @@ defmodule CodingAgentFramework.Mains.Checkout do
     do: ["-C", path, "rev-parse", "--verify", "--quiet", "refs/heads/" <> trunk]
 
   def git({:branch, path}), do: ["-C", path, "symbolic-ref", "--quiet", "--short", "HEAD"]
-  def git({:status, path}), do: ["-C", path, "status", "--porcelain", "--untracked-files=all"]
+  # A plain `status` takes the index lock to write back the file times it refreshed, so a
+  # person's commit in the checkout during a read failed on the lock (F-145).
+  def git({:status, path}),
+    do: ["--no-optional-locks", "-C", path, "status", "--porcelain", "--untracked-files=all"]
 
   def git({:counts, path, trunk}),
     do: ["-C", path, "rev-list", "--left-right", "--count", "#{local(trunk)}...#{remote(trunk)}"]
