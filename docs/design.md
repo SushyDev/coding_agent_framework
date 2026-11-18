@@ -261,8 +261,8 @@ What each interface does:
 - **`Watch`.** `view(watch, scope)` the `Tracker`'s fold for a view and for `look`;
   `metrics(watch, query)` a named metric over a window; `digest(watch, window)` the symptoms and
   their counts, worst first; `remedies(watch, :list | {:approve, symptom, remedy, cap} |
-  {:revoke, …})` the allow-list, widened only by the operator and narrowed by the operator or
-  the cap; `clear(watch, symptom, by)` a person's clear of a symptom that waits on one.
+  {:revoke, …})` the allow-list, widened only by the operator and narrowed on its own when a
+  remedy fails; `clear(watch, symptom, by)` a person's clear of a symptom that waits on one.
 
 **Measured today** (F-162): 29 library apps and `caf_example`; 577 public functions in the
 libraries (OTP callbacks left out), from 3 in `caf_screen` to 79 in `caf_sessions` and 53 in
@@ -283,6 +283,15 @@ answer to its owner through `Team.operate/4`; every box records in the `Ledger`;
 reads the `Ledger` and acts only through `Team.operate/4`, as an actor with the same checks and
 claims as the operator.
 
+**Contracts and one composed spec** (decided). Each box's spec states its contract: what the box
+promises at its interface (a row delivered at most once and only into an ended turn; a lease
+within capacity; a prompt answered once by its rightful answerer) and what it assumes of the
+boxes it calls. One composed spec, `Boxes.tla`, checks the boxes together through those
+contracts, not their insides: a delivery during a move, a lease held across a dialog, a prompt
+across an agent's restart, a remedy racing a parent's fix, and restarts of one agent and of the
+whole. Faults that show only when protocols meet are checked there, and because it composes
+contracts rather than whole specs, it stays small enough for TLC.
+
 ### The agent's surface
 
 Small is not weak. An agent keeps full control of its own subtree: it starts, briefs, messages,
@@ -295,11 +304,11 @@ resume after a kill, a reconnect, a placement).
 
 | Verb | Job | Options | Replaces today's tools |
 |---|---|---|---|
-| `delegate(brief, opts)` | hand off work and get the report | `project`, `branch`, `model`, `interactive`, `wait` (seconds to hold the call for the report), `review: true` (decided: a fresh-context reviewer, read-only by its launch's settings, not by its brief, checks the work against the brief's objective and an acceptance list stored as data the builder cannot edit, runs the checks itself, and its verdict goes up with the report; a builder's "tests pass" is a claim, not a verdict), `variants: n` with `take: :first_passing \| :compare` (refused `no_selector` without `review` or a check to choose by, and each variant under an equal share of the budget), `budget` (tokens, cost or time, enforced and reported), `fresh` (a context reset of the branch's delegate, re-entered from recorded state: the brief, its acceptance list, the branch's commits and the delegate's acts, not a prose summary), `main: name` (a main session of a project, no report) | `start_delegate`, `run_delegate`, `start_main` |
+| `delegate(brief, opts)` | hand off work and get the report | `project`, `branch`, `model`, `interactive`, `wait` (seconds to hold the call for the report), `review: true` (decided: a fresh-context reviewer, read-only by its launch's settings, not by its brief, checks the work against the brief's objective and an acceptance list stored as data the builder cannot edit, runs the checks itself, and its verdict goes up with the report; a builder's "tests pass" is a claim, not a verdict), `variants: n` with `select:` (decided: `:review`, `:gates` or an app's check, and `take: :first_passing \| :compare`; refused `{:refused, :no_selector}` without one; all variants under one shared budget), `budget` and `steps` (decided: tokens, cost, time and a cap on tool calls; reaching one is told to the parent and counted, never a kill), `fresh` (decided: a context reset of the branch's delegate, whose new session's first prompt is the brief, the progress note the agent keeps in its worktree, the branch and its last results, all recorded in the `Ledger`; not a prose summary), `main: name` (a main session of a project, no report) | `start_delegate`, `run_delegate`, `start_main` |
 | `message(to, text)` | say something along an edge | `urgent` (a nudge: interrupt, then this message ahead of every due row, as one checked step) | `message` |
 | `ask(questions)` | ask a person; opens a prompt, and the answer comes as a message | as today | `ask` |
 | `look(target, opts)` | see the tree, an agent, a service | `what`: `tree`, `state`, `screen`, `transcript`, `diff`, `cost`, `leases`, `stuck`, `logs`, `services`; `from` an offset; `all` | `agents`, `look`, `transcript`, `services`, `service_logs` |
-| `steer(target, act)` | act on its own subtree or its services | `act`: `interrupt` (a pause: the turn ends, and the agent waits for its next row), `answer` (a child's open prompt by id and label, through `Prompts`), `resume`, `stop`, `move`, and for a service `send`, `restart`, `stop`, `hand` | `interrupt`, `answer`, `resume`, `stop`, `move`, `service_send`, `service_restart`, `service_stop`, `service_hand` |
+| `steer(target, act)` | act on its own subtree or its services | `act`: `interrupt` (a pause: the turn ends, and the agent waits for its next row), `fresh` (the same reset as `delegate`'s option, decided), `answer` (a child's open prompt by id and label, through `Prompts`), `resume`, `stop`, `move`, and for a service `send`, `restart`, `stop`, `hand` | `interrupt`, `answer`, `resume`, `stop`, `move`, `service_send`, `service_restart`, `service_stop`, `service_hand` |
 | `wait_for(event, opts)` | be told when something happens, never poll | `event`: a delegate idle or its report, a job done, a service's line, port or exit, an answer, and an extension's events (a CI run, a review, a merge) | `service_wait` |
 | `serve(name, argv, opts)` | hold a program that outlives a turn | `host`, `forward`, `local`, `keep`, `timeout` | `service_start` |
 
@@ -321,10 +330,11 @@ every call of every agent and answers by policy: allow, correct (`updatedInput`)
 reason that names what to do instead, or hold for a decider. Policies are the app's data, per
 role and project, beside the extensions' guards; the framework's own (a move's drain, a budget,
 a heavy command's wrapper) are policies too. Each decision is a row, written before the
-answer, so every check is counted and replayed. A rule that must never be broken is not only a
-hook: it is also a permission deny rule in the role's launch settings, which Claude Code itself
-enforces when the framework does not answer (F-162's new-9); no supervised session is launched
-with `--bare`, which skips hooks.
+answer, so every check is counted and replayed. A rule that must never be broken is a
+permission deny rule in each agent's Claude Code settings, from the app's config, which Claude
+Code enforces itself and which holds while the framework is down (decided, F-162's new-9);
+hooks keep the soft and helpful work (corrections, context, counts, leases) and fail open. No
+supervised session is launched with `--bare`, which skips hooks.
 
 **Intercepted, not added.** Native Claude Code goes on as the agent knows it, with the
 framework's hooks deciding:
@@ -340,7 +350,10 @@ framework's hooks deciding:
 - Claude Code's `Agent` tool stays native, its subagents read and counted; for subagent types
   the app names, the hook denies with a reason that names the `delegate` call to make, since
   `updatedInput` can change a call's input but not the tool (F-162's new-4);
-- a budget spent denies the next tool call with a reason, and the parent is told once.
+- a budget or step cap reached denies the next tool call with a reason, and the parent is told
+  once; the same calls repeated with the same input are raised by the framework itself as a
+  `stuck` event, told to the parent with the calls as its facts (decided); neither ever ends the
+  agent.
 
 A hook that corrects a call (`updatedInput`, or a deny whose reason names the call to make)
 is preferred to a bare deny, and context a hook adds states facts ("the parent sent …"), never
@@ -348,8 +361,8 @@ orders, and stays under Claude Code's limit for added context (a longer text goe
 pointer to its file). Claude Code's hooks fail open: a hook that times out or errs lets the
 call go on, and the design keeps `onFailure` at "continue" so a framework that is down never
 refuses a tool call. So an intercept is enforced only while the framework answers; what must
-hold regardless is also a deny rule in the launch settings, and a call that went on unanswered
-is a fact the `Watch` counts (F-162's new-9).
+hold regardless is a deny rule in the launch settings, never a hook alone, and a call that went
+on unanswered is a fact the `Watch` counts (F-162's new-9).
 
 **Off the agents' list**, to the app's surface: `answer_startup` (a prompt the app answers),
 `end_main`, a main session's
@@ -377,7 +390,8 @@ a fact, nothing pruned. No metric is counted by code sprinkled through the parts
 | `lease_wait` | each grant's wait, each refusal by reason, by class and module |
 | `ended_hard` | kills, ends by `Recoveries`, restarts of the framework, raised errors |
 | `guard_fired` | an extension's guard that denied or corrected a call, by guard |
-| `repeating` | one agent's same tool call with the same input, or the same result, many times in a row, from the hooks' rows |
+| `stuck` | one agent's same tool call with the same input, or the same result, many times in a row, from the hooks' rows; told to its parent as an event |
+| `capped` | a budget or step cap reached, and a `Stop` hold at Claude Code's cap of blocks |
 | `unenforced` | a held hook that went on unanswered (the framework down or past its deadline) |
 | `restarted` | an agent's, host's or account's process restarted by its supervisor, and one whose restart budget ran out |
 | `prompt_wait` | each prompt's time open, by kind and depth, and the ones past their deadline |
@@ -389,15 +403,19 @@ is the agent-facing view of the same folds for its own subtree.
 
 1. **Detect and record, always.** A symptom found is a fact with its evidence, shown in the
    digest, whatever happens next.
-2. **Act only by an approved remedy.** The allow-list is rows the operator writes: a symptom, a
+2. **Act only by an approved remedy**, triggered only by facts in the `Ledger` (a fold, never a
+   model's reading of a log). The allow-list is rows the operator writes: a symptom, a
    remedy (an act of `Team.operate/4`, such as reopening a lost viewer, ending an orphan by its
    record, telling a parent of an idle child), and a cap per hour. A remedy is claimed in the
    `Ledger` on the symptom's state, so it acts once per state; its precondition is checked
    against the state read before the claim (`Team.tla`'s `Needed`); it is verified after; when
    the cap trips, the healer stops acting on that symptom and opens a prompt.
 3. **Prompt for everything else**: a prompt of kind `remedy` with the evidence and a proposed
-   remedy, whose answers are "act once", "add to the allow-list" and "leave it"; only the
-   operator widens the list.
+   remedy, whose answers are "act once", "add to the allow-list" and "leave it".
+
+The list narrows on its own and widens only by the operator (decided): a remedy whose verify
+fails is dropped from its symptom's list at once, with a note to the operator saying why, and
+comes back only by the operator's approval.
 
 This tier is for the world outside the BEAM (a lost viewer, an orphan, an idle child). A crash
 of the framework's own code is OTP's to heal, within its restart budget ("Processes and
@@ -512,6 +530,7 @@ by label, a default, a deadline, its owner and its status (`open`, `answering`, 
 | `exit` | `Sessions`, from Claude Code's own exit prompt read on the pane | `Sessions`' checked press |
 | `remedy` | the `Watch` | `Team.operate/4` and the allow-list |
 | `restarts` | a supervisor whose budget ran out | its process started again |
+| `stop_cap` | the `Stop` hold, at Claude Code's cap of 8 blocks in a row, in place of being overridden (decided) | `Intake`'s hold: go on, or let the turn end |
 | `policy` | the app (confirm a landing, say) | the app's callback |
 
 **The rules.** A prompt is answered once, by its rightful answerer: a person, through the app,
@@ -2581,13 +2600,24 @@ uuid, and each spec that instances a module compares its state counts before and
 
 **The boxes** (F-162) come next, before the rest of item 14 and items 15 to 17, so that each
 later unit is built behind one box's interface and the agents' seven verbs. Item 14's `Stop`
-held for the app is a `Hold` kind and may go in beside them; it counts its blocks, since Claude
-Code overrides a `Stop` hook that blocks too many times in a row with no tool call between, and
-models that override as an action of the environment (F-162's new-11). Each unit keeps
+held for the app is a `Hold` kind and may go in beside them; it counts its blocks per agent,
+since Claude Code overrides a `Stop` hook's block past 8 in a row with no tool call between, and
+at the cap it hands the agent to a person as a `stop_cap` prompt in place of being overridden
+(decided); the override is an action of the environment in its spec, and whether the waiter's
+wakes count toward the cap is measured per release (F-162's new-11).
+
+Skipped, decided by the operator (F-162): forcing a model to be deterministic, debate between
+agents, outside record and replay libraries (the `Ledger`'s replay covers it), Claude Code's
+checkpoints for rollback (worktrees stay the unit), and post-mortems written by a model (the
+`Ledger`'s facts instead). Each unit keeps
 every gate green. Sizes are changed lines apart from fixtures, estimated by F-162. B1 is the
 model before the code it describes (B4, B6, B8, B9, B11); B2 and B3 change no behavior.
 
-- **B1. Model**, specs only, in four parts that may land apart: the restart as a step per agent
+- **B1. Model**, specs only, in five parts that may land apart. First each box's contract
+  stated in its spec's header and as the properties it exports, and `Boxes.tla` (about +400),
+  composing the boxes by their contracts: a delivery during a move, a lease across a dialog, a
+  prompt across a restart, a remedy racing a fix, one agent's restart and the whole one
+  (decided). Then the restart as a step per agent
   (`Restart(a)`) beside the whole one in `Start.tla`, `Delegate.tla`, `Dialog.tla` and
   `Move.tla`, bounded by `MaxRestarts`, with state counts compared before and after (about
   +200); `Prompt.tla` (about +300), instancing `Hold` and `Claim`, with `Dialog.tla`'s answer and
@@ -2638,15 +2668,17 @@ model before the code it describes (B4, B6, B8, B9, B11); B2 and B3 change no be
 - **F-157**, as decided: the heavy `Bash` command rewritten into a wrapper under a lease; then
   `run` leaves the agents' list (about −200).
 - **B10. The intercepts**: `AskUserQuestion` opened as a prompt where no person attends; the
-  `Agent` tool's named types answered with the `delegate` call to make; the `repeating` and
-  `unenforced` facts from the hooks' rows. About +300.
+  `Agent` tool's named types answered with the `delegate` call to make; the `unenforced` fact
+  and the `stuck` event raised from the hooks' rows and told to the parent. About +300.
 - **B11. `delegate`'s options**, the model first: `Delegate.tla` gains `review` (the acceptance
-  list fixed before the builder starts, a reviewer with a fresh context that is not the
-  builder, the report carrying the verdict), `variants` (each counted against the cap, refused
-  without a selector, at most one taken under `first_passing`, the others stopped by their
-  parent's claim), `budget` (a `tool` hold's deny past the budget, told to the parent once) and
-  `fresh` (F-150's start again, re-entered from recorded state in place of the brief). Then each
-  as its own unit. About +300 of spec, then +300 to +400 each.
+  list fixed before the builder starts, a reviewer with a fresh context, read-only by its
+  launch, that is not the builder, the report carrying the verdict), `variants` (each counted
+  against the cap, refused `no_selector` without `select:`, one shared budget, at most one taken
+  under `first_passing`, the others stopped by their parent's claim), `budget` and `steps` (a
+  `tool` hold's deny past either, told to the parent once, never a kill) and `fresh` (F-150's
+  start again, also `steer(:fresh)`, its first prompt the brief, the agent's progress note, the
+  branch and its last results, recorded in the `Ledger`). Then each as its own unit. About +300
+  of spec, then +300 to +400 each.
 - **B12. Extensions**: the bundle in the config, its verb through `operate/4`, its skill in the
   launch, its context at a brief and by `additionalContext`, its events as facts, its guards and
   their counts, scoped per role and project. About +600.
