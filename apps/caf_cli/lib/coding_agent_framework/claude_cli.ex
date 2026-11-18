@@ -26,7 +26,10 @@ defmodule CodingAgentFramework.ClaudeCLI do
 
   - `CLAUDE_CONFIG_DIR`: the account's own directory, so nothing comes from `~/.claude`;
   - `HOME`: where Claude Code and the tools it runs (git, gh, ssh) find a person's own files;
-  - `PATH`: how its Bash tool finds the programs a session runs;
+  - `PATH`: how its Bash tool finds the programs a session runs, and on macOS how Claude Code
+    finds `security`, which reads its login from the Keychain (in 2.1.322), so the launch's
+    `PATH` must hold `/usr/bin`. No `USER` is passed: the Keychain entry is named by `USER`,
+    else by the OS user name, which is the same one;
   - `TERM`: the terminal type its screen is drawn for, which dtach does not set;
   - `LANG`: a UTF-8 locale, so text past ASCII is read and drawn as it is;
   - `MCP_TOOL_TIMEOUT` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`, both the launch's

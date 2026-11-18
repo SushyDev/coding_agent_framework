@@ -956,16 +956,9 @@ defmodule CodingAgentFramework.Delegates do
   defp hooked(%{intake: nil}, _agent), do: {:unknown, :no_intake}
 
   defp hooked(s, %{session_id: sid} = agent) when is_binary(sid) do
-    case IntakeTable.rows(s.intake.db, s.host, agent.account) do
-      {:ok, %{rows: rows}} ->
-        own = Enum.filter(rows, &(&1.session_id == sid))
-
-        requests =
-          for %{event: "PermissionRequest", hold: "held", id: id} <- own,
-              into: %{},
-              do: {Integer.to_string(id), %{state: :held}}
-
-        last = own |> Enum.map(& &1.id) |> Enum.max(fn -> 0 end)
+    case IntakeTable.session(s.intake.db, s.host, agent.account, sid) do
+      {:ok, %{last: last, held: held}} ->
+        requests = Map.new(held, &{Integer.to_string(&1), %{state: :held}})
         gone = not Agents.running?(agent)
         {:ok, %{offset: last, gone: gone, ending: false, requests: requests}}
 

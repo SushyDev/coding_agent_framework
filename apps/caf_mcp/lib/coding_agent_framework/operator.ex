@@ -65,7 +65,14 @@ defmodule CodingAgentFramework.Operator do
   @spec interrupt(GenServer.server(), String.t()) :: answer
   def interrupt(mcp, agent), do: fix(mcp, "interrupt", agent)
 
-  @doc "Answers `agent`'s open request `dialog` with `label`, `\"allow\"` or `\"deny\"`, under a claim."
+  @doc """
+  Answers `agent`'s open request `dialog` with `label`, `"allow"` or `"deny"`, under a claim:
+  a delegate's through `Delegates`, as its parent would, and a main session's held
+  `PermissionRequest` (`dialog` its row's id) through `Mains.answer/5` (F-147).
+
+      Operator.answer(mcp, "app-main", "41", "allow")
+      #=> {:ok, %{done: :sent, claim: 7, settled: {:ok, :verified}}}
+  """
   @spec answer(GenServer.server(), String.t(), String.t(), String.t()) :: answer
   def answer(mcp, agent, dialog, label),
     do: MCP.operate(mcp, "answer", %{"agent" => agent, "dialog" => dialog, "label" => label})

@@ -43,13 +43,8 @@ defmodule CodingAgentFramework.ExampleTest do
         interval: 200
       )
 
-    # The account's last weekly reading, as its status line would have written it.
-    {:ok, accounts} = Accounts.new(home, ["work"])
-    {:ok, file} = Accounts.usage_file(accounts, "work")
-    File.mkdir_p!(Path.dirname(file))
-    week = %{"seven_day" => %{"used_percentage" => 25, "resets_at" => 4_000_000_000}}
-    File.write!(file, JSON.encode!(%{"rate_limits" => week}))
-
+    # A new home: no account has a reading, and a start still picks one (F-147).
+    File.mkdir_p!(home)
     {:ok, server} = Example.server(config)
     on_exit(fn -> Tmux.kill_server(server) end)
     on_exit(fn -> end_recorded(dir) end)
@@ -135,14 +130,18 @@ defmodule CodingAgentFramework.ExampleTest do
     end
 
     {:ok, pids} = pids(ctx)
+    secret = hook_secret(ctx.home)
+    assert secret == File.read!(Path.join(ctx.home, "intake.secret"))
 
     # A restart on the same home: the parts read their tables again, `Sessions` adopts the
-    # held delegates, which ran on, and the tree comes back the same.
+    # held delegates, which ran on, and the tree comes back the same. The hooks' secret is the
+    # home's, so the held delegates' hooks are still taken.
     :ok = stop_supervised(Example)
     parts = start(ctx.config)
     {:ok, again} = settled(parts, ctx)
     assert Enum.map(again.agents, & &1.name) == Enum.map(tree.agents, & &1.name)
     assert pids(ctx) == {:ok, pids}
+    assert hook_secret(ctx.home) == secret
 
     # The rows came back with the start: a third delegate is past the parent's cap of two.
     assert {:refused, {:cap, _}} =
@@ -535,12 +534,22 @@ defmodule CodingAgentFramework.ExampleTest do
     # `Mains`, which resumes only one whose process ended: a declared one has none.
     assert {:refused, {:not_stopped, "declared"}} = Operator.resume(parts.mcp, "app-main")
 
+    # That state stays claimed, by the refused resume: a second fix of it acts nothing.
+    assert {:refused, {:already_claimed, "operator"}} =
+             Operator.answer(parts.mcp, "app-main", "1", "allow")
+
+    assert {:refused, {:not_built, :main_fix}} = Operator.interrupt(parts.mcp, "app-main")
+
     # A main session's end (F-143) is the operator's: a declared one with no delegate ends at
     # once, and its name never starts again.
     assert {:refused, :operator_only} =
              MCP.call(parts.mcp, "app-main", "end_main", %{"name" => "app-main"})
 
     assert {:ok, :ended} = Operator.end_main(parts.mcp, "app-main")
+
+    # The operator's answer of a main session's held permission request goes to `Mains`, and
+    # through `Intake` (F-146's new-5), on a state of its own: an ended one holds none.
+    assert {:refused, {:not_held, "1"}} = Operator.answer(parts.mcp, "app-main", "1", "allow")
 
     assert {:refused, {:running, "app-main"}} =
              Operator.start_main(parts.mcp, "app", "app-main", "Go.")
@@ -646,4 +655,13 @@ defmodule CodingAgentFramework.ExampleTest do
 
   defp pids(ctx),
     do: {:ok, for(n <- ~w(app-unit-one app-unit-two), do: Table.get(ctx.sessions, "ws", n).pid)}
+
+  # The secret the account's hooks post with, as the start wrote them.
+  defp hook_secret(home) do
+    {:ok, accounts} = Accounts.new(home, ["work"])
+    {:ok, dir} = Accounts.config_dir(accounts, "work")
+    settings = JSON.decode!(File.read!(Path.join([dir, "framework", "delegate.settings.json"])))
+    [%{"hooks" => [hook]}] = settings["hooks"]["Stop"]
+    hook["headers"]["x-caf-secret"]
+  end
 end

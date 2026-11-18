@@ -42,6 +42,8 @@ defmodule CodingAgentFramework.UsageTest do
     end
   end
 
+  # An account with no reading has run nothing, so it is assumed at 0 %, as a reset week is.
+  defp expected(nil, _), do: {:assumed, 0.0}
   defp expected(_, _), do: :unknown
 
   property "pick answers the most left among current and assumed readings, current first" do
@@ -83,6 +85,18 @@ defmodule CodingAgentFramework.UsageTest do
     assert Usage.pick(%{"a" => reset, "b" => %{zero | used: 10.0}}, ~w(a b), @now) == {:ok, "a"}
     assert Usage.pick(%{"a" => reset, "b" => zero}, ~w(a b), @now) == {:ok, "b"}
     assert Usage.pick(%{"a" => zero, "b" => reset}, ~w(b a), @now) == {:ok, "a"}
+  end
+
+  test "an account with no reading counts as assumed at 0, after a current one at that share" do
+    zero = %{used: 0.0, resets_at: @now + 5, seen_at: @seen}
+    stale = %{zero | seen_at: @seen - 7 * 3_600_000}
+    assert Usage.pick(%{}, ~w(a b), @now) == {:ok, "a"}
+    assert Usage.pick(%{"a" => %{zero | used: 10.0}}, ~w(a b), @now) == {:ok, "b"}
+    assert Usage.pick(%{"b" => zero}, ~w(a b), @now) == {:ok, "b"}
+    assert Usage.pick(%{"a" => stale}, ~w(a b), @now) == {:ok, "b"}
+
+    assert Usage.pick(%{"a" => stale, "b" => %{used: nil}}, ~w(a b), @now) ==
+             {:refused, :none_known}
   end
 
   defp file_gen do

@@ -26,7 +26,7 @@ defmodule CodingAgentFramework.Usage do
       iex> {:ok, _} = CodingAgentFramework.Usage.read(usage)
       iex> {:ok, %{readings: readings}} = CodingAgentFramework.Usage.readings(usage)
       iex> CodingAgentFramework.Usage.pick(readings, ["work"])
-      {:refused, :none_known}
+      {:ok, "work"}
   """
 
   use GenServer
@@ -39,9 +39,11 @@ defmodule CodingAgentFramework.Usage do
   `Reading.status/3` with `max_age` seconds (default 6 hours): the least share used among
   current and assumed readings, a current one before an assumed one at the same share, then the
   first name. A reading whose window has reset is assumed at 0 %, however old. An account with no
-  reading, one of another shape, or one not reset but older than `max_age` is not known, so it is
-  never picked; with none known the answer is `{:refused, :none_known}`.
-  Pure and total over `readings`, a map of account to reading as `readings/2` gives it.
+  reading is assumed at 0 % too, as a reset week is: nothing on it has run, so a new home can
+  start its first session, whose status line gives the first reading. A reading of another
+  shape, or one not reset but older than `max_age`, is not known, so it is never picked; with
+  none known the answer is `{:refused, :none_known}`. Pure and total over `readings`, a map of
+  account to reading as `readings/2` gives it.
 
       iex> old = 1_000_000
       iex> readings = %{"a" => %{used: 80.0, resets_at: 200, seen_at: old},
@@ -56,6 +58,10 @@ defmodule CodingAgentFramework.Usage do
       iex> later = %{"a" => %{used: 80.0, resets_at: 99_999, seen_at: old}}
       iex> CodingAgentFramework.Usage.pick(later, ["a"], 100 + 6 * 3600 + 900)
       {:refused, :none_known}
+      iex> CodingAgentFramework.Usage.pick(later, ["a", "new"], 100 + 6 * 3600 + 900)
+      {:ok, "new"}
+      iex> CodingAgentFramework.Usage.pick(%{"b" => %{used: 0.0, resets_at: 99_999, seen_at: old}}, ["a", "b"], 100)
+      {:ok, "b"}
   """
   @spec pick(map, [term], integer, integer) :: {:ok, term} | {:refused, :none_known}
   def pick(readings, among, now \\ System.os_time(:second), max_age \\ Reading.max_age())
@@ -63,7 +69,7 @@ defmodule CodingAgentFramework.Usage do
   def pick(readings, among, now, max_age) when is_map(readings) and is_list(among) do
     known =
       for account <- Enum.uniq(among),
-          {kind, used} <- [Reading.status(Map.get(readings, account), now, max_age)],
+          {kind, used} <- [known(Map.get(readings, account), now, max_age)],
           do: {used, if(kind == :current, do: 0, else: 1), account}
 
     case Enum.min(known, fn -> nil end) do
@@ -73,6 +79,9 @@ defmodule CodingAgentFramework.Usage do
   end
 
   def pick(_, _, _, _), do: {:refused, :none_known}
+
+  defp known(nil, _now, _max_age), do: {:assumed, 0.0}
+  defp known(reading, now, max_age), do: Reading.status(reading, now, max_age)
 
   @doc """
   Starts `Usage`. Options: `accounts:` (an `Accounts`), `host:` (this host's name, for the
