@@ -63,6 +63,7 @@ defmodule CodingAgentFramework.MCPTest do
     # A `Jobs` whose `run` is unknown, as it is when its owner drops or the exit is not read.
     def run(test, job, _where, _worktree, _argv, opts) do
       send(test, {:run, job, opts[:timeout]})
+      send(test, {:lease, job, opts[:lease]})
       {:unknown, :dropped}
     end
   end
@@ -315,6 +316,33 @@ defmodule CodingAgentFramework.MCPTest do
 
     assert [%{outcome: ~s({"unknown":{"job":"mcp-u-1","reason":"dropped"}})} | _] =
              MCP.calls(mcp)
+  end
+
+  test "a run's class names its lease, with the units the app's function gives, in one request" do
+    units = fn
+      :landing, project -> {:ok, %{"slot" => 1, ("land:" <> project) => 1}}
+      _class, _project -> {:ok, %{"slot" => 1}}
+    end
+
+    mcp = unknown_mcp("lease", lease: units)
+    args = %{"host" => "ws", "argv" => ["x"], "timeout" => 1000}
+    {:unknown, _} = MCP.call(mcp, "app-fix", "run", args)
+
+    assert_received {:lease, "mcp-lease-1",
+                     %{class: :heavy, module: "app", units: %{"slot" => 1}}}
+
+    {:unknown, _} =
+      MCP.call(mcp, "app-fix", "run", Map.put(args, "opts", %{"class" => "landing"}))
+
+    landing = %{"slot" => 1, "land:app" => 1}
+    assert_received {:lease, "mcp-lease-2", %{class: :landing, module: "app", units: ^landing}}
+
+    assert {:refused, {:bad, :class}} =
+             MCP.call(mcp, "app-fix", "run", Map.put(args, "opts", %{"class" => "main"}))
+
+    # With no `lease` function a run names no lease.
+    {:unknown, _} = run_call(unknown_mcp("plain", []), 1000)
+    assert_received {:lease, "mcp-plain-1", nil}
   end
 
   test "the cap is an option, a day by default, and the job id names the instance" do

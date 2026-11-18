@@ -197,10 +197,14 @@ Built, each from a checked model in `model/tla/`:
   options and listed paths, and waits on a person through its deadline and a restart, its lease
   held. Nothing answers one on its own: the app may choose kinds through a callback, and a
   person answers by label (`Sessions.answer_dialog/5`, the operator's `answer_startup`), marked
-  first, pressed once and checked on the screen.
+  first, pressed once and checked on the screen;
+- `Jobs` under the `Scheduler` (F-139): every job asks for a lease in the class its caller
+  names (a heavy run, a builder's suite, a landing's gates), its row the holder, released once
+  `Jobs` read the job's end; a refused job is a row that says why and when to ask again; a
+  heavy slot is the first fenced resource, so a start that lands late runs nothing; and a
+  landing takes its slot and its project's lock in one gang lease, through the `run` tool.
 
-The remodel (F-115, taken in F-116) is done. Next, `Jobs`' start and a landing's gang lease ask
-the `Scheduler` too. Then
+The remodel (F-115, taken in F-116) is done. Next,
 main sessions, the mechanisms an app's policies stand on (an idle
 delegate's watchdog, `Stop` held for the app, clone copies, an idempotent
 start), packaging, and stacks with the LiveView components. The plan and the order of the units are in
@@ -296,6 +300,7 @@ flowchart BT
   delegates --> mailbox
   delegates --> registry
   delegates --> scheduler
+  jobs --> scheduler
   scheduler --> store
   mailbox --> sessions
   mailbox --> grants

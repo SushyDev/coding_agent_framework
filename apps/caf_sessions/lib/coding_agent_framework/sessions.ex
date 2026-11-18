@@ -445,6 +445,11 @@ defmodule CodingAgentFramework.Sessions do
         pending: %{}
       }
 
+      # The declared main sessions are rows before `start_link` returns: a tool call the app
+      # sends right after its start may name one, and `Grants` reads the tree from these rows.
+      ids = for {name, project} <- state.mains, do: Table.declare(db, host.name, name, project)
+      if ids != [], do: state.notify.(%{topic: topic(state), ids: ids})
+
       {:ok, state, {:continue, :adopt}}
     else
       {:refused, reason} -> {:stop, reason}
@@ -455,11 +460,6 @@ defmodule CodingAgentFramework.Sessions do
   def handle_continue(:adopt, state) do
     # A start this process's last life claimed and never answered: its call ended with it.
     if state.acts, do: Acts.interrupt(state.acts, actor(state))
-
-    for {name, project} <- state.mains do
-      id = Table.declare(state.db, state.host.name, name, project)
-      state.notify.(%{topic: topic(state), ids: [id]})
-    end
 
     # A press marked before this process's last life ended may have gone: never pressed again.
     for row <- Table.with_status(state.db, state.host.name, "dialog"),

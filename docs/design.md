@@ -198,7 +198,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Scheduler` | one per instance, against `Schedule.tla`: every agent start, heavy run and landing asks it for a lease first ("A lease" below). A grant is one write transaction that checks each resource's capacity and inserts the row, with all of a landing's resources in one lease; a release is a compare-and-set on the lease id, so it happens once; a lease names the row of the work it admits, and is released only when that row's owner says the work ended (by its `Holder.Process` record; a row still starting is live), never because time passed. It reads pressure and each account's budget, never the load average | `leases`: id (the fencing token), request id, outcome (granted or refused), class, module, account, the units of each resource, the holder (the work's row), asked, decided and released times, and a refusal's reason and retry time |
 | `Stacks` | the worktrees and `gh stack` chains of a main session's work | — |
 | `Copies` | a host's copy of each worktree, brought in step by rsync before each job or service, and removed with the worktree | `copies` |
-| `Jobs` | one-off commands on a host, in a copy: held, logged, ended by their exit or their timeout | `jobs` |
+| `Jobs` | one-off commands on a host, in a copy: held, logged, ended by their exit or their timeout; each asks the `Scheduler` for a lease first, in the class its caller names, its row the holder (`Jobs.Work` answers for it), and its wrapper runs only under the fence of that lease ("A lease") | `jobs`, with each row's lease id and a lease refusal's reason and retry time |
 | `Services` | programs agents start and keep on a host, in a copy: held, owned, read, written to, restarted, with ports forwarded to the workstation; the forward is a second `Holder.Process` record of the service | `services` |
 | `Tracker` | the state views read: the fold of every reader | — |
 | `Recoveries` | detect a broken state, take its act in `Acts`, act once per state, verify; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after its end within its stop's deadline, by `Holder.Process` (`Sessions` itself never kills). Two states wait for a person, whose clear makes the next one new: a viewer lost a third time within a window, and an end whose process outlived the KILL (`unknown`, F-118's new-5); the fault ledger shows both | no table of its own |
@@ -223,7 +223,8 @@ declarations to `Cues`, and names each part's process to it as it starts; no par
 | `mailbox` | `Mailbox` | `Delegates`, `Mover` |
 | `intake:<host>:<account>:waiters` | `Intake` | `Mailbox` |
 | `usage:<host>:<account>` | `Usage` | `Scheduler` (a queued request's window ran out) |
-| `intake:<host>:<account>`, `acts:…`, `jobs`, `services`, `scheduler:<host>` | their parts | none |
+| `jobs` | `Jobs` | `Scheduler` (a job's work ended) |
+| `intake:<host>:<account>`, `acts:…`, `services`, `scheduler:<host>` | their parts | none |
 
 No cue says that a host's job or service changed, so `Jobs` and `Services` settle their rows on
 their own interval, as a reader reads, and `Stream` reads its logs on one; each of the three
@@ -338,6 +339,17 @@ any reply does (new-4).
     `UPDATE … WHERE id = ? AND
     released_at IS NULL`, so exactly one succeeds. A resource the lease guards (a heavy slot's
     script, a lock file) carries the lease id and refuses a holder whose id is not current.
+    The first is a heavy run's slot (F-139): `Jobs` writes the lease id beside the job on its
+    host before it sends the start; the job's wrapper takes that fence (`mkdir`) before it
+    runs anything and runs only with its own id, and a start whose reply was cut is settled as
+    never run only once `Jobs` took the fence itself. So a start that lands after its lease was
+    released runs nothing, which `Copy.tla` had assumed never happens.
+  - **Jobs and landings** (F-139). A job asks in the class its caller names: a landing's
+    gates, a builder's suite, or a heavy run (the default); its row, written `asked` first, is
+    the holder. A landing's job asks for every resource the landing needs in one request, the
+    app's declaration: in the example a heavy slot and its project's landing lock
+    (`land:<project>`, capacity one), so it is one gang lease. An agent names the class in the
+    `run` tool. A refused job's row says why and when to retry, under a new job id.
   - **Accounts.** Holding several Claude accounts and moving work between them is allowed
     (decided), so the account is a resource with several entries; a start's account is
     chosen when it is admitted, and `Mover` moves a session later.
@@ -1434,7 +1446,11 @@ restarts), `ReleaseOnce` (and only after the work ended), `GangAtomic`, `Answere
 `RefusedIsNotFailed`; action properties `ClassOrder` (with the hold, checked by `Hold`'s
 configuration: two landings and a heavy run on two slots and one lock), `NoStartUnderSevere`,
 `NoHeavyUnderHigh`, `NoStartWithoutBudget`; liveness
-`QueuedIsAnswered` and `EndedIsReleased`. It instances neither `Claim` nor `Hold`: a lease is
+`QueuedIsAnswered` and `EndedIsReleased`. Its `Fence` shape (F-139: two heavy runs on one
+slot) adds the host: a start sent may land at any later step, the wrapper takes the fence
+before it runs, and the owner settles a start never run only once it took the fence;
+`NoRunUnleased` (a job runs only under its unreleased lease) and `HostCapacity` (the running
+jobs never pass a capacity), with Break `NoFence`. It instances neither `Claim` nor `Hold`: a lease is
 units counted against a capacity for a process's life, not one act per state, and a queued
 request has no row, may be answered twice (queued, then once more) and is asked again after a
 restart rather than settled; the spec's header says so.
@@ -1874,9 +1890,9 @@ new-2, F-113's new-2).
   refusals per class and module), shipped together so the thresholds are set from the
   workstation's own readings. `Usage` reads the five-hour window beside the weekly one. Every
   start, heavy run and landing asks it first; item 14's admission is this unit. Built in
-  F-135 with `Delegates`' start; `Jobs`' start (a heavy run, its job row the holder) and a
-  landing's gang lease ask it next, then `Sessions`' start of a main session once `Mains`
-  starts one.
+  F-135 with `Delegates`' start; `Jobs`' start (its job row the holder), the heavy slot's
+  fence and a landing's gang lease in F-139; then `Sessions`' start of a main session once
+  `Mains` starts one.
 
 About 3,100 lines change in all; the library ends about 1,300 lines smaller, and the model about
 the same size with each mechanism once. R6 and R7 are the riskiest: `Mailbox`'s `sending` as the

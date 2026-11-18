@@ -14,7 +14,26 @@ defmodule CodingAgentFramework.Jobs do
     * `{:unknown, :no_exit}`: the socket is dead and there is no exit file; nothing is fetched;
     * `{:unknown, :dropped}`: the call's deadline (the job's timeout) passed with the host
       unread; its end comes later, as a late end;
-    * `{:refused, {:sync, reason}}`: the sync was cut, and nothing ran.
+    * `{:refused, {:sync, reason}}`: the sync was cut, and nothing ran;
+    * `{:refused, {:lease, why}}`: the lease was refused, and nothing ran (below).
+
+  **The lease** (`docs/design.md`, "A lease"; `model/tla/Schedule.tla`). With a `scheduler:`,
+  a run asks it for a lease before the copy's turn, in the class its caller names (`lease:`,
+  `%{class: :heavy | :builder | :landing, module: m, units: units}`): one request for every
+  unit the job needs, so a landing's slot and lock come in one gang lease or not at all. The
+  holder is the job's row, written `asked` first; `Jobs.Work` answers for it, and the lease
+  lasts until the row holds the job's end. Queued, the run waits in the caller's process for
+  the one more answer, at most `:lease_wait` ms. A refusal, by the `Scheduler` or the
+  framework (`scheduler_ended`, `unanswered`, `unknown`), is a row `refused` with its
+  `reason` and `retry_at`, never a failed run: `{:refused, {:lease, {reason, retry_at}}}`.
+
+  **The fence.** Under a lease, `Jobs` writes the lease id beside the job on its host
+  (`<job>.exit.lease`) before it sends the start, and the wrapper hands it the same id. The
+  wrapper takes the fence (`mkdir <job>.exit.fence`) before it runs anything, and runs only
+  when it took it and the id is its own. A start whose reply was cut is settled as never run
+  only once `Jobs` took the fence itself; when the wrapper has it, the job ran. So a start
+  that lands late, after its lease was released, runs nothing (`Schedule.tla`'s
+  `NoRunUnleased`).
 
   **The fetch** (`fetch: paths`) begins once the end is read, and brings back only the named
   paths, each only while the worktree's file is still what the sync recorded
@@ -32,8 +51,9 @@ defmodule CodingAgentFramework.Jobs do
   to the job's caller. The function answers `:ok` once the end is stored, and the row
   is then marked told; it answers `{:unknown, reason}` when it could not store it, and the row
   stays owed and is handed again at the next cue. One that raises is handed again at the next
-  start. `{:refused, :interrupted}` is for a row a restart
-  left `asked`: nothing reached the host, so it is never run or retried. It and `{:refused,
+  start. `{:refused, :interrupted}` is for a row a restart, or the end of its caller's process,
+  left `asked`: nothing reached the host, so it is never run or retried. A caller's process
+  that ends during its start or run leaves the row owed, as a restart does. It and `{:refused,
   {:start, :not_held}}` are not an end: the job never ran.
 
   At its start, `Jobs` also removes the temporary folder of a fetch a restart cut
@@ -60,7 +80,7 @@ defmodule CodingAgentFramework.Jobs do
 
   use GenServer
 
-  alias CodingAgentFramework.{Copies, Holder, Programs, Reader, Shell}
+  alias CodingAgentFramework.{Copies, Holder, Programs, Reader, Scheduler, Shell}
   alias CodingAgentFramework.Copies.Held
   alias CodingAgentFramework.Jobs.Table
 
@@ -68,10 +88,17 @@ defmodule CodingAgentFramework.Jobs do
   @log_max 16_384
   # How long past the call's deadline a read waits for the host to end the job itself.
   @grace 5_000
-  # $1..$7: the copy, the log, the exit file, the timeout in seconds, kill, sleep, mkdir; then
-  # the job's argv. `mkdir` of `<exit>.won` picks the one writer of the exit file.
+  # $1..$8: the copy, the log, the exit file, the timeout in seconds, kill, sleep, mkdir, the
+  # lease id (empty with no lease); then the job's argv. Under a lease, `mkdir` of
+  # `<exit>.fence` picks who decides the start: this wrapper, which then runs only with its own
+  # id, or `Jobs`, which settles it never run. `mkdir` of `<exit>.won` picks the one writer of
+  # the exit file.
   @wrapper ~S"""
-  c=$1 l=$2 e=$3 t=$4 k=$5 s=$6 m=$7; shift 7
+  c=$1 l=$2 e=$3 t=$4 k=$5 s=$6 m=$7 f=$8; shift 8
+  if [ -n "$f" ]; then
+    "$m" "$e.fence" 2>/dev/null || exit 0
+    read -r x < "$e.lease" && [ "$x" = "$f" ] || exit 0
+  fi
   ( "$s" "$t"; "$m" "$e.won" 2>/dev/null || exit 0; echo timeout > "$e"; "$k" -KILL -- "-$$" ) \
     </dev/null >/dev/null 2>&1 &
   ( cd "$c" && exec "$@" ) </dev/null >>"$l" 2>&1
@@ -89,6 +116,16 @@ defmodule CodingAgentFramework.Jobs do
   @exit ~S"""
   if [ -e "$1" ]; then read -r x < "$1"; echo "end $x"; else echo 'end none'; fi
   """
+  # $1 the lease file, $2 the lease id: written whole before the start is sent, in the
+  # directory the copy's start made, so the wrapper reads it whole.
+  @fence ~S"""
+  echo "$2" > "$1"
+  """
+  # $1 mkdir, $2 the fence: `Jobs` takes it, or finds the wrapper took it first.
+  @revoke ~S"""
+  if "$1" "$2" 2>/dev/null; then echo revoked; elif [ -d "$2" ]; then echo taken; fi
+  """
+  @lease_wait 300_000
 
   @type where :: %{host: String.t(), project: String.t(), name: String.t()}
 
@@ -99,8 +136,9 @@ defmodule CodingAgentFramework.Jobs do
   and for the copy `flock` and `rsync`) and its framework directory; `:on_late_end`, a function
   of one argument that is handed each late end and answers `:ok` or `{:unknown, reason}`; and
   optionally `:interval` (ms between settles of the owed rows; without it, they settle only at
-  its start and at `cue/2`) and `:notify`, a function of one cue: after each write of a row it
-  gets `%{topic: "jobs", ids: [id]}`.
+  its start and at `cue/2`), `:notify`, a function of one cue: after each write of a row it
+  gets `%{topic: "jobs", ids: [id]}`, and `:scheduler`, the instance's `Scheduler`, which every
+  run then asks for a lease first.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -111,7 +149,10 @@ defmodule CodingAgentFramework.Jobs do
   `:sync_timeout` and `:lock_wait` (ms) for the sync; `:start_timeout` (ms) for dtach's reply;
   `:env`, the job's whole environment as `{name, value}` pairs; `:reaper`; `:interval` (ms)
   between reads that failed; `:log_bytes`, the tail's size; `:fetch`, the paths to bring back,
-  relative to the worktree. The fetch's rsync has the sync's timeout and lock wait.
+  relative to the worktree. The fetch's rsync has the sync's timeout and lock wait. With a
+  `scheduler:`, `:lease` (`%{class: class, module: module, units: units}`, the class one of
+  `:landing`, `:builder`, `:heavy`) and `:lease_wait` (ms a queued lease is waited for, 300 000
+  by default); without `:lease` the run is refused `{:bad, :lease}` before any row is written.
   """
   @spec run(GenServer.server(), String.t(), where, String.t(), [String.t()], keyword) ::
           {:ok, map} | {:refused, term} | {:unknown, term}
@@ -121,27 +162,35 @@ defmodule CodingAgentFramework.Jobs do
     paths = Keyword.get(opts, :fetch, [])
 
     with :ok <- named(paths),
-         {:ok, ctx} <- context(jobs, id, where, start),
-         :ok <- call(jobs, {:ask, row(id, where, worktree)}),
+         {:ok, config} <- call(jobs, :config),
+         {:ok, ask} <- lease_request(config, id, opts),
+         {:ok, ctx} <- context_of(config, id, where, start),
+         :ok <- call(jobs, {:ask, row(id, where, worktree), self()}),
+         {:ok, lease} <- lease(jobs, id, config.scheduler, ask, opts),
          refused = fn _ -> put(jobs, id, %{state: "refused"}) end,
-         {:ok, %{record: record}} <- Held.ready(ctx, worktree, opts, refused) do
+         {:ok, %{record: record}} <- Held.ready(ctx, worktree, opts, refused),
+         :ok <- fence(jobs, ctx, id, lease) do
       now = now()
       deadline = now + start + timeout
-      put(jobs, id, %{state: "starting", start_until: now + start, deadline: deadline})
       secs = :erlang.float_to_binary(timeout / 1000, decimals: 3)
       %{kill: k, sleep: s, mkdir: m} = ctx.programs.paths
-      args = ["caf-job", ctx.path, ctx.log, ctx.exit, secs, k, s, m]
-      held = Held.hold(ctx, @wrapper, args, argv, Keyword.get(opts, :env, []))
+      args = ["caf-job", ctx.path, ctx.log, ctx.exit, secs, k, s, m, lease_id(lease)]
       put = &put(jobs, id, &1)
       interval = Keyword.get(opts, :interval, 200)
 
       # dtach's held reply: the job is live. Its reply cut: the host is read until the deadline.
       read = fn
         :reply -> {:ok, :live}
-        :cut -> retry(deadline, interval, fn -> read(ctx, :once, @call) end)
+        :cut -> retry(deadline, interval, fn -> cut_read(ctx, lease, @call) end)
       end
 
-      with {:ok, :running} <- Held.settle(ctx, held, now + start, read, &started(put, &1)),
+      # The row leaves `asked` only while it is still `asked`: a restart, or the end of this
+      # process, that made it `interrupted` ended its lease, so nothing is sent.
+      starting = %{state: "starting", start_until: now + start, deadline: deadline}
+
+      with :ok <- advance(jobs, ctx, id, starting),
+           held = Held.hold(ctx, @wrapper, args, argv, Keyword.get(opts, :env, [])),
+           {:ok, :running} <- Held.settle(ctx, held, now + start, read, &started(put, &1)),
            {:ok, value} <- wait_end(ctx, deadline, Keyword.get(opts, :interval, 200)),
            :ok <- put.(ended(value)) do
         fetch = fn -> fetch(ctx, worktree, record, opts) end
@@ -209,6 +258,136 @@ defmodule CodingAgentFramework.Jobs do
          do: {:ok, Map.merge(ctx, %{socket: b <> ".sock", log: b <> ".log", exit: b <> ".exit"})}
   end
 
+  # The lease a run asks for, when `Jobs` has a `Scheduler`: the caller names its class.
+  defp lease_request(%{scheduler: nil}, _id, _opts), do: {:ok, nil}
+
+  defp lease_request(_config, id, opts) do
+    case Keyword.get(opts, :lease) do
+      %{class: class, module: module, units: units} when class in [:landing, :builder, :heavy] ->
+        {:ok,
+         %{
+           id: "job:" <> id,
+           class: class,
+           module: module,
+           account: nil,
+           units: units,
+           holder: {"job", id}
+         }}
+
+      _ ->
+        {:refused, {:bad, :lease}}
+    end
+  end
+
+  # Schedule.tla: the row (`asked`) is the lease's holder, written before the lease is asked for.
+  # A queued request's one more answer comes to this process, the caller's.
+  defp lease(_jobs, _id, nil, nil, _opts), do: {:ok, nil}
+
+  defp lease(jobs, id, scheduler, ask, opts) do
+    case Scheduler.request(scheduler, ask) do
+      {:queued, %{id: request}} -> await_lease(scheduler, request, opts) |> leased(jobs, id)
+      answer -> leased(answer, jobs, id)
+    end
+  end
+
+  defp await_lease(scheduler, request, opts) do
+    ref = Process.monitor(scheduler)
+
+    receive do
+      {:lease, ^request, answer} ->
+        Process.demonitor(ref, [:flush])
+        answer
+
+      {:DOWN, ^ref, :process, _, _} ->
+        {:refused, {:scheduler_ended, now()}}
+    after
+      Keyword.get(opts, :lease_wait, @lease_wait) ->
+        Process.demonitor(ref, [:flush])
+        {:refused, {:unanswered, now()}}
+    end
+  end
+
+  defp leased({:ok, lease}, jobs, id) do
+    case put(jobs, id, %{lease: lease.id}) do
+      :ok -> {:ok, lease}
+      other -> other
+    end
+  end
+
+  # Every other answer is a refusal of the job, never a failed run: its row says why and when
+  # to ask again. A lease granted to a request whose answer was unknown is released, since the
+  # row now says its work ended.
+  defp leased(not_granted, jobs, id) do
+    {reason, retry_at} =
+      case not_granted do
+        {:refused, {reason, retry_at}} when is_atom(reason) -> {reason, retry_at}
+        {:refused, reason} -> {reason, now()}
+        {:unknown, reason} -> {{:unknown, reason}, now()}
+      end
+
+    text = if is_atom(reason), do: Atom.to_string(reason), else: inspect(reason)
+    put(jobs, id, %{state: "refused", reason: text, retry_at: retry_at})
+    {:refused, {:lease, {reason, retry_at}}}
+  end
+
+  defp lease_id(nil), do: ""
+  defp lease_id(%{id: id}), do: Integer.to_string(id)
+
+  # The fence, under a lease: the lease id beside the job, written before its start is sent. A
+  # fence that cannot be written refuses the job before anything is sent.
+  defp fence(_jobs, _ctx, _id, nil), do: :ok
+
+  defp fence(jobs, ctx, id, lease) do
+    args = ["-c", @fence, "caf-fence", ctx.exit <> ".lease", lease_id(lease)]
+
+    case Shell.run(ctx.programs.host, ctx.programs.paths.sh, args, timeout: @call) do
+      {:ok, %{status: 0}} ->
+        :ok
+
+      other ->
+        put(jobs, id, %{state: "refused"})
+        Copies.give_back(ctx.copies, ctx.copy, ctx.run)
+        {:refused, {:fence, other}}
+    end
+  end
+
+  # A start whose reply was cut, read once its deadline passed. Under a lease it is settled as
+  # never run only once `Jobs` took the fence; when the wrapper took it, the job ran, and a
+  # dead socket with no exit file is a job lost, not one never held.
+  defp cut_read(ctx, nil, timeout), do: read(ctx, :once, timeout)
+
+  defp cut_read(ctx, _lease, timeout) do
+    %{sh: sh, mkdir: mkdir} = ctx.programs.paths
+    args = ["-c", @revoke, "caf-revoke", mkdir, ctx.exit <> ".fence"]
+
+    case Shell.run(ctx.programs.host, sh, args, timeout: timeout) do
+      {:ok, %{status: 0, output: "revoked\n"}} ->
+        {:refused, {:start, :not_held}}
+
+      {:ok, %{status: 0, output: "taken\n"}} ->
+        case read(ctx, :once, timeout) do
+          {:ok, {:end, "none"}} -> {:ok, :live}
+          other -> other
+        end
+
+      other ->
+        {:unknown, {:revoke, other}}
+    end
+  end
+
+  # From `asked` to `starting`, only while the row is still `asked`; else the copy's turn goes
+  # back and nothing is sent.
+  defp advance(jobs, ctx, id, fields) do
+    case call(jobs, {:advance, id, "asked", fields}) do
+      :ok ->
+        :ok
+
+      other ->
+        Copies.give_back(ctx.copies, ctx.copy, ctx.run)
+        other
+    end
+  end
+
   # Each named path is relative and stays inside the worktree.
   defp named(paths) do
     case Enum.reject(paths, &inside?/1) do
@@ -240,7 +419,7 @@ defmodule CodingAgentFramework.Jobs do
   defp settle_row(ctx, row, timeout, put) do
     case row.state do
       "starting" ->
-        read = fn :cut -> read(ctx, :once, timeout) end
+        read = fn :cut -> cut_read(ctx, row.lease, timeout) end
         Held.settle_cut(ctx, row.start_until, read, &started(put, &1))
 
       "running" ->
@@ -426,7 +605,12 @@ defmodule CodingAgentFramework.Jobs do
 
     with :ok <- File.mkdir_p(dir),
          {:ok, db} <- Table.open(Path.join(dir, "jobs.db")) do
-      config = %{hosts: Keyword.fetch!(opts, :hosts), copies: Keyword.fetch!(opts, :copies)}
+      config = %{
+        hosts: Keyword.fetch!(opts, :hosts),
+        copies: Keyword.fetch!(opts, :copies),
+        scheduler: Keyword.get(opts, :scheduler)
+      }
+
       # A row whose start or run was under way lost its call with the restart: it is owed.
       rows = Table.all(db)
 
@@ -444,7 +628,7 @@ defmodule CodingAgentFramework.Jobs do
           state in ~w(exited timedout) and is_binary(wt),
           do: Copies.sweep_fetch(wt)
 
-      s = %{db: db, config: config, on_late_end: Keyword.fetch!(opts, :on_late_end)}
+      s = %{db: db, config: config, on_late_end: Keyword.fetch!(opts, :on_late_end), callers: %{}}
       {:ok, Map.merge(s, Reader.loop(opts)), {:continue, :settle}}
     else
       {:error, reason} -> {:stop, {:dir, reason}}
@@ -461,21 +645,53 @@ defmodule CodingAgentFramework.Jobs do
   @impl true
   def handle_info(:tick, s), do: {:noreply, Reader.tick(s, &{:ok, settle_owed(&1)})}
 
+  # The caller's process ended with its run under way: a row still `asked` sent nothing and is
+  # interrupted, as after a restart; one starting or running is owed its end. Either way its
+  # row settles, so the lease it holds is released.
+  def handle_info({:DOWN, ref, :process, _, _}, s) do
+    {id, callers} = Map.pop(s.callers, ref)
+    s = %{s | callers: callers}
+
+    case id && Table.get(s.db, id) do
+      %{state: "asked"} = row ->
+        write(s, %{row | state: "interrupted", late: "owed"})
+
+      %{state: st, late: nil} = row when st in ~w(starting running) ->
+        write(s, %{row | late: "owed"})
+
+      _ ->
+        :ok
+    end
+
+    {:noreply, s}
+  end
+
   @impl true
   def handle_call(:config, _from, s), do: {:reply, {:ok, s.config}, s}
   def handle_call(:rows, _from, s), do: {:reply, Table.all(s.db), s}
   def handle_call({:get, id}, _from, s), do: {:reply, Table.get(s.db, id), s}
 
-  def handle_call({:ask, %{id: id} = row}, _from, s) do
-    if Table.get(s.db, id),
-      do: {:reply, {:refused, {:job_exists, id}}, s},
-      else: {:reply, put_row(s, row), s}
+  def handle_call({:ask, %{id: id} = row, caller}, _from, s) do
+    if Table.get(s.db, id) do
+      {:reply, {:refused, {:job_exists, id}}, s}
+    else
+      s = put_in(s.callers[Process.monitor(caller)], id)
+      {:reply, put_row(s, row), s}
+    end
   end
 
   def handle_call({:put, id, fields}, _from, s) do
     case Table.get(s.db, id) do
       nil -> {:reply, {:refused, {:no_job, id}}, s}
-      row -> {:reply, write(s, Map.merge(row, fields)), s}
+      row -> {:reply, write(s, Map.merge(row, fields)), forget(s, id, fields)}
+    end
+  end
+
+  def handle_call({:advance, id, from, fields}, _from, s) do
+    case Table.get(s.db, id) do
+      %{state: ^from} = row -> {:reply, write(s, Map.merge(row, fields)), s}
+      %{state: state} -> {:reply, {:refused, {:row, state}}, s}
+      nil -> {:reply, {:refused, {:no_job, id}}, s}
     end
   end
 
@@ -485,6 +701,20 @@ defmodule CodingAgentFramework.Jobs do
       row -> {:reply, write(s, %{row | late: "owed"}), s}
     end
   end
+
+  # A row its run has settled needs no watch on its caller.
+  defp forget(s, id, %{state: state}) when state in @ended do
+    case Enum.find(s.callers, fn {_ref, of} -> of == id end) do
+      {ref, _} ->
+        Process.demonitor(ref, [:flush])
+        %{s | callers: Map.delete(s.callers, ref)}
+
+      nil ->
+        s
+    end
+  end
+
+  defp forget(s, _id, _fields), do: s
 
   # Reads each owed row's job on the host once, in this process, so its end is written by the
   # one writer that hands it on. A row still live, or unread, waits for the next cue.

@@ -31,6 +31,10 @@ defmodule CodingAgentFramework.Example.Config do
     `%{"seat" => 4, "slot" => 2}`, an agent's seat and a heavy run's slot. Placeholders until
     they are measured on the workstation;
   - `lease`: the units a delegate's start asks for; `%{"seat" => 1}` by default;
+  - `job_lease`: the units a job asks for, by the class its caller names (`heavy`, `builder`,
+    `landing`); a heavy slot each by default. A landing also takes its project's landing lock,
+    `land:<project>`, which the app declares with capacity one for each project, in the same
+    gang lease;
   - `pressure`: how the `Scheduler` reads the host's pressure (`Scheduler.Pressure`), as its
     `pressure:` option; nil by default, which reads stall times where the host has them
     (`/proc/pressure`) and nothing elsewhere;
@@ -66,6 +70,7 @@ defmodule CodingAgentFramework.Example.Config do
     interval: 2_000,
     resources: %{"seat" => 4, "slot" => 2},
     lease: %{"seat" => 1},
+    job_lease: %{heavy: %{"slot" => 1}, builder: %{"slot" => 1}, landing: %{"slot" => 1}},
     pressure: nil,
     tool_hooks: %{}
   ]

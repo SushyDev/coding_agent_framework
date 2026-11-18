@@ -17,7 +17,10 @@ defmodule CodingAgentFramework.MCP do
   - `run(host, argv, timeout, opts)`: `Grants.may_use?/2`, then the jobs' `run/6`, as job
     `mcp-<instance>-<call id>` in the copy of the caller's worktree that `place` names, with
     `timeout` (ms, at most the `:cap`, a day unless the app says) as the job's and the call's.
-    `opts` may name `fetch` (paths). The answer is `Jobs`' own, except an unknown one: it is
+    `opts` may name `fetch` (paths) and `class` (`heavy` by default, `builder` or `landing`):
+    with the app's `lease:` function, of the class and the caller's project, the job asks the
+    `Scheduler` for a lease of the units it answers, in that class, all in one request, so a
+    landing's slot and lock are one gang lease. The answer is `Jobs`' own, except an unknown one: it is
     `{:unknown, %{job: id, reason: reason}}`, so the caller can match the job's late end,
     which comes as a message, to the call;
   - `start_delegate(project, branch, model, brief)`: `Grants.may_start_delegate?/3`, then the
@@ -141,7 +144,15 @@ defmodule CodingAgentFramework.MCP do
           timeout: %{type: "integer", description: "ms, at most a day"},
           opts: %{
             type: "object",
-            properties: %{fetch: %{type: "array", items: %{type: "string"}}}
+            properties: %{
+              fetch: %{type: "array", items: %{type: "string"}},
+              class: %{
+                type: "string",
+                enum: ["heavy", "builder", "landing"],
+                description:
+                  "the lease's class: a heavy run (default), a builder's suite, or a landing's gates"
+              }
+            }
           }
         },
         required: ["host", "argv", "timeout"]
@@ -403,8 +414,10 @@ defmodule CodingAgentFramework.MCP do
   instance's `CodingAgentFramework.Acts`, where each fix takes its claim. `:mover` (optional)
   is `{CodingAgentFramework.Mover, pid}`, which the `move` tool calls; without it `move` is
   refused `:no_mover`. `:sessions` (optional) is `{CodingAgentFramework.Sessions, pid}`, which
-  `answer_startup` calls; without it that tool is refused `:no_sessions`. `:instance` (a string,
-  required)
+  `answer_startup` calls; without it that tool is refused `:no_sessions`. `:lease` (optional) is
+  a function of a job's class (`:heavy`, `:builder`, `:landing`) and the caller's project that
+  answers `{:ok, units}`, the units of each resource the `Scheduler` leases that the job needs,
+  or `{:refused, reason}`; without it `run` names no lease. `:instance` (a string, required)
   is this part's name in its jobs' ids, so two of them sharing one `Jobs` never make the same
   id. `:cap` (ms, default a day) is the most a `run`'s or a `service_wait`'s `timeout` may be.
   `:tool_timeout` (ms) is the MCP tool timeout `CodingAgentFramework.ClaudeCLI` sets for every
@@ -559,12 +572,14 @@ defmodule CodingAgentFramework.MCP do
     with true <-
            (is_list(fetch) and Enum.all?(argv ++ fetch, &is_binary/1)) or
              {:refused, {:bad, :args}},
+         {:ok, class} <- job_class(get_in(a, ["opts", "class"])),
          :ok <- Grants.may_use?(ctx.grants, caller),
-         {:ok, %{project: p, name: n, worktree: w}} <- ctx.place.(caller) do
+         {:ok, %{project: p, name: n, worktree: w}} <- ctx.place.(caller),
+         {:ok, lease} <- job_lease(ctx, class, p) do
       job = "mcp-#{ctx.instance}-#{id}"
       where = %{host: host, project: p, name: n}
 
-      case mod.run(server, job, where, w, argv, timeout: t, fetch: fetch) do
+      case mod.run(server, job, where, w, argv, [timeout: t, fetch: fetch] ++ lease) do
         {:unknown, reason} -> {:unknown, %{job: job, reason: reason}}
         answer -> answer
       end
@@ -792,6 +807,21 @@ defmodule CodingAgentFramework.MCP do
   defp fix("answer", _args), do: {:refused, {:bad, :args}}
   defp fix(tool, _args), do: {:ok, String.to_existing_atom(tool)}
 
+  defp job_class(nil), do: {:ok, :heavy}
+  defp job_class("heavy"), do: {:ok, :heavy}
+  defp job_class("builder"), do: {:ok, :builder}
+  defp job_class("landing"), do: {:ok, :landing}
+  defp job_class(_), do: {:refused, {:bad, :class}}
+
+  # The units a job of `class` in `project` asks for, as the app declares them; with no `lease`
+  # function the jobs ask for no lease.
+  defp job_lease(%{lease: nil}, _class, _project), do: {:ok, []}
+
+  defp job_lease(ctx, class, project) do
+    with {:ok, units} <- ctx.lease.(class, project),
+         do: {:ok, [lease: %{class: class, module: project, units: units}]}
+  end
+
   defp service_ok(name) do
     if is_binary(name), do: :ok, else: {:refused, {:bad, :args}}
   end
@@ -916,6 +946,7 @@ defmodule CodingAgentFramework.MCP do
       ctx = Map.merge(ctx, %{cap: cap, tool_timeout: tool_timeout, margin: margin})
       ctx = Map.put(ctx, :mover, Keyword.get(opts, :mover))
       ctx = Map.put(ctx, :sessions, Keyword.get(opts, :sessions))
+      ctx = Map.put(ctx, :lease, Keyword.get(opts, :lease))
       {:ok, %{db: db, dir: dir, port: Keyword.fetch!(opts, :port), ctx: ctx}}
     else
       {:error, reason} -> {:stop, {:mkdir, reason}}

@@ -5,6 +5,7 @@ defmodule CodingAgentFramework.ExampleTest do
   use ExUnit.Case, async: true
 
   doctest CodingAgentFramework.Example.Config
+  doctest CodingAgentFramework.Example, only: [resources: 1, job_units: 3]
 
   import CodingAgentFramework.TestHost
 
@@ -168,6 +169,30 @@ defmodule CodingAgentFramework.ExampleTest do
              Mailbox.notify(parts.mailbox, "app-main", text, key: "job:mcp-t-#{id}")
 
     assert {:refused, {:unknown_agent, "nobody"}} = Mailbox.notify(parts.mailbox, "nobody", "x")
+  end
+
+  test "a delegate's landing job takes its slot and its project's lock in one lease", ctx do
+    File.write!(Path.join(ctx.dir, "hold"), "")
+    parts = start(ctx.config)
+    {:ok, _} = MCP.call(parts.mcp, "app-main", "start_delegate", args("unit/one"))
+    {:ok, ddb} = Delegates.Table.open(Path.join(ctx.home, "caf.db"))
+    {:ok, _} = row(ddb, &(&1.status == "running"))
+
+    run = %{"host" => "ws", "argv" => [program!(:sh), "-c", "exit 0"], "timeout" => 10_000}
+    landing = Map.put(run, "opts", %{"class" => "landing"})
+    assert {:ok, %{exit: 0}} = MCP.call(parts.mcp, "app-unit-one", "run", landing)
+
+    # Schedule.tla: one lease of both, whose holder is the job's row, released by the monitor
+    # once `Jobs` wrote the job's end.
+    {:ok, lease} =
+      await(fn ->
+        case Enum.find(Scheduler.leases(parts.scheduler), &(&1.class == "landing")) do
+          %{released_by: "monitor"} = lease -> {:ok, lease}
+          _ -> nil
+        end
+      end)
+
+    assert %{units: %{"slot" => 1, "land:app" => 1}, holder: {"job", "mcp-t-" <> _}} = lease
   end
 
   test "a delegate's end ends its services, and hands a kept one to its parent", ctx do
@@ -492,6 +517,7 @@ defmodule CodingAgentFramework.ExampleTest do
     "transcripts" => [:delegates, :mailbox],
     "delegates" => [:mailbox, :scheduler],
     "usage" => [:scheduler],
+    "jobs" => [:scheduler],
     "mailbox" => [:delegates, :mover],
     "waiters" => [:mailbox]
   }

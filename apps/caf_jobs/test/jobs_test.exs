@@ -6,10 +6,11 @@ defmodule CodingAgentFramework.JobsTest do
   use ExUnit.Case, async: true
 
   doctest CodingAgentFramework.Jobs.Table
+  doctest CodingAgentFramework.Jobs.Work
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Copies, Host, Jobs, Programs, Shell}
+  alias CodingAgentFramework.{Copies, Host, Jobs, Programs, Scheduler, Shell}
 
   setup do
     dir = test_dir()
@@ -387,6 +388,137 @@ defmodule CodingAgentFramework.JobsTest do
     {:ok, db} = Jobs.Table.open(path)
     assert %{id: "jo", worktree: nil} = Jobs.Table.get(db, "jo")
     assert {:ok, _} = Jobs.Table.open(path)
+  end
+
+  # Schedule.tla: `Jobs` under a `Scheduler` of `resources`, which reads the job rows through
+  # `Jobs.Work` and is cued by each write of a row, as the embedding app wires them.
+  defp leased(c, resources, more \\ []) do
+    stop_supervised!(Jobs)
+    {:ok, work} = Jobs.Work.open(c.opts[:dir])
+    db = Path.join(c.dir, "leases.db")
+    holders = %{"job" => &Jobs.Work.state(work, &1)}
+    opts = [db: db, host: "test", resources: resources, holders: holders] ++ more
+    scheduler = start_supervised!({Scheduler, opts})
+    notify = &Scheduler.cue(scheduler, &1)
+    jobs = start_supervised!({Jobs, c.opts ++ [scheduler: scheduler, notify: notify]})
+    %{c | jobs: jobs} |> Map.put(:scheduler, scheduler)
+  end
+
+  defp heavy(module \\ "p"), do: [lease: %{class: :heavy, module: module, units: %{"slot" => 1}}]
+
+  defp row(c, id), do: Enum.find(Jobs.rows(c.jobs), &(&1.id == id))
+
+  defp lease_of(c, id),
+    do: Enum.find(Scheduler.leases(c.scheduler), &(&1.request_id == "job:" <> id))
+
+  defp released(c, id) do
+    await(fn -> if lease_of(c, id).released_at, do: {:ok, lease_of(c, id)} end)
+  end
+
+  test "NoRunUnleased: a job asks for its lease first, runs under it, and its end releases it",
+       c do
+    c = leased(c, %{"slot" => 1})
+    assert {:refused, {:bad, :lease}} = run(c, "jl0", "test", ~w(exit 0))
+    assert row(c, "jl0") == nil
+
+    assert {:ok, %{exit: 0}} = run(c, "jl", "test", ~w(exit 0), heavy())
+    lease = lease_of(c, "jl")
+    assert %{outcome: "granted", class: "heavy", holder: {"job", "jl"}} = lease
+    assert %{state: "exited", lease: id} = row(c, "jl")
+    assert id == lease.id
+    assert {:ok, %{released_by: "monitor"}} = released(c, "jl")
+  end
+
+  test "RefusedIsNotFailed: a refused lease is a row that says why and when, and nothing runs",
+       c do
+    c = leased(c, %{"slot" => 1}, queue_bound: 0)
+    assert {:refused, {:lease, {:queue_full, at}}} = run(c, "jq", "test", ~w(exit 0), heavy())
+    assert %{state: "refused", reason: "queue_full", retry_at: ^at, lease: nil} = row(c, "jq")
+    assert File.ls!(Path.join(c.dir, "pids")) == []
+    # A refusal is answered, not owed: nothing is handed on later.
+    no_second(c.jobs)
+  end
+
+  test "CapacityHolds: a second heavy run waits for the slot, and runs once the first ends", c do
+    c = leased(c, %{"slot" => 1})
+    first = Task.async(fn -> run(c, "jh1", "test", ["wait"], heavy("a")) end)
+    {:ok, _} = pid(c, 1)
+    second = Task.async(fn -> run(c, "jh2", "test", ~w(exit 0), heavy("b")) end)
+    {:ok, _} = await(fn -> if row(c, "jh2"), do: {:ok, :asked} end)
+    assert %{state: "asked"} = row(c, "jh2")
+    assert lease_of(c, "jh2") == nil
+
+    File.write!(Path.join(c.dir, "fifo"), "0\n")
+    assert {:ok, %{exit: 0}} = Task.await(first, 15_000)
+    assert {:ok, %{exit: 0}} = Task.await(second, 15_000)
+    assert lease_of(c, "jh2").id > lease_of(c, "jh1").id
+  end
+
+  test "GangAtomic: a landing takes its slot and its lock in one lease, or none of them", c do
+    c = leased(c, %{"slot" => 1, "land:p" => 1})
+    heavy = Task.async(fn -> run(c, "jg1", "test", ["wait"], heavy()) end)
+    {:ok, _} = pid(c, 1)
+    units = %{"slot" => 1, "land:p" => 1}
+    landing = [lease: %{class: :landing, module: "p", units: units}]
+    land = Task.async(fn -> run(c, "jg2", "test", ~w(exit 0), landing) end)
+    {:ok, _} = await(fn -> if row(c, "jg2"), do: {:ok, :asked} end)
+
+    # The lock is free, but the slot is not: the landing holds neither while it waits.
+    held = fn -> Enum.filter(Scheduler.leases(c.scheduler), &is_nil(&1.released_at)) end
+    assert [%{request_id: "job:jg1", units: %{"slot" => 1}}] = held.()
+
+    File.write!(Path.join(c.dir, "fifo"), "0\n")
+    assert {:ok, %{exit: 0}} = Task.await(heavy, 15_000)
+    assert {:ok, %{exit: 0}} = Task.await(land, 15_000)
+    assert %{class: "landing", units: ^units} = lease_of(c, "jg2")
+  end
+
+  test "NoRunUnleased: a wrapper that finds its fence taken runs nothing", c do
+    c = leased(c, %{"slot" => 1})
+    # A late start's stand-in: the fence was taken before the wrapper came to it.
+    File.mkdir_p!(Path.join(c.dir, "ws/jobs/jf.exit.fence"))
+    assert {:unknown, :no_exit} = run(c, "jf", "test", ~w(exit 0), heavy())
+    assert File.ls!(Path.join(c.dir, "pids")) == []
+    assert %{state: "lost"} = row(c, "jf")
+    assert {:ok, _} = released(c, "jf")
+  end
+
+  test "NoRunUnleased: a cut start is settled never run only once Jobs took its fence", c do
+    c = leased(c, %{"slot" => 2})
+    stop_supervised!(Jobs)
+    {:ok, db} = Jobs.Table.open(Path.join(c.opts[:dir], "jobs.db"))
+    base = %{host: "test", project: "p", name: "w", worktree: c.wt, late: "owed", start_until: 0}
+    # Neither start landed: `Jobs` takes the fence, so a start landing later runs nothing.
+    :ok = Jobs.Table.put(db, Map.merge(base, %{id: "jn", state: "starting", lease: 1}))
+    # The wrapper took the fence, and left no exit file: the job ran, and was lost.
+    :ok = Jobs.Table.put(db, Map.merge(base, %{id: "jt", state: "starting", lease: 2}))
+    File.mkdir_p!(Path.join(c.dir, "ws/jobs/jt.exit.fence"))
+
+    jobs = start_supervised!({Jobs, c.opts})
+    assert {:ok, %{state: "refused"}} = Jobs.settle(jobs, "jn")
+    assert File.dir?(Path.join(c.dir, "ws/jobs/jn.exit.fence"))
+    assert {:ok, %{state: "lost"}} = await(fn -> settled(jobs, "jt") end)
+  end
+
+  defp settled(jobs, id) do
+    case Jobs.settle(jobs, id) do
+      {:ok, %{state: "lost"}} = lost -> lost
+      _ -> nil
+    end
+  end
+
+  test "JobSettles: a caller that ends while its lease is queued leaves its row interrupted", c do
+    c = leased(c, %{"slot" => 1})
+    first = Task.async(fn -> run(c, "jc1", "test", ["wait"], heavy()) end)
+    {:ok, _} = pid(c, 1)
+    caller = Task.async(fn -> run(c, "jc2", "test", ~w(exit 0), heavy()) end)
+    {:ok, _} = await(fn -> if row(c, "jc2"), do: {:ok, :asked} end)
+    Task.shutdown(caller, :brutal_kill)
+
+    assert {:ok, %{job: "jc2", end: {:refused, :interrupted}}} = late(c.jobs)
+    File.write!(Path.join(c.dir, "fifo"), "0\n")
+    assert {:ok, %{exit: 0}} = Task.await(first, 15_000)
+    assert lease_of(c, "jc2") == nil
   end
 
   defp write_whole_in(root, file) do
