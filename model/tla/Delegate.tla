@@ -45,9 +45,11 @@
 (*                                                                         *)
 (* Left abstract: the parent's pid, account and transcript copy           *)
 (* (Move.tla); the start's account, worktree, setup and dtach steps        *)
-(* (Start.tla); the deadline a starting row waits for before it is        *)
-(* refused with no Sessions row of its call: the call and Sessions' own    *)
-(* row are one step here; the text of a report; the delegate's subagents  *)
+(* (Start.tla); the clock: the caller's deadline passes as one step, and   *)
+(* the row's deadline, later, is Settled's refusal of a row with no        *)
+(* Sessions row once no request of it waits in time; a call's give-up     *)
+(* once Sessions took it (the row then waits for Sessions' row, as after a *)
+(* restart); the text of a report; the delegate's subagents                *)
 (* and tokens; messages to a delegate and its replies (Team.tla,          *)
 (* Delivery.tla). A delegate takes one turn's message per process and     *)
 (* finishes once. The Stop event stands for the result in the delegate's  *)
@@ -137,10 +139,17 @@
 (* process (WorkEndedIsFree). Delegates.Work answers a refused, finished   *)
 (* or failed row ended only once Sessions' row of it is free; with the     *)
 (* status alone (StatusEndsWork) a finished delegate's lease goes while    *)
-(* its process lives. Not implied: here a call Delegates gave up on never  *)
-(* reaches Sessions later, so a refused row holds nothing                  *)
-(* (RefusedHoldsNothing); in the code a start may still be taken after its *)
-(* row was refused at its deadline (F-164's new-1).                        *)
+(* its process lives.                                                      *)
+(*                                                                         *)
+(* The request in Sessions' queue (F-166, F-164's new-1): a call of        *)
+(* Sessions is a request in its mailbox until Sessions takes it, and it    *)
+(* stays there through Delegates' restart and its call's give-up. The      *)
+(* request carries the caller's deadline, which passes before the row's    *)
+(* (CallerLate). Sessions refuses a request it takes past that deadline    *)
+(* and writes nothing (Called), so a row refused with no Sessions row,     *)
+(* at its own deadline, stays without a process: RefusedHoldsNothing is    *)
+(* checked against the late take. TakeStale starts it anyway, under a row  *)
+(* Delegates already refused.                                              *)
 (*                                                                         *)
 (* Restarts (F-164): the whole framework's (FrameworkDies, Delegates' own  *)
 (* memory: Sessions is another process and its calls run on), and an       *)
@@ -185,7 +194,8 @@ Breaks == {
     "StartOverLive",         \* a second start of a branch goes on while its session is live
     "BriefAfterInit",        \* a headless start waits for its init before its message
     "StatusEndsWork",        \* the lease's owner says a refused, finished or failed row ended
-    "TurnInMemory"           \* an own turn's notice mark is kept in memory, not as Mailbox's key
+    "TurnInMemory",          \* an own turn's notice mark is kept in memory, not as Mailbox's key
+    "TakeStale"              \* Sessions takes a request whose caller's deadline passed
 }
 
 ASSUME Break \in Breaks
@@ -220,6 +230,9 @@ VARIABLES
                   \*          "brief", "person"
     stops,        \* in memory: delegates whose Stop event Intake holds, not yet handled
     call,         \* in memory: d -> "none", "start", "resume": Delegates' call of Sessions
+    queue,        \* Sessions' mailbox: d -> the request of the latest call not yet taken:
+                  \*           "none", "start", "resume"
+    late,         \* d -> the caller's deadline of that request has passed
     sess,         \* Sessions: d -> its row of the latest call: "none", "start" or "resume"
                   \*           (written, under way), "held" (a headless process held,
                   \*           its init not read), "running", "refused" (free), "orphan"
@@ -241,7 +254,7 @@ VARIABLES
 
 parentVars == <<parentRuns, turn, parentStops, parentTurned>>
 delegateVars == <<status, held, resumes, proc, reply, kills, persons, rsrc>>
-callVars == <<call, sess, marked, pipe, taken, resumed>>
+callVars == <<call, queue, late, sess, marked, pipe, taken, resumed>>
 \* Item 14's: the idle notice and the start idempotent per branch (F-150).
 policyVars == <<idles, overdue, told, keys, againStarts, woken, ownDone, ownTold>>
 dvars == <<row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, lost, wrong>>
@@ -311,6 +324,8 @@ Init ==
     /\ rsrc = [d \in Delegates |-> "none"]
     /\ stops = {}
     /\ call = [d \in Delegates |-> "none"]
+    /\ queue = [d \in Delegates |-> "none"]
+    /\ late = [d \in Delegates |-> FALSE]
     /\ sess = [d \in Delegates |-> "none"]
     /\ marked = [d \in Delegates |-> FALSE]
     /\ pipe = [d \in Delegates |-> 0]
@@ -332,7 +347,8 @@ Init ==
 -----------------------------------------------------------------------------
 (* The framework: its tables survive a restart; what it holds in memory does not *)
 
-\* Sessions is another process: a call it took runs on. Under HeldInMemory
+\* Sessions is another process: a call it took runs on, and a request in its
+\* mailbox waits there to be taken (F-166). Under HeldInMemory
 \* the reports not yet stored go with the memory. The wake at an idle
 \* delegate's bound is in memory, so the bound starts again; under
 \* IdleInMemory the notices' marks go too, and under TurnInMemory the own
@@ -349,8 +365,8 @@ FrameworkDies ==
                  [] OTHER -> keys
     /\ D!Restart
     /\ UNCHANGED <<parentVars, status, resumes, proc, reply, kills, persons, rsrc,
-                   sess, marked, pipe, taken, resumed, idles, told, againStarts, woken, ownDone,
-                   ownTold>>
+                   queue, late, sess, marked, pipe, taken, resumed, idles, told, againStarts,
+                   woken, ownDone, ownTold>>
 
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
@@ -365,19 +381,21 @@ FrameworkStarts ==
 \* held, or confirmed once its message went in with the hold, which
 \* SessionsDecides and Confirmed still stand for; or an orphan, a headless
 \* process held with no line when the crash fell between the hold and the
-\* write, which never confirms and which Recoveries ends (OrphanEnded).
+\* write, which never confirms and which Recoveries ends (OrphanEnded). A
+\* request not yet taken goes with the process's mailbox.
 RestartAgent(d) ==
     /\ up /\ restarts < MaxRestarts
     /\ restarts' = restarts + 1
     /\ call' = [call EXCEPT ![d] = "none"]
+    /\ queue' = [queue EXCEPT ![d] = "none"]
     /\ stops' \in {stops, stops \ {d}}
     /\ \/ UNCHANGED <<sess, proc, resumed>>
        \/ /\ sess[d] \in {"start", "resume"} /\ d \notin Interactive
           /\ sess' = [sess EXCEPT ![d] = "orphan"]
           /\ proc' = [proc EXCEPT ![d] = "waiting"]
           /\ resumed' = [resumed EXCEPT ![d] = IF sess[d] = "resume" THEN @ + 1 ELSE @]
-    /\ UNCHANGED <<up, parentVars, status, held, resumes, reply, kills, persons, rsrc, marked,
-                   pipe, taken, policyVars, dvars>>
+    /\ UNCHANGED <<up, parentVars, status, held, resumes, reply, kills, persons, rsrc, late,
+                   marked, pipe, taken, policyVars, dvars>>
 
 \* The parent's agent process crashes and its supervisor starts it again: a
 \* hand of a report to the parent under way is cut, its mark kept
@@ -395,7 +413,7 @@ OrphanEnded(d) ==
     /\ sess' = [sess EXCEPT ![d] = "refused"]
     /\ proc' = [proc EXCEPT ![d] = "dead"]
     /\ UNCHANGED <<up, restarts, parentVars, stops, policyVars, dvars, status, held, resumes,
-                   reply, kills, persons, rsrc, call, marked, pipe, taken, resumed>>
+                   reply, kills, persons, rsrc, call, queue, late, marked, pipe, taken, resumed>>
 
 -----------------------------------------------------------------------------
 (* The parent: its turns, and its process ending and running again (a move) *)
@@ -427,6 +445,13 @@ ParentRuns ==
 
 others == <<up, restarts, parentVars, stops, policyVars, dvars>>
 
+\* Delegates calls Sessions: its call waits in memory, and the request, in
+\* Sessions' mailbox, carries the caller's deadline, not yet passed.
+Request(d, kind) ==
+    /\ call' = [call EXCEPT ![d] = kind]
+    /\ queue' = [queue EXCEPT ![d] = kind]
+    /\ late' = [late EXCEPT ![d] = FALSE]
+
 \* In a turn the parent calls start_delegate. The project and branch
 \* checks may refuse it, and the cap must when it is reached. The row is
 \* written first, as starting, and the call of Sessions begins. The brief
@@ -436,10 +461,10 @@ others == <<up, restarts, parentVars, stops, policyVars, dvars>>
 StartAsked(d) ==
     /\ up /\ parentRuns /\ turn /\ status[d] = "none"
     /\ \/ /\ status' = [status EXCEPT ![d] = "refused"]
-          /\ UNCHANGED <<call, marked>>
+          /\ UNCHANGED <<call, queue, late, marked>>
        \/ /\ Cardinality(Counted) < Cap \/ Break = "NoCap"
           /\ status' = [status EXCEPT ![d] = "starting"]
-          /\ call' = [call EXCEPT ![d] = "start"]
+          /\ Request(d, "start")
           /\ marked' = [marked EXCEPT ![d] = MarkedFirst(d)]
     /\ UNCHANGED <<others, held, resumes, proc, reply, kills, persons, rsrc, sess, pipe, taken,
                    resumed>>
@@ -459,7 +484,7 @@ StartAgain(d) ==
     /\ proc' = [proc EXCEPT ![d] = IF @ = "dead" THEN "none" ELSE @]
     /\ status' = [status EXCEPT ![d] = "starting"]
     /\ resumes' = [resumes EXCEPT ![d] = 0]
-    /\ call' = [call EXCEPT ![d] = "start"]
+    /\ Request(d, "start")
     /\ sess' = [sess EXCEPT ![d] = "none"]
     /\ marked' = [marked EXCEPT ![d] = MarkedFirst(d)]
     /\ taken' = [taken EXCEPT ![d] = 0]
@@ -467,11 +492,33 @@ StartAgain(d) ==
     /\ UNCHANGED <<up, restarts, parentVars, stops, idles, overdue, told, keys, woken, ownDone,
                    ownTold, dvars, held, reply, kills, persons, rsrc, pipe>>
 
-\* Sessions takes the call and writes its own row first (Start.tla).
+\* Sessions takes the request from its mailbox, whether Delegates runs or
+\* not. In the caller's time it writes its own row first (Start.tla). Past
+\* the caller's deadline it answers {:refused, :caller_gone} and writes
+\* nothing, so a row Delegates refused with no Sessions row stays without a
+\* process. TakeStale takes it as one in time.
 Called(d) ==
-    /\ up /\ call[d] # "none" /\ sess[d] = "none"
-    /\ sess' = [sess EXCEPT ![d] = call[d]]
-    /\ UNCHANGED <<others, delegateVars, call, marked, pipe, taken, resumed>>
+    /\ queue[d] # "none" /\ sess[d] = "none"
+    /\ queue' = [queue EXCEPT ![d] = "none"]
+    /\ IF late[d] /\ Break # "TakeStale"
+         THEN UNCHANGED sess
+         ELSE sess' = [sess EXCEPT ![d] = queue[d]]
+    /\ UNCHANGED <<others, delegateVars, call, late, marked, pipe, taken, resumed>>
+
+\* The caller's deadline passes while the request waits in Sessions' mailbox.
+\* It comes before the row's, so the row is not refused before it.
+CallerLate(d) ==
+    /\ queue[d] # "none" /\ ~late[d]
+    /\ late' = [late EXCEPT ![d] = TRUE]
+    /\ UNCHANGED <<others, delegateVars, call, queue, sess, marked, pipe, taken, resumed>>
+
+\* The caller's wait ends after its deadline: Delegates' call answers
+\* {:unknown, {:timeout, wait}}, and the row waits for Settled while the
+\* request may still wait in Sessions' mailbox.
+CallGivesUp(d) ==
+    /\ up /\ call[d] # "none" /\ queue[d] # "none" /\ late[d]
+    /\ call' = [call EXCEPT ![d] = "none"]
+    /\ UNCHANGED <<others, delegateVars, queue, late, sess, marked, pipe, taken, resumed>>
 
 \* Sessions holds the process, which waits for its first message, or
 \* refuses. A resumed process reads a FIFO of its own: no line written for
@@ -487,8 +534,8 @@ SessionsDecides(d) ==
           /\ resumed' = [resumed EXCEPT ![d] = IF sess[d] = "resume" THEN @ + 1 ELSE @]
        \/ /\ sess' = [sess EXCEPT ![d] = "refused"]
           /\ UNCHANGED <<proc, pipe, resumed>>
-    /\ UNCHANGED <<others, status, held, resumes, reply, kills, persons, rsrc, call, marked,
-                   taken>>
+    /\ UNCHANGED <<others, status, held, resumes, reply, kills, persons, rsrc, call, queue, late,
+                   marked, taken>>
 
 \* A held headless process's init, once it read its first line, confirms
 \* the start; a process gone first is never confirmed, and the call is
@@ -497,7 +544,7 @@ Confirmed(d) ==
     /\ sess[d] = "held"
     /\ \/ proc[d] \in {"working", "idle"} /\ sess' = [sess EXCEPT ![d] = "running"]
        \/ proc[d] = "dead" /\ sess' = [sess EXCEPT ![d] = "refused"]
-    /\ UNCHANGED <<others, delegateVars, call, marked, pipe, taken, resumed>>
+    /\ UNCHANGED <<others, delegateVars, call, queue, late, marked, pipe, taken, resumed>>
 
 \* What a settled call writes: a start runs or is refused; a resume runs,
 \* or its refusal is the report, as a second kill's is.
@@ -528,24 +575,30 @@ Settle(d, s) ==
     /\ status' = [status EXCEPT ![d] = Outcome(d, s)]
     /\ IF Outcome(d, s) = "failed" THEN Report(d, "none") ELSE NoReport
 
-\* Sessions answered the call under way.
+\* Sessions answered the call under way: its row settled, or, with no row, a
+\* request taken past the caller's deadline while the call still waited.
 CallAnswered(d) ==
-    /\ up /\ call[d] # "none" /\ sess[d] \in {"running", "refused"}
+    /\ up /\ call[d] # "none"
+    /\ \/ sess[d] \in {"running", "refused"}
+       \/ sess[d] = "none" /\ queue[d] = "none"
     /\ call' = [call EXCEPT ![d] = "none"]
     /\ IF status[d] \in {"starting", "resuming"}
          THEN Settle(d, sess[d]) /\ UNCHANGED resumes
          \* ResumeBeforeRow: the row learns of the resume only now.
          ELSE /\ resumes' = [resumes EXCEPT ![d] = @ + 1]
               /\ UNCHANGED status /\ NoReport
-    /\ UNCHANGED <<up, restarts, parentVars, stops, proc, reply, kills, persons, sess, marked, pipe,
-                   taken, resumed, policyVars>>
+    /\ UNCHANGED <<up, restarts, parentVars, stops, proc, reply, kills, persons, queue, late, sess,
+                   marked, pipe, taken, resumed, policyVars>>
 
-\* After a restart, a row whose call a restart cut off is settled by
-\* Sessions' row of that call, once that row is settled; with none, the call
-\* never reached Sessions, and it is not made again.
+\* After a restart or a call's give-up, a row whose call was cut off is
+\* settled by Sessions' row of that call, once that row is settled; with
+\* none by the row's deadline, which a request waiting in the caller's time
+\* has not reached, the call never reached Sessions, and it is not made again.
 Settled(d) ==
     /\ up /\ call[d] = "none" /\ status[d] \in {"starting", "resuming"}
-    /\ sess[d] \in {"none", "running", "refused"} \/ Break = "SettleEarly"
+    /\ \/ sess[d] \in {"running", "refused"}
+       \/ sess[d] = "none" /\ (queue[d] = "none" \/ late[d])
+       \/ Break = "SettleEarly"
     /\ Settle(d, sess[d])
     /\ UNCHANGED <<up, restarts, parentVars, stops, resumes, proc, reply, kills, persons, callVars,
                    policyVars>>
@@ -559,7 +612,7 @@ InputWritten(d) ==
     /\ ~marked[d] \/ Break = "NewUuid"
     /\ marked' = [marked EXCEPT ![d] = TRUE]
     /\ pipe' = [pipe EXCEPT ![d] = 1]
-    /\ UNCHANGED <<others, delegateVars, call, sess, taken, resumed>>
+    /\ UNCHANGED <<others, delegateVars, call, queue, late, sess, taken, resumed>>
 
 \* The delegate takes its message and starts a turn.
 InputTaken(d) ==
@@ -568,8 +621,8 @@ InputTaken(d) ==
     /\ proc' = [proc EXCEPT ![d] = "working"]
     /\ reply' = [reply EXCEPT ![d] = "none"]
     /\ taken' = [taken EXCEPT ![d] = @ + 1]
-    /\ UNCHANGED <<others, status, held, resumes, kills, persons, rsrc, call, sess, marked,
-                   resumed>>
+    /\ UNCHANGED <<others, status, held, resumes, kills, persons, rsrc, call, queue, late, sess,
+                   marked, resumed>>
 
 \* A person attached to an interactive delegate types a prompt once its
 \* turn has ended: a turn of its own, after the brief's.
@@ -673,7 +726,7 @@ HeldStored(d) ==
 KillSeen(d) ==
     /\ up /\ status[d] = "running" /\ call[d] = "none" /\ proc[d] = "dead" /\ reply[d] = "none"
     /\ IF resumes[d] = 0 \/ Break = "ResumeAgain"
-         THEN /\ call' = [call EXCEPT ![d] = "resume"]
+         THEN /\ Request(d, "resume")
               /\ sess' = [sess EXCEPT ![d] = "none"]
               /\ marked' = [marked EXCEPT ![d] = MarkedFirst(d)]
               /\ IF Break = "ResumeBeforeRow"
@@ -683,7 +736,7 @@ KillSeen(d) ==
               /\ NoReport
          ELSE /\ status' = [status EXCEPT ![d] = "failed"]
               /\ Report(d, "none")
-              /\ UNCHANGED <<resumes, call, sess, marked>>
+              /\ UNCHANGED <<resumes, call, queue, late, sess, marked>>
     /\ UNCHANGED <<up, restarts, parentVars, proc, reply, kills, persons, stops, pipe, taken,
                    resumed, policyVars>>
 
@@ -755,7 +808,7 @@ Mailboxes(d) ==
 
 -----------------------------------------------------------------------------
 Framework(d) ==
-    \/ Called(d) \/ CallAnswered(d) \/ Settled(d) \/ InputWritten(d)
+    \/ CallAnswered(d) \/ CallGivesUp(d) \/ Settled(d) \/ InputWritten(d)
     \/ StopHandled(d) \/ TranscriptRead(d) \/ HeldStored(d) \/ KillSeen(d)
     \/ DelegateEnds(d) \/ BoundPasses(d) \/ IdleTold(d)
     \/ \E n \in 1..MaxWakes : TurnTold(d, n)
@@ -764,7 +817,8 @@ Next ==
     \/ FrameworkDies \/ FrameworkStarts \/ RestartParent
     \/ PromptSent \/ TurnEnds \/ ParentStops \/ ParentRuns
     \/ Mailbox(D!Connects(Parent))
-    \/ \E d \in Delegates : StartAsked(d) \/ StartAgain(d) \/ SessionsDecides(d) \/ Confirmed(d)
+    \/ \E d \in Delegates : StartAsked(d) \/ StartAgain(d) \/ Called(d) \/ CallerLate(d)
+                            \/ SessionsDecides(d) \/ Confirmed(d)
                             \/ InputTaken(d) \/ PersonTypes(d) \/ DelegateFinishes(d)
                             \/ TurnEndsBare(d) \/ DelegateKilled(d)
                             \/ RestartAgent(d) \/ OrphanEnded(d)
@@ -806,6 +860,9 @@ TypeOK ==
     /\ reply \in [Delegates -> {"none", "brief", "person", "own"}]
     /\ rsrc \in [Delegates -> {"none", "brief", "person", "own"}]
     /\ call \in [Delegates -> {"none", "start", "resume"}]
+    /\ queue \in [Delegates -> {"none", "start", "resume"}]
+    /\ late \in [Delegates -> BOOLEAN]
+    /\ \A d \in Delegates : queue[d] # "none" => sess[d] = "none"
     /\ sess \in [Delegates -> {"none", "start", "resume", "held", "running", "refused", "orphan"}]
     /\ stops \subseteq Delegates
     /\ idles \in [Delegates -> Nat] /\ overdue \in [Delegates -> BOOLEAN]
