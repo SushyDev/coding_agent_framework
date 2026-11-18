@@ -65,19 +65,10 @@ The framework home must be short: macOS cuts a socket path at 104 bytes.
 
    Passed when each check names the account you logged in with.
 
-4. **A first reading of each account's allowance.** A start picks the account with the most
-   allowance left, and an account has no reading until a session on it draws its status line,
-   so on a new home every start is refused `:none_known` (the build note's finding new-1).
-   Until that is settled, write a reading whose week has reset, which counts as 0 % used and is
-   marked assumed; the first status line a session draws replaces it:
-
-   ```sh
-   mkdir -p /Users/me/caf-e2e/usage
-   for a in one two; do
-     printf '{"rate_limits":{"seven_day":{"used_percentage":0,"resets_at":1000000000}}}' \
-       > /Users/me/caf-e2e/usage/$a.json
-   done
-   ```
+No reading of either account's allowance is written by hand. A start picks the account with
+the most allowance left, and an account with no reading counts as 0 % used, assumed, as a reset
+week does, after any account at the same share with a current reading. So the first start goes
+to `one`, the first name, and its status line gives the first real reading.
 
 ## 1. The app starts, and the project is cloned
 
@@ -87,7 +78,9 @@ The framework home must be short: macOS cuts a socket path at 104 bytes.
 - **Passed when** `checkout(caf)` reads `demo: ready, on main, clean true, ahead 0, behind 0`
   with the path `/Users/me/caf-e2e/checkouts/demo`, `git -C /Users/me/caf-e2e/checkouts/demo
   log --oneline` shows the seed commit, and `agents(caf)` shows `demo-main: main of demo, on no
-  account, gone (row declared)`.
+  account, gone (row declared)`. `ls -l /Users/me/caf-e2e/intake.secret` shows the hooks'
+  secret, readable and writable by you alone (`-rw-------`): the first start made it, and every
+  later start reads it.
 
 ## 2. A main session starts, and the person answers its trust dialog
 
@@ -102,11 +95,19 @@ The framework home must be short: macOS cuts a socket path at 104 bytes.
   `answer_dialog(caf, "demo-main", "trust", "<the label that trusts the folder>")`.
 - **Watch** `attach(caf, "demo-main")` in a second terminal: the trust dialog, then the brief's
   turn. Do not press anything on the dialog there: the console answers it. Claude Code may ask
-  to allow a `caf` tool later; such a request is answered on this screen, by the person.
+  to allow a `caf` tool or `Bash` later. The console answers such a request: `requests(caf,
+  "demo-main")` lists each held request with its tool, and `answer_request(caf, "demo-main",
+  "<id>", "allow")` answers one. The dialog stays on this screen meanwhile, and a person may
+  answer it there first; the console's answer then changes nothing. Copy the id `requests`
+  prints: an answer refused for a wrong id keeps that state claimed, and the next answer of it
+  is refused `already_claimed` until the state moves (F-147's finding new-1); answer it on the
+  screen then.
 - **Passed when** the dialog leaves the screen after the console's answer (and not before),
   the brief runs as the first turn, `agents(caf)` shows `demo-main` on account `one`, `idle`,
   `dialogs(caf)` shows none, and `look(caf, "demo-main")` shows the brief and its one-line reply.
-  `leases(caf)` shows the main session's lease, class `main`, held by it.
+  `leases(caf)` shows the main session's lease, class `main`, held by it. A request the console
+  answered (if one came) leaves the screen once `answer_request` reads `ok`, and `requests(caf,
+  "demo-main")` then lists it no more.
 
 ## 3. A headless delegate's report goes into the idle main session by the waiter
 
@@ -124,8 +125,9 @@ The framework home must be short: macOS cuts a socket path at 104 bytes.
   "demo-main")`) has a user line that begins `Stop hook blocking error from command` and holds
   the report and a last line `[delivery <uuid>]`, and the main session answers it. The commit
   is on `unit/hello` in `/Users/me/caf-e2e/worktrees/demo/demo-unit-hello`. `agents(caf)` shows
-  the delegate `idle`; the session it ran on is the account with the most allowance left
-  (`two`, once `one` has a real reading).
+  the delegate `idle`; the session it ran on is the account with the most allowance left:
+  `two`, which has no reading yet and counts as 0 %, unless `one`'s first reading is 0 % too,
+  which wins as current.
 
 ## 4. An interactive delegate
 
@@ -168,7 +170,9 @@ The framework home must be short: macOS cuts a socket path at 104 bytes.
   ```
 
   and `leases(caf)` while the job runs, `leases(caf, true)` after it.
-- **Watch** `demo-main`'s screen; allow the `run` tool there if Claude Code asks.
+- **Watch** `demo-main`'s screen. If Claude Code asks to allow the `run` tool, answer from the
+  console: `requests(caf, "demo-main")`, then `answer_request(caf, "demo-main", "<id>",
+  "allow")`.
 - **Passed when**, while it runs, `leases(caf)` shows a lease of class `heavy` with a slot,
   held by `job mcp-e2e-<n>`; after it, the same lease reads `released by monitor`, and
   `demo-main` reports exit 0 and `job done`. The job ran in a copy under
@@ -184,7 +188,8 @@ The framework home must be short: macOS cuts a socket path at 104 bytes.
   with the old process; `attach(caf, "demo-main")` again for the new one.
 - **Passed when** `demo-main` runs on `two`, then on `one`, under the same name and session:
   `look(caf, "demo-main")` still shows the earlier turns, and a message sent after each move
-  (`message(caf, "demo-main", "Which account are you on? One word.")`) is delivered once.
+  (`message(caf, "demo-main", "Which account are you on? One word.")`) is delivered once, and
+  `status(caf, <its id>)` shows the reply's text under the reply.
   `faults(caf)` shows no `move` failed. The move back meets no dialog: `one` trusted the folder.
 
 ## 8. A framework restart in the middle of a delegate's run, settled after
@@ -203,7 +208,8 @@ The framework home must be short: macOS cuts a socket path at 104 bytes.
 - **Passed when** after the restart `agents(caf)` shows `demo-unit-slow` still `working`, the
   same process (its viewer never ended); when it ends, its report reaches `demo-main` once;
   `leases(caf)` shows its lease held until then and released after; `faults(caf)` shows only
-  rows the restart cut, as `interrupted`, and nothing `failed`.
+  rows the restart cut, as `interrupted`, and nothing `failed`. `intake.secret` is the file the
+  first start wrote, unchanged, so the held sessions' hooks are still taken.
 
 ## 9. A message too long to type goes in by its pointer
 
@@ -219,9 +225,10 @@ The restart cut `demo-main`'s waiter, so until a turn of it ends, a row for it i
 - **Watch** `demo-main`'s screen: one typed line, `A message for you is in …; read it.`, then
   a turn that reads the file.
 - **Passed when** `status(caf, <id>)` reads `delivered by typed` and `typed as a pointer to
-  /Users/me/caf-e2e/due/demo-main/<id>.md`, and `demo-main` replies `pointer`. Write down
-  whether a waiter came back after that turn: whether `demo-unit-slow`'s report then came by
-  the waiter (a `Stop hook blocking error` line) or was typed too (finding new-2).
+  /Users/me/caf-e2e/due/demo-main/<id>.md`, and `demo-main` replies `pointer`, which
+  `status(caf, <id>)` shows as the reply's text. A waiter comes back after that turn, since the
+  session's hooks post with the home's secret, kept across the restart: `demo-unit-slow`'s
+  report then comes by the waiter (a `Stop hook blocking error` line), not typed.
 
 ## 10. The main session's end
 

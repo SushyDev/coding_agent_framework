@@ -225,7 +225,7 @@ defmodule CodingAgentFramework.Delegates do
          {:ok, agents} <- Agents.open(Keyword.fetch!(opts, :sessions_db), s.host),
          {:ok, _} <- hand_over(s.sessions, Table.old_tree(db)),
          :ok <- Table.rebuild(db),
-         {:ok, intake} <- intake(opts) do
+         {:ok, intake} <- Intake.reader(opts) do
       s =
         Map.merge(s, %{
           db: db,
@@ -932,19 +932,6 @@ defmodule CodingAgentFramework.Delegates do
 
   defp agent(s, row), do: Agents.get(s.agents, row.name)
 
-  defp intake(opts) do
-    case {opts[:intake], opts[:intake_db]} do
-      {nil, _} ->
-        {:ok, nil}
-
-      {pid, path} when is_binary(path) ->
-        with {:ok, db} <- IntakeTable.open(path), do: {:ok, %{pid: pid, db: db}}
-
-      _ ->
-        {:refused, {:bad, :intake_db}}
-    end
-  end
-
   # What a fix reads of a delegate: Stream's row of a headless one's process; for an
   # interactive one, what Intake holds of its session: the newest hook event's id (any event
   # moves it, as each read event moves a log's offset), the PermissionRequests it holds, and
@@ -956,16 +943,9 @@ defmodule CodingAgentFramework.Delegates do
   defp hooked(%{intake: nil}, _agent), do: {:unknown, :no_intake}
 
   defp hooked(s, %{session_id: sid} = agent) when is_binary(sid) do
-    case IntakeTable.rows(s.intake.db, s.host, agent.account) do
-      {:ok, %{rows: rows}} ->
-        own = Enum.filter(rows, &(&1.session_id == sid))
-
-        requests =
-          for %{event: "PermissionRequest", hold: "held", id: id} <- own,
-              into: %{},
-              do: {Integer.to_string(id), %{state: :held}}
-
-        last = own |> Enum.map(& &1.id) |> Enum.max(fn -> 0 end)
+    case IntakeTable.session(s.intake.db, s.host, agent.account, sid) do
+      {:ok, %{last: last, held: held}} ->
+        requests = Map.new(held, &{Integer.to_string(&1), %{state: :held}})
         gone = not Agents.running?(agent)
         {:ok, %{offset: last, gone: gone, ending: false, requests: requests}}
 

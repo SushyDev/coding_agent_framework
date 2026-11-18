@@ -14,7 +14,8 @@ defmodule CodingAgentFramework.MainsTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, Grants, Inlet, Mailbox, Mains, Registry, Scheduler}
+  alias CodingAgentFramework.{Accounts, Grants, Inlet, Intake, Mailbox, Mains, Registry}
+  alias CodingAgentFramework.Scheduler
   alias CodingAgentFramework.{ScreenStandIn, Sessions, SessionsSetup, Transcripts, Usage}
   alias CodingAgentFramework.Mains.{Checkout, Starts, Work}
   alias CodingAgentFramework.Sessions.Agents
@@ -304,6 +305,73 @@ defmodule CodingAgentFramework.MainsTest do
 
     assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-main", :trust, @trust)
     assert {:ok, %{session_id: ^sid}} = await(fn -> running(ctx, "app-main") end)
+  end
+
+  # F-146's new-5: the operator answers a main session's held PermissionRequest through
+  # Intake, on the state its claim holds (Team.tla's CanAct), as an interactive delegate's.
+  test "answer sends a main session's held permission request its decision, once", ctx do
+    db = Path.join(ctx.dir, "intake.db")
+    intake = start_supervised!({Intake, db: db, host: "test"})
+    mains = start_supervised!({Mains, ctx.mains_opts ++ [intake: intake, intake_db: db]})
+    assert {:ok, _} = level(ctx, mains)
+
+    assert {:ok, %{held: []}} = Mains.fix_state(mains, "app-main")
+    assert {:refused, {:not_held, "1"}} = Mains.answer(mains, "app-main", "1", "allow")
+    assert {:unknown, {:dialog, :trust}} = Mains.start_main(mains, "app", "app-main", nil)
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-main", :trust, @trust)
+    assert {:ok, %{session_id: sid}} = await(fn -> running(ctx, "app-main") end)
+
+    me = self()
+
+    hold = fn tool ->
+      body = %{
+        "hook_event_name" => "PermissionRequest",
+        "session_id" => sid,
+        "tool_use_id" => tool
+      }
+
+      Task.async(fn ->
+        # The holder, as `Intake.Plug` is: it writes the decision, then says so.
+        {:ok, {:held, held, ref, _}} = Intake.post(intake, "work", JSON.encode!(body))
+        send(me, {:held, tool})
+
+        receive do
+          {^ref, {:decision, text}} ->
+            :ok = Intake.written(intake, held, ref)
+            JSON.decode!(text)
+        after
+          10_000 -> :none
+        end
+      end)
+    end
+
+    first = hold.("t1")
+    assert_receive {:held, "t1"}, 5_000
+    assert {:ok, %{held: [id]} = state} = Mains.fix_state(mains, "app-main")
+    assert {:refused, {:bad, :label}} = Mains.answer(mains, "app-main", id, "yes", state: state)
+
+    assert {:refused, {:moved, ^state}} =
+             Mains.answer(mains, "app-main", id, "allow", state: %{state | held: []})
+
+    assert {:ok, :sent} = Mains.answer(mains, "app-main", id, "allow", state: state)
+
+    assert %{"hookSpecificOutput" => %{"decision" => %{"behavior" => "allow"}}} =
+             Task.await(first)
+
+    # The answer moved the state: the old one acts nothing, and a second request is its own.
+    assert {:refused, {:moved, %{held: []}}} =
+             Mains.answer(mains, "app-main", id, "allow", state: state)
+
+    second = hold.("t2")
+    assert_receive {:held, "t2"}, 5_000
+    assert {:ok, %{held: [two]} = state} = Mains.fix_state(mains, "app-main")
+    assert {:ok, :sent} = Mains.answer(mains, "app-main", two, "deny", state: state)
+
+    assert %{"hookSpecificOutput" => %{"decision" => %{"behavior" => "deny", "message" => _}}} =
+             Task.await(second)
+
+    # Without an Intake, Mains answers none.
+    assert {:refused, :no_intake} = Mains.answer(mains(ctx), "app-main", two, "allow")
   end
 
   # F-141's new-4: a start refused once its brief was stored settles that one row, ended.

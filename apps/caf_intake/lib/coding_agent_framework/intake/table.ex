@@ -161,6 +161,22 @@ defmodule CodingAgentFramework.Intake.Table do
     end
   end
 
+  @doc """
+  What a fix reads of an interactive session (a main session, or an interactive delegate):
+  `last`, the id of the newest row of its session (0 for none), and `held`, the ids of its
+  `PermissionRequest` rows still `held`, in order; `:unread` before a start.
+  """
+  @spec session(db, String.t(), String.t(), String.t()) ::
+          :unread | {:ok, %{last: non_neg_integer, held: [integer]}}
+  def session(db, host, account, session_id) do
+    with {:ok, _} <- last_read(db, host, account) do
+      where = "host = ?1 AND account = ?2 AND session_id = ?3 ORDER BY id"
+      own = Store.select(db, "intake_events", @columns, where, [host, account, session_id])
+      held = for %{event: "PermissionRequest", hold: "held", id: id} <- own, do: id
+      {:ok, %{last: own |> Enum.map(& &1.id) |> Enum.max(fn -> 0 end), held: held}}
+    end
+  end
+
   @doc "The rows with these ids; an id with no row is absent."
   @spec rows_by_id(db, [integer]) :: [map]
   def rows_by_id(db, ids), do: Store.rows_by_id(db, "intake_events", @columns, ids)

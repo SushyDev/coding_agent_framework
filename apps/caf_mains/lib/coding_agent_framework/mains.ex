@@ -51,8 +51,9 @@ defmodule CodingAgentFramework.Mains do
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, ClaudeCLI, Mailbox, Programs, Scheduler, Sessions}
-  alias CodingAgentFramework.{Shell, Store, Stream, Usage}
+  alias CodingAgentFramework.{Accounts, ClaudeCLI, Intake, Mailbox, Programs, Scheduler}
+  alias CodingAgentFramework.{Sessions, Shell, Store, Stream, Usage}
+  alias CodingAgentFramework.Intake.Table, as: IntakeTable
   alias CodingAgentFramework.Mains.{Checkout, Starts, Table, Work}
   alias CodingAgentFramework.Sessions.{Agents, Worktree}
 
@@ -76,8 +77,9 @@ defmodule CodingAgentFramework.Mains do
   `mcp:` (a function of a main session's name answering `{:ok, path}`, its MCP config, as
   `Delegates` takes it), `scheduler:` and `lease:` (the units a start asks for, default
   `%{"seat" => 1}`), `operator:` (a name no main session may take), `interval:` (ms between the
-  checkouts' reads, default 5 000), `clone_timeout:` (ms, default 600 000), `notify:` and
-  `clock:` (wall-clock ms).
+  checkouts' reads, default 5 000), `clone_timeout:` (ms, default 600 000), `intake:` (the
+  host's `Intake`) and `intake_db:` (its file), through which the operator answers a main
+  session's held permission request (`answer/5`), `notify:` and `clock:` (wall-clock ms).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -133,16 +135,37 @@ defmodule CodingAgentFramework.Mains do
   @doc """
   The state of main session `name` a fix claims in `Acts` (F-143's new-1): its agent row's
   status, session id and last process (pid and start time), so a resume after another resume
-  and stop is a new state. The operator's `resume` tool claims it, then calls `resume_main/3`
-  with it. Answers `{:ok, state}`, or refused `:no_session` or `{:not_main, kind}`. Option:
-  `:timeout`.
+  and stop is a new state, and `held`, the ids of the `PermissionRequest` rows `Intake` holds
+  for its session (none without `intake:`), so an answer moves it. The operator's `resume` and
+  `answer` tools claim it, then call `resume_main/3` or `answer/5` with it. Answers `{:ok,
+  state}`, or refused `:no_session` or `{:not_main, kind}`. Option: `:timeout`.
 
       Mains.fix_state(mains, "app-epic")
-      #=> {:ok, %{status: "stopped", session_id: "…", pid: 4242, proc_start: "…"}}
+      #=> {:ok, %{status: "stopped", session_id: "…", pid: 4242, proc_start: "…", held: []}}
   """
   @spec fix_state(GenServer.server(), String.t(), keyword) :: outcome(map)
   def fix_state(mains, name, opts \\ []),
     do: call(mains, {:fix_state, name}, Keyword.get(opts, :timeout, @step))
+
+  @doc """
+  Answers main session `name`'s held permission request `request` (the id of its
+  `PermissionRequest` row, as `fix_state/3`'s `held` names it) with `label`, `allow` or
+  `deny`, through `Intake.answer/4`, as an interactive delegate's is answered (F-146's new-5):
+  the operator's act, since a main session has no parent. Only while `state:` (the state the
+  caller claimed, `fix_state/3`'s) is still the session's; else `{:refused, {:moved, now}}`
+  and nothing is sent. Refused `{:not_held, request}` for a request it does not hold,
+  `:no_intake` without `intake:`, and as `fix_state/3`. Answers `Intake.answer/4`'s answer:
+  `{:ok, :sent}`; the dialog may have taken a person's answer first.
+
+      Mains.answer(mains, "app-epic", "41", "allow", state: state)
+      #=> {:ok, :sent}
+  """
+  @spec answer(GenServer.server(), String.t(), String.t(), String.t(), keyword) ::
+          outcome(:sent)
+  def answer(mains, name, request, label, opts \\ []) do
+    claimed = Keyword.get(opts, :state, :any)
+    call(mains, {:answer, name, request, label, claimed}, Keyword.get(opts, :timeout, 2 * @step))
+  end
 
   @doc """
   Ends main session `name` for good (F-143; `Team.tla`'s `MainEnds`): the operator's act
@@ -198,6 +221,7 @@ defmodule CodingAgentFramework.Mains do
     s = Map.new(keys, &{&1, Keyword.fetch!(opts, &1)})
 
     with {:ok, run} <- Programs.take(s.programs, [:git, :env]),
+         {:ok, intake} <- Intake.reader(opts),
          {:ok, projects} <- projects(s.home, s.projects),
          {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)),
          {:ok, starts} <- Starts.open(Keyword.fetch!(opts, :db)),
@@ -205,6 +229,7 @@ defmodule CodingAgentFramework.Mains do
       s =
         Map.merge(s, %{
           projects: projects,
+          intake: intake,
           db: db,
           starts: starts,
           agents: agents,
@@ -332,7 +357,7 @@ defmodule CodingAgentFramework.Mains do
     agent = Agents.get(s.agents, name)
 
     with :ok <- resumable(s, agent),
-         :ok <- claimed(agent, claimed),
+         :ok <- claimed(s, agent, claimed),
          {:ok, p} <- Map.fetch(s.projects, agent.project) |> known(agent.project),
          :ok <- made(s, agent.project),
          :ok <- model_ok(model),
@@ -346,11 +371,21 @@ defmodule CodingAgentFramework.Mains do
   end
 
   def handle_call({:fix_state, name}, _from, s) do
+    {:reply, with({:ok, agent} <- main_agent(s, name), do: fix_state_of(s, agent)), s}
+  end
+
+  # Team.tla's CanAct: the answer goes out only on the state its claim holds. The hold's one
+  # response is Intake's (Hold.tla), as for an interactive delegate's request.
+  def handle_call({:answer, name, request, label, claimed}, _from, s) do
     reply =
-      case Agents.get(s.agents, name) do
-        nil -> {:refused, :no_session}
-        %{kind: "main"} = agent -> {:ok, fix_state_of(agent)}
-        %{kind: kind} -> {:refused, {:not_main, kind}}
+      with true <- label in ~w(allow deny) or {:refused, {:bad, :label}},
+           true <- s.intake != nil or {:refused, :no_intake},
+           {:ok, agent} <- main_agent(s, name),
+           :ok <- claimed(s, agent, claimed),
+           {:ok, %{held: held}} <- fix_state_of(s, agent),
+           true <- request in held or {:refused, {:not_held, request}} do
+        decision = if label == "allow", do: :allow, else: {:deny, "Denied by the operator."}
+        Intake.answer(s.intake.pid, String.to_integer(request), decision, timeout: @step)
       end
 
     {:reply, reply, s}
@@ -367,12 +402,36 @@ defmodule CodingAgentFramework.Mains do
     end
   end
 
-  defp fix_state_of(agent), do: Map.take(agent, [:status, :session_id, :pid, :proc_start])
+  defp main_agent(s, name) do
+    case Agents.get(s.agents, name) do
+      nil -> {:refused, :no_session}
+      %{kind: "main"} = agent -> {:ok, agent}
+      %{kind: kind} -> {:refused, {:not_main, kind}}
+    end
+  end
 
-  defp claimed(_agent, :any), do: :ok
+  defp fix_state_of(s, agent) do
+    state = Map.take(agent, [:status, :session_id, :pid, :proc_start])
+    {:ok, Map.put(state, :held, held(s, agent))}
+  end
 
-  defp claimed(agent, state) do
-    now = fix_state_of(agent)
+  # The session's held PermissionRequests, as Intake keeps them. An Intake that never started
+  # on this host holds none.
+  defp held(%{intake: nil}, _agent), do: []
+
+  defp held(s, %{session_id: sid, account: account}) when is_binary(sid) and is_binary(account) do
+    case IntakeTable.session(s.intake.db, s.host, account, sid) do
+      {:ok, %{held: held}} -> Enum.map(held, &Integer.to_string/1)
+      :unread -> []
+    end
+  end
+
+  defp held(_s, _agent), do: []
+
+  defp claimed(_s, _agent, :any), do: :ok
+
+  defp claimed(s, agent, state) do
+    {:ok, now} = fix_state_of(s, agent)
     if now == state, do: :ok, else: {:refused, {:moved, now}}
   end
 

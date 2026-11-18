@@ -140,9 +140,12 @@ defmodule CodingAgentFramework.MailboxAskTest do
     assert {:refused, :no_answer} = Mailbox.reply(ctx.mailbox, id)
     assert {:ok, %{uuid: u}} = until(ctx, id, &(&1.status == "delivered"))
 
-    assert {:ok, %{from: "d1", to: "operator", kind: "reply", status: "kept"}} =
+    assert {:ok, %{from: "d1", to: "operator", kind: "reply", status: "kept", text: text}} =
              await(fn -> cue(ctx) && Mailbox.reply(ctx.mailbox, id) end, 10_000)
 
+    # The reply's own text, as its row keeps it (F-146's new-4).
+    assert %{text: ^text} = Table.answer(ctx.mtable, u)
+    assert text != ""
     refute Enum.any?(Table.open_rows(ctx.mtable), &(&1.reply_to == u))
   end
 

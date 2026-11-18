@@ -239,7 +239,10 @@ The LiveView side is a library of components over the `Tracker`, with one exampl
 JSON file checked whole at start with each refusal named, and `bin/caf-example` runs it with
 the operator's console in IEx (F-146; the end-to-end run is `docs/e2e.md`); one supervision
 tree starts every part in the order each needs, the reaper first, and one `Cues` per instance;
-it makes the hook secret and the `start_id` of `Acts` once per start. It routes no cue by hand:
+it makes the `start_id` of `Acts` once per start, and reads the hook secret, kept per home
+(`Intake.secret/1`: made at the first start, readable only by its user, changed only by a
+person, F-146's new-2, built in F-147), so a session held across a restart keeps its hooks. It
+routes no cue by hand:
 each part declares the topics it reads, `Cues` routes them, and `Jobs` and `Services` cue like
 every other part, so no ticker sends a made-up topic (R11). It opens no part's table: the tree,
 an agent's worktree and the agent a hook names are `Sessions`' functions (R9). What it still
@@ -576,6 +579,12 @@ model its row keeps (F-141's new-5); its row in `main_starts` names the session 
 `Acts` (`Mains.fix_state/3`: its status, session id and last process) and calls `resume_main`
 with it, which acts only while that state is still the row's (F-144). A move's resume needs
 none: the start's lease lives while a move of its session is under way.
+
+**A permission request** of a main session is the `PermissionRequest` `Intake` holds for its
+session, as an interactive delegate's is (F-146's new-5, built in F-147). The operator's
+`answer` of one claims its state (`Mains.fix_state/3`, which also names the requests held) and
+calls `Mains.answer/5` with it, which goes to `Intake.answer/4` only while that state is still
+the session's and the request is held. A person may answer the dialog on its screen first.
 
 **Its end** (F-143, `Team.tla`'s `MainEnds`) is the operator's act alone: `end_main(name)`, the
 operator's tool, `Mains.end_main/3`, which `Sessions.end_main/3` does. It is refused while a
@@ -1248,7 +1257,8 @@ starts by itself never replaces a reply or a report.
 person through `ask`. A reply to the operator's message, or the notice in its place, is stored
 addressed to the operator, `kept` from its store (F-138's new-1, as `Delivery.tla`'s `StoreRow`
 keeps a row to no session), so no settle reads it again, and never delivered: the app reads it
-by the message's id (`Mailbox.reply/2`, built in F-142). The operator's `run_delegate` hands the report to the operator, who
+by the message's id (`Mailbox.reply/2`, built in F-142), which answers the reply's text with
+its status (F-146's new-4, built in F-147). The operator's `run_delegate` hands the report to the operator, who
 waited for it. Either way the main session sees the act as it sees any act on its child: in the
 log, not as a message.
 
@@ -1357,9 +1367,9 @@ section.
 - **Transport.** Each account's settings name an `http` hook for each event the framework
   reads: SessionStart, SessionEnd, Stop, StopFailure, SubagentStart, SubagentStop, Notification,
   UserPromptSubmit, PermissionRequest and PermissionDenied. Each hook posts to
-  `http://127.0.0.1:<port>/hooks/<account>` on the framework's node, with a secret of the
-  instance's in a header, and sets its own `timeout`. No program on the host takes part, so a
-  held hook is one open request. PreToolUse and PostToolUse are written only when the app gives
+  `http://127.0.0.1:<port>/hooks/<account>` on the framework's node, with the home's secret
+  (kept per home, so it outlives a restart) in a header, and sets its own `timeout`. No program
+  on the host takes part, so a held hook is one open request. PreToolUse and PostToolUse are written only when the app gives
   `Intake` a callback for them, and are not stored as they come: they carry every tool input,
   and `Transcripts` reads those. A main session's waiter is the one `command` hook: it posts to
   `/hooks/<account>/waiter` ("Delivery into a main session").
@@ -1371,7 +1381,7 @@ section.
 
   | Kind | Hook | Decider | Deadline | Row |
   |---|---|---|---|---|
-  | `permission` | `PermissionRequest` | a person, or an agent's `answer` | 570 s of 600 s | yes |
+  | `permission` | `PermissionRequest` | a person, or an agent's or the operator's `answer` | 570 s of 600 s | yes |
   | `tool` | `PreToolUse` | the app's callback | 5 s of 10 s | yes |
   | `stop` | `Stop` | the app's callback (item 14) | under the hook's | a decision only |
   | `waiter` | the `asyncRewake` Stop hook | `Mailbox`'s due row, by `deliver` | 7,080 s of 7,200 s, with a heartbeat every 5 s | the delivery's, in `Mailbox` |
@@ -1780,6 +1790,10 @@ used and when it resets). It reads no credential and calls no API.
 - A reading past its `resets_at` counts as 0 % used, marked as assumed, since the week started
   anew. A view shows it as assumed until a session's first answer on that account gives a real
   reading.
+- An account with no reading counts as 0 % used, assumed, as a reset week does (F-146's new-1,
+  built in F-147): nothing on it has run, and an account has no reading until a session on it
+  draws its status line, so a new home could otherwise start no session. The first status line
+  replaces it.
 - `pick` answers the account with the most left among current and assumed readings, preferring a
   current one at the same share, or `refused{none_known}`. It never guesses past that.
 - A check flags an account whose sessions have run past their first answer with no new reading.
@@ -2066,7 +2080,9 @@ uuid, and each spec that instances a module compares its state counts before and
 15. **Packaging and toolchain**: one `coding_agent_framework` package; `Programs` looked up and
     checked at start, with a Homebrew setup documented; the Elixir and OTP floor tested; a
     library supervisor from a config struct, out of `caf_example`; accounts: how to log one in
-    (`bin/caf-login`, built in F-146), and Keychain reads for held processes (`USER`, and `security` on the launch's `PATH`).
+    (`bin/caf-login`, built in F-146), and Keychain reads for held processes (`security` on the
+    launch's `PATH`; no `USER`, since the OS user name stands in for it, F-146's new-3). Each
+    pinned release's check confirms both from a held session's login.
 16. **What the app reads and drives**: structured reports with a schema and several per
     delegate; app metadata and names on agents; status with the last activity, cost and tokens,
     and a needs-input state; one activity feed per agent; an urgent message (interrupt, then

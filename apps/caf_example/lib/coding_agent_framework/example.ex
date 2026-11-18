@@ -36,8 +36,10 @@ defmodule CodingAgentFramework.Example do
   checkout and its pull, and starts a main session (`start_main`): the app calls
   `Mains.landed/2` when something landed in a project's trunk.
 
-  **Once per start.** `start_link/1` makes `Acts`' `start_id` and the hooks' secret, and
-  writes each account's files with that secret, before any part starts.
+  **Once per start.** `start_link/1` makes `Acts`' `start_id`, reads the hooks' secret, kept
+  per home (`Intake.secret/1` on `<home>/intake.secret`, made at the first start), and writes
+  each account's files with that secret, before any part starts. A session held across a
+  restart keeps its hooks: its settings name the same secret.
 
   Nothing it starts acts outside the framework home but its own tmux server (whose socket is in
   the home) and its two ports.
@@ -87,7 +89,7 @@ defmodule CodingAgentFramework.Example do
          {:ok, jobs_work} <- Jobs.Work.open(Config.path(c, "parts/jobs")),
          {:ok, mains_work} <-
            Mains.Work.open(Config.path(c, "caf.db"), Config.path(c, "caf.db"), c.workstation),
-         secret = token(),
+         {:ok, secret} <- Intake.secret(Config.path(c, "intake.secret")),
          :ok <- prepare(c, accounts, programs, secret) do
       w = %{c: c, programs: programs, tmux: tmux, accounts: accounts, holder: holder}
       w = Map.merge(w, %{agents: agents, secret: secret, start_id: token()})
@@ -360,31 +362,36 @@ defmodule CodingAgentFramework.Example do
         # it serves: it declares the config's main sessions before it answers its start.
         {:mains,
          fn pid ->
-           {Mains,
-            host: host,
-            home: c.home,
-            db: db,
-            sessions_db: db,
-            programs: p,
-            reaper: pid.(:reaper),
-            sessions: pid.(:sessions),
-            mailbox: pid.(:mailbox),
-            usage: pid.(:usage),
-            accounts: w.accounts,
-            projects: c.projects,
-            mains: c.mains,
-            launch: [
-              claude: c.claude,
-              env: c.env,
-              tool_timeout: c.tool_timeout,
-              model: c.main_model
-            ],
-            mcp: &issue(pid.(:mcp), &1),
-            scheduler: pid.(:scheduler),
-            lease: c.lease,
-            operator: c.operator,
-            interval: every,
-            notify: notify}
+           {
+             Mains,
+             # The operator answers a main session's held permission request through it.
+             host: host,
+             home: c.home,
+             db: db,
+             sessions_db: db,
+             programs: p,
+             reaper: pid.(:reaper),
+             sessions: pid.(:sessions),
+             mailbox: pid.(:mailbox),
+             usage: pid.(:usage),
+             accounts: w.accounts,
+             projects: c.projects,
+             mains: c.mains,
+             launch: [
+               claude: c.claude,
+               env: c.env,
+               tool_timeout: c.tool_timeout,
+               model: c.main_model
+             ],
+             mcp: &issue(pid.(:mcp), &1),
+             scheduler: pid.(:scheduler),
+             lease: c.lease,
+             operator: c.operator,
+             intake: pid.(:intake),
+             intake_db: db,
+             interval: every,
+             notify: notify
+           }
          end},
         {:copies, fn _ -> {Copies, dir: Config.path(c, "parts/copies"), programs: p} end},
         {:jobs,

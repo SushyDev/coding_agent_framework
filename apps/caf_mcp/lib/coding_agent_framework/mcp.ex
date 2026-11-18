@@ -66,9 +66,12 @@ defmodule CodingAgentFramework.MCP do
     from byte `from`, and the next offset. A main session is refused until `Screen` and `Mains`.
   - the fix tools, a parent's on its own delegate, or the operator's on any (`Grants.may_fix?/3`;
     no agent fixes a main session; the operator's resume of one claims `Mains.fix_state/3`'s
-    state and calls `Mains.resume_main/3` with it, F-144, and its other fixes of one are
-    refused `{:not_built, :main_fix}`): `interrupt(agent)`, `answer(agent, dialog, label)` (`dialog` is the open
-    `can_use_tool` request's id, `label` `allow` or `deny`), `resume(agent)` (a delegate whose
+    state and calls `Mains.resume_main/3` with it, F-144, its answer of one's held permission
+    request calls `Mains.answer/5` the same way, F-147, and its other fixes of one are refused
+    `{:not_built, :main_fix}`): `interrupt(agent)`, `answer(agent, dialog, label)` (`dialog`
+    is the open request's id: a headless delegate's `can_use_tool` request, or the
+    `PermissionRequest` row `Intake` holds for an interactive delegate or a main session;
+    `label` `allow` or `deny`), `resume(agent)` (a delegate whose
     process died) and `stop(agent)` (once its report is delivered). Each reads the delegate's
     state (`Delegates.fix_state/3`), claims it in `Acts` (`Acts.claim/6`, act the tool's name),
     then `Delegates.fix/5` acts only while that state is still the delegate's, and the claim
@@ -955,7 +958,7 @@ defmodule CodingAgentFramework.MCP do
   end
 
   # Who reads the target's state and acts: `Delegates` for a delegate, as its parent; `Mains`
-  # for the operator's resume of a main session. Its other fixes are not built.
+  # for the operator's resume and answer of a main session. Its other fixes are not built.
   defp fixer(ctx, caller, agent, tool) do
     case as_parent(ctx, caller, agent) do
       {:ok, parent} ->
@@ -977,6 +980,18 @@ defmodule CodingAgentFramework.MCP do
              with {:ok, %{name: name}} <-
                     mod.resume_main(server, agent, state: state, timeout: @start_wait),
                   do: {:ok, %{resumed: name}}
+           end
+         }}
+
+      # F-146's new-5: a main session's held permission request, through Intake under the claim.
+      {:refused, {:not_built, :main_fix}} when tool == "answer" and ctx.mains != nil ->
+        {mod, server} = ctx.mains
+
+        {:ok,
+         %{
+           state: fn -> mod.fix_state(server, agent) end,
+           fix: fn {:answer, request, label}, state ->
+             mod.answer(server, agent, request, label, state: state)
            end
          }}
 

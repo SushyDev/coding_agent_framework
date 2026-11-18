@@ -16,7 +16,8 @@ defmodule CodingAgentFramework.Intake do
 
   and `CodingAgentFramework.Accounts.prepare/3` with `intake: %{port: 4790, secret: secret}`
   writes the hooks that post there (`hooks/4`), with `tools: [:pre_tool_use]` for each tool
-  callback the app gives.
+  callback the app gives. The secret is the home's, kept across starts (`secret/1`), so a
+  session held across a restart still posts with the one the plug takes.
 
   - An event's row is written, then the plug answers 200 with an empty body. A second post of
     one key (`CodingAgentFramework.Intake.Event`) writes no second row.
@@ -186,6 +187,99 @@ defmodule CodingAgentFramework.Intake do
     else
       {:secret, false} -> {:refused, :bad_secret}
       _ -> {:refused, {:bad_paths, paths}}
+    end
+  end
+
+  @doc """
+  Another part's hold on the host's `Intake`, from that part's `intake:` (the process) and
+  `intake_db:` (its file) options, as `Delegates` and `Mains` take them: `{:ok, %{pid: pid, db:
+  db}}`, `db` a reader of the part's own (`Intake.Table`); `{:ok, nil}` without `intake:`; or
+  `{:refused, {:bad, :intake_db}}` when the file is not named.
+  """
+  @spec reader(keyword) :: {:ok, %{pid: GenServer.server(), db: term} | nil} | {:refused, term}
+  def reader(opts) do
+    case {opts[:intake], opts[:intake_db]} do
+      {nil, _} ->
+        {:ok, nil}
+
+      {pid, path} when is_binary(path) ->
+        with {:ok, db} <- Table.open(path), do: {:ok, %{pid: pid, db: db}}
+
+      _ ->
+        {:refused, {:bad, :intake_db}}
+    end
+  end
+
+  @doc """
+  The hooks' secret kept at `path`, a file under the framework home: read at every start, and
+  made at the first, readable only by its user (mode 0600). A session held across a restart
+  was started with the hooks of an earlier start, and its settings are written again only at
+  its start or resume, so the secret outlives every start: it changes only when a person
+  removes the file, and a session held then posts with the old one until its next resume.
+
+  It is made whole, under a name of its own, and linked into place, so a start never reads half
+  a secret and never replaces one. A file that is not a secret, or that others may read, is
+  refused, not replaced.
+
+      iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "intake.secret")
+      iex> {:ok, secret} = CodingAgentFramework.Intake.secret(path)
+      iex> CodingAgentFramework.Intake.secret(path) == {:ok, secret}
+      true
+      iex> File.stat!(path).mode |> Bitwise.band(0o777) |> Integer.to_string(8)
+      "600"
+  """
+  @spec secret(Path.t()) :: {:ok, String.t()} | {:refused, term} | {:unknown, term}
+  def secret(path) do
+    case File.read(path) do
+      {:ok, text} -> kept_secret(path, text)
+      {:error, :enoent} -> make_secret(path)
+      {:error, reason} -> {:unknown, {:secret, path, reason}}
+    end
+  end
+
+  defp kept_secret(path, text) do
+    secret = String.trim(text)
+
+    case File.stat(path) do
+      {:ok, %{mode: mode}} when Bitwise.band(mode, 0o077) != 0 ->
+        {:refused, {:secret_readable, path}}
+
+      {:ok, _} ->
+        if secret =~ @secret_chars, do: {:ok, secret}, else: {:refused, {:bad_secret, path}}
+
+      {:error, reason} ->
+        {:unknown, {:secret, path, reason}}
+    end
+  end
+
+  # Made with no access for others before a byte is written, then linked: a link fails on a
+  # name that is taken, so a secret another start made first is read, never replaced.
+  defp make_secret(path) do
+    secret = Base.url_encode64(:crypto.strong_rand_bytes(24), padding: false)
+    tmp = "#{path}.#{System.os_time(:nanosecond)}.#{System.unique_integer([:positive])}"
+
+    result =
+      with :ok <- File.mkdir_p(Path.dirname(path)),
+           {:ok, file} <- File.open(tmp, [:write, :exclusive, :binary]),
+           :ok <- secret_chmod(file, tmp),
+           :ok <- IO.binwrite(file, secret),
+           :ok <- File.close(file) do
+        File.ln(tmp, path)
+      end
+
+    File.rm(tmp)
+
+    case result do
+      :ok -> {:ok, secret}
+      {:error, :eexist} -> secret(path)
+      {:error, reason} -> {:unknown, {:secret, path, reason}}
+    end
+  end
+
+  defp secret_chmod(file, tmp) do
+    with {:error, _} = error <- File.chmod(tmp, 0o600) do
+      File.close(file)
+      error
     end
   end
 

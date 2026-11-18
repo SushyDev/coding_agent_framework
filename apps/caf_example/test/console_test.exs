@@ -185,12 +185,8 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
       end
     end
 
-    # The first account's last weekly reading, as its status line would have written it.
-    usage = Path.join(ctx.data["home"], "usage/one.json")
-    File.mkdir_p!(Path.dirname(usage))
-    week = %{"seven_day" => %{"used_percentage" => 25, "resets_at" => 4_000_000_000}}
-    File.write!(usage, JSON.encode!(%{"rate_limits" => week}))
-
+    # A new home: no account has a reading, so each counts as assumed at 0 % (F-146's new-1),
+    # and a start picks the first.
     path = write!(ctx, ctx.data)
     {:ok, config} = ConfigFile.read(path, ctx.env)
     {:ok, server} = Example.server(config)
@@ -212,6 +208,15 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
     [_, id] = Regex.run(~r/queued as message (\d+);/, out.())
     delivered = "message #{id} from operator to app-unit-one: delivered by stream"
     see.(fn -> Console.status(caf, String.to_integer(id)) end, delivered)
+
+    # The reply's own text follows its status (F-146's new-4).
+    see.(
+      fn -> Console.status(caf, String.to_integer(id)) end,
+      ~r/  reply \d+ from app-unit-one: kept\n  \| \S/
+    )
+
+    # A main session's held permission requests (F-146's new-5): a declared one holds none.
+    see.(fn -> Console.requests(caf, "app-main") end, "app-main holds no permission request")
 
     # The operator's run_delegate prints the report once it comes, from a process of its own.
     :ok = Console.run_delegate(caf, "app-main", "app", "unit/two", "Go.", timeout: 20_000)

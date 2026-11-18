@@ -111,6 +111,27 @@ defmodule CodingAgentFramework.IntakeTest do
     assert [%{hold: "lost"}, %{hold: "unknown"}] = rows(db)
   end
 
+  test "the hooks' secret is made once per home, kept, and never replaced" do
+    dir = CodingAgentFramework.TestHost.test_dir()
+    path = Path.join([dir, "home", "intake.secret"])
+    {:ok, secret} = Intake.secret(path)
+    assert secret =~ ~r/\A[A-Za-z0-9_-]{32}\z/
+    assert Intake.secret(path) == {:ok, secret}
+    assert File.ls!(Path.dirname(path)) == ["intake.secret"]
+
+    # A person's own secret, a newline after it, is read as it is.
+    File.write!(path, "mine.1\n")
+    assert Intake.secret(path) == {:ok, "mine.1"}
+
+    File.chmod!(path, 0o640)
+    assert Intake.secret(path) == {:refused, {:secret_readable, path}}
+
+    File.chmod!(path, 0o600)
+    File.write!(path, "no 'quotes'")
+    assert Intake.secret(path) == {:refused, {:bad_secret, path}}
+    assert File.read!(path) == "no 'quotes'"
+  end
+
   describe "the event parser" do
     defp text,
       do:

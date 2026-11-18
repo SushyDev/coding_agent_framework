@@ -307,13 +307,14 @@ defmodule CodingAgentFramework.Mailbox do
   def answer_to(mailbox, key, opts \\ []), do: call(mailbox, {:answer_to, key}, opts)
 
   @doc """
-  The reply to message `id`, or the notice in its place, as `status/3` answers a row: how the
-  app reads the answer to the operator's message, which is `kept` for it and never delivered
-  ("Agents working together"). `{:refused, :no_message}` for no such row, `{:refused,
-  :no_answer}` while none has come.
+  The reply to message `id`, or the notice in its place, as `status/3` answers a row and with
+  its `text`: how the app reads the answer to the operator's message, which is `kept` for it
+  and never delivered ("Agents working together"). `{:refused, :no_message}` for no such row,
+  `{:refused, :no_answer}` while none has come.
 
       Mailbox.reply(mailbox, 12)
-      #=> {:ok, %{id: 14, from: "app-unit", to: "operator", kind: "reply", status: "kept", …}}
+      #=> {:ok, %{id: 14, from: "app-unit", to: "operator", kind: "reply", status: "kept",
+      #=>   text: "The tests pass.", …}}
   """
   def reply(mailbox, id), do: call(mailbox, {:reply, id}, [])
 
@@ -649,8 +650,14 @@ defmodule CodingAgentFramework.Mailbox do
 
   def handle_call({:reply, id}, _from, s) do
     case Table.get(s.db, id) do
-      %{uuid: uuid} -> {:reply, shown(Table.answer(s.db, uuid) || {:refused, :no_answer}), s}
-      nil -> {:reply, {:refused, :no_message}, s}
+      %{uuid: uuid} ->
+        case Table.answer(s.db, uuid) do
+          nil -> {:reply, {:refused, :no_answer}, s}
+          answer -> {:reply, with_text(shown(answer), answer), s}
+        end
+
+      nil ->
+        {:reply, {:refused, :no_message}, s}
     end
   end
 
@@ -744,6 +751,8 @@ defmodule CodingAgentFramework.Mailbox do
      Map.take(m, keys)
      |> Map.merge(%{from: m.from_agent, to: m.to_agent, is_error: bool(m.is_error)})}
   end
+
+  defp with_text({:ok, shown}, m), do: {:ok, Map.put(shown, :text, m.text)}
 
   defp bool(n), do: %{1 => true, 0 => false}[n]
 

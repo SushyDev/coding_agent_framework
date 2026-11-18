@@ -19,6 +19,7 @@ defmodule CafMains.MixProject do
     [
       {:caf_accounts, in_umbrella: true},
       {:caf_cli, in_umbrella: true},
+      {:caf_intake, in_umbrella: true},
       {:caf_mailbox, in_umbrella: true},
       {:caf_scheduler, in_umbrella: true},
       {:caf_sessions, in_umbrella: true},
