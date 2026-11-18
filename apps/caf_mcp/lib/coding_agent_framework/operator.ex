@@ -39,11 +39,23 @@ defmodule CodingAgentFramework.Operator do
       Operator.start_main(mcp, "app", "app-epic", "Plan the epic.")
       #=> {:ok, %{main: "app-epic"}}
   """
-  @spec start_main(GenServer.server(), String.t(), String.t(), String.t()) :: answer
-  def start_main(mcp, project, name, brief) do
+  @spec start_main(GenServer.server(), String.t(), String.t(), String.t(), String.t() | nil) ::
+          answer
+  def start_main(mcp, project, name, brief, model \\ nil) do
     args = %{"project" => project, "name" => name, "brief" => brief}
+    args = if model, do: Map.put(args, "model", model), else: args
     MCP.operate(mcp, "start_main", args)
   end
+
+  @doc """
+  Ends main session `name` for good (F-143): refused while any delegate of it has not ended;
+  otherwise it is stopped once idle, its agent row is `ended`, and what it owns ends with it.
+
+      Operator.end_main(mcp, "app-epic")
+      #=> {:ok, :ended}
+  """
+  @spec end_main(GenServer.server(), String.t()) :: answer
+  def end_main(mcp, name), do: MCP.operate(mcp, "end_main", %{"name" => name})
 
   @doc "Sends `text` to agent `to`, stored first and typed into an ended turn, as any message."
   @spec message(GenServer.server(), String.t(), String.t()) :: answer

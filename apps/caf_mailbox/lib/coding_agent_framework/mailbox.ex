@@ -207,6 +207,18 @@ defmodule CodingAgentFramework.Mailbox do
   def ended(mailbox, to, opts \\ []), do: call(mailbox, {:ended, to}, opts)
 
   @doc """
+  The one row stored under `uuid` will never go in: the brief of a main session's start that
+  was refused (`Mains`, F-143), while other rows to that name stay queued for its next start.
+  A `queued` row is settled `ended`; answers `{:ok, :ended}`, `{:ok, status}` for a row already
+  settled, or `{:refused, {:not_queued, status}}` for one in flight, or `{:refused,
+  :no_message}`.
+
+      Mailbox.settle_row(mailbox, "6f1c…")
+      #=> {:ok, :ended}
+  """
+  def settle_row(mailbox, uuid, opts \\ []), do: call(mailbox, {:settle_row, uuid}, opts)
+
+  @doc """
   Agent `from` asks a person (`docs/design.md`, `ask`; `Team.tla`'s `Ask`), with `questions`
   as `Mailbox.Ask.questions/1` checks them. The ask is a row from `from` to the operator, kept
   for the app as a reply to the operator is, and never delivered: nothing waits on it. Answers
@@ -534,6 +546,26 @@ defmodule CodingAgentFramework.Mailbox do
     ids = for %{to_agent: ^to, status: "queued"} = m <- Table.open_rows(s.db), do: m.id
     for id <- ids, do: write(s, %{id: id}, status: "ended")
     {:reply, {:ok, ids}, s}
+  end
+
+  def handle_call({:settle_row, uuid}, _from, s) do
+    reply =
+      case Table.by_uuid(s.db, uuid) do
+        nil ->
+          {:refused, :no_message}
+
+        %{status: "queued"} = m ->
+          write(s, m, status: "ended")
+          {:ok, :ended}
+
+        %{status: "sending"} ->
+          {:refused, {:not_queued, "sending"}}
+
+        %{status: status} ->
+          {:ok, status}
+      end
+
+    {:reply, reply, s}
   end
 
   def handle_call({:await, to, key, deadline}, from, s) do

@@ -96,7 +96,8 @@ defmodule CodingAgentFramework.Mains do
   @doc """
   Starts main session `name` of `project`, with `brief` (a string, or nil for none) as its
   first message (see the module doc). Options: `from:` (the brief's sender: a main session's
-  name, or the operator's; the operator's by default), `timeout:` (what the caller waits,
+  name, or the operator's; the operator's by default), `model:` (the model it runs, else the
+  app's launch's, F-141's new-8), `timeout:` (what the caller waits,
   default 300 000 ms; the start goes on past it). Answers `{:ok, %{name, account,
   session_id}}`; `{:refused, reason}`: `{:running, name}`, `{:unknown_project, project}`,
   `{:checkout, state}` while the checkout is not made, `{:too_long, max}` for a brief a launch
@@ -107,8 +108,42 @@ defmodule CodingAgentFramework.Mains do
           outcome(map)
   def start_main(mains, project, name, brief, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 300_000)
-    call(mains, {:start_main, project, name, brief, opts[:from]}, timeout)
+    call(mains, {:start_main, project, name, brief, opts[:from], opts[:model]}, timeout)
   end
+
+  @doc """
+  Resumes main session `name`, whose process ended (its agent row `stopped`), in its checkout
+  with its session id (F-141's new-5): new work, so it writes a start's row and asks the
+  `Scheduler` for a lease of its own, class main session, as `start_main/5` does, and then
+  `Sessions.resume/6` on the account with the most allowance left. Options: `model:` (else the
+  model its row keeps) and `timeout:`. Answers as `start_main/5` does; refused also
+  `:no_session`, `{:not_main, kind}`, `{:not_stopped, status}` and `{:running, name}` while a
+  start of it is under way.
+
+      Mains.resume_main(mains, "app-epic")
+      #=> {:ok, %{name: "app-epic", account: "home", session_id: "…"}}
+  """
+  @spec resume_main(GenServer.server(), String.t(), keyword) :: outcome(map)
+  def resume_main(mains, name, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 300_000)
+    call(mains, {:resume_main, name, opts[:model]}, timeout)
+  end
+
+  @doc """
+  Ends main session `name` for good (F-143; `Team.tla`'s `MainEnds`): the operator's act
+  alone, which the app or the operator's tool `end_main` calls. Refused `{:starting, name}`
+  while a start of it is under way here; then `Sessions.end_main/3` refuses it while any of its
+  delegates has not ended (`{:delegates, names}`), stops it once idle, and marks its agent row
+  `ended`, so the app's end of an owner's services ends every one it owns, kept ones too. Its
+  name never starts again. Answers `{:ok, :ended}` or what `Sessions.end_main/3` answers.
+
+      Mains.end_main(mains, "app-epic")
+      #=> {:ok, :ended}
+      #=> {:refused, {:delegates, ["app-epic-api"]}}
+  """
+  @spec end_main(GenServer.server(), String.t(), keyword) :: outcome(:ended)
+  def end_main(mains, name, opts \\ []),
+    do: call(mains, {:end_main, name}, Keyword.get(opts, :timeout, @call + @slack))
 
   @doc """
   Something landed in `project`'s trunk: a pull of its checkout is owed, and goes as soon as no
@@ -170,8 +205,12 @@ defmodule CodingAgentFramework.Mains do
           notify: Keyword.get(opts, :notify, fn _ -> :ok end),
           clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
           # Per project: the task under way, and whether a pull is owed.
-          checkouts: Map.new(projects, fn {name, _} -> {name, %{task: nil, owed: false}} end),
+          checkouts:
+            Map.new(projects, fn {name, _} ->
+              {name, %{task: nil, owed: false, pulling: false}}
+            end),
           calls: %{},
+          ends: %{},
           waiting: %{}
         })
 
@@ -254,36 +293,70 @@ defmodule CodingAgentFramework.Mains do
     {:reply, reply, s}
   end
 
-  def handle_call({:start_main, project, name, brief, from_name}, from, s) do
+  def handle_call({:start_main, project, name, brief, from_name, model}, from, s) do
     with :ok <- name_ok(s, name),
          {:ok, p} <- Map.fetch(s.projects, project) |> known(project),
          :ok <- made(s, project),
          :ok <- free(s, project, name),
          :ok <- brief_ok(brief),
+         :ok <- model_ok(model),
          {:ok, account} <- pick(s),
          {:ok, _} <- Sessions.declare(s.sessions, name, project) do
       uuid = if brief, do: Stream.uuid()
-      start = %{host: s.host, project: project, name: name, account: account.name}
-
-      row =
-        Starts.starting(s.starts, Map.merge(start, %{brief_uuid: uuid, deadline: deadline(s)}))
-
-      announce(s, row.id)
+      row = starting(s, project, name, account, uuid)
       start = %{p: p, account: account, brief: brief, from: from_name || s.operator}
-
-      # Schedule.tla: the row is the lease's holder, written before the lease is asked for.
-      case lease(s, row, account) do
-        {:ok, _lease} ->
-          begin(s, row, start, from)
-
-        {:queued, %{id: request}} ->
-          {:noreply, put_in(s.waiting[request], %{id: row.id, from: from, start: start})}
-
-        not_granted ->
-          {:reply, refuse(s, row, {:lease, lease_refusal(not_granted)}), s}
-      end
+      leased(s, row, Map.merge(start, %{model: model, resume: nil}), from)
     else
       refused -> {:reply, refused, s}
+    end
+  end
+
+  # F-141's new-5: a resume is new work, so it asks for a lease of its own, as a start does.
+  def handle_call({:resume_main, name, model}, from, s) do
+    agent = Agents.get(s.agents, name)
+
+    with :ok <- resumable(s, agent),
+         {:ok, p} <- Map.fetch(s.projects, agent.project) |> known(agent.project),
+         :ok <- made(s, agent.project),
+         :ok <- model_ok(model),
+         {:ok, account} <- pick(s) do
+      row = starting(s, agent.project, name, account, nil)
+      start = %{p: p, account: account, brief: nil, from: nil, model: model}
+      leased(s, row, Map.put(start, :resume, agent.session_id), from)
+    else
+      refused -> {:reply, refused, s}
+    end
+  end
+
+  # A start of the name under way would run a second process; Sessions refuses the rest.
+  def handle_call({:end_main, name}, from, s) do
+    if Enum.any?(Starts.starting_rows(s.starts, s.host), &(&1.name == name)) do
+      {:reply, {:refused, {:starting, name}}, s}
+    else
+      sessions = s.sessions
+      task = Task.async(fn -> Sessions.end_main(sessions, name, timeout: @call) end)
+      {:noreply, put_in(s.ends[task.ref], from)}
+    end
+  end
+
+  defp starting(s, project, name, account, uuid) do
+    start = %{host: s.host, project: project, name: name, account: account.name}
+    row = Starts.starting(s.starts, Map.merge(start, %{brief_uuid: uuid, deadline: deadline(s)}))
+    announce(s, row.id)
+    row
+  end
+
+  # Schedule.tla: the row is the lease's holder, written before the lease is asked for.
+  defp leased(s, row, start, from) do
+    case lease(s, row, start.account) do
+      {:ok, _lease} ->
+        begin(s, row, start, from)
+
+      {:queued, %{id: request}} ->
+        {:noreply, put_in(s.waiting[request], %{id: row.id, from: from, start: start})}
+
+      not_granted ->
+        {:reply, refuse(s, row, {:lease, lease_refusal(not_granted)}), s}
     end
   end
 
@@ -339,6 +412,10 @@ defmodule CodingAgentFramework.Mains do
         s = %{s | calls: calls}
         {:noreply, reply_to(from, answered(s, Starts.get(s.starts, id), answer), s)}
 
+      Map.has_key?(s.ends, ref) ->
+        {from, ends} = Map.pop(s.ends, ref)
+        {:noreply, reply_to(from, answer, %{s | ends: ends})}
+
       project = Enum.find_value(s.checkouts, fn {p, c} -> if c.task == ref, do: p end) ->
         {:noreply, checked(s, project, answer)}
 
@@ -373,18 +450,18 @@ defmodule CodingAgentFramework.Mains do
       not File.dir?(p.repo) ->
         s
         |> put(name, state: "cloning", owed: true, reason: nil)
-        |> run_task(name, fn -> clone(s, p) end)
+        |> run_task(name, false, fn -> clone(s, p) end)
 
       true ->
-        run_task(s, name, fn -> read(s, p, c.owed) end)
+        run_task(s, name, c.owed, fn -> read(s, p, c.owed) end)
     end
   end
 
   # A task linked to Mains, as a worktree's in `Sessions`: its git commands run with the host's
   # reaper, so Mains' death ends them, and a restart finds only what is on disk.
-  defp run_task(s, name, fun) do
+  defp run_task(s, name, pulling?, fun) do
     task = Task.async(fun)
-    put_in(s.checkouts[name], %{task: task.ref, owed: false})
+    put_in(s.checkouts[name], %{task: task.ref, owed: false, pulling: pulling?})
   end
 
   # A task's answer: the reading written, and the pull owed again when a reading held it back,
@@ -409,9 +486,17 @@ defmodule CodingAgentFramework.Mains do
           s = put_in(s.checkouts[name].owed, landed? or held?)
           put(s, name, fields ++ [reason: reason, owed: landed? or held?])
 
+        # A lock is a person's to clear: the pull stays owed, as one a reading held back does,
+        # and the read after they clear it pulls (F-143). Nothing here removes it.
         {:failed, reason} ->
-          state = if File.dir?(s.projects[name].repo), do: "failed", else: "absent"
-          put(s, name, state: state, reason: Store.text(reason), owed: landed?)
+          state =
+            if File.dir?(s.projects[name].repo),
+              do: Checkout.failed_state(reason),
+              else: "absent"
+
+          owed? = landed? or (state == "locked" and s.checkouts[name].pulling)
+          s = put_in(s.checkouts[name].owed, owed?)
+          put(s, name, state: state, reason: Store.text(reason), owed: owed?)
       end
 
     # A new checkout is read, and pulled, at once.
@@ -497,7 +582,11 @@ defmodule CodingAgentFramework.Mains do
          {:ok, status} <- git(s, p, {:status, p.repo}, @git),
          {:ok, counts} <- git(s, p, {:counts, p.repo, p.trunk}, @git),
          %{} = r <- Checkout.reading(p.trunk, b, status, counts) do
-      {:ok, r}
+      # git's own lock, which a cut command leaves: a read may still pass, a merge never does.
+      # Read, never removed: a person clears it (F-143).
+      if File.exists?(Checkout.lock_path(p.repo)),
+        do: {:ok, %{r | state: "locked"}},
+        else: {:ok, r}
     else
       {_, reason} -> {:failed, {:read, reason}}
     end
@@ -562,6 +651,27 @@ defmodule CodingAgentFramework.Mains do
 
   defp brief_ok(_brief), do: {:refused, {:bad, :brief}}
 
+  defp model_ok(nil), do: :ok
+  defp model_ok(model) when is_binary(model) and model != "", do: :ok
+  defp model_ok(_model), do: {:refused, {:bad, :model}}
+
+  # A main session whose process ended, with a session to resume, and no start of it under way.
+  defp resumable(_s, nil), do: {:refused, :no_session}
+  defp resumable(_s, %{kind: kind}) when kind != "main", do: {:refused, {:not_main, kind}}
+
+  defp resumable(s, agent) do
+    cond do
+      Enum.any?(Starts.starting_rows(s.starts, s.host), &(&1.name == agent.name)) ->
+        {:refused, {:running, agent.name}}
+
+      agent.status == "stopped" and is_binary(agent.session_id) and not Agents.moving?(agent) ->
+        :ok
+
+      true ->
+        {:refused, {:not_stopped, agent.status}}
+    end
+  end
+
   defp pick(s) do
     with {:ok, %{readings: readings}} <- Usage.readings(s.usage, timeout: @step),
          {:ok, name} <- Usage.pick(readings, s.accounts.names) do
@@ -595,10 +705,9 @@ defmodule CodingAgentFramework.Mains do
   # start as its first message; Sessions starts the session in the checkout.
   defp begin(s, row, start, from) do
     with :ok <- brief(s, row, start),
-         {:ok, launched} <- launch_first(s, row) do
-      launch =
-        [role: :parent, kind: :main, cwd: start.p.repo, project: row.project] ++ s.launch
-
+         {:ok, launched} <- launch_first(s, row, start) do
+      launch = [role: :parent, kind: :main, cwd: start.p.repo, project: row.project]
+      launch = launch ++ launch_model(s.launch, start)
       launch = if launched, do: launch ++ [prompt: launched.text], else: launch
       {sessions, mailbox, mcp} = {s.sessions, s.mailbox, s.mcp}
 
@@ -608,7 +717,7 @@ defmodule CodingAgentFramework.Mains do
           answer =
             with {:ok, config} <- mcp.(row.name) do
               launch = if config, do: launch ++ [mcp: config], else: launch
-              Sessions.start(sessions, row.name, start.account, launch, timeout: @call)
+              session(sessions, row.name, start, launch)
             end
 
           if launched, do: Mailbox.launched(mailbox, launched.id, answer)
@@ -630,7 +739,26 @@ defmodule CodingAgentFramework.Mains do
     end
   end
 
-  defp launch_first(s, row) do
+  defp session(sessions, name, %{resume: nil} = start, launch),
+    do: Sessions.start(sessions, name, start.account, launch, timeout: @call)
+
+  defp session(sessions, name, start, launch),
+    do: Sessions.resume(sessions, name, start.account, start.resume, launch, timeout: @call)
+
+  # The model the caller names (F-141's new-8), else the app's; a resume that names none runs
+  # the one its row keeps, as a move's resume does.
+  defp launch_model(launch, %{model: model}) when is_binary(model),
+    do: Keyword.put(launch, :model, model)
+
+  defp launch_model(launch, %{resume: resume}) when is_binary(resume),
+    do: Keyword.delete(launch, :model)
+
+  defp launch_model(launch, _start), do: launch
+
+  # A resume carries no brief: what is queued to it goes in by its waiter once it runs.
+  defp launch_first(_s, _row, %{resume: resume}) when is_binary(resume), do: {:ok, nil}
+
+  defp launch_first(s, row, _start) do
     case Mailbox.launch(s.mailbox, row.name, row.deadline) do
       {:ok, %{id: _, text: _} = launched} -> {:ok, launched}
       {:ok, :none} -> {:ok, nil}
@@ -653,10 +781,16 @@ defmodule CodingAgentFramework.Mains do
     unknown
   end
 
+  # A refused start's brief never goes in (F-141's new-4): its one row is settled, and other
+  # rows to the name stay queued for its next start.
   defp refuse(s, row, why) do
     write(s, row, status: "refused", reason: why)
+    drop_brief(s, row)
     {:refused, why}
   end
+
+  defp drop_brief(_s, %{brief_uuid: nil}), do: :ok
+  defp drop_brief(s, row), do: Mailbox.settle_row(s.mailbox, row.brief_uuid)
 
   # A start with no call under way here, read again: by the agent row of its call once that row
   # is settled; with none by its deadline, the call never reached Sessions.
@@ -673,9 +807,11 @@ defmodule CodingAgentFramework.Mains do
 
         since? and Agents.free?(agent) ->
           write(s, row, status: "refused", reason: agent.status)
+          drop_brief(s, row)
 
         not since? and s.clock.() >= row.deadline ->
           write(s, row, status: "refused", reason: :interrupted)
+          drop_brief(s, row)
 
         true ->
           :ok

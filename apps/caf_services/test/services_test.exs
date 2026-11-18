@@ -209,7 +209,11 @@ defmodule CodingAgentFramework.ServicesTest do
              Services.owner_ended(c.services, "web-a")
 
     assert %{state: "running", owner: "web-main", keep: true, pid: ^pid} = row(c, "web")
-    assert {:ok, %{state: "ended"}} = Services.stop(c.services, "web-main", "web")
+
+    # F-143, Team.tla's Kept: a main session has no parent, and the operator owns nothing, so
+    # what it kept ends with it.
+    assert {:ok, %{"web" => {:ok, :ended}}} = Services.owner_ended(c.services, "web-main")
+    assert {:ok, :gone} = gone(pid)
   end
 
   test "StartsOnSyncedCopy, OneProcess: a restart ends the service, syncs again and counts", c do

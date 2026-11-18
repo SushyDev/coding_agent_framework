@@ -530,6 +530,16 @@ defmodule CodingAgentFramework.ExampleTest do
 
     assert {:refused, {:unknown_project, "web"}} =
              Operator.start_main(parts.mcp, "web", "web-main", "Go.")
+
+    # A main session's end (F-143) is the operator's: a declared one with no delegate ends at
+    # once, and its name never starts again.
+    assert {:refused, :operator_only} =
+             MCP.call(parts.mcp, "app-main", "end_main", %{"name" => "app-main"})
+
+    assert {:ok, :ended} = Operator.end_main(parts.mcp, "app-main")
+
+    assert {:refused, {:running, "app-main"}} =
+             Operator.start_main(parts.mcp, "app", "app-main", "Go.")
   end
 
   # The parts the app wires and the topics each one cues on, as the parts write them.

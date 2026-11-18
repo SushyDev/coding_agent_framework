@@ -489,9 +489,9 @@ defmodule CodingAgentFramework.Services do
   end
 
   @doc """
-  The owner's end: the embedding app calls it when agent `owner` ends. Each running service it
-  owns with `keep` goes to its parent; each other one ends, as `stop/4` ends it, with its
-  options. Answers each service's outcome by name: `{:ok, {:handed, parent}}`, `{:ok,
+  The owner's end: the embedding app calls it when agent `owner` ends. Each running service a
+  delegate owns with `keep` goes to its parent; each other one ends, as `stop/4` ends it, with
+  its options, and so does every one a main session owns, kept or not, since it has no parent. Answers each service's outcome by name: `{:ok, {:handed, parent}}`, `{:ok,
   :ended}`, or what its end answered. A service whose start is under way is not taken.
 
   With `:acts`, the end of a running service is a row of its own (F-130's new-3): actor `app`,
@@ -508,10 +508,20 @@ defmodule CodingAgentFramework.Services do
     end
   end
 
-  defp owner_end(services, grants, %{keep: true, state: "running"} = row, _opts) do
-    with {:ok, parent} <- Grants.parent(grants, row.owner),
-         {:ok, _} <- put(services, row.name, %{owner: parent}, %{owner: row.owner}),
-         do: {:ok, {:handed, parent}}
+  # A kept service goes to a delegate's parent. A main session has none, and the operator owns
+  # nothing (F-143, `Team.tla`'s `Kept`): what it kept ends with it.
+  defp owner_end(services, grants, %{keep: true, state: "running"} = row, opts) do
+    case Grants.parent(grants, row.owner) do
+      {:ok, parent} ->
+        with {:ok, _} <- put(services, row.name, %{owner: parent}, %{owner: row.owner}),
+             do: {:ok, {:handed, parent}}
+
+      {:refused, :main_has_no_parent} ->
+        owner_end(services, grants, %{row | keep: false}, opts)
+
+      other ->
+        other
+    end
   end
 
   defp owner_end(services, _grants, row, opts) do
