@@ -23,7 +23,9 @@ defmodule CodingAgentFramework.Screen do
     * `%{state: :dialog, kind: kind, options: [label], selected: label}`: a dialog, its
       options' labels in order and the one the `❯` marks. Answer it by label (`option_keys/2`).
       Its kinds: `:trust` (the folder trust dialog), `:imports` (external `CLAUDE.md` imports,
-      with `paths:`, the external paths it lists) and `:permission`. The two a start meets
+      with `paths:`, the external paths it lists, and `shortened:`, those of them drawn
+      shortened: a path wider than the pane is cut in its middle with `…` on one line, never
+      wrapped, so it reads as one path that is not whole) and `:permission`. The two a start meets
       first, `:trust` and `:imports`, send no hook event;
     * `%{state: :exited}`: Claude Code has exited.
 
@@ -43,7 +45,8 @@ defmodule CodingAgentFramework.Screen do
               required(:kind) => atom,
               required(:options) => [String.t()],
               required(:selected) => String.t(),
-              optional(:paths) => [String.t()]
+              optional(:paths) => [String.t()],
+              optional(:shortened) => [String.t()]
             }
           | %{state: :exited}
 
@@ -185,13 +188,14 @@ defmodule CodingAgentFramework.Screen do
 
   # The paths a dialog lists under its heading, one a line, more indented than the heading,
   # up to the first blank line. A heading with no path under it is not the dialog the
-  # fixture shows.
-  defp paths(body, %{paths: heading}) do
+  # fixture shows. A path drawn with the release's ellipsis was shortened to fit the pane.
+  defp paths(body, %{paths: heading} = kind) do
     with [line | after_it] <- Enum.drop_while(body, &(String.trim(&1) != heading)),
          depth = indent(line),
          listed = Enum.take_while(after_it, &(&1 != "")),
          true <- listed != [] and Enum.all?(listed, &(indent(&1) > depth)) do
-      {:ok, %{paths: Enum.map(listed, &String.trim/1)}}
+      paths = Enum.map(listed, &String.trim/1)
+      {:ok, %{paths: paths, shortened: Enum.filter(paths, &String.contains?(&1, kind.shortened))}}
     else
       _ -> :error
     end

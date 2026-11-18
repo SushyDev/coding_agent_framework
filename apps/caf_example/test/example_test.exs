@@ -531,6 +531,10 @@ defmodule CodingAgentFramework.ExampleTest do
     assert {:refused, {:unknown_project, "web"}} =
              Operator.start_main(parts.mcp, "web", "web-main", "Go.")
 
+    # The operator's resume of a main session (F-143's new-1) claims its state and goes to
+    # `Mains`, which resumes only one whose process ended: a declared one has none.
+    assert {:refused, {:not_stopped, "declared"}} = Operator.resume(parts.mcp, "app-main")
+
     # A main session's end (F-143) is the operator's: a declared one with no delegate ends at
     # once, and its name never starts again.
     assert {:refused, :operator_only} =

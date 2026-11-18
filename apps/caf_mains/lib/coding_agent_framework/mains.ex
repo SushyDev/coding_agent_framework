@@ -116,9 +116,10 @@ defmodule CodingAgentFramework.Mains do
   with its session id (F-141's new-5): new work, so it writes a start's row and asks the
   `Scheduler` for a lease of its own, class main session, as `start_main/5` does, and then
   `Sessions.resume/6` on the account with the most allowance left. Options: `model:` (else the
-  model its row keeps) and `timeout:`. Answers as `start_main/5` does; refused also
-  `:no_session`, `{:not_main, kind}`, `{:not_stopped, status}` and `{:running, name}` while a
-  start of it is under way.
+  model its row keeps), `state:` (the operator's fix, F-144: the state its claim in `Acts`
+  holds, `fix_state/3`'s; the resume is refused `{:moved, state}` when the row's is another
+  now) and `timeout:`. Answers as `start_main/5` does; refused also `:no_session`, `{:not_main,
+  kind}`, `{:not_stopped, status}` and `{:running, name}` while a start of it is under way.
 
       Mains.resume_main(mains, "app-epic")
       #=> {:ok, %{name: "app-epic", account: "home", session_id: "…"}}
@@ -126,8 +127,22 @@ defmodule CodingAgentFramework.Mains do
   @spec resume_main(GenServer.server(), String.t(), keyword) :: outcome(map)
   def resume_main(mains, name, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 300_000)
-    call(mains, {:resume_main, name, opts[:model]}, timeout)
+    call(mains, {:resume_main, name, opts[:model], Keyword.get(opts, :state, :any)}, timeout)
   end
+
+  @doc """
+  The state of main session `name` a fix claims in `Acts` (F-143's new-1): its agent row's
+  status, session id and last process (pid and start time), so a resume after another resume
+  and stop is a new state. The operator's `resume` tool claims it, then calls `resume_main/3`
+  with it. Answers `{:ok, state}`, or refused `:no_session` or `{:not_main, kind}`. Option:
+  `:timeout`.
+
+      Mains.fix_state(mains, "app-epic")
+      #=> {:ok, %{status: "stopped", session_id: "…", pid: 4242, proc_start: "…"}}
+  """
+  @spec fix_state(GenServer.server(), String.t(), keyword) :: outcome(map)
+  def fix_state(mains, name, opts \\ []),
+    do: call(mains, {:fix_state, name}, Keyword.get(opts, :timeout, @step))
 
   @doc """
   Ends main session `name` for good (F-143; `Team.tla`'s `MainEnds`): the operator's act
@@ -312,20 +327,33 @@ defmodule CodingAgentFramework.Mains do
   end
 
   # F-141's new-5: a resume is new work, so it asks for a lease of its own, as a start does.
-  def handle_call({:resume_main, name, model}, from, s) do
+  # A fix's resume acts only on the state its claim holds (Team.tla's CanAct).
+  def handle_call({:resume_main, name, model, claimed}, from, s) do
     agent = Agents.get(s.agents, name)
 
     with :ok <- resumable(s, agent),
+         :ok <- claimed(agent, claimed),
          {:ok, p} <- Map.fetch(s.projects, agent.project) |> known(agent.project),
          :ok <- made(s, agent.project),
          :ok <- model_ok(model),
          {:ok, account} <- pick(s) do
-      row = starting(s, agent.project, name, account, nil)
+      row = starting(s, agent.project, name, account, nil, agent.session_id)
       start = %{p: p, account: account, brief: nil, from: nil, model: model}
       leased(s, row, Map.put(start, :resume, agent.session_id), from)
     else
       refused -> {:reply, refused, s}
     end
+  end
+
+  def handle_call({:fix_state, name}, _from, s) do
+    reply =
+      case Agents.get(s.agents, name) do
+        nil -> {:refused, :no_session}
+        %{kind: "main"} = agent -> {:ok, fix_state_of(agent)}
+        %{kind: kind} -> {:refused, {:not_main, kind}}
+      end
+
+    {:reply, reply, s}
   end
 
   # A start of the name under way would run a second process; Sessions refuses the rest.
@@ -339,8 +367,18 @@ defmodule CodingAgentFramework.Mains do
     end
   end
 
-  defp starting(s, project, name, account, uuid) do
-    start = %{host: s.host, project: project, name: name, account: account.name}
+  defp fix_state_of(agent), do: Map.take(agent, [:status, :session_id, :pid, :proc_start])
+
+  defp claimed(_agent, :any), do: :ok
+
+  defp claimed(agent, state) do
+    now = fix_state_of(agent)
+    if now == state, do: :ok, else: {:refused, {:moved, now}}
+  end
+
+  # `resume` is the session id a resume takes up, nil for a start (F-143's new-5).
+  defp starting(s, project, name, account, uuid, resume \\ nil) do
+    start = %{host: s.host, project: project, name: name, account: account.name, resume: resume}
     row = Starts.starting(s.starts, Map.merge(start, %{brief_uuid: uuid, deadline: deadline(s)}))
     announce(s, row.id)
     row

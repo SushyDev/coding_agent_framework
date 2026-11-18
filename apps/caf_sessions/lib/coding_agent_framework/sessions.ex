@@ -51,8 +51,11 @@ defmodule CodingAgentFramework.Sessions do
   `dialog:` callback is asked once per kind: `{:answer, label}` presses that option, and
   `:ask`, the default, leaves it to a person: the start answers `{:unknown, {:dialog, kind}}`
   at once, and the row waits, through the start's deadline and a restart, until
-  `answer_dialog/5` presses an option. Each press is marked on the row before it goes, checked
-  by the `Inlet` (`Inlet.choose/5`), and never made twice. While a row waits, its pane is read
+  `answer_dialog/5` presses an option. Each press is an act in `Acts` (F-144), marked on the
+  row before it goes, checked by the `Inlet` (`Inlet.choose/5`) in a task whose answer comes
+  back as a message, and never made twice: a press a restart cut is `cut`, and only a person's
+  clear (`clear_dialog/4`) lets it be made once more. A person gives up a start on a dialog by
+  `stop/3`, SIGTERM to its held program's record. While a row waits, its pane is read
   every `look:` ms and at each cue: the next dialog becomes the row's, and once the session
   file names the process the row is `running`, as a start's confirm makes it. A start whose
   process exits on a dialog ("No, exit") is `stopped`.
@@ -177,6 +180,8 @@ defmodule CodingAgentFramework.Sessions do
   @cd ~S(cd -- "$0" && exec "$@")
   # A checked press of a dialog's option: the Inlet's keys, its two screen reads and Enter.
   @press 20_000
+  # The actor of an answer the app's `dialog:` callback gives, in `Acts`.
+  @app "app"
 
   @type outcome(ok) :: {:ok, ok} | {:refused, term} | {:unknown, term}
 
@@ -243,7 +248,9 @@ defmodule CodingAgentFramework.Sessions do
     do: request(sessions, {:start, name, account, launch, session_id}, opts)
 
   @doc """
-  Ends running session `name` and waits for its process to exit. Its row is `stopping` first,
+  Ends running session `name` and waits for its process to exit. A row on a startup dialog
+  (F-144) gets SIGTERM to its held program's record, since it has no session file to read idle
+  from; it is `stopped` once its process is gone. Its row is `stopping` first,
   so `Mailbox` marks no row to it from then on. An interactive session gets SIGTERM once its
   session file says `idle` and, read in the same step through `open_to:`, no `Mailbox` row to it
   is `sending`: a row marked before the stop is waited for until the stop's deadline, then
@@ -290,14 +297,18 @@ defmodule CodingAgentFramework.Sessions do
   Answers the startup dialog agent `name`'s start waits on (its row `dialog`) by the option
   labeled `label`: a person's answer, from the app's view or the operator's tool. `kind` is the
   dialog's (`:trust` or `:imports`, or its name), so an answer meant for one dialog never
-  presses another. The answer is marked on the row, then the `Inlet`'s checked press goes
-  (`Inlet.choose/5`); the start then goes on as before.
+  presses another. The answer is an act in `Acts` (with `acts:`), actor `by:` (the person, by
+  default `"person"`; the operator's tool names the operator) and state the row's start, the
+  dialog and its mark, so each is answered once. It is marked on the row, then the `Inlet`'s
+  checked press goes (`Inlet.choose/5`) in a task, so `Sessions` answers other calls meanwhile;
+  the start then goes on as before.
 
   Answers `{:ok, :sent}` once the dialog has left the pane. Refused, with nothing pressed:
   `:no_session`, `{:not_on_dialog, status}`, `{:bad, :kind}`, `{:shown, kind}` (the row shows
   another dialog, or none), `{:no_option, label}`, `{:answered, mark}` (an answer to that
-  dialog was already marked: never pressed twice), `:no_inlet`, or the `Inlet`'s refusal.
-  Unknown: the `Inlet`'s, once a key may have gone; that answer is never pressed again. Option:
+  dialog was already marked: never pressed twice, but for a cut one a person cleared,
+  `clear_dialog/4`), `:no_inlet`, `{:acts, answer}`, or the `Inlet`'s refusal. Unknown: the
+  `Inlet`'s, once a key may have gone; that answer is never pressed again. Options: `by:`,
   `:timeout` (ms, default 25 000).
 
       Sessions.answer_dialog(sessions, "app-main", :trust, "Yes, I trust this folder")
@@ -308,10 +319,36 @@ defmodule CodingAgentFramework.Sessions do
           outcome(:sent)
   def answer_dialog(sessions, name, kind, label, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, @press + @read)
+    by = Keyword.get(opts, :by, "person")
 
     case Dialog.kind(kind) do
       nil -> {:refused, {:bad, :kind}}
-      kind -> call(sessions, {:answer_dialog, name, kind, label}, timeout)
+      kind -> call(sessions, {:answer_dialog, name, kind, label, by}, timeout)
+    end
+  end
+
+  @doc """
+  A person clears agent `name`'s answer to startup dialog `kind` whose press a restart cut
+  (its mark `cut`, F-144, `Dialog.tla`'s Clear), once they have seen the pane still show that
+  dialog with its first option selected: no key of the press moved the selection or landed.
+  The pane is read again here, and the clear refused unless it shows so. The answer is then
+  `cleared` and may be given once more, by `answer_dialog/5`, checked as any press; a press of
+  it cut again is `unknown`, never cleared again. The cut press's row in `Acts` is cleared too.
+
+  Answers `{:ok, :cleared}`; refused `:no_session`, `{:not_on_dialog, status}`, `{:bad,
+  :kind}`, `:no_answer`, `{:not_cut, mark}`, `{:moved, selected}`, `{:shown, what}`, `:no_inlet`
+  or `{:unread, why}`. Option: `:timeout` (ms, default 10 000: the pane read takes up to 5 000).
+
+      Sessions.clear_dialog(sessions, "app-main", :trust)
+      #=> {:ok, :cleared}
+      #=> {:refused, {:not_cut, "unknown"}}
+  """
+  @spec clear_dialog(GenServer.server(), String.t(), atom | String.t(), keyword) ::
+          outcome(:cleared)
+  def clear_dialog(sessions, name, kind, opts \\ []) do
+    case Dialog.kind(kind) do
+      nil -> {:refused, {:bad, :kind}}
+      kind -> call(sessions, {:clear_dialog, name, kind}, Keyword.get(opts, :timeout, 2 * @read))
     end
   end
 
@@ -489,10 +526,16 @@ defmodule CodingAgentFramework.Sessions do
     # A start this process's last life claimed and never answered: its call ended with it.
     if state.acts, do: Acts.interrupt(state.acts, actor(state))
 
-    # A press marked before this process's last life ended may have gone: never pressed again.
+    # A press marked before this process's last life ended may have gone: cut, never pressed
+    # again unless a person clears it, and its row in `Acts` settled unknown, for that clear.
     for row <- Table.with_status(state.db, state.host.name, "dialog"),
-        answers = Dialog.after_restart(row),
-        do: write(state, row, answers: answers)
+        answers = Dialog.after_restart(row) do
+      for {_, %{mark: "pressing", act: act}} <- Dialog.answers(row),
+          state.acts,
+          do: Acts.settle(state.acts, act, :unknown, reason: :cut, acted: true)
+
+      write(state, row, answers: answers)
+    end
 
     settle(state, :all, true)
 
@@ -579,18 +622,37 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
-  def handle_call({:answer_dialog, name, kind, label}, _from, state) do
+  # The press goes in a task: its answer replies to the caller once it comes back.
+  def handle_call({:answer_dialog, name, kind, label, by}, from, state) do
     with %{} = row <- Table.get(state.db, state.host.name, name) || {:refused, :no_session},
          "dialog" <- row.status,
-         :ok <- Dialog.check(row, kind, label) do
-      answer = press(state, row, kind, label)
-      # The next screen, a dialog or the start going on, is the row's now, not at the next look.
-      if answer != {:refused, :no_inlet}, do: look_at(state, Table.get(state.db, row.host, name))
-      {:reply, answer, look_later(state)}
+         :ok <- Dialog.check(row, kind, label),
+         :ok <- press(state, row, kind, label, by, from) do
+      {:noreply, state}
     else
       status when is_binary(status) -> {:reply, {:refused, {:not_on_dialog, status}}, state}
       refused -> {:reply, refused, state}
     end
+  end
+
+  # Dialog.tla's Clear: a press a restart cut, cleared by a person once the pane, read now,
+  # still shows that dialog with its first option selected, so no key of it moved or landed.
+  def handle_call({:clear_dialog, name, kind}, _from, state) do
+    reply =
+      with %{} = row <- Table.get(state.db, state.host.name, name) || {:refused, :no_session},
+           "dialog" <- row.status,
+           {:ok, answers} <- Dialog.clear(row, kind),
+           :ok <- unmoved(state, row, kind) do
+        write(state, row, answers: answers)
+        act = answers[kind][:act]
+        if act && state.acts, do: Acts.clear(state.acts, [act])
+        {:ok, :cleared}
+      else
+        status when is_binary(status) -> {:refused, {:not_on_dialog, status}}
+        refused -> refused
+      end
+
+    {:reply, reply, state}
   end
 
   def handle_call(:ends_owed, _from, state) do
@@ -763,9 +825,32 @@ defmodule CodingAgentFramework.Sessions do
       %{status: "running", pid: pid} = row when is_integer(pid) ->
         # StopAsked, with the stop's own deadline in the row: from here `Mailbox` marks no row
         # to the session, so a row it marked before is the only one the idle read waits for.
-        write(state, row, status: "stopping", reason: nil, deadline: deadline)
+        # A main session's end is kept on the row (F-143's new-4), so the settle ends it after
+        # a stop that answered unknown.
+        ending = if how == :end_main, do: [end_asked: state.clock.()], else: []
+        write(state, row, [status: "stopping", reason: nil, deadline: deadline] ++ ending)
         pending = %{kind: :ask, from: from, row: row, deadline: deadline, how: how}
         {:noreply, ask(state, name, pending)}
+
+      # Dialog.tla's Stop (F-144): a row on a dialog has no session file to read idle from, so
+      # its held program's record takes the SIGTERM. The row waits as before until its process
+      # is gone; then it is stopped, as "No, exit" leaves it.
+      %{status: "dialog"} = row when how == :end and not is_map_key(state.pending, name) ->
+        case held(state, row) do
+          {:ok, %{process: process, record: %{pid: _} = record}} ->
+            sent =
+              if process == :live,
+                do: Holder.Process.signal(state.procs, record, "TERM"),
+                else: {:ok, :gone}
+
+            row = %{row | pid: record.pid, proc_start: record.start}
+            pending = %{kind: :stop, from: from, row: row, deadline: deadline, how: how}
+            send(self(), {:check, name})
+            {:noreply, put_in(state.pending[name], Map.put(pending, :sent, sent))}
+
+          other ->
+            {:reply, {:refused, {:unread, other}}, state}
+        end
 
       nil ->
         {:reply, {:refused, :no_session}, state}
@@ -805,12 +890,12 @@ defmodule CodingAgentFramework.Sessions do
         state = put_in(state.pending[name], pending)
 
         wait(state, name, pending, fn ->
-          write(state, row, status: "running")
+          write(state, row, status: "running", end_asked: nil)
           refused
         end)
 
       {:refused, _} = refused ->
-        write(state, row, status: "running")
+        write(state, row, status: "running", end_asked: nil)
         done(state, name, pending, refused)
 
       # An unknown end may have gone out: the exit is waited for, and never sent again.
@@ -956,6 +1041,12 @@ defmodule CodingAgentFramework.Sessions do
     {:noreply, look_later(state)}
   end
 
+  # A dialog's press answered, from its task.
+  def handle_info({ref, {:pressed, press, answer}}, state) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    {:noreply, pressed(state, press, answer)}
+  end
+
   # A worktree's task answered: the start goes on to the hold, or is refused with nothing held.
   def handle_info({ref, prepared}, state) when is_reference(ref) do
     Process.demonitor(ref, [:flush])
@@ -1027,7 +1118,7 @@ defmodule CodingAgentFramework.Sessions do
     if gone? and dead?(state, row) do
       case pending.how do
         :end_main ->
-          write(state, row, status: "ended", reason: nil)
+          write(state, row, status: "ended", reason: nil, end_asked: nil)
           done(state, name, pending, {:ok, :ended})
 
         _ ->
@@ -1067,7 +1158,11 @@ defmodule CodingAgentFramework.Sessions do
   defp look_at(_state, %{role: role}) when role != "parent", do: :none
 
   defp look_at(state, row) do
-    with {:ok, screen} <- Inlet.look(state.inlet, row.name, row.release, timeout: @read),
+    # A row whose press is under way is read once its answer comes back (`pressed/3`): the
+    # Inlet is busy with that press, and a read now would hold this process until it is done.
+    # The row as written now: a caller's copy (a start's) may predate the mark.
+    with true <- not Dialog.pressing?(Table.get(state.db, row.host, row.name) || row) || :pressed,
+         {:ok, screen} <- Inlet.look(state.inlet, row.name, row.release, timeout: @read),
          true <- Dialog.startup?(screen) do
       now = Table.get(state.db, row.host, row.name) || row
       shown = Dialog.encode(screen)
@@ -1078,6 +1173,7 @@ defmodule CodingAgentFramework.Sessions do
       now = Table.get(state.db, row.host, row.name)
       decide(state, now, screen)
     else
+      :pressed -> :pressed
       _ -> :none
     end
   end
@@ -1089,8 +1185,8 @@ defmodule CodingAgentFramework.Sessions do
       :pressed
     else
       with {:answer, label} <- state.dialog.(kind, options),
-           :ok <- Dialog.check(row, kind, label) do
-        press(state, row, kind, label)
+           :ok <- Dialog.check(row, kind, label),
+           :ok <- press(state, row, kind, label, @app, nil) do
         :pressed
       else
         _ -> {:ask, kind}
@@ -1098,27 +1194,74 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
-  # Dialog.tla's Take and Press: the answer marked pressing on the row first, then the Inlet's
-  # checked press; sent or unknown stays marked, and only a refusal, which pressed nothing,
-  # takes the mark away.
-  defp press(%{inlet: nil}, _row, _kind, _label), do: {:refused, :no_inlet}
+  # Dialog.tla's Take and Press: the answer's row in `Acts` (F-144: actor `by`, a person or the
+  # app; state the row's start, the dialog and the mark it is taken from, so each is answered
+  # once), then the answer marked pressing on the row, then the Inlet's checked press in a task
+  # linked to this process, so other calls go on meanwhile (F-144) and a restart ends it. Its
+  # answer comes back as a message (`pressed/3`). `from` is the caller to answer, or nil.
+  defp press(%{inlet: nil}, _row, _kind, _label, _by, _from), do: {:refused, :no_inlet}
 
-  defp press(state, row, kind, label) do
-    write(state, row, answers: Dialog.mark(row, kind, label, "pressing"))
-    row = Table.get(state.db, row.host, row.name)
+  defp press(state, row, kind, label, by, from) do
+    taken = %{start: row.started_at, dialog: kind, mark: Dialog.from_mark(row, kind)}
 
-    answer =
-      Inlet.choose(state.inlet, row.name, kind, label, release: row.release, timeout: @press)
+    with {:ok, act} <- answer_act(state, by, row.name, taken) do
+      write(state, row, answers: Dialog.mark(row, kind, label, "pressing", act: act))
+      inlet = state.inlet
+      {name, release} = {row.name, row.release}
 
+      Task.async(fn ->
+        answer =
+          try do
+            Inlet.choose(inlet, name, kind, label, release: release, timeout: @press)
+          catch
+            how, _ -> {:unknown, {how, :press}}
+          end
+
+        {:pressed, %{name: name, kind: kind, label: label, act: act, from: from}, answer}
+      end)
+
+      :ok
+    end
+  end
+
+  defp answer_act(%{acts: nil}, _by, _name, _taken), do: {:ok, nil}
+
+  defp answer_act(state, by, name, taken) do
+    case Acts.claim(state.acts, by, name, taken, :answer_startup) do
+      {:ok, id} -> {:ok, id}
+      other -> {:refused, {:acts, other}}
+    end
+  end
+
+  # Dialog.tla's Pressed: sent or unknown stays marked, and only a refusal, which pressed
+  # nothing, takes the mark back. The next screen, a dialog or the start going on, is the row's
+  # now, not at the next look.
+  defp pressed(state, %{name: name, kind: kind, label: label} = press, answer) do
     mark =
       case answer do
         {:ok, :sent} -> "sent"
         {:refused, _} -> nil
-        {:unknown, _} -> "unknown"
+        _unknown -> "unknown"
       end
 
-    write(state, row, answers: Dialog.mark(row, kind, label, mark))
-    answer
+    row = Table.get(state.db, state.host.name, name)
+    if row, do: write(state, row, answers: Dialog.mark(row, kind, label, mark))
+    if press.act, do: Acts.answered(state.acts, press.act, answer)
+    if press.from, do: GenServer.reply(press.from, answer)
+    if row, do: look_at(state, Table.get(state.db, row.host, name))
+    look_later(state)
+  end
+
+  # The pane shows `kind` with its first option selected, as the dialog is drawn before a key.
+  defp unmoved(%{inlet: nil}, _row, _kind), do: {:refused, :no_inlet}
+
+  defp unmoved(state, row, kind) do
+    case Inlet.look(state.inlet, row.name, row.release, timeout: @read) do
+      {:ok, %{state: :dialog, kind: ^kind, options: [first | _], selected: first}} -> :ok
+      {:ok, %{state: :dialog, kind: ^kind, selected: selected}} -> {:refused, {:moved, selected}}
+      {:ok, screen} -> {:refused, {:shown, Map.get(screen, :kind, screen.state)}}
+      other -> {:refused, {:unread, other}}
+    end
   end
 
   # One read of the waiting rows' panes `look` ms from now, while any row waits on a person.
@@ -1220,14 +1363,20 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   # StopSettled with no stop under way: stopped once its process is gone by pid and start time
-  # and its socket is dead; running while it lives, unless the stop was late (no_exit).
+  # and its socket is dead, or ended when it was a main session's end (Team.tla's EndSettled);
+  # running while it lives, unless the stop was late (no_exit). A stop a restart cut goes back
+  # to running, and with it the end asked: whether its SIGTERM went is not known.
   defp settle_row(state, %{status: "stopping"} = row, _read?) do
     case liveness(state, row) do
       gone when gone in [:gone, :replaced] ->
-        if dead?(state, row), do: write(state, row, status: "stopped")
+        cond do
+          not dead?(state, row) -> :ok
+          row.end_asked -> write(state, row, status: "ended", reason: nil, end_asked: nil)
+          true -> write(state, row, status: "stopped")
+        end
 
       :live when row.reason != "no_exit" ->
-        write(state, row, status: "running")
+        write(state, row, status: "running", end_asked: nil)
 
       _late_or_unknown ->
         :ok

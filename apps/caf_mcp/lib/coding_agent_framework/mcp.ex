@@ -65,8 +65,9 @@ defmodule CodingAgentFramework.MCP do
     and transcript (`Transcripts.text/4`), each with its own refusal; `transcript`: whole lines
     from byte `from`, and the next offset. A main session is refused until `Screen` and `Mains`.
   - the fix tools, a parent's on its own delegate, or the operator's on any (`Grants.may_fix?/3`;
-    no agent fixes a main session, and the operator's fix of one is refused `{:not_built,
-    :main_fix}` until `Mains`): `interrupt(agent)`, `answer(agent, dialog, label)` (`dialog` is the open
+    no agent fixes a main session; the operator's resume of one claims `Mains.fix_state/3`'s
+    state and calls `Mains.resume_main/3` with it, F-144, and its other fixes of one are
+    refused `{:not_built, :main_fix}`): `interrupt(agent)`, `answer(agent, dialog, label)` (`dialog` is the open
     `can_use_tool` request's id, `label` `allow` or `deny`), `resume(agent)` (a delegate whose
     process died) and `stop(agent)` (once its report is delivered). Each reads the delegate's
     state (`Delegates.fix_state/3`), claims it in `Acts` (`Acts.claim/6`, act the tool's name),
@@ -81,8 +82,9 @@ defmodule CodingAgentFramework.MCP do
   - `answer_startup(agent, kind, label)`: the operator's alone (F-140); any other caller is
     refused `:operator_only`. The startup dialog an interactive start waits on (`kind`
     `trust` or `imports`, as the agent row shows it, `Sessions.Agents.dialog/1`), answered by
-    its option's label through the sessions' `answer_dialog/5`, which marks the answer on the
-    row before its checked press and never presses it twice. Answers `Sessions`' answer.
+    its option's label through the sessions' `answer_dialog/5`, which writes it as an act in
+    `Acts`, actor the operator, marks it on the row before its checked press and never presses
+    it twice. Answers `Sessions`' answer.
   - `end_main(name)`: the operator's alone (F-143); any other caller is refused
     `:operator_only`. The mains' `end_main/3`: refused while a delegate of it has not ended
     (`{:delegates, names}`), else the session stopped once idle and its agent row `ended`, so
@@ -681,7 +683,8 @@ defmodule CodingAgentFramework.MCP do
     with true <- caller == Grants.operator(ctx.grants) or {:refused, :operator_only},
          true <- ctx.sessions != nil or {:refused, :no_sessions} do
       {mod, server} = ctx.sessions
-      mod.answer_dialog(server, agent, k, l)
+      # The answer's row in `Acts` names the operator as its actor (F-140's new-6).
+      mod.answer_dialog(server, agent, k, l, by: caller)
     end
   end
 
@@ -816,19 +819,19 @@ defmodule CodingAgentFramework.MCP do
   # Team.tla's ClaimTaken, then FixActs or FixRefused (in `Delegates`, which reads the state
   # again), then the claim settled by the state read after: verified when the fix took and the
   # state moved. A claim left open by an unknown settle is a restart's to close as interrupted.
+  # The operator's resume of a main session (F-143's new-1) claims its state read from
+  # `Mains`, which resumes it only while that state is still its own.
   defp act(ctx, caller, _id, tool, %{"agent" => agent} = a)
        when tool in @fixes and is_binary(agent) do
-    {mod, server} = ctx.delegates
-
     with {:ok, fix} <- fix(tool, a),
          :ok <- Grants.may_fix?(ctx.grants, caller, agent),
-         {:ok, parent} <- as_parent(ctx, caller, agent),
-         {:ok, state} <- mod.fix_state(server, parent, agent),
+         {:ok, by} <- fixer(ctx, caller, agent, tool),
+         {:ok, state} <- by.state.(),
          {:ok, claim} <- Acts.claim(ctx.acts, caller, agent, state, tool) do
-      outcome = mod.fix(server, parent, agent, fix, state)
+      outcome = by.fix.(fix, state)
 
       verdict =
-        case {outcome, mod.fix_state(server, parent, agent)} do
+        case {outcome, by.state.()} do
           {{:ok, _}, {:ok, read}} when read != state -> :verified
           _ -> :not_verified
         end
@@ -949,6 +952,37 @@ defmodule CodingAgentFramework.MCP do
 
     with :ok <- Grants.may_start_delegate?(ctx.grants, caller, parent),
          do: mod.start_delegate(server, parent, project, branch, model, brief, opts)
+  end
+
+  # Who reads the target's state and acts: `Delegates` for a delegate, as its parent; `Mains`
+  # for the operator's resume of a main session. Its other fixes are not built.
+  defp fixer(ctx, caller, agent, tool) do
+    case as_parent(ctx, caller, agent) do
+      {:ok, parent} ->
+        {mod, server} = ctx.delegates
+
+        {:ok,
+         %{
+           state: fn -> mod.fix_state(server, parent, agent) end,
+           fix: fn fix, state -> mod.fix(server, parent, agent, fix, state) end
+         }}
+
+      {:refused, {:not_built, :main_fix}} when tool == "resume" and ctx.mains != nil ->
+        {mod, server} = ctx.mains
+
+        {:ok,
+         %{
+           state: fn -> mod.fix_state(server, agent) end,
+           fix: fn :resume, state ->
+             with {:ok, %{name: name}} <-
+                    mod.resume_main(server, agent, state: state, timeout: @start_wait),
+                  do: {:ok, %{resumed: name}}
+           end
+         }}
+
+      refused ->
+        refused
+    end
   end
 
   # `Delegates` knows a delegate by its parent: the operator's fix acts as that parent would.

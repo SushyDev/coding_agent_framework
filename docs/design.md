@@ -569,8 +569,11 @@ the read after the person clears it pulls (F-141's new-6).
 **A resume** of a main session whose process ended (`Mains.resume_main/3`) is new work: it
 writes a start's row and asks the `Scheduler` for a lease of its own, class main session
 (always admitted), as a start does, then resumes it in the checkout with its session id and the
-model its row keeps (F-141's new-5). A move's resume needs none: the start's lease lives while
-a move of its session is under way.
+model its row keeps (F-141's new-5); its row in `main_starts` names the session id it resumed
+(`resume`, F-143's new-5). The operator's `resume` tool of a main session claims its state in
+`Acts` (`Mains.fix_state/3`: its status, session id and last process) and calls `resume_main`
+with it, which acts only while that state is still the row's (F-144). A move's resume needs
+none: the start's lease lives while a move of its session is under way.
 
 **Its end** (F-143, `Team.tla`'s `MainEnds`) is the operator's act alone: `end_main(name)`, the
 operator's tool, `Mains.end_main/3`, which `Sessions.end_main/3` does. It is refused while a
@@ -578,7 +581,10 @@ start of the name is under way, and while any delegate of it has not ended (`{:d
 names}`), so no delegate is left with no parent; `Sessions` checks that and moves the row in one
 step, and refuses a delegate's start under an ended main session (`{:parent_ended, name}`). A
 running session is stopped by SIGTERM once idle, as any stop; a row with no process is ended at
-once. Its agent row is then `ended` (`Sessions.Agents.ended?/1` holds for it), so the app's end
+once. The row keeps the end asked (`end_asked`, F-144, `Team.tla`'s `EndSettled`): a stop that
+answered unknown, its process outliving the stop's deadline, leaves the row `stopping` with the
+mark, and the settle ends it once the process is gone, with no second call; a stop refused, or
+cut by a restart, takes the mark away with it, and no resume takes a row with it. Its agent row is then `ended` (`Sessions.Agents.ended?/1` holds for it), so the app's end
 of an owner's services ends every service it owns, kept ones too: a kept service goes to its
 owner's parent, a main session has none, and the operator owns nothing. Rows to it are settled
 ended, as to any agent that ended. Its name never starts again.
@@ -674,7 +680,9 @@ imports?" when the project's `CLAUDE.md` imports a file outside its folder. Neit
 event, and on 2.1.322 no session file exists while one is shown, so `Registry` sees nothing.
 While an interactive start has no session file, `Sessions` reads its pane through the `Inlet`;
 `Screen` reads each dialog's kind, its options by label, the selected one, and the imports
-dialog's external paths. A dialog makes the agent row `dialog`, with the dialog on the row and
+dialog's external paths. On 2.1.322 a path wider than the pane is shortened in its middle with
+`…` on one line, never wrapped; `Screen` reads it as one path and names it among `shortened`
+(F-144's capture). A dialog makes the agent row `dialog`, with the dialog on the row and
 a cue: not started, not idle, and not free, so the `Scheduler` counts its lease held and a view
 shows why (`Sessions.Agents.dialog/1`). The start's deadline does not end it, and a restart
 leaves it waiting.
@@ -686,10 +694,22 @@ The answer comes from outside, by the option's label: `Sessions.answer_dialog/5`
 calls and the operator's tool `answer_startup` calls (the operator's alone). It is marked on
 the row before its press, and the `Inlet` presses it checked: the pane still shows that dialog,
 the press lands on the chosen option, and the dialog leaves; otherwise refused (nothing went)
-or unknown. A kind with any mark is never pressed again, and a mark a restart finds `pressing`
-is unknown. While the row waits its pane is read again on an interval and at each cue, so the
+or unknown. The press runs in a task whose answer comes back as a message, as `Mailbox`'s
+hand-on does, so `Sessions` answers other calls meanwhile, the mark `pressing`; a row whose
+press is under way is not read again until it answers (F-144). Each answer is an act in `Acts`
+(F-144): actor the person (the operator's tool names the operator) or the app (its callback,
+actor `app`), target the agent, state the row's start, the dialog and the mark the answer is
+taken from, so each is answered once. A kind with any mark is never pressed again, and a mark a
+restart finds `pressing` is `cut`, its act settled unknown. A person who sees the pane still
+show that dialog with its first option selected clears a cut press once
+(`Sessions.clear_dialog/4`, which reads the pane again and clears the cut act in `Acts`): it is
+`cleared` and may be answered once more, checked as any press, and a press of it cut again is
+`unknown`. While the row waits its pane is read again on an interval and at each cue, so the
 next dialog becomes the row's; past the dialogs the session file names the process and the row
-runs, as a start's confirm makes it. "No, exit" ends the process, and the row is `stopped`.
+runs, as a start's confirm makes it. "No, exit" ends the process, and the row is `stopped`. A
+person may give up a start without answering: `Sessions.stop/3` of a row on a dialog sends
+SIGTERM to its held program's record (`Holder.Process`), and the row is `stopped` once its
+process is gone (F-144).
 
 ## The delegate protocol
 
@@ -1529,10 +1549,12 @@ of a job writes in the copy once its end is read.
 
 `Dialog.tla` (F-140) models a startup dialog: the pane read while a start has no session
 file, the row `dialog` waiting on a person through its deadline and a restart, the app's
-callback for the kinds it chose, an answer marked before its checked press, and the start going
-on past the dialogs. Invariants: `OnlyAsked` (nothing presses a dialog no one asked to
-answer), `OnNamed` (a press lands only on the dialog it names), `AtMostOnce` (an answer whose
-press is unknown, or cut by a restart, is never pressed again), `NotEndedOnDialog` (a row on a
+callback for the kinds it chose, an answer marked before its checked press, the press in a task
+whose answer comes back as a message, a person's clear of a press a restart cut and a person's
+stop (F-144), and the start going on past the dialogs. Invariants: `OnlyAsked` (nothing presses
+a dialog no one asked to answer), `OnNamed` (a press lands only on the dialog it names),
+`AtMostOnce` (an answer whose press is unknown is never pressed again, and one cut by a restart
+only once more, after a person's clear), `NotEndedOnDialog` (a row on a
 dialog is never an orphan), `LeaseWhileLive`; liveness `DialogShown` (the next dialog becomes
 the row's after an answer) and `GoesOn`. Each has a `Break_Dialog_*` configuration.
 
@@ -2019,8 +2041,10 @@ uuid, and each spec that instances a module compares its state counts before and
     operator's `end_main`, with its kept services (F-109's new-4) ending with it, and F-141's
     follow-ups (`resume_main` under its own lease, a refused start's brief settled, a locked
     checkout shown; built in F-143, against `Team.tla`). F-140's follow-ups (the dialog's press
-    in a task, a person's clear of an unknown mark, the stop of a row on a dialog, a shortened
-    imports path, the answer as an `Acts` row) are the next unit.
+    in a task, a person's clear of a cut press, the stop of a row on a dialog, a shortened
+    imports path, the answer as an `Acts` row) and F-143's (the operator's resume of a main
+    session, the end kept on the row, `main_starts`' `resume`) are built in F-144, against
+    `Dialog.tla` and `Team.tla`.
 14. **Mechanisms an app's policies stand on**, on the remodel's shape, in this order:
     - a delegate idle with no report, a value of `Sessions`' turn function that `Delegates`
       tells its parent, in `Delegate.tla`;

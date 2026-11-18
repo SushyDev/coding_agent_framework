@@ -10,7 +10,8 @@ defmodule CodingAgentFramework.Mains.Starts do
   cut it (`called_at`, in wall-clock ms, tells that call's agent row from an earlier one;
   `deadline` the wall-clock time a cut call is settled by), then `running` or `refused` with
   its `reason`, once. `brief_uuid` is the uuid of the brief's row in `Mailbox`, or nil for a
-  start with no brief.
+  start with no brief. `resume` is the session id a resume (`Mains.resume_main/3`) takes up,
+  nil for a start (F-143's new-5), added to an older file if missing.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "doc.db")
       iex> {:ok, db} = CodingAgentFramework.Mains.Starts.open(path)
@@ -21,14 +22,14 @@ defmodule CodingAgentFramework.Mains.Starts do
   alias CodingAgentFramework.Store
 
   @columns ~w(id host project name account brief_uuid status reason called_at deadline
-              created_at updated_at)a
+              created_at updated_at resume)a
 
   @schema """
   CREATE TABLE IF NOT EXISTS main_starts (
     id INTEGER PRIMARY KEY, host TEXT NOT NULL, project TEXT NOT NULL, name TEXT NOT NULL,
     account TEXT NOT NULL, brief_uuid TEXT, status TEXT NOT NULL, reason TEXT,
     called_at INTEGER NOT NULL, deadline INTEGER NOT NULL, created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL);
+    updated_at INTEGER NOT NULL, resume TEXT);
   CREATE INDEX IF NOT EXISTS main_starts_status ON main_starts (host, status);
   CREATE INDEX IF NOT EXISTS main_starts_name ON main_starts (host, name);
   """
@@ -37,13 +38,13 @@ defmodule CodingAgentFramework.Mains.Starts do
 
   @doc "Opens (and creates) the file at `path`, with the table."
   @spec open(String.t()) :: {:ok, db} | {:refused, term}
-  def open(path), do: Store.open(path, @schema)
+  def open(path), do: Store.open(path, @schema, added: [main_starts: ["resume TEXT"]])
 
   @doc "Writes a start's row, as `starting`, and returns it."
   @spec starting(db, map) :: map
   def starting(db, start) do
     now = System.os_time(:millisecond)
-    keys = ~w(host project name account brief_uuid deadline)a
+    keys = ~w(host project name account brief_uuid deadline resume)a
     first = [status: "starting", called_at: now, created_at: now, updated_at: now]
 
     [[id]] =

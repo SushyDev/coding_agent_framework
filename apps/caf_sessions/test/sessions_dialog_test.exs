@@ -9,7 +9,7 @@ defmodule CodingAgentFramework.SessionsDialogTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Inlet, Registry, ScreenStandIn, Sessions, SessionsSetup}
+  alias CodingAgentFramework.{Acts, Inlet, Registry, ScreenStandIn, Sessions, SessionsSetup}
   alias CodingAgentFramework.Sessions.{Agents, Table}
 
   @trust "Yes, I trust this folder"
@@ -32,7 +32,10 @@ defmodule CodingAgentFramework.SessionsDialogTest do
 
   defp sessions(ctx, extra \\ []) do
     spec =
-      Supervisor.child_spec({Sessions, ctx.opts ++ extra}, id: make_ref(), restart: :temporary)
+      Supervisor.child_spec({Sessions, Keyword.merge(ctx.opts, extra)},
+        id: make_ref(),
+        restart: :temporary
+      )
 
     start_supervised!(spec)
   end
@@ -108,9 +111,10 @@ defmodule CodingAgentFramework.SessionsDialogTest do
              Sessions.start(sessions, "alpha", ctx.account, ctx.launch)
   end
 
-  # AtMostOnce across a restart: the row waits through it, an answer marked pressing when the
-  # process ended is unknown and never pressed, and another answer goes as before.
-  test "a restart keeps the row waiting, and a press it cut is never made again", ctx do
+  # AtMostOnce across a restart, and Clear (F-144): the row waits through it, an answer marked
+  # pressing when the process ended is cut and not pressed again until a person who sees the
+  # dialog unmoved clears it, once; then it may be answered once more.
+  test "a restart keeps the row waiting, and a press it cut goes again only after a clear", ctx do
     first = sessions(ctx)
     assert {:unknown, {:dialog, :trust}} = Sessions.start(first, "alpha", ctx.account, ctx.launch)
     GenServer.stop(first)
@@ -121,19 +125,78 @@ defmodule CodingAgentFramework.SessionsDialogTest do
 
     second = sessions(ctx)
 
-    assert {:ok, %{answers: %{trust: %{mark: "unknown"}}}} =
-             await(fn ->
-               case Agents.dialog(Agents.get(ctx.agents, "alpha")) do
-                 %{answers: %{trust: %{mark: "unknown"}}} = d -> {:ok, d}
-                 other -> other
-               end
-             end)
+    assert {:ok, %{answers: %{trust: %{mark: "cut"}}}} = await(fn -> marked(ctx, "cut") end)
 
-    assert {:refused, {:answered, "unknown"}} =
+    assert {:refused, {:answered, "cut"}} =
              Sessions.answer_dialog(second, "alpha", :trust, @trust)
 
     refute File.exists?(Path.join(ctx.dir, "trusted"))
     assert Agents.get(ctx.agents, "alpha").status == "dialog"
+
+    # The person's clear, once: the pane still shows the trust dialog, its first option selected.
+    assert {:refused, :no_answer} = Sessions.clear_dialog(second, "alpha", :imports)
+    assert {:ok, :cleared} = Sessions.clear_dialog(second, "alpha", "trust")
+    assert {:refused, {:not_cut, "cleared"}} = Sessions.clear_dialog(second, "alpha", :trust)
+    assert {:ok, :sent} = Sessions.answer_dialog(second, "alpha", :trust, @trust)
+    assert File.exists?(Path.join(ctx.dir, "trusted"))
+
+    assert {:ok, %{answers: %{trust: %{mark: "sent", cleared: true}}}} =
+             await(fn -> marked(ctx, "sent") end)
+  end
+
+  # Dialog.tla's Stop (F-144): a person gives up a start without answering, by SIGTERM to the
+  # held program's record; the row is stopped and its name free.
+  test "a stop of a row on a dialog ends its process", ctx do
+    sessions = sessions(ctx)
+
+    assert {:unknown, {:dialog, :trust}} =
+             Sessions.start(sessions, "alpha", ctx.account, ctx.launch)
+
+    assert {:ok, :stopped} = Sessions.stop(sessions, "alpha")
+    row = Agents.get(ctx.agents, "alpha")
+    assert row.status == "stopped"
+    assert Agents.free?(row)
+    refute File.exists?(Path.join(ctx.dir, "trusted"))
+  end
+
+  # The press goes in a task (F-144): while the Inlet is held up, the row is marked pressing and
+  # Sessions answers other calls; each answer is a row in Acts, actor the person or the app.
+  test "a press runs in a task, and each answer is an act in Acts", ctx do
+    acts =
+      start_supervised!(
+        {Acts, db: Path.join(ctx.dir, "acts.db"), start_id: "t", host: "test", instance: "a"}
+      )
+
+    dialog = fn kind, _options -> if kind == :trust, do: {:answer, @trust}, else: :ask end
+    # No periodic look while the Inlet is held up: one would wait on it (F-144's new-2).
+    sessions = sessions(ctx, acts: acts, dialog: dialog, look: 600_000)
+
+    assert {:unknown, {:dialog, :imports}} =
+             Sessions.start(sessions, "alpha", ctx.account, ctx.launch)
+
+    :sys.suspend(ctx.inlet)
+
+    answer =
+      Task.async(fn ->
+        Sessions.answer_dialog(sessions, "alpha", :imports, @no_imports, by: "operator")
+      end)
+
+    # A look a cue started before the mark may wait on the held Inlet first, up to 5 s.
+    assert {:ok, %{answers: %{imports: %{mark: "pressing"}}}} =
+             await(fn -> marked(ctx, "pressing", :imports) end, 30_000)
+
+    assert {:ok, []} = Sessions.ends_owed(sessions)
+    :sys.resume(ctx.inlet)
+    assert {:ok, :sent} = Task.await(answer, 30_000)
+
+    assert {:ok, [trust, imports]} = Acts.rows(acts, act: "answer_startup")
+    assert %{actor: "app", target: "alpha", status: "settled", outcome: "verified"} = trust
+    assert %{actor: "operator", status: "settled", outcome: "verified"} = imports
+    assert imports.state =~ "imports"
+
+    # A second answer of the same state is refused, by the mark and by the act.
+    assert {:refused, _} =
+             Sessions.answer_dialog(sessions, "alpha", :imports, @no_imports, by: "operator")
   end
 
   # The app's choice: a callback that answers the trust dialog presses it, marked first, and
@@ -175,6 +238,13 @@ defmodule CodingAgentFramework.SessionsDialogTest do
                  other -> other
                end
              end)
+  end
+
+  defp marked(ctx, mark, kind \\ :trust) do
+    case Agents.dialog(Agents.get(ctx.agents, "alpha")) do
+      %{answers: %{^kind => %{mark: ^mark}}} = d -> {:ok, d}
+      other -> other
+    end
   end
 
   defp nonempty([]), do: :none

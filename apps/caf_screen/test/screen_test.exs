@@ -11,6 +11,8 @@ defmodule CodingAgentFramework.ScreenTest do
 
   @trust ["No, exit", "Yes, I trust this folder"]
   @imports ["No, disable external imports", "Yes, allow external imports"]
+  @long "/work/shared-notes-with-a-deliberately-…e-path-onto-another-line/" <>
+          "outside-file-with-a-long-name.md"
   @permission [
     "Yes",
     "Yes, and always allow access to /work/repo from this project",
@@ -39,7 +41,17 @@ defmodule CodingAgentFramework.ScreenTest do
       kind: :imports,
       options: @imports,
       selected: "No, disable external imports",
-      paths: ["/work/outside.md"]
+      paths: ["/work/outside.md"],
+      shortened: []
+    },
+    # A path wider than the pane, shortened in the middle on one line (F-144's capture).
+    "imports-long-path" => %{
+      state: :dialog,
+      kind: :imports,
+      options: @imports,
+      selected: "No, disable external imports",
+      paths: [@long],
+      shortened: [@long]
     }
   }
 
@@ -146,6 +158,14 @@ defmodule CodingAgentFramework.ScreenTest do
 
       flush = edit("imports-dialog.txt", "    /work/outside.md", "  /work/outside.md")
       assert Screen.read(flush, @release) == {:unknown, {:unrecognized, @release}}
+    end
+
+    test "of several paths, only one drawn with an ellipsis is shortened" do
+      both =
+        edit("imports-long-path.txt", "    /work/shared", "    /work/short.md\n    /work/shared")
+
+      assert {:ok, %{paths: ["/work/short.md", @long], shortened: [@long]}} =
+               Screen.read(both, @release)
     end
 
     test "a dialog's options at another dialog's indent are unrecognized" do

@@ -257,6 +257,34 @@ defmodule CodingAgentFramework.SessionsTest do
     assert {:ok, _} = cued_row_when(ctx, sessions, "deaf", &(&1.status == "stopped"))
   end
 
+  # Team.tla's EndAskedEnds (F-143's new-4): the row keeps the end asked, so the settle ends it
+  # once the process is gone, across a restart and with no second call.
+  test "F-144: a main session's end whose stop answered unknown is ended by the settle", ctx do
+    assert {:ok, %{pid: pid}} =
+             Sessions.start(ctx.sessions, "deaf", ctx.account, launch(ctx, :at_start))
+
+    assert {:ok, %{status: 0}} = kill(pid, "-STOP")
+    stop = Task.async(fn -> Sessions.end_main(ctx.sessions, "deaf") end)
+    assert {:ok, _} = row_when(ctx, "deaf", &(&1.status == "stopping"))
+    assert is_integer(Table.get(ctx.table, "test", "deaf").end_asked)
+    advance(ctx)
+    assert {:unknown, {:no_exit, {:ok, :sent}}} = Task.await(stop)
+
+    sessions = restart(ctx, nil)
+    :sys.get_state(sessions)
+    assert %{status: "stopping", end_asked: asked} = Table.get(ctx.table, "test", "deaf")
+    assert is_integer(asked)
+
+    assert {:ok, %{status: 0}} = kill(pid, "-CONT")
+    assert {:ok, :gone} = await(fn -> if not alive?(pid), do: {:ok, :gone} end)
+
+    assert {:ok, %{end_asked: nil}} =
+             cued_row_when(ctx, sessions, "deaf", &(&1.status == "ended"))
+
+    assert {:refused, {:ended, "deaf"}} =
+             Sessions.start(sessions, "deaf", ctx.account, launch(ctx, :at_start))
+  end
+
   test "F-61: RunningSettled stops a running row whose process was killed; the name resumes",
        ctx do
     {dir, crashed} = own_dir(ctx, "crashed", :at_start)

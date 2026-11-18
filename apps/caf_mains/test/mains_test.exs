@@ -281,8 +281,19 @@ defmodule CodingAgentFramework.MainsTest do
     assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "app-main")
     assert {:ok, [_]} = await(fn -> leases(ctx, & &1.released_at) end)
 
-    assert {:unknown, {:dialog, :trust}} = Mains.resume_main(mains, "app-main")
-    assert [_, %{status: "starting", id: id}] = Starts.rows(ctx.starts, "test")
+    # A fix's resume acts only on the state its claim holds (F-143's new-1).
+    assert {:ok, %{status: "stopped", session_id: ^sid} = dead} =
+             Mains.fix_state(mains, "app-main")
+
+    assert {:refused, {:moved, ^dead}} =
+             Mains.resume_main(mains, "app-main", state: %{dead | pid: -1})
+
+    assert {:unknown, {:dialog, :trust}} = Mains.resume_main(mains, "app-main", state: dead)
+
+    # The start's row says which session it resumed (F-143's new-5).
+    assert [%{resume: nil}, %{status: "starting", id: id, resume: ^sid}] =
+             Starts.rows(ctx.starts, "test")
+
     key = Work.key("test", id)
 
     assert {:ok, [%{holder: {"main", ^key}}]} =

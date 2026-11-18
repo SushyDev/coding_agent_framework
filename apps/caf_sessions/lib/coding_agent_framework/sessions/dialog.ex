@@ -8,14 +8,16 @@ defmodule CodingAgentFramework.Sessions.Dialog do
   `Sessions` reads the pane while its start has no session file, and the row says `dialog`
   until the start goes on. Its `dialog` column is the dialog shown (`shown/1`), and its
   `answers` column each kind's answer, marked `pressing` before its press goes, then `sent` or
-  `unknown` (`answers/1`). An answer whose mark is `pressing` when `Sessions` restarts is
-  `unknown`: its press may have gone. A kind with any mark is never pressed again.
+  `unknown` (`answers/1`), with the id of its row in `Acts` (`act`). An answer whose mark is
+  `pressing` when `Sessions` restarts is `cut`: its press may have gone. A kind with any mark
+  is never pressed again, but for a `cut` one a person cleared (`clear/2`, F-144): it is
+  `cleared`, may be answered once more, and a press of it cut again is `unknown`.
 
       iex> alias CodingAgentFramework.Sessions.Dialog
       iex> screen = %{state: :dialog, kind: :trust, options: ["No, exit", "Yes"], selected: "No, exit"}
       iex> row = %{dialog: Dialog.encode(screen), answers: nil}
       iex> Dialog.shown(row)
-      %{kind: :trust, options: ["No, exit", "Yes"], selected: "No, exit", paths: []}
+      %{kind: :trust, options: ["No, exit", "Yes"], selected: "No, exit", paths: [], shortened: []}
       iex> Dialog.check(row, :trust, "Yes")
       :ok
       iex> Dialog.check(%{row | answers: ~s({"trust":{"label":"Yes","mark":"sent"}})}, :trust, "Yes")
@@ -55,15 +57,25 @@ defmodule CodingAgentFramework.Sessions.Dialog do
   def encode(%{state: :dialog, kind: kind} = screen) do
     %{kind: kind, options: screen.options, selected: screen.selected}
     |> Map.put(:paths, Map.get(screen, :paths, []))
+    |> Map.put(:shortened, Map.get(screen, :shortened, []))
   end
 
-  @doc "The dialog the row shows, or showed last: `%{kind, options, selected, paths}`, or nil."
+  @doc """
+  The dialog the row shows, or showed last: `%{kind, options, selected, paths, shortened}`
+  (`shortened` the paths the pane drew cut in their middle, `Screen`'s), or nil.
+  """
   @spec shown(map | nil) :: map | nil
   def shown(%{dialog: text}) when is_binary(text) do
     case JSON.decode(text) do
       {:ok, %{"kind" => name, "options" => options, "selected" => selected} = d} ->
         if kind = kind(name),
-          do: %{kind: kind, options: options, selected: selected, paths: d["paths"] || []}
+          do: %{
+            kind: kind,
+            options: options,
+            selected: selected,
+            paths: d["paths"] || [],
+            shortened: d["shortened"] || []
+          }
 
       _ ->
         nil
@@ -73,13 +85,19 @@ defmodule CodingAgentFramework.Sessions.Dialog do
   def shown(%{dialog: %{kind: _} = dialog}), do: dialog
   def shown(_), do: nil
 
-  @doc "Each kind's answer on the row: `%{kind => %{label: label, mark: mark}}`."
+  @doc """
+  Each kind's answer on the row: `%{kind => %{label: label, mark: mark}}`, with `act` (its row
+  in `Acts`) and `cleared: true` (a person cleared a cut press of it) when it has them.
+  """
   @spec answers(map | nil) :: %{kind => %{label: String.t(), mark: String.t()}}
   def answers(%{answers: text}) when is_binary(text) do
     case JSON.decode(text) do
       {:ok, %{} = all} ->
-        for {name, %{"label" => label, "mark" => mark}} <- all, kind = kind(name), into: %{} do
-          {kind, %{label: label, mark: mark}}
+        for {name, %{"label" => label, "mark" => mark} = a} <- all,
+            kind = kind(name),
+            into: %{} do
+          extra = for {k, v} <- [act: a["act"], cleared: a["cleared"]], v, do: {k, v}
+          {kind, Map.new([label: label, mark: mark] ++ extra)}
         end
 
       _ ->
@@ -90,15 +108,31 @@ defmodule CodingAgentFramework.Sessions.Dialog do
   def answers(_), do: %{}
 
   @doc """
-  The row's answers with `kind`'s marked `mark` (nil removes it), as the column stores them.
+  The row's answers with `kind`'s marked `mark`, as the column stores them, with `fields`
+  (`act:`) over what the answer had. A refusal, which pressed nothing, takes the mark back to
+  what it was before the press: none, or `cleared`.
   """
-  @spec mark(map, kind, String.t(), String.t() | nil) :: map
-  def mark(row, kind, _label, nil), do: Map.delete(answers(row), kind)
-  def mark(row, kind, label, mark), do: Map.put(answers(row), kind, %{label: label, mark: mark})
+  @spec mark(map, kind, String.t(), String.t() | nil, keyword) :: map
+  def mark(row, kind, label, mark, fields \\ [])
+
+  def mark(row, kind, _label, nil, _fields) do
+    all = answers(row)
+
+    case all[kind] do
+      %{cleared: true} = a -> Map.put(all, kind, %{a | mark: "cleared"})
+      _ -> Map.delete(all, kind)
+    end
+  end
+
+  def mark(row, kind, label, mark, fields) do
+    all = answers(row)
+    old = Map.take(all[kind] || %{}, [:act, :cleared])
+    Map.put(all, kind, Map.merge(old, Map.new([label: label, mark: mark] ++ fields)))
+  end
 
   @doc """
-  The answers a restart finds: a press marked `pressing` may have gone, so it is `unknown`.
-  Answers nil when nothing changes.
+  The answers a restart finds: a press marked `pressing` may have gone, so it is `cut`, or
+  `unknown` once a person cleared it before. Answers nil when nothing changes.
   """
   @spec after_restart(map) :: map | nil
   def after_restart(row) do
@@ -106,16 +140,67 @@ defmodule CodingAgentFramework.Sessions.Dialog do
 
     if Enum.any?(all, fn {_, a} -> a.mark == "pressing" end) do
       Map.new(all, fn
-        {k, %{mark: "pressing"} = a} -> {k, %{a | mark: "unknown"}}
+        {k, %{mark: "pressing", cleared: true} = a} -> {k, %{a | mark: "unknown"}}
+        {k, %{mark: "pressing"} = a} -> {k, %{a | mark: "cut"}}
         pair -> pair
       end)
     end
   end
 
   @doc """
+  The answers after a person's clear of `kind`'s cut press (`Dialog.tla`'s Clear): `cleared`,
+  so it may be answered once more. Refused `{:not_cut, mark}` for any other mark, a press
+  cleared once among them, and `:no_answer` for none.
+
+      iex> alias CodingAgentFramework.Sessions.Dialog
+      iex> row = %{answers: ~s({"trust":{"label":"Yes","mark":"cut"}})}
+      iex> Dialog.clear(row, :trust)
+      {:ok, %{trust: %{label: "Yes", mark: "cleared", cleared: true}}}
+      iex> Dialog.clear(%{answers: ~s({"trust":{"label":"Yes","mark":"unknown"}})}, :trust)
+      {:refused, {:not_cut, "unknown"}}
+  """
+  @spec clear(map, kind) :: {:ok, map} | {:refused, term}
+  def clear(row, kind) do
+    all = answers(row)
+
+    case all[kind] do
+      %{mark: "cut"} = a ->
+        {:ok, Map.put(all, kind, Map.merge(a, %{mark: "cleared", cleared: true}))}
+
+      %{mark: mark} ->
+        {:refused, {:not_cut, mark}}
+
+      nil ->
+        {:refused, :no_answer}
+    end
+  end
+
+  @doc """
+  Whether a press of an answer on the row is under way: one is marked `pressing`.
+
+      iex> CodingAgentFramework.Sessions.Dialog.pressing?(%{answers: ~s({"trust":{"label":"Yes","mark":"pressing"}})})
+      true
+  """
+  @spec pressing?(map) :: boolean
+  def pressing?(row), do: Enum.any?(answers(row), fn {_, a} -> a.mark == "pressing" end)
+
+  @doc """
+  The mark an answer of `kind` is taken from: `"none"`, or `"cleared"` after a person's
+  clear. With the row's start, it is the state the answer's row in `Acts` claims, so each is
+  answered once.
+  """
+  @spec from_mark(map, kind) :: String.t()
+  def from_mark(row, kind) do
+    case answers(row)[kind] do
+      nil -> "none"
+      %{mark: mark} -> mark
+    end
+  end
+
+  @doc """
   Whether `label` may answer `kind` on this row now: the row shows that dialog, with that
-  option, and no answer to it has been marked. Refusals: `{:shown, kind | nil}` (another
-  dialog, or none), `{:no_option, label}`, `{:answered, mark}`.
+  option, and no answer to it has been marked but a `cleared` one. Refusals: `{:shown, kind |
+  nil}` (another dialog, or none), `{:no_option, label}`, `{:answered, mark}`.
   """
   @spec check(map, kind, String.t()) :: :ok | {:refused, term}
   def check(row, kind, label) do
@@ -124,7 +209,7 @@ defmodule CodingAgentFramework.Sessions.Dialog do
     cond do
       shown == nil or shown.kind != kind -> {:refused, {:shown, shown && shown.kind}}
       label not in shown.options -> {:refused, {:no_option, label}}
-      a = answers(row)[kind] -> {:refused, {:answered, a.mark}}
+      (a = answers(row)[kind]) && a.mark != "cleared" -> {:refused, {:answered, a.mark}}
       true -> :ok
     end
   end
