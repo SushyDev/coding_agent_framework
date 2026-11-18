@@ -202,10 +202,18 @@ Built, each from a checked model in `model/tla/`:
   names (a heavy run, a builder's suite, a landing's gates), its row the holder, released once
   `Jobs` read the job's end; a refused job is a row that says why and when to ask again; a
   heavy slot is the first fenced resource, so a start that lands late runs nothing; and a
-  landing takes its slot and its project's lock in one gang lease, through the `run` tool.
+  landing takes its slot and its project's lock in one gang lease, through the `run` tool;
+- `Mains` (F-141), against `Checkout.tla`: each project's checkout, the framework's own clone
+  of its repository, made once under a temporary name and renamed whole; the pull after a
+  landing, fast-forward only and only while the checkout is clean, owed again after a restart
+  and held back, visibly, while a person's edit or commit is there; the checkout's reading
+  (branch, clean, ahead and behind its remote) for a view; and `start_main`, a main session
+  started in the checkout under a free name, its brief its first message, through the
+  `Scheduler` and the startup dialogs. The example app declares its projects and main sessions
+  through it.
 
 The remodel (F-115, taken in F-116) is done. Next,
-main sessions, the mechanisms an app's policies stand on (an idle
+a main session's end (F-141's new-1), the mechanisms an app's policies stand on (an idle
 delegate's watchdog, `Stop` held for the app, clone copies, an idempotent
 start), packaging, and stacks with the LiveView components. The plan and the order of the units are in
 [docs/design.md](docs/design.md); each unit's notes are in `docs/build-notes/`.
@@ -246,6 +254,7 @@ flowchart BT
   tracker[caf_tracker]
   delegates[caf_delegates]
   mover[caf_mover]
+  mains[caf_mains]
   scheduler[caf_scheduler]
   subgraph team["The tree's tools"]
     grants[caf_grants]
@@ -316,6 +325,15 @@ flowchart BT
   mover --> usage
   mover --> transcripts
   mover --> acts
+  mains --> shell
+  mains --> accounts
+  mains --> cli
+  mains --> usage
+  mains --> stream
+  mains --> sessions
+  mains --> mailbox
+  mains --> scheduler
+  mains --> store
   mcp --> grants
   mcp --> acts
   copies --> shell
@@ -337,7 +355,8 @@ on the others, as an embedding app would be, and uses every one of them. `caf_cu
 `caf_grants`, `caf_intake` and `caf_screen` use no other app: the embedding app hands `caf_cues`
 each part's declaration of what it reads and `caf_grants` the tree as a function, and
 `caf_screen` reads a screen's text it is given. `caf_mcp` reaches `Delegates`,
-`Mailbox`, the `Tracker`, the `Mover` and `Sessions` through modules the embedding app names.
+`Mailbox`, the `Tracker`, the `Mover`, `Sessions` and `Mains` through modules the embedding app
+names.
 
 ## Development
 
