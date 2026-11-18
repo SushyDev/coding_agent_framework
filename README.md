@@ -215,7 +215,10 @@ Built, each from a checked model in `model/tla/`:
   a delegate of it has not ended, the session stopped once idle and its agent row ended, so
   every service it owns ends, kept ones too; a main session's resume under a lease of its own,
   a refused start's brief settled, the model a start names, and a stale lock in the checkout
-  shown as `locked` until a person clears it.
+  shown as `locked` until a person clears it;
+- the example app run for real (F-146): it starts from a config file checked whole, an
+  operator's console in IEx (`bin/caf-example`), an account's login (`bin/caf-login`), and the
+  end-to-end run as steps for a person and a main session ([docs/e2e.md](docs/e2e.md)).
 
 The remodel (F-115, taken in F-116) is done. Next,
 F-140's follow-ups on startup dialogs, the mechanisms an app's policies stand on (an idle
@@ -402,6 +405,34 @@ Entering the shell writes this repository's own `pre-commit` hook into the commo
 spelling (`typos`) on the staged files, by absolute store paths, so a plain `git commit` outside
 the shell runs it. If `core.hooksPath` points at a global directory, that directory must hand off
 to this file when it exists. A `pre-commit` this repository did not write is never replaced.
+
+### Running the example app
+
+`caf_example` is the embedding app that wires every part. To run it against the real Claude
+Code:
+
+1. Write a config file: one JSON object with the framework home, its accounts, its projects
+   (each with its `origin`, `trunk`, `branches`, `cap` and the main sessions it declares), the
+   two ports and the `Scheduler`'s capacities. `CodingAgentFramework.Example.ConfigFile`'s doc
+   names every key and its default; the file is checked whole at start, and each refusal names
+   its key, such as `{"projects.demo.cap", :missing}`.
+2. Log each account in, once, with `bin/caf-login <home> <account>`. It runs Claude Code's own
+   login (`claude auth login`) in your terminal with that account's config directory,
+   `<home>/accounts/<account>/claude`, and `bin/caf-login --check <home> <account>` asks Claude
+   Code whether it worked. Spell `<home>` as the config file does. The framework itself never
+   reads a credential: the first session it starts on an account is the real check.
+3. Start it with `bin/caf-example <config>`. It runs in devenv's environment (running itself
+   through `devenv shell` when it is not), starts the app, and opens an IEx shell with the
+   operator's console imported and the app named `caf`: `agents(caf)`, `dialogs(caf)`,
+   `answer_dialog(caf, …)`, `start_main(caf, …)`, `start_delegate(caf, …)`,
+   `run_delegate(caf, …)`, `message(caf, …)`, `asks(caf)`, `move(caf, …)`, `end_main(caf, …)`,
+   `leases(caf)`, `faults(caf)` and the rest (`h CodingAgentFramework.Example.Console`). Each
+   acts as the operator, through the same tools and checks as an agent's, and prints a short
+   reading. Quitting the shell stops the framework; the agents run on under dtach, and the
+   next start adopts them.
+
+[docs/e2e.md](docs/e2e.md) is the end-to-end run, step by step, that a person and a main
+session follow together with it.
 
 ## License
 

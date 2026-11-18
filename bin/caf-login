@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Logs one account of a framework home in, with Claude Code's own login, in this terminal:
+#
+#   bin/caf-login <home> <account>           # claude auth login, with the account's directory
+#   bin/caf-login --check <home> <account>   # claude auth status, with the same directory
+#
+# The account's Claude config directory is <home>/accounts/<account>/claude, the one the
+# framework sets as CLAUDE_CONFIG_DIR at every launch on that account (docs/design.md,
+# "Claude Code"). Give <home> spelled as the config file's `home`: the directory is named by
+# that path. The framework never reads a credential, so whether an account is logged in is
+# unknown to it until a session on the account starts or fails; --check asks Claude Code.
+#
+# It runs devenv's pinned Claude Code (CAF_CLAUDE), with the updater off; outside devenv it
+# runs itself again through `devenv shell`. Nothing of a Claude Code session this was typed in
+# (CLAUDECODE, CLAUDE_CODE_*) reaches the login.
+set -euo pipefail
+
+usage() { echo "usage: bin/caf-login [--check] <home> <account>"; }
+fail() {
+  echo "caf-login: $*" >&2
+  exit 2
+}
+
+check=0
+if [[ "${1:-}" == --check ]]; then check=1; shift; fi
+case "${1:-}" in -h | --help) usage; exit 0 ;; esac
+(($# == 2)) || { usage >&2; exit 2; }
+home=$1 account=$2
+[[ "$home" == /* ]] || fail "$home is not an absolute path"
+[[ "$account" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || fail "$account is not an account's name"
+
+dir="$home/accounts/$account/claude"
+# Setting CLAUDE_CONFIG_DIR to the default directory logs Claude Code out (docs/design.md).
+if [[ -d "$dir" && "$(cd "$dir" && pwd -P)" == "$(cd "$HOME" && pwd -P)/.claude" ]]; then
+  fail "$dir is the default directory ~/.claude; name a framework home of its own"
+fi
+
+if [[ -z "${CAF_CLAUDE:-}" ]]; then
+  command -v devenv >/dev/null || fail "devenv is not on PATH; see README.md, Development"
+  root="$(cd "$(dirname "$0")/.." && pwd -P)"
+  args=("$home" "$account")
+  if ((check)); then args=(--check "${args[@]}"); fi
+  cd "$root"
+  exec devenv shell -- "$root/bin/caf-login" "${args[@]}"
+fi
+
+unset CLAUDECODE TMUX TMUX_PANE
+while IFS= read -r name; do
+  if [[ "$name" == CLAUDE_CODE_* ]]; then unset "$name"; fi
+done < <(compgen -e)
+export CLAUDE_CONFIG_DIR="$dir" DISABLE_AUTOUPDATER=1
+
+if ((check)); then
+  echo "caf-login: account $account, $dir:"
+  exec "$CAF_CLAUDE" auth status --text
+fi
+
+mkdir -p "$dir"
+echo "caf-login: logging account $account in, with $dir"
+"$CAF_CLAUDE" auth login
+echo
+echo "caf-login: to check it, run: bin/caf-login --check $home $account"
+echo "caf-login: the first session the framework starts on $account is the real check."
