@@ -2153,6 +2153,19 @@ work `Delegates.Work` says ended has no process (Break `StatusEndsWork`). `Boxes
 header maps each effect of its `RestartAgent` to the step that checks it. With one agent,
 `Start.tla` and `Dialog.tla` reach the same states as before; the build note has the counts.
 
+`Prompt.tla` (F-167) is the `Prompts` box's contract ("Prompts"): a row opened once per owner
+state, answered once by its rightful answerer (a person, the app's decider for its kinds, the
+asker's parent for `permission`, `plan` and `elicitation`), the answer checked on the row read
+before its claim (`Claim`), marked `answering`, handed to its owner and settled by the owner's
+answer or, after a restart, its evidence; a deadline that takes a declared default or expires
+the row; a held request's owner as `Hold` (one response, its deadline, its holder's death);
+the `stop_cap` hold at Claude Code's cap with the override as the environment's act; and a
+`restarts` prompt past an agent process's budget. Invariants `OneAnswer`, `OnlyRightful`,
+`NotAfterDeadline`, `DefaultOnlyDeclared`, `KeptAcrossRestart`, `NeverOverridden`; liveness
+`PromptsEnd` and `Escalated`; each with a `Break_Prompt_*` configuration. `Dialog.tla`'s answer
+and `Team.tla`'s ask are its instances: the dialog's mark is the prompt's row, and an ask opens
+one and is answered by `AnswerNow`. Its header says how it implies `Boxes.tla`'s `pr` and `rp`.
+
 **The remodel's model** (F-115). Each mechanism is written once, and the specs above are
 reshaped around three new ones, in R4 and R6, before the code they describe:
 
@@ -2658,7 +2671,8 @@ model before the code it describes (B4, B6, B8, B9, B11); B2 and B3 change no be
   `Move.tla`, bounded by `MaxRestarts`, with state counts compared before and after (about
   +200; built in F-164, with `Delivery.tla`'s cut of a hand by its addressee's restart and
   `Delegate.tla`'s `WorkEndedIsFree`); `Prompt.tla` (about +300), instancing `Hold` and `Claim`, with `Dialog.tla`'s answer and
-  `Team.tla`'s ask as its instances; `Heal.tla` (about +250), instancing `Claim`: a symptom, the
+  `Team.tla`'s ask as its instances (built in F-167; `Team.tla`'s `AnswerClaimed` is left, its
+  new-5); `Heal.tla` (about +250), instancing `Claim`: a symptom, the
   allow-list, a remedy claimed once per state, its precondition read before the claim, verified
   after, a cap per window that turns acting into a prompt; and `Delivery.tla`'s subscription
   (about +150): a row stored waiting on an event key, fired once by the event's fact (one
