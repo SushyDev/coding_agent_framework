@@ -116,6 +116,9 @@ defmodule CodingAgentFramework.AgentsTest do
   # F-165: the end's own time, which a later write keeps and a new start clears.
   test "a row's end time is its first done status's, kept by later writes", ctx do
     row = %{host: "test", name: "app-done", kind: "delegate", socket: "app-done", account: "w"}
+    # A starting row past its deadline with no process is the running `Sessions`' to settle on
+    # any cue (F-154's new-5); this one's deadline is far off, so only the test writes it.
+    row = Map.put(row, :deadline, System.os_time(:millisecond) + 600_000)
     id = Table.starting(ctx.table, Map.merge(row, %{role: "delegate", cwd: ctx.dir}))
     Table.update(ctx.table, id, status: "stopped")
     assert %{ended_at: nil} = Table.get(ctx.table, "test", "app-done")
@@ -146,6 +149,7 @@ defmodule CodingAgentFramework.AgentsTest do
 
   test "the migration's hand-over gives a delegate with no parent its parent and its end", ctx do
     row = %{host: "test", name: "app-old", kind: "delegate", socket: "app-old", account: "work"}
+    row = Map.put(row, :deadline, System.os_time(:millisecond) + 600_000)
     id = Table.starting(ctx.table, Map.merge(row, %{role: "delegate", cwd: ctx.dir}))
     Table.update(ctx.table, id, status: "stopped")
     {:ok, agents} = Agents.open(ctx.opts[:db], "test")

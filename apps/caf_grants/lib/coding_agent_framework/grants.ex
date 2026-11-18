@@ -31,6 +31,7 @@ defmodule CodingAgentFramework.Grants do
   | `may_start_delegate?/3` | a main session, for itself; the operator, for any main session | `:main_session_only`, `:parent_or_operator` |
   | `may_start_main?/2` | a main session, or the operator | `:main_session_only` |
   | `may_use?/2` | any agent the tree holds, and the operator | `{:unknown_agent, name}` |
+  | `may_call?/3` (an app's tool) | an agent whose role and project its scope holds, and the operator | `:out_of_scope` |
   | `may_start_service?/2` | any agent the tree holds | `{:unknown_agent, name}`, `:operator_owns_nothing` |
   | `may_fix_service?/3` | the service's owner, the owner's parent, or the operator | `:service_fixed_by_owner_or_parent` |
   | `may_hand?/4` | the owner, to its parent or a child | `:handed_by_owner`, `:handed_along_edge` |
@@ -183,6 +184,32 @@ defmodule CodingAgentFramework.Grants do
   def may_use?(grants, caller), do: check(grants, [caller], fn _ -> :ok end)
 
   @doc """
+  May `caller` see and call an app's tool of `scope` (`CodingAgentFramework.Extension`, F-154)?
+  An agent whose role (`:main` for a main session, `:delegate` otherwise) and project the scope
+  holds, else `{:refused, :out_of_scope}`; the operator always.
+
+      iex> tree = fn -> [%{name: "app-main", project: "app", parent: nil},
+      ...>   %{name: "app-fix", project: "app", parent: "app-main"}] end
+      iex> grants = CodingAgentFramework.Grants.new(tree)
+      iex> scope = %{roles: [:main], projects: :all}
+      iex> {CodingAgentFramework.Grants.may_call?(grants, "app-main", scope),
+      ...>  CodingAgentFramework.Grants.may_call?(grants, "app-fix", scope)}
+      {:ok, {:refused, :out_of_scope}}
+  """
+  @spec may_call?(t, String.t(), %{roles: [atom], projects: :all | [String.t()]}) :: answer
+  def may_call?(grants, caller, %{roles: roles, projects: projects}) do
+    check(grants, [caller], fn tree ->
+      role = if main?(tree, caller), do: :main, else: :delegate
+
+      cond do
+        operator?(tree, caller) -> :ok
+        role in roles and (projects == :all or tree.projects[caller] in projects) -> :ok
+        true -> {:refused, :out_of_scope}
+      end
+    end)
+  end
+
+  @doc """
   The parent of `name`, to whom a kept service goes when its owner ends: `{:ok, parent}` for a
   delegate, `{:refused, :main_has_no_parent}` for a main session.
   """
@@ -228,7 +255,8 @@ defmodule CodingAgentFramework.Grants do
     two = Enum.find(entries, &(parents[&1.name] != &1.parent))
     # A root is a main session, and only a root is.
     mains = MapSet.new(for %{name: n, parent: nil} <- entries, do: n)
-    tree = %{parents: parents, mains: mains, operator: grants.operator}
+    projects = Map.new(entries, &{&1.name, &1[:project]})
+    tree = %{parents: parents, mains: mains, operator: grants.operator, projects: projects}
     op = grants.operator
 
     cond do

@@ -99,7 +99,9 @@ defmodule CodingAgentFramework.Mains do
   Starts main session `name` of `project`, with `brief` (a string, or nil for none) as its
   first message (see the module doc). Options: `from:` (the brief's sender: a main session's
   name, or the operator's; the operator's by default), `model:` (the model it runs, else the
-  app's launch's, F-141's new-8), `timeout:` (what the caller waits,
+  app's launch's, F-141's new-8), `meta:` (a map of the app's own keys kept on the agent row,
+  `Sessions.start/5`, F-154; refused `{:bad, :meta}` when not a map), `timeout:` (what the
+  caller waits,
   default 300 000 ms; the start goes on past it). Answers `{:ok, %{name, account,
   session_id}}`; `{:refused, reason}`: `{:running, name}`, `{:unknown_project, project}`,
   `{:checkout, state}` while the checkout is not made, `{:lease, why}`, or `Sessions`' refusal
@@ -111,7 +113,8 @@ defmodule CodingAgentFramework.Mains do
           outcome(map)
   def start_main(mains, project, name, brief, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 300_000)
-    call(mains, {:start_main, project, name, brief, opts[:from], opts[:model]}, timeout)
+    start = {:start_main, project, name, brief, opts[:from], opts[:model], opts[:meta]}
+    call(mains, start, timeout)
   end
 
   @doc """
@@ -350,19 +353,20 @@ defmodule CodingAgentFramework.Mains do
     {:reply, reply, s}
   end
 
-  def handle_call({:start_main, project, name, brief, from_name, model}, from, s) do
+  def handle_call({:start_main, project, name, brief, from_name, model, meta}, from, s) do
     with :ok <- name_ok(s, name),
          {:ok, p} <- Map.fetch(s.projects, project) |> known(project),
          :ok <- made(s, project),
          :ok <- free(s, project, name),
          :ok <- brief_ok(brief),
          :ok <- model_ok(model),
+         true <- meta == nil or is_map(meta) or {:refused, {:bad, :meta}},
          {:ok, account} <- pick(s),
          {:ok, _} <- Sessions.declare(s.sessions, name, project) do
       uuid = if brief, do: Stream.uuid()
       row = starting(s, project, name, account, uuid)
       start = %{p: p, account: account, brief: brief, from: from_name || s.operator}
-      leased(s, row, Map.merge(start, %{model: model, resume: nil}), from)
+      leased(s, row, Map.merge(start, %{model: model, meta: meta, resume: nil}), from)
     else
       refused -> {:reply, refused, s}
     end
@@ -824,6 +828,8 @@ defmodule CodingAgentFramework.Mains do
       launch = [role: :parent, kind: :main, cwd: start.p.repo, project: row.project]
       launch = launch ++ launch_model(s.launch, start)
       launch = if launched, do: launch ++ [prompt: launched.text], else: launch
+      # A start that names no metadata, and a resume, keep the row's (`Sessions.start/5`).
+      launch = if start[:meta], do: launch ++ [meta: start.meta], else: launch
       {sessions, mailbox, mcp} = {s.sessions, s.mailbox, s.mcp}
 
       # The config is made in the task: the embedding app's `issue` may call a part that waits.
