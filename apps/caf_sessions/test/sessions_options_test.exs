@@ -14,10 +14,10 @@ defmodule CodingAgentFramework.SessionsOptionsTest do
        ctx do
     deny = %{"permissions" => %{"deny" => ["Bash(git push *)"]}}
     options = %{settings: deny, add_dirs: ["/srv/docs"], append_system_prompt: "Be brief."}
-    bad = headless(ctx, :at_start) ++ [options: %{env: %{"HOME" => "/x"}}]
+    bad = headless(ctx, :on_message) ++ [options: %{env: %{"HOME" => "/x"}}]
     assert {{:refused, _}, nil} = {start(ctx, bad), Table.get(ctx.table, "test", "o1")}
 
-    assert {:ok, %{session_id: id}} = start(ctx, headless(ctx, :at_start) ++ [options: options])
+    assert {:ok, %{session_id: id}} = start(ctx, headless(ctx, :on_message) ++ [options: options])
     own = Path.join(ctx.account.config_dir, "framework/agents/o1.settings.json")
     assert JSON.decode!(File.read!(own))["permissions"] == deny["permissions"]
     flags = ["--settings", own, "--add-dir", "/srv/docs", "--append-system-prompt=Be brief."]
@@ -33,7 +33,7 @@ defmodule CodingAgentFramework.SessionsOptionsTest do
 
     # The resume names no options and no model: those of the row are given again (F-133's
     # new-3), as a resume another part makes (a move, a recovery) has them.
-    launch = Keyword.delete(headless(ctx, :at_start), :model)
+    launch = Keyword.delete(headless(ctx, :on_message), :model)
     assert {:ok, _} = Sessions.resume(ctx.sessions, "o1", ctx.account, id, launch)
 
     {:ok, again} = await(fn -> if a = HeadlessStandIn.argv(ctx.dir, id), do: {:ok, a} end)

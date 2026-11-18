@@ -61,7 +61,7 @@ defmodule CodingAgentFramework.DelegatesTest do
     }
 
     launch =
-      SessionsSetup.headless(ctx, :at_start) |> Keyword.take([:claude, :env, :tool_timeout])
+      SessionsSetup.headless(ctx, :on_message) |> Keyword.take([:claude, :env, :tool_timeout])
 
     opts = [
       host: "test",
@@ -208,6 +208,48 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert text == "done #{u2}"
     assert %{status: "running", resumes: 0, reason: "replaced"} = Table.get(ctx.dtable, id)
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "message #{u2}"]
+  end
+
+  test "a start whose init never comes takes a stop, and settles refused", ctx do
+    # F-152: a stand-in that never writes its init, held past its first line. The row stays
+    # starting; a parent's stop ends its held program by its record, and the start is refused.
+    never = Keyword.put(ctx.dopts[:launch], :claude, HeadlessStandIn.write!(ctx.dir, :never))
+    delegates = restart(%{ctx | dopts: Keyword.put(ctx.dopts, :launch, never)})
+    name = "app-unit-one"
+
+    call =
+      Task.async(fn ->
+        Delegates.start_delegate(delegates, "main", "app", "unit/one", "opus", "Review it.")
+      end)
+
+    {:ok, _} = await(fn -> if match?(%{viewer: "open"}, session_row(ctx, name)), do: {:ok, 1} end)
+
+    # The brief went in right after the hold: the stand-in took it, and wrote no init.
+    [%{brief_uuid: u}] = Table.rows(ctx.dtable, "test")
+    taken = ["message #{u}"]
+    {:ok, _} = await(fn -> if HeadlessStandIn.taken(ctx.dir) == taken, do: {:ok, 1} end)
+
+    {:ok, %{status: "starting", offset: nil} = state} =
+      Delegates.fix_state(delegates, "main", name)
+
+    assert {:refused, {:not_started, "starting"}} =
+             Delegates.fix(delegates, "main", name, :interrupt, state)
+
+    assert {:ok, :stopped} = Delegates.fix(delegates, "main", name, :stop, state)
+    assert {:refused, :stopped} = Task.await(call)
+    assert [%{status: "refused", reason: "stopped"}] = Table.rows(ctx.dtable, "test")
+    assert %{status: "refused", reason: "stopped"} = session_row(ctx, name)
+
+    # Its replay settles the brief, whatever the start answered; nothing else went in.
+    assert HeadlessStandIn.taken(ctx.dir) == taken
+
+    {:ok, _} =
+      await(fn ->
+        {:ok, _} = Stream.read(ctx.stream)
+        Mailbox.cue(ctx.mailbox, %{topic: "stream:test", ids: []})
+        brief = Enum.find(rows(ctx), &(&1.kind == "brief"))
+        if brief.status == "delivered", do: {:ok, brief}, else: brief
+      end)
   end
 
   # Move.tla's NoStartWhileDraining: a move's drain starts no delegate under its session.

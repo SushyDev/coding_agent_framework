@@ -70,8 +70,14 @@ defmodule CodingAgentFramework.Sessions do
   naming the session id while the socket is live and the held program's record names a
   process that runs with its pid and start time. The record is written before the program
   starts, so the init comes after it. A resume
-  follows the same log again, from the offset `Stream` saved. A delegate's first message is a
-  `Stream` write, not part of the start: `prompt:` is not read.
+  follows the same log again, from the offset `Stream` saved. `prompt:` is not read. Claude
+  Code 2.1.322 writes the init only after it read its first line (F-152), so a delegate's
+  launch carries that line, `first: %{uuid, text}` (the row `Mailbox` marked for this start),
+  and the start writes it through `Stream` right after the hold, before it waits for the init;
+  a write refused is not made again, and the start waits for its deadline. A delegate whose
+  start is never confirmed is stopped by `stop/3` as a start on a dialog is: SIGTERM to its
+  held program's record; the start then answers `{:refused, :stopped}` once the process is
+  gone and its socket dead, and the row is `refused`, reason `stopped`.
 
   **A worktree** (`docs/design.md`, "The worktree"; `Start.tla`'s `Checked`, `Added`,
   `SetupStarts` and `SetupEnds`): a launch with `worktree: %{project: project, branch: branch}`
@@ -852,6 +858,13 @@ defmodule CodingAgentFramework.Sessions do
             {:reply, {:refused, {:unread, other}}, state}
         end
 
+      # F-152: a delegate's start never confirmed (its init never came) has no turn to read
+      # idle from either: its held program's record takes the SIGTERM, and the start is
+      # refused once its process is gone.
+      %{status: status, role: "delegate"} = row
+      when status in ~w(starting unknown) and how == :end ->
+        stop_unconfirmed(state, name, row, from, deadline)
+
       nil ->
         {:reply, {:refused, :no_session}, state}
 
@@ -859,6 +872,40 @@ defmodule CodingAgentFramework.Sessions do
         {:reply, {:refused, {:not_running, row.status}}, state}
     end
   end
+
+  # The start's own call, when under way and past its hold, waits for the exit and answers
+  # refused; with no call under way (after a restart, or an unknown answer), the stop waits for
+  # it and writes the row refused. A start still in its worktree or setup holds nothing yet.
+  defp stop_unconfirmed(state, name, row, from, deadline) do
+    pending = state.pending[name]
+
+    with :ok <- stoppable(pending),
+         {:ok, %{process: process, record: %{pid: _} = record}} <- held(state, row) do
+      sent =
+        if process == :live,
+          do: Holder.Process.signal(state.procs, record, "TERM"),
+          else: {:ok, :gone}
+
+      row = Map.merge(row, %{pid: record.pid, proc_start: record.start})
+      stop = %{from: from, sent: sent, deadline: deadline, record: record}
+      send(self(), {:check, name})
+
+      pending =
+        if pending,
+          do: Map.put(pending, :stop, stop),
+          else: %{kind: :stop, from: from, row: row, deadline: deadline, how: :unconfirmed}
+
+      {:noreply, put_in(state.pending[name], Map.put(pending, :sent, sent))}
+    else
+      {:refused, _} = refused -> {:reply, refused, state}
+      other -> {:reply, {:refused, {:unread, other}}, state}
+    end
+  end
+
+  defp stoppable(nil), do: :ok
+  defp stoppable(%{kind: :start, stop: _}), do: {:refused, :stopping}
+  defp stoppable(%{kind: :start}), do: :ok
+  defp stoppable(%{kind: kind}), do: {:refused, {:not_held, kind}}
 
   # What a main session's end may do with its row: nothing more, write it ended, or stop it
   # first; refused while a delegate of it has not ended, a move or a call is under way, or a
@@ -1084,9 +1131,46 @@ defmodule CodingAgentFramework.Sessions do
         done(state, name, pending, refused)
 
       :held ->
+        written = write_first(state, pending.way)
         write(state, row, viewer: open_viewer(state, name, pending.viewer))
         send(self(), {:check, name})
-        put_in(state.pending[name], pending)
+        put_in(state.pending[name], Map.put(pending, :first, written))
+    end
+  end
+
+  # A headless process writes its system/init only after it read its first line (Claude Code
+  # 2.1.322; F-152), so the line goes in right after the hold, before the start waits for the
+  # init: through `Stream`, under the uuid `Mailbox` marked it by, and settled by its replay.
+  # Written once: a refusal leaves the start to its deadline, and `Mailbox` makes the row due
+  # again by its fold.
+  defp write_first(state, %{first: %{uuid: uuid, text: text}, session_id: id}) do
+    case Stream.write(state.stream, id, {:message, uuid, text}, timeout: @stream) do
+      {:ok, _} = ok ->
+        ok
+
+      other ->
+        Logger.debug("sessions: the first line to #{id} was not written: #{inspect(other)}")
+        other
+    end
+  end
+
+  defp write_first(_state, _way), do: nil
+
+  # A start a stop was asked of (F-152) is never confirmed: once its process is gone by its
+  # record and its socket is dead, the row is refused, the start answers so and the stop is
+  # done. Past the deadline the stop answers as a late one, and the start as it would.
+  defp check(state, name, %{kind: :start, stop: stop, row: row} = pending) do
+    held = Map.merge(row, %{pid: stop.record.pid, proc_start: stop.record.start})
+
+    if liveness(state, held) in [:gone, :replaced] and dead?(state, row) do
+      write(state, row, status: "refused", reason: "stopped")
+      GenServer.reply(stop.from, {:ok, :stopped})
+      done(state, name, pending, {:refused, :stopped})
+    else
+      wait(state, name, pending, fn ->
+        GenServer.reply(stop.from, {:unknown, {:no_exit, stop.sent}})
+        late(state, row)
+      end)
     end
   end
 
@@ -1125,6 +1209,11 @@ defmodule CodingAgentFramework.Sessions do
         :end_main ->
           write(state, row, status: "ended", reason: nil, end_asked: nil)
           done(state, name, pending, {:ok, :ended})
+
+        # A delegate's start never confirmed: refused, as its own call would have answered.
+        :unconfirmed ->
+          write(state, row, status: "refused", reason: "stopped")
+          done(state, name, pending, {:ok, :stopped})
 
         _ ->
           write(state, row, status: "stopped")
@@ -1726,8 +1815,10 @@ defmodule CodingAgentFramework.Sessions do
          true <- id =~ ~r/\A[A-Za-z0-9_-]{1,64}\z/ or {:refused, {:bad, :session_id}},
          {:ok, options, own} <- own(state, :delegate, account, name, resume, launch),
          {:ok, cli} <- ClaudeCLI.headless(account, Keyword.take(launch, keys) ++ start ++ own),
-         {:ok, transcript} <- Transcripts.path(account.config_dir, cwd, id) do
-      {:ok, %{stream: stream, session_id: id, cli: cli, transcript: transcript, options: options}}
+         {:ok, transcript} <- Transcripts.path(account.config_dir, cwd, id),
+         {:ok, first} <- first(launch[:first]) do
+      way = %{stream: stream, session_id: id, cli: cli, transcript: transcript, options: options}
+      {:ok, Map.put(way, :first, first)}
     else
       :error -> {:refused, :no_stream}
       refused -> refused
@@ -1744,6 +1835,14 @@ defmodule CodingAgentFramework.Sessions do
          {:ok, cli} <- cli(role, account, name, resume, Keyword.delete(launch, :prompt), own),
          do: {:ok, %{cli: cli, options: options, prompt: prompt}}
   end
+
+  # A delegate's first line (F-152): the row `Mailbox` marked for this start, by its uuid.
+  defp first(nil), do: {:ok, nil}
+
+  defp first(%{uuid: uuid, text: text} = first) when is_binary(uuid) and is_binary(text),
+    do: {:ok, first}
+
+  defp first(_first), do: {:refused, {:bad, :first}}
 
   # The session's due directory, granted by `--add-dir` at every interactive start, so reading
   # a long row the typed write points to never asks permission (F-142). The agent row keeps

@@ -32,6 +32,14 @@
 (*             and wrote in its row first, and refused a second time       *)
 (*             under that uuid (Stream.tla models it).                     *)
 (*                                                                         *)
+(* A headless process writes its system/init only after it read its first *)
+(* line (Claude Code 2.1.322), and Sessions confirms its start only by     *)
+(* that init. So its turn's message is marked before Sessions is called,   *)
+(* and Sessions writes it into the FIFO right after the hold, before it    *)
+(* waits for the init (F-152; Delivery.tla's stream row for a start).      *)
+(* BriefAfterInit writes it only once the row is running: each waits on    *)
+(* the other, and the start never settles.                                 *)
+(*                                                                         *)
 (* Left abstract: the parent's pid, account and transcript copy           *)
 (* (Move.tla); the start's account, worktree, setup and dtach steps        *)
 (* (Start.tla); the deadline a starting row waits for before it is        *)
@@ -132,7 +140,8 @@ Breaks == {
     "NoPointer",             \* a report too long to type waits for a waiter (F-132), never typed
     "IdleInMemory",          \* the idle notice's mark is kept in memory, not as Mailbox's key
     "IdlePerDelegate",       \* the idle notice's key names the delegate, not its idle state
-    "StartOverLive"          \* a second start of a branch goes on while its session is live
+    "StartOverLive",         \* a second start of a branch goes on while its session is live
+    "BriefAfterInit"         \* a headless start waits for its init before its message
 }
 
 ASSUME Break \in Breaks
@@ -168,7 +177,8 @@ VARIABLES
     stops,        \* in memory: delegates whose Stop event Intake holds, not yet handled
     call,         \* in memory: d -> "none", "start", "resume": Delegates' call of Sessions
     sess,         \* Sessions: d -> its row of the latest call: "none", "start" or "resume"
-                  \*           (written, under way), "running", "refused"
+                  \*           (written, under way), "held" (a headless process held,
+                  \*           its init not read), "running", "refused"
     marked,       \* Stream's table: d -> the turn's message is marked under the row's uuid
     pipe,         \* d -> message lines in the current process's FIFO, not yet taken
     taken,        \* d -> turn messages the delegate's processes took
@@ -211,6 +221,10 @@ Active == {d \in Delegates :
              status[d] \in {"starting", "running", "resuming", "finished", "failed"}}
 Counted == IF Break = "CapSkipsStarting"
              THEN {d \in Active : status[d] # "starting"} ELSE Active
+
+\* The turn's message is marked before Sessions is called, for the start to
+\* carry or write; under BriefAfterInit a headless one's is not.
+MarkedFirst(d) == d \in Interactive \/ Break # "BriefAfterInit"
 
 \* The report is handed to Mailbox: its row is stored.
 Stored(d) == row[d].st # "none"
@@ -308,9 +322,10 @@ others == <<up, restarts, parentVars, stops, policyVars, dvars>>
 
 \* In a turn the parent calls start_delegate. The project and branch
 \* checks may refuse it, and the cap must when it is reached. The row is
-\* written first, as starting, and the call of Sessions begins. An
-\* interactive delegate's brief is marked by launch before the call: the
-\* start carries it.
+\* written first, as starting, and the call of Sessions begins. The brief
+\* is marked before the call: by launch for an interactive delegate, whose
+\* start carries it, and by stream for a headless one, whose start writes
+\* it right after the hold (under BriefAfterInit, only once it runs).
 StartAsked(d) ==
     /\ up /\ parentRuns /\ turn /\ status[d] = "none"
     /\ \/ /\ status' = [status EXCEPT ![d] = "refused"]
@@ -318,7 +333,7 @@ StartAsked(d) ==
        \/ /\ Cardinality(Counted) < Cap \/ Break = "NoCap"
           /\ status' = [status EXCEPT ![d] = "starting"]
           /\ call' = [call EXCEPT ![d] = "start"]
-          /\ marked' = [marked EXCEPT ![d] = d \in Interactive]
+          /\ marked' = [marked EXCEPT ![d] = MarkedFirst(d)]
     /\ UNCHANGED <<others, held, resumes, proc, reply, kills, persons, rsrc, sess, pipe, taken,
                    resumed>>
 
@@ -339,7 +354,7 @@ StartAgain(d) ==
     /\ resumes' = [resumes EXCEPT ![d] = 0]
     /\ call' = [call EXCEPT ![d] = "start"]
     /\ sess' = [sess EXCEPT ![d] = "none"]
-    /\ marked' = [marked EXCEPT ![d] = d \in Interactive]
+    /\ marked' = [marked EXCEPT ![d] = MarkedFirst(d)]
     /\ taken' = [taken EXCEPT ![d] = 0]
     /\ resumed' = [resumed EXCEPT ![d] = 0]
     /\ UNCHANGED <<up, restarts, parentVars, stops, idles, overdue, told, keys, dvars, held, reply,
@@ -354,17 +369,28 @@ Called(d) ==
 \* Sessions holds the process, which waits for its first message, or
 \* refuses. A resumed process reads a FIFO of its own: no line written for
 \* the process before reaches it (Stream.tla). An interactive process
-\* starts with its message as the prompt argument the launch marked.
+\* starts with its message as the prompt argument the launch marked, and
+\* its session file confirms it. A headless process is held first, and
+\* the message marked before the call goes into its FIFO in the same step.
 SessionsDecides(d) ==
     /\ sess[d] \in {"start", "resume"}
-    /\ \/ /\ sess' = [sess EXCEPT ![d] = "running"]
+    /\ \/ /\ sess' = [sess EXCEPT ![d] = IF d \in Interactive THEN "running" ELSE "held"]
           /\ proc' = [proc EXCEPT ![d] = "waiting"]
-          /\ pipe' = [pipe EXCEPT ![d] = IF d \in Interactive /\ marked[d] THEN 1 ELSE 0]
+          /\ pipe' = [pipe EXCEPT ![d] = IF marked[d] THEN 1 ELSE 0]
           /\ resumed' = [resumed EXCEPT ![d] = IF sess[d] = "resume" THEN @ + 1 ELSE @]
        \/ /\ sess' = [sess EXCEPT ![d] = "refused"]
           /\ UNCHANGED <<proc, pipe, resumed>>
     /\ UNCHANGED <<others, status, held, resumes, reply, kills, persons, rsrc, call, marked,
                    taken>>
+
+\* A held headless process's init, once it read its first line, confirms
+\* the start; a process gone first is never confirmed, and the call is
+\* refused (no process of it runs).
+Confirmed(d) ==
+    /\ sess[d] = "held"
+    /\ \/ proc[d] \in {"working", "idle"} /\ sess' = [sess EXCEPT ![d] = "running"]
+       \/ proc[d] = "dead" /\ sess' = [sess EXCEPT ![d] = "refused"]
+    /\ UNCHANGED <<others, delegateVars, call, marked, pipe, taken, resumed>>
 
 \* What a settled call writes: a start runs or is refused; a resume runs,
 \* or its refusal is the report, as a second kill's is.
@@ -449,8 +475,13 @@ PersonTypes(d) ==
 \* Its turn ends with its last reply, and its Stop event (the result in its
 \* log, or an interactive session's Stop hook) comes. A kill before that is
 \* written loses it; here, with the framework down the event reaches nothing.
+\* A headless start reads the init every 200 ms while it waits, and a turn
+\* takes longer than that: the init is read before the turn it began ends.
+\* A turn that ended and a process that exited within one read would leave
+\* the start refused and the reply unread (F-152's build note, new-2).
 DelegateFinishes(d) ==
     /\ proc[d] \in {"working", "person"}
+    /\ sess[d] # "held"
     /\ proc' = [proc EXCEPT ![d] = "idle"]
     /\ reply' = [reply EXCEPT ![d] = IF proc[d] = "working" THEN "brief" ELSE "person"]
     /\ stops' = IF up THEN stops \cup {d} ELSE stops
@@ -459,8 +490,10 @@ DelegateFinishes(d) ==
 
 \* Its turn ends with nothing the framework reads as its report (an
 \* interactive turn with no reply text): an idle state of its own begins.
+\* As in DelegateFinishes, the init is read before a turn ends.
 TurnEndsBare(d) ==
     /\ d \in Stalls /\ proc[d] = "working"
+    /\ sess[d] # "held"
     /\ proc' = [proc EXCEPT ![d] = "stalled"]
     /\ idles' = [idles EXCEPT ![d] = @ + 1]
     /\ overdue' = [overdue EXCEPT ![d] = FALSE]
@@ -508,13 +541,13 @@ HeldStored(d) ==
 \* A process killed before its last reply is resumed once: the row counts
 \* the resume, as resuming, before Sessions is asked, with the next turn's
 \* message under a uuid of its own (marked by launch for an interactive
-\* one). A second kill is the report.
+\* one, by stream for a headless one). A second kill is the report.
 KillSeen(d) ==
     /\ up /\ status[d] = "running" /\ call[d] = "none" /\ proc[d] = "dead" /\ reply[d] = "none"
     /\ IF resumes[d] = 0 \/ Break = "ResumeAgain"
          THEN /\ call' = [call EXCEPT ![d] = "resume"]
               /\ sess' = [sess EXCEPT ![d] = "none"]
-              /\ marked' = [marked EXCEPT ![d] = d \in Interactive]
+              /\ marked' = [marked EXCEPT ![d] = MarkedFirst(d)]
               /\ IF Break = "ResumeBeforeRow"
                    THEN UNCHANGED <<status, resumes>>
                    ELSE /\ status' = [status EXCEPT ![d] = "resuming"]
@@ -593,7 +626,7 @@ Next ==
     \/ FrameworkDies \/ FrameworkStarts
     \/ PromptSent \/ TurnEnds \/ ParentStops \/ ParentRuns
     \/ Mailbox(D!Connects(Parent))
-    \/ \E d \in Delegates : StartAsked(d) \/ StartAgain(d) \/ SessionsDecides(d)
+    \/ \E d \in Delegates : StartAsked(d) \/ StartAgain(d) \/ SessionsDecides(d) \/ Confirmed(d)
                             \/ InputTaken(d) \/ PersonTypes(d) \/ DelegateFinishes(d)
                             \/ TurnEndsBare(d) \/ DelegateKilled(d)
                             \/ Framework(d)
@@ -606,7 +639,8 @@ Fairness ==
     /\ WF_vars(FrameworkStarts) /\ WF_vars(ParentRuns) /\ WF_vars(TurnEnds)
     /\ SF_vars(Mailbox(D!Connects(Parent)))
     /\ \A d \in Delegates :
-         /\ WF_vars(Called(d)) /\ WF_vars(SessionsDecides(d)) /\ WF_vars(CallAnswered(d))
+         /\ WF_vars(Called(d)) /\ WF_vars(SessionsDecides(d)) /\ WF_vars(Confirmed(d))
+         /\ WF_vars(CallAnswered(d))
          /\ WF_vars(Settled(d)) /\ WF_vars(InputWritten(d)) /\ WF_vars(InputTaken(d))
          /\ WF_vars(StopHandled(d)) /\ WF_vars(TranscriptRead(d)) /\ WF_vars(HeldStored(d))
          /\ WF_vars(KillSeen(d)) /\ WF_vars(DelegateEnds(d))
@@ -629,7 +663,7 @@ TypeOK ==
     /\ reply \in [Delegates -> {"none", "brief", "person"}]
     /\ rsrc \in [Delegates -> {"none", "brief", "person"}]
     /\ call \in [Delegates -> {"none", "start", "resume"}]
-    /\ sess \in [Delegates -> {"none", "start", "resume", "running", "refused"}]
+    /\ sess \in [Delegates -> {"none", "start", "resume", "held", "running", "refused"}]
     /\ stops \subseteq Delegates
     /\ idles \in [Delegates -> Nat] /\ overdue \in [Delegates -> BOOLEAN]
     /\ told \in [Delegates -> Nat] /\ keys \subseteq Delegates \X Nat /\ againStarts \in Nat
@@ -665,7 +699,8 @@ ReportAnswersTheBrief == \A d \in Delegates : rsrc[d] # "person"
 
 \* No process runs for a delegate whose start was refused: a held process
 \* always has a row that reports it.
-RefusedHoldsNothing == \A d \in Delegates : status[d] = "refused" => proc[d] = "none"
+RefusedHoldsNothing ==
+    \A d \in Delegates : status[d] = "refused" => proc[d] \in {"none", "dead"}
 
 \* Each process takes one turn's message: the brief, or a resumed one's.
 OneMessagePerProcess == \A d \in Delegates : taken[d] <= resumed[d] + 1

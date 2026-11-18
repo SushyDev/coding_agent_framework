@@ -25,7 +25,7 @@ defmodule CodingAgentFramework.SessionsViewerTest do
 
   test "a delegate's viewer follows its event log, and not its socket", ctx do
     assert {:ok, %{session_id: id}} =
-             Sessions.start(ctx.sessions, "d1", ctx.account, headless(ctx, :at_start))
+             Sessions.start(ctx.sessions, "d1", ctx.account, headless(ctx, :on_message))
 
     log = Path.join(Stream.dir(ctx.dir, id), "events.jsonl")
     argv = [program!(:tail), "-F", log]

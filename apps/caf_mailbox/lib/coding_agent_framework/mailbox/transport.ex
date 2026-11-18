@@ -27,7 +27,7 @@ defmodule CodingAgentFramework.Mailbox.Transport do
   def settle(%{via: "waiter"} = row, evidence), do: Waiter.settle(row, evidence.waiter)
   def settle(%{via: "typed"} = row, evidence), do: Typed.settle(row, evidence.typed)
   def settle(%{via: "launch"} = row, evidence), do: Launch.settle(row, evidence.launch)
-  def settle(row, evidence), do: Stream.settle(row, evidence.fold)
+  def settle(row, evidence), do: Stream.settle(row, evidence.fold, evidence[:now])
 end
 
 defmodule CodingAgentFramework.Mailbox.Transport.Waiter do
@@ -153,22 +153,36 @@ defmodule CodingAgentFramework.Mailbox.Transport.Stream do
   nothing of it went in. A restart changes nothing else: the same evidence settles the row once
   read.
 
+  A headless start's first row (F-152, `Mailbox.launch/4` with `via: :stream`) is marked before
+  the start writes it, with the start's deadline as `sent_at`: until then, a fold with no line
+  of it decides nothing, since the start may still write it. The start's answer clears
+  `sent_at`.
+
       iex> alias CodingAgentFramework.Mailbox.Transport.Stream
       iex> Stream.settle(%{uuid: "u1"}, %{messages: %{"u1" => %{state: :undelivered}}})
       :again
+      iex> Stream.settle(%{uuid: "u1", sent_at: 100}, nil, 50)
+      :keep
   """
 
   alias CodingAgentFramework.Stream.Fold
 
-  @doc "Settles `row` by `fold`, the fold of its session (nil when `Stream` follows none)."
-  @spec settle(map, map | nil) :: :keep | :delivered | :again
-  def settle(row, fold) do
+  @doc """
+  Settles `row` by `fold`, the fold of its session (nil when `Stream` follows none), at `now`
+  (wall-clock ms; needed only for a start's first row).
+  """
+  @spec settle(map, map | nil, integer | nil) :: :keep | :delivered | :again
+  def settle(row, fold, now \\ nil) do
     case Fold.outcome(fold || %{messages: %{}}, row.uuid) do
       :writing -> :keep
-      outcome when outcome in [:none, :undelivered] -> :again
+      :none -> if starting?(row, now), do: :keep, else: :again
+      :undelivered -> :again
       _delivered -> :delivered
     end
   end
+
+  defp starting?(%{sent_at: at}, now) when is_integer(at), do: now == nil or now < at
+  defp starting?(_row, _now), do: false
 end
 
 defmodule CodingAgentFramework.Mailbox.Transport.Call do

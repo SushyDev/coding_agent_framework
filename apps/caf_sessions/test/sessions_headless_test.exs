@@ -20,7 +20,7 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
   test "a start is confirmed by its first event and the pid its wrapper recorded", ctx do
     # RowWritten, Held, ViewerOpened, StartDecided.
     assert {:ok, %{name: "d1", pid: pid, session_id: id}} =
-             Sessions.start(ctx.sessions, "d1", ctx.account, headless(ctx, :at_start))
+             Sessions.start(ctx.sessions, "d1", ctx.account, headless(ctx, :on_message))
 
     assert File.ls!(Path.join(ctx.dir, "pids")) == [Integer.to_string(pid)]
 
@@ -39,7 +39,9 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
     # StartDecided past the deadline, then ReRead: running once the init comes, stopped once
     # the socket is dead.
     {gone_dir, never} = own_dir(ctx, "gone", :never)
-    late = Task.async(fn -> unknown_start(ctx, "late", headless(ctx, :on_message)) end)
+    # With no first line, a process that writes its init only on a line is never confirmed.
+    bare = Keyword.delete(headless(ctx, :on_message), :first)
+    late = Task.async(fn -> unknown_start(ctx, "late", bare) end)
     gone = Task.async(fn -> unknown_start(ctx, "gone", never) end)
     assert {:unknown, :no_first_event} = Task.await(late, 15_000)
     assert {:unknown, :no_first_event} = Task.await(gone, 15_000)
@@ -59,9 +61,13 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
   test "a stop writes end_session only after the report and the turn, and sees the exit by pid",
        ctx do
     # StopAsked, StopSettled.
-    assert {:ok, %{pid: pid, session_id: id}} =
-             Sessions.start(ctx.sessions, "d3", ctx.account, headless(ctx, :at_start))
+    launch = headless(ctx, :on_message)
 
+    assert {:ok, %{pid: pid, session_id: id}} =
+             Sessions.start(ctx.sessions, "d3", ctx.account, launch)
+
+    # The start's first line went in right after the hold; its turn ends at once.
+    stream_row(ctx, id, & &1.idle)
     {:ok, %{uuid: u}} = Stream.write(ctx.stream, id, {:message, "ask first"})
     stream_row(ctx, id, &(&1.requests["req-" <> u].state == :held))
 
@@ -79,13 +85,18 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
     assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "d3")
     refute alive?(pid)
     assert %{status: "stopped"} = Table.get(ctx.table, "test", "d3")
-    assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "answer req-#{u}", "end"]
+    taken = ["message #{launch[:first].uuid}", "message #{u}", "answer req-#{u}", "end"]
+    assert HeadlessStandIn.taken(ctx.dir) == taken
   end
 
   test "a resume appends to the same log, read on from the offset Stream saved", ctx do
-    assert {:ok, %{pid: first, session_id: id}} =
-             Sessions.start(ctx.sessions, "d4", ctx.account, headless(ctx, :at_start))
+    start = headless(ctx, :on_message)
+    resume = headless(ctx, :on_message)
 
+    assert {:ok, %{pid: first, session_id: id}} =
+             Sessions.start(ctx.sessions, "d4", ctx.account, start)
+
+    stream_row(ctx, id, & &1.idle)
     {:ok, %{uuid: u1}} = Stream.write(ctx.stream, id, {:message, "before"})
     before = stream_row(ctx, id, &(&1.messages[u1].state == :delivered and &1.idle))
     assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "d4")
@@ -93,11 +104,12 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
     {:ok, :absent} = await(fn -> absent(Holder.state(ctx.holder, "d4")) end)
 
     assert {:ok, %{pid: second, session_id: ^id}} =
-             Sessions.resume(ctx.sessions, "d4", ctx.account, id, headless(ctx, :at_start))
+             Sessions.resume(ctx.sessions, "d4", ctx.account, id, resume)
 
     assert second != first
     assert %{status: "running", resume: ^id} = Table.get(ctx.table, "test", "d4")
 
+    stream_row(ctx, id, & &1.idle)
     {:ok, %{uuid: u2}} = Stream.write(ctx.stream, id, {:message, "after"})
     resumed = stream_row(ctx, id, &(&1.messages[u2].state == :delivered and &1.idle))
     assert resumed.offset > before.offset
@@ -109,12 +121,30 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
     # Each process read its own FIFO (new-1).
     fifos = Stream.dir(ctx.dir, id) |> File.ls!() |> Enum.filter(&(&1 =~ "in.")) |> Enum.sort()
     assert fifos == ["in.0", "in.1"]
-    assert HeadlessStandIn.taken(ctx.dir) == ["message #{u1}", "end", "message #{u2}"]
+    [s, r] = [start[:first].uuid, resume[:first].uuid]
+
+    assert HeadlessStandIn.taken(ctx.dir) ==
+             ["message #{s}", "message #{u1}", "end", "message #{r}", "message #{u2}"]
+  end
+
+  test "a start whose init never comes is stopped by its record, and the start is refused",
+       ctx do
+    # F-152: no first line, so the stand-in in the real release's shape never writes its init.
+    # The stop sends SIGTERM to the held program's record; the start answers refused.
+    bare = Keyword.delete(headless(ctx, :on_message), :first)
+    stuck = start_task(ctx, "stuck", bare)
+    assert {:ok, _} = row_when(ctx, "stuck", &(&1.viewer != nil))
+
+    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "stuck")
+    assert {:refused, :stopped} = Task.await(stuck)
+    assert %{status: "refused", reason: "stopped"} = Table.get(ctx.table, "test", "stuck")
+    assert {:refused, {:not_running, "refused"}} = Sessions.stop(ctx.sessions, "stuck")
+    assert HeadlessStandIn.taken(ctx.dir) == []
   end
 
   test "a delegate that exits before any read is seen gone, since its hold was told", ctx do
     # HeldTold (Stream.tla): no read saw it live, yet Stream sees its exit (new-3).
-    launch = Keyword.put(headless(ctx, :at_start), :claude, program!(true))
+    launch = Keyword.put(headless(ctx, :on_message), :claude, program!(true))
     assert {:unknown, :no_first_event} = unknown_start(ctx, "brief", launch)
     assert %{session_id: id} = Table.get(ctx.table, "test", "brief")
     assert %{gone: true} = stream_row(ctx, id, & &1.gone)
@@ -122,7 +152,8 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
 
   test "after a restart, a starting delegate is adopted when its first event comes", ctx do
     # Adopt: running.
-    slow = start_task(ctx, "slow", headless(ctx, :on_message))
+    # No first line, so the init waits for the test's own line after the restart.
+    slow = start_task(ctx, "slow", Keyword.delete(headless(ctx, :on_message), :first))
     assert {:ok, %{session_id: id}} = row_when(ctx, "slow", &(&1.viewer == "open"))
     sessions = restart(ctx, slow)
     assert %{status: "starting"} = Table.get(ctx.table, "test", "slow")
@@ -156,8 +187,11 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
 
   test "after a restart, a stopping delegate is settled by its pid and start time", ctx do
     # StopSettled with no stop under way: stopped when gone, running when it lives.
-    {gone_dir, gone_launch} = own_dir(ctx, "ended", :at_start)
-    assert {:ok, _} = Sessions.start(ctx.sessions, "kept", ctx.account, headless(ctx, :at_start))
+    {gone_dir, gone_launch} = own_dir(ctx, "ended", :on_message)
+
+    assert {:ok, _} =
+             Sessions.start(ctx.sessions, "kept", ctx.account, headless(ctx, :on_message))
+
     assert {:ok, _} = Sessions.start(ctx.sessions, "ended", ctx.account, gone_launch)
     Process.exit(ctx.sessions, :kill)
 
@@ -173,11 +207,11 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
 
   test "a running delegate killed before its last reply is settled stopped, then resumed", ctx do
     # RunningSettled (F-61): gone by pid and start time, its socket dead; a live one stays.
-    {dir, killed} = own_dir(ctx, "killed", :at_start)
+    {dir, killed} = own_dir(ctx, "killed", :on_message)
     assert {:ok, %{session_id: id}} = Sessions.start(ctx.sessions, "killed", ctx.account, killed)
 
     assert {:ok, %{pid: pid}} =
-             Sessions.start(ctx.sessions, "kept", ctx.account, headless(ctx, :at_start))
+             Sessions.start(ctx.sessions, "kept", ctx.account, headless(ctx, :on_message))
 
     kill_held(ctx, dir, "killed")
 
@@ -188,7 +222,7 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
     assert alive?(pid)
 
     assert {:ok, %{session_id: ^id}} =
-             Sessions.resume(ctx.sessions, "killed", ctx.account, id, headless(ctx, :at_start))
+             Sessions.resume(ctx.sessions, "killed", ctx.account, id, headless(ctx, :on_message))
 
     assert %{status: "running", resume: ^id} = Table.get(ctx.table, "test", "killed")
   end

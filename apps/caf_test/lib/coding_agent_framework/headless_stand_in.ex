@@ -4,8 +4,9 @@ defmodule CodingAgentFramework.HeadlessStandIn do
   bash script run by `ClaudeCLI.wrapper/4` under dtach. It reads stream-json lines on stdin and
   writes events on stdout in the shapes `docs/build-notes/F-31.md` records, with synthetic values:
 
-  - `system`/`init` with the `--session-id` or `--resume` id: at its start (mode `:at_start`),
-    on the first line it reads (`:on_message`), or never (`:never`);
+  - `system`/`init` with the `--session-id` or `--resume` id: on the first line it reads
+    (`:on_message`, the default: Claude Code 2.1.322 writes it only then, F-152), at its start
+    (`:at_start`, only for a test that needs it so and says why), or never (`:never`);
   - for a user line: its replay (`isReplay` and its uuid), then `assistant`, a
     `rate_limit_event` and a `result` naming the uuid, whose text is `done <uuid>`. A message
     whose text starts with `ask` first asks a `can_use_tool` permission (`request_id`
@@ -30,7 +31,7 @@ defmodule CodingAgentFramework.HeadlessStandIn do
   Writes the stand-in for `mode` into `dir` and answers its path. It is written whole under
   another name and renamed into place, since a start may be running the path (F-39).
   """
-  def write!(dir, mode \\ :at_start, idle \\ stand_in_idle())
+  def write!(dir, mode \\ :on_message, idle \\ stand_in_idle())
       when mode in [:at_start, :on_message, :never] do
     path = Path.join(dir, "headless-#{mode}")
     File.mkdir_p!(Path.join(dir, "pids"))
