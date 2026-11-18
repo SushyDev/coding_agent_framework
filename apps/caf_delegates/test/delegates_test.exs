@@ -134,6 +134,82 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}"]
   end
 
+  # Delegate.tla's TurnEndsBare, BoundPasses and IdleTold: IdleToldOnce and IdleNoticed.
+  test "a delegate idle with no report is told to its parent once per idle state", ctx do
+    restart(ctx, idle_bound: 60_000)
+
+    assert {:ok, %{id: id, name: name, brief_uuid: u}} =
+             Delegates.start_delegate(current(ctx), "main", "app", "unit/one", "opus", "quiet")
+
+    stream_row(ctx, id, &(&1.idle and &1.messages[u].state == :delivered))
+    idle_seen(ctx, id)
+    assert notices(ctx) == []
+
+    tick(ctx, 60_000)
+    cue(ctx, current(ctx))
+    assert [%{to_agent: "main", text: text}] = notices(ctx)
+    assert text =~ "Delegate #{name} is idle with no report"
+
+    # Once per idle state: a later cue, and a restart whose bound then passes again, tell no more.
+    cue(ctx, current(ctx))
+    restart(ctx, idle_bound: 60_000)
+    idle_seen(ctx, id)
+    tick(ctx, 60_000)
+    cue(ctx, current(ctx))
+    assert [_] = notices(ctx)
+
+    # A turn that starts ends the state: the parent's message, whose turn ends the same way, is
+    # a new idle state, told once its bound passes.
+    {:ok, {:queued, m}} = Mailbox.message(ctx.mailbox, "main", name, "quiet again")
+    {:ok, %{uuid: mu}} = mailbox_until(ctx, m, &(&1.status == "delivered"))
+    stream_row(ctx, id, &(&1.idle and &1.messages[mu].state == :delivered))
+    idle_seen(ctx, id)
+    assert [_] = notices(ctx)
+    tick(ctx, 60_000)
+    cue(ctx, current(ctx))
+    assert [_, _] = notices(ctx)
+
+    # Never a kill or a nudge: the delegate took only its brief and the message, and runs on.
+    assert %{status: "running", report: "none"} = Table.get(ctx.dtable, id)
+    assert %{status: "running"} = session_row(ctx, name)
+    assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "message #{mu}"]
+  end
+
+  # Delegate.tla's StartAgain: a start idempotent per branch.
+  test "a second start of a branch answers its live delegate; one gone with no report starts again",
+       ctx do
+    hold(ctx)
+    assert {:ok, %{id: id, name: name, brief_uuid: u} = first} = start(ctx, "app", "unit/one")
+
+    # Live: the same delegate, with nothing written; the cap of one does not refuse it.
+    assert start(ctx, "app", "unit/one") == {:ok, Map.put(first, :already, true)}
+    assert [_] = Table.rows(ctx.dtable, "test")
+    assert [_] = Enum.filter(rows(ctx), &(&1.kind == "brief"))
+
+    assert {:refused, {:other_parent, ^name}} =
+             Delegates.start_delegate(current(ctx), "other", "app", "unit/one", "opus", "Go.")
+
+    # Gone with no report, its agent row settled stopped before Delegates resumes it: a new row,
+    # and the old one is never resumed.
+    stream_row(ctx, id, &(&1.messages[u].state == :delivered))
+    kill_delegate(ctx, id, [])
+
+    {:ok, _} =
+      await(fn ->
+        Sessions.cue(ctx.sessions, %{topic: "stream:test", ids: []})
+        Sessions.viewer_argv(ctx.sessions, name)
+        if session_row(ctx, name).status == "stopped", do: {:ok, 1}
+      end)
+
+    File.rm!(Path.join(ctx.dir, "hold"))
+    assert {:ok, %{id: two, name: ^name, brief_uuid: u2}} = start(ctx, "app", "unit/one")
+    assert two != id
+    assert {:ok, %{report: "taken", text: text}} = cue_until(ctx, two, &(&1.status == "finished"))
+    assert text == "done #{u2}"
+    assert %{status: "running", resumes: 0, reason: "replaced"} = Table.get(ctx.dtable, id)
+    assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "message #{u2}"]
+  end
+
   # Move.tla's NoStartWhileDraining: a move's drain starts no delegate under its session.
   describe "a lease (Schedule.tla)" do
     test "a start asks first; a refusal holds nothing, starts nothing and is no failed run",
@@ -576,11 +652,26 @@ defmodule CodingAgentFramework.DelegatesTest do
 
   defp rows(ctx), do: Enum.reject(Enum.map(1..50, &Mailbox.Table.get(ctx.mtable, &1)), &is_nil/1)
 
+  # The framework's notices that a delegate is idle with no report.
+  defp notices(ctx),
+    do: Enum.filter(rows(ctx), &(&1.from_agent == "framework" and &1.kind == "msg"))
+
+  defp tick(ctx, ms), do: Agent.update(ctx.clock, &(&1 + ms))
+
+  # Cues until Delegates has read row `id`'s idle state: its bound runs from that read.
+  defp idle_seen(ctx, id) do
+    {:ok, _} =
+      await(fn ->
+        cue(ctx, current(ctx))
+        if :sys.get_state(current(ctx)).idle[id], do: {:ok, 1}
+      end)
+  end
+
   defp current(ctx), do: Process.get(:delegates, ctx.delegates)
 
-  defp restart(ctx) do
+  defp restart(ctx, more \\ []) do
     if Process.alive?(current(ctx)), do: Process.exit(current(ctx), :kill)
-    opts = Keyword.put(ctx.dopts, :mailbox, mailbox(ctx))
+    opts = ctx.dopts |> Keyword.put(:mailbox, mailbox(ctx)) |> Keyword.merge(more)
     child = Supervisor.child_spec({Delegates, opts}, id: make_ref(), restart: :temporary)
     delegates = start_supervised!(child)
     Process.put(:delegates, delegates)

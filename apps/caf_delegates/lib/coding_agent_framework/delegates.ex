@@ -58,6 +58,12 @@ defmodule CodingAgentFramework.Delegates do
   (`Transcripts.Fold.reply_to/2`) once that turn has ended: closed by a later turn, or its
   session file read ended through `registry:`. Its resume carries the word to go on by launch.
 
+  **A delegate idle with no report** (F-150, `Delegate.tla`'s `IdleNoticed`): a running row
+  whose turn has ended by its kind's rule (`Sessions.Turn`; an interactive one's session file),
+  with no row to it open in `Mailbox`, for longer than the app's `idle_bound:`, is told to its
+  parent once per idle state, by `Mailbox.notify/4` under the state's key. Never a kill or a
+  nudge into the delegate. The state ends when a turn starts, a report is taken, or it ends.
+
   **The report** is handed to `Mailbox` (`Mailbox.report/5`) under the brief's uuid, to the
   agent row's parent, and the row's `report` is then `taken`; until `Mailbox` takes it, it is
   `held`, with its text, and handed again at each cue.
@@ -122,7 +128,9 @@ defmodule CodingAgentFramework.Delegates do
   it reads from their session files. With `inlet:` (the host's `Inlet`), `intake:` (the host's
   `Intake`) and `intake_db:` (its file), a parent's fixes reach an interactive delegate as they
   reach a main session (F-137's new-3): its interrupt is Escape through the `Inlet`, and its
-  answer goes to the `PermissionRequest` `Intake` holds for it.
+  answer goes to the `PermissionRequest` `Intake` holds for it. With `idle_bound:` (ms), a
+  delegate idle with no report for longer than it is told to its parent, once per idle state;
+  an interactive one's needs `registry:` and `intake:`.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -132,6 +140,15 @@ defmodule CodingAgentFramework.Delegates do
   and `brief` as its first message, stored in `Mailbox`. Answers `{:ok, %{id, name,
   session_id, account, brief_uuid}}`, the report being the reply to `brief_uuid`; `{:refused,
   reason}`; or `{:unknown, reason}`, when its row stays `starting` for a later read to settle.
+
+  A start is idempotent per branch (`Delegates.Turn.again/3`): while the branch's delegate of
+  `parent` has a live session, a second start answers that delegate, with `already: true`, and
+  writes nothing (its brief and options are not used). A row with no report whose process is
+  gone does not count as running: the start goes on as a new row, the old one is never resumed,
+  and its brief and word to go on are settled `ended` in `Mailbox` first (`{:refused,
+  {:in_flight, name}}` while one is still in flight). It refuses `{:starting, name}` while a
+  start or resume of the name is under way, `{:other_parent, name}` for another parent's
+  delegate, and `{:delegate, %{name, status, session}}` for one neither live nor gone.
   Options: `:timeout`, what the caller waits (default 300 000 ms; the start goes on past it),
   and `:options` (`ClaudeCLI.Options`), checked before the row and kept on the agent row,
   which its resume takes again; and `interactive: true` for the terminal interface, refused
@@ -271,7 +288,11 @@ defmodule CodingAgentFramework.Delegates do
           intake: intake,
           pending: %{},
           # An interactive delegate's marked lines found: {session id, uuid} to its byte offset.
-          marks: %{}
+          marks: %{},
+          # The delegates idle with no report: row id to its idle state's key, when this
+          # process first read it, and whether its parent was told.
+          idle_bound: Keyword.get(opts, :idle_bound),
+          idle: %{}
         })
 
       # A start waiting for its lease when the Scheduler ends is refused: its queue is gone.
@@ -308,15 +329,21 @@ defmodule CodingAgentFramework.Delegates do
          :ok <- interactive_ok(s, how, brief),
          {:ok, options} <- Options.check(options),
          {:ok, p} <- Turn.check(s.projects, project, branch),
+         name = Turn.name(p, branch),
+         old = Enum.find(Table.latest(s.db, s.host), &(&1.name == name)),
+         {:go, again} <- again(s, old, parent),
          # Move.tla's NoStartWhileDraining: no delegate starts under a parent a move drains.
          false <- Agents.moving?(Agents.get(s.agents, parent)) and {:refused, {:moving, parent}},
-         true <- holding(s, parent) < p.cap or {:refused, {:cap, p.cap}},
-         {:ok, account} <- pick(s) do
+         true <- holding(s, parent, name) <= p.cap or {:refused, {:cap, p.cap}},
+         {:ok, account} <- pick(s),
+         :ok <- if(again, do: replaced(s, old), else: :ok) do
       # StartAsked: the row first, as starting, with its brief's uuid; then the brief's row.
-      row = %{host: s.host, name: Turn.name(p, branch), branch: branch, model: model}
+      row = %{host: s.host, name: name, branch: branch, model: model}
       row = Map.merge(row, %{brief_uuid: Stream.uuid(), deadline: deadline(s, p)})
       id = Table.starting(s.db, row)
       announce(s, id)
+      # StartAgain: the old row is history now, never resumed; it says why.
+      if again, do: write(s, old, reason: "replaced")
       row = Table.get(s.db, id)
       start = %{p: p, account: account, parent: parent, options: options, brief: brief, how: how}
 
@@ -333,7 +360,8 @@ defmodule CodingAgentFramework.Delegates do
           reply(answered(s, row, {:refused, {:lease, lease_refusal(not_granted)}}))
       end
     else
-      refused -> {:reply, refused, s}
+      # A refusal, or the answer of the delegate already there.
+      answer -> {:reply, answer, s}
     end
   end
 
@@ -466,11 +494,50 @@ defmodule CodingAgentFramework.Delegates do
   defp lease_refusal({:refused, why}), do: why
   defp lease_refusal({:unknown, why}), do: {:unknown, why}
 
-  # The parent's cap: its delegates the tree holds, and its starts under way here, whose agent
-  # row may not be written yet. A start a restart cut before it reached `Sessions` never will.
-  defp holding(s, parent) do
-    starting = for {_, %{parent: ^parent, name: name}} <- s.pending, do: name
-    Agents.children(s.agents, parent, starting)
+  # The parent's cap, with the start of `name` in it: its delegates the tree holds, and its
+  # starts under way here, whose agent row may not be written yet (a start a restart cut before
+  # it reached `Sessions` never will). A name started again is counted once (StartAgain).
+  defp holding(s, parent, name) do
+    starting = for {_, %{parent: ^parent, name: n}} <- s.pending, do: n
+    Agents.children(s.agents, parent, [name | starting])
+  end
+
+  # A start idempotent per branch (`Delegates.Turn.again/3`): `{:go, false}` for a new start,
+  # `{:go, true}` to start a name whose row has no report and whose process is gone, the
+  # running delegate's answer, or a refusal.
+  defp again(s, old, parent) do
+    agent = old && agent(s, old)
+
+    case Turn.again(old, agent, parent) do
+      :new -> {:go, false}
+      :again -> {:go, true}
+      :already -> {:ok, Map.put(started(old, agent), :already, true)}
+      refused -> refused
+    end
+  end
+
+  # The start's answer, from its row and its agent row.
+  defp started(row, agent) do
+    answer = Map.take(row, [:id, :name, :brief_uuid])
+    Map.merge(answer, %{session_id: agent && agent.session_id, account: agent && agent.account})
+  end
+
+  # A start of a name again: the old start's brief and word to go on never go in, so the new
+  # process takes only its own. One in flight to the gone process settles first, from the
+  # exit's evidence, and the start is refused until then.
+  defp replaced(s, old) do
+    Enum.reduce_while([old.brief_uuid, old.resume_uuid], :ok, fn
+      nil, :ok ->
+        {:cont, :ok}
+
+      uuid, :ok ->
+        case Mailbox.settle_row(s.mailbox, uuid) do
+          {:ok, _} -> {:cont, :ok}
+          {:refused, :no_message} -> {:cont, :ok}
+          {:refused, {:not_queued, _sending}} -> {:halt, {:refused, {:in_flight, old.name}}}
+          other -> {:halt, other}
+        end
+    end)
   end
 
   # Called: Sessions writes its own row first and runs on through a restart of this process.
@@ -544,9 +611,7 @@ defmodule CodingAgentFramework.Delegates do
   # unknown answer leaves the row as it is, for Settled to decide.
   defp answered(s, row, {:ok, %{session_id: sid}}) do
     write(s, row, status: "running", reason: nil)
-    agent = agent(s, row)
-    answer = Map.take(row, [:id, :name, :brief_uuid])
-    {{:ok, Map.merge(answer, %{session_id: sid, account: agent && agent.account})}, s}
+    {{:ok, %{started(row, agent(s, row)) | session_id: sid}}, s}
   end
 
   defp answered(s, %{status: "starting"} = row, {:refused, why} = refused) do
@@ -566,14 +631,96 @@ defmodule CodingAgentFramework.Delegates do
     {unknown, s}
   end
 
-  # Each name's latest row that may still move, with no call under way, read again.
+  # Each name's latest row that may still move, with no call under way, read again; then the
+  # running ones idle with no report.
   defp settle(s) do
+    s = Enum.reduce(movable(s), s, &settle_row(&2, &1, agent(&2, &1)))
+    idle(s, Enum.filter(movable(s), &(&1.status == "running")))
+  end
+
+  defp movable(s) do
     busy = MapSet.new(Map.values(s.pending), & &1.id)
 
     Table.latest(s.db, s.host)
     |> Enum.filter(&(&1.status in Table.open()))
     |> Enum.reject(&MapSet.member?(busy, &1.id))
-    |> Enum.reduce(s, &settle_row(&2, &1, agent(&2, &1)))
+  end
+
+  # A delegate idle with no report (`Delegate.tla`'s BoundPasses and IdleTold): its row running
+  # with no call under way, its turn ended by its kind's rule, and no row to it open in
+  # `Mailbox`. Its idle state is the row with its fix state's offset, which any event of the
+  # delegate moves, so a turn that starts ends the state. Past `idle_bound:`, from when this
+  # process first read the state (a restart starts it again), the parent is told by a notice
+  # stored under the state's key, which `Mailbox` takes once, so no restart tells it twice.
+  # Nothing is done to the delegate. A read that fails decides nothing.
+  defp idle(%{idle_bound: nil} = s, _rows), do: s
+
+  defp idle(s, rows) do
+    now = s.clock.()
+
+    seen =
+      Enum.reduce(rows, %{}, fn row, seen ->
+        agent = agent(s, row)
+
+        case idle_entry(s, row, agent, idle_state(s, row, agent), now) do
+          nil -> seen
+          entry -> Map.put(seen, row.id, entry)
+        end
+      end)
+
+    %{s | idle: seen}
+  end
+
+  defp idle_entry(s, row, agent, {:idle, key}, now) do
+    {since, told} =
+      case s.idle[row.id] do
+        %{key: ^key} = entry ->
+          {entry.since, entry.told}
+
+        _ ->
+          # One wake at the bound, when the notice may go; not a poll.
+          Process.send_after(self(), :deadline, s.idle_bound)
+          {now, false}
+      end
+
+    told = told or (now - since >= s.idle_bound and tell_idle(s, row, agent, key, now - since))
+    %{key: key, since: since, told: told}
+  end
+
+  defp idle_entry(s, row, _agent, :unread, _now), do: s.idle[row.id]
+  defp idle_entry(_s, _row, _agent, :busy, _now), do: nil
+
+  # `{:idle, key}`, `:busy`, or `:unread` when a read failed.
+  defp idle_state(s, row, agent) do
+    with false <- Agents.moving?(agent) and :busy,
+         {:ok, fold} <- followed(s, agent),
+         true <- ended_turn?(s, agent, fold) or :busy,
+         {:ok, []} <- Mailbox.open_to(s.mailbox, row.name) do
+      {:idle, fold.offset}
+    else
+      :busy -> :busy
+      {:ok, [_ | _]} -> :busy
+      _unread -> :unread
+    end
+  end
+
+  # The turn has ended, by `Sessions.Turn`'s rule for its kind: a headless delegate's `Stream`
+  # fold, an interactive one's session file (`turn_ended?/2`).
+  defp ended_turn?(s, agent, fold) do
+    if Agents.headless?(agent),
+      do: SessionsTurn.headless(agent, fold) == :ended,
+      else: turn_ended?(s, agent)
+  end
+
+  defp tell_idle(s, row, agent, key, ms) do
+    text =
+      "Delegate #{row.name} is idle with no report: its turn ended at least " <>
+        "#{div(ms, 1000)} s ago and nothing is due to it."
+
+    match?(
+      {:ok, _},
+      Mailbox.notify(s.mailbox, agent.parent, text, key: "idle:#{s.host}:#{row.id}:#{key}")
+    )
   end
 
   # Settled: by the agent row of this call (written at or after the call) once that row is

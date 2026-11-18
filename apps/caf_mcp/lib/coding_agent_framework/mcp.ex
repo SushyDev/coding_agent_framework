@@ -25,8 +25,9 @@ defmodule CodingAgentFramework.MCP do
     which comes as a message, to the call;
   - `start_delegate(project, branch, model, brief)`: `Grants.may_start_delegate?/3`, then the
     delegates' `start_delegate/7` with the caller as parent (the operator names a main session
-    as `parent`); answers `%{delegate: name}`, or the start's refusal. The report comes later
-    as a message. Both take optional `options`;
+    as `parent`); answers `%{delegate: name}`, with `already: true` when the branch's delegate
+    was running already and is answered in place of a new one, or the start's refusal. The
+    report comes later as a message. Both take optional `options`;
   - `run_delegate(project, branch, model, brief, timeout)`: as `start_delegate`, then the
     mailbox's `await/4` on the report, the answer to the brief's uuid, all within `timeout`
     (ms, capped as `run`'s, and under the client's tool timeout less the margin:
@@ -627,8 +628,8 @@ defmodule CodingAgentFramework.MCP do
 
   defp act(ctx, caller, _id, "start_delegate", args) do
     with {:ok, start} <- start_args(ctx, args, caller),
-         {:ok, %{name: name}} <- start_delegate(ctx, caller, start, @start_wait),
-         do: {:ok, %{delegate: name}}
+         {:ok, %{name: name} = started} <- start_delegate(ctx, caller, start, @start_wait),
+         do: {:ok, Map.merge(%{delegate: name}, Map.take(started, [:already]))}
   end
 
   defp act(ctx, caller, _id, "run_delegate", %{"timeout" => t} = args)

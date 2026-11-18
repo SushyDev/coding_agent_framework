@@ -97,6 +97,7 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
 
     {:ok,
      delegates: delegates,
+     dopts: opts,
      dtable: dtable,
      agents: agents,
      mailbox: mailbox,
@@ -207,6 +208,46 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
 
     assert {:ok, %{status: "delivered"}} = brief(ctx, u)
     assert {:ok, %{kind: "reply", from: ^name, to: "main"}} = Mailbox.answer_to(ctx.mailbox, u)
+  end
+
+  # TurnEndsBare and IdleTold, by an interactive delegate's rule: the brief's turn ended with no
+  # reply, its session file reads idle, and nothing is due to it.
+  test "an interactive delegate idle with no report is told to its parent once", ctx do
+    Process.exit(ctx.delegates, :kill)
+    opts = ctx.dopts ++ [idle_bound: 60_000]
+    child = Supervisor.child_spec({Delegates, opts}, id: make_ref(), restart: :temporary)
+    delegates = start_supervised!(child)
+
+    assert {:ok, %{id: id, name: name, brief_uuid: u, session_id: sid}} =
+             Delegates.start_delegate(delegates, "main", "app", "unit/one", "opus", "Look.",
+               interactive: true
+             )
+
+    text = "Look.\n\n[delivery #{u}]"
+    assert {:ok, [^text]} = await(fn -> nonempty(ScreenStandIn.prompts(ctx.dir)) end)
+    {:ok, dir} = Accounts.config_dir(ctx.accounts, "work")
+    {:ok, path} = Transcripts.path(dir, Agents.get(ctx.agents, name).cwd, sid)
+    lines(path, [user(text)])
+    {:ok, _} = await(fn -> with {:ok, %{status: "delivered"}} = ok <- brief(ctx, u), do: ok end)
+
+    {:ok, _} =
+      await(fn ->
+        Delegates.cue(delegates, %{topic: "transcripts:test:work"})
+        if :sys.get_state(delegates).idle[id], do: {:ok, 1}
+      end)
+
+    Agent.update(ctx.clock, &(&1 + 60_000))
+    Delegates.cue(delegates, %{topic: "transcripts:test:work"})
+    Delegates.cue(delegates, %{topic: "transcripts:test:work"})
+    :sys.get_state(delegates)
+    {:ok, mtable} = Mailbox.Table.open(Path.join(ctx.dir, "caf.db"))
+    rows = Enum.reject(Enum.map(1..20, &Mailbox.Table.get(mtable, &1)), &is_nil/1)
+
+    assert [%{to_agent: "main", text: notice}] =
+             Enum.filter(rows, &(&1.from_agent == "framework" and &1.kind == "msg"))
+
+    assert notice =~ "Delegate #{name} is idle with no report"
+    assert %{status: "running", report: "none"} = Table.get(ctx.dtable, id)
   end
 
   # An interactive start needs a brief its argument can carry.

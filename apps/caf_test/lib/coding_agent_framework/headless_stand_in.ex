@@ -12,7 +12,8 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     `req-<uuid>`), and ends its turn when the answer comes; so does every message while a file
     `<dir>/hold` exists; the answer is replayed. `half` ends its turn with half a
     `rate_limit_event` line, and the next message finishes it; `self` ends its turn, then
-    starts one of its own at once, whose `result` (`on its own`) names no message;
+    starts one of its own at once, whose `result` (`on its own`) names no message; `quiet`
+    ends its turn with an empty `result` that names no message, so no report is read from it;
   - for `interrupt`: a cancel of the request pending, and a `result`;
   - `end_session` ends it; a line that is not a JSON object ends it with status 1.
 
@@ -106,6 +107,8 @@ defmodule CodingAgentFramework.HeadlessStandIn do
             *'"content":"self'*)
               turn_end "$u"
               ev '{"type":"result","subtype":"success","is_error":false,"result":"on its own","session_id":"'"$sid"'","user_message_uuids":[]}' ;;
+            *'"content":"quiet'*)
+              ev '{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"'"$sid"'","user_message_uuids":[]}' ;;
             *'"content":"half'*)
               turn_end "$u"; half=1
               printf '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed",' ;;
