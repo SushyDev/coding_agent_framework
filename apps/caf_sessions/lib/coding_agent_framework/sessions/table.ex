@@ -40,7 +40,12 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   **An end** (F-143's new-4): `end_asked` is when a main session's end (`Sessions.end_main/3`)
   asked its stop, wall-clock ms, NULL otherwise; a stop of it that answered unknown leaves it,
-  so the settle ends the row once its process is gone.
+  so the settle ends the row once its process is gone. `ended_at` is when the row became done
+  (`refused` or `ended`, `done/0`), wall-clock ms: the write that first gives it a done status
+  stamps it, a later write keeps it, and a status not done or a new start clears it. So a part
+  that asks what came after the end (`Mailbox`, a later start's brief) reads the end itself,
+  never `updated_at`, which every write moves (F-165). `open/1` gives a done row of an earlier
+  file, which has none, its `updated_at`.
 
   **Indexes.** Nothing is pruned (an ended delegate keeps its row), so each hot read has one:
   by name (the unique key), by status (each settle), by cwd (a start's check that no other
@@ -63,7 +68,7 @@ defmodule CodingAgentFramework.Sessions.Table do
   @columns ~w(id host name kind parent project socket account role cwd resume status reason
               viewer pid session_id proc_start started_at updated_at deadline repo branch
               worktree options model release move move_from move_to move_act move_deadline
-              dialog answers end_asked)a
+              dialog answers end_asked ended_at)a
 
   @schema """
   CREATE TABLE IF NOT EXISTS agents (
@@ -73,7 +78,7 @@ defmodule CodingAgentFramework.Sessions.Table do
     proc_start TEXT, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deadline INTEGER,
     repo TEXT, branch TEXT, worktree TEXT, options TEXT, model TEXT, release TEXT, move TEXT,
     move_from TEXT, move_to TEXT, move_act INTEGER, move_deadline INTEGER, dialog TEXT,
-    answers TEXT, end_asked INTEGER, UNIQUE (host, name));
+    answers TEXT, end_asked INTEGER, ended_at INTEGER, UNIQUE (host, name));
   CREATE INDEX IF NOT EXISTS agents_status ON agents (host, status);
   CREATE INDEX IF NOT EXISTS agents_cwd ON agents (host, cwd);
   CREATE INDEX IF NOT EXISTS agents_parent ON agents (host, parent);
@@ -82,7 +87,7 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   # The columns a later build added to `agents`, so added if missing: the release a session
   # runs (R8), a move's phase on the row (F-133), the model (F-136), and a startup dialog and
-  # its answers (F-140), and an end asked (F-144).
+  # its answers (F-140), an end asked (F-144), and the end's own time (F-165).
   @added [
     agents: [
       "release TEXT",
@@ -94,7 +99,8 @@ defmodule CodingAgentFramework.Sessions.Table do
       "move_deadline INTEGER",
       "dialog TEXT",
       "answers TEXT",
-      "end_asked INTEGER"
+      "end_asked INTEGER",
+      "ended_at INTEGER"
     ]
   ]
 
@@ -160,8 +166,20 @@ defmodule CodingAgentFramework.Sessions.Table do
     with {:ok, db} <- Store.open(path, @schema, added: @added) do
       migrate(db)
       Store.convert(db, "agents", [:reason, :viewer])
+      end_times(db)
       {:ok, db}
     end
+  end
+
+  # A done row an earlier build wrote has no end time; its last write is the best one it kept.
+  # A row this build wrote has one, so a second open takes nothing.
+  defp end_times(db) do
+    Store.query(
+      db,
+      "UPDATE agents SET ended_at = updated_at " <>
+        "WHERE ended_at IS NULL AND status IN (#{Store.marks(length(@done))})",
+      @done
+    )
   end
 
   @doc "Opens the file at `path` to read: the table is made if absent, and nothing is taken."
@@ -183,7 +201,8 @@ defmodule CodingAgentFramework.Sessions.Table do
                :move_deadline,
                :dialog,
                :answers,
-               :end_asked
+               :end_asked,
+               :ended_at
              ])
 
       Store.transaction(db, fn ->
@@ -231,7 +250,7 @@ defmodule CodingAgentFramework.Sessions.Table do
 
     reset =
       "reason = NULL, viewer = NULL, pid = NULL, proc_start = NULL, worktree = NULL, " <>
-        "dialog = NULL, answers = NULL, end_asked = NULL"
+        "dialog = NULL, answers = NULL, end_asked = NULL, ended_at = NULL"
 
     sets =
       Enum.map_join(keys -- [:host, :name], ",", &"#{&1} = excluded.#{&1}") <>
@@ -265,14 +284,28 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   @doc """
   Sets `fields` (status, reason, viewer, pid, session_id, proc_start, deadline, worktree,
-  parent, project, dialog, answers, end_asked, and a move's `move`, `move_from`, `move_to`, `move_act`, `move_deadline`) on
-  row `id`.
+  parent, project, dialog, answers, end_asked, and a move's `move`, `move_from`, `move_to`,
+  `move_act`, `move_deadline`) on row `id`, with `updated_at`, and `ended_at` as the module
+  doc says: a first done status stamps it, any other status clears it.
   """
   @spec update(db, integer, keyword) :: :ok
   def update(db, id, fields) do
-    fields = Keyword.put(fields, :updated_at, System.os_time(:millisecond))
+    now = System.os_time(:millisecond)
+    fields = Keyword.put(fields, :updated_at, now) ++ end_time(db, id, fields[:status], now)
     Store.update(db, "agents", id, fields)
   end
+
+  # Sessions is the one writer, so the read and the write here see no other write between.
+  defp end_time(_db, _id, nil, _now), do: []
+
+  defp end_time(db, id, status, now) when status in @done do
+    case Store.query(db, "SELECT ended_at FROM agents WHERE id = ?1", [id]) do
+      [[nil]] -> [ended_at: now]
+      _ended_before -> []
+    end
+  end
+
+  defp end_time(_db, _id, _status, _now), do: [ended_at: nil]
 
   @doc "The row of `{host, name}`, or nil."
   @spec get(db, String.t(), String.t()) :: row | nil
