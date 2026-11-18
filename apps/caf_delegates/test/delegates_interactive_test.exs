@@ -10,7 +10,8 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, Delegates, Grants, Inlet, Mailbox, ScreenStandIn}
+  alias CodingAgentFramework.{Accounts, Delegates, Grants, Inlet, Intake, Mailbox}
+  alias CodingAgentFramework.ScreenStandIn
   alias CodingAgentFramework.{Sessions, SessionsSetup, Transcripts, Usage}
   alias CodingAgentFramework.Delegates.Table
   alias CodingAgentFramework.Sessions.Agents
@@ -85,14 +86,78 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
       mailbox: mailbox,
       launch: [claude: claude] ++ launch,
       clock: fn -> Agent.get(ctx.clock, & &1) end,
-      projects: %{"app" => project}
+      projects: %{"app" => project},
+      inlet: inlet,
+      intake: start_supervised!({Intake, db: db, host: "test"}),
+      intake_db: db
     ]
 
     delegates = start_supervised!(Supervisor.child_spec({Delegates, opts}, restart: :temporary))
     {:ok, dtable} = Table.open(db)
 
     {:ok,
-     delegates: delegates, dtable: dtable, agents: agents, mailbox: mailbox, accounts: accounts}
+     delegates: delegates,
+     dtable: dtable,
+     agents: agents,
+     mailbox: mailbox,
+     accounts: accounts,
+     intake: opts[:intake]}
+  end
+
+  # F-137's new-3: a parent's fixes reach an interactive delegate as they reach a main session.
+  # Its permission request is the PermissionRequest Intake holds, and the answer goes there;
+  # its interrupt is Escape through the Inlet, which presses nothing while no turn runs.
+  test "a parent's answer and interrupt reach an interactive delegate", ctx do
+    assert {:ok, %{name: name, session_id: sid}} =
+             Delegates.start_delegate(
+               ctx.delegates,
+               "main",
+               "app",
+               "unit/two",
+               "opus",
+               "Review it.",
+               interactive: true
+             )
+
+    {:ok, _} = await(fn -> if ScreenStandIn.prompts(ctx.dir) != [], do: {:ok, 1} end)
+    {:ok, %{held: []}} = Delegates.fix_state(ctx.delegates, "main", name)
+
+    body = %{"hook_event_name" => "PermissionRequest", "session_id" => sid, "tool_use_id" => "t1"}
+    me = self()
+
+    hold =
+      Task.async(fn ->
+        # The holder, as `Intake.Plug` is: it writes the decision, then says so.
+        {:ok, {:held, held, ref, _wait}} = Intake.post(ctx.intake, "work", JSON.encode!(body))
+        send(me, :held)
+
+        receive do
+          {^ref, {:decision, text}} ->
+            Intake.written(ctx.intake, held, ref)
+            {:decision, text}
+        after
+          10_000 -> :none
+        end
+      end)
+
+    assert_receive :held, 5_000
+    assert {:ok, %{held: [id]} = state} = Delegates.fix_state(ctx.delegates, "main", name)
+
+    assert {:refused, {:not_held, "0"}} =
+             Delegates.fix(ctx.delegates, "main", name, {:answer, "0", "allow"}, state)
+
+    assert {:ok, :sent} =
+             Delegates.fix(ctx.delegates, "main", name, {:answer, id, "allow"}, state)
+
+    assert {:decision, decision} = Task.await(hold)
+    assert decision =~ "allow"
+
+    # The answer moved its state: a fix of the old one acts nothing.
+    assert {:refused, {:moved, _}} = Delegates.fix(ctx.delegates, "main", name, :interrupt, state)
+    {:ok, now} = Delegates.fix_state(ctx.delegates, "main", name)
+
+    assert {:refused, {:screen, %{state: :idle}}} =
+             Delegates.fix(ctx.delegates, "main", name, :interrupt, now)
   end
 
   # StartAsked with the brief marked by launch, the start carrying it as its prompt, the trust
@@ -123,7 +188,10 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     {:ok, dir} = Accounts.config_dir(ctx.accounts, "work")
     {:ok, path} = Transcripts.path(dir, cwd, sid)
 
+    before = %{"type" => "summary", "summary" => "A line before the brief."}
+
     lines(path, [
+      before,
       user(text),
       reply("m1", "Done."),
       user("And something else?"),
@@ -132,6 +200,10 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
 
     assert {:ok, %{status: "finished", text: "Done.", report: "taken"}} =
              cue_until(ctx, id, &(&1.status == "finished" and &1.report == "taken"))
+
+    # F-137's new-4: the brief's marked line, once found, is read from its offset.
+    at = byte_size(JSON.encode!(before)) + 1
+    assert %{{^sid, ^u} => ^at} = :sys.get_state(ctx.delegates).marks
 
     assert {:ok, %{status: "delivered"}} = brief(ctx, u)
     assert {:ok, %{kind: "reply", from: ^name, to: "main"}} = Mailbox.answer_to(ctx.mailbox, u)

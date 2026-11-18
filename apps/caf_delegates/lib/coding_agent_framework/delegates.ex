@@ -84,7 +84,9 @@ defmodule CodingAgentFramework.Delegates do
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, Acts, ClaudeCLI, Mailbox, Registry, Scheduler}
+  alias CodingAgentFramework.{Accounts, Acts, ClaudeCLI, Inlet, Intake, Mailbox, Registry}
+  alias CodingAgentFramework.Scheduler
+  alias CodingAgentFramework.Intake.Table, as: IntakeTable
   alias CodingAgentFramework.{Sessions, Stream, Transcripts, Usage}
   alias CodingAgentFramework.Mailbox.Transport.Waiter
   alias CodingAgentFramework.Sessions.Turn, as: SessionsTurn
@@ -116,7 +118,10 @@ defmodule CodingAgentFramework.Delegates do
   With `scheduler:` (the instance's `Scheduler`), each start asks it for a lease first, of the
   units `lease:` names (default `%{"seat" => 1}`); a resume runs under the start's lease.
   With `registry:` (the host's `Registry`), it starts interactive delegates, whose turn's end
-  it reads from their session files.
+  it reads from their session files. With `inlet:` (the host's `Inlet`), `intake:` (the host's
+  `Intake`) and `intake_db:` (its file), a parent's fixes reach an interactive delegate as they
+  reach a main session (F-137's new-3): its interrupt is Escape through the `Inlet`, and its
+  answer goes to the `PermissionRequest` `Intake` holds for it.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -142,10 +147,13 @@ defmodule CodingAgentFramework.Delegates do
   The state of `parent`'s delegate `name` that a fix claims (`Team.tla`'s `epoch`), read after
   a read of `Stream`: the row's `id`, `status`, `resumes` and `report`, and from `Stream`'s row
   of its process the log's `offset` (each event read moves it), `gone`, `ending`, and the ids
-  of the requests `held`; and whether its agent row is free of a process (`ended`). A fix of
-  one state acts once; any event, exit, end, answer, resume or report moves it. The latest row
-  of that name is the delegate. Answers `{:ok, state}`, or `{:refused, {:no_delegate, name}}`,
-  `{:refused, {:not_started, status}}`, or `Stream`'s.
+  of the requests `held`; and whether its agent row is free of a process (`ended`). For an
+  interactive delegate, which has no `Stream` row, `offset` is the id of the newest hook event
+  `Intake` stored for its session, `held` the ids of the `PermissionRequest` rows it holds, and
+  `gone` whether its agent row is not running. A fix of one state acts once; any event, exit,
+  end, answer, resume or report moves it. The latest row of that name is the delegate. Answers
+  `{:ok, state}`, or `{:refused, {:no_delegate, name}}`, `{:refused, {:not_started, status}}`,
+  `{:unknown, :no_intake}` for an interactive one with no `intake:`, or `Stream`'s.
 
       Delegates.fix_state(delegates, "app-main", "app-unit-review")
       #=> {:ok, %{id: 1, status: "running", resumes: 0, report: "none", offset: 812,
@@ -159,8 +167,11 @@ defmodule CodingAgentFramework.Delegates do
   claimed) is still its state, read again here; else `{:refused, {:moved, now}}` and nothing
   acts. `fix` is:
 
-  - `:interrupt`: `Stream.interrupt/3`;
+  - `:interrupt`: `Stream.interrupt/3`; for an interactive delegate, `Inlet.interrupt/3`
+    (Escape, once its screen shows a turn running, until it shows the turn ended);
   - `{:answer, request_id, label}`: `Stream.answer/5`, through the request the delegate holds;
+    for an interactive delegate, `Intake.answer/4` on its held `PermissionRequest` row, whose
+    id is the request's (`allow`, or a deny with a reason);
   - `:resume`: a dead delegate (its process gone, the row `running`) goes down the resume path
     a cue takes, which counts its one resume first: `{:ok, :resuming}`. A live one is refused
     as `:live`, one already resumed as `:resumed_once`, one whose agent row may still hold a
@@ -213,7 +224,8 @@ defmodule CodingAgentFramework.Delegates do
     with {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)),
          {:ok, agents} <- Agents.open(Keyword.fetch!(opts, :sessions_db), s.host),
          {:ok, _} <- hand_over(s.sessions, Table.old_tree(db)),
-         :ok <- Table.rebuild(db) do
+         :ok <- Table.rebuild(db),
+         {:ok, intake} <- intake(opts) do
       s =
         Map.merge(s, %{
           db: db,
@@ -225,7 +237,13 @@ defmodule CodingAgentFramework.Delegates do
           scheduler: Keyword.get(opts, :scheduler),
           lease: Keyword.get(opts, :lease, %{"seat" => 1}),
           registry: Keyword.get(opts, :registry),
-          pending: %{}
+          # An interactive delegate's fixes: Escape through the Inlet, and its held
+          # PermissionRequests answered through Intake (F-137's new-3).
+          inlet: Keyword.get(opts, :inlet),
+          intake: intake,
+          pending: %{},
+          # An interactive delegate's marked lines found: {session id, uuid} to its byte offset.
+          marks: %{}
         })
 
       # A start waiting for its lease when the Scheduler ends is refused: its queue is gone.
@@ -586,9 +604,15 @@ defmodule CodingAgentFramework.Delegates do
   # transcript's last reply, which a person's later turn gives. Its process gone with no such
   # reply, it is resumed once, as a headless one is. A read that fails decides nothing.
   defp settle_interactive(s, row, agent) do
-    with {:ok, brief} <- turn_of(s, agent, row.brief_uuid),
-         {:ok, turn} <-
-           if(row.resume_uuid, do: turn_of(s, agent, row.resume_uuid), else: {:ok, brief}) do
+    {brief, s} = turn_of(s, agent, row.brief_uuid)
+
+    {turn, s} =
+      if row.resume_uuid && match?({:ok, _}, brief),
+        do: turn_of(s, agent, row.resume_uuid),
+        else: {brief, s}
+
+    with {:ok, brief} <- brief,
+         {:ok, turn} <- turn do
       reply = with {:ok, %{reply: text}} when is_binary(text) <- turn, do: text, else: (_ -> nil)
 
       cond do
@@ -612,22 +636,45 @@ defmodule CodingAgentFramework.Delegates do
     end
   end
 
-  # What the transcript holds of the turn the row `uuid` began (`Transcripts.Fold.reply_to/2`).
+  # What the transcript holds of the turn the row `uuid` began (`Transcripts.Fold.reply_to/2`),
+  # read from its marked line once that is found (F-137's new-4): the transcript is read from
+  # byte 0 only until then. A mark no longer at its offset (a file rewritten) is looked for again.
   defp turn_of(s, %{session_id: sid} = agent, uuid) when is_binary(sid) do
+    key = {sid, uuid}
+    from = Map.get(s.marks, key, 0)
+
+    case turn_from(s, agent, uuid, from) do
+      {:ok, :absent} when from > 0 -> turn_of(%{s | marks: Map.delete(s.marks, key)}, agent, uuid)
+      {:ok, turn, at} -> {{:ok, turn}, put_in(s.marks[key], at)}
+      other -> {other, s}
+    end
+  end
+
+  defp turn_of(s, _agent, _uuid), do: {{:unread, :no_session}, s}
+
+  defp turn_from(s, agent, uuid, from) do
     t = s.transcripts
+    sid = agent.session_id
 
     with {:ok, dir} <- Accounts.config_dir(s.accounts, agent.account),
          {:ok, path} <- Transcripts.path(dir, agent.cwd, sid),
          {:ok, %{failed: []}} <- Transcripts.read(t, [{agent.account, sid, path}], timeout: @step),
-         {:ok, %{bytes: bytes}} <- Transcripts.text(t, agent.account, sid, 0, timeout: @step) do
-      {:ok, Fold.reply_to(bytes, Waiter.mark(uuid))}
+         {:ok, %{bytes: bytes, from: start}} <-
+           Transcripts.text(t, agent.account, sid, from, timeout: @step) do
+      mark = Waiter.mark(uuid)
+
+      case Fold.marked_at(bytes, mark) do
+        nil ->
+          {:ok, :absent}
+
+        at ->
+          {:ok, Fold.reply_to(binary_part(bytes, at, byte_size(bytes) - at), mark), start + at}
+      end
     else
       {:refused, :no_file} -> {:ok, :absent}
       other -> {:unread, other}
     end
   end
-
-  defp turn_of(_s, _agent, _uuid), do: {:unread, :no_session}
 
   # The session file of its process reads its turn ended (`Sessions.Turn.interactive/3`).
   defp turn_ended?(s, agent) do
@@ -788,11 +835,36 @@ defmodule CodingAgentFramework.Delegates do
     |> Map.put(:ended, Agents.free?(agent))
   end
 
-  defp act(s, row, _agent, _fold, :interrupt, _from),
-    do: {:reply, Stream.interrupt(s.stream, row_session(s, row), timeout: @step), s}
+  # An interactive delegate has no Stream: Escape through the Inlet, checked on its screen.
+  defp act(s, row, agent, _fold, :interrupt, _from) do
+    cond do
+      Agents.headless?(agent) ->
+        {:reply, Stream.interrupt(s.stream, row_session(s, row), timeout: @step), s}
 
-  defp act(s, row, _agent, _fold, {:answer, request, label}, _from),
-    do: {:reply, Stream.answer(s.stream, row_session(s, row), request, label, timeout: @step), s}
+      s.inlet == nil ->
+        {:reply, {:refused, :no_inlet}, s}
+
+      true ->
+        {:reply, Inlet.interrupt(s.inlet, row.name, release: agent.release, timeout: @call), s}
+    end
+  end
+
+  # An interactive delegate's request is Intake's held PermissionRequest, as a main session's.
+  defp act(s, row, agent, fold, {:answer, request, label}, _from) do
+    cond do
+      Agents.headless?(agent) ->
+        answer = Stream.answer(s.stream, row_session(s, row), request, label, timeout: @step)
+        {:reply, answer, s}
+
+      not Map.has_key?(fold.requests, request) ->
+        {:reply, {:refused, {:not_held, request}}, s}
+
+      true ->
+        decision = if label == "allow", do: :allow, else: {:deny, "Denied by its parent."}
+        id = String.to_integer(request)
+        {:reply, Intake.answer(s.intake.pid, id, decision, timeout: @step), s}
+    end
+  end
 
   # The resume path a cue takes once the process is gone and the agent row is free. A wedged
   # delegate, alive but stuck, is not stopped first: F-100's build note, new-1.
@@ -860,7 +932,51 @@ defmodule CodingAgentFramework.Delegates do
 
   defp agent(s, row), do: Agents.get(s.agents, row.name)
 
-  defp followed(s, %{session_id: sid}) when is_binary(sid) do
+  defp intake(opts) do
+    case {opts[:intake], opts[:intake_db]} do
+      {nil, _} ->
+        {:ok, nil}
+
+      {pid, path} when is_binary(path) ->
+        with {:ok, db} <- IntakeTable.open(path), do: {:ok, %{pid: pid, db: db}}
+
+      _ ->
+        {:refused, {:bad, :intake_db}}
+    end
+  end
+
+  # What a fix reads of a delegate: Stream's row of a headless one's process; for an
+  # interactive one, what Intake holds of its session: the newest hook event's id (any event
+  # moves it, as each read event moves a log's offset), the PermissionRequests it holds, and
+  # whether its process runs.
+  defp followed(s, agent) do
+    if Agents.headless?(agent), do: streamed(s, agent), else: hooked(s, agent)
+  end
+
+  defp hooked(%{intake: nil}, _agent), do: {:unknown, :no_intake}
+
+  defp hooked(s, %{session_id: sid} = agent) when is_binary(sid) do
+    case IntakeTable.rows(s.intake.db, s.host, agent.account) do
+      {:ok, %{rows: rows}} ->
+        own = Enum.filter(rows, &(&1.session_id == sid))
+
+        requests =
+          for %{event: "PermissionRequest", hold: "held", id: id} <- own,
+              into: %{},
+              do: {Integer.to_string(id), %{state: :held}}
+
+        last = own |> Enum.map(& &1.id) |> Enum.max(fn -> 0 end)
+        gone = not Agents.running?(agent)
+        {:ok, %{offset: last, gone: gone, ending: false, requests: requests}}
+
+      :unread ->
+        {:unknown, :intake_unread}
+    end
+  end
+
+  defp hooked(_s, _agent), do: {:unknown, :no_session}
+
+  defp streamed(s, %{session_id: sid}) when is_binary(sid) do
     case Stream.rows(s.stream, timeout: @step) do
       {:ok, %{rows: rows}} ->
         found = Enum.find(rows, &(&1.session == sid))
@@ -871,7 +987,7 @@ defmodule CodingAgentFramework.Delegates do
     end
   end
 
-  defp followed(_s, _agent), do: {:unknown, :no_session}
+  defp streamed(_s, _agent), do: {:unknown, :no_session}
 
   defp pick(s) do
     with {:ok, %{readings: readings}} <- Usage.readings(s.usage, timeout: @step),

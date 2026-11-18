@@ -594,10 +594,18 @@ A main session holds, and a view shows:
 
 **Moving it** starts on its own when the account reaches 90 % of its weekly allowance, or with
 one press at any level. It goes to the account with the most allowance left:
-1. Drain: no new delegates, background commands or tool calls start.
+1. Drain: no new delegates, background commands or tool calls start. The drain stops what the
+   framework starts (decided, F-142's new-2): `Mailbox` and `Delegates` start nothing, and while
+   the agent row has a move phase the framework's `PreToolUse` callback (`Mover.pre_tool_use/2`,
+   ahead of the app's own) denies a `Bash` call with `run_in_background` and the `Monitor`
+   tool, with a reason that says a move is under way. Every account's settings therefore name
+   the `PreToolUse` hook.
 2. Wait until no background command runs and no `run_delegate` call of the session is under
    way (its report would otherwise be written to a process the move ends). This is read after
    the drain began, so nothing can start after it; a background command is a child of the session's process and ends with it.
+   The session file says `shell`, not `idle`, while a background command runs after the turn
+   ended, and `idle` once it ends (measured on 2.1.322, F-142), so the idle read of step 3 is
+   this wait.
 3. End the session by SIGTERM to its pid, by the row's pid and start time, once its session
    file says `idle` (F-114) and no `Mailbox` row to it is `sending`; once the row is `stopping`,
    `Mailbox` neither marks nor hands on a row to it (F-122's new-1: a row marked before the
@@ -632,11 +640,15 @@ clear once no `Mailbox` row to it is `sending` and no `run_delegate` call of it 
 SIGTERM as above; a delegate's is SIGTERM too, by its record, once `Stream`'s fold reads its
 turn ended and no row to it is sending, since an `end_session` would settle its queued rows
 ended. A stop refused while a turn runs is asked again only on a `registry:` or `stream:` cue.
-`copying` copies `<config>/projects/<cwd>/<session id>.jsonl` and the directory of that name
-beside it, each whole under a temporary name and renamed, once the row is free (its process
+`copying` copies `<config>/projects/<cwd>/<session id>.jsonl`, the directory of that name
+beside it and `<config>/session-env/<session id>` (the one other per-session file 2.1.322
+keeps, F-133's new-4), each whole under a temporary name and renamed, once the row is free (its process
 gone by pid and start time and its socket dead); `resuming` is `Sessions.resume` on the other
 account with the same session id and the app's launch for the agent (a delegate's from
-`Delegates.launch/2`), the row's own options and model taken again. Each failure settles on one account:
+`Delegates.launch/2`), the row's own options and model taken again. An interactive session's
+first due row goes in as the resume's prompt (`launch`, "Delivery"; F-137's new-1), since the
+resumed process has no waiter until a turn of it ends; a row still `sending` settles first.
+Each failure settles on one account:
 
 - the drain or the stop not done by the move's deadline while the old process runs: given up,
   the session runs on on its account, the act `failed`;
@@ -649,8 +661,9 @@ account with the same session id and the app's launch for the agent (a delegate'
   act `move` `failed`, reason `stranded`, for a person.
 
 A resume is asked again only while the row is free, and `Sessions` starts no name whose process
-may live, so a restart never runs two. Background commands (step 2) are not read: no reader of
-them is built (F-133's new-1).
+may live, so a restart never runs two. Background commands (step 2) are read by the stop's idle
+read, through the session file (F-133's new-1); a move whose background command outlives its
+deadline is given up.
 
 Its chat is never archived.
 
@@ -874,13 +887,20 @@ launch carries.
   word to go on's), once that turn has ended: a later user entry began another turn, or its
   session file reads its turn ended. Never the transcript's last reply: a person may have
   typed a turn of their own since (`Delegate.tla`'s `ReportAnswersTheBrief`,
-  `Break_Delegate_LastReply`).
+  `Break_Delegate_LastReply`). Once its marked line is found, `Delegates` keeps that line's
+  byte offset in memory and reads the transcript from it (F-137's new-4, F-142); a restart reads
+  from byte 0 once, and a mark no longer at its offset is looked for again.
 - Its process gone with no such reply, it is resumed once, as a headless one is, and the
   resume carries the word to go on (or the brief again) by `launch`.
 - Its stop is a main session's: SIGTERM after an `idle` read. `Mover` moves it as it moves a
   main session (`Delegates.launch/2` answers role `parent` for it).
-- A parent's fixes that act through `Stream` (an interrupt, an answer) do not reach it
-  (F-137's new-3).
+- A parent's fixes reach it as they reach a main session (F-137's new-3, built in F-142). Its
+  interrupt is Escape through the `Inlet` (`Inlet.interrupt/3`), checked: the screen shows a
+  turn running, the press lands as its own tmux command, and the screen then shows the turn
+  ended. Its permission request is the `PermissionRequest` `Intake` holds for its session, and
+  the answer goes there (`Intake.answer/4`), never as keys. The state a fix claims is read from
+  `Intake`'s rows of its session in place of a `Stream` row: the newest event's id (any hook
+  event moves it), the held requests' ids, and whether its process runs.
 
 ## Headless delegates
 
@@ -1050,9 +1070,18 @@ a waiter connects; a view shows a session idle with no waiter and something due,
 `Inlet`'s checked write reaches it, as one more transport of the same row. It types one line, the row's
 uuid at its end, only when the session file reads idle with no waiter held and the screen shows
 an empty box, both read again in the write's own step, and sends Enter as its own command once
-the box shows the text. The limit (F-132): a text of more than one line, or longer than the
-pane's width less four columns, is refused untyped and waits for a waiter, since no fixture shows
-how a release draws a wrapped box (F-113's new-1). `Intake` cues a
+the box shows the text. The limit (F-132): the `Inlet` refuses a text of more than one line, or
+longer than the pane's width less four columns, since no fixture shows how a release draws a
+wrapped box (F-113's new-1). So a row too long to type (more than one line, a control
+character, or a line longer than 76 characters with its mark, which fits an 80-column pane) is
+typed as a pointer (F-142, decided): `Mailbox` writes its whole text to
+`<home>/due/<agent>/<row id>.md` (`Sessions.due_dir/2`), and types one line, "A message for
+you is in <path>; read it.", with the row's uuid at its end. Each interactive start of the
+agent passes that directory by `--add-dir`, so reading the file never asks permission, and it
+holds only the agent's due texts. The file stays after its row is delivered: the line is taken before the agent reads the file, in the turn it starts, and the framework keeps its data. The transcript's
+user line settles it as any typed row, and its turn's end brings the next waiter, so no row
+waits for a person's prompt. A pointer line the box still cannot hold is refused, and its row
+waits for a waiter. `Intake` cues a
 session's waiter coming and going on a topic of its own (`intake:<host>:<account>:waiters`, with
 the session ids), and `Mailbox` tries a due row on that cue, not on a timer (F-123's new-3).
 The cue also settles a row `sending` by the last waiter: a turn's end starts the next waiter,
@@ -1068,8 +1097,10 @@ the idle read, and waits for a `sending` one to settle until the stop's deadline
 with `{:sending, ids}`; a row still `queued` is not waited for (F-125's new-2). It
 replaces a typed `/exit`. Claude Code's shutdown keeps the transcript and
 fires SessionEnd with reason `other`, which `Sessions` and `Recoveries` read as that end. The
-session file's `status` (`busy`, `idle`, `waiting` with `waitingFor`) is not documented; it is
-checked against each pinned release, as the screen fixtures are.
+session file's `status` (`busy`, `idle`, `waiting` with `waitingFor`, and `shell` while a
+background command runs after the turn ended) is not documented; its shape is checked against
+each pinned release, as the screen fixtures are, and with it which per-session files a
+`--resume` reads (2.1.322: the transcript, its directory and `session-env/<session id>`).
 
 ## Agents working together
 
@@ -1193,8 +1224,9 @@ starts by itself never replaces a reply or a report.
 **The operator** acts through these same tools and checks, as the parent of every main session
 (F-109). No agent messages the operator: it is no agent's addressee, and an agent reaches a
 person through `ask`. A reply to the operator's message, or the notice in its place, is stored
-addressed to the operator and never delivered: the app reads it by the message's id
-(`Mailbox.reply/2`). The operator's `run_delegate` hands the report to the operator, who
+addressed to the operator, `kept` from its store (F-138's new-1, as `Delivery.tla`'s `StoreRow`
+keeps a row to no session), so no settle reads it again, and never delivered: the app reads it
+by the message's id (`Mailbox.reply/2`, built in F-142). The operator's `run_delegate` hands the report to the operator, who
 waited for it. Either way the main session sees the act as it sees any act on its child: in the
 log, not as a message.
 
@@ -1202,9 +1234,12 @@ log, not as a message.
 for the app as a reply to the operator is: stored, never delivered. The app reads the open asks
 and one by id (`Mailbox.open_asks/2`, `Mailbox.asked/3`) and answers through one function,
 `Mailbox.answer/4`, each answer the label or labels the person chose and the person's own text.
+Those answers are kept as JSON beside the text the agent gets, and `asked/3` shows them
+(F-138's new-3).
 The answer is a row from the operator to the agent that asked, keyed by the ask's uuid, so the
 table's unique key keeps the first answer and refuses a second (`:answered`). It is delivered
-as any row is, by the agent's transport, one line per question, so an idle agent wakes to it.
+as any row is, by the agent's transport, one line per question, so an idle agent wakes to it;
+with no waiter, its several lines go as the typed pointer to its file (F-138's new-2, F-142).
 To an agent that ended first it is stored and settled `ended`, never delivered.
 
 **Services** belong to the agent that started them. When the owner ends, its services end too,
@@ -1260,15 +1295,19 @@ changed (R6).
 | `call` | a waiting `run_delegate` | the endpoint's write, and the calling process still running after it | due again, for the parent's waiter: the call it answered is gone |
 
 **The launch** (F-137). A waiter connects only once a turn of its process has ended, and the
-`Inlet` types only a short row, so neither carries a delegate's brief into a new interactive
-session. Claude Code takes an initial prompt as its last argument, at a start and with
+`Inlet` types only a short line, so neither carries a delegate's brief into a new interactive
+session but as the typed pointer to its file (F-142), which needs the screen idle with an empty
+box. The launch needs no screen: since the pointer it is the quicker path, not the only one, and
+`Delivery.tla` has no Break for it. Claude Code takes an initial prompt as its last argument, at a start and with
 `--resume`, and runs it as the first turn. So the first row to an interactive session (a
-delegate's brief, or its word to go on, or the brief again, at a resume) is marked `sending`
+delegate's brief, or its word to go on, or the brief again, at a resume; the first row due at a
+move's resume, F-142) is marked `sending`
 by `launch` before the start (`Mailbox.launch/4`, by the part that starts it, by the start's
 deadline), and the start's answer is told to `Mailbox` (`launched/3`). Every later row goes by
-the waiter, or by `typed` when it is short and no waiter is connected. A long row to a session
-whose waiter is gone after its turns waits for a person's prompt, whose turn's end brings the
-next waiter (`Delivery.tla`'s `Held`). An argument of about 900 000 bytes passed and one of 1
+the waiter, or by `typed` when no waiter is connected: a short row as its own line, a long one
+or one of several lines as a pointer to the file that holds it ("A session with no waiter",
+F-142), so no row waits for a person's prompt after a bare resume, a restart that cut the
+waiter, or the waiter's deadline (`Delivery.tla`'s `NoPointer`). An argument of about 900 000 bytes passed and one of 1
 100 000 did not on macOS (`getconf ARG_MAX` 1 048 576 for arguments and environment together),
 so a launch carries at most 512 KiB.
 

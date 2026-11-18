@@ -231,7 +231,9 @@ defmodule CodingAgentFramework.Example do
        end},
       {:intake,
        fn _ ->
-         tools = Map.to_list(Map.take(c.tool_hooks, [:pre_tool_use, :post_tool_use]))
+         # The framework's PreToolUse callback first (a move's drain), then the app's.
+         pre = Mover.pre_tool_use(w.agents, c.tool_hooks[:pre_tool_use])
+         tools = [pre_tool_use: pre] ++ Map.to_list(Map.take(c.tool_hooks, [:post_tool_use]))
          agent = &Sessions.Agents.by_session(w.agents, &1, &2)
          {Intake, [db: db, host: host, notify: notify, agent: agent] ++ tools}
        end},
@@ -314,6 +316,7 @@ defmodule CodingAgentFramework.Example do
             accounts: w.accounts,
             inlet: pid.(:inlet),
             registry: pid.(:registry),
+            home: c.home,
             notify: notify}
          end},
         {:delegates,
@@ -328,6 +331,9 @@ defmodule CodingAgentFramework.Example do
             accounts: w.accounts,
             transcripts: pid.(:transcripts),
             registry: pid.(:registry),
+            inlet: pid.(:inlet),
+            intake: pid.(:intake),
+            intake_db: db,
             mailbox: pid.(:mailbox),
             launch: [claude: c.claude, env: c.env, tool_timeout: c.tool_timeout],
             projects: c.projects,
@@ -568,7 +574,7 @@ defmodule CodingAgentFramework.Example do
   end
 
   defp prepare(c, accounts, programs, secret) do
-    tools = Map.keys(Map.take(c.tool_hooks, [:pre_tool_use, :post_tool_use]))
+    tools = [:pre_tool_use | Map.keys(Map.take(c.tool_hooks, [:post_tool_use]))]
     data = %{programs: programs, intake: %{port: c.ports.intake, secret: secret, tools: tools}}
 
     Enum.reduce_while(c.accounts, :ok, fn a, :ok ->

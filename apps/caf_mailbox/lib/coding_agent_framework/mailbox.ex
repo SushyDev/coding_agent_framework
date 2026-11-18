@@ -45,8 +45,13 @@ defmodule CodingAgentFramework.Mailbox do
     session file reads idle, handed to `Inlet.type/4` as one line with the row's uuid at its end
     (`Transport.Typed`). The `Inlet` reads the turn again in its own step, with the screen as
     the session's recorded release draws it, and types only into an ended turn with an empty
-    box. The transcript settles it, as a waiter's row. A row whose text the `Inlet` refused (too
-    long for the box, or more than one line) is not typed again: it waits for a waiter.
+    box. The transcript settles it, as a waiter's row. A row too long to type (more than one
+    line, a control character, or longer than `Transport.Typed.short/0`) is written whole to
+    `<home>/due/<agent>/<id>.md` (`Sessions.due_dir/2`, which each interactive start of the agent
+    may read by `--add-dir`), and the line typed names that file (`Transport.Typed.pointer/2`);
+    the file goes once the row is delivered. A row whose line the `Inlet` refused anyway (the
+    box narrower than the line), or one too long with no `home:`, is not typed again: it waits
+    for a waiter.
 
   - `launch` (F-137), for the first row to an interactive session's new process: marked by
     `launch/4` before the start that carries it as its prompt, told the start's answer by
@@ -87,7 +92,7 @@ defmodule CodingAgentFramework.Mailbox do
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, Grants, Inlet, Intake, Registry, Store, Stream}
+  alias CodingAgentFramework.{Accounts, Grants, Inlet, Intake, Registry, Sessions, Store, Stream}
   alias CodingAgentFramework.Transcripts
   alias CodingAgentFramework.Sessions.{Agents, Turn}
   alias CodingAgentFramework.Mailbox.{Ask, Table, Transport}
@@ -109,7 +114,8 @@ defmodule CodingAgentFramework.Mailbox do
   optionally `notify:`; for the
   waiter transport, `intake:` with `transcripts:` and `accounts:` (an `Accounts`), and
   `take_bound:` (ms, 10 000 by default); for the typed transport, `inlet:` with `registry:` (the
-  host's `Registry`), `transcripts:` and `accounts:`.
+  host's `Registry`), `transcripts:` and `accounts:`, and `home:`, the framework home `Sessions`
+  was given, whose due directories carry a row too long to type.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -236,9 +242,10 @@ defmodule CodingAgentFramework.Mailbox do
 
   @doc """
   Ask `id`, for the app: `{:ok, %{id, from, questions, asked_at, answer}}`, `answer` nil until
-  it is answered, then `%{id, text, status}`, the text the agent gets and its row's status
-  (`queued`, `sending`, `delivered`, or `ended` when the agent ended first); or `{:refused,
-  :no_ask}`.
+  it is answered, then `%{id, text, status, answers}`, the text the agent gets, its row's status
+  (`queued`, `sending`, `delivered`, or `ended` when the agent ended first) and the answers as
+  `answer/4` took them, labels and text (nil for an answer an earlier build stored); or
+  `{:refused, :no_ask}`.
   """
   def asked(mailbox, id, opts \\ []), do: call(mailbox, {:asked, id}, opts)
 
@@ -287,7 +294,7 @@ defmodule CodingAgentFramework.Mailbox do
 
   @doc """
   What became of row `id`: `{:ok, %{id, from, to, kind, status, via, attempt, reply_to, subtype,
-  is_error}}`, `status` being `queued`, `sending`, `delivered` or `ended`, `reply_to` the uuid
+  is_error}}`, `status` being `queued`, `sending`, `delivered`, `ended` or `kept` (a row to the operator, never delivered), `reply_to` the uuid
   of the row an answer answers (`key:<key>` for a `notify/4` stored under a key, nil for any
   other), and `subtype` and `is_error` a reply's result's; or `{:refused, :no_message}`.
   """
@@ -298,6 +305,17 @@ defmodule CodingAgentFramework.Mailbox do
   answers a row, or `{:refused, :no_answer}`.
   """
   def answer_to(mailbox, key, opts \\ []), do: call(mailbox, {:answer_to, key}, opts)
+
+  @doc """
+  The reply to message `id`, or the notice in its place, as `status/3` answers a row: how the
+  app reads the answer to the operator's message, which is `kept` for it and never delivered
+  ("Agents working together"). `{:refused, :no_message}` for no such row, `{:refused,
+  :no_answer}` while none has come.
+
+      Mailbox.reply(mailbox, 12)
+      #=> {:ok, %{id: 14, from: "app-unit", to: "operator", kind: "reply", status: "kept", …}}
+  """
+  def reply(mailbox, id), do: call(mailbox, {:reply, id}, [])
 
   @doc """
   The ids of the rows to `to` still `queued` or `sending`: `{:ok, ids}`. With `status:
@@ -370,7 +388,8 @@ defmodule CodingAgentFramework.Mailbox do
       waiter = Map.merge(waiter, %{intake: opts[:intake], bound: bound})
 
       typed =
-        if opts[:inlet], do: %{inlet: opts[:inlet], registry: Keyword.fetch!(opts, :registry)}
+        if opts[:inlet],
+          do: %{inlet: opts[:inlet], registry: Keyword.fetch!(opts, :registry), home: opts[:home]}
 
       # `calls`: row id to the call that took it; `waits`: key to the call waiting for it;
       # `hands`: a hand-on's task ref to the row it hands on and what its answer writes.
@@ -388,6 +407,7 @@ defmodule CodingAgentFramework.Mailbox do
   @impl true
   def handle_continue(:read, s) do
     Stream.read(s.stream, timeout: @step)
+    s = keep_operators(s)
 
     for %{via: via, status: "sending", sent_at: at} <- Table.open_rows(s.db),
         via in ["waiter", "typed", "launch"],
@@ -409,7 +429,7 @@ defmodule CodingAgentFramework.Mailbox do
              {:refused, {:bad, :message}},
          :ok <- Grants.may_message?(s.grants, from, to) do
       row = %{from: from, to: to, text: text, uuid: Stream.uuid(), kind: "msg"}
-      stored(s, Table.store(s.db, row))
+      stored(s, put(s, row))
     else
       refused -> {:reply, refused, s}
     end
@@ -425,7 +445,7 @@ defmodule CodingAgentFramework.Mailbox do
          # The operator is no agent: nothing would deliver to it.
          true <- to != Grants.operator(s.grants) or {:refused, {:not_an_agent, to}} do
       row = %{from: @framework, to: to, text: text, uuid: Stream.uuid(), kind: "msg"}
-      stored(s, Table.store(s.db, Map.put(row, :reply_to, key && "key:" <> key)))
+      stored(s, put(s, Map.put(row, :reply_to, key && "key:" <> key)))
     else
       refused -> {:reply, refused, s}
     end
@@ -441,7 +461,7 @@ defmodule CodingAgentFramework.Mailbox do
          :ok <- Grants.may_use?(s.grants, from) do
       row = %{from: from, to: operator, text: JSON.encode!(questions), kind: "ask"}
 
-      case Table.store(s.db, Map.put(row, :uuid, Stream.uuid())) do
+      case put(s, Map.put(row, :uuid, Stream.uuid())) do
         nil ->
           {:reply, {:unknown, :not_stored}, s}
 
@@ -472,8 +492,10 @@ defmodule CodingAgentFramework.Mailbox do
          {:ok, answers} <- Ask.answers(questions, answers) do
       row = %{from: m.to_agent, to: m.from_agent, text: Ask.text(id, questions, answers)}
       row = Map.merge(row, %{uuid: Stream.uuid(), kind: "answer", reply_to: m.uuid})
+      # The labels as the app gave them, beside the agent's text (F-138's new-3).
+      row = Map.put(row, :answer, JSON.encode!(answers))
 
-      case Table.store(s.db, row) do
+      case put(s, row) do
         nil -> {:reply, {:refused, :answered}, s}
         answer -> stored(s, answer)
       end
@@ -485,7 +507,7 @@ defmodule CodingAgentFramework.Mailbox do
 
   def handle_call({:store, row}, _from, s) do
     if Enum.all?([row.from, row.to, row.text, row.uuid], &(is_binary(&1) and &1 != "")),
-      do: stored(s, Table.store(s.db, row)),
+      do: stored(s, put(s, row)),
       else: {:reply, {:refused, {:bad, :message}}, s}
   end
 
@@ -625,6 +647,13 @@ defmodule CodingAgentFramework.Mailbox do
   def handle_call({:answer_to, key}, _from, s),
     do: {:reply, shown(Table.answer(s.db, key) || {:refused, :no_answer}), s}
 
+  def handle_call({:reply, id}, _from, s) do
+    case Table.get(s.db, id) do
+      %{uuid: uuid} -> {:reply, shown(Table.answer(s.db, uuid) || {:refused, :no_answer}), s}
+      nil -> {:reply, {:refused, :no_message}, s}
+    end
+  end
+
   def handle_call({:open_to, to, which}, _from, s) do
     ids =
       for %{to_agent: ^to} = m <- Table.open_rows(s.db),
@@ -681,6 +710,24 @@ defmodule CodingAgentFramework.Mailbox do
     end
   end
 
+  # The one store: a row to the operator is no session's, so it is `kept` from the start and
+  # out of `Table.open_rows/1`: no settle reads it again (F-138's new-1).
+  defp put(s, row) do
+    operator = Grants.operator(s.grants)
+    row = if operator && row.to == operator, do: Map.put(row, :status, "kept"), else: row
+    Table.store(s.db, row)
+  end
+
+  # Rows to the operator an earlier build stored `queued` are kept, once, at the start.
+  defp keep_operators(s) do
+    operator = Grants.operator(s.grants)
+
+    for %{to_agent: ^operator, status: "queued"} = m <- Table.open_rows(s.db),
+        do: Table.update(s.db, m.id, status: "kept", attempt: nil)
+
+    s
+  end
+
   defp stored(s, nil), do: {:reply, {:ok, :stored_before}, s}
 
   defp stored(s, id) do
@@ -703,8 +750,11 @@ defmodule CodingAgentFramework.Mailbox do
   defp shown_ask(s, m) do
     answer =
       case Table.answer(s.db, m.uuid) do
-        nil -> nil
-        a -> %{id: a.id, text: a.text, status: a.status}
+        nil ->
+          nil
+
+        a ->
+          %{id: a.id, text: a.text, status: a.status, answers: a.answer && JSON.decode!(a.answer)}
       end
 
     %{
@@ -781,7 +831,13 @@ defmodule CodingAgentFramework.Mailbox do
   end
 
   defp settled(_s, _m, :keep), do: :ok
-  defp settled(s, m, :delivered), do: write(s, m, status: "delivered", attempt: nil)
+
+  defp settled(s, m, :delivered) do
+    # A pointer's file stays: the line is taken before the agent reads the file, in the turn it
+    # starts, and nothing tells when that read is done. The framework keeps its data.
+    write(s, m, status: "delivered", attempt: nil)
+  end
+
   defp settled(s, m, :again), do: again(s, m, nil)
 
   # Due again, first, under its same uuid.
@@ -816,12 +872,12 @@ defmodule CodingAgentFramework.Mailbox do
   defp reply_row(s, m, to, {:result, r}) do
     row = %{from: m.to_agent, to: to, text: r.text, uuid: Stream.uuid(), kind: "reply"}
     row = Map.merge(row, %{reply_to: m.uuid, subtype: r.subtype, is_error: r.is_error})
-    stored_quietly(s, Table.store(s.db, row))
+    stored_quietly(s, put(s, row))
   end
 
   defp reply_row(s, m, to, :exited) do
     row = %{from: @framework, to: to, text: notice(m), uuid: Stream.uuid(), kind: "notice"}
-    stored_quietly(s, Table.store(s.db, Map.put(row, :reply_to, m.uuid)))
+    stored_quietly(s, put(s, Map.put(row, :reply_to, m.uuid)))
   end
 
   defp notice(m),
@@ -1001,27 +1057,66 @@ defmodule CodingAgentFramework.Mailbox do
   defp type(s, m, srow) do
     case turn_now(s, srow.name, srow.pid) do
       :ok ->
-        from = offset(s, srow)
-        mark = [status: "sending", via: "typed", session_id: srow.session_id, at: srow.pid]
-        write(s, m, mark ++ [from_byte: from, sent_at: now() + @inlet])
-        text = Transport.Typed.text(m.text, m.uuid)
-        reads = Map.take(s, [:agents, :typed, :waiter])
-        turn = fn -> turn_now(reads, srow.name, srow.pid) end
-        inlet = s.typed.inlet
-
-        hand_on(
-          s,
-          m,
-          fn ->
-            Inlet.type(inlet, srow.name, text, release: srow.release, turn: turn, timeout: @inlet)
-          end,
-          &sent/3
-        )
+        type_line(s, m, srow, line(s, m, srow))
 
       {:refused, why} ->
         if m.attempt != Store.text(why), do: write(s, m, attempt: why)
         s
     end
+  end
+
+  # The line typed: the row's own, or for a row too long to type, one that names the file its
+  # text is written to in the agent's due directory, which its start may read (F-142).
+  defp line(s, m, srow) do
+    cond do
+      Transport.Typed.short?(m.text, m.uuid) ->
+        {:ok, Transport.Typed.text(m.text, m.uuid)}
+
+      is_nil(s.typed.home) ->
+        {:refused, {:too_long, :no_home}}
+
+      true ->
+        path = due_path(s, srow.name, m)
+
+        with :ok <- File.mkdir_p(Path.dirname(path)),
+             :ok <- File.write(path <> ".tmp", m.text),
+             :ok <- File.rename(path <> ".tmp", path) do
+          {:ok, Transport.Typed.pointer(path, m.uuid)}
+        else
+          {:error, why} -> {:unknown, {:due_file, why}}
+        end
+    end
+  end
+
+  defp due_path(s, name, m),
+    do: Path.join(Sessions.due_dir(s.typed.home, name), "#{m.id}.md")
+
+  defp type_line(s, m, _srow, {:refused, why}) do
+    write(s, m, attempt: why)
+    s
+  end
+
+  defp type_line(s, m, _srow, {:unknown, why}) do
+    if m.attempt != Store.text(why), do: write(s, m, attempt: why)
+    s
+  end
+
+  defp type_line(s, m, srow, {:ok, text}) do
+    from = offset(s, srow)
+    mark = [status: "sending", via: "typed", session_id: srow.session_id, at: srow.pid]
+    write(s, m, mark ++ [from_byte: from, sent_at: now() + @inlet])
+    reads = Map.take(s, [:agents, :typed, :waiter])
+    turn = fn -> turn_now(reads, srow.name, srow.pid) end
+    inlet = s.typed.inlet
+
+    hand_on(
+      s,
+      m,
+      fn ->
+        Inlet.type(inlet, srow.name, text, release: srow.release, turn: turn, timeout: @inlet)
+      end,
+      &sent/3
+    )
   end
 
   # The turn of `name`'s process `pid` read now: its row, its session file and its waiter.

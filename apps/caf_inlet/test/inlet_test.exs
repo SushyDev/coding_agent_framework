@@ -173,6 +173,23 @@ defmodule CodingAgentFramework.InletTest do
     refute_received {:write, ^inlet, _}
   end
 
+  # F-142, item 4: an interactive delegate's interrupt. Checked: a turn runs, the Escape lands,
+  # the turn ends; an idle screen takes no key.
+  test "interrupts a running turn by Escape, and nothing when no turn runs", ctx do
+    open(ctx, "busy", ["--screen", "running"])
+    inlet = ctx.inlet
+    assert {:ok, :sent} = Inlet.interrupt(inlet, "busy", release: @release)
+    assert_received {:write, ^inlet, {:keys, ["Escape"]}}
+    assert File.exists?(Path.join(ctx.dir, "interrupted"))
+    assert {:ok, %{state: :idle}} = screen(ctx, "busy", &(&1.state == :idle))
+
+    assert {:refused, {:screen, %{state: :idle}}} =
+             Inlet.interrupt(inlet, "busy", release: @release)
+
+    assert {:refused, :no_release} = Inlet.interrupt(inlet, "busy", release: nil)
+    refute_received {:write, ^inlet, _}
+  end
+
   defp open(ctx, name, args \\ []) do
     script = ScreenStandIn.write!(ctx.dir)
     {:ok, _} = Tmux.new_session(ctx.server, name, [script | args], size: {120, 40})

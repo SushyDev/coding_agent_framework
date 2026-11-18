@@ -77,9 +77,10 @@ defmodule CodingAgentFramework.MoverTest do
     assert pid == moved.pid
   end
 
-  # StopWhileSending, MarkWhileEnding, OnceAcrossMove, RowsArrive: a row sending holds the end;
-  # no row is marked while the move is under way; each goes once, to the new process, first the
-  # one made due again.
+  # StopWhileSending, MarkWhileEnding, OnceAcrossMove, RowsArrive (NoResumeLaunch): a row
+  # sending holds the end; no row is marked while the move is under way; each goes once, to the
+  # new process, first the one made due again, as the resume's prompt, since the resumed
+  # process has no waiter until a turn of it ends.
   @tag take_bound: 3_000
   test "rows to the session wait through the move and go once, to the new process", ctx do
     main = main(ctx)
@@ -100,19 +101,22 @@ defmodule CodingAgentFramework.MoverTest do
     # Past the take bound row one is due again, the drain is clear, and the move goes on.
     assert {:ok, moved} = row_when(ctx, "main", &moved?(&1, "spare"))
 
-    # MarkWhileEnding: neither row was marked during the move.
-    assert %{status: "queued", again: 1, uuid: ^u1} = mrow(ctx, one)
-    assert %{status: "queued", again: 0} = mrow(ctx, two)
-
-    # The new process's waiters take them in order, row one first under its uuid, each settled
-    # from the transcript the agent row names now.
-    spare = paths(ctx, "spare", main.sid)
-    turn = WaiterStandIn.turn_end(spare.settings, main.sid, spare.transcript, :idle)
-    assert {2, "report one\n\n[delivery " <> rest} = Task.await(turn, 10_000)
-    assert rest == u1 <> "]"
-    assert %{status: "sending", at: at} = mrow(ctx, one)
+    # MarkWhileEnding: neither row was marked during the move; row one, made due again, went
+    # by launch as the resume's prompt, for the new process, under its uuid; row two waits.
+    assert %{status: "sending", via: "launch", again: 1, uuid: ^u1, at: at} = mrow(ctx, one)
     assert at == moved.pid
+    assert %{status: "queued", again: 0} = mrow(ctx, two)
+    {args, 0} = System.cmd(program!(:ps), ["-ww", "-o", "args=", "-p", "#{moved.pid}"])
+    assert args =~ "report one" and args =~ "[delivery #{u1}]"
 
+    # Claude Code writes the prompt as the first turn's user line, in the transcript the agent
+    # row names now, which settles row one.
+    spare = paths(ctx, "spare", main.sid)
+    user = %{"type" => "user", "message" => %{"content" => "report one\n\n[delivery #{u1}]"}}
+    File.write!(spare.transcript, [JSON.encode!(user), "\n"], [:append])
+    assert {:ok, _} = mrow_when(ctx, one, &(&1.status == "delivered"))
+
+    # That turn's end brings the new process's first waiter, which takes row two.
     turn = WaiterStandIn.turn_end(spare.settings, main.sid, spare.transcript, :idle)
     assert {2, "report two" <> _} = Task.await(turn, 10_000)
     assert {:ok, _} = mrow_when(ctx, two, &(&1.status == "delivered"))
@@ -120,13 +124,57 @@ defmodule CodingAgentFramework.MoverTest do
 
     # OnceAcrossMove: one take of row one, in the new transcript; none in the old.
     refute File.read!(main.transcript) =~ "[delivery #{u1}]"
-    assert lines_with(spare.transcript, "[delivery #{u1}]") == 3
+    assert lines_with(spare.transcript, "[delivery #{u1}]") == 1
+  end
+
+  # ShellIsIdle, NothingLost: the session file says `shell` while a background command runs
+  # after the turn ended, and the SIGTERM waits for `idle`; then the copy takes the session's
+  # `session-env` beside its transcript.
+  test "the end waits for background commands, and the copy takes the session's env", ctx do
+    main = main(ctx)
+    env = Path.join([ctx.dirs["work"], "session-env", main.sid])
+    File.mkdir_p!(env)
+    File.write!(Path.join(env, "hook-1.sh"), "export A=1\n")
+
+    assert {:ok, :sent} = MoverSetup.type(ctx, "main", "shell")
+    assert {:ok, _} = file_says(ctx, "work", "shell")
+    assert {:ok, _} = move(ctx, "main")
+
+    # A background command runs: the stop is refused at each reading, and nothing is sent.
+    assert {:ok, _} = row_when(ctx, "main", &(&1.move == "stopping"))
+
+    # NoDrain: while the row has a move phase, the framework's PreToolUse callback denies a new
+    # background command or monitor; any other call goes to the app's callback.
+    pre = Mover.pre_tool_use(ctx.agents, fn _event -> :allow end)
+    bash = fn input -> %{agent: "main", tool_name: "Bash", tool_input: input} end
+    assert {:deny, why} = pre.(bash.(%{"command" => "make", "run_in_background" => true}))
+    assert why =~ "moving"
+    assert {:deny, _} = pre.(%{agent: "main", tool_name: "Monitor", tool_input: %{}})
+    assert pre.(bash.(%{"command" => "make"})) == :allow
+    assert Mover.pre_tool_use(ctx.agents).(bash.(%{"command" => "make"})) == :pass
+    {:ok, _} = CodingAgentFramework.Registry.read(ctx.registry)
+    :sys.get_state(mover())
+    assert alive?(main.pid)
+
+    # It ends: the file says idle, and the move goes on.
+    assert {:ok, :sent} = MoverSetup.type(ctx, "main", "idle")
+    assert {:ok, _} = row_when(ctx, "main", &moved?(&1, "spare"))
+    refute alive?(main.pid)
+
+    # Moved: background commands start again.
+    background = %{"command" => "make", "run_in_background" => true}
+    assert pre.(bash.(background)) == :allow
+
+    copy = Path.join([ctx.dirs["spare"], "session-env", main.sid, "hook-1.sh"])
+    assert File.read!(copy) == "export A=1\n"
   end
 
   # SettleOnTarget, DeliveredIsKept: the old process ends by itself with a row in flight whose
-  # take it wrote; the move goes on from the copy, and the row is settled against the copy.
+  # take it wrote; the move goes on from the copy, and the resume waits for the row to settle
+  # (no launch while a row is sending), from the transcript the agent row names, so it is
+  # delivered once and never carried again as the resume's prompt.
   @tag take_bound: 60_000
-  test "a row in flight when the old process ends by itself is settled from the copy", ctx do
+  test "a row in flight when the old process ends by itself settles before the resume", ctx do
     main = main(ctx)
     {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "d0", "main", "report one")
     turn = WaiterStandIn.turn_end(main.settings, main.sid, main.transcript, :lost)
@@ -138,10 +186,17 @@ defmodule CodingAgentFramework.MoverTest do
     WaiterStandIn.take(main.transcript, main.sid, String.trim_trailing(text), :idle)
     assert {:ok, %{status: 0}} = kill(main.pid, "-KILL")
 
-    assert {:ok, _} = row_when(ctx, "main", &moved?(&1, "spare"))
-    assert %{status: "sending"} = mrow(ctx, one)
-    transcript_cue(ctx)
-    assert {:ok, %{again: 0}} = mrow_when(ctx, one, &(&1.status == "delivered"))
+    # Copied, and the resume waits while the row is sending.
+    assert {:ok, _} = row_when(ctx, "main", &(&1.move == "resuming"))
+    assert %{status: "sending", via: "waiter"} = mrow(ctx, one)
+    assert %{account: "work", status: "stopped"} = row(ctx, "main")
+
+    assert {:ok, %{again: 0}} =
+             mrow_when(ctx, one, &(&1.status == "delivered"), "transcripts:test:work")
+
+    assert {:ok, moved} = row_when(ctx, "main", &moved?(&1, "spare"))
+    {args, 0} = System.cmd(program!(:ps), ["-ww", "-o", "args=", "-p", "#{moved.pid}"])
+    refute args =~ "report one"
   end
 
   # How a move refused or cut settles: on one account, never two; never none unless both
@@ -311,10 +366,10 @@ defmodule CodingAgentFramework.MoverTest do
 
   defp mrow(ctx, id), do: Mailbox.Table.get(ctx.mtable, id)
 
-  defp mrow_when(ctx, id, ready?) do
+  defp mrow_when(ctx, id, ready?, topic \\ "transcripts:test:spare") do
     await(
       fn ->
-        transcript_cue(ctx)
+        transcript_cue(ctx, topic)
         row = mrow(ctx, id)
         if ready?.(row), do: {:ok, row}, else: row
       end,
@@ -324,8 +379,8 @@ defmodule CodingAgentFramework.MoverTest do
 
   # A transcript's cue, the one a waiter row's lines are read on; a call after the cast answers
   # once it is handled.
-  defp transcript_cue(ctx) do
-    Mailbox.cue(ctx.mailbox, %{topic: "transcripts:test:spare", ids: []})
+  defp transcript_cue(ctx, topic) do
+    Mailbox.cue(ctx.mailbox, %{topic: topic, ids: []})
     Mailbox.status(ctx.mailbox, 0)
   end
 

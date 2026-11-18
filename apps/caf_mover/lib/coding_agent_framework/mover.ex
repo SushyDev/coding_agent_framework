@@ -20,14 +20,19 @@ defmodule CodingAgentFramework.Mover do
   2. `stopping`: `Sessions.stop/3` `for: :move`, the SIGTERM by the row's pid and start time
      once the session reads idle and no row to it is sending, then the wait for the exit and
      the dead socket. A stop refused (a turn runs) is asked again only on a reader's cue
-     (`registry:`, `stream:`), when the evidence of the turn can have changed.
+     (`registry:`, `stream:`), when the evidence of the turn can have changed. An interactive
+     session's file says `shell`, not `idle`, while a background command runs after its turn
+     ended (Claude Code 2.1.322), so the stop waits for its background commands too.
   3. `copying`: once the row is free (its process gone, by pid and start time, and its socket
-     dead), the transcript `<config>/projects/<cwd>/<session id>.jsonl` and the directory beside
-     it of that name are copied into the other account's config directory, each under a
-     temporary name and renamed into place, and the copy's size checked against the source's.
+     dead), the transcript `<config>/projects/<cwd>/<session id>.jsonl`, the directory beside
+     it of that name and `<config>/session-env/<session id>` are copied into the other
+     account's config directory, each under a temporary name and renamed into place, and the
+     transcript's size checked against the source's.
   4. `resuming`: `Sessions.resume/6` on the other account with the same session id and name,
      the launch the app gives (`launch:`, without options, so the row's own are taken again),
-     and so Remote Control and the waiter's hook of that account. Once the row runs there the
+     and so Remote Control and the waiter's hook of that account. An interactive session's
+     first due row goes in as the resume's prompt (`Mailbox.launch/4`, then `launched/3`), since
+     the resumed process has no waiter until a turn of it ends. Once the row runs there the
      move is done: its fields are cleared and its act `verified`.
 
   **How each failure settles**, the session running on one account, never two and never none:
@@ -60,6 +65,8 @@ defmodule CodingAgentFramework.Mover do
   @timeout 1_800_000
   # Each stop's own deadline in `Sessions`.
   @stop 30_000
+  # A resume's deadline in `Sessions`, which bounds the launch that carries its first row.
+  @resume 30_000
 
   @type outcome(ok) :: {:ok, ok} | {:refused, term} | {:unknown, term}
 
@@ -88,6 +95,41 @@ defmodule CodingAgentFramework.Mover do
   @spec move(GenServer.server(), String.t(), String.t(), keyword) :: outcome(map)
   def move(mover, actor, name, opts \\ []),
     do: call(mover, {:move, actor, name, Keyword.get(opts, :to)})
+
+  @doc """
+  The framework's `PreToolUse` callback, for `Intake`'s `pre_tool_use:` (F-142's new-2). The
+  drain stops what the framework starts; a background command is the session's own, so while
+  the agent's row has a move phase this denies a `Bash` call with `run_in_background` and the
+  `Monitor` tool, with a reason the agent reads. Any other call goes to `then`, the app's own
+  callback (`:pass` with none). It reads the agent rows through `agents`
+  (`Sessions.Agents.open/2`), in the callback's own process.
+
+      Intake.start_link(db: db, host: "laptop", agent: &Agents.by_session(agents, &1, &2),
+        pre_tool_use: Mover.pre_tool_use(agents, &MyApp.pre_tool_use/1))
+  """
+  @spec pre_tool_use(Agents.t(), (map -> term) | nil) :: (map -> term)
+  def pre_tool_use(agents, then \\ nil) do
+    fn event ->
+      row = is_binary(event[:agent]) && Agents.get(agents, event.agent)
+
+      cond do
+        row && Agents.moving?(row) && background?(event) ->
+          {:deny,
+           "This session is moving to another Claude account. Start no background command " <>
+             "or monitor now: run it in the foreground, or after the move."}
+
+        then ->
+          then.(event)
+
+        true ->
+          :pass
+      end
+    end
+  end
+
+  defp background?(%{tool_name: "Bash", tool_input: %{"run_in_background" => true}}), do: true
+  defp background?(%{tool_name: "Monitor"}), do: true
+  defp background?(_event), do: false
 
   @doc "Hands it a cue; every move under way on the host takes its next step that can."
   @spec cue(GenServer.server(), map) :: :ok
@@ -295,20 +337,46 @@ defmodule CodingAgentFramework.Mover do
 
   defp resume(s, row) do
     with {:ok, account} <- Accounts.ready(s.accounts, row.move_to),
-         {:ok, launch} <- s.launch.(row) do
+         {:ok, launch} <- s.launch.(row),
+         {:ok, launched} <- launch_first(s, row) do
       launch = Keyword.delete(launch, :options)
+      launch = if launched, do: launch ++ [prompt: launched.text], else: launch
+      mailbox = s.mailbox
 
       async(s, row, :resume, fn ->
-        Sessions.resume(s.sessions, row.name, account, row.session_id, launch)
+        answer =
+          Sessions.resume(s.sessions, row.name, account, row.session_id, launch, timeout: @resume)
+
+        if launched, do: Mailbox.launched(mailbox, launched.id, answer)
+        answer
       end)
     else
-      # Not known yet (a part the launch needs has not started): the next cue asks again.
+      # Not known yet (a part the launch needs has not started, or a row to the session is
+      # still in flight): the next cue asks again.
       {:unknown, why} ->
-        Logger.debug("mover: no launch for #{row.name} yet: #{inspect(why)}")
+        Logger.debug("mover: no resume of #{row.name} yet: #{inspect(why)}")
         s
 
       refused ->
         answered(s, row, :resume, refused)
+    end
+  end
+
+  # The first row due to an interactive session goes in as its resume's prompt (F-142, item 3):
+  # the resumed process has no waiter until a turn of it ends, and the `Inlet` types no long
+  # row, so a report would otherwise wait for a person's prompt. A headless session's rows go
+  # by its stream. A row still `sending` (a launch a restart cut, say) settles first.
+  defp launch_first(s, row) do
+    if Agents.headless?(row) do
+      {:ok, nil}
+    else
+      case Mailbox.launch(s.mailbox, row.name, s.clock.() + @resume + @step) do
+        {:ok, %{id: _, text: _} = launched} -> {:ok, launched}
+        {:ok, :none} -> {:ok, nil}
+        {:refused, :no_transcripts} -> {:ok, nil}
+        {:refused, {:sending, ids}} -> {:unknown, {:sending, ids}}
+        {_, why} -> {:unknown, {:launch, why}}
+      end
     end
   end
 
@@ -395,8 +463,20 @@ defmodule CodingAgentFramework.Mover do
          true <- is_binary(row.session_id) or {:refused, :no_session_id},
          {:ok, source} <- Transcripts.path(from, row.cwd, row.session_id),
          {:ok, copy} <- Transcripts.path(to, row.cwd, row.session_id),
-         :ok <- copy_file(source, copy) do
-      copy_dir(Path.rootname(source), Path.rootname(copy))
+         :ok <- copy_file(source, copy),
+         :ok <- copy_dir(Path.rootname(source), Path.rootname(copy)) do
+      env = Path.join("session-env", row.session_id)
+      copy_any(Path.join(from, env), Path.join(to, env))
+    end
+  end
+
+  # `session-env/<session id>`, the one other per-session file Claude Code 2.1.322 keeps
+  # (F-133's new-4), a directory or a file; a session with none has nothing to copy.
+  defp copy_any(source, copy) do
+    cond do
+      File.dir?(source) -> copy_dir(source, copy)
+      File.regular?(source) -> copy_file(source, copy)
+      true -> :ok
     end
   end
 
@@ -420,7 +500,8 @@ defmodule CodingAgentFramework.Mover do
       tmp = copy <> ".moving"
       File.rm_rf(tmp)
 
-      with {:ok, _} <- File.cp_r(source, tmp) |> named(:copy_dir),
+      with :ok <- File.mkdir_p(Path.dirname(copy)) |> named(:mkdir),
+           {:ok, _} <- File.cp_r(source, tmp) |> named(:copy_dir),
            {:ok, _} <- File.rm_rf(copy) |> named(:copy_dir),
            :ok <- File.rename(tmp, copy) |> named(:copy_dir),
            do: :ok

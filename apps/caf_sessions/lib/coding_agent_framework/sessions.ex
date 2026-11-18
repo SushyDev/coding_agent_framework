@@ -1580,9 +1580,41 @@ defmodule CodingAgentFramework.Sessions do
     with {:ok, prompt} <- prompt(state, launch[:prompt]),
          {:ok, hooks} <- waiter_hooks(state, account),
          {:ok, options, own} <- own(state, role, account, name, resume, launch, hooks),
+         {:ok, own} <- due(state, name, own),
          {:ok, cli} <- cli(role, account, name, resume, Keyword.delete(launch, :prompt), own),
          do: {:ok, %{cli: cli, options: options, prompt: prompt}}
   end
+
+  # The session's due directory, granted by `--add-dir` at every interactive start, so reading
+  # a long row the typed write points to never asks permission (F-142). The agent row keeps
+  # only its own options; this one is added again at each start.
+  defp due(%{home: nil}, _name, own), do: {:ok, own}
+
+  defp due(state, name, own) do
+    dir = due_dir(state.home, name)
+
+    case Worktree.name?(name) && File.mkdir_p(dir) do
+      false ->
+        {:refused, {:bad, :name}}
+
+      :ok ->
+        options = Map.update(own[:options] || %{}, :add_dirs, [dir], &(&1 ++ [dir]))
+        {:ok, Keyword.put(own, :options, options)}
+
+      {:error, why} ->
+        {:refused, {:due_dir, why}}
+    end
+  end
+
+  @doc """
+  The directory of agent `name`'s due texts under the framework home: `Mailbox` writes a row too
+  long to type there, and each interactive start of the agent may read it (`--add-dir`).
+
+      iex> CodingAgentFramework.Sessions.due_dir("/srv/caf/home", "app-main")
+      "/srv/caf/home/due/app-main"
+  """
+  @spec due_dir(Path.t(), String.t()) :: Path.t()
+  def due_dir(home, name), do: Path.join([home, "due", name])
 
   defp prompt(_state, nil), do: {:ok, nil}
 

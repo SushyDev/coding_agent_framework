@@ -106,6 +106,29 @@ defmodule CodingAgentFramework.Inlet do
   end
 
   @doc """
+  Interrupts `session`'s running turn by Escape, as a person would (F-142, item 4: an
+  interactive delegate's interrupt, which no `Stream` carries). In one step of this process: the
+  screen is read as the session's release draws it, and must show a turn running; Escape goes as
+  its own tmux command; then the screen is read again until it no longer shows the turn running
+  (`see:` ms, 5 000 by default). Options `release:` (required), `see:` and `timeout:`.
+
+  Answers `{:ok, :sent}` once the turn has ended; `{:refused, reason}` when no key went:
+  `:no_release`, `{:screen, reading}` (no turn runs), or `Tmux`'s; `{:unknown, reason}` once
+  the key may have gone: `{:escape, reason}`, or `{:still_running, reading}`.
+
+      iex> {:ok, fake} = CodingAgentFramework.Tmux.Fake.start_link(key: {"laptop", "fake"})
+      iex> server = CodingAgentFramework.Tmux.Fake.new(fake, {"laptop", "fake"})
+      iex> {:ok, inlet} = CodingAgentFramework.Inlet.start_link(tmux: server)
+      iex> CodingAgentFramework.Inlet.interrupt(inlet, "alpha", release: nil)
+      {:refused, :no_release}
+  """
+  @spec interrupt(GenServer.server(), String.t(), keyword) :: outcome
+  def interrupt(inlet, session, opts) do
+    request = {:interrupt, session, Keyword.fetch!(opts, :release)}
+    call(inlet, request, Keyword.get(opts, :see, 5_000), opts)
+  end
+
+  @doc """
   Reads `session`'s screen as `release` draws it (`Screen.read/2`), for a caller that writes
   nothing: `Sessions` reads a starting session's pane for a dialog. Answers `{:ok, screen}`,
   `{:unknown, {:unrecognized, release}}`, or a refusal (`:no_release`, `{:unknown_release,
@@ -165,6 +188,24 @@ defmodule CodingAgentFramework.Inlet do
     end
   end
 
+  # Checked: a turn runs, the press lands, the turn ends.
+  defp act({:interrupt, session, release}, see, tmux) do
+    with :ok <- if(is_binary(release), do: :ok, else: {:refused, :no_release}),
+         {:ok, pane} <- pane(tmux, session),
+         :ok <- running(tmux, pane, session, release) do
+      case Tmux.write(tmux, pane, session, {:keys, ["Escape"]}) do
+        {:ok, :sent} ->
+          ended(tmux, pane, session, release, System.monotonic_time(:millisecond) + see)
+
+        {:refused, _} = refused ->
+          refused
+
+        {:unknown, reason} ->
+          {:unknown, {:escape, reason}}
+      end
+    end
+  end
+
   defp act({:look, session, release}, _see, tmux) do
     with :ok <- if(is_binary(release), do: :ok, else: {:refused, :no_release}),
          {:ok, pane} <- pane(tmux, session),
@@ -217,6 +258,38 @@ defmodule CodingAgentFramework.Inlet do
         receive do
         after
           @look -> left(tmux, pane, session, release, kind, deadline)
+        end
+    end
+  end
+
+  defp running(tmux, pane, session, release) do
+    with {:ok, %{text: screen}} <- Tmux.capture(tmux, pane, session) do
+      case Screen.read(screen, release) do
+        {:ok, %{state: :running}} -> :ok
+        {:ok, reading} -> {:refused, {:screen, reading}}
+        {:unknown, {:unrecognized, _}} -> {:refused, {:screen, :unrecognized}}
+        {:refused, _} = refused -> refused
+      end
+    end
+  end
+
+  # After the Escape, the turn ends: the screen shows anything but a turn running.
+  defp ended(tmux, pane, session, release, deadline) do
+    reading =
+      with {:ok, %{text: screen}} <- Tmux.capture(tmux, pane, session),
+           do: Screen.read(screen, release)
+
+    cond do
+      match?({:ok, %{state: state}} when state != :running, reading) ->
+        {:ok, :sent}
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        {:unknown, {:still_running, reading}}
+
+      true ->
+        receive do
+        after
+          @look -> ended(tmux, pane, session, release, deadline)
         end
     end
   end

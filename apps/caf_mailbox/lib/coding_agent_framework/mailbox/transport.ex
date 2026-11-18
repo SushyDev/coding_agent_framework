@@ -218,9 +218,42 @@ defmodule CodingAgentFramework.Mailbox.Transport.Typed do
 
   alias CodingAgentFramework.Mailbox.Transport.Waiter
 
+  # The longest line typed as the row's own text: under the box of an 80-column pane, the
+  # narrowest a session's pane is drawn at, so a short row needs no screen's width to decide.
+  @short 76
+
   @doc "The text typed: the row's text and, at the end of the same line, its uuid."
   @spec text(String.t(), String.t()) :: String.t()
   def text(text, uuid), do: text <> " [delivery " <> uuid <> "]"
+
+  @doc "The longest line typed as a row's own text, in characters."
+  @spec short() :: pos_integer
+  def short, do: @short
+
+  @doc """
+  Whether a row's text is typed as itself (`text/2`): one line of printable characters within
+  `short/0`. Any other row is written to a file and typed as `pointer/2` (F-142).
+
+      iex> CodingAgentFramework.Mailbox.Transport.Typed.short?("Done.", "u1")
+      true
+      iex> CodingAgentFramework.Mailbox.Transport.Typed.short?("Done.\\nAll of it.", "u1")
+      false
+  """
+  @spec short?(String.t(), String.t()) :: boolean
+  def short?(text, uuid) do
+    line = text(text, uuid)
+    String.length(line) <= @short and not Regex.match?(~r/[\x00-\x1f\x7f]/, line)
+  end
+
+  @doc """
+  The line typed for a row too long to type: it names the file its whole text is in, which the
+  session may read, and carries the uuid at its end as `text/2` does.
+
+      iex> CodingAgentFramework.Mailbox.Transport.Typed.pointer("/h/due/main/7.md", "u1")
+      "A message for you is in /h/due/main/7.md; read it. [delivery u1]"
+  """
+  @spec pointer(Path.t(), String.t()) :: String.t()
+  def pointer(path, uuid), do: text("A message for you is in #{path}; read it.", uuid)
 
   @doc """
   What the transcript `bytes` show of the row under `uuid`, as `Waiter.seen/2` reads them: a user

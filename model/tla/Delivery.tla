@@ -27,18 +27,20 @@
 (*           and no answer still on its way to a turn, due again. A        *)
 (*           restart settles it the same way.                              *)
 (*   typed   the Inlet's checked write, for an interactive session with no *)
-(*           waiter, into an ended turn only, and only a short row: a row  *)
-(*           in Long (more than one line, or wider than the box) is never  *)
-(*           typed (F-132). Refused when the check fails; unknown keeps    *)
-(*           the mark, and is never typed again; settled as waiter, once   *)
-(*           the turn that took it has ended.                              *)
+(*           waiter, into an ended turn only. A row in Long (more than one *)
+(*           line, or wider than the box) is written to a file the session *)
+(*           may read, and the line typed names it (F-142); which line is  *)
+(*           typed is left abstract. Refused when the check fails; unknown *)
+(*           keeps the mark, and is never typed again; settled as waiter,  *)
+(*           once the turn that took it has ended.                         *)
 (*                                                                         *)
 (* A waiter connects only once a turn of its process has ended (`turned`): *)
 (* each turn's end starts the next one, and nothing starts one before the  *)
-(* first turn. So a new interactive process has neither a waiter nor, for  *)
-(* a long row, the typed write: its first row goes by launch (F-137). A    *)
-(* long row to a session whose waiter is gone after its turns waits for a  *)
-(* person's prompt, whose turn's end brings the next waiter (`Held`).      *)
+(* first turn. A new interactive process's first row goes by launch        *)
+(* (F-137); a row to a session with no waiter, long or not, goes by the    *)
+(* typed write, so none waits for a person's prompt. Since the pointer     *)
+(* (F-142) a first row would arrive by the typed write too: the launch is  *)
+(* the quicker path, with no screen to read, and no Break of its own.      *)
 (*   launch  the prompt argument of an interactive session's start (and of *)
 (*           its resume): the first row to it goes in as the start itself, *)
 (*           and Claude Code runs it as the session's first turn. Marked   *)
@@ -154,8 +156,7 @@ Breaks == {
     "SelfReply",             \* a reply is the last result since the row, whatever it names
     "NoNotice",              \* a row whose turn ended with no result gets no notice
     "ResumeOwnKey",          \* a resumed process's row is keyed by itself, not the brief
-    "NoLaunch",              \* a start carries no row: the first waits for a waiter or typing
-    "TypeLong"               \* the typed write takes a long row
+    "NoPointer"              \* a long row is not typed: it waits for a waiter (F-132)
 }
 
 ASSUME Break \in Breaks
@@ -236,8 +237,9 @@ Reaches(i, t) ==
     LET a == row[i].to IN
     CASE t = "stream" -> a \in Headless
       [] t = "waiter" -> a \notin Headless /\ waiter[a] = pr[a]
-      [] t = "typed"  -> a \notin Headless /\ waiter[a] # pr[a] /\ (i \notin Long \/ Break = "TypeLong")
-      [] t = "launch" -> a \notin Headless /\ Break # "NoLaunch"
+      [] t = "typed"  -> a \notin Headless /\ waiter[a] # pr[a]
+                         /\ (i \notin Long \/ Break # "NoPointer")
+      [] t = "launch" -> a \notin Headless
       [] t = "call"   -> /\ i \in Awaited
                          /\ \/ call[i] = "waiting"
                             \/ Break = "TakeAfterDeadline" /\ call[i] = "timedout"
@@ -298,8 +300,7 @@ Handed(i) ==
     /\ wire' = [wire EXCEPT ![i] = @ + 1]
     /\ claimed' = IF row[i].via = "stream" THEN claimed \cup {i} ELSE claimed
     /\ waiter' = IF row[i].via = "waiter" THEN [waiter EXCEPT ![a] = 0] ELSE waiter
-    /\ wrong' = wrong \cup (IF row[i].via = "typed" /\ i \in Long THEN {"typed long"} ELSE {})
-    /\ UNCHANGED <<row, call, tx, fold, rmem, last, unsure, lost>>
+    /\ UNCHANGED <<row, call, tx, fold, rmem, last, unsure, lost, wrong>>
 
 \* launch: the start is the hand-on. The row's text is the start's prompt
 \* argument, for the process p the start makes (the instancing spec starts
@@ -636,7 +637,7 @@ NewProcess(a) ==
     /\ turned' = [turned EXCEPT ![a] = FALSE]
 
 Resumed(a) ==
-    /\ up /\ pr[a] = 0 /\ ~over[a] /\ (a \notin Launched \/ Break = "NoLaunch")
+    /\ up /\ pr[a] = 0 /\ ~over[a] /\ a \notin Launched
     /\ NewProcess(a)
     /\ UNCHANGED <<up, over, dvars, restarts, ends, prompts, stops, readAt>>
 
@@ -753,10 +754,6 @@ OnlyIntoEndedTurn == "running turn" \notin wrong
 \* session whose row is stopping once its idle read is made.
 NotCutByStop == "cut" \notin wrong
 
-\* A long row is never typed: the Inlet refuses it, and it waits for a
-\* waiter or goes by launch.
-NoLongTyped == "typed long" \notin wrong
-
 \* A text reaches only the process it was marked for.
 OnlyToItsProcess == "other process" \notin wrong
 
@@ -791,16 +788,10 @@ AnswersTheBrief ==
 \* A row in flight settles.
 SendingSettles == \A i \in Ids : row[i].st = "sending" ~> row[i].st # "sending"
 
-\* A long row to an interactive session that has had its turns and has no
-\* waiter now: it waits for a person's prompt, whose turn's end brings the
-\* next waiter. A view shows it (design.md, "A session with no waiter").
-Held(i) ==
-    LET a == row[i].to IN
-    /\ i \in Long /\ a \in Addrs \ Headless /\ pr[a] # 0 /\ turned[a] /\ waiter[a] # pr[a]
-
-\* A due row is delivered, marked ended once its session ended, or held
-\* for a person's prompt.
-Arrives == \A i \in Ids : row[i].st = "due" ~> (row[i].st \in {"delivered", "ended"} \/ Held(i))
+\* A due row is delivered, or marked ended once its session ended. None
+\* waits for a person's prompt: a long row is typed as a pointer (F-142).
+\* NoPointer breaks it.
+Arrives == \A i \in Ids : row[i].st = "due" ~> row[i].st \in {"delivered", "ended"}
 
 \* A delivered row whose turn ends, with a result or with its process's
 \* end, is answered under its key, unless its session ended for good.
