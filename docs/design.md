@@ -111,7 +111,7 @@ Each word below names one thing, and the design, the code and the views use it o
   outside it. Every tool the framework runs keeps its state there too (F-155, the operator's
   rule: the framework needs only a system with nix; devenv brings every program, and every
   program's data stays in the home, never in the person's own folders): the GitHub CLI's login
-  (`<home>/gh`), git's global config with the author agents commit as and its signing key
+  (`<home>/gh`, its token a file there and never the OS keyring), git's global config with the author agents commit as and its signing key
   (`<home>/git/`), ssh's config and known hosts (`<home>/ssh/`), the XDG directories
   (`<home>/xdg/`), and each checkout's agent memory (`<home>/memory/`). `ToolHome` names them.
 - **Server**: a tmux server, `tmux -L <name>`. Pane ids are unique only within one server, and a
@@ -211,8 +211,10 @@ internal: still `def` where Elixir needs it, but `@moduledoc false`, and the bou
 | **`Watch`** | shows what runs, measures it, and heals only as approved; for the app and `look` | `view/2`, `metrics/2`, `digest/2`, `remedies/3`, `clear/3` | `remedies` | `Heal` (new, B1) | `caf_tracker`, `caf_recoveries` |
 
 Under the boxes is a base every box stands on: `caf_shell` (`Shell`, `Programs`,
-`Shell.Reaper`), `caf_holder` (`Holder`, `Holder.Process`), `caf_store` (`Store`, `Reader`) and
-the **`Ledger`** (`caf_acts` and `caf_cues`): every act and fact a row, and a cue per write.
+`Shell.Reaper`), `caf_tool_home` (`ToolHome`: where every tool the framework runs keeps its
+state, in the home; pure, using only `caf_shell`), `caf_holder` (`Holder`, `Holder.Process`),
+`caf_store` (`Store`, `Reader`) and the **`Ledger`** (`caf_acts` and `caf_cues`): every act and
+fact a row, and a cue per write.
 It is the floor, not a box: no agent sees it, and the app reads it only through its own surface
 (`query/2`, `subscribe/2`). Its contract is `Claim.tla`.
 

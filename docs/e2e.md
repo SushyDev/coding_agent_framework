@@ -96,8 +96,12 @@ The framework home must be short: macOS cuts a socket path at 104 bytes.
 
    `--git` makes `/Users/me/caf-e2e/git/signing_key`, the home's own key (never one of yours),
    once, prints its public key, and offers to add it to your GitHub account as a signing key.
-   Passed when `--check --gh` names your GitHub account, and the key's `.pub` is beside it. The
-   app refuses to start with a `git` author whose key is missing (`{:no_signing_key, path}`).
+   `--gh` logs in with `gh auth login --insecure-storage`, so the token is a file in the home
+   (`/Users/me/caf-e2e/gh/hosts.yml`, mode 600), not an entry in macOS's Keychain, which is gh's
+   default. Passed when `--check --gh` names your GitHub account and reads `the token is in the
+   home: a file`, and the key's `.pub` is beside it. A check that reads `the token is not in the
+   home` ends with status 1: run `bin/caf-login --gh` again. The app refuses to start with a
+   `git` author whose key is missing (`{:no_signing_key, path}`).
 
 No reading of either account's allowance is written by hand. A start picks the account with
 the most allowance left, and an account with no reading counts as 0 % used, assumed, as a reset

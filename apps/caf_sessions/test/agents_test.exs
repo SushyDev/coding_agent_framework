@@ -113,38 +113,39 @@ defmodule CodingAgentFramework.AgentsTest do
     assert {:refused, :no_session} = Sessions.ended(ctx.sessions, "nobody")
   end
 
-  # F-165: the end's own time, which a later write keeps and a new start clears.
+  # F-165: the end's own time, which a later write keeps and a new start clears. The rows go
+  # under a host the test's `Sessions` does not own: it settles only its own host's rows, and
+  # its adopt (`handle_continue`) may still run when the test starts, so a `starting` row with
+  # no deadline on its host would be settled `interrupted` under it.
   test "a row's end time is its first done status's, kept by later writes", ctx do
-    row = %{host: "test", name: "app-done", kind: "delegate", socket: "app-done", account: "w"}
-    # A starting row past its deadline with no process is the running `Sessions`' to settle on
-    # any cue (F-154's new-5); this one's deadline is far off, so only the test writes it.
-    row = Map.put(row, :deadline, System.os_time(:millisecond) + 600_000)
+    host = "other"
+    row = %{host: host, name: "app-done", kind: "delegate", socket: "app-done", account: "w"}
     id = Table.starting(ctx.table, Map.merge(row, %{role: "delegate", cwd: ctx.dir}))
     Table.update(ctx.table, id, status: "stopped")
-    assert %{ended_at: nil} = Table.get(ctx.table, "test", "app-done")
+    assert %{ended_at: nil} = Table.get(ctx.table, host, "app-done")
 
     Table.update(ctx.table, id, status: "refused", reason: "x")
-    assert %{ended_at: at} = Table.get(ctx.table, "test", "app-done")
+    assert %{ended_at: at} = Table.get(ctx.table, host, "app-done")
     assert is_integer(at)
 
     # Done again, or written with no status: the end stays the first one.
     Store.update(ctx.table, "agents", id, ended_at: at - 5)
     Table.update(ctx.table, id, status: "ended")
     Table.update(ctx.table, id, parent: "main")
-    assert %{status: "ended", ended_at: end_at} = Table.get(ctx.table, "test", "app-done")
+    assert %{status: "ended", ended_at: end_at} = Table.get(ctx.table, host, "app-done")
     assert end_at == at - 5
 
     # A done row an earlier file kept with no end time takes its last write's on open.
     Store.update(ctx.table, "agents", id, ended_at: nil, updated_at: 7)
     {:ok, _} = Table.open(ctx.opts[:db])
-    assert %{ended_at: 7} = Table.get(ctx.table, "test", "app-done")
+    assert %{ended_at: 7} = Table.get(ctx.table, host, "app-done")
 
     # A new start of the name has no end, nor a status written after it.
     Table.starting(ctx.table, Map.merge(row, %{role: "delegate", cwd: ctx.dir}))
-    assert %{status: "starting", ended_at: nil} = Table.get(ctx.table, "test", "app-done")
+    assert %{status: "starting", ended_at: nil} = Table.get(ctx.table, host, "app-done")
     Table.update(ctx.table, id, status: "ended")
     Table.update(ctx.table, id, status: "stopped")
-    assert %{ended_at: nil} = Table.get(ctx.table, "test", "app-done")
+    assert %{ended_at: nil} = Table.get(ctx.table, host, "app-done")
   end
 
   test "the migration's hand-over gives a delegate with no parent its parent and its end", ctx do
