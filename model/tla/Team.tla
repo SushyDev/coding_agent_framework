@@ -123,6 +123,15 @@
 (* and NoActOnCutOffClaim. A state is the agent's `epoch`. The operator's  *)
 (* Breaks instance Claim with a bug for its own claims only.               *)
 (*                                                                         *)
+(* An ask is a prompt (Prompt.tla, instanced as Q; F-167), kind          *)
+(* `question`: the ask opens its row, and the operator's answer is         *)
+(* Prompt's AnswerNow, the row read open, the answer claimed on its state  *)
+(* and the answer row stored in one call, so the prompt's status is the    *)
+(* guard that lets in the first answer only (AnswerTwice is Prompt's).     *)
+(* AskAnsweredRightly and AskClaimOnce are Prompt's OnlyRightful and       *)
+(* OneClaimPerState. A held request's answer (AnswerClaimed) is not a      *)
+(* prompt here yet: its claim is Grants' on the child's state.             *)
+(*                                                                         *)
 (* An answer of a held permission request (`answer`, F-147) is one more    *)
 (* fix kind. Intake holds a request while its agent's turn waits on it     *)
 (* (Hold.tla): the ids of the requests held for a session are part of the  *)
@@ -288,13 +297,16 @@ VARIABLES
     wrong,     \* ghost: what a guard should have refused
     ending,    \* table: the main sessions whose end is asked and whose row is not ended yet
     \* Delivery's, for the messages, replies and notices
-    row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, dlost, dwrong
+    row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, dlost, dwrong,
+    \* Prompt.tla's row of each ask (Q), and its answers' claims
+    qst, qclaims
 
 agentVars == <<proc, epoch, life, faults, turned, held, reqs>>
 claimVars == <<claims, done, calls, fixed, twice, cut>>
 svcVars == <<svc, owner, keep>>
 dvars == <<row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, dlost, dwrong>>
-vars == <<up, restarts, agentVars, claimVars, svcVars, wrong, ending, dvars>>
+qvars == <<qst, qclaims>>
+vars == <<up, restarts, agentVars, claimVars, svcVars, wrong, ending, dvars, qvars>>
 
 \* The operator is outside the tree, and never ends. An IF, since TLC splits a
 \* disjunction in an action and would read `proc` of the operator. A delegate
@@ -334,6 +346,30 @@ Cl(b) == INSTANCE Claim WITH
            rows <- claims, acting <- calls, done <- done, acted <- fixed, twice <- twice,
            cut <- cut, Break <- b
 
+\* An ask is a prompt of kind `question` (Prompt.tla), its row by the ask's id: a person
+\* answers it, through the app (the operator), and its owner, Mailbox, stores the answer row
+\* in the same call, so the claim, the hand and the owner's answer are one step (AnswerNow).
+\* No deadline, no default, no parent: the operator is its one answerer here. Since each
+\* answer is claimed and acted on in one step, the claims are also the ones done and acted on,
+\* and the row's state number is its count of writes: open, then one per answer. The state
+\* stays as small as before (F-167).
+QAsked(i) == {c \in qclaims : c.t = i}
+Q == INSTANCE Prompt WITH
+       Ps <- Ids, Agents <- Agents, Parent <- [a \in Agents |-> None], Persons <- Operators,
+       ParentKinds <- {}, AppKinds <- {}, DefaultKinds <- {}, ExpireKinds <- {}, HeldPs <- {},
+       Cap <- 0, Budget <- 1, MaxRestarts <- 0, MaxTools <- 0,
+       Break <- IF Break = "AnswerTwice" THEN "AnswerTwice" ELSE "none",
+       st <- qst,
+       ep <- [i \in Ids |-> IF qst[i] = "none" THEN 0 ELSE 1 + Cardinality(QAsked(i))],
+       kind <- [i \in Ids |-> "question"], asker <- [i \in Ids |-> row[i].from],
+       claims <- qclaims, acting <- {}, cdone <- qclaims,
+       acted <- {<<c.t, c.s>> : c \in qclaims}, twice <- FALSE, cut <- {}, pwrong <- {},
+       up <- up, restarts <- restarts,
+       hconn <- [p \in {} |-> FALSE], hrow <- [p \in {} |-> "none"], hmarking <- {},
+       hout <- [p \in {} |-> <<>>], hwrong <- {},
+       took <- [i \in Ids |-> 0], orec <- [i \in Ids |-> "none"], otold <- {},
+       turn <- "working", blocks <- 0, tools <- 0, crashes <- 0, gaveUp <- FALSE
+
 -----------------------------------------------------------------------------
 Init ==
     /\ up = TRUE /\ restarts = 0
@@ -351,6 +387,7 @@ Init ==
     /\ tx = [a \in Agents |-> <<>>] /\ fold = [i \in Ids |-> "none"]
     /\ rmem = {} /\ last = [a \in Agents |-> D!NoResult]
     /\ unsure = {} /\ dlost = {} /\ dwrong = {}
+    /\ qst = [i \in Ids |-> "none"] /\ qclaims = {}
 
 -----------------------------------------------------------------------------
 (* The framework: its tables survive a restart; what it holds in memory does not *)
@@ -361,11 +398,11 @@ FrameworkDies ==
     /\ Cl("none")!Restart
     /\ D!Restart
     /\ ending' = IF Break = "EndInMemory" THEN {} ELSE ending
-    /\ UNCHANGED <<agentVars, svcVars, wrong>>
+    /\ UNCHANGED <<agentVars, svcVars, qvars, wrong>>
 
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
-    /\ UNCHANGED <<restarts, agentVars, claimVars, svcVars, wrong, ending, dvars>>
+    /\ UNCHANGED <<restarts, agentVars, claimVars, svcVars, qvars, wrong, ending, dvars>>
 
 -----------------------------------------------------------------------------
 (* The agents: turns, a person's prompt to a main session; sticking, dying, ending *)
@@ -374,20 +411,20 @@ FrameworkStarts ==
 \* resumes, and turns it starts by itself.
 Prompted(a) ==
     /\ a \in Mains /\ proc[a] = "idle" /\ proc' = [proc EXCEPT ![a] = "working"]
-    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, held, reqs, claimVars, svcVars, wrong, ending, dvars>>
+    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, held, reqs, claimVars, svcVars, qvars, wrong, ending, dvars>>
 
 \* A delegate starts a turn by itself (F-31's new-2): its result names no row.
 SelfStarts(d) ==
     /\ SelfTurns /\ d \in Delegates /\ proc[d] = "idle"
     /\ proc' = [proc EXCEPT ![d] = "working"]
-    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, held, reqs, claimVars, svcVars, wrong, ending, dvars>>
+    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, held, reqs, claimVars, svcVars, qvars, wrong, ending, dvars>>
 
 \* `a`'s turn ends with a result, which names the rows whose turn it is.
 TurnEnds(a) ==
     /\ proc[a] = "working" /\ proc' = [proc EXCEPT ![a] = "idle"]
     /\ turned' = [turned EXCEPT ![a] = TRUE]
     /\ D!Result(a)
-    /\ UNCHANGED <<up, restarts, epoch, life, faults, held, reqs, claimVars, svcVars, wrong, ending>>
+    /\ UNCHANGED <<up, restarts, epoch, life, faults, held, reqs, claimVars, svcVars, qvars, wrong, ending>>
 
 \* An agent sticks, or its process ends. A row whose turn it was then has
 \* no result, and never will: the fold reads the exit.
@@ -398,7 +435,7 @@ Faults(a) ==
        \/ /\ proc[a] \in {"working", "idle", "stuck"} /\ proc' = [proc EXCEPT ![a] = "dead"]
           /\ D!Exited(a, FALSE)
     /\ epoch' = [epoch EXCEPT ![a] = @ + 1] /\ faults' = faults + 1
-    /\ UNCHANGED <<up, restarts, life, turned, held, reqs, claimVars, svcVars, wrong, ending>>
+    /\ UNCHANGED <<up, restarts, life, turned, held, reqs, claimVars, svcVars, qvars, wrong, ending>>
 
 \* Claude Code asks for a permission: Intake holds a PermissionRequest of the session (Hold.tla).
 \* The requests held are part of the state a fix reads (`Mains.fix_state/3`), so one moves it.
@@ -406,7 +443,7 @@ Requests(a) ==
     /\ up /\ proc[a] = "working" /\ reqs < MaxRequests
     /\ held' = [held EXCEPT ![a] = @ \cup {reqs + 1}] /\ reqs' = reqs + 1
     /\ epoch' = [epoch EXCEPT ![a] = @ + 1]
-    /\ UNCHANGED <<up, restarts, proc, life, faults, turned, claimVars, svcVars, wrong, ending, dvars>>
+    /\ UNCHANGED <<up, restarts, proc, life, faults, turned, claimVars, svcVars, qvars, wrong, ending, dvars>>
 
 \* A person answers a request on the screen, before any fix does: it is held no more, and the
 \* state moves.
@@ -414,14 +451,14 @@ PersonAnswers(a) ==
     /\ up /\ held[a] # {}
     /\ \E i \in held[a] : held' = [held EXCEPT ![a] = @ \ {i}]
     /\ epoch' = [epoch EXCEPT ![a] = @ + 1]
-    /\ UNCHANGED <<up, restarts, proc, life, faults, turned, reqs, claimVars, svcVars, wrong, ending, dvars>>
+    /\ UNCHANGED <<up, restarts, proc, life, faults, turned, reqs, claimVars, svcVars, qvars, wrong, ending, dvars>>
 
 \* A delegate ends once its report is delivered (Delegate.tla).
 DelegateEnds(d) ==
     /\ d \in Delegates /\ proc[d] = "idle"
     /\ proc' = [proc EXCEPT ![d] = "ended"] /\ epoch' = [epoch EXCEPT ![d] = @ + 1]
     /\ D!Exited(d, FALSE)
-    /\ UNCHANGED <<up, restarts, life, faults, turned, held, reqs, claimVars, svcVars, wrong, ending>>
+    /\ UNCHANGED <<up, restarts, life, faults, turned, held, reqs, claimVars, svcVars, qvars, wrong, ending>>
 
 \* A delegate's start refused once its call reached Sessions (F-153): its
 \* process ran and was stopped before its first turn took anything (a
@@ -432,7 +469,7 @@ StartRefused(d) ==
     /\ StartsRefused /\ d \in Delegates /\ proc[d] = "working" /\ life[d] = 1
     /\ epoch[d] = 0 /\ tx[d] = <<>>
     /\ proc' = [proc EXCEPT ![d] = "refused"] /\ epoch' = [epoch EXCEPT ![d] = @ + 1]
-    /\ UNCHANGED <<up, restarts, life, faults, turned, held, reqs, claimVars, svcVars, wrong, ending, dvars>>
+    /\ UNCHANGED <<up, restarts, life, faults, turned, held, reqs, claimVars, svcVars, qvars, wrong, ending, dvars>>
 
 \* Delegates' settle: a refused start's agent row is ended once no process of
 \* it may live, as a failed delegate's is, so it holds its main session's end
@@ -440,7 +477,7 @@ StartRefused(d) ==
 RefusedEnded(d) ==
     /\ up /\ proc[d] = "refused" /\ Break # "RefusedKept"
     /\ proc' = [proc EXCEPT ![d] = "ended"]
-    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, held, reqs, claimVars, svcVars, wrong, ending, dvars>>
+    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, held, reqs, claimVars, svcVars, qvars, wrong, ending, dvars>>
 
 \* A main session's end (F-143), the operator's alone: refused while any of
 \* its delegates has not ended, so none is left with no parent; SIGTERM once
@@ -464,7 +501,7 @@ MainEnds(c, m) ==
        \/ /\ StopsUnknown /\ proc[m] # "dead"
           /\ ending' = ending \cup {m}
           /\ UNCHANGED <<proc, epoch, dvars>>
-    /\ UNCHANGED <<up, restarts, life, faults, turned, held, reqs, claimVars, svcVars>>
+    /\ UNCHANGED <<up, restarts, life, faults, turned, held, reqs, claimVars, svcVars, qvars>>
 
 \* The SIGTERM that outlived the stop's deadline takes, or Recoveries ends
 \* the process by its record (`no_exit`): it exits.
@@ -472,19 +509,19 @@ EndTerm(m) ==
     /\ m \in ending /\ proc[m] \in {"working", "idle", "stuck"}
     /\ proc' = [proc EXCEPT ![m] = "dead"] /\ epoch' = [epoch EXCEPT ![m] = @ + 1]
     /\ D!Exited(m, FALSE)
-    /\ UNCHANGED <<up, restarts, life, faults, turned, held, reqs, claimVars, svcVars, wrong, ending>>
+    /\ UNCHANGED <<up, restarts, life, faults, turned, held, reqs, claimVars, svcVars, qvars, wrong, ending>>
 
 \* Sessions' settle: a row whose end is asked is ended once its process is gone.
 EndSettled(m) ==
     /\ up /\ m \in ending /\ proc[m] = "dead"
     /\ proc' = [proc EXCEPT ![m] = "ended"]
     /\ ending' = ending \ {m}
-    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, held, reqs, claimVars, svcVars, wrong, dvars>>
+    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, held, reqs, claimVars, svcVars, qvars, wrong, dvars>>
 
 -----------------------------------------------------------------------------
 (* Mailbox: a message along an edge, stored, then into an ended turn, once *)
 
-Mailbox(A) == A /\ UNCHANGED <<up, restarts, agentVars, claimVars, svcVars, wrong, ending>>
+Mailbox(A) == A /\ UNCHANGED <<up, restarts, agentVars, claimVars, svcVars, qvars, wrong, ending>>
 
 Send(c, t) ==
     /\ Live(c)
@@ -492,22 +529,28 @@ Send(c, t) ==
     /\ Cardinality(Msgs) < MaxMsgs
     /\ Mailbox(D!Store(D!NextId, c, t, "msg"))
 
+\* The ask and its answer write the prompt's row (Q) as well as Mailbox's.
+AskStep(A) == A /\ UNCHANGED <<up, restarts, agentVars, claimVars, svcVars, wrong, ending>>
+
 \* An agent asks a person: a row to the operator, kept for the app, never
-\* delivered (Delivery's StoreRow keeps a row to no session). One step, and
-\* the agent's turn goes on as it was.
+\* delivered (Delivery's StoreRow keeps a row to no session), and the prompt
+\* it opens. One step, and the agent's turn goes on as it was.
 Ask(a) ==
     /\ Live(a) /\ Operators # {}
     /\ Cardinality(Asks) < MaxAsks
-    /\ Mailbox(D!Store(D!NextId, a, CHOOSE o \in Operators : TRUE, "ask"))
+    /\ Q!Open(D!NextId)
+    /\ AskStep(D!Store(D!NextId, a, CHOOSE o \in Operators : TRUE, "ask"))
 
-\* The operator answers ask i: one row to the asker under the ask's key, the
-\* table's unique key letting in the first answer only. It is due as any row
-\* is, and settled ended when the asker ended first.
+\* The operator answers ask i, Prompt's AnswerNow: the prompt read still open,
+\* the answer claimed on its state, and one row to the asker under the ask's
+\* key, so the first answer only goes in. It is due as any row is, and settled
+\* ended when the asker ended first. Under AnswerTwice the prompt's check
+\* takes an answered one.
 Answers(o, i, t) ==
     /\ up /\ o \in Operators /\ row[i].kind = "ask" /\ D!NextId \in Ids
-    /\ AnswerRows(i) = {} \/ Break = "AnswerTwice"
     /\ t = row[i].from \/ Break = "AnswerToOther"
-    /\ Mailbox(/\ D!StoreRow(D!NextId, o, t, "answer", i, D!NoResult)
+    /\ Q!AnswerNow(i, o, "answer")
+    /\ AskStep(/\ D!StoreRow(D!NextId, o, t, "answer", i, D!NoResult)
                /\ UNCHANGED <<hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure,
                               dlost, dwrong>>)
 
@@ -517,7 +560,7 @@ Takes(i) ==
     LET a == row[i].to IN
     /\ D!Take(i)
     /\ proc' = [proc EXCEPT ![a] = IF @ = "idle" THEN "working" ELSE @]
-    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, held, reqs, claimVars, svcVars, wrong, ending>>
+    /\ UNCHANGED <<up, restarts, epoch, life, faults, turned, held, reqs, claimVars, svcVars, qvars, wrong, ending>>
 
 \* The transport by the target: the stream to a delegate, the typed write to
 \* a main session. Its waiter is Delivery.tla's and Delegate.tla's; one
@@ -557,7 +600,7 @@ ClaimTaken(c, t, k) ==
     /\ MayFix(c, t) /\ Stoppable(t, k)
     /\ Cl(ClaimBreak(c))!Take(c, t, k)
     /\ wrong' = wrong \cup (IF Needed(t, k) THEN {} ELSE {"claim before check"})
-    /\ UNCHANGED <<up, restarts, agentVars, svcVars, ending, dvars>>
+    /\ UNCHANGED <<up, restarts, agentVars, svcVars, qvars, ending, dvars>>
 
 \* The answer of request i of t, as the operator or t's parent makes it (`answer`, F-147), claimed
 \* on t's state now. The request it names must be one the state holds, checked before the claim
@@ -569,7 +612,7 @@ AnswerClaimed(c, t, i) ==
     /\ i \in held[t] \/ Break = "AnswerNotHeld"
     /\ Cl(ClaimBreak(c))!Take(c, t, "answer")
     /\ wrong' = wrong \cup (IF i \in held[t] THEN {} ELSE {"answer not held"})
-    /\ UNCHANGED <<up, restarts, agentVars, svcVars, ending, dvars>>
+    /\ UNCHANGED <<up, restarts, agentVars, svcVars, qvars, ending, dvars>>
 
 \* The claim is current, and the target is in the state its fix needs: an answer's, a request
 \* still held. A row whose end is asked is never resumed: Sessions starts no name stopping or
@@ -605,22 +648,22 @@ FixActs(r) ==
        \/ (r.act # "stop" /\ UNCHANGED <<proc, epoch, life, turned, held, dvars>>)
     /\ wrong' = wrong \cup (IF epoch[r.t] = r.s THEN {} ELSE {"stale"})
                        \cup (IF r.act # "answer" /\ r.t \in ending THEN {"resume ending"} ELSE {})
-    /\ UNCHANGED <<up, restarts, faults, reqs, svcVars, ending>>
+    /\ UNCHANGED <<up, restarts, faults, reqs, svcVars, qvars, ending>>
 
 FixRefused(r) ==
     /\ up /\ ~CanAct(r) /\ Cl("none")!LetGo(r)
-    /\ UNCHANGED <<up, restarts, agentVars, svcVars, wrong, ending, dvars>>
+    /\ UNCHANGED <<up, restarts, agentVars, svcVars, qvars, wrong, ending, dvars>>
 
 \* A restart cut off the call: the claim ends, and its fix is never sent again.
 ClaimSettled(r) ==
     /\ up /\ Cl("none")!Settle(r)
-    /\ UNCHANGED <<up, restarts, agentVars, svcVars, wrong, ending, dvars>>
+    /\ UNCHANGED <<up, restarts, agentVars, svcVars, qvars, wrong, ending, dvars>>
 
 -----------------------------------------------------------------------------
 (* Services: one owner; fixed by it or its parent; handed along an edge; *)
 (* ended with the owner, or kept for its parent                          *)
 
-svcOthers == <<up, restarts, agentVars, claimVars, ending, dvars>>
+svcOthers == <<up, restarts, agentVars, claimVars, ending, dvars, qvars>>
 
 ServiceStarts(a, s) ==
     /\ up /\ svc[s] = "none" /\ Live(a)
@@ -706,6 +749,7 @@ TypeOK ==
     /\ svc \in [Services -> {"none", "running", "ended"}]
     /\ owner \in [Services -> Agents \cup {None}]
     /\ ending \subseteq Mains
+    /\ qst \in [Ids -> Q!Statuses]
     /\ \A i \in Ids : row[i].st # "none" => row[i].from \in Actors \cup {D!Framework} \cup Agents
     /\ D!TypeOK
 
@@ -744,6 +788,10 @@ OperatorRowsKept ==
 
 \* An ask has at most one answer.
 AnswerOnce == \A k \in Ids : Cardinality(AnswerRows(k)) <= 1
+
+\* Prompt's, on the asks: each answer's claim is a person's (the operator's), one per state.
+AskAnsweredRightly == Q!OnlyRightful
+AskClaimOnce == Q!OneClaimPerState
 
 \* An answer is the operator's, to the agent that asked.
 AnswerToAsker ==
