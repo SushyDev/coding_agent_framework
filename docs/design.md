@@ -126,7 +126,434 @@ Each word below names one thing, and the design, the code and the views use it o
 - **Hold**: a request held open with a deadline, answered exactly once by a named decider, and
   settled when its holder dies. `Intake` keeps four kinds.
 
+**Boxes and verbs** (F-162)
+
+- **Box**: one of the seven single-purpose parts the framework is seen as from outside ("The
+  boxes"), with a handful of public functions, the tables it owns and the spec that is its
+  contract. The parts below are inside the boxes, and no box reaches into another but through
+  its interface.
+- **Verb**: one of the seven tools an agent sees beside native Claude Code ("The agent's
+  surface"): `delegate`, `message`, `ask`, `look`, `steer`, `wait_for` and `serve`. A verb takes
+  options rather than becoming more tools.
+- **Intercept**: the framework's answer to a native tool call by a hook (`PreToolUse`'s
+  decision or `updatedInput`, `additionalContext`), so the agent goes on with the tool it
+  already knows.
+- **Fact**: a recorded thing that happened, never changed: a row's status written, kept in its
+  table's history by the row's writer, or an outside event, kept in the `Ledger`'s `facts`. An
+  **act** is the `Ledger`'s other kind of row ("An act").
+- **Prompt**: anything waiting on a person or on an agent's parent, at any depth of the tree (a
+  permission request, a question, a startup dialog, a plan to approve, a remedy not on the
+  allow-list), one row in `Prompts`, answered once from one place.
+- **Agent process**: the one BEAM process that owns one agent's row and life, under a dynamic
+  supervisor; the agent itself, Claude Code, runs outside the BEAM under dtach.
+- **Subscription**: an agent's `wait_for` on an event, one row in `Mailbox`, fired once and
+  delivered as any row is.
+- **Symptom**: a named bad state the `Watch` reads from facts and acts (an idle delegate its
+  parent was not told of, a session stuck on a dialog), with its evidence.
+- **Remedy**: an act on a symptom's target that a person approved for that symptom, taken once
+  per state, verified after, and capped per hour.
+- **Extension**: a bundle an app registers to give agents a power of its own (a knowledge base,
+  an issue tracker): at most one verb, a skill, context at the right moment, events in and
+  guards, scoped per role and project.
+
 ## The parts
+
+### Principles
+
+Every part follows these, and a unit that cannot is a finding, not an exception.
+
+1. **An agent sees native Claude Code and seven verbs, and every tool call is checked before it
+   runs.** What it already does (its own Bash, background commands, subagents) is intercepted,
+   not replaced, by policies that are the app's data, correcting a call rather than refusing it
+   where they can; what is not its to do is not on its list.
+2. **Every act is a row before it acts, and the `Ledger` is the only truth**: a claim, a
+   delivery, a lease, a remedy, a tool call's decision, written first, settled by evidence
+   after; recorded real runs are replayed against new code in the gates.
+3. **Every protocol is modeled before it is built, and enforced as modeled**: one mechanism is
+   one spec that others instance or read, and each verb is legal only where the spec's
+   transitions allow it, refused with a reason elsewhere.
+4. **One writer per row, one interface per box.** Each row has one process that writes it (a
+   table's part, or an agent's own process for its row); a box is read and driven only through
+   its interface, and what is inside may change without its users knowing.
+5. **Every outcome is explicit**: `{:ok, …}`, `{:refused, reason}` or `{:unknown, reason}`, with
+   a finite timeout. No hidden retry, wait or fallback.
+6. **Nothing by guesswork.** Work is placed by a lease, acted on by a claim, ended by its pid and
+   start time, and answered by its named decider or a person; never by a pattern, a timer alone
+   or a screen read once.
+7. **Metrics are folds of what is recorded, and healing is bounded.** Every symptom is detected
+   and kept with its evidence; a crash of the framework's own code is restarted by OTP within a
+   budget; a bad state outside is acted on only by a remedy a person approved, once per state,
+   capped; everything else is a prompt to a person.
+8. **Nothing global, and a crash stays local.** Every box is per instance, started by one
+   supervisor from one config; each agent, host and account has its own processes, and a
+   restart re-adopts from the row, never relaunches.
+
+### The boxes
+
+Seven boxes, each named by what it does for its user. Each is a small interface over a
+reliable, modeled inside. The columns say what is public; everything else in the box's apps is
+internal: still `def` where Elixir needs it, but `@moduledoc false`, and the boundary gate
+(`mix caf.deps`, B2 below) refuses a call into it from outside the box.
+
+| Box | Does, for whom | Interface | Owns | Contract | Holds today's apps |
+|---|---|---|---|---|---|
+| **`Sessions`** | runs a Claude Code session and reaches into it, one agent process per agent: start, resume, stop, move, a dialog's press, a held hook's answer, a line into its turn; for `Team`, `Mailbox`, `Prompts` and `Watch` | `start/2`, `steer/3`, `read/2`, `hand/3` | `agents` (each row written by its agent process), `intake_events`, `stream_delegates`, the readers' tables | `Start`, `Agent`, `Move`, `Dialog`, `Stream`, `Intake` with `Hold` | `caf_sessions`, `caf_mover`, `caf_stream`, `caf_inlet`, `caf_screen`, `caf_intake`, `caf_registry`, `caf_transcripts`, `caf_sampler`, `caf_cli`, `caf_accounts`, `caf_tmux` |
+| **`Mailbox`** | hands an agent text once, in order, into an ended turn, and fires what it waits for; for `Team`, `Prompts` and `Watch` | `send/3`, `subscribe/3`, `read/2` | `messages`, `subscriptions` | `Delivery` | `caf_mailbox` |
+| **`Prompts`** | everything waiting on a person or a parent, at any depth, answered once from one place; for the app and `steer` | `open/2`, `answer/3`, `read/2` | `prompts` | `Prompt` (new, B1), instancing `Hold` and `Claim` | `Mailbox`'s asks, `Sessions.Dialog`'s answers, `Intake`'s permission answers (their mechanisms stay where they are) |
+| **`Team`** | the tree: who works for whom, what each may do, and the verbs; for agents and the app | `operate/4`, `tree/2`, `tools/2` | `delegates`, `checkouts`, `main_starts`, `mcp_tokens`, `mcp_calls`, `extensions` | `Delegate`, `Team`, `Checkout` (`Stack` when built) | `caf_delegates`, `caf_mains`, `caf_grants`, `caf_mcp` |
+| **`Scheduler`** | admits work in order, within capacity and allowance, on an account; for `Team` and `Hosts` | `request/2`, `read/2` | `leases` | `Schedule` | `caf_scheduler`, `caf_usage` |
+| **`Hosts`** | runs commands and services on any host, in a copy of the worktree; for `Team` | `run/3`, `serve/3`, `steer/3`, `read/2` | `copies`, `jobs`, `services` | `Copy`, `Shell` | `caf_copies`, `caf_jobs`, `caf_services` |
+| **`Watch`** | shows what runs, measures it, and heals only as approved; for the app and `look` | `view/2`, `metrics/2`, `digest/2`, `remedies/3`, `clear/3` | `remedies` | `Heal` (new, B1) | `caf_tracker`, `caf_recoveries` |
+
+Under the boxes is a base every box stands on: `caf_shell` (`Shell`, `Programs`,
+`Shell.Reaper`), `caf_holder` (`Holder`, `Holder.Process`), `caf_store` (`Store`, `Reader`) and
+the **`Ledger`** (`caf_acts` and `caf_cues`): every act and fact a row, and a cue per write.
+It is the floor, not a box: no agent sees it, and the app reads it only through its own surface
+(`query/2`, `subscribe/2`). Its contract is `Claim.tla`.
+
+What each interface does:
+
+- **`Ledger`** (the base). `claim(ledger, %{actor, target, state, act})` answers `{:ok, id}` or
+  `{:refused, {:claimed, by}}`; `settle(ledger, id, outcome)` by `Acts.answered/4`'s one rule;
+  `record(ledger, fact)` writes a fact from outside (an extension's event) with a cue;
+  `query(ledger, filter)` reads acts and facts; `subscribe(ledger, topics)` sends the caller a
+  cue per write, `{topic, ids}`, never the data. A status fact is written by the table's own
+  writer: `Store` appends it to that table's history (`<table>_facts`) in the transaction of
+  each status column it changes, so a table that keeps one row per thing still has its history
+  and every table keeps one writer; `query` reads the histories through their owners'
+  metadata, as the `Tracker`'s sources do (F-162's new-5).
+- **`Sessions`.** `start(sessions, spec)` starts or adopts a session by its spec (kind, name,
+  parent, project, account, launch, first row); `steer(sessions, name, act)`, `act` one of
+  `:resume`, `:stop`, `{:move, to}`, `{:answer, hold, label}` (a held permission or a startup
+  dialog), `:interrupt`, `{:clear, dialog}`, each under the claim its caller took;
+  `read(sessions, name_or_filter)` the agent row, its turn state, its screen or rendered log,
+  its transcript from an offset, and the evidence a delivery settles by; `hand(sessions, name,
+  row)` hands one marked row to the session by the transport its kind chooses, and answers
+  sent, refused or unknown. Hooks come in here, and the policies other boxes give at start (the
+  app's `PreToolUse`, a move's drain, a budget, an extension's guard) decide them. Whatever
+  waits on a person (a held permission request, a startup dialog) is opened in `Prompts`, and
+  its answer comes back as a `steer`.
+- **`Mailbox`.** `send(mailbox, %{from, to, kind, text, key})` stores a row (a message, a
+  reply, a notice, a brief, a report, a word to go on, a prompt's answer to an agent that
+  asked); `subscribe(mailbox, agent, event)` stores a subscription; `read` is a row's status, a
+  reply's text and the open subscriptions. It marks, hands through `Sessions.hand/3` and
+  settles by `Sessions.read/2`'s evidence.
+- **`Prompts`.** `open(prompts, prompt)` stores a prompt under its owner's key, so one state is
+  opened once: the asker's path in the tree (main session, delegate, its Claude Code
+  subagent), the kind, the question, the options, a default, a deadline and the owner (the box
+  whose mechanism applies the answer); `answer(prompts, id, %{by, choice, text})` is the one
+  answer function, for a person through the app, or a parent through `steer`; `read` the open
+  prompts by path, kind or age. Every write cues the topic `prompts`, so an app renders one
+  inbox ("Prompts" below).
+- **`Team`.** `operate(team, actor, verb, args)` is the one entry for every verb, whoever the
+  actor: an agent (by its token), the operator, the app, or the `Watch`'s healer. It checks the
+  edge (`Grants`), takes the claim, asks the `Scheduler`, and drives the other boxes.
+  `tree(team, opts)` is the tree; `tools(team, agent)` is the verbs and extension verbs that
+  agent sees, for its MCP endpoint.
+- **`Scheduler`.** `request(scheduler, request)` as "A lease" says; `read` the leases, the
+  queue and the gates. A release is internal: the owner's row ending, read from the `Ledger`'s
+  facts.
+- **`Hosts`.** `run(hosts, owner, %{host, argv, timeout, class, fetch})` a job under a lease;
+  `serve(hosts, owner, %{name, argv, host, forward, keep})` a service; `steer(hosts, name, act)`,
+  `act` one of `{:send, input}`, `:restart`, `:stop`, `{:hand, to}`; `read(hosts, name, what)` a
+  log from an offset or the rows. A wait on a service is a subscription in `Mailbox`, fed by its
+  facts (B9).
+- **`Watch`.** `view(watch, scope)` the `Tracker`'s fold for a view and for `look`;
+  `metrics(watch, query)` a named metric over a window; `digest(watch, window)` the symptoms and
+  their counts, worst first; `remedies(watch, :list | {:approve, symptom, remedy, cap} |
+  {:revoke, …})` the allow-list, widened only by the operator and narrowed by the operator or
+  the cap; `clear(watch, symptom, by)` a person's clear of a symptom that waits on one.
+
+**Measured today** (F-162): 29 library apps and `caf_example`; 577 public functions in the
+libraries (OTP callbacks left out), from 3 in `caf_screen` to 79 in `caf_sessions` and 53 in
+`caf_mailbox`; 142 pairs of apps that call each other, by about 770 call sites; 25 MCP tools,
+two of them the operator's alone; an embedding app that wires 25 children by hand in a 612-line
+supervisor module, 1,766 lines in all; 15 specs, 8,935 lines; one `Sessions` process for every
+agent. The seven boxes' interfaces are 26 functions, and the `Ledger`'s 5 in the base. What
+becomes internal: every function of `Stream`, `Inlet`, `Screen`, `Intake`,
+`Registry`, `Transcripts`, `TmuxSampler`, `Tmux`, `ClaudeCLI`, `Accounts`, `Mover`,
+`Delegates`, `Mains`, `Grants`, `MCP`, `Jobs`, `Copies`, `Services`, `Usage`, `Recoveries` and
+the `Tracker` but through their box's interface; `Sessions`' 79 become 4, `Mailbox`'s 53
+become 3.
+
+The boxes call each other along few arrows: `Team` drives `Sessions`, `Mailbox`, the
+`Scheduler` and `Hosts`; `Mailbox` hands rows through `Sessions`; `Hosts` asks the
+`Scheduler`; `Sessions`, `Mailbox` and the `Watch` open prompts, and `Prompts` hands each
+answer to its owner through `Team.operate/4`; every box records in the `Ledger`; the `Watch`
+reads the `Ledger` and acts only through `Team.operate/4`, as an actor with the same checks and
+claims as the operator.
+
+### The agent's surface
+
+Small is not weak. An agent keeps full control of its own subtree: it starts, briefs, messages,
+interrupts, answers, resumes, stops and moves its own delegates, runs and holds services, and
+sees the whole tree. What leaves its list is only what is not its to do (another subtree's acts,
+the operator's) and what the framework already does for it deterministically (a lease, a
+resume after a kill, a reconnect, a placement).
+
+**The seven verbs**, each one obvious job with options, served by `Team.operate/4`:
+
+| Verb | Job | Options | Replaces today's tools |
+|---|---|---|---|
+| `delegate(brief, opts)` | hand off work and get the report | `project`, `branch`, `model`, `interactive`, `wait` (seconds to hold the call for the report), `review: true` (decided: a fresh-context reviewer, read-only by its launch's settings, not by its brief, checks the work against the brief's objective and an acceptance list stored as data the builder cannot edit, runs the checks itself, and its verdict goes up with the report; a builder's "tests pass" is a claim, not a verdict), `variants: n` with `take: :first_passing \| :compare` (refused `no_selector` without `review` or a check to choose by, and each variant under an equal share of the budget), `budget` (tokens, cost or time, enforced and reported), `fresh` (a context reset of the branch's delegate, re-entered from recorded state: the brief, its acceptance list, the branch's commits and the delegate's acts, not a prose summary), `main: name` (a main session of a project, no report) | `start_delegate`, `run_delegate`, `start_main` |
+| `message(to, text)` | say something along an edge | `urgent` (a nudge: interrupt, then this message ahead of every due row, as one checked step) | `message` |
+| `ask(questions)` | ask a person; opens a prompt, and the answer comes as a message | as today | `ask` |
+| `look(target, opts)` | see the tree, an agent, a service | `what`: `tree`, `state`, `screen`, `transcript`, `diff`, `cost`, `leases`, `stuck`, `logs`, `services`; `from` an offset; `all` | `agents`, `look`, `transcript`, `services`, `service_logs` |
+| `steer(target, act)` | act on its own subtree or its services | `act`: `interrupt` (a pause: the turn ends, and the agent waits for its next row), `answer` (a child's open prompt by id and label, through `Prompts`), `resume`, `stop`, `move`, and for a service `send`, `restart`, `stop`, `hand` | `interrupt`, `answer`, `resume`, `stop`, `move`, `service_send`, `service_restart`, `service_stop`, `service_hand` |
+| `wait_for(event, opts)` | be told when something happens, never poll | `event`: a delegate idle or its report, a job done, a service's line, port or exit, an answer, and an extension's events (a CI run, a review, a merge) | `service_wait` |
+| `serve(name, argv, opts)` | hold a program that outlives a turn | `host`, `forward`, `local`, `keep`, `timeout` | `service_start` |
+
+`wait_for` answers at once with the subscription's id; when the event fires, the agent gets one
+message, so an idle agent wakes to it and no agent ever polls. An event that already happened
+since the moment the call names fires at once.
+
+**The verbs are the model's monitor** (decided). Each verb's act is legal only in the states the
+spec's transitions allow it from: a `steer(:resume)` of a delegate that is running, a `message`
+along no edge, a `stop` before the report is handed, a `delegate` under a parent that ended.
+`Team.operate/4` checks the act against the target's state, read before the claim, and refuses
+anything else with `{:refused, {:not_legal, state, act}}`, so the protocol checked in TLC is the
+one enforced at run time. The table of legal acts per state is written once beside the spec it
+comes from, and a test checks it against the spec's actions, so the two cannot drift. Today's
+`fix_check/2` and `Grants` checks are its first rows.
+
+**Every tool call is checked before it runs** (decided). The framework's `PreToolUse` hook sees
+every call of every agent and answers by policy: allow, correct (`updatedInput`), deny with a
+reason that names what to do instead, or hold for a decider. Policies are the app's data, per
+role and project, beside the extensions' guards; the framework's own (a move's drain, a budget,
+a heavy command's wrapper) are policies too. Each decision is a row, written before the
+answer, so every check is counted and replayed. A rule that must never be broken is not only a
+hook: it is also a permission deny rule in the role's launch settings, which Claude Code itself
+enforces when the framework does not answer (F-162's new-9); no supervised session is launched
+with `--bare`, which skips hooks.
+
+**Intercepted, not added.** Native Claude Code goes on as the agent knows it, with the
+framework's hooks deciding:
+
+- a heavy `Bash` command is rewritten (`updatedInput`) into a wrapper that takes a lease, runs
+  where the `Scheduler` places it, streams its output and exits with its code (F-157), so the
+  `run` tool goes once that is built;
+- `run_in_background` and `Monitor` stay native; during a move's drain they are denied with a
+  reason (as today);
+- Claude Code's own question tool (`AskUserQuestion`), in a session no person attends, opens a
+  prompt as `ask` does and is denied with a reason that says the answer comes as a message, so
+  the agent asks with its natural tool;
+- Claude Code's `Agent` tool stays native, its subagents read and counted; for subagent types
+  the app names, the hook denies with a reason that names the `delegate` call to make, since
+  `updatedInput` can change a call's input but not the tool (F-162's new-4);
+- a budget spent denies the next tool call with a reason, and the parent is told once.
+
+A hook that corrects a call (`updatedInput`, or a deny whose reason names the call to make)
+is preferred to a bare deny, and context a hook adds states facts ("the parent sent …"), never
+orders, and stays under Claude Code's limit for added context (a longer text goes as a
+pointer to its file). Claude Code's hooks fail open: a hook that times out or errs lets the
+call go on, and the design keeps `onFailure` at "continue" so a framework that is down never
+refuses a tool call. So an intercept is enforced only while the framework answers; what must
+hold regardless is also a deny rule in the launch settings, and a call that went on unanswered
+is a fact the `Watch` counts (F-162's new-9).
+
+**Off the agents' list**, to the app's surface: `answer_startup` (a prompt the app answers),
+`end_main`, a main session's
+move and resume (the operator's alone, as decided), the leases (asked by `Team` for every
+start, `Hosts` for every job), and `reload` (the framework reconnects an agent's tools when its
+list changes; F-162's new-2 says what must be measured first). From 25 tools to 7, and at most
+one verb per extension.
+
+### Metrics and healing
+
+Both are folds of what is already recorded: every act a row in the `Ledger`, every status write
+a fact, nothing pruned. No metric is counted by code sprinkled through the parts.
+
+**Metrics** are named folds, each with its evidence (the rows it counted), queried by
+`Watch.metrics/2` over a window and summed by `Watch.digest/2`. The first named symptoms:
+
+| Symptom | Evidence |
+|---|---|
+| `idle_untold` | a delegate idle with no report, and the time until its parent was told (F-150's notice) or acted |
+| `stuck_dialog` | a session on a startup dialog, a held permission request or a screen `Screen` cannot read, and how long |
+| `start_failed` | a start or resume refused or unknown, by reason |
+| `resent` | a row made due again, a row settled unknown, a row nearly delivered twice (two marks of one key) |
+| `waiter_lost` | a waiter cut with a row due, and the time the row waited |
+| `typed_refused` | a typed write refused or unknown |
+| `lease_wait` | each grant's wait, each refusal by reason, by class and module |
+| `ended_hard` | kills, ends by `Recoveries`, restarts of the framework, raised errors |
+| `guard_fired` | an extension's guard that denied or corrected a call, by guard |
+| `repeating` | one agent's same tool call with the same input, or the same result, many times in a row, from the hooks' rows |
+| `unenforced` | a held hook that went on unanswered (the framework down or past its deadline) |
+| `restarted` | an agent's, host's or account's process restarted by its supervisor, and one whose restart budget ran out |
+| `prompt_wait` | each prompt's time open, by kind and depth, and the ones past their deadline |
+
+Time in each state (per agent, per status) is a fold of the status facts. `look(what: :stuck)`
+is the agent-facing view of the same folds for its own subtree.
+
+**Healing**, in three tiers:
+
+1. **Detect and record, always.** A symptom found is a fact with its evidence, shown in the
+   digest, whatever happens next.
+2. **Act only by an approved remedy.** The allow-list is rows the operator writes: a symptom, a
+   remedy (an act of `Team.operate/4`, such as reopening a lost viewer, ending an orphan by its
+   record, telling a parent of an idle child), and a cap per hour. A remedy is claimed in the
+   `Ledger` on the symptom's state, so it acts once per state; its precondition is checked
+   against the state read before the claim (`Team.tla`'s `Needed`); it is verified after; when
+   the cap trips, the healer stops acting on that symptom and opens a prompt.
+3. **Prompt for everything else**: a prompt of kind `remedy` with the evidence and a proposed
+   remedy, whose answers are "act once", "add to the allow-list" and "leave it"; only the
+   operator widens the list.
+
+This tier is for the world outside the BEAM (a lost viewer, an orphan, an idle child). A crash
+of the framework's own code is OTP's to heal, within its restart budget ("Processes and
+restarts"); the two meet at the top, where a budget run out is a prompt too.
+
+The healer never ends a working agent (a remedy whose target's turn runs is refused before the
+claim), never changes code, and never retries: a remedy that did not help is a new symptom for a
+person. Today's `Recoveries` (detect, act once, verify) is the healer, and its acts are the
+default allow-list the app may narrow. `Heal.tla` (B1) is its contract: it instances `Claim`,
+and checks `OnlyApproved`, `OncePerState`, `CapHolds`, `AskedWhenCapped`, `NeverWorking`, and
+that every symptom is acted on or asked (`ActedOrAsked`), each with a `Break_Heal_*`
+configuration.
+
+### Extensions
+
+An app brings its own powers (a knowledge base, connectors to issue trackers, pull requests and
+project boards) as extensions. An extension is a bundle the app registers in its config, built
+on what Claude Code already understands, so the agent is told enough every time and never
+flooded:
+
+- **one verb at most**, its acts as an option (`issues(act: :comment, …)`), served by
+  `Team.operate/4` with the same checks, rows and timeouts as the seven;
+- **a skill** that teaches it: Claude Code shows its one-line description always and reads the
+  body when the work calls for it, so the bundle's long text costs nothing until it is needed;
+  the framework writes it into the agent's launch, never copied into a repository;
+- **context at the right moment**, by the framework: entries relevant to a brief attached to it
+  as `delegate` stores it, and entries relevant to a prompt or a tool call given by the hook's
+  `additionalContext`, each a short pointer with its id, never a whole record;
+- **events in**: an outside event (a CI run ended, a review, a merge) recorded as a fact in the
+  `Ledger`, which fires the subscriptions of `wait_for`;
+- **guards**: a rule that exists to catch a repeated mistake becomes a `PreToolUse` match that
+  corrects the call or denies it with a reason naming the right verb, counted as `guard_fired`
+  so a guard that keeps firing is a symptom, not a longer prose rule;
+- **scope**: roles (main session, delegate, reviewer) and projects, so an agent sees only the
+  verbs, skills and context its work needs.
+
+An extension adds no protocol of its own: its events go through `Mailbox`'s subscriptions, its
+acts through `Team`'s claims, its questions to a person through `Prompts`, and its context is a
+pure function of the brief or the prompt. One that needs a protocol over time models it first,
+as any part does.
+
+Where a rule goes is decided by what it is: always true and short, the root instructions; needed
+for a kind of work, a skill or the brief; needed at a known event, a hook's context; with no
+exception, a guard, not text.
+
+### Processes and restarts
+
+The framework is an OTP application in shape as well as in name: what can fail alone runs alone,
+and a crash is healed by its supervisor, deterministically, from the rows.
+
+- **One agent process per agent.** `Sessions` keeps a `DynamicSupervisor` of agent processes,
+  each a small `GenServer` found by the agent's name in a `Registry` of the instance's own (named
+  from the app's instance name, never a fixed atom). It owns its agent's row and life: the start
+  and its settle, the stop, the move's phase, its startup dialogs, its idle bound, its turn
+  state, the reads of its pane. It is the one writer of its row. The real agent, Claude Code,
+  stays outside the BEAM under dtach, so no crash of the framework ends it. Today one `Sessions`
+  process serves every agent, and one slow pane read or one stuck agent delays the rest (as
+  F-153's run showed); after B4 one agent's trouble stays its own.
+- **A restart re-adopts, never relaunches.** An agent process's `init` reads its row and its
+  `Holder.Process` record and settles by `Start.tla`'s adoption, as a whole restart of the
+  framework does today: a live process is adopted, a gone one settled, a start under way
+  settled at its deadline. Nothing is started again because a process restarted. A call to it
+  that a crash cut answers `{:unknown, :restarted}` to its caller.
+- **The restart budget is the healing budget.** Each agent process runs under its own small
+  supervisor with an intensity (`max_restarts` in `max_seconds`, the app's, three in a minute by
+  default). Past it, that supervisor gives up; the dynamic supervisor does not restart it
+  (`:temporary`), and `Sessions` records the fact and opens a prompt of kind `restarts` for a
+  person, with the crashes' reasons. The agent runs on under dtach meanwhile, unsupervised, which
+  the view shows; the person's answer starts its process again, which re-adopts.
+- **The same per host and per account.** Each host has a supervisor of its own (its reaper, its
+  connection, its sampler, its copies' and jobs' and services' readers), and each account its
+  readers (`Registry`, `Transcripts`, `Usage`), so a host that drops or an account whose files
+  cannot be read restarts alone. Each has an intensity, and past it a prompt.
+- **The top.** The instance's supervisor is `:rest_for_one` in the order each box needs, the
+  base first. Escalation goes up the tree as OTP's does; a restart of the whole instance is the
+  restart every spec already models, and past the top's intensity the app's own supervisor
+  decides, which for the example is a person.
+
+**How the specs meet OTP.** Every spec already has a restart of the framework: all memory lost,
+the rows kept, every row re-read. A crash of one agent process is the same step for one agent:
+its in-memory state (monitors, calls under way, timers, a press's task) lost, its row kept, and
+the others untouched. B1 makes the restart in `Start.tla`, `Delegate.tla`, `Dialog.tla` and
+`Move.tla` a step per agent (`Restart(a)`) beside the whole one, and checks every invariant under
+any interleaving of them, bounded by `MaxRestarts`. The budget is a bound, not fairness: a
+`gave_up` agent leaves the liveness properties, which then require a prompt (`Prompt.tla`'s
+`Escalated`). `Delivery.tla` keeps `Mailbox` one process: its one row in flight per addressee is
+its state, and a restart of it is the whole one already checked. So the specs say what a crash
+may do, and OTP only decides when.
+
+### Prompts
+
+Everything that waits on a person, or on an agent's parent, is one prompt in one inbox,
+answered from one place, whatever asked and however deep in the tree. Today an ask, a held
+permission request and a startup dialog are three mechanisms with three answer functions; each
+keeps its mechanism (the `Mailbox` row, `Intake`'s hold, `Sessions`' checked press), and
+`Prompts` is the one front of all three and of every kind after them.
+
+A prompt is a row: its owner's key (so one state opens one prompt), the asker's path (main
+session, delegate, the delegate's own Claude Code subagent), its kind, the question, the options
+by label, a default, a deadline, its owner and its status (`open`, `answering`, `answered`,
+`expired`, `withdrawn`, `lost`). Its kinds and owners:
+
+| Kind | Opened by | Its answer goes to |
+|---|---|---|
+| `permission` | `Sessions`, from a held `PermissionRequest`, a subagent's included (the hook names it) | `Intake`'s hold |
+| `question` | `ask`, and Claude Code's question tool intercepted | `Mailbox`, a row to the agent |
+| `startup` | `Sessions`, from a dialog read on the pane: trust, imports, onboarding | `Sessions`' checked press |
+| `plan` | `Sessions`, from a held call of Claude Code's plan exit | `Intake`'s hold |
+| `elicitation` | `Sessions`, from an MCP server's request for input, held by its hook | `Intake`'s hold |
+| `limit` | the `Scheduler` and `Sessions`, at an account's usage limit: wait or move | `Team.operate/4`: a move, or nothing |
+| `login` | `Sessions`, from a session whose account's login expired | a person, at `bin/caf-login`; the prompt settles when a session on it starts |
+| `exit` | `Sessions`, from Claude Code's own exit prompt read on the pane | `Sessions`' checked press |
+| `remedy` | the `Watch` | `Team.operate/4` and the allow-list |
+| `restarts` | a supervisor whose budget ran out | its process started again |
+| `policy` | the app (confirm a landing, say) | the app's callback |
+
+**The rules.** A prompt is answered once, by its rightful answerer: a person, through the app,
+for every kind; the asker's parent, through `steer`, for `permission`, `plan` and
+`elicitation`, as a fix under a claim (`Grants`). An answer is checked against the prompt read
+before its claim (a label it offers, a prompt still `open`), marked `answering`, handed to its
+owner, and settled by the owner's answer: answered, refused (back to `open`), or unknown (kept,
+never sent again). A person who answers on the pane first makes it `withdrawn`, read by its
+owner. At its deadline a prompt whose kind declares a safe default (a `limit`'s wait) takes it,
+recorded as the framework's; any other is `expired` and stays shown, since Claude Code no
+longer reads the hold. A restart keeps every `open` row and settles an `answering` one by its
+owner's evidence, as a dialog's press is settled today. Every write cues `prompts`.
+
+`Prompt.tla` (B1) is its contract: it instances `Hold` (one response, its deadline, its holder's
+death) and `Claim` (once per state), and checks `OneAnswer`, `OnlyRightful`, `NotAfterDeadline`,
+`DefaultOnlyDeclared`, `KeptAcrossRestart` and `Escalated` (a budget run out is a prompt), with
+liveness that every prompt is answered, expired or withdrawn; `Dialog.tla`'s answer and
+`Team.tla`'s `Ask` and `AnswerClaimed` become its instances.
+
+### The app's surface
+
+One config and one supervisor in; a few calls and one stream of cues out.
+
+- **In.** `CodingAgentFramework.child_spec(config)`: one config, checked whole at start with each
+  refusal naming its key (the home, hosts, accounts, projects, ports, capacities, the
+  callbacks for dialogs, `PreToolUse` and `Stop`, the idle bound, the restart budgets, the
+  remedies' allow-list and the extensions). One supervisor starts every box in its order; the
+  app wires nothing else.
+- **Calls.** `operate(caf, actor, verb, args)`: the seven verbs as the operator, and the
+  operator's own: `end_main`, a main session's `move` and `resume`, a remedy's `approve` and
+  `revoke`, a symptom's `clear`. `answer(caf, prompt, choice)` answers any prompt, in place of
+  `answer_startup`, an ask's answer and a request's answer. `prompts(caf, filter)`,
+  `view(caf, scope)`, `metrics(caf, query)`, `digest(caf, window)` and `query(caf, filter)` read.
+- **Cues.** `subscribe(caf, topics)`: one stream of `{topic, ids}` for every write, from the
+  `Ledger`. The app re-reads by id, as every view does; `prompts` is the inbox's topic.
+
+An app like a development loop's (views, builders, gates, landings) needs nothing more: a
+builder is a `delegate` with `review`, a gate is a heavy command or a job, a landing a job of
+class landing that opens a `policy` prompt where the app wants a person to confirm, the inbox
+`prompts` re-read on its cue, and each view a `view` or a `digest` re-read on a cue.
+
+### Inside the boxes
 
 Each part is one OTP process or one pure module, with one job, and is the one writer of the
 table it owns. A part reads another part's state only through that part's functions, never by
@@ -1254,7 +1681,8 @@ framework's tools, which are strict in how they act and narrow in whom they reac
   host, in a copy of their own worktree (a main session's is its checkout). A service is fixed
   by its owner, or by the owner's parent.
 
-**The tools:**
+**The tools** as built. B5 serves them as the seven verbs of "The agent's surface", each
+mechanism below unchanged; the operator's tools move to the app's surface:
 
 | Tool | Who | What it does |
 |---|---|---|
@@ -2145,9 +2573,108 @@ uuid, and each spec that instances a module compares its state counts before and
       running delegate only while its session is live, and a row with no report whose session
       is gone does not count as running (built in F-150, `Delegate.tla`'s `StartAgain`).
 
-    The fault ledger is R10. Which tests to rerun on a red, a re-entry brief after a reset, a
-    reviewer and its acceptance list, which edits to guard, and a replay suite are an app's
-    policies, not the framework's.
+    The fault ledger is R10. Which tests to rerun on a red, which edits to guard, and a replay
+    suite are an app's policies, not the framework's. A re-entry brief after a reset and a
+    reviewer with its acceptance list were too, until F-162 made them `delegate`'s `fresh` and
+    `review` options (B11 below): the mechanism is the framework's, what the list says is the
+    app's.
+
+**The boxes** (F-162) come next, before the rest of item 14 and items 15 to 17, so that each
+later unit is built behind one box's interface and the agents' seven verbs. Item 14's `Stop`
+held for the app is a `Hold` kind and may go in beside them; it counts its blocks, since Claude
+Code overrides a `Stop` hook that blocks too many times in a row with no tool call between, and
+models that override as an action of the environment (F-162's new-11). Each unit keeps
+every gate green. Sizes are changed lines apart from fixtures, estimated by F-162. B1 is the
+model before the code it describes (B4, B6, B8, B9, B11); B2 and B3 change no behavior.
+
+- **B1. Model**, specs only, in four parts that may land apart: the restart as a step per agent
+  (`Restart(a)`) beside the whole one in `Start.tla`, `Delegate.tla`, `Dialog.tla` and
+  `Move.tla`, bounded by `MaxRestarts`, with state counts compared before and after (about
+  +200); `Prompt.tla` (about +300), instancing `Hold` and `Claim`, with `Dialog.tla`'s answer and
+  `Team.tla`'s ask as its instances; `Heal.tla` (about +250), instancing `Claim`: a symptom, the
+  allow-list, a remedy claimed once per state, its precondition read before the claim, verified
+  after, a cap per window that turns acting into a prompt; and `Delivery.tla`'s subscription
+  (about +150): a row stored waiting on an event key, fired once by the event's fact (one
+  recorded before the subscription since the moment it names too), then delivered as any row,
+  with a restart between the fact and the fire.
+- **B2. Box facades and the boundary gate**: one public module per box (`Sessions`, `Mailbox`,
+  `Prompts`, `Team`, `Scheduler`, `Hosts`, `Watch`) and the `Ledger`'s in the base, with the
+  interface above, every other module
+  `@moduledoc false`, and `mix caf.deps` taught the box of each app so a call from outside a box
+  goes only through its facade. No apps merge: the umbrella's layers and the gate already earn
+  their keep, and merging buys only fewer `mix.exs` files (F-162's new-7). About +500, −150.
+- **B3. The app's surface**: `CodingAgentFramework.child_spec/1` from one config struct checked
+  whole, one supervisor of the boxes in order, `operate/4`, `view/2`, `query/2` and
+  `subscribe/2`; `caf_example` keeps its config file, its console and its ends, and loses its
+  supervisor's wiring. This is item 15's library supervisor, with the instance's name every
+  per-instance `Registry` is named from. About +500, −800.
+- **B4. One agent process per agent**, against B1's `Restart(a)`: `Sessions` becomes a
+  `DynamicSupervisor` of agent processes, each under its own small supervisor with the app's
+  restart budget, each the writer of its agent's row, re-adopting from the row at every
+  `init`; the per-host and per-account supervisors; a budget run out recorded, for B6 to turn
+  into a prompt. The largest unit of the path, since `Sessions` is the largest part: about
+  +900, −700, and it may split by kind (a main session's, then a delegate's).
+- **B5. The seven verbs**: `Team.operate/4` and the MCP endpoint serve `delegate`, `message`,
+  `ask`, `look`, `steer`, `wait_for` (answering `refused{not_built}` until B9) and `serve` over
+  today's mechanisms; `end_main` and a main session's move and resume go to the app's surface;
+  `reload` stays hidden until F-162's new-2 is measured; `run` stays until F-157's wrapper.
+  About +600, −700, most of it tool schemas and their tests.
+- **B6. `Prompts`**, against `Prompt.tla`: the `prompts` table, `open/2`, `answer/3`, `read/2`
+  and the `prompts` cue; an ask, a held permission request (a subagent's included) and a startup
+  dialog opened as prompts and answered through it; `answer_startup`, `Mailbox.answer/4` and the
+  operator's request answer become the app's one `answer/3`; the `restarts` kind from B4. Then,
+  one small unit each, the kinds that need a reading first: `plan`, `elicitation`, `limit`,
+  `login`, `exit` and onboarding, each checked against the pinned release (F-162's new-10).
+  About +600, −300, then +150 to +250 per kind.
+- **B7. Facts and metrics**: `Store` appends a status fact to the table's own history in the
+  transaction of each status write; the `Watch`'s named folds, `metrics/2` and `digest/2`;
+  `look(what: :stuck)`. Detect and record only. About +600.
+- **B8. Healing on an allow-list**, against `Heal.tla`: `Recoveries` becomes the `Watch`'s
+  healer acting through `Team.operate/4`, its acts the default allow-list, the cap, and the
+  `remedy` prompt. About +400, −250.
+- **B9. `wait_for`**, against `Delivery.tla`'s subscription: `Mailbox`'s `subscriptions`, fired
+  by facts; a job's end, a service's line, port and exit, a delegate's idle and report, an
+  answer. `service_wait`'s poll becomes a fact `Hosts` records. About +400, −150.
+- **F-157**, as decided: the heavy `Bash` command rewritten into a wrapper under a lease; then
+  `run` leaves the agents' list (about −200).
+- **B10. The intercepts**: `AskUserQuestion` opened as a prompt where no person attends; the
+  `Agent` tool's named types answered with the `delegate` call to make; the `repeating` and
+  `unenforced` facts from the hooks' rows. About +300.
+- **B11. `delegate`'s options**, the model first: `Delegate.tla` gains `review` (the acceptance
+  list fixed before the builder starts, a reviewer with a fresh context that is not the
+  builder, the report carrying the verdict), `variants` (each counted against the cap, refused
+  without a selector, at most one taken under `first_passing`, the others stopped by their
+  parent's claim), `budget` (a `tool` hold's deny past the budget, told to the parent once) and
+  `fresh` (F-150's start again, re-entered from recorded state in place of the brief). Then each
+  as its own unit. About +300 of spec, then +300 to +400 each.
+- **B12. Extensions**: the bundle in the config, its verb through `operate/4`, its skill in the
+  launch, its context at a brief and by `additionalContext`, its events as facts, its guards and
+  their counts, scoped per role and project. About +600.
+
+The operator's decisions on the research survey (F-162) place three more pieces in these units:
+the check of every tool call by the app's policies, each decision a row, goes in with B10 (the
+held `PreToolUse` is built; what is new is the policy data per role, the correction before the
+deny, and the deny rules beside each must-never policy, about +300 more); the legal acts per
+state, written beside each spec and tested against it, go in with B5 (about +300); and the
+reviewer, read-only by its launch, is B11's `review`. The fourth is its own unit:
+
+- **B13. Replay in the gates** (decided): a real run's `Ledger` (acts, facts and each table's
+  history) recorded whole, scrubbed of paths and names as `Screen`'s fixtures are, and kept per
+  release; a gate replays each recorded run through the folds, the legal-acts table and the
+  settle rules of new code, and fails on any act the run took that the code would now refuse or
+  settle otherwise. It goes after B7, which makes the histories. About +500, plus fixtures.
+
+About 9,000 lines added and 3,500 removed in all, over about twenty units counting B1's parts,
+B6's kinds and B11's options. What it buys: an agent's list from 25 tools to 7 verbs; a library
+seen through 26 functions in seven boxes and the `Ledger`'s 5, instead of 577 in 29 apps; an
+embedding app that hands one config to one supervisor; one process per agent, so one agent's
+trouble stays its own and OTP heals the framework's own crashes within a budget; one inbox for
+everything that waits on a person; and metrics, bounded healing, `wait_for`, review, variants,
+budgets and extensions built once, each behind one interface. What stays as it is: every
+mechanism inside the boxes, every spec but the additions of B1, the umbrella and its gates. The
+cost is mostly B2, B3 and B5, which move no behavior and touch most apps' docs and many tests'
+calls, and B4, which reshapes the largest part; the rest is new work that would cost more
+without them.
 15. **Packaging and toolchain**: one `coding_agent_framework` package; `Programs` looked up and
     checked at start, with a Homebrew setup documented; the Elixir and OTP floor tested; a
     library supervisor from a config struct, out of `caf_example`; accounts: how to log one in
