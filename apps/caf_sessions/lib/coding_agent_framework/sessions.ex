@@ -122,7 +122,9 @@ defmodule CodingAgentFramework.Sessions do
   `{:unknown, {:socket_live, sent}}`, and the row, reason `socket_live`, waits for the next
   settle. `sent` is what the end's TERM or `end_session` answered.
   `Sessions` itself never kills: its one signal is the stop's TERM. The row keeps the start's or stop's deadline in wall-clock time
-  (the `clock:` option), so a restart does not move it.
+  (the `clock:` option), so a restart does not move it. A start may wait in `Sessions`' mailbox
+  after its caller gave up; one taken past the caller's deadline it carries
+  (`:caller_deadline`) answers `{:refused, :caller_gone}` and makes nothing (F-166).
 
   **Rows with no call under way** are settled as `model/tla/Start.tla` does, when `Sessions`
   starts, at a starting row's deadline, and at each `Registry`, `Stream` or `TmuxSampler` cue
@@ -238,19 +240,26 @@ defmodule CodingAgentFramework.Sessions do
   and `options:`, kept on the row with the model, each of which a resume that names none takes
   again; and `meta:`, a map of the app's own keys kept on the row (refused `{:bad, :meta}`
   otherwise, `Table.meta_text/1`), which any start that names none keeps from the row (F-154).
-  Option:
+  Options:
   `:timeout`, to which a worktree's start adds its setup's deadline and its git commands'
-  bounds.
+  bounds; and `:caller_deadline`, wall-clock ms on this `Sessions`' `clock:`, the last moment
+  the caller takes the start to be in time. A start `Sessions` takes from its mailbox at or
+  past it answers `{:refused, :caller_gone}` and starts nothing: no act, no row, no process
+  (`Delegate.tla`'s `Called`, F-166). A caller that gives up on a start and then reads the
+  absence of its row as "never reached `Sessions`" passes it, earlier than that reading.
+  With none, a start is taken whenever it comes.
 
       Sessions.start(sessions, "reviewer", account,
         role: :delegate, parent: "app-main", worktree: %{project: project, branch: "unit/review"},
         claude: claude)
       #=> {:ok, %{name: "reviewer", pid: 4243, session_id: "…"}}
       #=> {:refused, {:worktree, :dirty}}
+      Sessions.start(sessions, "reviewer", account, launch, caller_deadline: deadline)
+      #=> {:refused, :caller_gone}
   """
   @spec start(GenServer.server(), String.t(), struct, keyword, keyword) :: outcome(map)
   def start(sessions, name, account, launch, opts \\ []),
-    do: request(sessions, {:start, name, account, launch, nil}, opts)
+    do: request(sessions, {:start, name, account, launch, nil, opts[:caller_deadline]}, opts)
 
   @doc """
   As `start/5`, resuming Claude Code's session `session_id` (`--resume`). A resume in a
@@ -260,7 +269,8 @@ defmodule CodingAgentFramework.Sessions do
   @spec resume(GenServer.server(), String.t(), struct, String.t(), keyword, keyword) ::
           outcome(map)
   def resume(sessions, name, account, session_id, launch, opts \\ []),
-    do: request(sessions, {:start, name, account, launch, session_id}, opts)
+    do:
+      request(sessions, {:start, name, account, launch, session_id, opts[:caller_deadline]}, opts)
 
   @doc """
   Ends running session `name` and waits for its process to exit. A row on a startup dialog
@@ -489,7 +499,9 @@ defmodule CodingAgentFramework.Sessions do
     timeout = Keyword.get(opts, :timeout, @timeout)
 
     budget =
-      with {:start, _, _, launch, _} <- request, do: budget(launch[:worktree]), else: (_ -> 0)
+      with {:start, _, _, launch, _, _} <- request,
+           do: budget(launch[:worktree]),
+           else: (_ -> 0)
 
     call(sessions, {request, timeout}, timeout + budget + @slack)
   end
@@ -605,10 +617,10 @@ defmodule CodingAgentFramework.Sessions do
   def handle_cast({:cue, _topic}, state), do: {:noreply, state}
 
   @impl true
-  def handle_call({{:start, name, account, launch, resume}, timeout}, from, state) do
-    launch = model(state, name, resume, launch)
-
-    with :ok <- free(state, name),
+  def handle_call({{:start, name, account, launch, resume, by}, timeout}, from, state) do
+    with :ok <- in_time(state, name, by),
+         launch = model(state, name, resume, launch),
+         :ok <- free(state, name),
          {:ok, place} <- place(state, name, launch),
          {:ok, role} <- Keyword.fetch(launch, :role) |> required(:role),
          {:ok, agent} <- agent(state, name, role, launch, place, resume),
@@ -1738,6 +1750,24 @@ defmodule CodingAgentFramework.Sessions do
     fields = [pid: file.pid, session_id: file.session_id, proc_start: file.proc_start]
     write(state, row, [status: "running", reason: nil] ++ fields)
   end
+
+  # Called (`Delegate.tla`, F-166): a start taken from the mailbox past its caller's deadline
+  # writes nothing, since that caller may already read the absence of its row as "never
+  # reached Sessions" and refuse it; a process started now would run under that refusal.
+  defp in_time(_state, _name, nil), do: :ok
+
+  defp in_time(state, name, by) when is_integer(by) do
+    late = state.clock.() - by
+
+    if late < 0 do
+      :ok
+    else
+      Logger.debug("start of #{name} taken #{late} ms past its caller's deadline: not made")
+      {:refused, :caller_gone}
+    end
+  end
+
+  defp in_time(_state, _name, _by), do: {:refused, {:bad, :caller_deadline}}
 
   defp free(state, name) do
     case Table.get(state.db, state.host.name, name) do

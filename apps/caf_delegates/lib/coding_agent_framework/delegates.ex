@@ -42,7 +42,10 @@ defmodule CodingAgentFramework.Delegates do
   then settles its row), or `refused`, and `Mailbox` ends the rows to it. A row a restart left
   `starting` is settled by the agent row of its call, once that row is settled; with no such
   row by the row's deadline, the call never reached `Sessions`, and the row is refused as
-  `interrupted`. A row still `starting` takes one fix, `:stop` (`Sessions.stop/3` ends its held
+  `interrupted`. That reading holds because the call carries a caller's deadline before the
+  row's (`Sessions.start/5`'s `:caller_deadline`, the row's deadline less the slack): a call
+  still in `Sessions`' mailbox past it, after its task gave up or this process restarted, is
+  refused there `caller_gone` and makes nothing (F-166). A row still `starting` takes one fix, `:stop` (`Sessions.stop/3` ends its held
   program by its record), and its start then settles refused.
 
   **A running delegate** is read from its `Stream` row at each cue: once the turn's message is
@@ -603,6 +606,11 @@ defmodule CodingAgentFramework.Delegates do
 
     mailbox = s.mailbox
 
+    # Sessions takes the call only by the row's deadline less the slack (F-166): one taken in
+    # time has written its agent row long before the row's deadline, at which Settled reads no
+    # such row as a call that never reached Sessions; one taken later makes nothing.
+    opts = [timeout: @call, caller_deadline: row.deadline - @slack]
+
     # The config is made in the task: the embedding app's `issue` may call a part that waits.
     task =
       Task.async(fn ->
@@ -612,13 +620,13 @@ defmodule CodingAgentFramework.Delegates do
 
             case start do
               {:resume, session_id} ->
-                Sessions.resume(s.sessions, row.name, account, session_id, launch, timeout: @call)
+                Sessions.resume(s.sessions, row.name, account, session_id, launch, opts)
 
               # A start that names no metadata keeps the row's (`Sessions.start/5`).
               {parent, options, meta} ->
                 launch = launch ++ [parent: parent, options: options]
                 launch = if meta, do: launch ++ [meta: meta], else: launch
-                Sessions.start(s.sessions, row.name, account, launch, timeout: @call)
+                Sessions.start(s.sessions, row.name, account, launch, opts)
             end
           end
 

@@ -802,9 +802,10 @@ any reply does (new-4).
   - **The end.** The lease lasts as long as its work. The `Scheduler` asks the owner of the
     work's row whether the work ended, which the owner answers by the row and its
     `Holder.Process` record (`Delegates.Work` for a delegate's row: live while it may still
-    start, run or be resumed; ended once refused or done and its agent row free, since a start
-    may reach `Sessions` after its row was refused; `Delegate.tla`'s `WorkEndedIsFree`,
-    F-164); a row still starting is live until its owner settles it. While it runs it monitors each lease it holds
+    start, run or be resumed; ended once refused or done and its agent row free, which the
+    row's status alone does not say; `Delegate.tla`'s `WorkEndedIsFree`, F-164; a start that
+    reaches `Sessions` after its caller's deadline makes nothing, F-166); a row still starting
+    is live until its owner settles it. While it runs it monitors each lease it holds
     and asks at each cue of the owner's rows; after a restart it asks about every unreleased
     row, releases it if the work ended and monitors it again if not. Both release by
     `UPDATE … WHERE id = ? AND
@@ -1289,7 +1290,13 @@ is told at most once per idle state across restarts.
 - A row a restart left starting or resuming is settled by `Sessions`' row of its call (one
   written at or after the call), once that row is settled: running, or refused. With no such
   row by the row's deadline, the call never reached `Sessions`, and the row is refused (a
-  start) or failed (a resume) as interrupted. A call is never made again. A refused resume is
+  start) or failed (a resume) as interrupted. A call is never made again. That reading is true
+  because the call carries a caller's deadline, the row's less its slack (F-166, F-164's
+  new-1): a call may wait in `Sessions`' mailbox after its task gave up or `Delegates`
+  restarted, and `Sessions` takes one past that deadline only to answer it
+  `{:refused, :caller_gone}`, writing nothing, so no process runs under a row already refused
+  (`Delegate.tla`'s `Called`, `RefusedHoldsNothing`, `Break_Delegate_TakeStale`). One taken in
+  time writes its agent row within seconds, long before the row's deadline. A refused resume is
   failed, and the refusal is its report.
 - A headless delegate's Stop is the `result` that ends the turn its message began, read from
   its event log; its text is the report. The log's offset persists, so a restart does not lose

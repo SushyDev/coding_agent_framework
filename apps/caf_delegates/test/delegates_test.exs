@@ -134,6 +134,30 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}"]
   end
 
+  # Delegate.tla's StartAsked, CallerLate, Called past the deadline and CallAnswered (F-166):
+  # RefusedHoldsNothing against a request that waited in Sessions' mailbox.
+  test "a start Sessions takes past its caller's deadline is refused and makes nothing", ctx do
+    :ok = :sys.suspend(ctx.sessions)
+    late = Task.async(fn -> start(ctx, "app", "unit/one") end)
+    assert {:ok, _} = await(fn -> queued(ctx.sessions) end)
+
+    # The caller's deadline is the row's less its slack, 120 s: the row's own has not passed.
+    [%{id: id, status: "starting", deadline: deadline}] = Table.latest(ctx.dtable, "test")
+    tick(ctx, deadline - 120_000 - Agent.get(ctx.clock, & &1))
+    :ok = :sys.resume(ctx.sessions)
+
+    assert {:refused, :caller_gone} = Task.await(late, 10_000)
+    assert %{status: "refused"} = Table.get(ctx.dtable, id)
+    assert session_row(ctx, "app-unit-one") == nil
+    assert File.ls(Path.join(ctx.dir, "pids")) in [{:error, :enoent}, {:ok, []}]
+
+    # Past the row's own deadline nothing more is made: the call is never made again.
+    tick(ctx, 120_000)
+    cue(ctx, current(ctx))
+    assert %{status: "refused"} = Table.get(ctx.dtable, id)
+    assert session_row(ctx, "app-unit-one") == nil
+  end
+
   # Delegate.tla's TurnEndsBare, BoundPasses and IdleTold: IdleToldOnce and IdleNoticed.
   test "a delegate idle with no report is told to its parent once per idle state", ctx do
     restart(ctx, idle_bound: 60_000)
@@ -729,6 +753,12 @@ defmodule CodingAgentFramework.DelegatesTest do
 
   defp session_row(ctx, name),
     do: CodingAgentFramework.Sessions.Table.get(ctx.table, "test", name)
+
+  # A call waits in `sessions`' mailbox, not yet taken; nothing else calls it while suspended.
+  defp queued(sessions) do
+    {:messages, messages} = Process.info(sessions, :messages)
+    if Enum.any?(messages, &match?({:"$gen_call", _, _}, &1)), do: {:ok, :queued}
+  end
 
   defp ok(nil), do: nil
   defp ok(row), do: {:ok, row}

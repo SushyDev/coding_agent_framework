@@ -35,6 +35,42 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
              await(fn -> if viewer(ctx, "d1") =~ ~s("subtype":"init"), do: {:ok, :shown} end)
   end
 
+  test "a start taken past its caller's deadline makes nothing: no row, no stream, no process",
+       ctx do
+    # Delegate.tla's CallerLate, CallGivesUp and Called past the deadline (F-166), the race
+    # Break_Delegate_TakeStale's trace takes: the request waits in Sessions' mailbox while its
+    # caller's deadline passes and its caller goes, as a timed-out or restarted Delegates' does.
+    by = Agent.get(ctx.clock, & &1) + 1_000
+    launch = headless(ctx, :on_message)
+    :ok = :sys.suspend(ctx.sessions)
+
+    late =
+      Task.async(fn ->
+        Sessions.start(ctx.sessions, "d9", ctx.account, launch, caller_deadline: by)
+      end)
+
+    assert {:ok, _} = await(fn -> queued(ctx.sessions, late.pid) end)
+    Agent.update(ctx.clock, &(&1 + 1_000))
+    Task.shutdown(late, :brutal_kill)
+    :ok = :sys.resume(ctx.sessions)
+
+    # Sessions takes its mailbox in order: this read is answered after the late start was taken.
+    assert {:refused, :no_session} = Sessions.viewer_argv(ctx.sessions, "d9")
+    assert Table.get(ctx.table, "test", "d9") == nil
+    assert {:ok, _} = Stream.read(ctx.stream)
+    assert {:ok, %{rows: []}} = Stream.rows(ctx.stream)
+    assert File.ls(Path.join(ctx.dir, "pids")) in [{:error, :enoent}, {:ok, []}]
+
+    # A caller still waiting is told; one in time starts the name, which nothing holds.
+    assert {:refused, :caller_gone} =
+             Sessions.start(ctx.sessions, "d9", ctx.account, launch, caller_deadline: by)
+
+    assert {:ok, %{name: "d9", pid: pid}} =
+             Sessions.start(ctx.sessions, "d9", ctx.account, launch, caller_deadline: by + 1)
+
+    assert File.ls!(Path.join(ctx.dir, "pids")) == [Integer.to_string(pid)]
+  end
+
   test "a start whose first event never comes is unknown; ReRead settles it either way", ctx do
     # StartDecided past the deadline, then ReRead: running once the init comes, stopped once
     # the socket is dead.
@@ -294,6 +330,12 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
   end
 
   # Reads until Stream's row of session `id` satisfies `ok?`, and answers it.
+  # The call of `caller` waits in `sessions`' mailbox, not yet taken.
+  defp queued(sessions, caller) do
+    {:messages, messages} = Process.info(sessions, :messages)
+    if Enum.any?(messages, &match?({:"$gen_call", {^caller, _}, _}, &1)), do: {:ok, caller}
+  end
+
   defp stream_row(ctx, id, ok? \\ fn _ -> true end) do
     {:ok, row} =
       await(fn ->
