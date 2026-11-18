@@ -222,12 +222,16 @@ Built, each from a checked model in `model/tla/`:
 - what that run needs first (F-147): a new home's first start, an account with no reading
   counting as 0 % used; the hooks' secret kept per home, so a session held across a restart
   keeps its hooks; the text of a reply to the operator; and the operator's answer of a main
-  session's held permission request, through `Intake` under a claim.
+  session's held permission request, through `Intake` under a claim;
+- the first two mechanisms an app's policies stand on (F-150), against `Delegate.tla`: a
+  delegate idle with no report past a bound the app sets is told to its parent once per idle
+  state, by a notice in `Mailbox` and never a kill; and a start idempotent per branch, which
+  answers the branch's live delegate (`already: true`) and starts again a row with no report
+  whose process is gone.
 
 The remodel (F-115, taken in F-116) is done. Next,
-F-140's follow-ups on startup dialogs, the mechanisms an app's policies stand on (an idle
-delegate's watchdog, `Stop` held for the app, clone copies, an idempotent
-start), packaging, and stacks with the LiveView components. The plan and the order of the units are in
+F-140's follow-ups on startup dialogs, the rest of the mechanisms an app's policies stand on
+(`Stop` held for the app, clone copies), packaging, and stacks with the LiveView components. The plan and the order of the units are in
 [docs/design.md](docs/design.md); each unit's notes are in `docs/build-notes/`.
 
 

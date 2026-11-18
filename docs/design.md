@@ -754,6 +754,28 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
    instead of retrying. That report is held and delivered like a finish. A kill after the last
    reply is a finish, read from the transcript.
 
+**A second start of a branch** (F-150, `Delegate.tla`'s `StartAgain`) looks up the name's
+latest row and its agent row before anything is written. While the parent's delegate of that
+branch has a live session, the start answers that delegate with `already: true`, and its brief
+is not used. A row with no report whose process is gone does not count as running: the start
+goes on as a new row, under the cap that already counts the name, and the old row is history,
+never resumed (its `reason` says `replaced`); its brief and word to go on are settled `ended`
+in `Mailbox` first, so the new process takes only its own, and the start is refused `in_flight`
+while one is still in flight. A start or resume under way refuses it (`starting`), as does
+another parent's delegate (`other_parent`) and one neither live nor gone (a report on its way,
+a stop or a move under way).
+
+**A delegate idle with no report** (F-150, `Delegate.tla`'s `IdleToldOnce` and `IdleNoticed`):
+a running row with no call under way, whose turn has ended by its kind's rule (a headless
+one's `Stream` fold; an interactive one's session file, as its report's read takes it), with
+no row to it queued or sending in `Mailbox`, for longer than the app's bound (`idle_bound:`),
+is told to its parent by a notice from `framework` (`Mailbox.notify/4`). Never a kill, never a
+nudge into the delegate. Its idle state is the row with its fix state's offset, which any event
+of the delegate moves, so a turn that starts ends it, as a report taken or the delegate's end
+does. The bound runs from when `Delegates` first read the state, in memory, so a restart starts
+it again; the notice is stored under the state's key, which `Mailbox` takes once, so the parent
+is told at most once per idle state across restarts.
+
 **What `Delegates` holds** (`Delegate.tla`; F-59's build note):
 
 - The embedding app hands `Delegates` its projects as data when it starts it, each as `Sessions`
@@ -2078,7 +2100,7 @@ uuid, and each spec that instances a module compares its state counts before and
     `Dialog.tla` and `Team.tla`.
 14. **Mechanisms an app's policies stand on**, on the remodel's shape, in this order:
     - a delegate idle with no report, a value of `Sessions`' turn function that `Delegates`
-      tells its parent, in `Delegate.tla`;
+      tells its parent, in `Delegate.tla` (built in F-150, "The delegate protocol");
     - admission is the `Scheduler`'s lease ("A lease"; its code after R12), asked by
       `Sessions`' start, `Delegates`, `Jobs` and a landing, in place of a check of its own in
       each; its refusal is `{:refused, {reason, retry_at}}`, never a failed run;
@@ -2087,7 +2109,7 @@ uuid, and each spec that instances a module compares its state counts before and
     - copies by the file system's clone where it has one;
     - a start idempotent per branch, a lookup of the agent row: a second start answers the
       running delegate only while its session is live, and a row with no report whose session
-      is gone does not count as running.
+      is gone does not count as running (built in F-150, `Delegate.tla`'s `StartAgain`).
 
     The fault ledger is R10. Which tests to rerun on a red, a re-entry brief after a reset, a
     reviewer and its acceptance list, which edits to guard, and a replay suite are an app's

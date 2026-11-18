@@ -65,6 +65,43 @@ defmodule CodingAgentFramework.Delegates.TurnTest do
              Turn.next(@row, fold(%{"b1" => %{state: :delivered}}, true, result("x", "m2")))
   end
 
+  # Delegate.tla's StartAgain: a start idempotent per branch.
+  test "a second start of a branch: new, the live delegate, again, or refused" do
+    row = %{name: "app-unit-a", status: "running", report: "none"}
+    agent = %{kind: "delegate", parent: "m", status: "running"}
+
+    assert Turn.again(nil, nil, "m") == :new
+    assert Turn.again(%{row | status: "refused"}, agent, "m") == :new
+    assert Turn.again(row, %{agent | status: "ended"}, "m") == :new
+    assert Turn.again(%{row | status: "finished"}, %{agent | status: "ended"}, "m") == :new
+    assert Turn.again(row, nil, "m") == :new
+
+    assert Turn.again(row, agent, "m") == :already
+    assert Turn.again(%{row | status: "finished", report: "taken"}, agent, "m") == :already
+    assert Turn.again(row, %{agent | status: "stopped"}, "m") == :again
+
+    assert Turn.again(%{row | status: "starting"}, nil, "m") ==
+             {:refused, {:starting, "app-unit-a"}}
+
+    assert Turn.again(%{row | status: "resuming"}, agent, "m") ==
+             {:refused, {:starting, "app-unit-a"}}
+
+    assert Turn.again(row, agent, "n") == {:refused, {:other_parent, "app-unit-a"}}
+
+    # A report on its way, a stop under way, or a move: neither live nor gone.
+    finished = %{row | status: "finished", report: "taken"}
+
+    assert Turn.again(finished, %{agent | status: "stopped"}, "m") ==
+             {:refused,
+              {:delegate, %{name: "app-unit-a", status: "finished", session: "stopped"}}}
+
+    assert {:refused, {:delegate, %{session: "stopping"}}} =
+             Turn.again(row, %{agent | status: "stopping"}, "m")
+
+    assert {:refused, {:delegate, %{session: "running"}}} =
+             Turn.again(row, Map.put(agent, :move, "draining"), "m")
+  end
+
   defp result(text, uuid), do: %{text: text, user_message_uuids: [uuid]}
 
   # A fold as an earlier build stored it, loaded as `Stream.Table` loads one.
