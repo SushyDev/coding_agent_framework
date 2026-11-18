@@ -462,8 +462,8 @@ StartAgain(d) ==
     /\ marked' = [marked EXCEPT ![d] = MarkedFirst(d)]
     /\ taken' = [taken EXCEPT ![d] = 0]
     /\ resumed' = [resumed EXCEPT ![d] = 0]
-    /\ UNCHANGED <<up, restarts, parentVars, stops, idles, overdue, told, keys, dvars, held, reply,
-                   kills, persons, rsrc, pipe>>
+    /\ UNCHANGED <<up, restarts, parentVars, stops, idles, overdue, told, keys, woken, ownDone,
+                   ownTold, dvars, held, reply, kills, persons, rsrc, pipe>>
 
 \* Sessions takes the call and writes its own row first (Start.tla).
 Called(d) ==
@@ -604,7 +604,7 @@ TurnEndsBare(d) ==
     /\ overdue' = [overdue EXCEPT ![d] = FALSE]
     /\ told' = [told EXCEPT ![d] = 0]
     /\ UNCHANGED <<up, restarts, parentVars, status, held, resumes, reply, kills, persons, rsrc,
-                   stops, callVars, keys, againStarts, dvars>>
+                   stops, callVars, keys, againStarts, woken, ownDone, ownTold, dvars>>
 
 \* A background command of its own ends and wakes it: a turn that answers no
 \* message (F-155). Its row may still be running, its report not yet read.
@@ -691,7 +691,7 @@ BoundPasses(d) ==
     /\ up /\ Idle(d) /\ ~overdue[d]
     /\ overdue' = [overdue EXCEPT ![d] = TRUE]
     /\ UNCHANGED <<up, restarts, parentVars, delegateVars, stops, callVars, idles, told, keys,
-                   againStarts, dvars>>
+                   againStarts, woken, ownDone, ownTold, dvars>>
 
 \* Past the bound, the parent is told once per idle state: a notice stored
 \* in Mailbox under the state's key, which Mailbox takes once. Nothing is
@@ -701,7 +701,7 @@ IdleTold(d) ==
     /\ keys' = keys \cup {IdleKey(d)}
     /\ told' = [told EXCEPT ![d] = @ + 1]
     /\ UNCHANGED <<up, restarts, parentVars, delegateVars, stops, callVars, idles, overdue,
-                   againStarts, dvars>>
+                   againStarts, woken, ownDone, ownTold, dvars>>
 
 \* An own turn's last reply goes to the parent once the report is handed
 \* on: a notice stored under the turn's key, which Mailbox takes once.
