@@ -148,6 +148,22 @@ defmodule CodingAgentFramework.Mains do
     do: call(mains, {:fix_state, name}, Keyword.get(opts, :timeout, @step))
 
   @doc """
+  What the operator's fix needs of `state` (`fix_state/3`'s), read from that state alone, so
+  its caller checks it before it claims the state (`Team.tla`'s Needed, F-149) and a fix the
+  state refuses takes no claim: a `:resume` is refused `{:not_stopped, status}` unless the
+  session's process ended (`stopped`) with a session id to take up, as `resume_main/3` refuses
+  it. A start under way or a move is the resume's to meet when it acts. An answer's request is
+  checked against `held` by its caller.
+
+      Mains.fix_check(:resume, %{status: "declared", session_id: nil})
+      #=> {:refused, {:not_stopped, "declared"}}
+  """
+  @spec fix_check(atom | tuple, map) :: :ok | {:refused, term}
+  def fix_check(:resume, %{status: "stopped", session_id: sid}) when is_binary(sid), do: :ok
+  def fix_check(:resume, %{status: status}), do: {:refused, {:not_stopped, status}}
+  def fix_check(_fix, _state), do: :ok
+
+  @doc """
   Answers main session `name`'s held permission request `request` (the id of its
   `PermissionRequest` row, as `fix_state/3`'s `held` names it) with `label`, `allow` or
   `deny`, through `Intake.answer/4`, as an interactive delegate's is answered (F-146's new-5):
@@ -755,7 +771,8 @@ defmodule CodingAgentFramework.Mains do
   defp model_ok(model) when is_binary(model) and model != "", do: :ok
   defp model_ok(_model), do: {:refused, {:bad, :model}}
 
-  # A main session whose process ended, with a session to resume, and no start of it under way.
+  # A main session whose process ended, with a session to resume (fix_check/2, what its fix
+  # state says), not moving, and no start of it under way.
   defp resumable(_s, nil), do: {:refused, :no_session}
   defp resumable(_s, %{kind: kind}) when kind != "main", do: {:refused, {:not_main, kind}}
 
@@ -764,11 +781,11 @@ defmodule CodingAgentFramework.Mains do
       Enum.any?(Starts.starting_rows(s.starts, s.host), &(&1.name == agent.name)) ->
         {:refused, {:running, agent.name}}
 
-      agent.status == "stopped" and is_binary(agent.session_id) and not Agents.moving?(agent) ->
-        :ok
+      Agents.moving?(agent) ->
+        {:refused, {:not_stopped, agent.status}}
 
       true ->
-        {:refused, {:not_stopped, agent.status}}
+        fix_check(:resume, agent)
     end
   end
 

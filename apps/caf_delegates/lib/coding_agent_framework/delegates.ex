@@ -68,8 +68,9 @@ defmodule CodingAgentFramework.Delegates do
   frees its parent's cap, and what it owns ends (what it kept goes to its parent, its edge in
   the tree staying). Its report stays its parent's.
 
-  **A parent's fix** (`fix_state/3`, `fix/5`; `Team.tla`'s `FixActs`) is checked and claimed
-  by its caller (`MCP`); here it acts only while the state it claimed is still the delegate's,
+  **A parent's fix** (`fix_state/3`, `fix_check/2`, `fix/5`; `Team.tla`'s `Needed` and
+  `FixActs`) is checked against the state and claimed by its caller (`MCP`); here it acts only
+  while the state it claimed is still the delegate's,
   read again in the same step, and through the part that owns the act: `Stream` for an
   interrupt or an answer, the resume path above for a resume, `Sessions.stop/3` for a stop.
 
@@ -183,6 +184,33 @@ defmodule CodingAgentFramework.Delegates do
   """
   def fix(delegates, parent, name, fix, state),
     do: call(delegates, {:fix, parent, name, fix, state}, [], 2 * @call)
+
+  @doc """
+  What `fix` needs of `state` (`fix_state/3`'s), read from that state alone, so a caller checks
+  it before it claims the state (`Team.tla`'s Needed, F-149) and a fix the state refuses takes no
+  claim. `fix/5` checks it again on the state it acts on. A `:resume` is refused as `fix/5`
+  refuses it: `:resumed_once`, `:live` (its process not gone), `{:status, status}` and
+  `:session_running` (its agent row not free); a `:stop` `{:report, report}` while its report is
+  not handed to `Mailbox`; an `:interrupt` `:gone` once its process is. What only the act meets
+  is checked then: a stop's report not yet delivered, an interactive turn not on the screen.
+
+      Delegates.fix_check(:resume, %{resumes: 0, gone: false, status: "running", ended: false})
+      #=> {:refused, :live}
+  """
+  def fix_check(:resume, state) do
+    cond do
+      state.resumes > 0 -> {:refused, :resumed_once}
+      not state.gone -> {:refused, :live}
+      state.status != "running" -> {:refused, {:status, state.status}}
+      not state.ended -> {:refused, :session_running}
+      true -> :ok
+    end
+  end
+
+  def fix_check(:stop, %{report: "taken"}), do: :ok
+  def fix_check(:stop, %{report: report}), do: {:refused, {:report, report}}
+  def fix_check(:interrupt, %{gone: true}), do: {:refused, :gone}
+  def fix_check(_fix, _state), do: :ok
 
   @doc "Hands it a reader's cue: every row is read again. Answers `:ok` at once."
   def cue(delegates, %{topic: _}), do: GenServer.cast(delegates, :cue)
@@ -331,11 +359,13 @@ defmodule CodingAgentFramework.Delegates do
     {:reply, reply, s}
   end
 
-  # The act only while the claimed state is the delegate's, read again in this step.
+  # The act only while the claimed state is the delegate's, read again in this step, and needs
+  # the fix, for a caller that did not check it before its claim.
   def handle_call({:fix, parent, name, fix, state}, from, s) do
     with {:ok, row, agent, fold} <- child(s, parent, name),
          now = claimed(row, agent, fold),
-         true <- now == state or {:refused, {:moved, now}} do
+         true <- now == state or {:refused, {:moved, now}},
+         :ok <- fix_check(fix, now) do
       act(s, row, agent, fold, fix, from)
     else
       refused -> {:reply, refused, s}
@@ -866,26 +896,11 @@ defmodule CodingAgentFramework.Delegates do
     end
   end
 
-  # The resume path a cue takes once the process is gone and the agent row is free. A wedged
-  # delegate, alive but stuck, is not stopped first: F-100's build note, new-1.
-  defp act(s, row, agent, fold, :resume, _from) do
-    cond do
-      row.resumes > 0 ->
-        {:reply, {:refused, :resumed_once}, s}
-
-      not fold.gone ->
-        {:reply, {:refused, :live}, s}
-
-      row.status != "running" ->
-        {:reply, {:refused, {:status, row.status}}, s}
-
-      not Agents.free?(agent) ->
-        {:reply, {:refused, :session_running}, s}
-
-      true ->
-        resumed(exited(s, row, agent, fold), row.id)
-    end
-  end
+  # The resume path a cue takes once the process is gone and the agent row is free (fix_check/2,
+  # on the state read in this step). A wedged delegate, alive but stuck, is not stopped first:
+  # F-100's build note, new-1.
+  defp act(s, row, agent, fold, :resume, _from),
+    do: resumed(exited(s, row, agent, fold), row.id)
 
   # The report delivered and nothing open to it, by Mailbox; Sessions waits for the exit, and
   # this process does not wait with it. An ended delegate has nothing left to stop.

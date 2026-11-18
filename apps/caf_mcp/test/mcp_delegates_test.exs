@@ -267,19 +267,22 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     assert {:refused, {:moved, ^state}} =
              Delegates.fix(ctx.delegates, "main", "app-unit-one", :interrupt, stale)
 
-    # A fix refused when it acts settles its claim not verified, and the state stays claimed.
+    # What a fix needs of the state is checked before the claim (F-149): a fix the state refuses
+    # takes no claim, so the next fix of that state is taken.
     assert tool(ctx, "main", "resume", one) == %{"refused" => "live"}
-    assert tool(ctx, "main", "stop", one) == %{"refused" => ["already_claimed", "main"]}
-    assert tool(ctx, "main", "interrupt", one) == %{"refused" => ["already_claimed", "main"]}
+    assert tool(ctx, "main", "stop", one) == %{"refused" => ["report", "none"]}
+    assert {:ok, []} = Acts.rows(ctx.acts)
 
     # An answer moves the state at once: its request is no longer held.
-    assert %{"ok" => %{"settled" => %{"ok" => "verified"}}} =
-             tool(
-               ctx,
-               "main",
-               "answer",
-               Map.merge(two, %{"dialog" => req_two, "label" => "allow"})
-             )
+    for {agent, req} <- [{one, req_one}, {two, req_two}] do
+      assert %{"ok" => %{"settled" => %{"ok" => "verified"}}} =
+               tool(
+                 ctx,
+                 "main",
+                 "answer",
+                 Map.merge(agent, %{"dialog" => req, "label" => "allow"})
+               )
+    end
 
     # A claim still open on a state refuses a second fix as claimed.
     {:ok, _} = cue_until(ctx, &(&1.name == "app-unit-two" and &1.status == "finished"))
@@ -290,8 +293,9 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     assert {:ok, [%{state: ^stored} = r1, %{target: "app-unit-two"} = r2, %{id: ^id} = r3]} =
              Acts.rows(ctx.acts)
 
-    assert {r1.outcome, r2.outcome, r3.status} == {"not_verified", "verified", "claimed"}
+    assert {r1.outcome, r2.outcome, r3.status} == {"verified", "verified", "claimed"}
     refute "interrupt" in HeadlessStandIn.taken(ctx.dir)
+    assert "answer #{req_one}" in HeadlessStandIn.taken(ctx.dir)
     assert "answer #{req_two}" in HeadlessStandIn.taken(ctx.dir)
   end
 
@@ -345,6 +349,10 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     assert row.report == "taken"
     assert tool(ctx, "main", "stop", two) == %{"refused" => ["report", "queued"]}
 
+    # Its report handed but not delivered is what the stop meets when it acts, after its claim:
+    # the claim settles not verified, and the state stays claimed.
+    assert tool(ctx, "main", "stop", two) == %{"refused" => ["already_claimed", "main"]}
+
     assert %{"ok" => %{"done" => "stopped", "settled" => %{"ok" => "verified"}}} =
              tool(ctx, "main", "stop", %{"agent" => "app-unit-one"})
 
@@ -385,8 +393,9 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
 
     # Once the resumed process has finished, its state holds still for the next claim.
     assert {:ok, %{resumes: 1}} = cue_until(ctx, &(&1.status == "finished"))
+    # A second resume is refused by the state it would claim, so it takes no claim (F-149).
     assert tool(ctx, "main", "resume", one) == %{"refused" => "resumed_once"}
-    assert {:ok, [%{outcome: "verified"}, %{outcome: "not_verified"}]} = Acts.rows(ctx.acts)
+    assert {:ok, [%{outcome: "verified"}]} = Acts.rows(ctx.acts)
   end
 
   test "the operator acts as a parent of every main session, under its own name", ctx do

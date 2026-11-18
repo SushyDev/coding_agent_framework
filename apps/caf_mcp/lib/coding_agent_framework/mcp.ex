@@ -75,7 +75,10 @@ defmodule CodingAgentFramework.MCP do
     process died) and `stop(agent)` (once its report is delivered). Each reads the delegate's
     state (`Delegates.fix_state/3`), checks an answer's `dialog` against that state's `held`
     (an id it does not hold is refused `{:not_held, id}` with no claim, F-148, so the next
-    answer, with the right id, is taken), claims it in `Acts` (`Acts.claim/6`, act the tool's
+    answer, with the right id, is taken), checks what the fix needs of that state
+    (`Delegates.fix_check/2`, `Mains.fix_check/2`: a resume refused `:live` or `{:not_stopped,
+    status}`, a stop `{:report, status}`, takes no claim, F-149, so the state's next fix is
+    taken), claims it in `Acts` (`Acts.claim/6`, act the tool's
     name), then `Delegates.fix/5` acts only while that state is still the delegate's, and the claim
     is settled `verified` when the fix answered `ok` and the state read after has moved, else
     `not_verified`. A second fix of a state is refused `{:claimed, by}` or
@@ -826,9 +829,10 @@ defmodule CodingAgentFramework.MCP do
   # state moved. A claim left open by an unknown settle is a restart's to close as interrupted.
   # The operator's resume of a main session (F-143's new-1) claims its state read from
   # `Mains`, which resumes it only while that state is still its own. An answer's request is
-  # checked against the state's `held` before the claim, as its label is (F-148): a settled
-  # claim keeps its state, so one taken for a request the state does not hold would refuse the
-  # next answer, with the right id, until the state moved.
+  # checked against the state's `held` before the claim, as its label is (F-148), and what each
+  # fix needs of the state, by the part that acts (`fix_check/2`, `Team.tla`'s Needed, F-149): a
+  # settled claim keeps its state, so one taken for a fix the state refuses would refuse the
+  # state's next fix, the one it needs, until the state moved.
   defp act(ctx, caller, _id, tool, %{"agent" => agent} = a)
        when tool in @fixes and is_binary(agent) do
     with {:ok, fix} <- fix(tool, a),
@@ -836,6 +840,7 @@ defmodule CodingAgentFramework.MCP do
          {:ok, by} <- fixer(ctx, caller, agent, tool),
          {:ok, state} <- by.state.(),
          :ok <- held(fix, state),
+         :ok <- by.check.(fix, state),
          {:ok, claim} <- Acts.claim(ctx.acts, caller, agent, state, tool) do
       outcome = by.fix.(fix, state)
 
@@ -981,6 +986,7 @@ defmodule CodingAgentFramework.MCP do
         {:ok,
          %{
            state: fn -> mod.fix_state(server, parent, agent) end,
+           check: &mod.fix_check/2,
            fix: fn fix, state -> mod.fix(server, parent, agent, fix, state) end
          }}
 
@@ -990,6 +996,7 @@ defmodule CodingAgentFramework.MCP do
         {:ok,
          %{
            state: fn -> mod.fix_state(server, agent) end,
+           check: &mod.fix_check/2,
            fix: fn :resume, state ->
              with {:ok, %{name: name}} <-
                     mod.resume_main(server, agent, state: state, timeout: @start_wait),
@@ -1004,6 +1011,7 @@ defmodule CodingAgentFramework.MCP do
         {:ok,
          %{
            state: fn -> mod.fix_state(server, agent) end,
+           check: &mod.fix_check/2,
            fix: fn {:answer, request, label}, state ->
              mod.answer(server, agent, request, label, state: state)
            end
