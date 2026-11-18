@@ -1,19 +1,19 @@
-defmodule CodingAgentFramework.ExampleTest do
+defmodule CodingAgentFramework.SurfaceTest do
   # The whole tree under this test's own framework home, with its own tmux server and ports,
   # and the headless stand-in for Claude Code. The test sends no cue: what moves the rows is the
   # tree's own wiring.
   use ExUnit.Case, async: true
 
-  doctest CodingAgentFramework.Example.Config
-  doctest CodingAgentFramework.Example, only: [resources: 1, job_units: 3]
+  doctest CodingAgentFramework.Config
+  doctest CodingAgentFramework, only: [child_spec: 1, resources: 1, job_units: 3]
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, Cues, Example, HeadlessStandIn, Jobs, Mailbox, MCP}
+  alias CodingAgentFramework.{Accounts, Cues, HeadlessStandIn, Jobs, Mailbox, MCP}
   alias CodingAgentFramework.{Mains, Services}
   alias CodingAgentFramework.{Delegates, Operator, Scheduler, Tmux, Tracker}
   alias CodingAgentFramework.Acts
-  alias CodingAgentFramework.Example.Config
+  alias CodingAgentFramework.Config
   alias CodingAgentFramework.Sessions.Table
 
   setup do
@@ -27,7 +27,8 @@ defmodule CodingAgentFramework.ExampleTest do
     # The project's repository: Mains clones its checkout from it, under the home.
     project = %{origin: repo, trunk: "main", setup: [], setup_timeout: 10_000}
     project = Map.merge(project, %{env: %{"HOME" => dir}, branches: ~r/\Aunit\//, cap: 2})
-    home = Path.join(dir, "home")
+    # A home with a space, as macOS's `~/Library/Application Support/<app>` is (F-169).
+    home = Path.join(dir, "the home")
 
     {:ok, config} =
       Config.new(
@@ -45,7 +46,7 @@ defmodule CodingAgentFramework.ExampleTest do
 
     # A new home: no account has a reading, and a start still picks one (F-147).
     File.mkdir_p!(home)
-    {:ok, server} = Example.server(config)
+    {:ok, server} = CodingAgentFramework.server(config)
     on_exit(fn -> Tmux.kill_server(server) end)
     on_exit(fn -> end_recorded(dir) end)
     {:ok, sessions} = Table.open(Path.join(home, "caf.db"))
@@ -60,7 +61,7 @@ defmodule CodingAgentFramework.ExampleTest do
   end
 
   defp start(config) do
-    parts = Example.parts(start_supervised!({Example, config}))
+    parts = CodingAgentFramework.parts(start_supervised!({CodingAgentFramework, config}))
     keys = ~w(reaper cues inlet usage stream intake intake_http sampler sessions acts)a
     keys = keys ++ ~w(recoveries tracker scheduler delegates mover mailbox copies jobs services)a
     keys = keys ++ ~w(mains mcp mcp_http ends)a
@@ -136,7 +137,7 @@ defmodule CodingAgentFramework.ExampleTest do
     # A restart on the same home: the parts read their tables again, `Sessions` adopts the
     # held delegates, which ran on, and the tree comes back the same. The hooks' secret is the
     # home's, so the held delegates' hooks are still taken.
-    :ok = stop_supervised(Example)
+    :ok = stop_supervised({CodingAgentFramework, "t"})
     parts = start(ctx.config)
     {:ok, again} = settled(parts, ctx)
     assert Enum.map(again.agents, & &1.name) == Enum.map(tree.agents, & &1.name)
@@ -473,10 +474,17 @@ defmodule CodingAgentFramework.ExampleTest do
              Enum.filter(Mailbox.Table.open_rows(messages), &(&1.from_agent == "framework"))
   end
 
-  test "the app's PreToolUse callback denies a named tool through the account's hook", ctx do
+  test "the app's PreToolUse callback denies or corrects a call through the account's hook",
+       ctx do
     deny = fn
-      %{tool_name: "WebFetch"} -> {:deny, "No fetches in this app."}
-      _ -> :pass
+      %{tool_name: "WebFetch"} ->
+        {:deny, "No fetches in this app."}
+
+      %{tool_name: "Grep"} ->
+        {:allow, updated_input: %{"path" => "src"}, additional_context: "Code is in src."}
+
+      _ ->
+        :pass
     end
 
     me = self()
@@ -505,9 +513,31 @@ defmodule CodingAgentFramework.ExampleTest do
     assert %{"permissionDecision" => "deny", "permissionDecisionReason" => "No fetches" <> _} =
              JSON.decode!(post.("PreToolUse", "WebFetch"))["hookSpecificOutput"]
 
+    assert %{"permissionDecision" => "allow", "updatedInput" => %{"path" => "src"}} =
+             correction = JSON.decode!(post.("PreToolUse", "Grep"))["hookSpecificOutput"]
+
+    assert correction["additionalContext"] == "Code is in src."
     assert post.("PreToolUse", "Read") == ""
     assert post.("PostToolUse", "Read") == ""
     assert_receive {:after, %{tool_name: "Read", agent: nil}}, 5_000
+  end
+
+  test "the config's extensions are served on the agents' endpoint", ctx do
+    tool = %{
+      name: "board_cards",
+      description: "The board's cards.",
+      schema: %{"type" => "object"},
+      call: fn caller, _args -> {:ok, %{"caller" => caller}} end
+    }
+
+    config = %{
+      ctx.config
+      | extensions: [%{name: "board", scope: %{roles: [:main]}, tools: [tool]}]
+    }
+
+    parts = start(config)
+    assert "board_cards" in Enum.map(MCP.tools(parts.mcp, "app-main"), & &1.name)
+    assert {:ok, %{"caller" => "app-main"}} = MCP.call(parts.mcp, "app-main", "board_cards", %{})
   end
 
   # The checkout is the framework's own clone, and `start_main` goes through `MCP` to `Mains`:
@@ -581,10 +611,12 @@ defmodule CodingAgentFramework.ExampleTest do
   }
 
   test "an app that wires only the parts' declarations hands each part every cue it needs" do
-    cues = start_supervised!({Cues, parts: Example.reads()})
+    cues = start_supervised!({Cues, parts: CodingAgentFramework.reads()})
 
     # A stand-in for each part: it keeps whatever the part's own `cue` sends it.
-    stand_ins = for {key, _} <- Example.reads(), into: %{}, do: {key, spawn_link(&keep/0)}
+    stand_ins =
+      for {key, _} <- CodingAgentFramework.reads(), into: %{}, do: {key, spawn_link(&keep/0)}
+
     for {key, pid} <- stand_ins, do: Cues.started(cues, key, pid)
 
     for topic <- @topics do

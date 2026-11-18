@@ -1,13 +1,21 @@
-defmodule CodingAgentFramework.Example do
+defmodule CodingAgentFramework do
   @moduledoc """
-  The embedding app: one supervision tree that starts every built part on the workstation, in
-  order, from one `CodingAgentFramework.Example.Config`, and wires each part's cues and
-  callbacks. The libraries start nothing; this is where they are started.
+  Runs and supervises Claude Code agents across Claude accounts and machines: the app's
+  surface ("The app's surface" in `docs/design.md`, B3's start, F-169). One config in, checked
+  whole (`CodingAgentFramework.Config.new/1`, each refusal naming its key, the app's extensions
+  and tool callbacks among them), and one supervisor that starts every built part on the
+  workstation in order and wires each part's cues and callbacks. The other apps are libraries
+  that start nothing; this supervisor is where they are started, and the embedding app wires
+  nothing else.
 
-      {:ok, config} = Config.new(home: "/srv/caf", instance: "a", programs: programs, ...)
-      {:ok, sup} = CodingAgentFramework.Example.start_link(config)
-      CodingAgentFramework.Example.parts(sup).mcp
-      #=> #PID<0.321.0>
+      {:ok, config} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", ...)
+      children = [{CodingAgentFramework, config}]
+      Supervisor.start_link(children, strategy: :one_for_one)
+
+  or `CodingAgentFramework.start_link(config)`, and then `parts(sup).mcp` for the operator's
+  calls. The protocols the parts follow are written and checked first, as TLA+ specs in
+  `model/tla/` (`bin/check-model`). Two instances, each with its own home, ports and instance
+  name, run in one app: nothing in it is named globally.
 
   **Order.** The tree is `:rest_for_one`, and the host's `Shell.Reaper` is its first child, so
   every process that runs commands with it starts after it and is restarted with it (the
@@ -65,15 +73,44 @@ defmodule CodingAgentFramework.Example do
 
   alias CodingAgentFramework.{Scheduler, Sessions, Shell, Stream, Tmux, TmuxSampler, Tracker}
   alias CodingAgentFramework.{ToolHome, Transcripts, Usage}
-  alias CodingAgentFramework.Example.{Config, Ends}
+  alias CodingAgentFramework.{Config, Ends}
 
   require Logger
 
   @local {127, 0, 0, 1}
 
   @doc """
-  Starts the tree. Answers `{:ok, pid}`, `{:refused, reason}` when the config's programs,
-  accounts or home cannot be used, or `{:unknown, reason}` when a write under the home fails.
+  The tree as one child of the app's own supervisor, by the instance's name, so two instances
+  are two children. A start that `start_link/1` refuses or cannot settle fails the app's start
+  with `{:refused, reason}` or `{:unknown, reason}` as its error.
+
+      iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
+      ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
+      ...>   env: %{})
+      iex> %{id: id, type: :supervisor} = CodingAgentFramework.child_spec(c)
+      iex> id
+      {CodingAgentFramework, "a"}
+  """
+  @spec child_spec(Config.t()) :: Supervisor.child_spec()
+  def child_spec(%Config{} = c) do
+    %{id: {__MODULE__, c.instance}, start: {__MODULE__, :start_child, [c]}, type: :supervisor}
+  end
+
+  @doc false
+  # A supervisor takes `{:ok, pid}` or `{:error, reason}`; the explicit outcomes become the
+  # error, unchanged.
+  def start_child(c) do
+    case start_link(c) do
+      {:ok, pid} -> {:ok, pid}
+      {:error, _} = error -> error
+      other -> {:error, other}
+    end
+  end
+
+  @doc """
+  Starts the tree from a config `Config.new/1` checked. Answers `{:ok, pid}`, `{:refused,
+  reason}` when the config's programs, accounts or home cannot be used, or `{:unknown,
+  reason}` when a write under the home fails.
   """
   @spec start_link(Config.t()) :: Supervisor.on_start() | {:refused, term} | {:unknown, term}
   def start_link(%Config{} = c) do
@@ -449,7 +486,8 @@ defmodule CodingAgentFramework.Example do
             mover: {Mover, pid.(:mover)},
             sessions: {Sessions, pid.(:sessions)},
             mains: {Mains, pid.(:mains)},
-            lease: &job_units(c, &1, &2)}
+            lease: &job_units(c, &1, &2),
+            extensions: c.extensions}
          end},
         {:mcp_http,
          fn pid ->
@@ -507,10 +545,10 @@ defmodule CodingAgentFramework.Example do
   What the `Scheduler` leases: the config's `resources` (an agent's seat, a heavy run's slot),
   and each project's landing lock, `land:<project>`, one at a time.
 
-      iex> {:ok, c} = CodingAgentFramework.Example.Config.new(home: "/srv/caf", instance: "a",
+      iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
       ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
       ...>   env: %{}, projects: %{"web" => %{}})
-      iex> CodingAgentFramework.Example.resources(c)
+      iex> CodingAgentFramework.resources(c)
       %{"land:web" => 1, "seat" => 4, "slot" => 2}
   """
   @spec resources(Config.t()) :: %{String.t() => pos_integer}
@@ -521,14 +559,14 @@ defmodule CodingAgentFramework.Example do
   The units a job asks for, by the class its caller names: the config's `job_lease` for the
   class, and for a landing also its project's landing lock, all in one gang lease.
 
-      iex> {:ok, c} = CodingAgentFramework.Example.Config.new(home: "/srv/caf", instance: "a",
+      iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
       ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
       ...>   env: %{}, projects: %{"web" => %{}})
-      iex> CodingAgentFramework.Example.job_units(c, :landing, "web")
+      iex> CodingAgentFramework.job_units(c, :landing, "web")
       {:ok, %{"land:web" => 1, "slot" => 1}}
-      iex> CodingAgentFramework.Example.job_units(c, :heavy, "web")
+      iex> CodingAgentFramework.job_units(c, :heavy, "web")
       {:ok, %{"slot" => 1}}
-      iex> CodingAgentFramework.Example.job_units(c, :landing, "mobile")
+      iex> CodingAgentFramework.job_units(c, :landing, "mobile")
       {:refused, {:no_project, "mobile"}}
   """
   @spec job_units(Config.t(), atom, String.t()) :: {:ok, map} | {:refused, term}

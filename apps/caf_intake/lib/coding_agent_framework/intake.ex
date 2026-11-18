@@ -35,6 +35,14 @@ defmodule CodingAgentFramework.Intake do
     deadline `tool_deadline:`, 5 s by default, under the hook's 10 s timeout. `:pass`, a crash,
     an exit or a value that is not a decision is a pass. A decision's row has the actor `app`,
     and a second post of the call's key answers the row's decision again, or an empty body.
+    The callback corrects a call rather than refusing it where it can (F-169): `{:allow,
+    updated_input: map, additional_context: text}` runs the call with the input it gives, and
+    `{:deny, reason, additional_context: text}` refuses it; each key is optional. The context is
+    added to what the agent reads next, at most 10,000 characters, and is best written as facts
+    ("`land` runs the gates"), not orders. A correction is a decision as any other: its row has
+    the response it sent, the input included. An answer out of shape (a longer context, an
+    input that is not a map, a key it does not know) is a pass, and its row's `problem` names
+    why: `["context_too_long", length]` or `["bad_answer", key]`.
   - A `PostToolUse` is answered 200 at once and handed to the `post_tool_use:` callback in a
     process of its own, with no row. A tool call's row keeps `data` empty until a decision is
     taken: `Transcripts` holds the tool's input.
@@ -85,6 +93,8 @@ defmodule CodingAgentFramework.Intake do
   @secret_chars ~r/\A[A-Za-z0-9._~+\/=-]{1,256}\z/
   @timeout 5_000
   @tools %{pre_tool_use: "PreToolUse", post_tool_use: "PostToolUse", stop: "PostToolUse"}
+  # Claude Code 2.1.322 reads a hook's `additionalContext` up to this many characters.
+  @context_max 10_000
 
   @typedoc """
   A tool call, as a callback gets it: the agent (`nil` when the `agent:` lookup knows none), its
@@ -121,7 +131,9 @@ defmodule CodingAgentFramework.Intake do
   @doc """
   Starts an `Intake`. Options: `db:` (this instance's SQLite path), `host:` (the node's host
   name), and optionally `notify:` (a function of one cue), `deadline:` (ms a hold is kept),
-  `pre_tool_use:` (`fun(tool_event) -> :allow | {:deny, reason} | :ask | :pass`),
+  `pre_tool_use:` (`fun(tool_event) -> :allow | {:deny, reason} | :ask | :pass`, or a
+  correction: `{:allow, updated_input: map, additional_context: text}` or `{:deny, reason,
+  additional_context: text}`),
   `post_tool_use:` (`fun(tool_event)`, its value ignored), `tool_deadline:` (ms the first is
   waited for, under 8 s), `waiter_deadline:` (ms a waiter is held, under the waiter hook's
   `timeout`; 7,080,000 by default, under `waiter_hook/5`'s 7,200 s), `beat:` (ms between a
@@ -713,8 +725,9 @@ defmodule CodingAgentFramework.Intake do
   end
 
   # An empty response to a held request, and its row's end: Hold's Empty.
-  defp release(state, id, hold, row_end, actor \\ nil) do
-    move(state, id, hold, "held", row_end, nil, actor: actor)
+  # `opts`: `actor:` (who passed it) and `problem:` (why an answer was no decision).
+  defp release(state, id, hold, row_end, opts \\ []) do
+    move(state, id, hold, "held", row_end, nil, opts)
     send(hold.pid, {hold.ref, :release})
     drop(state, id, hold)
   end
@@ -797,10 +810,10 @@ defmodule CodingAgentFramework.Intake do
         put_in(state.holds[id], hold |> Map.put(:cap, true) |> Map.put(:reason, reason))
 
       {:block, reason} when is_binary(reason) ->
-        release(state, id, hold, "passed", "capped")
+        release(state, id, hold, "passed", actor: "capped")
 
       _ ->
-        release(state, id, hold, "passed", if(answer == :pass, do: actor))
+        release(state, id, hold, "passed", actor: if(answer == :pass, do: actor))
     end
   end
 
@@ -817,7 +830,7 @@ defmodule CodingAgentFramework.Intake do
   end
 
   defp cap_answer(state, id, hold, :end, _from),
-    do: {:reply, {:ok, :sent}, release(state, id, hold, "passed", "person")}
+    do: {:reply, {:ok, :sent}, release(state, id, hold, "passed", actor: "person")}
 
   # The Stop output Claude Code 2.1.322 reads: a block sends the agent back with the reason.
   defp stop_block(reason), do: JSON.encode!(%{"decision" => "block", "reason" => reason})
@@ -881,6 +894,8 @@ defmodule CodingAgentFramework.Intake do
       {nil, _} -> {:noreply, state}
       {%{deciding: true}, _} -> {:noreply, state}
       {hold, :pass} -> {:noreply, release(state, id, hold, "passed")}
+      # An answer out of shape is no decision, and its row says why.
+      {hold, {:refused, why}} -> {:noreply, release(state, id, hold, "passed", problem: why)}
       {_, {:decision, body}} -> {:noreply, decided(state, decide(state, id, body, "app"))}
     end
   end
@@ -990,12 +1005,24 @@ defmodule CodingAgentFramework.Intake do
   end
 
   # The PreToolUse output in the shape Claude Code 2.1.322 reads. It keeps a reason only beside
-  # deny or ask, so an allow carries none.
+  # deny or ask, so an allow carries none; `updatedInput` only beside allow.
   defp tool_response(:allow), do: tool_response("allow", %{})
   defp tool_response(:ask), do: tool_response("ask", %{})
 
   defp tool_response({:deny, reason}) when is_binary(reason),
     do: tool_response("deny", %{"permissionDecisionReason" => reason})
+
+  # A correction (F-169): the call runs with the input the app gives, and Claude Code adds the
+  # context to what the agent reads next. A key out of shape refuses the whole answer.
+  defp tool_response({:allow, opts}) when is_list(opts) and opts != [] do
+    with {:ok, fields} <- corrections(opts, [:updated_input, :additional_context]),
+         do: tool_response("allow", fields)
+  end
+
+  defp tool_response({:deny, reason, opts}) when is_binary(reason) and is_list(opts) do
+    with {:ok, fields} <- corrections(opts, [:additional_context]),
+         do: tool_response("deny", Map.put(fields, "permissionDecisionReason", reason))
+  end
 
   defp tool_response(_), do: :pass
 
@@ -1005,6 +1032,31 @@ defmodule CodingAgentFramework.Intake do
 
     {:decision, JSON.encode!(%{"hookSpecificOutput" => output})}
   end
+
+  defp corrections(opts, allowed) do
+    Enum.reduce_while(opts, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
+      case correction(key, value, key in allowed) do
+        {:ok, field} -> {:cont, {:ok, Map.merge(acc, field)}}
+        refused -> {:halt, refused}
+      end
+    end)
+  rescue
+    # A list that is not a keyword list.
+    _ in [FunctionClauseError, CaseClauseError, MatchError] -> {:refused, {:bad_answer, :opts}}
+  end
+
+  defp correction(key, _value, false), do: {:refused, {:bad_answer, key}}
+
+  defp correction(:updated_input, input, true) when is_map(input),
+    do: {:ok, %{"updatedInput" => input}}
+
+  defp correction(:additional_context, text, true) when is_binary(text) do
+    if String.length(text) <= @context_max,
+      do: {:ok, %{"additionalContext" => text}},
+      else: {:refused, {:context_too_long, String.length(text)}}
+  end
+
+  defp correction(key, _value, true), do: {:refused, {:bad_answer, key}}
 
   # The PermissionRequest output in the shape Claude Code 2.1.322 reads (F-24).
   defp permission_response(decision) do

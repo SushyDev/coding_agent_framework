@@ -135,17 +135,30 @@ defmodule CodingAgentFramework.Intake.Table do
 
   @doc """
   Moves row `id` from hold `from` to `to`, with `decision` when given, and the options
-  `actor:`, `data:` and `prompt:` when given (a tool call's row gets its input only with a
-  decision). False when it was not `from`.
+  `actor:`, `data:`, `prompt:` and `problem:` when given (a tool call's row gets its input only
+  with a decision; a callback's answer out of shape is the problem of the row it passes).
+  False when it was not `from`.
   """
   @spec move(db, integer, String.t(), String.t(), String.t() | nil, integer, keyword) :: boolean
   def move(db, id, from, to, decision, at, opts \\ []) do
     sql =
       "UPDATE intake_events SET hold = ?3, decision = coalesce(?4, decision), written_at = ?5, " <>
-        "actor = coalesce(?6, actor), data = coalesce(?7, data), prompt = coalesce(?8, prompt) " <>
-        "WHERE id = ?1 AND hold = ?2 RETURNING id"
+        "actor = coalesce(?6, actor), data = coalesce(?7, data), prompt = coalesce(?8, prompt), " <>
+        "problem = coalesce(?9, problem) WHERE id = ?1 AND hold = ?2 RETURNING id"
 
-    values = [id, from, to, decision, at, opts[:actor], opts[:data], opts[:prompt]]
+    values =
+      [
+        id,
+        from,
+        to,
+        decision,
+        at,
+        opts[:actor],
+        opts[:data],
+        opts[:prompt],
+        Store.text(opts[:problem])
+      ]
+
     Store.query(db, sql, values) != []
   end
 

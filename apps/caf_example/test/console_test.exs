@@ -8,9 +8,9 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{HeadlessStandIn, Tmux}
-  alias CodingAgentFramework.Example
-  alias CodingAgentFramework.Example.{Config, ConfigFile, Console, Run}
+  alias CodingAgentFramework.{HeadlessStandIn, Shell, Tmux}
+  alias CodingAgentFramework.Config
+  alias CodingAgentFramework.Example.{ConfigFile, Console, Run}
 
   @root Path.expand("../../..", __DIR__)
 
@@ -137,7 +137,7 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
 
   test "bin/caf-example starts the app with the stand-in and reaches the console", ctx do
     {:ok, config} = ConfigFile.read(path = write!(ctx, ctx.data), ctx.env)
-    {:ok, server} = Example.server(config)
+    {:ok, server} = CodingAgentFramework.server(config)
     on_exit(fn -> Tmux.kill_server(server) end)
     on_exit(fn -> end_recorded(ctx.dir) end)
 
@@ -153,8 +153,9 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
 
     send_line(port, ~s|attach(caf, "app-main")|)
 
-    {:ok, _} =
-      read_until(port, "#{program!(:tmux)} -S #{config.home}/tmux.sock attach -t '=app-main'")
+    socket = Shell.shell_quote(Path.join(config.home, "tmux.sock"))
+    tmux = Shell.shell_quote(program!(:tmux))
+    {:ok, _} = read_until(port, "#{tmux} -S #{socket} attach -t '=app-main'")
 
     # A new shell evaluates the dot file again, as after IEx's interrupt (F-153's new-5): the
     # app started once is `caf` again, and the VM runs on.
@@ -214,7 +215,7 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
     # and a start picks the first.
     path = write!(ctx, ctx.data)
     {:ok, config} = ConfigFile.read(path, ctx.env)
-    {:ok, server} = Example.server(config)
+    {:ok, server} = CodingAgentFramework.server(config)
     on_exit(fn -> Tmux.kill_server(server) end)
     on_exit(fn -> end_recorded(ctx.dir) end)
     {:ok, caf} = Console.start(path, ctx.env)

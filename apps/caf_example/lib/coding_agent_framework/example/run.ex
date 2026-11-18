@@ -14,8 +14,7 @@ defmodule CodingAgentFramework.Example.Run do
 
   use GenServer
 
-  alias CodingAgentFramework.Example
-  alias CodingAgentFramework.Example.Config
+  alias CodingAgentFramework.Config
   alias CodingAgentFramework.Intake.Table, as: IntakeTable
   alias CodingAgentFramework.Sessions.Agents
 
@@ -25,7 +24,7 @@ defmodule CodingAgentFramework.Example.Run do
 
   @doc """
   Starts the tree from `config`. Answers `{:ok, run}`, or the tree's own refusal or unknown
-  (`Example.start_link/1`).
+  (`CodingAgentFramework.start_link/1`).
   """
   @spec start(Config.t()) :: {:ok, pid} | {:refused, term} | {:unknown, term}
   def start(%Config{} = config) do
@@ -57,7 +56,7 @@ defmodule CodingAgentFramework.Example.Run do
     Process.flag(:trap_exit, true)
 
     # After the tree, which makes the home and its tables.
-    with {:ok, sup} <- Example.start_link(config),
+    with {:ok, sup} <- CodingAgentFramework.start_link(config),
          {:ok, agents} <- Agents.open(Config.path(config, "caf.db"), config.workstation),
          {:ok, intake} <- IntakeTable.open(Config.path(config, "caf.db")) do
       {:ok, %{config: config, agents: agents, intake: intake, sup: sup, down: nil}}
@@ -69,7 +68,7 @@ defmodule CodingAgentFramework.Example.Run do
 
   @impl true
   def handle_call(:info, _from, s) do
-    parts = if s.sup, do: Example.parts(s.sup), else: %{}
+    parts = if s.sup, do: CodingAgentFramework.parts(s.sup), else: %{}
     info = %{config: s.config, agents: s.agents, intake: s.intake, parts: parts, down: s.down}
     {:reply, info, s}
   end

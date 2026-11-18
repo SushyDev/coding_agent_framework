@@ -492,6 +492,19 @@ defmodule CodingAgentFramework.MCP do
     with {:ok, ctx} <- ask(mcp, :ctx), do: @tools ++ app_tools(ctx, agent)
   end
 
+  @doc """
+  The check `start_link/1` runs on its `extensions:`, beside this endpoint's own tools and
+  under its deadline (`tool_timeout` less `margin`), so an app's config can be checked whole
+  before anything starts (`CodingAgentFramework.Config.new/1`). Answers the bundles' tools,
+  as `CodingAgentFramework.Extension.check/3` does, or its refusal.
+
+      iex> CodingAgentFramework.MCP.extensions([%{name: "message"}], 3_600_000, 60_000)
+      {:refused, {:extension, "message", :clashes}}
+  """
+  @spec extensions(term, pos_integer, pos_integer) :: {:ok, [map]} | {:refused, term}
+  def extensions(extensions, tool_timeout, margin),
+    do: Extension.check(extensions, Enum.map(@tools, & &1.name), tool_timeout - margin)
+
   defp app_tools(ctx, agent) do
     for t <- ctx.app_tools,
         Grants.may_call?(ctx.grants, agent, t.scope) == :ok,
@@ -1103,9 +1116,8 @@ defmodule CodingAgentFramework.MCP do
     with true <-
            (is_integer(margin) and is_integer(tool_timeout) and margin > 0 and
               margin < tool_timeout) or {:refused, {:bad, :tool_timeout}},
-         names = Enum.map(@tools, & &1.name),
          ext = Keyword.get(opts, :extensions, []),
-         {:ok, app} <- Extension.check(ext, names, tool_timeout - margin),
+         {:ok, app} <- extensions(ext, tool_timeout, margin),
          :ok <- File.mkdir_p(Path.join(dir, "agents")),
          {:ok, db} <- Table.open(Path.join(dir, "mcp.db")) do
       ctx =

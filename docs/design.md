@@ -464,7 +464,11 @@ a scope, and its tools, each a name under the bundle's, a schema, a description 
 of the caller and the arguments), served on the agents' MCP endpoint beside the framework's
 tools, listed and called only where its scope holds the agent (`Grants.may_call?/3`), each call
 a row in `mcp_calls`, its crash and its deadline answered `unknown`. Several tools per bundle
-stand until B5 makes the verbs (F-154's new-1).
+stand until B5 makes the verbs (F-154's new-1). The app's `PreToolUse` callback corrects a
+call (F-169): `{:allow, updated_input: map, additional_context: text}` and `{:deny, reason,
+additional_context: text}`, written as Claude Code's `updatedInput` and `additionalContext`
+(at most 10,000 characters; a longer one, or any answer out of shape, is a pass whose row's
+`problem` names why).
 
 An extension adds no protocol of its own: its events go through `Mailbox`'s subscriptions, its
 acts through `Team`'s claims, its questions to a person through `Prompts`, and its context is a
@@ -582,6 +586,14 @@ One config and one supervisor in; a few calls and one stream of cues out.
   `view(caf, scope)`, `metrics(caf, query)`, `digest(caf, window)` and `query(caf, filter)` read.
 - **Cues.** `subscribe(caf, topics)`: one stream of `{topic, ids}` for every write, from the
   `Ledger`. The app re-reads by id, as every view does; `prompts` is the inbox's topic.
+
+Built so far (F-169, B3's start): `CodingAgentFramework.child_spec/1` and `start_link/1` in
+`caf_surface`, from one `CodingAgentFramework.Config` checked whole by `Config.new/1` (a key
+it does not know, the tool callbacks, the extensions by `MCP.extensions/3`, and a home too long
+for its tmux socket are each refused by name); the supervisor is the tree `caf_example` used
+to wire, `Ends` included, since an app that left it out would keep an ended owner's services
+(F-169's new-1). `caf_example` keeps its config file, its console and `Run`. The calls and the
+cues are B3's rest.
 
 An app like a development loop's (views, builders, gates, landings) needs nothing more: a
 builder is a `delegate` with `review`, a gate is a heavy command or a job, a landing a job of

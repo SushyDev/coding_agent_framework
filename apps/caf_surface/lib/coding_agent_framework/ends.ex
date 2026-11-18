@@ -1,4 +1,4 @@
-defmodule CodingAgentFramework.Example.Ends do
+defmodule CodingAgentFramework.Ends do
   @moduledoc """
   The owner's end of each agent that ended, in a process of its own: `act` (the app's call of
   `Services.owner_ended/3`) ends the services it owns, which waits on hosts, and a cue runs in

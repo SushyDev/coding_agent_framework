@@ -33,8 +33,9 @@ defmodule CodingAgentFramework.Example.Console do
   `Intake.Table`, and the rest through each part's own functions; it opens no part's table.
   """
 
-  alias CodingAgentFramework.{Acts, Mailbox, Mains, MCP, Operator, Scheduler, Sessions}
-  alias CodingAgentFramework.Example.{Config, ConfigFile, Run}
+  alias CodingAgentFramework.{Acts, Mailbox, Mains, MCP, Operator, Scheduler, Sessions, Shell}
+  alias CodingAgentFramework.Config
+  alias CodingAgentFramework.Example.{ConfigFile, Run}
   alias CodingAgentFramework.Intake.Table, as: IntakeTable
   alias CodingAgentFramework.Sessions.Agents
 
@@ -384,7 +385,8 @@ defmodule CodingAgentFramework.Example.Console do
   @spec attach(pid, String.t()) :: :ok
   def attach(caf, agent) do
     c = info(caf).config
-    say("#{c.programs.tmux} -S #{Config.path(c, "tmux.sock")} attach -t '=#{agent}'")
+    socket = Shell.shell_quote(Config.path(c, "tmux.sock"))
+    say("#{Shell.shell_quote(c.programs.tmux)} -S #{socket} attach -t '=#{agent}'")
   end
 
   defp banner(caf, c) do

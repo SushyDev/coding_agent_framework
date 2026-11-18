@@ -42,7 +42,7 @@ defmodule CodingAgentFramework.ToolHome do
       iex> List.keyfind(env, "GH_CONFIG_DIR", 0)
       {"GH_CONFIG_DIR", "/srv/caf/gh"}
       iex> List.keyfind(env, "GIT_SSH_COMMAND", 0)
-      {"GIT_SSH_COMMAND", "'/run/bin/ssh' '-F' '/srv/caf/ssh/config' '-o' 'UserKnownHostsFile=/srv/caf/ssh/known_hosts'"}
+      {"GIT_SSH_COMMAND", ~s('/run/bin/ssh' '-F' '/srv/caf/ssh/config' '-o' 'UserKnownHostsFile="/srv/caf/ssh/known_hosts"')}
   """
 
   alias CodingAgentFramework.Shell
@@ -78,16 +78,24 @@ defmodule CodingAgentFramework.ToolHome do
 
   @doc """
   The options every ssh the framework runs takes before its destination: the home's ssh config
-  and known hosts. A path holding whitespace is refused by `prepare/2`, since ssh reads several
-  known hosts files from one value split on it.
+  and known hosts. ssh reads several known hosts files from one value split on whitespace, so
+  the path goes between double quotes, which ssh takes as one word (F-169): a home with a space,
+  such as macOS's `~/Library/Application Support/<app>`, keeps one file. A home holding a
+  double quote, a backslash or a `%` (an ssh token) is refused by `prepare/2`.
 
       iex> CodingAgentFramework.ToolHome.ssh_options("/srv/caf")
-      ["-F", "/srv/caf/ssh/config", "-o", "UserKnownHostsFile=/srv/caf/ssh/known_hosts"]
+      ["-F", "/srv/caf/ssh/config", "-o", ~s(UserKnownHostsFile="/srv/caf/ssh/known_hosts")]
   """
   @spec ssh_options(Path.t()) :: [String.t()]
   def ssh_options(home) do
     ssh = Path.join(home, "ssh")
-    ["-F", Path.join(ssh, "config"), "-o", "UserKnownHostsFile=" <> Path.join(ssh, "known_hosts")]
+
+    [
+      "-F",
+      Path.join(ssh, "config"),
+      "-o",
+      ~s(UserKnownHostsFile=") <> Path.join(ssh, "known_hosts") <> ~s(")
+    ]
   end
 
   @doc """
@@ -118,15 +126,15 @@ defmodule CodingAgentFramework.ToolHome do
   `:projects` (project name to `project`, default none; with no home author each field is
   required), `:gh` and `:ssh_keygen` (absolute paths).
 
-  Answers `:ok`, or `{:refused, reason}` before any git file is written: `{:whitespace, home}`,
-  `{:bad, field}`, `{:no_signing_key, path}` (a key or its `.pub` missing: `bin/caf-login --git`
+  Answers `:ok`, or `{:refused, reason}` before any git file is written: `{:bad_home, home}`
+  (not absolute, or holding a control character, `"`, `\\` or `%`), `{:bad, field}`, `{:no_signing_key, path}` (a key or its `.pub` missing: `bin/caf-login --git`
   makes it), or `{:file, path, why}`.
   """
   @spec prepare(Path.t(), keyword) :: :ok | {:refused, term}
   def prepare(home, opts) do
     projects = Keyword.get(opts, :projects, %{})
 
-    with :ok <- no_whitespace(home),
+    with :ok <- home(home),
          {:ok, author} <- author(Keyword.get(opts, :author)),
          {:ok, gh} <- absolute(opts, :gh),
          {:ok, keygen} <- absolute(opts, :ssh_keygen),
@@ -141,10 +149,12 @@ defmodule CodingAgentFramework.ToolHome do
     end
   end
 
-  defp no_whitespace(home) do
-    if is_binary(home) and Path.type(home) == :absolute and not (home =~ ~r/[\s[:cntrl:]]/),
+  # A space is fine: every program takes the home as one argument, and ssh between quotes.
+  # What would break ssh's quoting or be read as its token is refused.
+  defp home(home) do
+    if is_binary(home) and Path.type(home) == :absolute and not (home =~ ~r/[[:cntrl:]"\\%]/),
       do: :ok,
-      else: {:refused, {:whitespace, home}}
+      else: {:refused, {:bad_home, home}}
   end
 
   defp author(%{name: name, email: email, signing_key: key}) do
