@@ -40,8 +40,10 @@ defmodule CodingAgentFramework.Sessions do
 
   **An interactive start's prompt** (`prompt:`, F-137: `Mailbox`'s `launch` transport) is
   written to `<dtach dir>/<name>.prompt`, and the hold runs `ClaudeCLI.prompted/5`, which reads
-  it into the last argument, after `--`, and removes it; a prompt over `ClaudeCLI.prompt_max/0`
-  bytes is refused. Claude Code runs it as the session's first turn.
+  it into the last argument, after `--`, and removes it; a prompt over `ClaudeCLI.prompt_max/1`
+  bytes for the host's operating system (`Programs.os/1`) is refused, as is any prompt on a host
+  whose limit is not known. Claude Code runs it as the session's first turn; `Mailbox` sends a
+  longer first row as a pointer to its file.
 
   **A startup dialog** (F-140, `model/tla/Dialog.tla`). Before its first turn an interactive
   session may show the folder trust dialog, then the external imports dialog; neither sends a
@@ -513,6 +515,7 @@ defmodule CodingAgentFramework.Sessions do
         waiter: waiter,
         git: Programs.fetch(programs, :git),
         cat: Programs.fetch(programs, :cat),
+        prompt_max: ClaudeCLI.prompt_max(Programs.os(programs)),
         inlet: Keyword.get(opts, :inlet),
         dialog: Keyword.get(opts, :dialog, &Dialog.ask/2),
         look: Keyword.get(opts, :look, 5_000),
@@ -1936,7 +1939,8 @@ defmodule CodingAgentFramework.Sessions do
 
   defp prompt(state, prompt) when is_binary(prompt) and prompt != "" do
     cond do
-      byte_size(prompt) > ClaudeCLI.prompt_max() -> {:refused, {:too_long, :prompt}}
+      not match?({:ok, _}, state.prompt_max) -> state.prompt_max
+      byte_size(prompt) > elem(state.prompt_max, 1) -> {:refused, {:too_long, :prompt}}
       not String.valid?(prompt) -> {:refused, {:bad, :prompt}}
       not match?({:ok, _}, state.cat) -> {:refused, {:no_program, :cat}}
       true -> {:ok, prompt}

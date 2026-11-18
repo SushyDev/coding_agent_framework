@@ -52,5 +52,14 @@ defmodule CodingAgentFramework.ShellTest do
     assert {:ok, "/" <> _} = Programs.fetch(programs, :tmux)
     assert {:refused, {:unknown_names, [:vim]}} = Programs.find(host(), [:tmux, :vim])
     assert {:refused, {:bad_paths, %{tmux: "tmux"}}} = Programs.new(host(), %{tmux: "tmux"})
+
+    # F-155: the host's operating system, which bounds a launch's argument, read beside the
+    # paths by `uname -s`, and a local host's given paths take this VM's own.
+    assert Programs.os(programs) == Programs.local_os()
+    assert Programs.local_os() in [:darwin, :linux]
+    assert {:ok, given} = Programs.new(host(), %{})
+    assert Programs.os(given) == Programs.local_os()
+    assert {:ok, linux} = Programs.new(host(), %{}, os: :linux)
+    assert Programs.os(linux) == :linux
   end
 end

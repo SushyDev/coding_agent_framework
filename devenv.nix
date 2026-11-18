@@ -18,6 +18,9 @@ let
   #   - wc, lsof: a service's log offset at its start, and whether a forward's own ssh holds its
   #     local port (Services).
   #   - curl: a main session's waiter hook (Intake.waiter_hook), run by its contract test.
+  #   - ssh-keygen: the home's commit signing key (bin/caf-login --git) and git's check of a
+  #     signature (gpg.ssh.program).
+  #   - cloudflared: a tunnel an app or a person configures; the framework never runs it.
   #   - sh, bash, rm, mv, env, kill, ps, cat, tail, head, mkdir, mkfifo, stty, echo, sleep, true: the
   #     POSIX tools the tests and scripts call (stty: the screen stand-in reads keys raw).
   #   - tlc and java: TLA+ checks of model/tla (bin/check-model). Development only.
@@ -34,6 +37,8 @@ let
     WC = lib.getExe' pkgs.coreutils "wc";
     LSOF = lib.getExe pkgs.lsof;
     CURL = lib.getExe pkgs.curl;
+    SSH_KEYGEN = lib.getExe' pkgs.openssh "ssh-keygen";
+    CLOUDFLARED = lib.getExe pkgs.cloudflared;
     SH = lib.getExe' pkgs.bash "sh";
     BASH = lib.getExe pkgs.bash;
     RM = lib.getExe' pkgs.coreutils "rm";
@@ -67,6 +72,7 @@ let
     [ "rsync" "$CAF_RSYNC --version" "version ${pkgs.rsync.version}" ]
     [ "ssh" "$CAF_SSH -V" "OpenSSH_${pkgs.openssh.version}" ]
     [ "flock" "$CAF_FLOCK --version" "flock ${pkgs.flock.version}" ]
+    [ "cloudflared" "$CAF_CLOUDFLARED --version" "version ${pkgs.cloudflared.version}" ]
   ];
   otpVersion = ''{ok, V} = file:read_file(filename:join([code:root_dir(), "releases", erlang:system_info(otp_release), "OTP_VERSION"])), io:put_chars(V), halt().'';
 
@@ -117,6 +123,7 @@ in
     pkgs.rsync
     pkgs.openssh
     pkgs.flock
+    pkgs.cloudflared
     tlaplus
     jdk
   ];

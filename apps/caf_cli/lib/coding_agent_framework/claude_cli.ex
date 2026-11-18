@@ -202,14 +202,32 @@ defmodule CodingAgentFramework.ClaudeCLI do
   exec "$@" -- "$p"
   """
 
-  # The longest prompt a launch carries, in bytes. macOS takes about 1 MiB of arguments and
-  # environment together (`getconf ARG_MAX` is 1 048 576; one argument of 900 000 bytes passed
-  # and one of 1 100 000 did not, measured for F-137), so half of it leaves room for the rest.
-  @prompt_max 524_288
+  # The longest prompt a launch carries, in bytes, per operating system. macOS takes about 1 MiB
+  # of arguments and environment together (`getconf ARG_MAX` is 1 048 576; one argument of
+  # 900 000 bytes passed and one of 1 100 000 did not, measured for F-137), so half of it leaves
+  # room for the rest. Linux takes more in all but refuses any one argument over
+  # `MAX_ARG_STRLEN`, 131 072 bytes with its closing NUL (32 pages of 4 KiB), with E2BIG; 4 KiB
+  # under it leaves a margin.
+  @prompt_max %{darwin: 524_288, linux: 126_976}
 
-  @doc "The longest prompt, in bytes, a launch carries as its argument (`prompted/5`)."
-  @spec prompt_max() :: pos_integer
-  def prompt_max, do: @prompt_max
+  @doc """
+  The longest prompt, in bytes, a launch carries as its argument (`prompted/5`) on a host of
+  operating system `os` (`CodingAgentFramework.Programs.os/1`): `{:ok, bytes}`, or
+  `{:refused, {:os, os}}` for one whose limit was never measured. A longer first row goes as a
+  pointer to its file (`CodingAgentFramework.Mailbox.launch/4`).
+
+      iex> CodingAgentFramework.ClaudeCLI.prompt_max(:linux)
+      {:ok, 126_976}
+      iex> CodingAgentFramework.ClaudeCLI.prompt_max(:unknown)
+      {:refused, {:os, :unknown}}
+  """
+  @spec prompt_max(atom) :: {:ok, pos_integer} | {:refused, {:os, atom}}
+  def prompt_max(os) do
+    case Map.fetch(@prompt_max, os) do
+      {:ok, max} -> {:ok, max}
+      :error -> {:refused, {:os, os}}
+    end
+  end
 
   @doc """
   `argv` (a session's, with no prompt) run by a wrapper that reads its first prompt from

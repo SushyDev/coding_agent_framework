@@ -153,6 +153,44 @@ defmodule CodingAgentFramework.MailboxLaunchTest do
     assert %{"type" => "user", "promptSource" => "typed"} = JSON.decode!(user)
   end
 
+  # F-155: Linux refuses one argument over 131 072 bytes, so on Linux a first row over its cap
+  # goes as a pointer: its text in the agent's due directory, the prompt one line naming it with
+  # the row's uuid, settled by that line as any launch. With no home it is refused unmarked.
+  test "a first row longer than the host's argument carries goes as a pointer", ctx do
+    home = Path.join(ctx.dir, "home")
+    m = restart(ctx.mopts ++ [home: home, os: :linux])
+    {:ok, max} = CodingAgentFramework.ClaudeCLI.prompt_max(:linux)
+    long = String.duplicate("brief ", div(max, 6) + 1)
+    {:ok, {:queued, one}} = Mailbox.message(m, "d1", "main", long)
+    deadline = System.os_time(:millisecond) + 30_000
+
+    assert {:ok, %{id: ^one, uuid: uuid, text: text}} = Mailbox.launch(m, "main", deadline)
+    file = Path.join([home, "due", "main", "#{one}.md"])
+    assert text == Transport.Launch.pointer(file, uuid)
+    assert File.read!(file) == long
+
+    launch = SessionsSetup.launch(ctx, :at_start)
+    launch = Keyword.merge(launch, claude: ScreenStandIn.write!(ctx.dir), prompt: text)
+
+    assert {:ok, %{session_id: sid} = started} =
+             Sessions.start(ctx.sessions, "main", ctx.account, launch)
+
+    assert {:ok, [^text]} = await(fn -> nonempty(ScreenStandIn.prompts(ctx.dir)) end)
+    assert {:ok, "sending"} = Mailbox.launched(m, one, {:ok, started})
+
+    {:ok, path} = Transcripts.path(ctx.account.config_dir, ctx.dir, sid)
+    user(path, text)
+    Process.put(:mailbox, m)
+    assert {:ok, %{status: "delivered"}} = until(ctx, one, &(&1.status == "delivered"))
+
+    # The same row with no home to write it to: refused, and nothing marked.
+    {:ok, {:queued, two}} = Mailbox.message(m, "d1", "main", long)
+    GenServer.stop(m)
+    bare = restart(ctx.mopts ++ [os: :linux])
+    assert {:refused, {:too_long, :no_home}} = Mailbox.launch(bare, "main", deadline)
+    assert %{status: "queued"} = Table.get(ctx.mtable, two)
+  end
+
   defp user(path, text) do
     File.mkdir_p!(Path.dirname(path))
     line = %{"type" => "user", "uuid" => "u-1", "message" => %{"content" => text}}

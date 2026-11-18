@@ -99,7 +99,7 @@ defmodule CodingAgentFramework.Delegates do
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, Acts, ClaudeCLI, Inlet, Intake, Mailbox, Registry}
+  alias CodingAgentFramework.{Accounts, Acts, Inlet, Intake, Mailbox, Registry}
   alias CodingAgentFramework.Scheduler
   alias CodingAgentFramework.Intake.Table, as: IntakeTable
   alias CodingAgentFramework.{Sessions, Stream, Transcripts, Usage}
@@ -160,8 +160,8 @@ defmodule CodingAgentFramework.Delegates do
   Options: `:timeout`, what the caller waits (default 300 000 ms; the start goes on past it),
   and `:options` (`ClaudeCLI.Options`), checked before the row and kept on the agent row,
   which its resume takes again; and `interactive: true` for the terminal interface, refused
-  `:no_registry` by a `Delegates` given no `registry:`, and `{:too_long, max}` for a brief a
-  launch cannot carry.
+  `:no_registry` by a `Delegates` given no `registry:`. A brief longer than a launch's argument
+  carries goes as a pointer to its file (`Mailbox.launch/4`, F-155).
   """
   def start_delegate(delegates, parent, project, branch, model, brief, opts \\ []) do
     how = if Keyword.get(opts, :interactive, false), do: :interactive, else: :headless
@@ -339,7 +339,7 @@ defmodule CodingAgentFramework.Delegates do
     with true <-
            Enum.all?([parent, model, brief], &(is_binary(&1) and &1 != "")) or
              {:refused, {:bad, :start}},
-         :ok <- interactive_ok(s, how, brief),
+         :ok <- interactive_ok(s, how),
          {:ok, options} <- Options.check(options),
          {:ok, p} <- Turn.check(s.projects, project, branch),
          name = Turn.name(p, branch),
@@ -623,14 +623,11 @@ defmodule CodingAgentFramework.Delegates do
 
   defp how(agent), do: if(agent && not Agents.headless?(agent), do: :interactive, else: :headless)
 
-  # An interactive start needs the turn's reader and a brief its argument can carry.
-  defp interactive_ok(_s, :headless, _brief), do: :ok
-  defp interactive_ok(%{registry: nil}, :interactive, _brief), do: {:refused, :no_registry}
-
-  defp interactive_ok(_s, :interactive, brief) do
-    max = ClaudeCLI.prompt_max() - 200
-    if byte_size(brief) <= max, do: :ok, else: {:refused, {:too_long, max}}
-  end
+  # An interactive start needs the turn's reader. A brief of any length goes: one longer than
+  # the launch's argument carries goes as a pointer to its file (F-155).
+  defp interactive_ok(_s, :headless), do: :ok
+  defp interactive_ok(%{registry: nil}, :interactive), do: {:refused, :no_registry}
+  defp interactive_ok(_s, :interactive), do: :ok
 
   defp stored({:ok, _} = ok), do: ok
   defp stored(other), do: {:brief, other}

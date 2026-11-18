@@ -58,7 +58,9 @@ defmodule CodingAgentFramework.Mailbox do
   - `launch` (F-137), for the first row to an interactive session's new process: marked by
     `launch/4` before the start that carries it as its prompt, told the start's answer by
     `launched/3` (refused, due again), and settled by the transcript's user line with its mark
-    (`Transport.Launch`).
+    (`Transport.Launch`). A row longer than the workstation's argument carries
+    (`ClaudeCLI.prompt_max/1`) is written to the agent's due directory as a typed row's is, and
+    the prompt is one line naming that file (`Transport.Launch.pointer/2`, F-155).
 
   Without `intake:` or `inlet:` a main session's rows stay `queued`, `attempt` `:no_delivery`,
   unless a call takes them.
@@ -95,7 +97,7 @@ defmodule CodingAgentFramework.Mailbox do
   use GenServer
 
   alias CodingAgentFramework.{Accounts, Grants, Inlet, Intake, Registry, Sessions, Store, Stream}
-  alias CodingAgentFramework.Transcripts
+  alias CodingAgentFramework.{ClaudeCLI, Programs, Transcripts}
   alias CodingAgentFramework.Sessions.{Agents, Turn}
   alias CodingAgentFramework.Mailbox.{Ask, Table, Transport}
   alias CodingAgentFramework.Stream.Fold
@@ -117,7 +119,9 @@ defmodule CodingAgentFramework.Mailbox do
   waiter transport, `intake:` with `transcripts:` and `accounts:` (an `Accounts`), and
   `take_bound:` (ms, 10 000 by default); for the typed transport, `inlet:` with `registry:` (the
   host's `Registry`), `transcripts:` and `accounts:`, and `home:`, the framework home `Sessions`
-  was given, whose due directories carry a row too long to type.
+  was given, whose due directories carry a row too long to type or to launch with; `os:`, the
+  workstation's operating system (`Programs.os/1`, this VM's own by default), whose argument
+  limit (`ClaudeCLI.prompt_max/1`) bounds a launch's prompt.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -406,11 +410,15 @@ defmodule CodingAgentFramework.Mailbox do
 
       typed =
         if opts[:inlet],
-          do: %{inlet: opts[:inlet], registry: Keyword.fetch!(opts, :registry), home: opts[:home]}
+          do: %{inlet: opts[:inlet], registry: Keyword.fetch!(opts, :registry)}
 
       # `calls`: row id to the call that took it; `waits`: key to the call waiting for it;
       # `hands`: a hand-on's task ref to the row it hands on and what its answer writes.
       s = Map.merge(s, %{db: db, agents: agents, notify: notify, calls: %{}, waits: %{}})
+
+      s =
+        Map.merge(s, %{home: opts[:home], os: Keyword.get_lazy(opts, :os, &Programs.local_os/0)})
+
       s = Map.merge(s, %{hands: %{}, launching: MapSet.new()})
       {:ok, Map.merge(s, %{waiter: waiter, typed: typed}), {:continue, :read}}
     else
@@ -555,13 +563,17 @@ defmodule CodingAgentFramework.Mailbox do
         {:reply, {:ok, %{id: m.id, uuid: m.uuid, text: m.text}}, s}
 
       {[], [m | _]} ->
-        srow = Agents.get(s.agents, to)
-        sid = srow && srow.session_id
-        from = if is_binary(sid), do: offset(s, srow), else: 0
-        mark = [status: "sending", via: "launch", session_id: sid, at: nil, attempt: nil]
-        write(s, m, mark ++ [from_byte: from, sent_at: deadline])
-        s = %{s | launching: MapSet.put(s.launching, m.id)}
-        {:reply, {:ok, %{id: m.id, uuid: m.uuid, text: Transport.Launch.text(m.text, m.uuid)}}, s}
+        with {:ok, text} <- launch_text(s, to, m) do
+          srow = Agents.get(s.agents, to)
+          sid = srow && srow.session_id
+          from = if is_binary(sid), do: offset(s, srow), else: 0
+          mark = [status: "sending", via: "launch", session_id: sid, at: nil, attempt: nil]
+          write(s, m, mark ++ [from_byte: from, sent_at: deadline])
+          s = %{s | launching: MapSet.put(s.launching, m.id)}
+          {:reply, {:ok, %{id: m.id, uuid: m.uuid, text: text}}, s}
+        else
+          other -> {:reply, other, s}
+        end
     end
   end
 
@@ -1138,28 +1150,45 @@ defmodule CodingAgentFramework.Mailbox do
   # The line typed: the row's own, or for a row too long to type, one that names the file its
   # text is written to in the agent's due directory, which its start may read (F-142).
   defp line(s, m, srow) do
-    cond do
-      Transport.Typed.short?(m.text, m.uuid) ->
-        {:ok, Transport.Typed.text(m.text, m.uuid)}
+    if Transport.Typed.short?(m.text, m.uuid),
+      do: {:ok, Transport.Typed.text(m.text, m.uuid)},
+      else:
+        with(
+          {:ok, path} <- due_file(s, srow.name, m),
+          do: {:ok, Transport.Typed.pointer(path, m.uuid)}
+        )
+  end
 
-      is_nil(s.typed.home) ->
-        {:refused, {:too_long, :no_home}}
+  # The launch's prompt: the row's text, or for one longer than the host's argument carries,
+  # a short line naming the file its text is in, as a typed row's pointer (F-155).
+  defp launch_text(s, to, m) do
+    text = Transport.Launch.text(m.text, m.uuid)
 
-      true ->
-        path = due_path(s, srow.name, m)
-
-        with :ok <- File.mkdir_p(Path.dirname(path)),
-             :ok <- File.write(path <> ".tmp", m.text),
-             :ok <- File.rename(path <> ".tmp", path) do
-          {:ok, Transport.Typed.pointer(path, m.uuid)}
-        else
-          {:error, why} -> {:unknown, {:due_file, why}}
-        end
+    with {:ok, max} <- ClaudeCLI.prompt_max(s.os) do
+      if byte_size(text) <= max,
+        do: {:ok, text},
+        else:
+          with(
+            {:ok, path} <- due_file(s, to, m),
+            do: {:ok, Transport.Launch.pointer(path, m.uuid)}
+          )
     end
   end
 
-  defp due_path(s, name, m),
-    do: Path.join(Sessions.due_dir(s.typed.home, name), "#{m.id}.md")
+  # The row's whole text in the agent's due directory, written whole and renamed into place.
+  defp due_file(%{home: nil}, _name, _m), do: {:refused, {:too_long, :no_home}}
+
+  defp due_file(s, name, m) do
+    path = Path.join(Sessions.due_dir(s.home, name), "#{m.id}.md")
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- File.write(path <> ".tmp", m.text),
+         :ok <- File.rename(path <> ".tmp", path) do
+      {:ok, path}
+    else
+      {:error, why} -> {:unknown, {:due_file, why}}
+    end
+  end
 
   defp type_line(s, m, _srow, {:refused, why}) do
     write(s, m, attempt: why)

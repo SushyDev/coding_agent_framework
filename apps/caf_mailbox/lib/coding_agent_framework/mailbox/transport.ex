@@ -400,6 +400,17 @@ defmodule CodingAgentFramework.Mailbox.Transport.Launch do
   defp text_of(_), do: ""
 
   @doc """
+  The prompt a start carries for a row longer than the host's argument holds: one line that
+  names the file its whole text is in (the agent's due directory, which each interactive start
+  may read), and its uuid, as `text/2` (F-155).
+
+      iex> CodingAgentFramework.Mailbox.Transport.Launch.pointer("/h/due/main/7.md", "u1")
+      "A message for you is in /h/due/main/7.md; read it.\\n\\n[delivery u1]"
+  """
+  @spec pointer(Path.t(), String.t()) :: String.t()
+  def pointer(path, uuid), do: text("A message for you is in #{path}; read it.", uuid)
+
+  @doc """
   Settles `row` by `evidence`: `%{seen: seen/2's answer | :unread, gone: whether no process of
   the start runs}`. Any other key (`now`, `bound`) decides nothing.
   """

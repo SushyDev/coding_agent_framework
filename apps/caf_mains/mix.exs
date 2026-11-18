@@ -18,7 +18,6 @@ defmodule CafMains.MixProject do
   defp deps do
     [
       {:caf_accounts, in_umbrella: true},
-      {:caf_cli, in_umbrella: true},
       {:caf_intake, in_umbrella: true},
       {:caf_mailbox, in_umbrella: true},
       {:caf_scheduler, in_umbrella: true},

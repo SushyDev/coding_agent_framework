@@ -250,16 +250,19 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     assert %{status: "running", report: "none"} = Table.get(ctx.dtable, id)
   end
 
-  # An interactive start needs a brief its argument can carry.
-  test "a brief longer than a launch carries is refused before anything starts", ctx do
+  # A brief longer than a launch carries goes as a pointer to its file in the due directory
+  # (F-155); a Mailbox with no home has nowhere to write it, so the start is refused and
+  # nothing starts.
+  test "a brief longer than a launch carries, with no home for its file, starts nothing", ctx do
     long = String.duplicate("a", 600_000)
 
-    assert {:refused, {:too_long, _}} =
+    assert {:refused, {:launch, {:refused, {:too_long, :no_home}}}} =
              Delegates.start_delegate(ctx.delegates, "main", "app", "unit/one", "opus", long,
                interactive: true
              )
 
-    assert Table.latest(ctx.dtable, "test") == []
+    assert [%{status: "refused"}] = Table.latest(ctx.dtable, "test")
+    assert ScreenStandIn.prompts(ctx.dir) == []
   end
 
   defp brief(ctx, u) do

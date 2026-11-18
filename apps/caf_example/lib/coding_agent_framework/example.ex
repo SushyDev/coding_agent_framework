@@ -319,6 +319,7 @@ defmodule CodingAgentFramework.Example do
             inlet: pid.(:inlet),
             registry: pid.(:registry),
             home: c.home,
+            os: Programs.os(p),
             notify: notify}
          end},
         {:delegates,

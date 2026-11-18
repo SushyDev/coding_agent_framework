@@ -51,7 +51,7 @@ defmodule CodingAgentFramework.Mains do
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, ClaudeCLI, Intake, Mailbox, Programs, Scheduler}
+  alias CodingAgentFramework.{Accounts, Intake, Mailbox, Programs, Scheduler}
   alias CodingAgentFramework.{Sessions, Shell, Store, Stream, Usage}
   alias CodingAgentFramework.Intake.Table, as: IntakeTable
   alias CodingAgentFramework.Mains.{Checkout, Starts, Table, Work}
@@ -102,8 +102,9 @@ defmodule CodingAgentFramework.Mains do
   app's launch's, F-141's new-8), `timeout:` (what the caller waits,
   default 300 000 ms; the start goes on past it). Answers `{:ok, %{name, account,
   session_id}}`; `{:refused, reason}`: `{:running, name}`, `{:unknown_project, project}`,
-  `{:checkout, state}` while the checkout is not made, `{:too_long, max}` for a brief a launch
-  cannot carry, `{:lease, why}`, or `Sessions`' refusal; or `{:unknown, reason}` while its row
+  `{:checkout, state}` while the checkout is not made, `{:lease, why}`, or `Sessions`' refusal
+  (a brief longer than a launch's argument carries goes as a pointer to its file,
+  `Mailbox.launch/4`, F-155); or `{:unknown, reason}` while its row
   waits, as on a startup dialog (`{:dialog, kind}`).
   """
   @spec start_main(GenServer.server(), String.t(), String.t(), String.t() | nil, keyword) ::
@@ -760,10 +761,7 @@ defmodule CodingAgentFramework.Mains do
 
   defp brief_ok(nil), do: :ok
 
-  defp brief_ok(brief) when is_binary(brief) and brief != "" do
-    max = ClaudeCLI.prompt_max() - 200
-    if byte_size(brief) <= max, do: :ok, else: {:refused, {:too_long, max}}
-  end
+  defp brief_ok(brief) when is_binary(brief) and brief != "", do: :ok
 
   defp brief_ok(_brief), do: {:refused, {:bad, :brief}}
 

@@ -16,11 +16,13 @@ defmodule CafMailbox.MixProject do
   defp deps do
     [
       {:caf_accounts, in_umbrella: true},
+      {:caf_cli, in_umbrella: true},
       {:caf_grants, in_umbrella: true},
       {:caf_inlet, in_umbrella: true},
       {:caf_intake, in_umbrella: true},
       {:caf_registry, in_umbrella: true},
       {:caf_sessions, in_umbrella: true},
+      {:caf_shell, in_umbrella: true},
       {:caf_stream, in_umbrella: true},
       {:caf_store, in_umbrella: true},
       {:caf_transcripts, in_umbrella: true},
