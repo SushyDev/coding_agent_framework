@@ -1627,10 +1627,13 @@ once, a newline every 5 s (the heartbeat), and the text as the last chunk; at `I
 deadline, 2 minutes under the hook's `timeout`, it ends with no text. A failed write ends the
 hold (`Hold`'s cut). A connection can die unseen until a heartbeat fails, and text written to
 it in that time is not read; the transcript then has no line, and `Mailbox` makes the row due
-again. A second waiter for a session waits behind the first, and the first is sent a heartbeat
-at once; the second takes the first's place once the first's hold ends, by a failed write, its
-text or its deadline. A waiter is answered empty only at its deadline. `Intake.tla` models the
-waiter as `Hold`'s third instance (F-123).
+again. Every `Stop` event starts a waiter, a blocked one too (measured on 2.1.322: nine
+blocked `Stop`s left nine live waiters, F-157), so a session has several live connections. The
+newest is the session's waiter, and each older one still held is answered empty at once: its
+program exits 0 and wakes nothing. A waiter whose text is in flight is not replaced: a newer
+one waits behind it and takes its place once its hold ends. A waiter is answered empty only at
+its deadline or once a newer one is live. `Intake.tla` models the waiter as `Hold`'s third
+instance (F-123), and the newest kept as `Superseded` (F-157).
 
 A session with no waiter (before its first turn ends, after a waiter's deadline, or after a
 restart cut the waiter's connection) gets nothing that way, and `Intake` knows it
@@ -1954,7 +1957,7 @@ section.
   |---|---|---|---|---|
   | `permission` | `PermissionRequest` | a person, or an agent's or the operator's `answer` | 570 s of 600 s | yes |
   | `tool` | `PreToolUse` | the app's callback | 5 s of 10 s | yes |
-  | `stop` | `Stop` | the app's callback (item 14) | under the hook's | a decision only |
+  | `stop` | `Stop` | the app's callback (item 14), a pause's word, or a person at the cap | 570 s of 600 s | yes |
   | `waiter` | the `asyncRewake` Stop hook | `Mailbox`'s due row, by `deliver` | 7,080 s of 7,200 s, with a heartbeat every 5 s | the delivery's, in `Mailbox` |
 
   `Hold.tla` models the hold once, and `Intake.tla` instances it per kind (R4).
@@ -1970,6 +1973,22 @@ section.
   holds the input (F-121's new-4).
   A second post of the key answers the row's decision, or an empty body. A PostToolUse is
   answered at once and handed to its callback, with no row.
+- **A held `Stop`** (F-157, decision 10). With the app's `stop:` callback, the `Stop` hook
+  waits 600 s and each turn's end is a hold whose row is written "held". The callback gets the
+  agent, its project, the session, its count of blocks and the hook's input, and answers
+  `:pass` (the turn ends) or `{:block, reason}` (`{"decision": "block", "reason": …}`: the
+  agent goes on). Claude Code 2.1.322 honors 8 blocks in a row with no tool call between and
+  overrides the 9th (measured, F-157), so `Intake` keeps each session's count in its table
+  (`intake_stops`), written before a block goes out and reset only by a `PostToolUse` post,
+  which the `Stop` hold's settings add. It may count more than Claude Code, never fewer: a
+  post lost while the framework is down, or a wake or a person's prompt that Claude Code may
+  take as a reset, leave it high. The 8th block in a row is not sent: the row waits on a person
+  (its `prompt` is `stop_cap`), whose `:go_on` is that block and whose `:end` lets the turn
+  end; past it the hold passes at once, its actor `capped`. A pause per agent or per project
+  (`intake_pauses`, set by the app or the operator, a pause per agent before one per project)
+  holds each `Stop` until it is lifted, when the callback is asked, or answers it with the
+  pause's own word, counted as the callback's is. At the deadline, a pass. A crash of the
+  callback is a pass. `Intake.tla`'s `HS` models it, and `Prompt.tla` the `stop_cap` prompt.
 - **Stored, then acknowledged.** `Intake` writes the event's row, then answers 200 with an empty
   body. A row is keyed by Claude Code's own ids where the event has them (`session_id` with
   `tool_use_id`, `prompt_id` or the start's `source`), and a second post of one key writes no
@@ -2714,7 +2733,11 @@ held for the app is a `Hold` kind and may go in beside them; it counts its block
 since Claude Code overrides a `Stop` hook's block past 8 in a row with no tool call between, and
 at the cap it hands the agent to a person as a `stop_cap` prompt in place of being overridden
 (decided); the override is an action of the environment in its spec, and whether the waiter's
-wakes count toward the cap is measured per release (F-162's new-11).
+wakes count toward the cap is measured per release (F-162's new-11). The `stop_cap` prompt is
+the hold of the cap's last honored block: a person's "go on" is that block, and past it the
+hold passes and the turn ends, recorded `capped`; a person who wants more sends a message
+(F-167's new-1). Built in F-157 with a pause per agent and per project ("Intake"); until B6
+the `stop_cap` row is `Intake`'s, answered by `Intake.answer/4`.
 
 Skipped, decided by the operator (F-162): forcing a model to be deterministic, debate between
 agents, outside record and replay libraries (the `Ledger`'s replay covers it), Claude Code's

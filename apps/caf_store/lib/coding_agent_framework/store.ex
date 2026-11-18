@@ -91,14 +91,23 @@ defmodule CodingAgentFramework.Store do
 
   @doc """
   Runs `fun` in one immediate transaction and answers what it answers: what it writes is saved
-  together or not at all.
+  together or not at all. When `fun` raises, throws or exits, the transaction is rolled back
+  and the same error goes on to the caller, so the connection is never left inside an open
+  transaction that the next write would join.
   """
   @spec transaction(db, (-> result)) :: result when result: term
   def transaction(db, fun) do
     :ok = Sqlite3.execute(db, "BEGIN IMMEDIATE")
-    result = fun.()
-    :ok = Sqlite3.execute(db, "COMMIT")
-    result
+
+    try do
+      result = fun.()
+      :ok = Sqlite3.execute(db, "COMMIT")
+      result
+    catch
+      kind, reason ->
+        Sqlite3.execute(db, "ROLLBACK")
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    end
   end
 
   @doc """

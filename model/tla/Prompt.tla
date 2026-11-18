@@ -368,9 +368,10 @@ Requests ==
 
 \* The asker's turn reaches its Stop hook. Below the cap the app's callback decides it, in
 \* this step: a block, which Claude Code honors below the cap and overrides at it (the
-\* environment's act), or a pass. The block that would be the cap's last is held as a
-\* `stop_cap` prompt for a person; past the cap the framework blocks no more, and the turn
-\* ends. Under NoCap the callback decides every one.
+\* environment's act), or a pass. The callback's block that would be the cap's last is held
+\* as a `stop_cap` prompt for a person (its pass ends the turn, as below the cap); past the
+\* cap the framework blocks no more, and the turn ends. Under NoCap the callback decides
+\* every one. Intake.tla models the count Intake keeps (F-157).
 StopFires ==
     /\ AgentUp /\ "cap" \in HeldPs /\ turn = "working"
     /\ IF blocks < Cap - 1 \/ Break = "NoCap"
@@ -380,8 +381,9 @@ StopFires ==
                ELSE blocks' = blocks + 1 /\ UNCHANGED <<turn, pwrong>>
             \/ turn' = "ended" /\ UNCHANGED <<blocks, pwrong>>
        ELSE IF blocks = Cap - 1 /\ hrow["cap"] = "none" /\ ~hconn["cap"] /\ hout["cap"] = <<>>
-       THEN /\ H!Opens("cap", TRUE) /\ turn' = "stop"
-            /\ UNCHANGED <<blocks, pwrong>>
+       THEN \/ /\ H!Opens("cap", TRUE) /\ turn' = "stop"
+               /\ UNCHANGED <<blocks, pwrong>>
+            \/ turn' = "ended" /\ UNCHANGED <<blocks, pwrong>>
        ELSE turn' = "ended" /\ UNCHANGED <<blocks, pwrong>>
     /\ IF turn' = "stop" THEN TRUE ELSE UNCHANGED holdVars
     /\ UNCHANGED <<st, ep, claims, acting, cdone, acted, twice, cut, Rest, up, restarts, ownVars,

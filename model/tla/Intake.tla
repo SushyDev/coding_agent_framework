@@ -66,15 +66,42 @@
 (* chunk. The program can die unseen (a compaction, the session's exit);   *)
 (* a write to its connection may still succeed, so text written there is   *)
 (* not read, and only the transcript says what was. The next heartbeat     *)
-(* fails and cuts the hold (Hold's Cut). A second waiter of the session    *)
-(* waits behind the first, which is sent a heartbeat at once, and takes    *)
-(* its place once the first's hold ends. The deadline is hours and the     *)
-(* heartbeat seconds, so a death is found before the deadline: the         *)
-(* guard of WaiterExpires. Sessions are apart, so the spec has one.        *)
+(* fails and cuts the hold (Hold's Cut). Every Stop event starts a waiter, *)
+(* a blocked one too (measured on 2.1.322, F-157: nine blocked Stops left  *)
+(* nine live waiters), so a session has several live connections. Intake   *)
+(* keeps the newest as the session's waiter, and answers each older one    *)
+(* still held empty at once (Superseded): its program exits 0 and wakes    *)
+(* nothing. A waiter whose text is in flight is not replaced: a newer one  *)
+(* waits behind it and takes its place once its hold ends. The deadline   *)
+(* is hours and the heartbeat seconds, so a death is found before the      *)
+(* deadline: the guard of WaiterExpires. Sessions are apart, so the spec   *)
+(* has one.                                                                *)
 (* Left abstract: the heartbeat's period and the one sent at a second      *)
 (* waiter's arrival (both are HeartbeatFails, enabled while a death is     *)
 (* unseen); what the text says; Mailbox's settle from the transcript       *)
 (* (Delivery.tla), so a row it was told unknown stays so here.             *)
+(*                                                                         *)
+(* The Stop hold (F-157, decision 10): with the app's `stop` callback,     *)
+(* each of the session's Stop hooks is held (HS) and the callback decides  *)
+(* it: a pass lets the turn end, a block sends the agent back with a       *)
+(* reason. Claude Code honors at most Cap blocks in a row with no tool     *)
+(* call between and overrides the next (measured: 8 on 2.1.322); the      *)
+(* override is the environment's act here (StopRead). Intake keeps its own *)
+(* count of the session's blocks in a row in its table, written with the   *)
+(* block's row before the response goes out, and reset only by a          *)
+(* PostToolUse post: it may count more than Claude Code (a post lost      *)
+(* while down, a wake or a person's prompt that Claude Code may count as a *)
+(* reset), never fewer. Below Cap - 1 the callback's block is handed. At   *)
+(* Cap - 1 a block is not handed: the hold becomes a `stop_cap` prompt     *)
+(* (Prompt.tla), whose person's "go on" is the last block Claude Code      *)
+(* honors and whose "end" lets the turn end (F-167's new-1). At Cap or     *)
+(* more the hold passes at once, recorded capped. A pause (per agent or    *)
+(* per project, set by the app or the operator) keeps the callback from    *)
+(* deciding: a Stop held while paused is asked once the pause lifts, or    *)
+(* ends at the deadline. Left abstract: the reason's text; a pause that    *)
+(* answers with the app's word in place of holding (it is one more         *)
+(* decider of the hold, counted as the callback's block or pass is); the   *)
+(* waiter each Stop starts, which the waiter's section models alone.       *)
 (*                                                                         *)
 (* Sessions' contract for hooks (F-163): an event acknowledged only once   *)
 (* stored, stored once (AckedIsStored, StoredOnce); each hold one          *)
@@ -95,6 +122,10 @@ CONSTANTS
     MaxCalls,     \* tool calls of the session, each with its PreToolUse hook
     MaxWaiters,   \* waiters of the session, started in order, each at a turn's end
     MaxTexts,     \* texts Mailbox has due for the session
+    MaxStops,     \* Stop hooks of the session, in order, each held for the app's callback
+    MaxToolCalls, \* tool calls of the session, each resetting Claude Code's count of blocks
+    MaxPauses,    \* pauses set (and lifted) on the session's agent or project
+    Cap,          \* Stop blocks in a row Claude Code honors (8 on 2.1.322)
     MaxRestarts,  \* restarts of the framework
     Break         \* "none", or the guard removed (see Breaks)
 
@@ -111,17 +142,22 @@ Breaks == {
     "LateSent",         \* a decision after the tool deadline is still handed out
     "NoHeartbeat",      \* a waiter's hold writes nothing until its end
     "RefuseSecond",     \* a second waiter is answered empty while the first is held
-    "RefuseUnknown"     \* text whose write was cut is told refused, not unknown
+    "RefuseUnknown",    \* text whose write was cut is told refused, not unknown
+    "NoCap",            \* the callback's block is handed at every count, past Claude Code's cap
+    "CountInMemory",    \* the count of blocks is kept in memory, so a restart forgets it
+    "IgnorePause"       \* a Stop held while paused is decided by the callback
 }
 
 ASSUME Break \in Breaks
 ASSUME MaxPosts \in Nat /\ MaxDialogs \in Nat /\ MaxCalls \in Nat /\ MaxRestarts \in Nat
 ASSUME MaxWaiters \in Nat /\ MaxTexts \in Nat
+ASSUME MaxStops \in Nat /\ MaxToolCalls \in Nat /\ MaxPauses \in Nat /\ Cap \in Nat \ {0}
 
 Dialogs == 1..MaxDialogs
 Calls == 1..MaxCalls
 Waiters == 1..MaxWaiters
 Texts == 1..MaxTexts
+Stops == 1..MaxStops
 
 VARIABLES
     up,        \* the framework runs
@@ -163,13 +199,32 @@ VARIABLES
     cur,       \* the session's waiter in Intake's map, or 0
     gave,      \* w -> the text handed to w, or 0
     mail,      \* t -> "due", "sending", "sent", "unknown": Mailbox's row, by deliver's answer
-    read       \* t -> how many programs read t (and woke their session with it)
+    read,      \* t -> how many programs read t (and woke their session with it)
+    superseded, \* ghost: waiters answered empty because a newer one was live
+    turn,      \* the session's turn: "working", "stopping" (its Stop hook runs), "ended"
+    stp,       \* s -> "none", "waiting", "blocked", "passed", "failed": what Stop hook s read
+    scb,       \* s -> "none", "asked", "paused", "block", "pass", "used": the callback
+    capq,      \* the Stops held as a `stop_cap` prompt, decided by a person
+    \* s's hold, as Hold.tla's variables (HS)
+    sconn,     \* in memory: Intake holds s's request open
+    srow,      \* table: s's row (Hold's Rows)
+    smarking,  \* in memory: Stops whose decision went out, row not yet marked
+    sout,      \* s -> what Intake handed s's request, in order: "decision" or "empty"
+    swrong,    \* decisions that took another Stop's hold: none, as each names its own
+    ccBlocks,  \* Claude Code's count of blocks in a row, no tool call between
+    fBlocks,   \* table: Intake's count of the session's blocks in a row
+    toolsRun,  \* tool calls so far
+    paused,    \* table: the session's agent or project is paused
+    pauses,    \* pauses set so far
+    faults     \* ghost: "overridden" (a block of the framework's overridden), "whilePaused"
 
 eventVars == <<posts, inflight, toStore, toAck, rows, acked>>
 dialogVars == <<dialog, outcome, hook, conn, hold, written, sent, heard, typed, wrong>>
 toolVars == <<call, cb, tconn, trow, tmarking, handed, twrong>>
-waiterVars == <<prog, wconn, wrow, wmarking, wout, wwrong, cur, gave, mail, read>>
-vars == <<up, restarts, eventVars, dialogVars, toolVars, waiterVars>>
+waiterVars == <<prog, wconn, wrow, wmarking, wout, wwrong, cur, gave, mail, read, superseded>>
+stopVars == <<turn, stp, scb, capq, sconn, srow, smarking, sout, swrong, ccBlocks, fBlocks,
+              toolsRun, paused, pauses, faults>>
+vars == <<up, restarts, eventVars, dialogVars, toolVars, waiterVars, stopVars>>
 
 \* PermissionRequest's holds, and PreToolUse's.
 HP == INSTANCE Hold WITH
@@ -188,6 +243,9 @@ HT == INSTANCE Hold WITH
 HW == INSTANCE Hold WITH
         Reqs <- Waiters, conn <- wconn, row <- wrow, marking <- wmarking, out <- wout,
         wrong <- wwrong, Break <- "none"
+HS == INSTANCE Hold WITH
+        Reqs <- Stops, conn <- sconn, row <- srow, marking <- smarking, out <- sout,
+        wrong <- swrong, Break <- "none"
 
 -----------------------------------------------------------------------------
 Init ==
@@ -225,6 +283,19 @@ Init ==
     /\ gave = [w \in Waiters |-> 0]
     /\ mail = [t \in Texts |-> "due"]
     /\ read = [t \in Texts |-> 0]
+    /\ superseded = {}
+    /\ turn = "working"
+    /\ stp = [s \in Stops |-> "none"]
+    /\ scb = [s \in Stops |-> "none"]
+    /\ capq = {}
+    /\ sconn = [s \in Stops |-> FALSE]
+    /\ srow = [s \in Stops |-> "none"]
+    /\ smarking = {}
+    /\ sout = [s \in Stops |-> <<>>]
+    /\ swrong = {}
+    /\ ccBlocks = 0 /\ fBlocks = 0 /\ toolsRun = 0
+    /\ paused = FALSE /\ pauses = 0
+    /\ faults = {}
 
 -----------------------------------------------------------------------------
 (* The framework: its tables survive a restart; open requests do not *)
@@ -244,12 +315,18 @@ FrameworkDies ==
     /\ HW!Cut(Waiters)
     /\ prog' = [w \in Waiters |-> IF wconn[w] /\ prog[w] = "waiting" THEN "failed" ELSE prog[w]]
     /\ cur' = 0
+    /\ HS!Cut(Stops)
+    \* A Stop hook that fails lets the turn end (onFailure continue).
+    /\ stp' = [s \in Stops |-> IF sconn[s] /\ stp[s] = "waiting" THEN "failed" ELSE stp[s]]
+    /\ turn' = IF \E s \in Stops : sconn[s] /\ stp[s] = "waiting" THEN "ended" ELSE turn
+    /\ fBlocks' = IF Break = "CountInMemory" THEN 0 ELSE fBlocks
     /\ UNCHANGED <<posts, rows, acked, dialog, outcome, heard, typed, cb>>
-    /\ UNCHANGED <<wrow, wout, wwrong, gave, mail, read>>
+    /\ UNCHANGED <<wrow, wout, wwrong, gave, mail, read, superseded>>
+    /\ UNCHANGED <<scb, capq, srow, sout, swrong, ccBlocks, toolsRun, paused, pauses, faults>>
 
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
-    /\ UNCHANGED <<toolVars, waiterVars>>
+    /\ UNCHANGED <<toolVars, waiterVars, stopVars>>
     /\ UNCHANGED <<restarts, eventVars, dialogVars>>
 
 -----------------------------------------------------------------------------
@@ -261,7 +338,7 @@ Posted(e) ==
     /\ posts[e] < MaxPosts
     /\ posts' = [posts EXCEPT ![e] = @ + 1]
     /\ inflight' = IF up THEN [inflight EXCEPT ![e] = @ + 1] ELSE inflight
-    /\ UNCHANGED <<toolVars, waiterVars>>
+    /\ UNCHANGED <<toolVars, waiterVars, stopVars>>
     /\ UNCHANGED <<up, restarts, toStore, toAck, rows, acked, dialogVars>>
 
 \* The row is written once per event: a second post of it finds the row.
@@ -270,14 +347,14 @@ Stored(e) ==
     /\ inflight' = [inflight EXCEPT ![e] = @ - 1]
     /\ toAck' = [toAck EXCEPT ![e] = @ + 1]
     /\ rows' = [rows EXCEPT ![e] = IF @ = 0 \/ Break = "NoDedupe" THEN @ + 1 ELSE @]
-    /\ UNCHANGED <<toolVars, waiterVars>>
+    /\ UNCHANGED <<toolVars, waiterVars, stopVars>>
     /\ UNCHANGED <<up, restarts, posts, toStore, acked, dialogVars>>
 
 Acked(e) ==
     /\ up /\ toAck[e] > 0
     /\ toAck' = [toAck EXCEPT ![e] = @ - 1]
     /\ acked' = [acked EXCEPT ![e] = @ + 1]
-    /\ UNCHANGED <<toolVars, waiterVars>>
+    /\ UNCHANGED <<toolVars, waiterVars, stopVars>>
     /\ UNCHANGED <<up, restarts, posts, inflight, toStore, rows, dialogVars>>
 
 \* Under AckBeforeStore: the 200 goes out first, the row after.
@@ -286,14 +363,14 @@ AckedFirst(e) ==
     /\ inflight' = [inflight EXCEPT ![e] = @ - 1]
     /\ toStore' = [toStore EXCEPT ![e] = @ + 1]
     /\ acked' = [acked EXCEPT ![e] = @ + 1]
-    /\ UNCHANGED <<toolVars, waiterVars>>
+    /\ UNCHANGED <<toolVars, waiterVars, stopVars>>
     /\ UNCHANGED <<up, restarts, posts, toAck, rows, dialogVars>>
 
 StoredLate(e) ==
     /\ up /\ toStore[e] > 0
     /\ toStore' = [toStore EXCEPT ![e] = @ - 1]
     /\ rows' = [rows EXCEPT ![e] = IF @ = 0 THEN @ + 1 ELSE @]
-    /\ UNCHANGED <<toolVars, waiterVars>>
+    /\ UNCHANGED <<toolVars, waiterVars, stopVars>>
     /\ UNCHANGED <<up, restarts, posts, inflight, toAck, acked, dialogVars>>
 
 -----------------------------------------------------------------------------
@@ -306,7 +383,7 @@ DialogOpens(p) ==
     /\ dialog' = [dialog EXCEPT ![p] = "open"]
     /\ hook' = [hook EXCEPT ![p] = IF up THEN "waiting" ELSE "failed"]
     /\ HP!Opens(p, up)
-    /\ UNCHANGED <<toolVars, waiterVars>>
+    /\ UNCHANGED <<toolVars, waiterVars, stopVars>>
     /\ UNCHANGED <<up, restarts, eventVars, outcome, heard, typed>>
 
 \* A person answers on the screen or by Remote Control. The hook goes on
@@ -315,7 +392,7 @@ PersonAnswers(p) ==
     /\ dialog[p] = "open"
     /\ dialog' = [dialog EXCEPT ![p] = "closed"]
     /\ outcome' = [outcome EXCEPT ![p] = "person"]
-    /\ UNCHANGED <<toolVars, waiterVars>>
+    /\ UNCHANGED <<toolVars, waiterVars, stopVars>>
     /\ UNCHANGED <<up, restarts, eventVars, hook, conn, hold, written, sent, heard, typed, wrong>>
 
 \* Claude Code stops waiting. The framework's deadline comes first, so this
@@ -324,14 +401,14 @@ HookTimesOut(p) ==
     /\ hook[p] = "waiting"
     /\ hold[p] \notin {"none", "held", "deciding"} \/ Break \in {"NoOwnDeadline", "NoExpiry"}
     /\ hook' = [hook EXCEPT ![p] = "timedout"]
-    /\ UNCHANGED <<toolVars, waiterVars>>
+    /\ UNCHANGED <<toolVars, waiterVars, stopVars>>
     /\ UNCHANGED <<up, restarts, eventVars, dialog, outcome, conn, hold, written, sent, heard,
                    typed, wrong>>
 
 -----------------------------------------------------------------------------
 (* Intake: a held hook, its answer, its deadline, and a restart (HP) *)
 
-PermissionOnly == UNCHANGED <<toolVars, waiterVars>> /\ UNCHANGED <<up, restarts, eventVars>>
+PermissionOnly == UNCHANGED <<toolVars, waiterVars, stopVars>> /\ UNCHANGED <<up, restarts, eventVars>>
 
 HoldStored(p) ==
     /\ up /\ HP!Held(p)
@@ -378,13 +455,13 @@ AnswerTyped(p) ==
     /\ dialog' = [dialog EXCEPT ![p] = "closed"]
     /\ outcome' = [outcome EXCEPT ![p] = "keys"]
     /\ typed' = typed \cup {p}
-    /\ UNCHANGED <<toolVars, waiterVars>>
+    /\ UNCHANGED <<toolVars, waiterVars, stopVars>>
     /\ UNCHANGED <<up, restarts, eventVars, hook, conn, hold, written, sent, heard, wrong>>
 
 -----------------------------------------------------------------------------
 (* PreToolUse: one response per request, the callback's decision or none (HT) *)
 
-ToolOnly == UNCHANGED <<up, restarts, eventVars, dialogVars, waiterVars>>
+ToolOnly == UNCHANGED <<up, restarts, eventVars, dialogVars, waiterVars, stopVars>>
 
 \* What the hook reads of a response handed while its request is open.
 Reads(c, what) ==
@@ -452,7 +529,7 @@ ToolSettled(c) ==
 -----------------------------------------------------------------------------
 (* The waiter: one session's asyncRewake Stop hooks, each a hold (HW) *)
 
-WaiterOnly == UNCHANGED <<up, restarts, eventVars, dialogVars, toolVars>>
+WaiterOnly == UNCHANGED <<up, restarts, eventVars, dialogVars, toolVars, stopVars, superseded>>
 
 \* Intake keeps w as a hold: its text not yet written, or written and not
 \* yet marked. Once its hold ends, the session takes its next waiter.
@@ -475,11 +552,23 @@ WaiterStarts(w) ==
     /\ WaiterOnly /\ UNCHANGED <<cur, gave, mail, read>>
 
 \* Intake holds it: status 200 at once, then heartbeats. It is the
-\* session's waiter if the session has none; otherwise it waits behind it.
+\* session's waiter, the newest, unless the session's waiter has text in
+\* flight (or came later); then it waits behind it.
 WaiterHeld(w) ==
     /\ up /\ HW!Held(w)
-    /\ cur' = IF Live(cur) THEN cur ELSE w
+    /\ cur' = IF Live(cur) /\ (wrow[cur] = "deciding" \/ cur > w) THEN cur ELSE w
     /\ WaiterOnly /\ UNCHANGED <<prog, gave, mail, read>>
+
+\* An older waiter still held, once a newer one is live, is answered empty
+\* at once: its program exits 0 and wakes nothing.
+Superseded(w) ==
+    /\ up /\ w # cur /\ wconn[w] /\ wrow[w] = "held"
+    /\ \E v \in Waiters : v > w /\ wconn[v] /\ wrow[v] \in {"held", "deciding"}
+    /\ HW!Passed(w)
+    /\ Idles(w)
+    /\ superseded' = superseded \cup {w}
+    /\ UNCHANGED <<up, restarts, eventVars, dialogVars, toolVars, stopVars>>
+    /\ UNCHANGED <<cur, gave, mail, read>>
 
 \* Under RefuseSecond: a waiter behind the session's one is answered empty.
 TurnedAway(w) ==
@@ -555,6 +644,140 @@ WaiterReplaced ==
     /\ WaiterOnly /\ UNCHANGED <<prog, wconn, wrow, wmarking, wout, wwrong, gave, mail, read>>
 
 -----------------------------------------------------------------------------
+(* The Stop hold: the app's callback, Claude Code's cap, a pause (HS)      *)
+
+StopOnly == UNCHANGED <<up, restarts, eventVars, dialogVars, toolVars, waiterVars>>
+
+\* What Claude Code does with a response to Stop s's open request: a block
+\* sends the agent back, honored while its count is under the cap and
+\* overridden past it (the environment's act); an empty body ends the turn.
+StopRead(s, what) ==
+    /\ IF sconn[s] /\ stp[s] = "waiting"
+         THEN /\ stp' = [stp EXCEPT ![s] = what]
+              /\ IF what = "blocked" /\ ccBlocks < Cap
+                   THEN turn' = "working" /\ ccBlocks' = ccBlocks + 1 /\ UNCHANGED faults
+                   ELSE /\ turn' = "ended" /\ UNCHANGED ccBlocks
+                        /\ faults' = IF what = "blocked" THEN faults \cup {"overridden"} ELSE faults
+         ELSE UNCHANGED <<stp, turn, ccBlocks, faults>>
+
+\* The turn reaches its Stop hook, which posts and waits. With the
+\* framework down the post fails, and the turn ends.
+StopFires(s) ==
+    /\ turn = "working" /\ stp[s] = "none" /\ \A t \in Stops : t < s => stp[t] # "none"
+    /\ stp' = [stp EXCEPT ![s] = IF up THEN "waiting" ELSE "failed"]
+    /\ turn' = IF up THEN "stopping" ELSE "ended"
+    /\ HS!Opens(s, up)
+    /\ StopOnly
+    /\ UNCHANGED <<scb, capq, srow, smarking, sout, swrong, ccBlocks, fBlocks, toolsRun, paused,
+                   pauses, faults>>
+
+\* Intake writes the row and starts the deadline. The callback is asked in a
+\* process of its own, unless the session's agent or project is paused.
+StopHeld(s) ==
+    /\ up /\ HS!Held(s)
+    /\ scb' = [scb EXCEPT ![s] = IF paused /\ Break # "IgnorePause" THEN "paused" ELSE "asked"]
+    /\ StopOnly
+    /\ UNCHANGED <<turn, stp, capq, ccBlocks, fBlocks, toolsRun, paused, pauses, faults>>
+
+\* The callback answers whenever it does, or never.
+StopCallback(s) ==
+    /\ scb[s] = "asked"
+    /\ \E a \in {"block", "pass"} : scb' = [scb EXCEPT ![s] = a]
+    /\ StopOnly
+    /\ UNCHANGED <<turn, stp, capq, sconn, srow, smarking, sout, swrong, ccBlocks, fBlocks,
+                   toolsRun, paused, pauses, faults>>
+
+\* The callback's answer is taken while the hold is held and nothing is
+\* paused. A pass, or any answer at the cap or past it, is an empty body (at
+\* the cap, recorded capped). A block below Cap - 1 is handed, the count
+\* written with the row's deciding. A block at Cap - 1 is held as a
+\* `stop_cap` prompt for a person. Under NoCap every block is handed.
+StopTaken(s) ==
+    /\ up /\ scb[s] \in {"block", "pass"} /\ srow[s] = "held" /\ sconn[s] /\ s \notin capq
+    /\ ~paused \/ Break = "IgnorePause"
+    /\ scb' = [scb EXCEPT ![s] = "used"]
+    /\ CASE scb[s] = "block" /\ (fBlocks < Cap - 1 \/ Break = "NoCap") ->
+              /\ HS!Asked(s, s) /\ fBlocks' = fBlocks + 1
+              /\ faults' = IF paused THEN faults \cup {"whilePaused"} ELSE faults
+              /\ UNCHANGED <<turn, stp, capq, ccBlocks>>
+         [] scb[s] = "block" /\ fBlocks = Cap - 1 ->
+              /\ capq' = capq \cup {s}
+              /\ faults' = IF paused THEN faults \cup {"whilePaused"} ELSE faults
+              /\ UNCHANGED <<turn, stp, sconn, srow, smarking, sout, swrong, fBlocks, ccBlocks>>
+         [] OTHER ->
+              /\ HS!Passed(s) /\ StopRead(s, "passed")
+              /\ UNCHANGED <<capq, fBlocks>>
+    /\ StopOnly /\ UNCHANGED <<toolsRun, paused, pauses>>
+
+\* A person answers the `stop_cap` prompt: "go on" is the last block Claude
+\* Code honors, "end" lets the turn end.
+CapAnswered(s) ==
+    /\ up /\ s \in capq /\ srow[s] = "held" /\ sconn[s]
+    /\ \/ HS!Asked(s, s) /\ fBlocks' = fBlocks + 1 /\ UNCHANGED <<turn, stp, ccBlocks, faults>>
+       \/ HS!Passed(s) /\ StopRead(s, "passed") /\ UNCHANGED fBlocks
+    /\ StopOnly /\ UNCHANGED <<scb, capq, toolsRun, paused, pauses>>
+
+\* The block is the response, and the request closes.
+StopHanded(s) ==
+    /\ up /\ HS!Decides(s)
+    /\ StopRead(s, "blocked")
+    /\ StopOnly /\ UNCHANGED <<scb, capq, fBlocks, toolsRun, paused, pauses>>
+
+StopMarked(s) ==
+    /\ up /\ HS!Marked(s)
+    /\ StopOnly
+    /\ UNCHANGED <<turn, stp, scb, capq, ccBlocks, fBlocks, toolsRun, paused, pauses, faults>>
+
+\* Intake's deadline, under the hook's timeout: an empty body, the turn ends.
+StopDeadline(s) ==
+    /\ up /\ HS!Expires(s)
+    /\ StopRead(s, "passed")
+    /\ StopOnly /\ UNCHANGED <<scb, capq, fBlocks, toolsRun, paused, pauses>>
+
+StopSettled(s) ==
+    /\ up /\ HS!Settles(s)
+    /\ StopOnly
+    /\ UNCHANGED <<turn, stp, scb, capq, ccBlocks, fBlocks, toolsRun, paused, pauses, faults>>
+
+\* A tool call runs: Claude Code's count is reset, and the PostToolUse post
+\* resets Intake's, unless the framework is down and the post is lost.
+ToolRuns ==
+    /\ turn = "working" /\ toolsRun < MaxToolCalls
+    /\ toolsRun' = toolsRun + 1
+    /\ ccBlocks' = 0
+    /\ fBlocks' = IF up THEN 0 ELSE fBlocks
+    /\ StopOnly
+    /\ UNCHANGED <<turn, stp, scb, capq, sconn, srow, smarking, sout, swrong, paused, pauses,
+                   faults>>
+
+\* A person's prompt or a wake starts a new turn. Whether Claude Code then
+\* resets its count is not measured: it may or may not; Intake does not.
+NewTurn ==
+    /\ turn = "ended" /\ \E s \in Stops : stp[s] = "none"
+    /\ turn' = "working"
+    /\ \E reset \in BOOLEAN : ccBlocks' = IF reset THEN 0 ELSE ccBlocks
+    /\ StopOnly
+    /\ UNCHANGED <<stp, scb, capq, sconn, srow, smarking, sout, swrong, fBlocks, toolsRun, paused,
+                   pauses, faults>>
+
+\* The app or the operator pauses the session's agent or project, or lifts
+\* the pause: the Stops held while it was on are asked of the callback.
+PauseSet ==
+    /\ up /\ ~paused /\ pauses < MaxPauses
+    /\ paused' = TRUE /\ pauses' = pauses + 1
+    /\ StopOnly
+    /\ UNCHANGED <<turn, stp, scb, capq, sconn, srow, smarking, sout, swrong, ccBlocks, fBlocks,
+                   toolsRun, faults>>
+
+PauseLifted ==
+    /\ up /\ paused
+    /\ paused' = FALSE
+    /\ scb' = [s \in Stops |-> IF scb[s] = "paused" THEN "asked" ELSE scb[s]]
+    /\ StopOnly
+    /\ UNCHANGED <<turn, stp, capq, sconn, srow, smarking, sout, swrong, ccBlocks, fBlocks,
+                   toolsRun, pauses, faults>>
+
+-----------------------------------------------------------------------------
 Next ==
     \/ FrameworkDies \/ FrameworkStarts
     \/ \E c \in Calls :
@@ -573,6 +796,11 @@ Next ==
          \/ WaiterSettles(w)
     \/ \E t \in Texts : TextAsked(t)
     \/ WaiterReplaced
+    \/ \E w \in Waiters : Superseded(w)
+    \/ \E s \in Stops :
+         \/ StopFires(s) \/ StopHeld(s) \/ StopCallback(s) \/ StopTaken(s) \/ CapAnswered(s)
+         \/ StopHanded(s) \/ StopMarked(s) \/ StopDeadline(s) \/ StopSettled(s)
+    \/ ToolRuns \/ NewTurn \/ PauseSet \/ PauseLifted
 
 Fairness ==
     /\ WF_vars(FrameworkStarts)
@@ -587,8 +815,11 @@ Fairness ==
     /\ \A w \in Waiters : WF_vars(WaiterHeld(w)) /\ WF_vars(TurnedAway(w))
                           /\ WF_vars(HeartbeatFails(w)) /\ WF_vars(TextWritten(w))
                           /\ WF_vars(TextMarked(w)) /\ WF_vars(WaiterExpires(w))
-                          /\ WF_vars(WaiterSettles(w))
+                          /\ WF_vars(WaiterSettles(w)) /\ WF_vars(Superseded(w))
     /\ WF_vars(WaiterReplaced)
+    /\ \A s \in Stops : WF_vars(StopHeld(s)) /\ WF_vars(StopTaken(s)) /\ WF_vars(StopHanded(s))
+                        /\ WF_vars(StopMarked(s)) /\ WF_vars(StopDeadline(s))
+                        /\ WF_vars(StopSettled(s))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -614,6 +845,14 @@ TypeOK ==
     /\ mail \in [Texts -> {"due", "sending", "sent", "unknown"}]
     /\ read \in [Texts -> Nat]
     /\ \A w \in Waiters : wconn[w] => up
+    /\ superseded \subseteq Waiters
+    /\ turn \in {"working", "stopping", "ended"}
+    /\ stp \in [Stops -> {"none", "waiting", "blocked", "passed", "failed"}]
+    /\ scb \in [Stops -> {"none", "asked", "paused", "block", "pass", "used"}]
+    /\ capq \subseteq Stops /\ HS!TypeOK
+    /\ ccBlocks \in 0..Cap /\ fBlocks \in Nat /\ toolsRun \in 0..MaxToolCalls
+    /\ paused \in BOOLEAN /\ pauses \in 0..MaxPauses
+    /\ \A s \in Stops : sconn[s] => up
 
 \* A 200 goes back only for an event whose row is written.
 AckedIsStored == \A e \in Events : acked[e] > 0 => rows[e] > 0
@@ -660,9 +899,10 @@ WaiterOneResponse == HW!OneResponse
 \* Text is read at most once: no text deliver was told unknown is handed again.
 ReadOnce == \A t \in Texts : read[t] <= 1
 
-\* A waiter's request ends empty only at its deadline: a second waiter is
-\* never turned away while the first is held.
-EmptyOnlyAtDeadline == \A w \in Waiters : wout[w] = <<"empty">> => wrow[w] = "expired"
+\* A waiter's request ends empty only at its deadline, or once a newer one
+\* is live: a newer waiter is never turned away for an older one.
+EmptyOnlyAtDeadline ==
+    \A w \in Waiters : wout[w] = <<"empty">> => wrow[w] = "expired" \/ w \in superseded
 
 \* Every waiter's request ends, and its hold settles.
 WaiterRequestsEnd == HW!RequestsEnd
@@ -675,6 +915,23 @@ DeathFound == \A w \in Waiters :
 \* A waiter held is the session's, unless its hold ends first.
 WaiterTaken == \A w \in Waiters :
                  (wconn[w] /\ wrow[w] = "held")
-                   ~> (cur = w \/ wrow[w] \in {"answered", "expired", "lost", "unknown"})
+                   ~> (cur = w \/ wrow[w] \in {"answered", "expired", "passed", "lost", "unknown"})
+
+\* Every Stop's request gets one response, a late decision dropped.
+StopOneResponse == HS!OneResponse
+StopLateDropped == HS!LateDropped
+
+\* No block of the framework's is overridden: at the cap's last honored
+\* block a person decides, and past it the hold passes.
+NeverOverridden == "overridden" \notin faults
+
+\* Intake never counts fewer blocks in a row than Claude Code.
+CountKept == fBlocks >= ccBlocks
+
+\* No Stop is decided by the app's callback while its agent or project is paused.
+NotWhilePaused == "whilePaused" \notin faults
+
+\* Every Stop's request ends, and its hold settles.
+StopRequestsEnd == HS!RequestsEnd
 
 =============================================================================

@@ -38,13 +38,25 @@ defmodule CodingAgentFramework.Intake do
   - A `PostToolUse` is answered 200 at once and handed to the `post_tool_use:` callback in a
     process of its own, with no row. A tool call's row keeps `data` empty until a decision is
     taken: `Transcripts` holds the tool's input.
+  - `Stop` (`model/tla/Intake.tla`'s HS), with the app's `stop:` callback: each turn's end is
+    held and the callback decides it, `:pass` (the turn ends) or `{:block, reason}` (the agent
+    goes on, told the reason); deadline `stop_deadline:`, 570 s by default, under the hook's
+    600 s timeout (`hooks/4` with `:stop`), and a pass at it. Claude Code honors 8 blocks in a
+    row with no tool call between and overrides the 9th (measured on 2.1.322), so `Intake`
+    keeps each session's count in its table, written before a block goes out and reset only
+    by a `PostToolUse` post. At the cap's last honored block (`stop_cap:` 8, less one) a block
+    is not sent: the row waits on a person as a `stop_cap` prompt (its `prompt` column), whom
+    `answer/4` answers `:go_on` (that block) or `:end`; past it the hold passes at once, its
+    actor `capped`. A pause (`pause/4`, per agent or per project) holds a `Stop` until it is
+    lifted (`lift/3`), when the callback is asked, or answers it with the pause's own word.
   - The waiter (`model/tla/Intake.tla`'s HW): a main session's `asyncRewake` Stop hook
     (`waiter_hook/5`) posts to `/hooks/<account>/waiter` and waits. It has no row; its decider
-    is `deliver/5`, and `Mailbox` keeps the delivery's row. One waiter per session is the
-    session's; a second waits behind it, and the first is sent a heartbeat at once, so a
-    connection that died unseen is found and the second takes its place. The plug writes a
-    heartbeat chunk every `beat:` ms, and a failed write ends the hold. At `waiter_deadline:`,
-    under the hook's `timeout`, the response ends empty.
+    is `deliver/5`, and `Mailbox` keeps the delivery's row. Every `Stop` starts one, a blocked
+    one too, so a session has several live: the newest is the session's, and each older one
+    still held is answered empty at once (its program exits 0 and wakes nothing). A waiter
+    whose text is in flight is not replaced: a newer one waits behind it and takes its place
+    once its hold ends. The plug writes a heartbeat chunk every `beat:` ms, and a failed write
+    ends the hold. At `waiter_deadline:`, under the hook's `timeout`, the response ends empty.
 
   After each write it calls `notify` with `%{topic: "intake:<host>:<account>", ids: ids}`, a
   cue and never the data. `CodingAgentFramework.Tracker.IntakeSource` reads the rows. A
@@ -59,17 +71,20 @@ defmodule CodingAgentFramework.Intake do
 
   @deadline 570_000
   @tool_deadline 5_000
+  @stop_deadline 570_000
+  # Claude Code 2.1.322 honors this many Stop blocks in a row and overrides the next (F-157).
+  @stop_cap 8
   # The waiter hook's `timeout` (s), and Intake's deadline 2 minutes under it.
   @waiter_timeout 7_200
   @waiter_deadline 7_080_000
   @beat 5_000
   # How long past a kind's deadline the plug waits, if the `Intake` stops answering: a
   # PreToolUse's deadline is at most 8 s under the hook's 10 s timeout.
-  @margins %{permission: 5_000, tool: 1_500, waiter: 5_000}
+  @margins %{permission: 5_000, tool: 1_500, waiter: 5_000, stop: 5_000}
   # A secret goes into a curl config file between double quotes, so it keeps to these.
   @secret_chars ~r/\A[A-Za-z0-9._~+\/=-]{1,256}\z/
   @timeout 5_000
-  @tools %{pre_tool_use: "PreToolUse", post_tool_use: "PostToolUse"}
+  @tools %{pre_tool_use: "PreToolUse", post_tool_use: "PostToolUse", stop: "PostToolUse"}
 
   @typedoc """
   A tool call, as a callback gets it: the agent (`nil` when the `agent:` lookup knows none), its
@@ -86,6 +101,23 @@ defmodule CodingAgentFramework.Intake do
           optional(:tool_response) => term
         }
 
+  @typedoc """
+  A turn's end, as the `stop:` callback gets it: the agent and its project (`nil` when the
+  lookups know none), its account and session, `blocks` (the session's blocks in a row so far,
+  as `Intake` counts them) and `input`, the `Stop` hook's input as Claude Code posted it.
+  """
+  @type stop_event :: %{
+          agent: String.t() | nil,
+          project: String.t() | nil,
+          account: String.t(),
+          session_id: String.t(),
+          blocks: non_neg_integer,
+          input: map
+        }
+
+  @typedoc "What a pause does to a held `Stop`: hold it until lifted, or answer it at once."
+  @type pause_how :: :hold | :pass | {:block, String.t()}
+
   @doc """
   Starts an `Intake`. Options: `db:` (this instance's SQLite path), `host:` (the node's host
   name), and optionally `notify:` (a function of one cue), `deadline:` (ms a hold is kept),
@@ -94,8 +126,11 @@ defmodule CodingAgentFramework.Intake do
   waited for, under 8 s), `waiter_deadline:` (ms a waiter is held, under the waiter hook's
   `timeout`; 7,080,000 by default, under `waiter_hook/5`'s 7,200 s), `beat:` (ms between a
   waiter's heartbeats, 5,000 by default), `agent:` (`fun(account, session_id) -> name | nil`,
-  for the events' `agent`) and `name:` (for the embedding app's tree; the library looks up no
-  name).
+  for the events' `agent`), `stop:` (`fun(stop_event) -> :pass | {:block, reason}`, which
+  makes each `Stop` a hold), `stop_deadline:` (ms a `Stop` is held, under the `Stop` hook's
+  600 s), `stop_cap:` (Claude Code's blocks in a row, 8), `project:` (`fun(agent) -> project |
+  nil`, which a pause per project reads) and `name:` (for the embedding app's tree; the
+  library looks up no name).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
@@ -104,8 +139,10 @@ defmodule CodingAgentFramework.Intake do
   The settings' `hooks` for `account`: an `http` hook per event of `Event.names/0`, and one for
   each tool callback named in `tools` (`:pre_tool_use`, `:post_tool_use`), posting to this
   host's port with the secret in the `x-caf-secret` header. PermissionRequest waits 600 s and
-  the rest 10 s, which also raises SessionEnd's shared 1.5 s budget. `onFailure` is left at its
-  default, continue, so a framework that is down never refuses a tool call.
+  the rest 10 s, which also raises SessionEnd's shared 1.5 s budget. With `:stop` (the app's
+  `stop:` callback), `Stop` waits 600 s too, and `PostToolUse` posts, which resets the count
+  of blocks. `onFailure` is left at its default, continue, so a framework that is down never
+  refuses a tool call or keeps a turn from ending.
 
       iex> hooks = CodingAgentFramework.Intake.hooks(4790, "work", "s3")
       iex> [%{"hooks" => [hook]}] = hooks["PermissionRequest"]
@@ -114,16 +151,22 @@ defmodule CodingAgentFramework.Intake do
       iex> CodingAgentFramework.Intake.hooks(4790, "work", "s3", [:pre_tool_use])["PreToolUse"]
       ...> |> hd() |> Map.fetch!("hooks") |> hd() |> Map.fetch!("timeout")
       10
+      iex> CodingAgentFramework.Intake.hooks(4790, "work", "s3", [:stop])["Stop"]
+      ...> |> hd() |> Map.fetch!("hooks") |> hd() |> Map.fetch!("timeout")
+      600
   """
-  @spec hooks(:inet.port_number(), String.t(), String.t(), [:pre_tool_use | :post_tool_use]) ::
-          map
+  @spec hooks(:inet.port_number(), String.t(), String.t(), [
+          :pre_tool_use | :post_tool_use | :stop
+        ]) :: map
   def hooks(port, account, secret, tools \\ []) do
+    long = ["PermissionRequest" | if(:stop in tools, do: ["Stop"], else: [])]
+
     Map.new(Event.names() ++ Enum.map(tools, &Map.fetch!(@tools, &1)), fn name ->
       hook = %{
         "type" => "http",
         "url" => "http://127.0.0.1:#{port}/hooks/#{account}",
         "headers" => %{"x-caf-secret" => secret},
-        "timeout" => if(name == "PermissionRequest", do: 600, else: 10)
+        "timeout" => if(name in long, do: 600, else: 10)
       }
 
       {name, [%{"hooks" => [hook]}]}
@@ -307,14 +350,37 @@ defmodule CodingAgentFramework.Intake do
   def post(intake, account, body, opts \\ []), do: call(intake, {:post, account, body}, opts)
 
   @doc """
-  Answers held row `id` with `decision`: `:allow`, `{:allow, updated_permissions}` (for "don't
-  ask again") or `{:deny, message}`. Returns `{:ok, :sent}` once the response is written; a
-  person may have answered the dialog first, which a later read shows. A row that is not
-  `held` is refused with `{:refused, {:not_held, hold}}`.
+  Answers held row `id` with `decision`. A `PermissionRequest`'s: `:allow`, `{:allow,
+  updated_permissions}` (for "don't ask again") or `{:deny, message}`; a person may have
+  answered the dialog first, which a later read shows. A `Stop` waiting on a person at Claude
+  Code's cap (`prompt` `stop_cap`): `:go_on`, the last block Claude Code honors, with the
+  callback's reason, or `:end`, which lets the turn end. Returns `{:ok, :sent}` once the
+  response is written. A row that is not `held` for that answer is refused with
+  `{:refused, {:not_held, hold}}`.
   """
   @spec answer(GenServer.server(), integer, term, keyword) ::
           {:ok, :sent} | {:refused, term} | {:unknown, term}
   def answer(intake, id, decision, opts \\ []), do: call(intake, {:answer, id, decision}, opts)
+
+  @doc """
+  Pauses an agent's or a project's turn ends: `scope` is `{:agent, name}` or `{:project,
+  name}`, and `how` is `:hold` (each `Stop` held until the pause is lifted, or until its
+  deadline) or the pause's own word for each, `:pass` or `{:block, reason}`, counted as the
+  callback's is. A pause per agent goes before one per project. `by` names who paused (the
+  app, the operator). It is a row, so it outlives a restart. Returns `{:ok, :paused}`.
+  """
+  @spec pause(GenServer.server(), {:agent | :project, String.t()}, pause_how, String.t(), keyword) ::
+          {:ok, :paused} | {:refused, term} | {:unknown, term}
+  def pause(intake, scope, how, by, opts \\ []),
+    do: call(intake, {:pause, scope, how, by}, opts)
+
+  @doc """
+  Lifts a pause: each `Stop` it held is decided now, by the callback or by a pause that still
+  covers it. Returns `{:ok, :lifted}`, or `{:refused, :not_paused}`.
+  """
+  @spec lift(GenServer.server(), {:agent | :project, String.t()}, keyword) ::
+          {:ok, :lifted} | {:refused, term} | {:unknown, term}
+  def lift(intake, scope, opts \\ []), do: call(intake, {:lift, scope}, opts)
 
   @doc """
   Holds a waiter's post for `account`, as the plug does: `body` is the Stop hook's input, which
@@ -384,14 +450,20 @@ defmodule CodingAgentFramework.Intake do
           deadlines: %{
             permission: Keyword.get(opts, :deadline, @deadline),
             tool: Keyword.get(opts, :tool_deadline, @tool_deadline),
-            waiter: Keyword.get(opts, :waiter_deadline, @waiter_deadline)
+            waiter: Keyword.get(opts, :waiter_deadline, @waiter_deadline),
+            stop: Keyword.get(opts, :stop_deadline, @stop_deadline)
           },
           beat: Keyword.get(opts, :beat, @beat),
           # {account, session_id} -> the key of the session's waiter
           waiters: %{},
           pre_tool_use: Keyword.get(opts, :pre_tool_use),
           post_tool_use: Keyword.get(opts, :post_tool_use),
+          stop: Keyword.get(opts, :stop),
+          stop_cap: Keyword.get(opts, :stop_cap, @stop_cap),
           agent: Keyword.get(opts, :agent, fn _, _ -> nil end),
+          project: Keyword.get(opts, :project, fn _ -> nil end),
+          # {:agent | :project, name} -> :hold | :pass | {:block, reason}, as the table keeps them
+          pauses: Map.new(Table.pauses(db, host), &{{&1.scope, &1.name}, pause_how(&1)}),
           holds: %{}
         }
 
@@ -410,22 +482,77 @@ defmodule CodingAgentFramework.Intake do
   @impl true
   def handle_call({:post, account, body}, from, state) do
     case Event.parse(body) do
-      %{event: "PreToolUse"} when state.pre_tool_use == nil -> {:reply, {:ok, :not_read}, state}
-      %{event: "PostToolUse"} = row -> post_tool_use(row, account, state)
-      row -> store(row, account, from, state)
+      %{event: "PreToolUse"} when state.pre_tool_use == nil ->
+        {:reply, {:ok, :not_read}, state}
+
+      %{event: "PostToolUse"} = row ->
+        # Spec action ToolRuns: a tool call ran, so the session's blocks are no longer in a row.
+        if state.stop && row.session_id,
+          do: Table.reset_blocks(state.db, state.host, account, row.session_id, now())
+
+        post_tool_use(row, account, state)
+
+      %{event: "Stop", problem: nil} = row when state.stop != nil ->
+        # Claude Code never posts one Stop twice, and two Stops may carry the same body: each
+        # is a hold of its own, under a key no other post repeats.
+        store(%{row | hold: true, key: "#{row.key}:#{now()}:#{unique()}"}, account, from, state)
+
+      row ->
+        store(row, account, from, state)
     end
   end
 
   def handle_call({:answer, id, decision}, from, state) do
-    with {:ok, body} <- permission_response(decision),
-         %{kind: :permission} <- state.holds[id],
-         {:ok, state} <- decide(state, id, body, nil) do
-      {:noreply, put_in(state.holds[id][:from], from)}
-    else
-      {:refused, _} = refused -> {:reply, refused, state}
-      _ -> {:reply, {:refused, {:not_held, hold_of(state, id)}}, state}
+    case state.holds[id] do
+      %{kind: :stop, cap: true} = hold
+      when decision in [:go_on, :end] and not is_map_key(hold, :deciding) ->
+        cap_answer(state, id, hold, decision, from)
+
+      %{kind: :permission} ->
+        with {:ok, body} <- permission_response(decision),
+             {:ok, state} <- decide(state, id, body, nil) do
+          {:noreply, put_in(state.holds[id][:from], from)}
+        else
+          {:refused, _} = refused -> {:reply, refused, state}
+          _ -> {:reply, {:refused, {:not_held, hold_of(state, id)}}, state}
+        end
+
+      _ ->
+        {:reply, {:refused, {:not_held, hold_of(state, id)}}, state}
     end
   end
+
+  def handle_call({:pause, {scope, name} = key, how, by}, _from, state)
+      when scope in [:agent, :project] and is_binary(name) and is_binary(by) do
+    case pause_row(how) do
+      {:ok, row} ->
+        Table.put_pause(
+          state.db,
+          state.host,
+          Map.merge(row, %{scope: scope, name: name, set_by: by}),
+          now()
+        )
+
+        {:reply, {:ok, :paused}, unpaused(put_in(state.pauses[key], how))}
+
+      refused ->
+        {:reply, refused, state}
+    end
+  end
+
+  def handle_call({:pause, scope, _how, _by}, _from, state),
+    do: {:reply, {:refused, {:bad_scope, scope}}, state}
+
+  def handle_call({:lift, {scope, name} = key}, _from, state) when scope in [:agent, :project] do
+    if Table.delete_pause(state.db, state.host, scope, name) do
+      {:reply, {:ok, :lifted}, unpaused(%{state | pauses: Map.delete(state.pauses, key)})}
+    else
+      {:reply, {:refused, :not_paused}, state}
+    end
+  end
+
+  def handle_call({:lift, scope}, _from, state),
+    do: {:reply, {:refused, {:bad_scope, scope}}, state}
 
   def handle_call({:wait, account, body}, {pid, _}, state) do
     case JSON.decode(body) do
@@ -437,18 +564,26 @@ defmodule CodingAgentFramework.Intake do
         timer = Process.send_after(self(), {:expire, key}, state.deadlines.waiter)
         state = put_in(state.holds[key], Map.put(hold, :timer, timer))
 
+        # Every Stop starts a waiter, a blocked one too (F-157), so the newest is the
+        # session's, unless the session's waiter has text in flight: then it waits behind.
         state =
           case state.holds[state.waiters[{account, session}]] do
-            # A second waiter waits behind the first, which is sent a heartbeat now: if its
-            # program died unseen, the write fails and this one takes its place.
-            %{pid: first, ref: ref} ->
-              send(first, {ref, :beat})
+            %{deciding: true} ->
               state
 
-            nil ->
+            _ ->
               waiters_cue(state, account, session)
               put_in(state.waiters[{account, session}], key)
           end
+
+        # Spec action Superseded: each older one still held is answered empty, and its program
+        # exits 0 and wakes nothing.
+        older =
+          for {k, %{kind: :waiter, account: ^account, session: ^session} = h} <- state.holds,
+              k != key and not Map.has_key?(h, :deciding),
+              do: {k, h}
+
+        state = Enum.reduce(older, state, fn {k, h}, state -> release(state, k, h, "passed") end)
 
         wait = state.deadlines.waiter + @margins.waiter
         {:reply, {:ok, {:waiting, key, hold.ref, wait, state.beat}}, state}
@@ -522,11 +657,12 @@ defmodule CodingAgentFramework.Intake do
       {:new, id} when row.hold ->
         # Spec actions HoldStored and ToolHeld (Hold's Held): the row says held while the plug
         # keeps the request open, and the deadline starts.
-        kind = if row.event == "PreToolUse", do: :tool, else: :permission
+        kind = Map.get(%{"PreToolUse" => :tool, "Stop" => :stop}, row.event, :permission)
 
         hold = %{
           kind: kind,
           account: account,
+          session: row.session_id,
           pid: pid,
           ref: make_ref(),
           mon: Process.monitor(pid),
@@ -536,7 +672,13 @@ defmodule CodingAgentFramework.Intake do
         hold =
           Map.put(hold, :timer, Process.send_after(self(), {:expire, id}, state.deadlines[kind]))
 
-        hold = if kind == :tool, do: ask(state, id, hold, row), else: hold
+        hold =
+          case kind do
+            :tool -> ask(state, id, hold, row)
+            :stop -> who(state, id, hold, row)
+            :permission -> hold
+          end
+
         cue(state, account, [id])
         wait = state.deadlines[kind] + @margins[kind]
         {:reply, {:ok, {:held, id, hold.ref, wait}}, put_in(state.holds[id], hold)}
@@ -571,11 +713,133 @@ defmodule CodingAgentFramework.Intake do
   end
 
   # An empty response to a held request, and its row's end: Hold's Empty.
-  defp release(state, id, hold, row_end) do
-    move(state, id, hold, "held", row_end, nil)
+  defp release(state, id, hold, row_end, actor \\ nil) do
+    move(state, id, hold, "held", row_end, nil, actor: actor)
     send(hold.pid, {hold.ref, :release})
     drop(state, id, hold)
   end
+
+  # Spec action StopHeld: the agent and its project are looked up in a process of its own, as a
+  # tool call's are, and come back as `{:stop_who, …}`; a crash there is a pass.
+  defp who(state, id, hold, row) do
+    {me, %{agent: agent, project: project}} = {self(), state}
+    input = JSON.decode!(row.data)
+
+    lookup = fn ->
+      name = agent.(hold.account, hold.session)
+      send(me, {:stop_who, id, name, if(name, do: project.(name))})
+    end
+
+    {_, wmon} = spawn_monitor(lookup)
+    hold |> Map.put(:input, input) |> Map.put(:wmon, wmon)
+  end
+
+  # The pause that covers a held Stop: its agent's, else its project's, else none.
+  defp pause_of(state, hold) do
+    (hold[:agent] && state.pauses[{:agent, hold.agent}]) ||
+      (hold[:project] && state.pauses[{:project, hold.project}])
+  end
+
+  # What a held Stop waits for next. A pause that holds keeps it (with the callback's answer,
+  # if one came, for the lift); a pause's word is its answer; else the callback's answer is
+  # taken, or the callback is asked in a process of its own.
+  defp stop_next(state, id, hold) do
+    case {pause_of(state, hold), hold[:answer]} do
+      {:hold, _} ->
+        put_in(state.holds[id], Map.put(hold, :paused, true))
+
+      {nil, nil} ->
+        put_in(state.holds[id], hold |> Map.delete(:paused) |> ask_stop(state, id))
+
+      {nil, answer} ->
+        take(state, id, Map.delete(hold, :paused), answer, "app")
+
+      {word, _} ->
+        take(state, id, Map.delete(hold, :paused), word, "pause")
+    end
+  end
+
+  defp ask_stop(hold, state, id) do
+    {me, callback} = {self(), state.stop}
+    blocks = Table.blocks(state.db, state.host, hold.account, hold.session)
+
+    event = %{
+      agent: hold.agent,
+      project: hold.project,
+      account: hold.account,
+      session_id: hold.session,
+      blocks: blocks,
+      input: hold.input
+    }
+
+    {_, wmon} = spawn_monitor(fn -> send(me, {:stop_answer, id, callback.(event)}) end)
+    Map.put(hold, :wmon, wmon)
+  end
+
+  # Spec action StopTaken: an answer of the callback or of a pause, against the session's count
+  # of blocks in a row. A pass, or any answer at the cap or past it, is an empty body; past it
+  # the row's actor is `capped`. A block below the cap's last is written in the count before
+  # it goes out; the cap's last is held for a person, as a `stop_cap` prompt.
+  defp take(state, id, hold, answer, actor) do
+    %{db: db, host: host, stop_cap: cap} = state
+    blocks = Table.blocks(db, host, hold.account, hold.session)
+    hold = unwatch(hold)
+
+    case answer do
+      {:block, reason} when is_binary(reason) and blocks < cap - 1 ->
+        Table.put_blocks(db, host, hold.account, hold.session, blocks + 1, now())
+        state = put_in(state.holds[id], hold)
+        decided(state, decide(state, id, stop_block(reason), actor))
+
+      {:block, reason} when is_binary(reason) and blocks == cap - 1 ->
+        move(state, id, hold, "held", "held", nil, prompt: "stop_cap")
+        cue(state, hold, [id])
+        put_in(state.holds[id], hold |> Map.put(:cap, true) |> Map.put(:reason, reason))
+
+      {:block, reason} when is_binary(reason) ->
+        release(state, id, hold, "passed", "capped")
+
+      _ ->
+        release(state, id, hold, "passed", if(answer == :pass, do: actor))
+    end
+  end
+
+  # Spec action CapAnswered: a person's "go on" is the cap's last honored block; "end" lets
+  # the turn end.
+  defp cap_answer(state, id, hold, :go_on, from) do
+    blocks = Table.blocks(state.db, state.host, hold.account, hold.session)
+    Table.put_blocks(state.db, state.host, hold.account, hold.session, blocks + 1, now())
+
+    case decide(state, id, stop_block(hold.reason), "person") do
+      {:ok, state} -> {:noreply, put_in(state.holds[id][:from], from)}
+      :not_held -> {:reply, {:refused, {:not_held, hold_of(state, id)}}, state}
+    end
+  end
+
+  defp cap_answer(state, id, hold, :end, _from),
+    do: {:reply, {:ok, :sent}, release(state, id, hold, "passed", "person")}
+
+  # The Stop output Claude Code 2.1.322 reads: a block sends the agent back with the reason.
+  defp stop_block(reason), do: JSON.encode!(%{"decision" => "block", "reason" => reason})
+
+  # After a pause changes, each Stop it held is looked at again.
+  defp unpaused(state) do
+    for {id, %{kind: :stop, paused: true}} <- state.holds, reduce: state do
+      state -> stop_next(state, id, state.holds[id])
+    end
+  end
+
+  defp pause_row(:hold), do: {:ok, %{how: "hold"}}
+  defp pause_row(:pass), do: {:ok, %{how: "pass"}}
+
+  defp pause_row({:block, reason}) when is_binary(reason) and reason != "",
+    do: {:ok, %{how: "block", reason: reason}}
+
+  defp pause_row(how), do: {:refused, {:bad_pause, how}}
+
+  defp pause_how(%{how: "hold"}), do: :hold
+  defp pause_how(%{how: "pass"}), do: :pass
+  defp pause_how(%{how: "block", reason: reason}), do: {:block, reason}
 
   @impl true
   def handle_cast({:written, id, ref}, state) do
@@ -618,6 +882,29 @@ defmodule CodingAgentFramework.Intake do
       {%{deciding: true}, _} -> {:noreply, state}
       {hold, :pass} -> {:noreply, release(state, id, hold, "passed")}
       {_, {:decision, body}} -> {:noreply, decided(state, decide(state, id, body, "app"))}
+    end
+  end
+
+  def handle_info({:stop_who, id, agent, project}, state) do
+    case state.holds[id] do
+      %{kind: :stop, wmon: _} = hold when not is_map_key(hold, :deciding) ->
+        hold = hold |> unwatch() |> Map.merge(%{agent: agent, project: project})
+        {:noreply, stop_next(state, id, hold)}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:stop_answer, id, answer}, state) do
+    case state.holds[id] do
+      # An answer after the deadline, for a request gone, or for a row a person now answers:
+      # dropped (LateDropped).
+      %{kind: :stop, wmon: _} = hold when not is_map_key(hold, :deciding) ->
+        {:noreply, stop_next(state, id, hold |> unwatch() |> Map.put(:answer, answer))}
+
+      _ ->
+        {:noreply, state}
     end
   end
 
@@ -752,4 +1039,5 @@ defmodule CodingAgentFramework.Intake do
     do: state.notify.(%{topic: "intake:#{state.host}:#{account}:waiters", ids: [session]})
 
   defp now, do: System.os_time(:millisecond)
+  defp unique, do: System.unique_integer([:positive, :monotonic])
 end

@@ -1,13 +1,17 @@
 defmodule CodingAgentFramework.Intake.Table do
   @moduledoc """
   `Intake`'s tables, in one SQLite file the caller names: `intake_events`, one row per hook
-  event by `{host, account, key}`, and `intake_starts`, when each host's `Intake` last started.
+  event by `{host, account, key}`; `intake_starts`, when each host's `Intake` last started;
+  `intake_stops`, each session's count of `Stop` blocks in a row; and `intake_pauses`, the
+  pauses the `Stop` hold reads, per agent and per project.
 
   `CodingAgentFramework.Intake` is the one writer. A host whose `Intake` never started is
   `:unread`, never an empty list. A row's `hold` is nil for an event that is not held, and
   otherwise one of `held`, `deciding`, `answered`, `expired`, `passed`, `lost` and `unknown`
   (`model/tla/Hold.tla`'s rows). A decided row's `decision` is the response, and its `actor`
-  who decided (`app` for a PreToolUse).
+  who decided (`app` for the app's callback, `pause` for a pause's word, `person` for a
+  person's answer, `capped` for a `Stop` let pass at Claude Code's cap). A held `Stop` that
+  waits on a person has `prompt` `stop_cap`.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "intake.db")
       iex> {:ok, db} = CodingAgentFramework.Intake.Table.open(path)
@@ -17,7 +21,8 @@ defmodule CodingAgentFramework.Intake.Table do
 
   alias CodingAgentFramework.Store
 
-  @columns ~w(id host account key event session_id data problem hold decision written_at actor)a
+  @columns ~w(id host account key event session_id data problem hold decision written_at actor
+              prompt)a
 
   @schema """
   CREATE TABLE IF NOT EXISTS intake_events (
@@ -25,9 +30,16 @@ defmodule CodingAgentFramework.Intake.Table do
     event TEXT, session_id TEXT, data TEXT, problem TEXT, hold TEXT, decision TEXT,
     written_at INTEGER NOT NULL, actor TEXT, UNIQUE (host, account, key));
   CREATE TABLE IF NOT EXISTS intake_starts (host TEXT PRIMARY KEY, started_at INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS intake_stops (
+    host TEXT NOT NULL, account TEXT NOT NULL, session_id TEXT NOT NULL,
+    blocks INTEGER NOT NULL, written_at INTEGER NOT NULL,
+    PRIMARY KEY (host, account, session_id));
+  CREATE TABLE IF NOT EXISTS intake_pauses (
+    host TEXT NOT NULL, scope TEXT NOT NULL, name TEXT NOT NULL, how TEXT NOT NULL,
+    reason TEXT, set_by TEXT, set_at INTEGER NOT NULL, PRIMARY KEY (host, scope, name));
   """
 
-  @open [added: [intake_events: ["actor TEXT"]]]
+  @open [added: [intake_events: ["actor TEXT", "prompt TEXT"]]]
 
   @type db :: Store.db()
 
@@ -123,18 +135,88 @@ defmodule CodingAgentFramework.Intake.Table do
 
   @doc """
   Moves row `id` from hold `from` to `to`, with `decision` when given, and the options
-  `actor:` and `data:` when given (a tool call's row gets its input only with a decision).
-  False when it was not `from`.
+  `actor:`, `data:` and `prompt:` when given (a tool call's row gets its input only with a
+  decision). False when it was not `from`.
   """
   @spec move(db, integer, String.t(), String.t(), String.t() | nil, integer, keyword) :: boolean
   def move(db, id, from, to, decision, at, opts \\ []) do
     sql =
       "UPDATE intake_events SET hold = ?3, decision = coalesce(?4, decision), written_at = ?5, " <>
-        "actor = coalesce(?6, actor), data = coalesce(?7, data) " <>
+        "actor = coalesce(?6, actor), data = coalesce(?7, data), prompt = coalesce(?8, prompt) " <>
         "WHERE id = ?1 AND hold = ?2 RETURNING id"
 
-    values = [id, from, to, decision, at, opts[:actor], opts[:data]]
+    values = [id, from, to, decision, at, opts[:actor], opts[:data], opts[:prompt]]
     Store.query(db, sql, values) != []
+  end
+
+  @doc """
+  A session's count of `Stop` blocks in a row, as `Intake` last wrote it: 0 when it has none.
+
+      iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "intake.db")
+      iex> {:ok, db} = CodingAgentFramework.Intake.Table.open(path)
+      iex> CodingAgentFramework.Intake.Table.put_blocks(db, "h", "work", "s1", 3, 1)
+      iex> CodingAgentFramework.Intake.Table.blocks(db, "h", "work", "s1")
+      3
+  """
+  @spec blocks(db, String.t(), String.t(), String.t()) :: non_neg_integer
+  def blocks(db, host, account, session_id) do
+    sql = "SELECT blocks FROM intake_stops WHERE host = ?1 AND account = ?2 AND session_id = ?3"
+
+    case Store.query(db, sql, [host, account, session_id]) do
+      [[n]] -> n
+      [] -> 0
+    end
+  end
+
+  @doc "Writes a session's count of `Stop` blocks in a row."
+  @spec put_blocks(db, String.t(), String.t(), String.t(), non_neg_integer, integer) :: :ok
+  def put_blocks(db, host, account, session_id, n, at) do
+    row = [host: host, account: account, session_id: session_id, blocks: n, written_at: at]
+    Store.upsert(db, "intake_stops", row)
+    :ok
+  end
+
+  @doc "Sets a session's count to 0 after a tool call; true when it was more."
+  @spec reset_blocks(db, String.t(), String.t(), String.t(), integer) :: boolean
+  def reset_blocks(db, host, account, session_id, at) do
+    sql =
+      "UPDATE intake_stops SET blocks = 0, written_at = ?4 " <>
+        "WHERE host = ?1 AND account = ?2 AND session_id = ?3 AND blocks > 0 RETURNING blocks"
+
+    Store.query(db, sql, [host, account, session_id, at]) != []
+  end
+
+  @doc """
+  A host's pauses, each `%{scope: :agent | :project, name, how, reason, set_by, set_at}`; `how`
+  is `hold`, `pass` or `block` (with its `reason`).
+  """
+  @spec pauses(db, String.t()) :: [map]
+  def pauses(db, host) do
+    columns = [:scope, :name, :how, :reason, :set_by, :set_at]
+
+    for row <- Store.select(db, "intake_pauses", columns, "host = ?1 ORDER BY set_at", [host]),
+        do: %{row | scope: String.to_existing_atom(row.scope)}
+  end
+
+  @doc "Writes a pause in place of the one of the same scope and name."
+  @spec put_pause(db, String.t(), map, integer) :: :ok
+  def put_pause(db, host, pause, at) do
+    row = [host: host, scope: Atom.to_string(pause.scope), name: pause.name, how: pause.how]
+
+    Store.upsert(
+      db,
+      "intake_pauses",
+      row ++ [reason: pause[:reason], set_by: pause[:set_by], set_at: at]
+    )
+
+    :ok
+  end
+
+  @doc "Removes a pause; true when there was one."
+  @spec delete_pause(db, String.t(), :agent | :project, String.t()) :: boolean
+  def delete_pause(db, host, scope, name) do
+    sql = "DELETE FROM intake_pauses WHERE host = ?1 AND scope = ?2 AND name = ?3 RETURNING name"
+    Store.query(db, sql, [host, Atom.to_string(scope), name]) != []
   end
 
   @doc "A host's account's rows, and `read_at`: its last start or newest row; `:unread` before a start."
