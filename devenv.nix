@@ -21,8 +21,9 @@ let
   #   - ssh-keygen: the home's commit signing key (bin/caf-login --git) and git's check of a
   #     signature (gpg.ssh.program).
   #   - cloudflared: a tunnel an app or a person configures; the framework never runs it.
-  #   - sh, bash, rm, mv, env, kill, ps, cat, tail, head, mkdir, mkfifo, stty, echo, sleep, true: the
-  #     POSIX tools the tests and scripts call (stty: the screen stand-in reads keys raw).
+  #   - sh, bash, rm, mv, env, kill, ps, cat, tail, head, mkdir, mktemp, mkfifo, stty, echo, sleep,
+  #     true: the POSIX tools the tests and scripts call (stty: the screen stand-in reads keys
+  #     raw; mktemp and rm: bin/caf-login's scratch folder for Claude Code's first run).
   #   - tlc and java: TLA+ checks of model/tla (bin/check-model). Development only.
   programs = {
     TMUX = lib.getExe pkgs.tmux;
@@ -50,6 +51,7 @@ let
     TAIL = lib.getExe' pkgs.coreutils "tail";
     HEAD = lib.getExe' pkgs.coreutils "head";
     MKDIR = lib.getExe' pkgs.coreutils "mkdir";
+    MKTEMP = lib.getExe' pkgs.coreutils "mktemp";
     MKFIFO = lib.getExe' pkgs.coreutils "mkfifo";
     STTY = lib.getExe' pkgs.coreutils "stty";
     ECHO = lib.getExe' pkgs.coreutils "echo";

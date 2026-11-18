@@ -22,7 +22,11 @@
 # account that passed it is not run again.
 #
 # --gh logs the GitHub CLI in with <home>/gh, the GH_CONFIG_DIR every launch, job and service
-# sets (F-155): agents push with the person's own GitHub login, kept in the home.
+# sets (F-155): agents push with the person's own GitHub login, kept in the home. The login runs
+# `gh auth login --insecure-storage`, so the token is a file in the home (gh's hosts.yml, mode
+# 600), never the OS keyring (macOS's Keychain), which is gh's default and outside the home.
+# --check --gh says where the token is, and ends with status 1 when gh is logged in on a token
+# that is not in that file.
 #
 # --git makes <home>/git/<name> (signing_key by default), an ed25519 key of the home's own,
 # never one of the person's keys, with no passphrase, since a headless session signs with no
@@ -31,8 +35,9 @@
 # home's gh. GitHub shows a commit Verified when that key is on the account and the commit's
 # email (the config's git.email) is one of the account's verified emails.
 #
-# It runs devenv's pinned programs (CAF_CLAUDE, CAF_GH, CAF_SSH_KEYGEN), with Claude Code's
-# updater off; outside devenv it runs itself again through `devenv shell`. Nothing of a Claude
+# It runs devenv's pinned programs (CAF_CLAUDE, CAF_GH, CAF_SSH_KEYGEN, CAF_MKDIR, CAF_MKTEMP,
+# CAF_RM, CAF_CAT), with Claude Code's updater off; outside devenv it runs itself again through
+# `devenv shell`. Nothing of a Claude
 # Code session this was typed in (CLAUDECODE, CLAUDE_CODE_*) reaches the login.
 set -euo pipefail
 
@@ -95,13 +100,34 @@ export XDG_DATA_HOME="$home/xdg/data" XDG_STATE_HOME="$home/xdg/state"
 
 if [[ $mode == gh ]]; then
   "$CAF_MKDIR" -p "$GH_CONFIG_DIR" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+  hosts="$GH_CONFIG_DIR/hosts.yml"
+  # Whether gh keeps a token in the home's own file. Without a token there, gh's status may
+  # still pass on a token in the OS keyring or in GH_TOKEN, which are outside the home.
+  token_in_home() { [[ -r "$hosts" && "$(<"$hosts")" == *"oauth_token:"* ]]; }
   if ((check)); then
     echo "caf-login: GitHub CLI, $GH_CONFIG_DIR:"
-    exec "$CAF_GH" auth status
+    status=0
+    "$CAF_GH" auth status || status=$?
+    if token_in_home; then
+      echo "caf-login: the token is in the home: a file, $hosts"
+    elif ((status == 0)); then
+      echo "caf-login: the token is not in the home: $hosts holds none, so gh reads it from the OS keyring or the environment" >&2
+      echo "caf-login: run bin/caf-login --gh $home to log in again, with the token in the home" >&2
+      status=1
+    else
+      echo "caf-login: no token in the home: $hosts holds none"
+    fi
+    exit "$status"
   fi
   echo "caf-login: logging the GitHub CLI in, with $GH_CONFIG_DIR"
-  "$CAF_GH" auth login
+  # gh's own default is the OS keyring (macOS's Keychain), outside the home.
+  "$CAF_GH" auth login --insecure-storage
   echo
+  if ! token_in_home; then
+    echo "caf-login: the token is not in $hosts; run bin/caf-login --gh $home again" >&2
+    exit 1
+  fi
+  echo "caf-login: the token is in the home: a file, $hosts"
   echo "caf-login: to check it, run: bin/caf-login --check --gh $home"
   exit 0
 fi
@@ -159,12 +185,12 @@ echo
 if onboarded; then
   echo "caf-login: Claude Code's first-run onboarding was passed on $account before"
 else
-  scratch="$(mktemp -d "${TMPDIR:-/tmp}/caf-login.XXXXXX")"
+  scratch="$("$CAF_MKTEMP" -d "${TMPDIR:-/tmp}/caf-login.XXXXXX")"
   echo "caf-login: now Claude Code's first run on $account, in a scratch folder, $scratch."
   echo "caf-login: pass its onboarding (the theme, then each screen after it) and the folder's"
   echo "caf-login: trust dialog, then type /exit."
   (cd "$scratch" && "$CAF_CLAUDE") || true
-  rm -rf -- "$scratch"
+  "$CAF_RM" -rf -- "$scratch"
   echo
   if onboarded; then
     echo "caf-login: Claude Code's first-run onboarding: passed"
