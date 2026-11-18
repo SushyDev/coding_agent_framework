@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Logs one account of a framework home in, with Claude Code's own login, in this terminal:
+# Logs a framework home's accounts in, each with its own tool's login, in this terminal:
 #
 #   bin/caf-login <home> <account>           # claude auth login, then Claude Code's first run
 #   bin/caf-login --check <home> <account>   # claude auth status, and whether the first run passed
+#   bin/caf-login --gh <home>                # gh auth login, with the home's GH_CONFIG_DIR
+#   bin/caf-login --check --gh <home>        # gh auth status, with the same directory
+#   bin/caf-login --git <home> [--key <name>] [--title <title>]
+#                                            # the home's commit signing key, made once
 #
 # The account's Claude config directory is <home>/accounts/<account>/claude, the one the
 # framework sets as CLAUDE_CONFIG_DIR at every launch on that account (docs/design.md,
@@ -17,44 +21,118 @@
 # .claude.json records the onboarding passed (hasCompletedOnboarding), which --check reads. An
 # account that passed it is not run again.
 #
-# It runs devenv's pinned Claude Code (CAF_CLAUDE), with the updater off; outside devenv it
-# runs itself again through `devenv shell`. Nothing of a Claude Code session this was typed in
-# (CLAUDECODE, CLAUDE_CODE_*) reaches the login.
+# --gh logs the GitHub CLI in with <home>/gh, the GH_CONFIG_DIR every launch, job and service
+# sets (F-155): agents push with the person's own GitHub login, kept in the home.
+#
+# --git makes <home>/git/<name> (signing_key by default), an ed25519 key of the home's own,
+# never one of the person's keys, with no passphrase, since a headless session signs with no
+# ssh agent. It never writes over an existing key. It prints the public key and offers to add
+# it to the person's GitHub account as a signing key (gh ssh-key add --type signing), with the
+# home's gh. GitHub shows a commit Verified when that key is on the account and the commit's
+# email (the config's git.email) is one of the account's verified emails.
+#
+# It runs devenv's pinned programs (CAF_CLAUDE, CAF_GH, CAF_SSH_KEYGEN), with Claude Code's
+# updater off; outside devenv it runs itself again through `devenv shell`. Nothing of a Claude
+# Code session this was typed in (CLAUDECODE, CLAUDE_CODE_*) reaches the login.
 set -euo pipefail
 
-usage() { echo "usage: bin/caf-login [--check] <home> <account>"; }
+usage() {
+  echo "usage: bin/caf-login [--check] <home> <account>"
+  echo "       bin/caf-login [--check] --gh <home>"
+  echo "       bin/caf-login --git <home> [--key <name>] [--title <title>]"
+}
 fail() {
   echo "caf-login: $*" >&2
   exit 2
 }
 
-check=0
+all=("$@")
+check=0 mode=claude key=signing_key title=""
 if [[ "${1:-}" == --check ]]; then check=1; shift; fi
-case "${1:-}" in -h | --help) usage; exit 0 ;; esac
-(($# == 2)) || { usage >&2; exit 2; }
-home=$1 account=$2
-[[ "$home" == /* ]] || fail "$home is not an absolute path"
-[[ "$account" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || fail "$account is not an account's name"
-
-dir="$home/accounts/$account/claude"
-# Setting CLAUDE_CONFIG_DIR to the default directory logs Claude Code out (docs/design.md).
-if [[ -d "$dir" && "$(cd "$dir" && pwd -P)" == "$(cd "$HOME" && pwd -P)/.claude" ]]; then
-  fail "$dir is the default directory ~/.claude; name a framework home of its own"
+case "${1:-}" in
+  -h | --help) usage; exit 0 ;;
+  --gh) mode=gh; shift ;;
+  --git) mode=git; shift ;;
+esac
+if [[ $mode == git ]]; then
+  ((check == 0)) || { usage >&2; exit 2; }
+  (($# >= 1)) || { usage >&2; exit 2; }
+  home=$1; shift
+  while (($# > 0)); do
+    case "$1" in
+      --key) (($# >= 2)) || { usage >&2; exit 2; }; key=$2; shift 2 ;;
+      --title) (($# >= 2)) || { usage >&2; exit 2; }; title=$2; shift 2 ;;
+      *) usage >&2; exit 2 ;;
+    esac
+  done
+  [[ "$key" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "$key is not a key file's name"
+elif [[ $mode == gh ]]; then
+  (($# == 1)) || { usage >&2; exit 2; }
+  home=$1
+else
+  (($# == 2)) || { usage >&2; exit 2; }
+  home=$1 account=$2
+  [[ "$account" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || fail "$account is not an account's name"
 fi
+[[ "$home" == /* ]] || fail "$home is not an absolute path"
 
 if [[ -z "${CAF_CLAUDE:-}" ]]; then
   command -v devenv >/dev/null || fail "devenv is not on PATH; see README.md, Development"
   root="$(cd "$(dirname "$0")/.." && pwd -P)"
-  args=("$home" "$account")
-  if ((check)); then args=(--check "${args[@]}"); fi
   cd "$root"
-  exec devenv shell -- "$root/bin/caf-login" "${args[@]}"
+  exec devenv shell -- "$root/bin/caf-login" "${all[@]}"
 fi
 
 unset CLAUDECODE TMUX TMUX_PANE
 while IFS= read -r name; do
   if [[ "$name" == CLAUDE_CODE_* ]]; then unset "$name"; fi
 done < <(compgen -e)
+
+# Where gh and git keep their state: the home's, as every launch sets it (ToolHome.env/2).
+export GH_CONFIG_DIR="$home/gh" GIT_CONFIG_GLOBAL="$home/git/config" GIT_CONFIG_NOSYSTEM=1
+export XDG_CONFIG_HOME="$home/xdg/config" XDG_CACHE_HOME="$home/xdg/cache"
+export XDG_DATA_HOME="$home/xdg/data" XDG_STATE_HOME="$home/xdg/state"
+
+if [[ $mode == gh ]]; then
+  "$CAF_MKDIR" -p "$GH_CONFIG_DIR" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+  if ((check)); then
+    echo "caf-login: GitHub CLI, $GH_CONFIG_DIR:"
+    exec "$CAF_GH" auth status
+  fi
+  echo "caf-login: logging the GitHub CLI in, with $GH_CONFIG_DIR"
+  "$CAF_GH" auth login
+  echo
+  echo "caf-login: to check it, run: bin/caf-login --check --gh $home"
+  exit 0
+fi
+
+if [[ $mode == git ]]; then
+  file="$home/git/$key"
+  "$CAF_MKDIR" -p "$home/git"
+  if [[ -e "$file" || -e "$file.pub" ]]; then
+    echo "caf-login: $file is there already; it is kept as it is."
+  else
+    "$CAF_SSH_KEYGEN" -q -t ed25519 -N "" -C "${title:-caf $key}" -f "$file"
+    echo "caf-login: made $file, the home's own signing key."
+  fi
+  [[ -r "$file.pub" ]] || fail "$file.pub is missing"
+  echo "caf-login: its public key:"
+  "$CAF_CAT" "$file.pub"
+  echo
+  read -r -p "Add it to your GitHub account as a signing key, with the home's gh? [y/N] " answer
+  if [[ "$answer" == [yY]* ]]; then
+    "$CAF_GH" ssh-key add "$file.pub" --type signing --title "${title:-caf $key}"
+  else
+    echo "caf-login: to add it later: GH_CONFIG_DIR=$GH_CONFIG_DIR gh ssh-key add $file.pub --type signing"
+  fi
+  exit 0
+fi
+
+dir="$home/accounts/$account/claude"
+# Setting CLAUDE_CONFIG_DIR to the default directory logs Claude Code out (docs/design.md).
+if [[ -d "$dir" && "$(cd "$dir" && pwd -P)" == "$(cd "$HOME" && pwd -P)/.claude" ]]; then
+  fail "$dir is the default directory ~/.claude; name a framework home of its own"
+fi
 export CLAUDE_CONFIG_DIR="$dir" DISABLE_AUTOUPDATER=1
 
 # Whether Claude Code's first-run onboarding was passed on the account.
@@ -73,7 +151,7 @@ if ((check)); then
   exit "$status"
 fi
 
-mkdir -p "$dir"
+"$CAF_MKDIR" -p "$dir"
 echo "caf-login: logging account $account in, with $dir"
 "$CAF_CLAUDE" auth login
 echo

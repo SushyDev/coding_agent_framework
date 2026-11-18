@@ -73,12 +73,24 @@ defmodule CodingAgentFramework.Transcripts do
   """
   @spec path(String.t(), String.t(), String.t()) :: {:ok, String.t()} | {:refused, term}
   def path(config_dir, cwd, session_id) do
-    case String.replace(cwd, ~r/[^a-zA-Z0-9]/, "-") do
-      key when byte_size(key) <= 200 ->
-        {:ok, Path.join([config_dir, "projects", key, session_id <> ".jsonl"])}
+    with {:ok, dir} <- project_dir(config_dir, cwd),
+         do: {:ok, Path.join(dir, session_id <> ".jsonl")}
+  end
 
-      _ ->
-        {:refused, :long_cwd}
+  @doc """
+  The directory Claude Code keeps a working directory's sessions in, for an account's config
+  directory: `<config>/projects/<cwd, each character other than a letter or a digit as ->`.
+  Its `memory/` is that directory's agent memory (F-155). `{:refused, :long_cwd}` past 200
+  characters, where Claude Code shortens the name in a way not read here.
+
+      iex> CodingAgentFramework.Transcripts.project_dir("/caf/accounts/a/claude", "/caf/checkouts/demo")
+      {:ok, "/caf/accounts/a/claude/projects/-caf-checkouts-demo"}
+  """
+  @spec project_dir(Path.t(), Path.t()) :: {:ok, Path.t()} | {:refused, :long_cwd}
+  def project_dir(config_dir, cwd) do
+    case String.replace(cwd, ~r/[^a-zA-Z0-9]/, "-") do
+      key when byte_size(key) <= 200 -> {:ok, Path.join([config_dir, "projects", key])}
+      _ -> {:refused, :long_cwd}
     end
   end
 

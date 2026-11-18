@@ -32,6 +32,11 @@ defmodule CodingAgentFramework.Sessions do
   pid comes from that file, since dtach does not report it. **A resume** is the same with
   `--resume <id>`.
 
+  **One memory per checkout** (F-155). With `home:`, before each start or resume the account's
+  memory of the cwd is linked to the home's one folder of it (`Sessions.Memory.link/3`), so a
+  session on any account, a move's resume included, reads and writes the same memory; a start
+  whose link is refused (both folders hold files, say) is refused `{:memory, reason}`.
+
   **The release.** An interactive start records, on its row (`release`), the Claude Code release
   its program is: what `<claude> --version` prints first, as in `2.1.322 (Claude Code)`, read
   before the row is written (F-113's new-4). `Screen` reads the session's screen as that
@@ -167,7 +172,7 @@ defmodule CodingAgentFramework.Sessions do
   alias CodingAgentFramework.{ClaudeCLI, Holder, Programs, Registry, Shell, Stream, Tmux}
   alias CodingAgentFramework.{Accounts, Acts, ClaudeCLI.Options, Inlet, Intake, Store}
   alias CodingAgentFramework.Transcripts
-  alias CodingAgentFramework.Sessions.{Agents, Dialog, Table, Turn, Worktree}
+  alias CodingAgentFramework.Sessions.{Agents, Dialog, Memory, Table, Turn, Worktree}
 
   @timeout 30_000
   # Each git command of a worktree, and the checks and the add before a setup: three lists or
@@ -593,6 +598,7 @@ defmodule CodingAgentFramework.Sessions do
          {:ok, role} <- Keyword.fetch(launch, :role) |> required(:role),
          {:ok, agent} <- agent(state, name, role, launch, place, resume),
          {:ok, way} <- way(state, role, account, name, place.cwd, resume, launch),
+         :ok <- memory(state, account, place.cwd),
          deadline = state.clock.() + timeout + budget(place.tree),
          row = new_row(state, name, account, role, place, resume, way, deadline, launch),
          row = Map.merge(row, agent),
@@ -1903,6 +1909,17 @@ defmodule CodingAgentFramework.Sessions do
     do: {:ok, first}
 
   defp first(_first), do: {:refused, {:bad, :first}}
+
+  # The account's memory of the cwd links to the home's one folder of it, before every start
+  # or resume, so a session on any account, and a move, keeps one memory (F-155).
+  defp memory(%{home: nil}, _account, _cwd), do: :ok
+
+  defp memory(state, account, cwd) do
+    case Memory.link(state.home, account.config_dir, cwd) do
+      :ok -> :ok
+      {:refused, why} -> {:refused, {:memory, why}}
+    end
+  end
 
   # The session's due directory, granted by `--add-dir` at every interactive start, so reading
   # a long row the typed write points to never asks permission (F-142). The agent row keeps
