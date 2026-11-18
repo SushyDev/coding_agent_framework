@@ -192,7 +192,15 @@ Built, each from a checked model in `model/tla/`:
   delegate idle with no report past a bound the app sets is told to its parent once per idle
   state, by a notice in `Mailbox` and never a kill; and a start idempotent per branch, which
   answers the branch's live delegate (`already: true`) and starts again a row with no report
-  whose process is gone.
+  whose process is gone;
+- what a move to a Linux workstation needs first (F-155): a launch's prompt cap per operating
+  system (Linux refuses one argument over 128 KiB), a longer first row going as a pointer to
+  its file; one agent memory per checkout in the home, each account's linked to it, so a move
+  keeps it; a delegate's turn of its own after its report (a background command of its own woke
+  it) told to its parent once, as a notice, never as the report, against `Delegate.tla`; every
+  tool's state in the home (gh's login, git's config with the app's own commit author and SSH
+  signing with the home's own key, ssh's config and known hosts, the XDG directories), with
+  `bin/caf-login --gh` and `--git`; and cloudflared in devenv.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
@@ -339,6 +347,7 @@ flowchart BT
     holder[caf_holder]
     store[caf_store]
     cues[caf_cues]
+    tool_home[caf_tool_home]
   end
   subgraph io["Readers and writers"]
     registry[caf_registry]
@@ -372,6 +381,7 @@ flowchart BT
   end
 
   tmux --> shell
+  tool_home --> shell
   holder --> shell
   registry --> shell
   registry --> holder
@@ -423,6 +433,8 @@ flowchart BT
   mailbox --> accounts
   mailbox --> inlet
   mailbox --> registry
+  mailbox --> cli
+  mailbox --> shell
   mover --> sessions
   mover --> mailbox
   mover --> accounts
@@ -431,7 +443,6 @@ flowchart BT
   mover --> acts
   mains --> shell
   mains --> accounts
-  mains --> cli
   mains --> usage
   mains --> stream
   mains --> sessions
@@ -465,7 +476,11 @@ names.
 ## Development
 
 Every tool comes from [devenv](https://devenv.sh) 2.x, pinned by `devenv.lock`: Erlang, Elixir,
-tmux, dtach, Claude Code, git, gh, TLC with its JDK, and the POSIX tools the tests call.
+tmux, dtach, Claude Code, git, gh, rsync, ssh and ssh-keygen, cloudflared (for a tunnel an app or a
+person configures; the framework never runs it), TLC with its JDK, and the POSIX tools the tests
+call. Every program the framework, a launch, a job or a test runs is devenv's, by its `CAF_<NAME>`
+path, and every program's data stays in the framework home, so a home moves whole to another
+machine that has nix.
 
 - Enter the environment with `devenv shell`, or run one command in it with
   `devenv shell -- <command>`.

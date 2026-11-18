@@ -55,9 +55,14 @@ The framework home must be short: macOS cuts a socket path at 104 bytes.
          "branches": "^unit/",
          "cap": 3
        }
-     }
+     },
+     "git": {"name": "Demo Bot", "email": "you@example.com"}
    }
    ```
+
+   `git` is the author every agent commits as, distinct from you. For GitHub to show its
+   commits Verified, `email` must be one of your GitHub account's verified emails (its noreply
+   address works); the name may be anything.
 
 3. **Log both accounts in**, each with its own config directory under the home:
 
@@ -77,6 +82,22 @@ The framework home must be short: macOS cuts a socket path at 104 bytes.
    Passed when each check names the account you logged in with and reads `Claude Code's
    first-run onboarding: passed`. A check that reads `not passed` ends with status 1: run
    `bin/caf-login` for that account again.
+
+4. **Log the GitHub CLI in, and make the home's signing key.** Every tool's state lives in the
+   home (F-155): gh's login in `/Users/me/caf-e2e/gh`, git's config and the commit signing key
+   in `/Users/me/caf-e2e/git/`, ssh's config and known hosts in `/Users/me/caf-e2e/ssh/`.
+   Agents push with your own GitHub login and commit as the config's `git` author:
+
+   ```sh
+   bin/caf-login --gh /Users/me/caf-e2e
+   bin/caf-login --check --gh /Users/me/caf-e2e
+   bin/caf-login --git /Users/me/caf-e2e --title "caf-e2e signing key"
+   ```
+
+   `--git` makes `/Users/me/caf-e2e/git/signing_key`, the home's own key (never one of yours),
+   once, prints its public key, and offers to add it to your GitHub account as a signing key.
+   Passed when `--check --gh` names your GitHub account, and the key's `.pub` is beside it. The
+   app refuses to start with a `git` author whose key is missing (`{:no_signing_key, path}`).
 
 No reading of either account's allowance is written by hand. A start picks the account with
 the most allowance left, and an account with no reading counts as 0 % used, assumed, as a reset
