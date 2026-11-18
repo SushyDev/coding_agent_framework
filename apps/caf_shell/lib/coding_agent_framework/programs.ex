@@ -86,7 +86,21 @@ defmodule CodingAgentFramework.Programs do
   @sh "/bin/sh"
   @find ~S"""
   for n do
-    if p=$(command -v "$n"); then printf '%s\t%s\n' "$n" "$p"; else printf '%s\t\n' "$n"; fi
+    p=$(command -v "$n") || p=
+    case $p in
+      /*) ;;
+      *)
+        # A builtin (kill, echo, test, ...) answers `command -v` with its bare name; the
+        # program is then the first executable regular file of that name on the PATH.
+        p=
+        old=$IFS; IFS=:
+        for d in $PATH; do
+          if [ -f "${d:-.}/$n" ] && [ -x "${d:-.}/$n" ]; then p="${d:-.}/$n"; break; fi
+        done
+        IFS=$old
+        ;;
+    esac
+    printf '%s\t%s\n' "$n" "$p"
   done
   """
 
@@ -110,6 +124,10 @@ defmodule CodingAgentFramework.Programs do
 
   `/bin/sh` is the only fixed program path in the library: something must find the rest, and
   POSIX puts a shell there on every host. Every other module runs the paths found here or given.
+
+  A name that is also a shell builtin (`kill`, `echo`, `test`) is looked up on the `PATH` for an
+  executable file, in the same shell run. A relative `PATH` entry gives a relative path, which
+  is not absolute and so counts as not found.
 
   Returns `{:refused, {:not_found, names}}` naming each one that did not.
   """
