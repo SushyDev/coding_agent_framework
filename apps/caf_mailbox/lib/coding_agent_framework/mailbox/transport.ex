@@ -81,7 +81,7 @@ defmodule CodingAgentFramework.Mailbox.Transport.Waiter do
   Whether `text` carries a row's mark, of any uuid: a delivery of the framework's, which a
   turn of a delegate's own never begins with (F-155).
 
-      iex> CodingAgentFramework.Mailbox.Transport.Waiter.marked?("Hi.\n[delivery u1]")
+      iex> CodingAgentFramework.Mailbox.Transport.Waiter.marked?("Hi. [delivery u1]")
       true
       iex> CodingAgentFramework.Mailbox.Transport.Waiter.marked?("<task-notification>")
       false
