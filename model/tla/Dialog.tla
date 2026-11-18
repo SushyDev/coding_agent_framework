@@ -57,13 +57,20 @@
 (* implies it. KeptAcrossRestart holds here because the mark is a durable  *)
 (* field of the row; Prompt.tla (B1) will own it as a row of Prompts. Its  *)
 (* LeaseWhileLive is Boxes.tla's for the dialog statuses.                  *)
+(*                                                                         *)
+(* Restarts (F-164): the whole one (Restart, then Recover) and the agent's *)
+(* own process's (RestartAgent, B4's), both bounded by MaxRestarts. With   *)
+(* one agent here they lose the same memory, since the press's task is     *)
+(* the agent process's; the agent's own restart differs in what runs on:   *)
+(* Prompts, whose answer on its way may reach the new process, and the     *)
+(* Scheduler and Recoveries, which never stop.                             *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
 CONSTANTS
     Dialogs,      \* the kinds the program shows, in order, e.g. <<"trust", "imports">>
     Auto,         \* the kinds the app's callback answers ("yes"); {} by default: it asks
-    MaxRestarts,  \* restarts of Sessions
+    MaxRestarts,  \* restarts of Sessions and of the agent's own process
     Break         \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -284,20 +291,38 @@ Restart ==
     /\ UNCHANGED <<at, live, status, shown, mark, cleared, lease, sent, asked, wrong, unasked,
                    killedOn>>
 
-\* Back up: an answer marked pressing may have gone, so it is cut, never pressed again unless
-\* a person clears it, and a press cut after its clear is unknown. Under RetryUnknown it is
-\* cleared, to be answered again; under ClearTwice it is cut again.
+\* What the row's marks say once Sessions reads them again: an answer marked pressing may
+\* have gone, so it is cut, never pressed again unless a person clears it, and a press cut
+\* after its clear is unknown. Under RetryUnknown it is cleared, to be answered again; under
+\* ClearTwice it is cut again.
+Readopted ==
+    [k \in Kinds |->
+       IF mark[k] = "pressing"
+       THEN CASE Break = "RetryUnknown" -> "none"
+              [] k \in cleared /\ Break # "ClearTwice" -> "unknown"
+              [] OTHER -> "cut"
+       ELSE mark[k]]
+
 Recover ==
     /\ ~up
     /\ up' = TRUE
-    /\ mark' = [k \in Kinds |->
-                  IF mark[k] = "pressing"
-                  THEN CASE Break = "RetryUnknown" -> "none"
-                         [] k \in cleared /\ Break # "ClearTwice" -> "unknown"
-                         [] OTHER -> "cut"
-                  ELSE mark[k]]
+    /\ mark' = Readopted
     /\ UNCHANGED <<at, live, status, shown, restarts, call, pending, results, cleared, lease, sent, asked,
                    wrong, unasked, killedOn>>
+
+\* The agent's own process crashes and its supervisor starts it again, in one step (B4;
+\* F-164): nothing reads its memory in between. Its press tasks end with it, so the answers
+\* not pressed and the tasks' answers not taken are lost. A person's answer on its way is lost
+\* with it, or reaches the new process, since Prompts runs on; the Scheduler and Recoveries run
+\* on too. The row stays, and the init reads its marks again, as Recover does.
+RestartAgent ==
+    /\ up /\ restarts < MaxRestarts
+    /\ restarts' = restarts + 1
+    /\ call' \in {call, {}}
+    /\ pending' = {} /\ results' = {}
+    /\ mark' = Readopted
+    /\ UNCHANGED <<at, live, status, shown, up, cleared, lease, sent, asked, wrong, unasked,
+                   killedOn>>
 
 -----------------------------------------------------------------------------
 
@@ -313,7 +338,7 @@ Init ==
 
 Next ==
     \/ Draw \/ Read \/ Callback \/ Confirm \/ Deadline \/ Kill \/ Settle \/ Release
-    \/ Restart \/ Recover \/ Stop
+    \/ Restart \/ Recover \/ RestartAgent \/ Stop
     \/ \E l \in Labels : ViewerPress(l) \/ Answer(l)
     \/ \E p \in pending : Press(p)
     \/ \E r \in results : Pressed(r)

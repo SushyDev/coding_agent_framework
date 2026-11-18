@@ -147,12 +147,21 @@
 (* idle read and SIGTERM, its Settle RunningSettled and StopSettled;       *)
 (* LeaseWhileLive there rests on NoHeldWithoutRow. Assumed of Mailbox:     *)
 (* nothing goes in once the idle read is made (Delivery.tla's              *)
-(* NotCutByStop), which TermsOnlyIdle needs for a row's turn. Not          *)
-(* implied: Boxes.tla's statuses leave out refused, unknown and orphan,    *)
-(* and here a row refused or orphan may still have a live process          *)
-(* (NotGivenUpEarly), so "work ended" is not "no process" for every ended  *)
-(* status (F-163's new-1); and the restart here is the whole one, while    *)
-(* Boxes.tla's Restart(a) is B1's next part.                               *)
+(* NotCutByStop), which TermsOnlyIdle needs for a row's turn. An agent row *)
+(* free (Ended: none, stopped, refused) has no process (NoHeldWithoutRow); *)
+(* an orphan or unknown one may, so the owner of a lease reads this row's  *)
+(* freedom, not its own status, before it says the work ended             *)
+(* (Delegate.tla's WorkEndedIsFree, F-163's new-1). Not implied: Boxes.tla *)
+(* leaves out refused, unknown and orphan.                                 *)
+(*                                                                         *)
+(* Restarts (F-164): the whole framework's (FrameworkDies and              *)
+(* FrameworkStarts) and one session's agent process's (RestartAgent, B4's, *)
+(* Boxes.tla's RestartAgent), in any interleaving, bounded together by     *)
+(* MaxRestarts. An agent process's restart loses that session's calls      *)
+(* under way, its setup and its cue, and nothing else: Recoveries' claims  *)
+(* and the other sessions' calls run on. Its init re-adopts from the row   *)
+(* by the same steps as the whole one's, so every property holds under    *)
+(* both. With one session the two reach the same states.                   *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
@@ -160,8 +169,8 @@ CONSTANTS
     S,            \* session names, each its own socket
     NPids,        \* pids on the host, 1..NPids
     MaxStarts,    \* starts of each name
-    MaxRestarts,  \* restarts of the framework
-    MaxForeign,   \* processes other programs start
+    MaxRestarts,  \* restarts of the framework and of a session's agent process
+    MaxForeign,  \* processes other programs start
     Worktrees,    \* starts add or reuse a worktree and run the setup in it
     Shared,       \* every session's worktree is at one path
     Before,       \* what a path may hold at first: a subset of {"none", "tree", "other"}
@@ -218,7 +227,7 @@ Paths == {PathOf(s) : s \in S}
 
 VARIABLES
     up,          \* the framework runs
-    restarts,    \* restarts so far
+    restarts,    \* restarts so far, the whole framework's and an agent process's
     row,         \* table: s -> "none", "starting", "running", "stopping", "stopped",
                  \*          "refused", "unknown", "orphan"
     rowProc,     \* table: s -> the pid and start time the row took from the session file
@@ -403,6 +412,24 @@ FrameworkStarts ==
     /\ UNCHANGED <<late, restarts, row, rowProc, starts, resume, call, past, proc, file, foreign,
                    clock, onTime, ends, wrongKills, trees, treeGhosts, sock, hardKills,
                    records, endVars>>
+
+\* One session's agent process crashes and its supervisor starts it again
+\* (B4), in one step: nothing reads its memory in between, and a cue lost in
+\* between is one its init gives again. Its calls under way go, and with
+\* them a setup under way, whose reaper ends with its caller. Its row, its
+\* process outside, Recoveries' claims (the Watch's, not the agent's) and
+\* every other session's state stay. Its init settles its row as the
+\* framework's start does: a cue for it, and Adopt and ReRead as before.
+RestartAgent(s) ==
+    /\ up /\ restarts < MaxRestarts
+    /\ restarts' = restarts + 1
+    /\ call' = [call EXCEPT ![s] = "none"]
+    /\ setupRuns' = IF call[s] = "setting" /\ Break # "SetupOutlives"
+                      THEN [setupRuns EXCEPT ![PathOf(s)] = FALSE] ELSE setupRuns
+    /\ cued' = [cued EXCEPT ![s] = row[s] \in {"running", "stopping", "orphan"}]
+    /\ UNCHANGED <<late, up, row, rowProc, starts, resume, past, proc, file, foreign, clock,
+                   onTime, ends, wrongKills, wt, dirty, ready, branch, outside, treeGhosts, sock,
+                   hardKills, records, endVars>>
 
 -----------------------------------------------------------------------------
 (* The outside: processes, dtach, other programs, people, Claude Code's     *)
@@ -815,7 +842,8 @@ Next ==
     \/ FrameworkDies \/ FrameworkStarts \/ ForeignStarts
     \/ \E p \in Paths : PathTaken(p) \/ TreeChanged(p) \/ LeftSetupEnds(p)
     \/ \E s \in S :
-         \/ ProcExits(s) \/ DtachExits(s) \/ DtachKilled(s) \/ FileWritten(s) \/ Tick(s)
+         \/ RestartAgent(s)
+         \/ ProcExits(s)\/ DtachExits(s) \/ DtachKilled(s) \/ FileWritten(s) \/ Tick(s)
          \/ TurnStarts(s) \/ TurnEnds(s)
          \/ RowWritten(s) \/ Checked(s) \/ Added(s) \/ SetupStarts(s) \/ SetupEnds(s)
          \/ Held(s) \/ ViewerOpened(s) \/ StartDecided(s)

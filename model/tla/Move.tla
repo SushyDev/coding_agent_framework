@@ -67,8 +67,15 @@
 (* (OnceAcrossMove, NotCutByEnd, OnlyToItsProcess). Boxes.tla's move is a  *)
 (* stop and a resume under one lease, with the evidence `ev` unchanged     *)
 (* across it: TranscriptKept and DeliveredIsKept are what let it leave     *)
-(* the account and the copy out. Not implied: the restart here is the      *)
-(* whole one; Restart(a) during a move is B1's next part.                  *)
+(* the account and the copy out.                                          *)
+(*                                                                         *)
+(* Restarts (F-164): the whole framework's, and the session's own agent    *)
+(* process's (RestartAgent, B4's), at any step of the move, both bounded  *)
+(* by MaxRestarts. The agent process holds the stop's idle read and the    *)
+(* write of a row handed to the session; the Mover's phase and Sessions'   *)
+(* row are rows, and Mailbox's own memory runs on. So its crash loses the  *)
+(* read, which the stop makes again, and cuts the hand under way, whose    *)
+(* mark is kept (Delivery.tla's AgentCut).                                 *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -82,8 +89,8 @@ CONSTANTS
     MaxDelegates,  \* delegates started
     MaxMsgs,       \* messages sent to the session
     MaxCrashes,    \* crashes of the old process once its stop is asked
-    MaxRestarts,   \* restarts of the framework
-    Break          \* "none", or the guard removed (see Breaks)
+    MaxRestarts,   \* restarts of the framework and of the session's agent process
+    Break         \* "none", or the guard removed (see Breaks)
 
 Breaks == {
     "none",
@@ -205,6 +212,17 @@ FrameworkDies ==
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
     /\ UNCHANGED <<restarts, work, mover, dvars>>
+
+\* The session's agent process crashes and its supervisor starts it again,
+\* in one step: nothing reads its memory in between. The idle read made
+\* there is lost and a hand to the session under way is cut; its init
+\* re-adopts the process from the row, never starting one.
+RestartAgent ==
+    /\ up /\ restarts < MaxRestarts
+    /\ restarts' = restarts + 1 /\ readAt' = 0
+    /\ \E went \in BOOLEAN : D!AgentCut(Main, went)
+    /\ UNCHANGED <<up, work, transcript, phase, target, copied, resumedWith, record, ends, lost,
+                   turned>>
 
 -----------------------------------------------------------------------------
 (* Usage, and the session's own work *)
@@ -415,7 +433,7 @@ SessionEndArrives(pid) ==
 
 -----------------------------------------------------------------------------
 Next ==
-    \/ FrameworkDies \/ FrameworkStarts \/ UsageRises
+    \/ FrameworkDies \/ FrameworkStarts \/ RestartAgent \/ UsageRises
     \/ \E p \in procs : \/ PromptSent(p) \/ TurnEnds(p) \/ BgStarted(p)
                         \/ Exits(p, "term") \/ Exits(p, "crash")
                         \/ \E d \in Delegates : DelegateStarted(p, d)

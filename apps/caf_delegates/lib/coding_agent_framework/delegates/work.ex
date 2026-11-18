@@ -9,9 +9,11 @@ defmodule CodingAgentFramework.Delegates.Work do
 
   The work is `:live` while the row may still start or run a process: `starting`, `resuming`,
   and `running` (a running delegate whose process is gone may be resumed once, under the same
-  lease). It has `:ended` once its start was `refused`, or once it is `finished` or `failed`
-  and its agent row is free of a process (`Sessions.Agents.free?/1`), or a newer start owns its
-  name. A row that does not exist never runs anything: ended.
+  lease). It has `:ended` once it is `refused`, `finished` or `failed` and its agent row is free
+  of a process (`Sessions.Agents.free?/1`), or a newer start owns its name. A refused start is
+  read as a finished one is: a start may reach `Sessions` after its row was refused, and its
+  process then lives under that row (`Delegate.tla`'s WorkEndedIsFree; F-163's new-1). A row
+  that does not exist never runs anything: ended.
 
       {:ok, work} = Delegates.Work.open(path, path, "ws")
       Delegates.Work.state(work, "ws:12")
@@ -50,8 +52,8 @@ defmodule CodingAgentFramework.Delegates.Work do
   end
 
   defp of(_work, %{status: status}) when status in ~w(starting resuming running), do: :live
-  defp of(_work, %{status: "refused"}), do: :ended
 
+  # Refused, finished, failed or ended: no process of it may live once its agent row is free.
   defp of(work, row) do
     latest = Enum.find(Table.latest(work.db, work.host), &(&1.name == row.name))
     agent = Agents.get(work.agents, row.name)

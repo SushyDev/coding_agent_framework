@@ -314,6 +314,32 @@ defmodule CodingAgentFramework.DelegatesTest do
       assert Work.state(work, key) == :live
       assert Work.state(work, "other:#{id}") == {:unknown, {:not_mine, "other:#{id}"}}
     end
+
+    # Delegate.tla's WorkEndedIsFree (F-163's new-1): a start that reached Sessions after its
+    # row was refused at its deadline runs under that row. The row is written refused here
+    # while the process runs, as that race leaves it.
+    test "a refused start whose process still lives keeps its seat", ctx do
+      %{work: work} = with_scheduler(ctx, [])
+      hold(ctx)
+      assert {:ok, %{id: id, name: name, brief_uuid: u}} = start(ctx, "app", "unit/one")
+      stream_row(ctx, id, &(&1.messages[u].state == :delivered))
+
+      :ok = Table.update(ctx.dtable, id, status: "refused", reason: "interrupted")
+      assert %{status: "running"} = session_row(ctx, name)
+      assert Work.state(work, "test:#{id}") == :live
+
+      # Its process gone and its agent row stopped, the seat goes.
+      kill_delegate(ctx, id, [])
+
+      {:ok, _} =
+        await(fn ->
+          Sessions.cue(ctx.sessions, %{topic: "stream:test", ids: []})
+          Sessions.viewer_argv(ctx.sessions, name)
+          if session_row(ctx, name).status == "stopped", do: {:ok, 1}
+        end)
+
+      assert Work.state(work, "test:#{id}") == :ended
+    end
   end
 
   # A Scheduler over a seat, and a Delegates that asks it, in place of the setup's.

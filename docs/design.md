@@ -498,12 +498,14 @@ and a crash is healed by its supervisor, deterministically, from the rows.
 the rows kept, every row re-read. A crash of one agent process is the same step for one agent:
 its in-memory state (monitors, calls under way, timers, a press's task) lost, its row kept, and
 the others untouched. B1 makes the restart in `Start.tla`, `Delegate.tla`, `Dialog.tla` and
-`Move.tla` a step per agent (`Restart(a)`) beside the whole one, and checks every invariant under
-any interleaving of them, bounded by `MaxRestarts`. The budget is a bound, not fairness: a
+`Move.tla` a step per agent (`Restart(a)`, named `RestartAgent` as in `Boxes.tla`; built in
+F-164) beside the whole one, and checks every invariant under any interleaving of them, bounded
+by `MaxRestarts`, which counts both. The budget is a bound, not fairness: a
 `gave_up` agent leaves the liveness properties, which then require a prompt (`Prompt.tla`'s
 `Escalated`). `Delivery.tla` keeps `Mailbox` one process: its one row in flight per addressee is
-its state, and a restart of it is the whole one already checked. So the specs say what a crash
-may do, and OTP only decides when.
+its state, and a restart of it is the whole one already checked; the addressee's own restart
+cuts the hand under way in its agent process (`AgentCut`), and the mark is kept for the
+evidence (F-163's new-2). So the specs say what a crash may do, and OTP only decides when.
 
 ### Prompts
 
@@ -786,8 +788,9 @@ any reply does (new-4).
   - **The end.** The lease lasts as long as its work. The `Scheduler` asks the owner of the
     work's row whether the work ended, which the owner answers by the row and its
     `Holder.Process` record (`Delegates.Work` for a delegate's row: live while it may still
-    start, run or be resumed; ended once refused, or done and its agent row free); a row still
-    starting is live until its owner settles it. While it runs it monitors each lease it holds
+    start, run or be resumed; ended once refused or done and its agent row free, since a start
+    may reach `Sessions` after its row was refused; `Delegate.tla`'s `WorkEndedIsFree`,
+    F-164); a row still starting is live until its owner settles it. While it runs it monitors each lease it holds
     and asks at each cue of the owner's rows; after a restart it asks about every unreleased
     row, releases it if the work ended and monitors it again if not. Both release by
     `UPDATE … WHERE id = ? AND
@@ -2132,8 +2135,23 @@ one (`OneProcess`, `AtMostOnce`, `OwnBudget`; liveness `Escalated`), each with a
 `Break_Boxes_*` configuration, and liveness that a dialog passes, an ended lease is released,
 a row in flight settles and every claim ends. Each contract spec's header names the
 properties it exports as its box's contract and how they imply what `Boxes.tla` assumes, or
-where they do not (F-163's findings). Its `Restart(a)`, its prompts and its healer are the
-seams of B1's later parts.
+where they do not (F-163's findings). Its prompts and its healer are the seams of B1's later
+parts.
+
+The restart per agent (F-164). `Start.tla`, `Delegate.tla`, `Dialog.tla` and `Move.tla` each
+gain `RestartAgent`, one agent process's crash and its supervisor's restart in one step,
+beside the whole restart and bounded with it by `MaxRestarts`: that agent's memory goes (its
+calls under way, a setup its reaper ends, its cue, its press tasks, its stop's idle read, the
+hand of a row under way), and its row, its process outside, `Recoveries`' claims, the other
+boxes and the other agents run on; its init re-adopts by the steps the whole restart's does.
+`Delivery.tla`'s `AgentCut` is that cut of a hand, its write gone or not, with the mark kept
+(Break `AgentCutUndoes`); `Move.tla` and `Delegate.tla` cut a hand to the session and to the
+parent by it. In `Delegate.tla` a delegate's restart also cuts `Sessions`' start under way,
+whose row is adopted, an orphan for `Recoveries` when the crash fell between the hold and the
+line. There too the owner's promise behind every lease is a property, `WorkEndedIsFree`:
+work `Delegates.Work` says ended has no process (Break `StatusEndsWork`). `Boxes.tla`'s
+header maps each effect of its `RestartAgent` to the step that checks it. With one agent,
+`Start.tla` and `Dialog.tla` reach the same states as before; the build note has the counts.
 
 **The remodel's model** (F-115). Each mechanism is written once, and the specs above are
 reshaped around three new ones, in R4 and R6, before the code they describe:
@@ -2638,7 +2656,8 @@ model before the code it describes (B4, B6, B8, B9, B11); B2 and B3 change no be
   (decided; built in F-163, "The model"). Then the restart as a step per agent
   (`Restart(a)`) beside the whole one in `Start.tla`, `Delegate.tla`, `Dialog.tla` and
   `Move.tla`, bounded by `MaxRestarts`, with state counts compared before and after (about
-  +200); `Prompt.tla` (about +300), instancing `Hold` and `Claim`, with `Dialog.tla`'s answer and
+  +200; built in F-164, with `Delivery.tla`'s cut of a hand by its addressee's restart and
+  `Delegate.tla`'s `WorkEndedIsFree`); `Prompt.tla` (about +300), instancing `Hold` and `Claim`, with `Dialog.tla`'s answer and
   `Team.tla`'s ask as its instances; `Heal.tla` (about +250), instancing `Claim`: a symptom, the
   allow-list, a remedy claimed once per state, its precondition read before the claim, verified
   after, a cap per window that turns acting into a prompt; and `Delivery.tla`'s subscription
