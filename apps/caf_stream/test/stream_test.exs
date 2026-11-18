@@ -30,11 +30,14 @@ defmodule CodingAgentFramework.StreamTest do
 
   test "a message written after a result is replayed and settled", ctx do
     s = hold!(ctx, "d1")
-    assert %{session_id: "d1", idle: true} = row!(ctx, s, &(&1.session_id == "d1"))
+    # Claude Code 2.1.322 writes its init only after it read a line (F-152): none yet.
+    assert %{session_id: nil, idle: true} = row!(ctx, s, &(&1.session == "d1"))
 
     {:ok, %{uuid: u1}} = Stream.write(s, "d1", {:message, "first"})
     assert {:refused, :turn_running} = Stream.write(s, "d1", {:message, "early"})
-    assert %{idle: true} = row!(ctx, s, &(&1.messages[u1].state == :delivered and &1.idle))
+
+    assert %{idle: true, session_id: "d1"} =
+             row!(ctx, s, &(&1.messages[u1].state == :delivered and &1.idle))
 
     {:ok, %{uuid: u2}} = Stream.write(s, "d1", {:message, "second"})
 
@@ -184,6 +187,8 @@ defmodule CodingAgentFramework.StreamTest do
     refute File.read!(log) |> String.ends_with?("\n")
 
     hold!(ctx, "c1", stand_in(ctx, resume: "c1"))
+    # The resumed process writes its init once it read its first line (F-152).
+    {:ok, _} = Stream.write(s, "c1", {:message, "go on"})
     resumed = row!(ctx, s, &(&1.session == "c1" and &1.session_id == "c1"))
     assert resumed.problems == 1
   end

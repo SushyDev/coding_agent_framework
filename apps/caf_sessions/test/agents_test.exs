@@ -78,7 +78,7 @@ defmodule CodingAgentFramework.AgentsTest do
                sessions,
                "lone",
                ctx.account,
-               Keyword.delete(headless(ctx, :at_start), :parent)
+               Keyword.delete(headless(ctx, :on_message), :parent)
              )
 
     assert {:refused, {:bad, :parent}} =
@@ -97,7 +97,7 @@ defmodule CodingAgentFramework.AgentsTest do
 
   test "a delegate ends only once no process of it may live, and frees its parent's cap", ctx do
     {:ok, agents} = Agents.open(ctx.opts[:db], "test")
-    {:ok, _} = Sessions.start(ctx.sessions, "app-fix", ctx.account, headless(ctx, :at_start))
+    {:ok, _} = Sessions.start(ctx.sessions, "app-fix", ctx.account, headless(ctx, :on_message))
     assert Agents.children(agents, "main") == 1
     assert {:refused, {:not_free, "running"}} = Sessions.ended(ctx.sessions, "app-fix")
 

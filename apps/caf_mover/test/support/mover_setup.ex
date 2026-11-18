@@ -178,7 +178,11 @@ defmodule CodingAgentFramework.MoverSetup do
     [role: :parent, cwd: dir, claude: ClaudeStandIn.write!(dir, :at_start)] ++ shared(dir)
   end
 
-  @doc "A headless stand-in's launch in `dir`, as a delegate of `main`."
+  @doc """
+  A headless stand-in's launch in `dir`, as a delegate of `main`. It writes its init at its
+  start (`:at_start`) on purpose: `Mover`'s resume of a headless delegate carries no first line,
+  so a stand-in in the real release's shape would never be confirmed (F-152's build note, new-1).
+  """
   def headless(dir) do
     [role: :delegate, parent: "main", cwd: dir, claude: HeadlessStandIn.write!(dir, :at_start)] ++
       shared(dir)

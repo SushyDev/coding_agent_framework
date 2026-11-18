@@ -28,7 +28,9 @@ defmodule CodingAgentFramework.Mailbox do
   - `stream`, for a headless delegate (its agent row, read through `Sessions.Agents`): only
     into an ended turn of its current process (`Stream`'s fold idle, live, no end marked, its
     agent row
-    `running`), written through `Stream` under the row's uuid;
+    `running`), written through `Stream` under the row's uuid; the first row to a new process
+    is marked before its start (`launch/4`, `via: :stream`) and written by the start right
+    after its hold, since the process writes its init only after it read a line (F-152);
   - `call`, for a reply or a notice a waiting `run_delegate` takes (`await/4`), only before the
     call's deadline; `told/3` settles it, and the end of the process that waits makes it due
     again;
@@ -192,17 +194,30 @@ defmodule CodingAgentFramework.Mailbox do
   `{:sending, ids}` while a row to `to` is in flight, `:no_transcripts` for a `Mailbox` with no
   waiter or typed transport, which settles none.
 
+  With `via: :stream`, the row is the first line of a headless delegate's start (F-152): a
+  headless process writes its `system`/`init` only after it read a line, so its start writes
+  this row through `Stream` right after the hold, under the row's uuid, before it waits for the
+  init. The row is marked `sending` by `stream`, its text as it is, and settles by the replay
+  as any `stream` row (`Transport.Stream`); until the start's answer, and after a restart until
+  `deadline`, a fold with no line of it decides nothing.
+
       Mailbox.launch(mailbox, "app-unit-review", deadline)
       #=> {:ok, %{id: 3, uuid: "…", text: "Review it.\\n\\n[delivery …]"}}
+      Mailbox.launch(mailbox, "app-unit-review", deadline, via: :stream)
+      #=> {:ok, %{id: 3, uuid: "…", text: "Review it."}}
   """
   def launch(mailbox, to, deadline, opts \\ []),
-    do: call(mailbox, {:launch, to, deadline}, opts)
+    do: call(mailbox, {:launch, to, deadline, Keyword.get(opts, :via, :launch)}, opts)
 
   @doc """
   The answer of the start `launch/4` marked row `id` for: `{:ok, %{session_id, pid}}` keeps it
   `sending` until the transcript shows its user line, or the take bound passes; `{:refused, _}`
   makes it due again, under its same uuid; `{:unknown, _}` keeps it until the start's deadline
   and the bound. Answers `{:ok, status}` or `{:refused, {:not_launched, status}}`.
+
+  A `stream` row a headless start was handed (F-152) is settled by its session's fold from the
+  answer on, whatever the answer: a start refused after its hold may have written the line,
+  and one refused before holds none of it, so the fold makes it due again.
   """
   def launched(mailbox, id, answer), do: call(mailbox, {:launched, id, answer}, [])
 
@@ -404,14 +419,15 @@ defmodule CodingAgentFramework.Mailbox do
 
   # A restart settles what it finds marked, from Stream's rows read to the end of each log; a
   # row a call took finds no call in memory, and is due again. A waiter's row is settled at its
-  # take bound, which no timer of the last process carries over.
+  # take bound, which no timer of the last process carries over; a headless start's first line,
+  # at its start's deadline.
   @impl true
   def handle_continue(:read, s) do
     Stream.read(s.stream, timeout: @step)
     s = keep_operators(s)
 
     for %{via: via, status: "sending", sent_at: at} <- Table.open_rows(s.db),
-        via in ["waiter", "typed", "launch"],
+        via in ["waiter", "typed", "launch", "stream"],
         is_integer(at),
         do: bound(s, at)
 
@@ -515,11 +531,11 @@ defmodule CodingAgentFramework.Mailbox do
   # The mark before a start: one row in flight per addressee, the first due, for the process
   # the start makes; its transcript's offset now bounds what its settle reads. The row is in
   # `launching` until the start's answer: no evidence settles it before.
-  def handle_call({:launch, to, deadline}, _from, s) do
+  def handle_call({:launch, to, deadline, via}, _from, s) do
     rows = for %{to_agent: ^to} = m <- Table.open_rows(s.db), do: m
 
     case {Enum.filter(rows, &(&1.status == "sending")), rows} do
-      _ when not is_map_key(s.waiter, :transcripts) ->
+      _ when via == :launch and not is_map_key(s.waiter, :transcripts) ->
         {:reply, {:refused, :no_transcripts}, s}
 
       {[_ | _] = sending, _} ->
@@ -527,6 +543,15 @@ defmodule CodingAgentFramework.Mailbox do
 
       {[], []} ->
         {:reply, {:ok, :none}, s}
+
+      # Delivery.tla's stream row for a start: marked while no process of it runs (`at` nil),
+      # for the session the agent row names at a resume, or the start's answer names.
+      {[], [m | _]} when via == :stream ->
+        srow = Agents.get(s.agents, to)
+        mark = [status: "sending", via: "stream", session_id: srow && srow.session_id, at: nil]
+        write(s, m, mark ++ [attempt: nil, sent_at: deadline])
+        s = %{s | launching: MapSet.put(s.launching, m.id)}
+        {:reply, {:ok, %{id: m.id, uuid: m.uuid, text: m.text}}, s}
 
       {[], [m | _]} ->
         srow = Agents.get(s.agents, to)
@@ -543,6 +568,26 @@ defmodule CodingAgentFramework.Mailbox do
     s = %{s | launching: MapSet.delete(s.launching, id)}
 
     case {Table.get(s.db, id), answer} do
+      # A headless start's first line went in through Stream before its init: its fold settles
+      # it from now on, as any stream row.
+      {%{status: "sending", via: "stream"} = m, {:ok, %{session_id: sid}}} ->
+        write(s, m, session_id: sid, sent_at: nil, attempt: nil)
+        {:reply, {:ok, "sending"}, s, {:continue, :settle}}
+
+      # A start refused after its hold (a stop of one never confirmed) may have written the
+      # line: the fold of the session it was held as decides, as at any exit; one refused
+      # before it holds no line of it, and the row is due again.
+      {%{status: "sending", via: "stream"} = m, {:refused, why}} ->
+        sid = m.session_id || session_of(s, m)
+        write(s, m, session_id: sid, sent_at: nil, attempt: why)
+        {:reply, {:ok, "sending"}, s, {:continue, :settle}}
+
+      # Unknown: the start's deadline, kept as `sent_at`, bounds the wait for its line.
+      {%{status: "sending", via: "stream"} = m, {_unknown, why}} ->
+        write(s, m, attempt: why)
+        if is_integer(m.sent_at), do: bound(s, m.sent_at)
+        {:reply, {:ok, "sending"}, s, {:continue, :settle}}
+
       {%{status: "sending", via: "launch"} = m, {:ok, %{session_id: sid} = started}} ->
         write(s, m, session_id: sid, at: started[:pid], sent_at: now(), attempt: nil)
         bound(s, now())
@@ -787,7 +832,7 @@ defmodule CodingAgentFramework.Mailbox do
       for %{status: "sending"} = m <- Table.open_rows(s.db),
           not MapSet.member?(handing, m.id) and not MapSet.member?(s.launching, m.id),
           m.via not in ["waiter", "launch"] or transcript? do
-        evidence = %{fold: folds[m.session_id], calls: s.calls}
+        evidence = %{fold: folds[m.session_id || session_of(s, m)], calls: s.calls, now: now()}
 
         evidence =
           case m.via do
@@ -809,6 +854,13 @@ defmodule CodingAgentFramework.Mailbox do
     else
       _ -> take_waiting(s)
     end
+  end
+
+  # A headless start's first row names no session until the start's answer: after a restart,
+  # its agent row's.
+  defp session_of(s, m) do
+    srow = Agents.get(s.agents, m.to_agent)
+    srow && srow.session_id
   end
 
   defp handing(s), do: MapSet.new(Map.values(s.hands), fn {m, _} -> m.id end)

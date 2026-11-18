@@ -43,7 +43,7 @@ defmodule CodingAgentFramework.AgentsSourceTest do
 
   test "the Tracker's tree holds what Sessions' tree holds: the main and its delegate", ctx do
     {:ok, _} = Sessions.start(ctx.sessions, "main", ctx.account, launch(ctx, :at_start))
-    launch = headless(ctx, :at_start) ++ [project: "app"]
+    launch = headless(ctx, :on_message) ++ [project: "app"]
     {:ok, %{session_id: sid}} = Sessions.start(ctx.sessions, "app-fix", ctx.account, launch)
 
     tracker =

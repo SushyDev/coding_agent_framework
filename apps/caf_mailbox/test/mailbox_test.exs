@@ -350,9 +350,31 @@ defmodule CodingAgentFramework.MailboxTest do
   defp started(ctx, name) do
     brief = Stream.uuid()
     {:ok, {:queued, _}} = Mailbox.brief(mailbox(ctx), "main", name, "Review it.", brief)
-    launch = SessionsSetup.headless(ctx, :at_start)
-    {:ok, %{session_id: sid}} = Sessions.start(ctx.sessions, name, ctx.account, launch)
+    start = &Sessions.start(ctx.sessions, name, ctx.account, &1)
+    {:ok, %{session_id: sid}} = with_first(ctx, name, start)
     {sid, brief}
+  end
+
+  # As Delegates does (F-152): the first row due is marked by stream for the start, which writes
+  # it right after its hold, and the start's answer is told. The mark waits for a row still in
+  # flight to settle, as Delegates' next cue would.
+  defp with_first(ctx, name, call) do
+    deadline = System.os_time(:millisecond) + 60_000
+
+    {:ok, first} =
+      await(fn ->
+        cue(ctx)
+
+        case Mailbox.launch(mailbox(ctx), name, deadline, via: :stream) do
+          {:ok, %{id: _}} = ok -> ok
+          other -> other
+        end
+      end)
+
+    launch = SessionsSetup.headless(ctx, :on_message)
+    answer = call.(Keyword.put(launch, :first, Map.take(first, [:uuid, :text])))
+    {:ok, _} = Mailbox.launched(mailbox(ctx), first.id, answer)
+    answer
   end
 
   # Resumes `name` once Sessions has settled its killed process's row, as Delegates does.
@@ -368,8 +390,7 @@ defmodule CodingAgentFramework.MailboxTest do
         10_000
       )
 
-    launch = SessionsSetup.headless(ctx, :at_start)
-    {:ok, _} = Sessions.resume(ctx.sessions, name, ctx.account, sid, launch)
+    {:ok, _} = with_first(ctx, name, &Sessions.resume(ctx.sessions, name, ctx.account, sid, &1))
   end
 
   defp signal(sig, pid), do: {_, 0} = System.cmd(program!(:kill), ["-" <> sig, pid])
