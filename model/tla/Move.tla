@@ -58,6 +58,17 @@
 (* has a Break_Move_<value>.cfg that TLC must fail.                       *)
 (*                                                                         *)
 (* Defense in depth, with no Break: none in this spec.                    *)
+(*                                                                         *)
+(* Sessions' contract, its move (F-163): one process at a time             *)
+(* (OneAccountAtATime), the whole transcript kept across the move          *)
+(* (TranscriptKept, DeliveredIsKept), a late SessionEnd never ending the   *)
+(* moved session, and with Delivery.tla's state a row once across the      *)
+(* move, never into a turn the end cuts, only to its own process           *)
+(* (OnceAcrossMove, NotCutByEnd, OnlyToItsProcess). Boxes.tla's move is a  *)
+(* stop and a resume under one lease, with the evidence `ev` unchanged     *)
+(* across it: TranscriptKept and DeliveredIsKept are what let it leave     *)
+(* the account and the copy out. Not implied: the restart here is the      *)
+(* whole one; Restart(a) during a move is B1's next part.                  *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 

@@ -33,6 +33,13 @@
 (*                                                                         *)
 (* Break: "none" is the design. Every other value removes one guard and    *)
 (* has a Break_Hold_<value>.cfg that TLC must fail.                        *)
+(*                                                                         *)
+(* The mechanism under Sessions' holds and, from B1, the Prompts box's     *)
+(* (F-163): one response per request, only by its named decider, a late    *)
+(* decision dropped, every hold settled after a cut (OneResponse,          *)
+(* OnlyNamed, LateDropped, AnsweredWasSent, RequestsEnd). Prompt.tla       *)
+(* instances it for a prompt's deadline and its holder's death; Boxes.tla  *)
+(* composes only the result, a prompt answered once.                       *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 

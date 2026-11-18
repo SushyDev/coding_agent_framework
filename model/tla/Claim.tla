@@ -30,6 +30,12 @@
 (*                                                                         *)
 (* Break: "none" is the design. Every other value removes one guard and    *)
 (* has a Break_Claim_<value>.cfg that TLC must fail.                       *)
+(*                                                                         *)
+(* The Ledger's contract (the base under the boxes, F-163):                *)
+(* OneClaimPerState, OneActPerState, NoActOnCutOffClaim and ClaimsEnd,     *)
+(* whoever claims. Boxes.tla instances this module whole (its L, on each   *)
+(* agent's state number), so the contract it composes is this spec's own:  *)
+(* the mapping is the identity. It assumes nothing of any box.             *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
