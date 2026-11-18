@@ -13,8 +13,9 @@ defmodule CodingAgentFramework.Mains.Checkout do
   --untracked-files=all` lists nothing), and how far its trunk is ahead of and behind
   `origin/<trunk>` as the last fetch left it. Its `state` is the one word a view shows: `ready`
   (on trunk, clean, level with its remote), `behind` (clean, and a pull would fast-forward it),
-  `dirty`, `ahead` (a commit on trunk the remote lacks), `off_trunk`; `cloning`, `absent` and
-  `failed` come from `Mains` itself. A pull goes only from `ready` or `behind`.
+  `dirty`, `ahead` (a commit on trunk the remote lacks), `off_trunk`; `cloning`, `absent`,
+  `locked` and `failed` come from `Mains` itself (`failed_state/1`). A pull goes only from
+  `ready` or `behind`.
 
       iex> alias CodingAgentFramework.Mains.Checkout
       iex> Checkout.path("/srv/caf", "app")
@@ -38,6 +39,10 @@ defmodule CodingAgentFramework.Mains.Checkout do
   @doc "The checkout's path under the framework home."
   @spec path(String.t(), String.t()) :: String.t()
   def path(home, project), do: Path.join([home, "checkouts", project])
+
+  @doc "git's index lock in the checkout at `path`, which a cut git command may leave."
+  @spec lock_path(String.t()) :: String.t()
+  def lock_path(path), do: Path.join([path, ".git", "index.lock"])
 
   @doc "Where its clone is made before it is renamed into place."
   @spec clone_path(String.t(), String.t()) :: String.t()
@@ -117,4 +122,27 @@ defmodule CodingAgentFramework.Mains.Checkout do
   @spec pullable?(reading | term) :: boolean
   def pullable?(%{state: state}), do: state in ["ready", "behind"]
   def pullable?(_), do: false
+
+  @doc """
+  The state of a checkout whose read or pull failed with `reason` (F-143): `locked` when git
+  names the checkout's `index.lock` (a git command a restart or a person cut left it, and
+  every git command there fails until it is gone), else `failed`. The framework never removes
+  a file in the checkout it did not write: a person clears the lock, and the pull, still owed,
+  goes at the read after.
+
+      iex> reason = {:read, {:git, 128, "fatal: Unable to create '/c/.git/index.lock': File exists."}}
+      iex> CodingAgentFramework.Mains.Checkout.failed_state(reason)
+      "locked"
+      iex> CodingAgentFramework.Mains.Checkout.failed_state({:pull, {:git, 128, "fatal: no remote"}})
+      "failed"
+  """
+  @spec failed_state(term) :: String.t()
+  def failed_state(reason) do
+    if String.contains?(
+         inspect(reason, limit: :infinity, printable_limit: :infinity),
+         "index.lock"
+       ),
+       do: "locked",
+       else: "failed"
+  end
 end

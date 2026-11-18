@@ -77,11 +77,18 @@ defmodule CodingAgentFramework.Sessions.Agents do
 
   @doc """
   Whether an agent has ended: a delegate whose start was refused or that is done for good, so
-  no process of it will run again and what it owned ends with it. A main session never has,
-  nor a name with no row.
+  no process of it will run again and what it owned ends with it; a main session once the
+  operator ended it (`Sessions.end_main/3`, F-143), and not for a refused start, after which
+  its name may start again. A name with no row has not.
+
+      iex> CodingAgentFramework.Sessions.Agents.ended?(%{kind: "main", status: "ended"})
+      true
+      iex> CodingAgentFramework.Sessions.Agents.ended?(%{kind: "main", status: "refused"})
+      false
   """
   @spec ended?(row | nil) :: boolean
   def ended?(%{kind: "delegate", status: status}), do: status in Table.done()
+  def ended?(%{kind: "main", status: "ended"}), do: true
   def ended?(_), do: false
 
   @doc """

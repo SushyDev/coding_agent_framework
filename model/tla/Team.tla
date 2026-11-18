@@ -22,10 +22,14 @@
 (* The ask is one step that leaves the agent's turn as it is: the tool     *)
 (* answers at once. The operator answers an ask once, with a row to the    *)
 (* asking agent under the ask's key, delivered as any row is, or settled   *)
-(* ended when that agent ended first. It owns no service, and no stop ends *)
-(* a main session. A service is owned by one agent, fixed by its owner or  *)
+(* ended when that agent ended first. It owns no service, and no fix's    *)
+(* stop ends a main session: only its end does (`end_main`, F-143), the    *)
+(* operator's act alone, refused while any of its delegates has not ended, *)
+(* taken once the main session is idle (SIGTERM, as any stop) or its       *)
+(* process is gone. A service is owned by one agent, fixed by its owner or *)
 (* the owner's parent, handed to the owner's parent or a child, and ended  *)
-(* or kept when its owner ends.                                            *)
+(* or kept when its owner ends: kept for a delegate's main session, and    *)
+(* ended with a main session, kept or not, since the operator owns nothing.*)
 (*                                                                         *)
 (* Models these modules of CodingAgentFramework (only Grants' checks are   *)
 (* built, F-73):                                                           *)
@@ -37,6 +41,8 @@
 (*   Stream    the fold of a delegate's log, which Delivery reads;         *)
 (*   Services  each service's owner, its keep flag, its fixes and hand-ons,*)
 (*             and its end with its owner (durable);                       *)
+(*   Sessions  a main session's end (`end_main`): its check of the         *)
+(*             delegates and its stop, in one process;                     *)
 (*   MCP       the calls: message, interrupt, resume, stop, service_start, *)
 (*             service_restart, service_stop, service_hand and ask, each   *)
 (*             with its caller's fixed identity; the operator's acts       *)
@@ -58,7 +64,7 @@
 (* process, logs, waits and host, and the claim its fix takes, which works *)
 (* as an agent's does (a restart and a stop are one step that may end it); *)
 (* how a stuck agent is seen; a person's acts on a main session (a stop or *)
-(* a move), so a main session never ends. A delegate's own end, once its   *)
+(* a move), which leave it as it is here. A delegate's own end, once its   *)
 (* report is delivered, is one step (Delegate.tla). A caller's own state is*)
 (* not checked: a call may come from a subagent while the caller's main    *)
 (* turn is stuck, so one caller may make the same call twice at once. A    *)
@@ -133,7 +139,11 @@ Breaks == {
     "HandToOperator",        \* a main session may hand a service to the operator, its parent
     "MessageToOperator",     \* an agent's message may go to the operator, as an ask does
     "AnswerTwice",           \* an ask's answer does not check for one stored before
-    "AnswerToOther"          \* an ask's answer may go to an agent other than the asker
+    "AnswerToOther",         \* an ask's answer may go to an agent other than the asker
+    "EndWithDelegates",      \* a main session's end is not refused while a delegate of it lives
+    "EndBusy",               \* a main session's end does not wait for it to be idle
+    "EndByAgent",            \* a main session may end another main session
+    "MainKeeps"              \* a kept service of an ended main session is kept, for no one
 }
 
 Agents == UNION Projects
@@ -314,6 +324,23 @@ DelegateEnds(d) ==
     /\ D!Exited(d, FALSE)
     /\ UNCHANGED <<up, restarts, life, faults, claimVars, svcVars, wrong>>
 
+\* A main session's end (F-143), the operator's alone: refused while any of
+\* its delegates has not ended, so none is left with no parent; SIGTERM once
+\* it is idle, as any stop, or nothing to send once its process is gone. Its
+\* row is then ended, and what it owns ends with it.
+MayEnd(c, m) == c \in Operators \/ (Break = "EndByAgent" /\ c \in Mains /\ c # m)
+LiveDelegates(m) == {d \in Delegates : Main(d) = m /\ proc[d] # "ended"}
+
+MainEnds(c, m) ==
+    /\ up /\ m \in Mains /\ Live(c) /\ MayEnd(c, m)
+    /\ LiveDelegates(m) = {} \/ Break = "EndWithDelegates"
+    /\ proc[m] \in {"idle", "dead"} \/ (Break = "EndBusy" /\ proc[m] \in {"working", "stuck"})
+    /\ proc' = [proc EXCEPT ![m] = "ended"] /\ epoch' = [epoch EXCEPT ![m] = @ + 1]
+    /\ wrong' = wrong \cup (IF c \in Operators THEN {} ELSE {"end by agent"})
+                       \cup (IF proc[m] \in {"idle", "dead"} THEN {} ELSE {"end busy"})
+    /\ IF proc[m] = "dead" THEN UNCHANGED dvars ELSE D!Exited(m, FALSE)
+    /\ UNCHANGED <<up, restarts, life, faults, claimVars, svcVars>>
+
 -----------------------------------------------------------------------------
 (* Mailbox: a message along an edge, stored, then into an ended turn, once *)
 
@@ -446,12 +473,14 @@ ServiceHanded(c, s, b) ==
     /\ wrong' = wrong \cup (IF c = o /\ (IsChild(o, b) \/ IsChild(b, o)) THEN {} ELSE {"hand"})
     /\ UNCHANGED <<svcOthers, svc, keep>>
 
-\* A kept service goes to its owner's parent; a main session never ends, so
-\* the owner here is a delegate.
+\* A kept service goes to a delegate's main session; one a main session kept
+\* ends with it, since the operator owns nothing.
+Kept(s) == keep[s] /\ (owner[s] \in Delegates \/ Break = "MainKeeps")
+
 ServiceOwnerEnded(s) ==
     /\ up /\ svc[s] = "running" /\ owner[s] \in Agents /\ proc[owner[s]] = "ended"
-    /\ keep[s] \/ Break # "NoOwnerWatch"
-    /\ IF keep[s]
+    /\ Kept(s) \/ Break # "NoOwnerWatch"
+    /\ IF Kept(s)
          THEN owner' = [owner EXCEPT ![s] = Main(owner[s])] /\ UNCHANGED svc
          ELSE /\ owner' = [owner EXCEPT ![s] = None]
               /\ svc' = IF Break = "OwnerClearedFirst" THEN svc ELSE [svc EXCEPT ![s] = "ended"]
@@ -465,6 +494,7 @@ Next ==
     \/ \E c \in Actors, t \in Agents : Send(c, t) \/ ClaimTaken(c, t)
     \/ \E c \in Agents, o \in Operators : Send(c, o)
     \/ \E a \in Agents : Ask(a)
+    \/ \E c \in Actors, m \in Mains : MainEnds(c, m)
     \/ \E o \in Operators, i \in Ids, t \in Agents : Answers(o, i, t)
     \/ \E i \in Ids : Mailboxes(i)
     \/ \E r \in calls : FixActs(r) \/ FixRefused(r)
@@ -550,9 +580,15 @@ FixOnClaimedState == "stale" \notin wrong
 \* every main session, and so of every agent.
 OnlyParentFixes == \A r \in claims : IsChild(r.t, r.by) \/ r.by \in Operators
 NoSelfFix == \A r \in claims : r.by # r.t
-\* No agent fixes a main session, only the operator; no fix ends one.
-MainFixedByOperatorOnly == /\ \A r \in claims : r.t \in Mains => r.by \in Operators
-                           /\ \A m \in Mains : proc[m] # "ended"
+\* No agent fixes a main session, only the operator; no fix stops one: only
+\* its end does.
+MainFixedByOperatorOnly == \A r \in claims : r.t \in Mains => r.by \in Operators /\ r.act # "stop"
+
+\* A main session's end is the operator's, taken idle or with its process
+\* gone, and leaves no delegate of it that has not ended.
+MainEndedByOperator == "end by agent" \notin wrong
+MainEndedIdle == "end busy" \notin wrong
+NoDelegateWithoutParent == \A d \in Delegates : proc[Main(d)] = "ended" => proc[d] = "ended"
 
 \* A running service has one owner; an ended one has none.
 OneOwner ==
@@ -572,10 +608,10 @@ MessageDelivered ==
     \A i \in Ids, a \in Agents :
         []<>(proc[a] = "idle") => [](Waiting(i) /\ row[i].to = a => <>(row[i].st = "delivered"))
 
-\* A row to a delegate that has ended settles: it went in before the end,
-\* or its row says the delegate ended first (Delivery's Arrives).
+\* A row to an agent that has ended settles: it went in before the end, or
+\* its row says the agent ended first (Delivery's Arrives).
 EndedMarked ==
-    \A i \in Ids : [](Waiting(i) /\ row[i].to \in Delegates /\ proc[row[i].to] = "ended"
+    \A i \in Ids : [](Waiting(i) /\ row[i].to \in Agents /\ proc[row[i].to] = "ended"
                       => <>(row[i].st \in {"delivered", "ended"}))
 
 \* A claim's call ends: its fix verified, or the claim released.
@@ -584,10 +620,12 @@ ClaimEnds == Cl("none")!ClaimsEnd
 \* A claim a restart cut off is never acted on.
 NoActOnCutOffClaim == Cl("none")!NoActOnCutOffClaim
 
-\* A service whose owner ended without keeping it ends.
+\* A service whose owner ended without keeping it ends, and one an ended main
+\* session owned, kept or not.
 ServiceEndsWithOwner ==
     \A s \in Services :
-        (svc[s] = "running" /\ owner[s] \in Agents /\ proc[owner[s]] = "ended" /\ ~keep[s])
+        (svc[s] = "running" /\ owner[s] \in Agents /\ proc[owner[s]] = "ended"
+            /\ (~keep[s] \/ owner[s] \in Mains))
             ~> svc[s] = "ended"
 
 \* A delivered message whose turn ends, with a result or with the process's

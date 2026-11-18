@@ -175,7 +175,7 @@ defmodule CodingAgentFramework.MCPTest do
              ~w(message run start_delegate run_delegate start_main) ++
                ~w(service_start services service_logs service_send service_wait) ++
                ~w(service_restart service_stop service_hand agents look transcript) ++
-               ~w(interrupt answer resume stop move answer_startup ask reload)
+               ~w(interrupt answer resume stop move answer_startup end_main ask reload)
   end
 
   test "a call is the agent's whose token it carries, whatever its arguments say",
@@ -228,9 +228,13 @@ defmodule CodingAgentFramework.MCPTest do
     start = %{"project" => "app", "name" => "app-b", "brief" => "Go."}
     assert tool(mcp, t["app-fix"], "start_main", start) == %{"refused" => "main_session_only"}
 
-    assert tool(mcp, t["app-fix"], "end_main", %{}) == %{
-             "refused" => ["unknown_tool", "end_main"]
-           }
+    # A main session's end is the operator's alone (F-143): no agent ends one, its own included.
+    assert tool(mcp, t["app-fix"], "end_main", %{}) == %{"refused" => ["bad", "args"]}
+
+    for caller <- ~w(app-fix app-main) do
+      assert tool(mcp, t[caller], "end_main", %{"name" => "app-main"}) ==
+               %{"refused" => "operator_only"}
+    end
   end
 
   test "run is the caller's job, named for the call, and answers as Jobs does",
@@ -493,7 +497,7 @@ defmodule CodingAgentFramework.MCPTest do
                  ~w(message run start_delegate run_delegate start_main) ++
                    ~w(service_start services service_logs service_send service_wait) ++
                    ~w(service_restart service_stop service_hand agents look transcript) ++
-                   ~w(interrupt answer resume stop move answer_startup ask reload)
+                   ~w(interrupt answer resume stop move answer_startup end_main ask reload)
              }
            }
 

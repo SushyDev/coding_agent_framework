@@ -210,10 +210,15 @@ Built, each from a checked model in `model/tla/`:
   (branch, clean, ahead and behind its remote) for a view; and `start_main`, a main session
   started in the checkout under a free name, its brief its first message, through the
   `Scheduler` and the startup dialogs. The example app declares its projects and main sessions
-  through it.
+  through it;
+- a main session's end (F-143), against `Team.tla`: the operator's `end_main`, refused while
+  a delegate of it has not ended, the session stopped once idle and its agent row ended, so
+  every service it owns ends, kept ones too; a main session's resume under a lease of its own,
+  a refused start's brief settled, the model a start names, and a stale lock in the checkout
+  shown as `locked` until a person clears it.
 
 The remodel (F-115, taken in F-116) is done. Next,
-a main session's end (F-141's new-1), the mechanisms an app's policies stand on (an idle
+F-140's follow-ups on startup dialogs, the mechanisms an app's policies stand on (an idle
 delegate's watchdog, `Stop` held for the app, clone copies, an idempotent
 start), packaging, and stacks with the LiveView components. The plan and the order of the units are in
 [docs/design.md](docs/design.md); each unit's notes are in `docs/build-notes/`.

@@ -143,6 +143,10 @@ defmodule CodingAgentFramework.Mailbox.Table do
     select(db, where, [])
   end
 
+  @doc "The row stored under `uuid`, or nil."
+  @spec by_uuid(db, String.t()) :: map | nil
+  def by_uuid(db, uuid), do: List.first(select(db, "uuid = ?1", [uuid]))
+
   @doc "Row `id`, or nil."
   @spec get(db, integer) :: map | nil
   def get(db, id), do: List.first(select(db, "id = ?1", [id]))

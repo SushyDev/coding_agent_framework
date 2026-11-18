@@ -102,6 +102,7 @@ defmodule CodingAgentFramework.MainsTest do
      mains_opts: opts,
      sessions: sessions,
      agents: agents,
+     accounts: accounts,
      scheduler: scheduler,
      starts: starts,
      mailbox_db: db}
@@ -139,7 +140,7 @@ defmodule CodingAgentFramework.MainsTest do
     assert :ok = Mains.landed(mains, "app")
 
     assert {:ok, %{state: "dirty", owed: "true", reason: ~s(["held","dirty"])}} =
-             await(fn -> state(mains, "dirty", owed: "true") end)
+             await(fn -> state(mains, "dirty", owed: "true", reason: ~s(["held","dirty"])) end)
 
     refute head(ctx, ctx.checkout) == head(ctx, ctx.origin)
     assert File.read!(edit) == "mine"
@@ -221,6 +222,145 @@ defmodule CodingAgentFramework.MainsTest do
 
     # A name that runs is in use.
     assert {:refused, {:running, "app-epic"}} = Mains.start_main(mains, "app", "app-epic", "Go.")
+  end
+
+  # F-143 (`Team.tla`'s `MainEnds`): the end is refused while a delegate of the main session has
+  # not ended (`NoDelegateWithoutParent`); then the session is stopped while idle and its row is
+  # ended, so it owns nothing more; no delegate starts under it, and its name never runs again.
+  # The model it was started with is the caller's (F-141's new-8).
+  test "end_main ends a main session once its delegates have ended, for good", ctx do
+    mains = mains(ctx)
+    assert {:ok, _} = level(ctx, mains)
+
+    assert {:unknown, {:dialog, :trust}} =
+             Mains.start_main(mains, "app", "app-epic", "Plan.", model: "sonnet")
+
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :trust, @trust)
+    assert {:ok, %{model: "sonnet"}} = await(fn -> running(ctx, "app-epic") end)
+    assert {:ok, _} = await(fn -> settled(ctx, mains) end)
+
+    # A delegate of it waits on its own dialog: it has not ended.
+    assert {:unknown, {:dialog, :trust}} = delegate(ctx, "app-epic-api", "app-epic")
+
+    assert {:refused, {:delegates, ["app-epic-api"]}} = Mains.end_main(mains, "app-epic")
+    assert %{status: "running"} = Agents.get(ctx.agents, "app-epic")
+
+    assert {_, _} = Sessions.answer_dialog(ctx.sessions, "app-epic-api", :trust, "No, exit")
+    assert {:ok, _} = await(fn -> status(ctx, "app-epic-api", "stopped") end)
+    assert {:ok, :ended} = Sessions.ended(ctx.sessions, "app-epic-api")
+
+    # Idle, it is stopped by SIGTERM, and its row is ended: Agents.ended?/1 now holds.
+    assert {:ok, :ended} = Mains.end_main(mains, "app-epic")
+    assert Agents.ended?(Agents.get(ctx.agents, "app-epic"))
+    assert {:ok, :ended} = Mains.end_main(mains, "app-epic")
+
+    assert {:refused, {:parent_ended, "app-epic"}} = delegate(ctx, "app-epic-web", "app-epic")
+    assert {:refused, {:running, "app-epic"}} = Mains.start_main(mains, "app", "app-epic", "Go.")
+    assert {:refused, {:not_stopped, "ended"}} = Mains.resume_main(mains, "app-epic")
+
+    assert {:refused, {:ended, "app-epic"}} =
+             Sessions.resume(ctx.sessions, "app-epic", ctx.account, "s", role: :parent)
+
+    # A declared main session with no process is ended at once.
+    assert {:ok, :ended} = Mains.end_main(mains, "app-main")
+    assert {:refused, {:not_main, "delegate"}} = Mains.end_main(mains, "app-epic-api")
+  end
+
+  # F-141's new-5: a resume is new work, with a lease of its own, class main session; the first
+  # start's lease went once its process ended.
+  test "resume_main resumes a stopped main session under a lease of its own", ctx do
+    mains = mains(ctx)
+    assert {:ok, _} = level(ctx, mains)
+
+    assert {:refused, {:not_stopped, "declared"}} = Mains.resume_main(mains, "app-main")
+    assert {:unknown, {:dialog, :trust}} = Mains.start_main(mains, "app", "app-main", nil)
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-main", :trust, @trust)
+    assert {:ok, %{session_id: sid}} = await(fn -> running(ctx, "app-main") end)
+    assert {:ok, _} = await(fn -> settled(ctx, mains) end)
+
+    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "app-main")
+    assert {:ok, [_]} = await(fn -> leases(ctx, & &1.released_at) end)
+
+    assert {:unknown, {:dialog, :trust}} = Mains.resume_main(mains, "app-main")
+    assert [_, %{status: "starting", id: id}] = Starts.rows(ctx.starts, "test")
+    key = Work.key("test", id)
+
+    assert {:ok, [%{holder: {"main", ^key}}]} =
+             await(fn -> leases(ctx, &is_nil(&1.released_at)) end)
+
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-main", :trust, @trust)
+    assert {:ok, %{session_id: ^sid}} = await(fn -> running(ctx, "app-main") end)
+  end
+
+  # F-141's new-4: a start refused once its brief was stored settles that one row, ended.
+  test "a refused start's brief is settled ended", ctx do
+    mains =
+      mains(%{ctx | mains_opts: ctx.mains_opts ++ [mcp: fn _ -> {:refused, :no_config} end]})
+
+    assert {:ok, _} = level(ctx, mains)
+
+    assert {:refused, :no_config} = Mains.start_main(mains, "app", "app-epic", "Plan.")
+    assert [%{status: "refused", brief_uuid: uuid}] = Starts.rows(ctx.starts, "test")
+    {:ok, mtable} = Mailbox.Table.open(ctx.mailbox_db)
+    assert %{status: "ended"} = Mailbox.Table.by_uuid(mtable, uuid)
+  end
+
+  # F-141's new-6: a stale lock is a state the view shows, never removed here; once a person
+  # clears it, the pull it held back goes.
+  test "a checkout's stale index.lock shows as locked until a person clears it", ctx do
+    mains = mains(ctx)
+    assert {:ok, _} = level(ctx, mains)
+
+    lock = Path.join([ctx.checkout, ".git", "index.lock"])
+    File.write!(lock, "")
+    commit!(ctx, ctx.origin, "while locked")
+    assert :ok = Mains.landed(mains, "app")
+
+    assert {:ok, %{owed: "true"}} = await(fn -> state(mains, "locked", owed: "true") end)
+    assert File.exists?(lock)
+
+    File.rm!(lock)
+    assert {:ok, _} = level(ctx, mains)
+  end
+
+  defp delegate(ctx, name, parent) do
+    {:ok, account} = Accounts.ready(ctx.accounts, "work")
+    claude = ctx.mains_opts[:launch][:claude]
+    launch = [role: :parent, kind: :delegate, parent: parent, cwd: ctx.dir, claude: claude]
+
+    Sessions.start(
+      ctx.sessions,
+      name,
+      account,
+      launch ++ Keyword.delete(ctx.mains_opts[:launch], :claude)
+    )
+  end
+
+  defp status(ctx, name, want) do
+    case Agents.get(ctx.agents, name) do
+      %{status: ^want} = row -> {:ok, row}
+      row -> row
+    end
+  end
+
+  # The cues the app's `Cues` would hand on: `Mains` settles its starts by the agent rows.
+  defp settled(ctx, mains) do
+    Mains.cue(mains, %{topic: "sessions:test", ids: []})
+
+    case Starts.starting_rows(ctx.starts, "test") do
+      [] -> {:ok, :settled}
+      rows -> rows
+    end
+  end
+
+  # The Scheduler reads its holders again on a cue, as on the app's.
+  defp leases(ctx, keep) do
+    Scheduler.cue(ctx.scheduler, %{topic: "sessions:test"})
+
+    case Enum.filter(Scheduler.leases(ctx.scheduler), keep) do
+      [] -> :none
+      found -> {:ok, found}
+    end
   end
 
   defp level(ctx, mains) do

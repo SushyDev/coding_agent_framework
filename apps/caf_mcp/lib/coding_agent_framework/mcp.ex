@@ -83,6 +83,10 @@ defmodule CodingAgentFramework.MCP do
     `trust` or `imports`, as the agent row shows it, `Sessions.Agents.dialog/1`), answered by
     its option's label through the sessions' `answer_dialog/5`, which marks the answer on the
     row before its checked press and never presses it twice. Answers `Sessions`' answer.
+  - `end_main(name)`: the operator's alone (F-143); any other caller is refused
+    `:operator_only`. The mains' `end_main/3`: refused while a delegate of it has not ended
+    (`{:delegates, names}`), else the session stopped once idle and its agent row `ended`, so
+    the app ends what it owns. Answers `Mains`' answer.
 
   **The operator** calls the same tools through `operate/3`, which writes its row under the
   operator's name, so each act it makes names it as the actor; `issue/2` never makes it a
@@ -193,7 +197,7 @@ defmodule CodingAgentFramework.MCP do
           "the brief is its first message. Answers its name.",
       inputSchema: %{
         type: "object",
-        properties: %{project: @str, name: @name, brief: @str},
+        properties: %{project: @str, name: @name, brief: @str, model: @str},
         required: ["project", "name", "brief"]
       }
     },
@@ -371,6 +375,13 @@ defmodule CodingAgentFramework.MCP do
         },
         required: ["agent", "kind", "label"]
       }
+    },
+    %{
+      name: "end_main",
+      description:
+        "The operator's: ends a main session for good, once every delegate of it has ended; " <>
+          "what it owns ends with it.",
+      inputSchema: %{type: "object", properties: %{name: @str}, required: ["name"]}
     },
     %{
       name: "ask",
@@ -632,14 +643,24 @@ defmodule CodingAgentFramework.MCP do
   end
 
   # A main session's start answers once its session runs, or once it waits on a person.
-  defp act(ctx, caller, _id, "start_main", %{"project" => p, "name" => n, "brief" => b})
+  defp act(ctx, caller, _id, "start_main", %{"project" => p, "name" => n, "brief" => b} = a)
        when is_binary(p) and is_binary(n) and is_binary(b) do
-    with :ok <- Grants.may_start_main?(ctx.grants, caller),
+    with true <- is_nil(a["model"]) or is_binary(a["model"]) or {:refused, {:bad, :args}},
+         :ok <- Grants.may_start_main?(ctx.grants, caller),
          true <- ctx.mains != nil or {:refused, :no_mains},
          {mod, server} = ctx.mains,
-         {:ok, %{name: name}} <-
-           mod.start_main(server, p, n, b, from: caller, timeout: @start_wait),
+         opts = [from: caller, model: a["model"], timeout: @start_wait],
+         {:ok, %{name: name}} <- mod.start_main(server, p, n, b, opts),
          do: {:ok, %{main: name}}
+  end
+
+  # A main session's end is the operator's alone (Team.tla's MainEnds): no agent ends one.
+  defp act(ctx, caller, _id, "end_main", %{"name" => name}) when is_binary(name) do
+    with true <- caller == Grants.operator(ctx.grants) or {:refused, :operator_only},
+         true <- ctx.mains != nil or {:refused, :no_mains} do
+      {mod, server} = ctx.mains
+      mod.end_main(server, name)
+    end
   end
 
   # A move is a fix's act (`Grants.may_fix?/3`: a parent's of its delegate, the operator's of

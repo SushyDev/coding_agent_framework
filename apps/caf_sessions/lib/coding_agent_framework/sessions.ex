@@ -267,6 +267,26 @@ defmodule CodingAgentFramework.Sessions do
     do: request(sessions, {:stop, name, Keyword.get(opts, :for, :end)}, opts)
 
   @doc """
+  Ends main session `name` for good (F-143, `Team.tla`'s `MainEnds`): `Mains.end_main/3`'s
+  call, the operator's act alone. Refused `{:delegates, names}` while any delegate of it has not
+  ended, so none is left with no parent; checked in the same step that moves the row, and a
+  delegate's start under an ended main session is refused `{:parent_ended, name}`. A running
+  session is stopped first, as `stop/3` stops it (SIGTERM once idle, `{:not_idle, status}`
+  otherwise), and its row is then `ended`; a row with no process (declared, stopped, refused)
+  is `ended` at once. An ended main session never starts again (`{:ended, name}`), and what it
+  owns ends with it (`Sessions.Agents.ended?/1`). Answers `{:ok, :ended}` (also for a row
+  already ended); refused `:no_session`, `{:not_main, kind}`, `{:moving, phase}`, `{:not_free,
+  status}`, or a stop's refusal; or the stop's unknown, which leaves the row `stopping` as
+  `stop/3` does: a later call ends it once it is free. Option: `:timeout`.
+
+      Sessions.end_main(sessions, "app-epic")
+      #=> {:ok, :ended}
+      #=> {:refused, {:delegates, ["app-epic-api"]}}
+  """
+  @spec end_main(GenServer.server(), String.t(), keyword) :: outcome(:ended)
+  def end_main(sessions, name, opts \\ []), do: request(sessions, {:end_main, name}, opts)
+
+  @doc """
   Answers the startup dialog agent `name`'s start waits on (its row `dialog`) by the option
   labeled `label`: a person's answer, from the app's view or the operator's tool. `kind` is the
   dialog's (`:trust` or `:imports`, or its name), so an answer meant for one dialog never
@@ -336,7 +356,7 @@ defmodule CodingAgentFramework.Sessions do
   becomes `ended`, so it frees its parent's cap and what it owns ends with it; it keeps its
   place in the tree, so what it kept goes to its parent.
   `Delegates` asks it. Answers `{:ok, :ended}` (also for a row already `ended`), `{:refused,
-  :no_session}`, `{:refused, :main}` for a main session, which never ends, `{:refused,
+  :no_session}`, `{:refused, :main}` for a main session, whose end is `end_main/3`, `{:refused,
   {:moving, phase}}` while a move resumes it, or `{:refused, {:not_free, status}}` while its
   process may live. Option: `:timeout` (ms, default 5 000).
 
@@ -712,6 +732,30 @@ defmodule CodingAgentFramework.Sessions do
     {:reply, reply, state}
   end
 
+  # Team.tla's MainEnds: the delegates checked and the row moved in one step of this process,
+  # so no delegate starts under it after the check (`agent/6` refuses an ended parent).
+  def handle_call({{:end_main, name}, timeout}, from, state) do
+    row = Table.get(state.db, state.host.name, name)
+
+    case row && end_check(state, row) do
+      nil ->
+        {:reply, {:refused, :no_session}, state}
+
+      :ended ->
+        {:reply, {:ok, :ended}, state}
+
+      :free ->
+        write(state, row, status: "ended", reason: nil)
+        {:reply, {:ok, :ended}, state}
+
+      :running ->
+        handle_call({{:stop, name, :end_main}, timeout}, from, state)
+
+      refused ->
+        {:reply, refused, state}
+    end
+  end
+
   def handle_call({{:stop, name, how}, timeout}, from, state) do
     deadline = state.clock.() + timeout
 
@@ -728,6 +772,27 @@ defmodule CodingAgentFramework.Sessions do
 
       row ->
         {:reply, {:refused, {:not_running, row.status}}, state}
+    end
+  end
+
+  # What a main session's end may do with its row: nothing more, write it ended, or stop it
+  # first; refused while a delegate of it has not ended, a move or a call is under way, or a
+  # process of it may live but does not run.
+  defp end_check(state, row) do
+    live =
+      for %{kind: "delegate"} = d <- Table.children(state.db, state.host.name, row.name),
+          not Agents.ended?(d),
+          do: d.name
+
+    cond do
+      row.kind != "main" -> {:refused, {:not_main, row.kind}}
+      row.status == "ended" -> :ended
+      live != [] -> {:refused, {:delegates, Enum.sort(live)}}
+      is_binary(row.move) -> {:refused, {:moving, row.move}}
+      Map.has_key?(state.pending, row.name) -> {:refused, {:not_free, "calling"}}
+      Agents.free?(row) -> :free
+      row.status == "running" and is_integer(row.pid) -> :running
+      true -> {:refused, {:not_free, row.status}}
     end
   end
 
@@ -960,8 +1025,15 @@ defmodule CodingAgentFramework.Sessions do
     gone? = liveness(state, row) in [:gone, :replaced]
 
     if gone? and dead?(state, row) do
-      write(state, row, status: "stopped")
-      done(state, name, pending, {:ok, :stopped})
+      case pending.how do
+        :end_main ->
+          write(state, row, status: "ended", reason: nil)
+          done(state, name, pending, {:ok, :ended})
+
+        _ ->
+          write(state, row, status: "stopped")
+          done(state, name, pending, {:ok, :stopped})
+      end
     else
       wait(state, name, pending, fn ->
         why = if gone?, do: :socket_live, else: :no_exit
@@ -1330,6 +1402,10 @@ defmodule CodingAgentFramework.Sessions do
       nil ->
         :ok
 
+      # A main session's end is for good (F-143): its name never runs again.
+      %{kind: "main", status: "ended"} ->
+        {:refused, {:ended, name}}
+
       %{status: status} = row ->
         if Agents.free?(row), do: :ok, else: {:refused, {:exists, status}}
     end
@@ -1345,8 +1421,12 @@ defmodule CodingAgentFramework.Sessions do
     project = launch[:project] || tree_project || (row && row.project)
 
     case {kind, parent} do
+      # Checked in the step that writes the row, as `end_main/3` checks the delegates: a
+      # delegate never starts under a main session that ended.
       {:delegate, p} when is_binary(p) and p != "" ->
-        {:ok, %{kind: "delegate", parent: p, project: project}}
+        if Agents.ended?(Table.get(state.db, state.host.name, p)),
+          do: {:refused, {:parent_ended, p}},
+          else: {:ok, %{kind: "delegate", parent: p, project: project}}
 
       {:delegate, _} ->
         {:refused, {:missing, :parent}}
