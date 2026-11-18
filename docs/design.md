@@ -235,7 +235,9 @@ cues its writes like every other part.
 The LiveView side is a library of components over the `Tracker`, with one example app.
 
 `caf_example` is the embedding app the example grows from (F-102): its configuration is data
-(the framework home, the workstation, other hosts, accounts, projects, ports); one supervision
+(the framework home, the workstation, other hosts, accounts, projects, ports), read from a
+JSON file checked whole at start with each refusal named, and `bin/caf-example` runs it with
+the operator's console in IEx (F-146; the end-to-end run is `docs/e2e.md`); one supervision
 tree starts every part in the order each needs, the reaper first, and one `Cues` per instance;
 it makes the hook secret and the `start_id` of `Acts` once per start. It routes no cue by hand:
 each part declares the topics it reads, `Cues` routes them, and `Jobs` and `Services` cue like
@@ -2063,8 +2065,8 @@ uuid, and each spec that instances a module compares its state counts before and
     policies, not the framework's.
 15. **Packaging and toolchain**: one `coding_agent_framework` package; `Programs` looked up and
     checked at start, with a Homebrew setup documented; the Elixir and OTP floor tested; a
-    library supervisor from a config struct, out of `caf_example`; accounts: how to log one in,
-    and Keychain reads for held processes (`USER`, and `security` on the launch's `PATH`).
+    library supervisor from a config struct, out of `caf_example`; accounts: how to log one in
+    (`bin/caf-login`, built in F-146), and Keychain reads for held processes (`USER`, and `security` on the launch's `PATH`).
 16. **What the app reads and drives**: structured reports with a schema and several per
     delegate; app metadata and names on agents; status with the last activity, cost and tokens,
     and a needs-input state; one activity feed per agent; an urgent message (interrupt, then

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Starts the example app from a config file, with the operator's console in an IEx shell:
+#
+#   bin/caf-example <config.json>
+#
+# The config is read and checked whole before anything starts (CodingAgentFramework.Example.
+# ConfigFile); a refusal names its key and ends the script with status 2. Once started, the
+# shell has the console imported and the running app named `caf`: `agents(caf)`,
+# `dialogs(caf)`, `start_main(caf, …)` and the rest (`h CodingAgentFramework.Example.Console`).
+# docs/e2e.md is the end-to-end run that uses it.
+#
+# It runs in devenv's environment: outside it, it runs itself again through `devenv shell`, so
+# every program is the lock's, by its CAF_* path. Mix compiles in MIX_ENV (dev unless set).
+# Quitting the shell stops the framework; the agents it holds run on, under dtach, and the next
+# start adopts them.
+set -euo pipefail
+
+usage() { echo "usage: bin/caf-example <config.json>"; }
+fail() {
+  echo "caf-example: $*" >&2
+  exit 2
+}
+
+case "${1:-}" in
+  -h | --help) usage; exit 0 ;;
+  "" | -*) usage >&2; exit 2 ;;
+esac
+(($# == 1)) || { usage >&2; exit 2; }
+[[ -f "$1" ]] || fail "$1 is not a file"
+config="$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")"
+root="$(cd "$(dirname "$0")/.." && pwd -P)"
+
+if [[ -z "${CAF_TMUX:-}" ]]; then
+  command -v devenv >/dev/null || fail "devenv is not on PATH; see README.md, Development"
+  cd "$root"
+  exec devenv shell -- "$root/bin/caf-example" "$config"
+fi
+
+# Nothing of a session this was typed in reaches the framework's node.
+unset TMUX TMUX_PANE CLAUDECODE
+cd "$root"
+export CAF_EXAMPLE_CONFIG="$config"
+exec iex --dot-iex "$root/apps/caf_example/console.iex.exs" -S mix run
