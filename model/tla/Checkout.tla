@@ -18,9 +18,19 @@
 (* would overwrite, and carries any other: an edit made between the clean  *)
 (* check and the merge is never lost.                                      *)
 (*                                                                         *)
-(* Models Mains' clone, its pull (`Mains.landed/2`, its read loop) and     *)
-(* the readiness Sessions and Delegates rely on before they make a         *)
-(* worktree or start a main session in the checkout.                       *)
+(* A checkout an earlier build made under the project's name (F-156, with  *)
+(* Old) is renamed to the project's directory once no session's process   *)
+(* may live in it or its worktrees, and before anything clones one there:  *)
+(* a rename under a running session moves its files away, and a clone     *)
+(* beside the old checkout makes two. After the rename every worktree     *)
+(* names the checkout's git directory at the old path until `git worktree *)
+(* repair`, which each read does while one is stale, so a restart between *)
+(* the rename and the repair still repairs.                                *)
+(*                                                                         *)
+(* Models Mains' clone, its pull (`Mains.landed/2`, its read loop), the   *)
+(* old checkout's rename (`Mains.Rename`) and the readiness Sessions and  *)
+(* Delegates rely on before they make a worktree or start a main session  *)
+(* in the checkout.                                                        *)
 (*                                                                         *)
 (* Left abstract: the commits themselves (trunk is a count, linear on the  *)
 (* remote, since stacks land into it); which files an edit touches (a      *)
@@ -37,7 +47,9 @@
 (*                                                                         *)
 (* The Team box's contract for a project's checkout (F-163): no edit       *)
 (* lost, a whole checkout only, trunk only forward, made once and caught   *)
-(* up (NoLostEdit, WholeCheckout, Forward, Made, CaughtUp). Boxes.tla      *)
+(* up (NoLostEdit, WholeCheckout, Forward, Made, CaughtUp); and, from      *)
+(* F-156, one checkout of a project, and no session's files moved under   *)
+(* it (OneCheckout, NoSessionMoved). Boxes.tla                             *)
 (* leaves the checkout inside a start; no interaction it checks needs      *)
 (* more. No gap.                                                           *)
 (***************************************************************************)
@@ -46,6 +58,7 @@ EXTENDS Naturals
 CONSTANTS
     MaxLandings,  \* landings into the remote's trunk
     MaxRestarts,  \* restarts of Mains
+    Old,          \* an earlier build left a checkout under the project's name (F-156)
     Break         \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -54,11 +67,14 @@ Breaks == {
     "ResetHard",      \* the pull resets trunk to the remote's, discarding what is not committed
     "ClearAfter",     \* the owed pull is cleared after the merge, not before the fetch
     "NoPullAtStart",  \* a start of Mains owes no pull: a landing while it was down is lost
-    "ClearOnDirty"    \* a pull refused for a checkout that is not clean is no longer owed
+    "ClearOnDirty",   \* a pull refused for a checkout that is not clean is no longer owed
+    "RenameWhileRunning", \* the old checkout is renamed while a session may run in it
+    "CloneBesideOld", \* a clone is made while the old checkout is still there
+    "NoRepair"        \* the worktrees are used after the rename with no repair
 }
 
 ASSUME Break \in Breaks
-ASSUME MaxLandings \in Nat /\ MaxRestarts \in Nat
+ASSUME MaxLandings \in Nat /\ MaxRestarts \in Nat /\ Old \in BOOLEAN
 
 VARIABLES
     remote,    \* the remote's trunk: how many commits
@@ -74,10 +90,17 @@ VARIABLES
     restarts,
     lost,      \* ghost: an edit or a local commit the framework discarded
     half,      \* ghost: a checkout used while it was not whole
-    back       \* ghost: the checkout's trunk moved backward
+    back,      \* ghost: the checkout's trunk moved backward
+    old,       \* the checkout under the project's name: "none" or "made"
+    inOld,     \* a session's process may live in the old checkout or its worktrees
+    links,     \* the worktrees' links to the checkout's git directory: "ok" or "stale"
+    moved,     \* ghost: a rename moved a session's files while it might run
+    two        \* ghost: the project had two checkouts at once
+
+oldVars == <<old, inOld, links, moved, two>>
 
 vars == <<remote, final, tmp, local, tracking, dirty, ahead, owed, pull, up, restarts, lost,
-          half, back>>
+          half, back, old, inOld, links, moved, two>>
 
 \* What Mains takes for a checkout it may use: one at its path (CloneInPlace cannot tell a
 \* whole one from a cut one; the design's is whole, since only the rename puts one there).
@@ -92,33 +115,38 @@ Land ==
     /\ remote' = remote + 1
     /\ owed' = IF up THEN TRUE ELSE owed
     /\ UNCHANGED <<final, tmp, local, tracking, dirty, ahead, pull, up, restarts, lost, half,
-                   back>>
+                   back,
+                   oldVars>>
 
 \* A person (or a main session, against the rule) edits a file in the checkout, or cleans it.
 Edit ==
     /\ final # "absent" /\ ~dirty
     /\ dirty' = TRUE
     /\ UNCHANGED <<remote, final, tmp, local, tracking, ahead, owed, pull, up, restarts, lost,
-                   half, back>>
+                   half, back,
+                   oldVars>>
 
 Clean ==
     /\ dirty
     /\ dirty' = FALSE
     /\ UNCHANGED <<remote, final, tmp, local, tracking, ahead, owed, pull, up, restarts, lost,
-                   half, back>>
+                   half, back,
+                   oldVars>>
 
 \* A person commits on trunk in the checkout, or takes the commit back.
 Commit ==
     /\ final # "absent" /\ ~ahead
     /\ ahead' = TRUE
     /\ UNCHANGED <<remote, final, tmp, local, tracking, dirty, owed, pull, up, restarts, lost,
-                   half, back>>
+                   half, back,
+                   oldVars>>
 
 Uncommit ==
     /\ ahead
     /\ ahead' = FALSE
     /\ UNCHANGED <<remote, final, tmp, local, tracking, dirty, owed, pull, up, restarts, lost,
-                   half, back>>
+                   half, back,
+                   oldVars>>
 
 -----------------------------------------------------------------------------
 (* Mains: the clone, made once *)
@@ -127,11 +155,13 @@ Uncommit ==
 \* path itself).
 CloneStart ==
     /\ up /\ ~Ready /\ final \in {"absent"} /\ tmp = "none"
+    /\ (old = "none" \/ Break = "CloneBesideOld")
     /\ IF Break = "CloneInPlace"
        THEN final' = "partial" /\ tmp' = tmp
        ELSE tmp' = "partial" /\ final' = final
     /\ UNCHANGED <<remote, local, tracking, dirty, ahead, owed, pull, up, restarts, lost, half,
-                   back>>
+                   back,
+                   oldVars>>
 
 \* The clone's fetch reads the remote's trunk as it is now.
 CloneDone ==
@@ -141,21 +171,57 @@ CloneDone ==
        \/ /\ Break = "CloneInPlace" /\ final = "partial"
           /\ final' = "made" /\ tmp' = tmp
     /\ local' = remote /\ tracking' = remote
-    /\ UNCHANGED <<remote, dirty, ahead, owed, pull, up, restarts, lost, half, back>>
+    /\ UNCHANGED <<remote, dirty, ahead, owed, pull, up, restarts, lost, half, back,
+                   oldVars>>
 
 \* A whole clone is renamed into place: from here the checkout is made, once.
 Rename ==
     /\ up /\ tmp = "whole" /\ final = "absent"
     /\ final' = "made" /\ tmp' = "none"
+    /\ two' = (two \/ old = "made")
     /\ UNCHANGED <<remote, local, tracking, dirty, ahead, owed, pull, up, restarts, lost, half,
-                   back>>
+                   back, old, inOld, links, moved>>
 
-\* A worktree made from the checkout, or a main session started in it: only once it is ready.
+\* A worktree made from the checkout, or a main session started in it: only once it is ready,
+\* and its worktrees' links name it (NoRepair: whatever they name).
 Use ==
-    /\ up /\ Ready
-    /\ half' = (half \/ final # "made")
+    /\ up /\ Ready /\ (links = "ok" \/ Break = "NoRepair")
+    /\ half' = (half \/ final # "made" \/ links # "ok")
     /\ UNCHANGED <<remote, final, tmp, local, tracking, dirty, ahead, owed, pull, up, restarts,
-                   lost, back>>
+                   lost, back,
+                   oldVars>>
+
+-----------------------------------------------------------------------------
+(* Mains: a checkout an earlier build named by its project (F-156) *)
+
+\* A session that ran in the old checkout or its worktrees ends: a person's act, or its exit.
+\* No session starts there again: a start needs the checkout at its new path (Ready).
+OldEnds ==
+    /\ inOld
+    /\ inOld' = FALSE
+    /\ UNCHANGED <<remote, final, tmp, local, tracking, dirty, ahead, owed, pull, up, restarts,
+                   lost, half, back, old, links, moved, two>>
+
+\* The accounts' conversations, the home's memory and then the checkout itself go to the new
+\* path, once no session's process may live there (RenameWhileRunning: whatever runs). The
+\* steps before the checkout's own rename are redone after a restart, so they are one step
+\* here; the read after it pulls, and its worktrees' links are stale.
+RenameOld ==
+    /\ up /\ old = "made" /\ final = "absent" /\ tmp = "none"
+    /\ (~inOld \/ Break = "RenameWhileRunning")
+    /\ old' = "none" /\ final' = "made" /\ links' = "stale"
+    /\ moved' = (moved \/ inOld)
+    /\ owed' = TRUE
+    /\ UNCHANGED <<remote, tmp, local, tracking, dirty, ahead, pull, up, restarts, lost, half,
+                   back, inOld, two>>
+
+\* `git worktree repair`, at each read while a worktree's link is stale, so a restart between
+\* the rename and the repair repairs too (NoRepair: never).
+Repair ==
+    /\ up /\ final = "made" /\ links = "stale" /\ Break # "NoRepair"
+    /\ links' = "ok"
+    /\ UNCHANGED <<remote, final, tmp, local, tracking, dirty, ahead, owed, pull, up, restarts,
+                   lost, half, back, old, inOld, moved, two>>
 
 -----------------------------------------------------------------------------
 (* Mains: the pull *)
@@ -166,7 +232,8 @@ Fetch ==
     /\ owed' = (Break = "ClearAfter")
     /\ tracking' = remote
     /\ pull' = "fetched"
-    /\ UNCHANGED <<remote, final, tmp, local, dirty, ahead, up, restarts, lost, half, back>>
+    /\ UNCHANGED <<remote, final, tmp, local, dirty, ahead, up, restarts, lost, half, back,
+                   oldVars>>
 
 \* Only while clean: no edit, and trunk not ahead of the remote; else a state a view shows,
 \* and the pull stays owed for the read after a person cleans it.
@@ -177,7 +244,8 @@ Check ==
             /\ owed' = (owed \/ Break # "ClearOnDirty")
        ELSE pull' = "checked" /\ owed' = owed
     /\ UNCHANGED <<remote, final, tmp, local, tracking, dirty, ahead, up, restarts, lost, half,
-                   back>>
+                   back,
+                   oldVars>>
 
 \* git's `merge --ff-only`: a local commit refuses it; an edit made since the check is either
 \* in the way (refused) or carried. A refusal leaves the pull owed. ResetHard takes the
@@ -189,7 +257,8 @@ Merge ==
        THEN /\ local' = tracking /\ dirty' = FALSE /\ ahead' = FALSE
             /\ lost' = (lost \/ dirty \/ ahead)
             /\ owed' = (owed /\ Break # "ClearAfter")
-       ELSE /\ UNCHANGED <<dirty, ahead, lost>>
+       ELSE /\ UNCHANGED <<dirty, ahead, lost,
+                   oldVars>>
             /\ \/ /\ ~ahead
                   /\ local' = tracking
                   /\ owed' = (owed /\ Break # "ClearAfter")
@@ -197,7 +266,8 @@ Merge ==
                   /\ local' = local
                   /\ owed' = TRUE
     /\ back' = (back \/ local' < local)
-    /\ UNCHANGED <<remote, final, tmp, tracking, up, restarts, half>>
+    /\ UNCHANGED <<remote, final, tmp, tracking, up, restarts, half,
+                   oldVars>>
 
 -----------------------------------------------------------------------------
 (* Restarts *)
@@ -207,7 +277,8 @@ Restart ==
     /\ up /\ restarts < MaxRestarts
     /\ up' = FALSE /\ restarts' = restarts + 1
     /\ owed' = FALSE /\ pull' = "idle"
-    /\ UNCHANGED <<remote, final, tmp, local, tracking, dirty, ahead, lost, half, back>>
+    /\ UNCHANGED <<remote, final, tmp, local, tracking, dirty, ahead, lost, half, back,
+                   oldVars>>
 
 \* Back up: a clone the restart cut is removed and made again; every checkout is owed a pull.
 Recover ==
@@ -216,7 +287,8 @@ Recover ==
     /\ tmp' = "none"
     /\ owed' = (Break # "NoPullAtStart")
     /\ UNCHANGED <<remote, final, local, tracking, dirty, ahead, pull, restarts, lost, half,
-                   back>>
+                   back,
+                   oldVars>>
 
 -----------------------------------------------------------------------------
 
@@ -226,16 +298,21 @@ Init ==
     /\ owed = FALSE /\ pull = "idle"
     /\ up = TRUE /\ restarts = 0
     /\ lost = FALSE /\ half = FALSE /\ back = FALSE
+    /\ old = (IF Old THEN "made" ELSE "none")
+    /\ inOld \in (IF Old THEN BOOLEAN ELSE {FALSE})
+    /\ links = "ok" /\ moved = FALSE /\ two = FALSE
 
 Next ==
     \/ Land \/ Edit \/ Clean \/ Commit \/ Uncommit
     \/ CloneStart \/ CloneDone \/ Rename \/ Use
     \/ Fetch \/ Check \/ Merge
+    \/ OldEnds \/ RenameOld \/ Repair
     \/ Restart \/ Recover
 
 Fairness ==
     /\ WF_vars(CloneStart) /\ WF_vars(CloneDone) /\ WF_vars(Rename)
     /\ WF_vars(Fetch) /\ WF_vars(Check) /\ WF_vars(Merge) /\ WF_vars(Recover)
+    /\ WF_vars(RenameOld) /\ WF_vars(Repair)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -249,6 +326,7 @@ TypeOK ==
     /\ dirty \in BOOLEAN /\ ahead \in BOOLEAN /\ owed \in BOOLEAN
     /\ pull \in {"idle", "fetched", "checked"}
     /\ up \in BOOLEAN /\ restarts \in 0..MaxRestarts
+    /\ old \in {"none", "made"} /\ inOld \in BOOLEAN /\ links \in {"ok", "stale"}
 
 \* Nothing a person left in the checkout, an edit or a commit, is discarded by a pull.
 NoLostEdit == ~lost
@@ -259,10 +337,18 @@ WholeCheckout == ~half
 \* The checkout's trunk only moves forward, and never past the remote's.
 Forward == ~back /\ local <= remote /\ tracking <= remote
 
-\* The checkout is made once, and stays: a whole clone reaches its path.
-Made == <>[](final = "made")
+\* The checkout is made once, and stays: a whole clone, or the old checkout once no session
+\* runs in it, reaches its path.
+Made == (<>[](~inOld)) => (<>[](final = "made"))
 
-\* Once the remote stops moving and the checkout stays clean, it holds the remote's trunk.
-CaughtUp == <>[](~dirty /\ ~ahead) => <>[](local = remote)
+\* A project never has two checkouts: no clone is made beside the old one (F-156).
+OneCheckout == ~two
+
+\* No rename moves the files of a session whose process may live (F-156).
+NoSessionMoved == ~moved
+
+\* Once the remote stops moving and the checkout stays clean, it holds the remote's trunk; an
+\* old checkout a session holds is neither renamed nor pulled until it ends (F-156).
+CaughtUp == <>[](~dirty /\ ~ahead /\ ~inOld) => <>[](local = remote)
 
 =============================================================================

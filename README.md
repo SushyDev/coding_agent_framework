@@ -237,7 +237,12 @@ Built, each from a checked model in `model/tla/`:
   runs;
 - `subscribe/2` on the app's surface (F-174): an app's own processes get the tree's cues on the
   topics they name, found by the instance's name in its own `Registry`, removed when they exit,
-  and never able to slow or break the tree.
+  and never able to slow or break the tree;
+- an app's conversations moved onto a new host at once (F-156, against `Checkout.tla`): each
+  checkout named by its repository (or the project's `dir:`), so `@../other_repo/` imports
+  resolve, an older checkout renamed once no session runs in it; and `bin/caf-import`, which
+  copies an existing config directory's conversations, memory and settings into an account and
+  makes each named conversation a stopped main session the app resumes.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
@@ -487,6 +492,8 @@ flowchart BT
   mains --> mailbox
   mains --> scheduler
   mains --> store
+  mains --> transcripts
+  mains --> acts
   mcp --> grants
   mcp --> acts
   copies --> shell
@@ -587,6 +594,10 @@ Code:
    operator, through the same tools and checks as an agent's, and prints a short reading.
    Quitting the shell stops the framework; the agents run on under dtach, and the next start
    adopts them, with the hooks' secret the first start wrote to `<home>/intake.secret`.
+4. To bring existing conversations along (F-156), once the app has started on the host and
+   made its checkouts: stop the account's sessions, then run `bin/caf-import <home> <account>
+   <your old config dir> --map <old cwd>=<project> --name <session id>=<name>`. Each named
+   conversation is a stopped main session at the next start, and `resume_main` takes it up.
 
 [docs/e2e.md](docs/e2e.md) is the end-to-end run, step by step, that a person and a main
 session follow together with it.

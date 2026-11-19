@@ -25,4 +25,26 @@ defmodule CodingAgentFramework.ConfigTest do
       _ -> assert {:ok, %Config{user: nil}} = Config.new(@fields)
     end
   end
+
+  # F-156: a checkout's directory is its repository's name, or the project's `dir:`, and two
+  # projects never share one.
+  test "each project's checkout has a directory of its own" do
+    project = %{origin: "git@github.com:me/app_repo.git", trunk: "main"}
+    fields = [user: "me"] ++ @fields
+
+    assert {:ok, %Config{projects: %{"app" => %{dir: "app_repo", repo: repo}}}} =
+             Config.new([projects: %{"app" => project}] ++ fields)
+
+    assert repo == "/srv/caf/checkouts/app_repo"
+
+    twice = %{"app" => project, "web" => Map.put(project, :dir, "app_repo")}
+
+    assert Config.new([projects: twice] ++ fields) ==
+             {:refused, {:bad, :projects, {:same_dir, "app_repo", ["app", "web"]}}}
+
+    apart = %{"app" => project, "web" => Map.put(project, :dir, "web")}
+
+    assert {:ok, %Config{projects: %{"web" => %{dir: "web"}}}} =
+             Config.new([projects: apart] ++ fields)
+  end
 end

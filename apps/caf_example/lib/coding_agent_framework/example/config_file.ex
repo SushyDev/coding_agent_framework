@@ -29,7 +29,8 @@ defmodule CodingAgentFramework.Example.ConfigFile do
   - `projects`: name to project. A project names its `origin` (the repository its checkout is
     cloned from, never the person's own clone), its `trunk`, the `branches` a delegate's branch
     must match (a regular expression) and `cap` (how many of one parent's delegates at once),
-    and optionally `mains` (the main session names it declares), `setup` (argvs, each program
+    and optionally `dir` (its checkout's directory under `<home>/checkouts/`, by default the
+    repository's name, F-156), `mains` (the main session names it declares), `setup` (argvs, each program
     an absolute path; none by default), `setup_timeout` (ms, 600 000 by default), `env` (the
     environment git and the setup run in, built from nothing, beside the home's tool state; by
     default `HOME` from the environment and `PATH` devenv's programs' directories, then
@@ -80,7 +81,7 @@ defmodule CodingAgentFramework.Example.ConfigFile do
   alias CodingAgentFramework.{Programs, ToolHome}
 
   @top ~w(home instance accounts ports projects scheduler launch operator interval git)
-  @project ~w(origin trunk mains branches cap setup setup_timeout env git)
+  @project ~w(origin trunk mains branches cap setup setup_timeout env git dir)
   @git ~w(name email signing_key)
   @launch ~w(claude model home path term lang user)
   @scheduler ~w(resources lease job_lease heavy)
@@ -336,6 +337,7 @@ defmodule CodingAgentFramework.Example.ConfigFile do
          trunk: trunk,
          branches: branches,
          cap: cap,
+         dir: p["dir"],
          setup: setup,
          setup_timeout: timeout,
          env: project_env,

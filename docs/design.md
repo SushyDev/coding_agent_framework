@@ -91,7 +91,10 @@ Each word below names one thing, and the design, the code and the views use it o
 - **Project**: a repository and its trunk, declared as data.
 - **Trunk**: the project's main branch, such as `main`.
 - **Checkout**: the framework's own clone of a project's repository, on the workstation, at
-  `<home>/checkouts/<project>`, made once from the project's repository. A project's
+  `<home>/checkouts/<dir>`, `dir` being the project's `dir:` or by default its repository's
+  name (F-156), so a `CLAUDE.md` that imports a sibling repository's file by relative path
+  finds it among the checkouts as among the person's own clones; made once from the project's
+  repository. Two projects never name one directory. A project's
   repository is the remote its stacks land on (its `origin`), never the person's own clone, so
   the pull after a landing pulls what landed. The main session runs
   there on trunk, and every worktree of the project is made from it. The framework never runs
@@ -1029,7 +1032,7 @@ The spec settles (F-72):
 
 A project may have several main sessions, each named by the app, with the project as one of
 its fields. Each runs in the project's checkout, the framework's own
-clone under `<home>/checkouts/<project>`, made once from the project's repository, on trunk. It
+clone under `<home>/checkouts/<dir>` (its repository's name, or its `dir:`), made once from the project's repository, on trunk. It
 changes nothing there: its delegates work in worktrees, their branches land into trunk through
 stacks, and after each landing the framework pulls trunk in that checkout (fast-forward only,
 and only while the checkout is clean; anything else is a state a person sees). So each main
@@ -1046,7 +1049,7 @@ brief is its first message.
 **How `Mains` does it** (F-141, `Checkout.tla`). The app hands `Mains` its projects, each
 naming its repository (`origin`), and the main sessions it declares (name to project), which
 `Mains` declares in `Sessions` before it answers its start. A project's checkout is cloned on
-trunk under `<home>/checkouts/.<project>.clone` and renamed into place once whole, so a
+trunk under `<home>/checkouts/.<dir>.clone` and renamed into place once whole, so a
 checkout at its path is always whole, and a start of `Mains` removes a clone a restart cut. A
 pull is owed after a landing (`Mains.landed/2`, which the app calls until `Stacks` is built;
 then `Stacks` calls it once it has seen a stack's layer merged into trunk, F-141's new-3) and at each
@@ -1078,6 +1081,40 @@ A stale `index.lock` in the checkout (a git command a restart cut) or a fetch th
 state a view shows (`locked`, `failed`, with its reason); the framework never removes a file in
 the checkout it did not write, and a person clears it. A pull a lock held back stays owed, and
 the read after the person clears it pulls (F-141's new-6).
+
+**A checkout under the project's name** (F-156, `Checkout.tla`'s `RenameOld` and `Repair`),
+which a build before the directory names made, goes to `<home>/checkouts/<dir>` once, before
+anything clones one there (`OneCheckout`), and only while no agent row of the project, nor
+any whose cwd is the old checkout, may hold a process (`NoSessionMoved`). Until then the
+checkout reads `old`, with the sessions that hold it as its reason, a start in it is refused
+`{:checkout, "old"}`, and each read tries again. Claude Code keys what it keeps of a working
+directory by its path, so the rename first moves each account's `projects/<encoded old
+cwd>/` and the home's memory folder of it to the new path's, entry by entry and never over
+one (refused `{:both, path}`), dropping the account's memory link for the next start to make
+again, then renames the checkout last, so a restart part way finds it at its old path and
+does the rest. Each worktree made from it still names the git directory at the old path:
+every read runs `git worktree repair` while one does. The rename is an act in `Acts`
+(`rename`, verified with its paths, or failed with each new reason it waited for).
+
+**An import** (F-156): `bin/caf-import <home> <account> <source config dir> [--map <old
+cwd>=<project>]... [--name <session id>=<name>]... [--meta <session id>=<json>]...` moves an
+app's existing Claude Code conversations onto a new host's framework at once
+(`Mains.Import`). It copies, never moves, each conversation of a mapped cwd into the
+account's `projects/<encoded checkout>/`, with the directory and `session-env` entry beside it,
+so `--resume <id>` in the checkout finds it; that cwd's memory into the home's memory folder
+of the checkout; and `settings.json`, `CLAUDE.md`, `agents/`, `commands/` and `skills/` where the
+account has none. The login stays the account's own. The checkouts' paths are read from
+`Mains`' rows, so the app starts once on the host first; it is refused while any agent row of
+the account may hold a process, and with nothing copied for a file that is there and differs.
+Each conversation copied is a manifest file, `<home>/imports/<account>/<session id>.json`,
+written last, so a second run says it was imported already. At each start `Mains` has
+`Sessions` write each named one as a main session's row, `stopped`, reason `imported`, with
+its project, session id, account, checkout and `meta` (`Sessions.import_main/4`), before it
+declares the config's main sessions, so the app's start-or-resume finds a session to resume
+(`start_main` refuses `{:running, name}`) and `resume_main` takes it up through the
+`Scheduler` and the startup dialogs as any resume, with the app's model the first time. The rows go
+through `Sessions` at the start, not by a call into the running app: the app runs no named
+node, and an import on a new host comes before its sessions ever run.
 
 **A resume** of a main session whose process ended (`Mains.resume_main/3`) is new work: it
 writes a start's row and asks the `Scheduler` for a lease of its own, class main session

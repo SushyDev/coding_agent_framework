@@ -583,7 +583,8 @@ defmodule CodingAgentFramework.SurfaceTest do
   test "the whole tree runs under a home whose path has a space (F-175)", ctx do
     assert ctx.home =~ "Application Support/app/framework"
     parts = start(ctx.config)
-    checkout = Path.join([ctx.home, "checkouts", "app"])
+    checkout = ctx.config.projects["app"].repo
+    assert checkout =~ "Application Support/app/framework/checkouts/"
     assert {:ok, %{path: ^checkout, clean: "true"}} = Mains.checkout(parts.mains, "app")
 
     assert {:ok, %{delegate: "app-unit-one"}} =
@@ -605,7 +606,7 @@ defmodule CodingAgentFramework.SurfaceTest do
 
   test "Mains holds the project's checkout and serves start_main", ctx do
     parts = start(ctx.config)
-    checkout = Path.join([ctx.home, "checkouts", "app"])
+    checkout = ctx.config.projects["app"].repo
 
     assert {:ok, %{path: ^checkout, branch: "main", clean: "true"}} =
              Mains.checkout(parts.mains, "app")

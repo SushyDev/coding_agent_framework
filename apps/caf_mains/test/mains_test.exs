@@ -11,14 +11,15 @@ defmodule CodingAgentFramework.MainsTest do
   doctest CodingAgentFramework.Mains.Checkout
   doctest CodingAgentFramework.Mains.Table
   doctest CodingAgentFramework.Mains.Starts
+  doctest CodingAgentFramework.Mains.Import
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, Grants, Inlet, Intake, Mailbox, Mains, Registry}
+  alias CodingAgentFramework.{Accounts, Acts, Grants, Inlet, Intake, Mailbox, Mains, Registry}
   alias CodingAgentFramework.Scheduler
   alias CodingAgentFramework.{ScreenStandIn, Sessions, SessionsSetup, Transcripts, Usage}
-  alias CodingAgentFramework.Mains.{Checkout, Starts, Work}
-  alias CodingAgentFramework.Sessions.Agents
+  alias CodingAgentFramework.Mains.{Checkout, Import, Starts, Work}
+  alias CodingAgentFramework.Sessions.{Agents, Memory}
 
   @trust "Yes, I trust this folder"
 
@@ -99,7 +100,8 @@ defmodule CodingAgentFramework.MainsTest do
 
     {:ok,
      origin: origin,
-     checkout: Checkout.path(ctx.dir, "app"),
+     project: project,
+     checkout: Mains.project(ctx.dir, "app", project).repo,
      mains_opts: opts,
      sessions: sessions,
      agents: agents,
@@ -119,7 +121,7 @@ defmodule CodingAgentFramework.MainsTest do
   # never lost (`NoLostEdit`); the read after the person cleans it pulls (`CaughtUp`).
   test "the checkout is made once, whole, and pulled after a landing only while clean", ctx do
     # A clone a restart cut, as its temporary directory: the start removes it and clones anew.
-    cut = Checkout.clone_path(ctx.dir, "app")
+    cut = Checkout.clone_path(ctx.dir, "origin")
     File.mkdir_p!(Path.join(cut, "half"))
     mains = mains(ctx)
 
@@ -437,6 +439,162 @@ defmodule CodingAgentFramework.MainsTest do
 
     File.rm!(lock)
     assert {:ok, _} = level(ctx, mains)
+  end
+
+  # F-156: an app's conversations copied in by `bin/caf-import`'s work, two projects each with
+  # its own checkout directory, resumed by name in the right checkout; a second import copies
+  # nothing; an import while a session of the account runs is refused.
+  test "an imported conversation resumes by name in its project's checkout", ctx do
+    web = Path.join(ctx.dir, "web_repo")
+    git!(ctx, ["init", "-q", "-b", "main", web])
+    commit!(ctx, web, "init")
+    projects = Map.put(ctx.mains_opts[:projects], "web", %{ctx.project | origin: web})
+    ctx = %{ctx | mains_opts: Keyword.put(ctx.mains_opts, :projects, projects)}
+    web_checkout = Mains.project(ctx.dir, "web", projects["web"]).repo
+    assert Path.basename(web_checkout) == "web_repo"
+
+    mains = mains(ctx)
+    assert {:ok, _} = level(ctx, mains)
+    assert {:ok, _} = await(fn -> ready(mains, "web") end, 15_000)
+
+    # The person's own config directory: two conversations under two old cwds, memory, settings
+    # and a login that must stay behind.
+    source = Path.join(ctx.dir, "old-claude")
+    {:ok, app_dir} = Transcripts.project_dir(source, "/old/app")
+    {:ok, web_dir} = Transcripts.project_dir(source, "/old/web")
+    write!(Path.join(app_dir, "s-app.jsonl"), ~s({"type":"user"}\n))
+    write!(Path.join([app_dir, "s-app", "subagents", "a.jsonl"]), "{}\n")
+    write!(Path.join([app_dir, "memory", "MEMORY.md"]), "kept from before")
+    write!(Path.join(web_dir, "s-web.jsonl"), ~s({"type":"user"}\n))
+    write!(Path.join(source, "settings.json"), ~s({"model":"opus"}))
+    write!(Path.join(source, ".credentials.json"), "secret")
+
+    # The import's home is the framework's; its accounts are the Sessions' account's own.
+    File.ln_s!(Path.join(ctx.dir, "home/accounts"), Path.join(ctx.dir, "accounts"))
+
+    run = %{
+      home: ctx.dir,
+      account: "work",
+      source: source,
+      maps: [{"/old/app", "app"}, {"/old/web", "web"}],
+      names: %{"s-app" => "app-epic", "s-web" => "web-epic"},
+      metas: %{"s-app" => %{"epic" => 7}}
+    }
+
+    assert {:ok, lines} = Import.run(run)
+    assert Enum.any?(lines, &(&1 =~ "s-app: imported (main session app-epic"))
+    config = ctx.account.config_dir
+    {:ok, transcript} = Transcripts.path(config, ctx.checkout, "s-app")
+    assert File.read!(transcript) == ~s({"type":"user"}\n)
+    assert File.exists?(Path.join([Path.rootname(transcript), "subagents", "a.jsonl"]))
+    assert {:ok, _} = Transcripts.path(config, web_checkout, "s-web") |> then(&exists/1)
+    {:ok, memory} = Memory.dir(ctx.dir, ctx.checkout)
+    assert File.read!(Path.join(memory, "MEMORY.md")) == "kept from before"
+    assert File.read!(Path.join(config, "settings.json")) == ~s({"model":"opus"})
+    refute File.exists?(Path.join(config, ".credentials.json"))
+
+    # A second run copies nothing, and says so.
+    assert {:ok, again} = Import.run(run)
+    assert Enum.any?(again, &(&1 =~ "s-app: imported already"))
+    assert Enum.any?(again, &(&1 =~ "memory: 0 file(s) copied, 1 there already"))
+
+    # At its next start Mains has Sessions write each named one, stopped, to be resumed.
+    GenServer.stop(mains)
+    mains = mains(ctx)
+
+    assert %{kind: "main", status: "stopped", session_id: "s-app", project: "app"} =
+             app = Agents.get(ctx.agents, "app-epic")
+
+    assert app.cwd == ctx.checkout and Agents.meta(app) == %{"epic" => 7}
+
+    assert %{status: "stopped", session_id: "s-web", cwd: ^web_checkout} =
+             Agents.get(ctx.agents, "web-epic")
+
+    # The app's start-or-resume: a start is refused, as for any session to resume; the resume
+    # takes it up in the app's checkout, with the memory it had.
+    assert {:refused, {:running, "app-epic"}} = Mains.start_main(mains, "app", "app-epic", "Go.")
+    assert {:unknown, {:dialog, :trust}} = Mains.resume_main(mains, "app-epic")
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :trust, @trust)
+    assert {:ok, %{session_id: "s-app", cwd: cwd}} = await(fn -> running(ctx, "app-epic") end)
+    assert cwd == ctx.checkout
+    {:ok, account_dir} = Transcripts.project_dir(config, ctx.checkout)
+    assert File.read!(Path.join([account_dir, "memory", "MEMORY.md"])) == "kept from before"
+
+    # While a session of the account runs, nothing is imported.
+    assert {:refused, {:running, ["app-epic"]}} = Import.run(run)
+  end
+
+  # F-156: a checkout an earlier build made under the project's name goes to its directory
+  # once, with the accounts' conversations, the home's memory and its worktrees' links
+  # (`Checkout.tla`'s RenameOld and Repair); while a session of the project may run, the rename
+  # waits, and says which (`NoSessionMoved`).
+  test "a checkout under the project's name is renamed once no session runs in it", ctx do
+    old = Checkout.path(ctx.dir, "app")
+    git!(ctx, ["clone", "-q", "--branch", "main", "--origin", "origin", ctx.origin, old])
+    tree = Path.join(ctx.dir, "tree")
+    git!(ctx, ["-C", old, "worktree", "add", "-q", "-b", "unit/a", tree, "main"])
+
+    config = ctx.account.config_dir
+    {:ok, transcript} = Transcripts.path(config, old, "s-old")
+    write!(transcript, "{}\n")
+    {:ok, old_memory} = Memory.dir(ctx.dir, old)
+    write!(Path.join(old_memory, "MEMORY.md"), "the old memory")
+    File.ln_s!(old_memory, Path.join(Path.dirname(transcript), "memory"))
+
+    # A session of the project on a dialog in the old checkout: its process may live.
+    {:ok, account} = Accounts.ready(ctx.accounts, "work")
+    claude = ctx.mains_opts[:launch][:claude]
+    launch = [role: :parent, cwd: old, project: "app", claude: claude]
+    launch = launch ++ Keyword.delete(ctx.mains_opts[:launch], :claude)
+
+    assert {:unknown, {:dialog, :trust}} =
+             Sessions.start(ctx.sessions, "app-old", account, launch)
+
+    acts_db = Path.join(ctx.dir, "acts.db")
+    acts = start_supervised!({Acts, db: acts_db, start_id: "s1", host: "test", instance: "t"})
+    mains = mains(%{ctx | mains_opts: ctx.mains_opts ++ [acts: acts]})
+
+    assert {:ok, %{state: "old", reason: reason}} = await(fn -> state(mains, "old") end)
+    assert reason =~ "app-old"
+    assert File.dir?(old) and not File.exists?(ctx.checkout)
+    assert {:refused, {:checkout, "old"}} = Mains.start_main(mains, "app", "app-epic", "Go.")
+
+    # Once it ended, the next read renames it.
+    assert {_, _} = Sessions.answer_dialog(ctx.sessions, "app-old", :trust, "No, exit")
+    assert {:ok, _} = level(ctx, mains)
+    refute File.exists?(old)
+    {:ok, moved} = Transcripts.path(config, ctx.checkout, "s-old")
+    assert File.read!(moved) == "{}\n"
+    refute File.exists?(Path.join(Path.dirname(moved), "memory"))
+    {:ok, new_memory} = Memory.dir(ctx.dir, ctx.checkout)
+    assert File.read!(Path.join(new_memory, "MEMORY.md")) == "the old memory"
+    assert git!(ctx, ["-C", tree, "rev-parse", "--abbrev-ref", "HEAD"]) == "unit/a\n"
+
+    assert [%{outcome: "failed"}, %{outcome: "verified"}] =
+             for(%{act: "rename"} = row <- elem(Acts.rows(acts), 1), do: row)
+  end
+
+  # F-156: two projects in one checkout directory are refused before anything starts.
+  test "two projects naming one directory are refused", ctx do
+    projects = Map.put(ctx.mains_opts[:projects], "web", Map.put(ctx.project, :dir, "origin"))
+    Process.flag(:trap_exit, true)
+
+    assert {:error, {:same_dir, "origin", ["app", "web"]}} =
+             Mains.start_link(Keyword.put(ctx.mains_opts, :projects, projects))
+  end
+
+  defp ready(mains, project) do
+    case Mains.checkout(mains, project) do
+      {:ok, %{state: "ready"} = row} -> {:ok, row}
+      other -> other
+    end
+  end
+
+  defp exists({:ok, path}), do: if(File.exists?(path), do: {:ok, path}, else: {:missing, path})
+
+  defp write!(path, text) do
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, text)
   end
 
   defp delegate(ctx, name, parent) do

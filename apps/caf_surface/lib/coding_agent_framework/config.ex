@@ -27,9 +27,11 @@ defmodule CodingAgentFramework.Config do
   - `accounts`: the Claude accounts' names;
   - `projects`: name to the project, as `CodingAgentFramework.Mains` takes it: its `origin`
     (the repository its stacks land on, which its checkout is cloned from), `trunk`, `setup`,
-    `setup_timeout`, `env`, `branches` and `cap`. Its `name` and its `repo`, the checkout
-    `<home>/checkouts/<project>`, are filled in, so `Sessions` and `Delegates` read it as
-    `Mains.project/3` answers it;
+    `setup_timeout`, `env`, `branches`, `cap` and `dir` (its checkout's directory, by default
+    the repository's name, F-156). Its `name`, `dir` and `repo`, the checkout
+    `<home>/checkouts/<dir>`, are filled in, so `Sessions` and `Delegates` read it as
+    `Mains.project/3` answers it; two projects naming one directory are refused, `{:bad,
+    :projects, {:same_dir, dir, names}}`;
   - `mains`: the main sessions the app declares, name to project, through `Mains`: the tree
     holds each as a root (no parent), so it can start its first delegate. A project may have
     several. None by default;
@@ -91,6 +93,7 @@ defmodule CodingAgentFramework.Config do
   """
 
   alias CodingAgentFramework.{Mains, MCP, Runs}
+  alias CodingAgentFramework.Mains.Checkout
 
   @enforce_keys [:home, :instance, :programs, :accounts, :ports, :claude, :env]
   defstruct [
@@ -193,7 +196,12 @@ defmodule CodingAgentFramework.Config do
 
         with {:ok, _} <- extensions(c) do
           projects = Map.new(c.projects, fn {n, p} -> {n, Mains.project(c.home, n, p)} end)
-          {:ok, %{c | projects: projects}}
+
+          # Two projects in one checkout directory (F-156).
+          case Checkout.same_dir(projects) do
+            nil -> {:ok, %{c | projects: projects}}
+            {dir, names} -> {:refused, {:bad, :projects, {:same_dir, dir, names}}}
+          end
         end
     end
   end
