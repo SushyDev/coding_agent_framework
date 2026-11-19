@@ -147,6 +147,33 @@ defmodule CodingAgentFramework.CopiesTest do
     end
   end
 
+  test "each write cues copies, and the table is a Tracker source of every copy's turn", c do
+    me = self()
+    dir = Path.join(c.dir, "cued")
+
+    copies =
+      start_supervised!({Copies, dir: dir, programs: programs(), notify: &send(me, &1)},
+        id: :cued
+      )
+
+    assert_receive %{topic: "copies"}
+    assert {:ok, :taken} = Copies.take(copies, c.local, "r1")
+    assert_receive %{topic: "copies"} = cue
+    refute Map.has_key?(cue, :ids)
+
+    alias CodingAgentFramework.{Copies.Table, Reader}
+    meta = Table.meta()
+
+    assert %{topic: "copies", scope: {"ws", "copies"}, kind: :copies} =
+             Reader.describe(meta, host: "ws")
+
+    {:ok, db} = Reader.open(meta, Path.join(dir, "copies.db"))
+    {:ok, %{rows: [row]}} = Reader.source_read(meta, db, [host: "ws"], :all)
+    assert %{holder: "r1", state: "taken", id: id} = row
+    assert id == "#{row.host}/#{row.project}/#{row.name}"
+    refute Map.has_key?(row, :sent)
+  end
+
   test "NoTurn: a second take is refused, naming the holder", c do
     assert {:ok, :taken} = Copies.take(c.copies, c.local, "r1")
     assert {:refused, {:turn_held, "r1"}} = Copies.take(c.copies, c.local, "r2")

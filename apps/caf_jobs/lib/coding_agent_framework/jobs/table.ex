@@ -35,6 +35,28 @@ defmodule CodingAgentFramework.Jobs.Table do
 
   @type db :: Store.db()
 
+  @doc """
+  The table's metadata for `CodingAgentFramework.Reader`'s `Tracker` source (F-171): a
+  writer's table, read now; topic `jobs` (`Jobs` cues one topic for every host), scope
+  `{host, "jobs"}` (the source's `host:` option), rows of kind `:jobs`, every host's.
+  """
+  @spec meta() :: map
+  def meta do
+    %{
+      schema: @schema,
+      open: [added: [jobs: @added]],
+      table: "jobs",
+      reads: nil,
+      columns: @columns,
+      scope: [],
+      topic: "jobs",
+      host_topic: false,
+      group: "jobs",
+      kind: :jobs,
+      name: nil
+    }
+  end
+
   @doc "Opens (and creates) the file at `path`, with the table."
   @spec open(String.t()) :: {:ok, db} | {:refused, term}
   def open(path), do: Store.open(path, @schema, added: [jobs: @added])

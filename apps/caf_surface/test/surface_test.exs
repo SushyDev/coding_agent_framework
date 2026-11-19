@@ -5,12 +5,13 @@ defmodule CodingAgentFramework.SurfaceTest do
   use ExUnit.Case, async: true
 
   doctest CodingAgentFramework.Config
+  doctest CodingAgentFramework.Endpoint
   doctest CodingAgentFramework, only: [child_spec: 1, resources: 1, job_units: 3]
 
   import CodingAgentFramework.TestHost
 
   alias CodingAgentFramework.{Accounts, Cues, HeadlessStandIn, Jobs, Mailbox, MCP}
-  alias CodingAgentFramework.{Mains, Services}
+  alias CodingAgentFramework.{Mains, Services, Shell}
   alias CodingAgentFramework.{Delegates, Operator, Scheduler, Tmux, Tracker}
   alias CodingAgentFramework.Acts
   alias CodingAgentFramework.Config
@@ -532,6 +533,30 @@ defmodule CodingAgentFramework.SurfaceTest do
     assert post.("PreToolUse", "Read") == ""
     assert post.("PostToolUse", "Read") == ""
     assert_receive {:after, %{tool_name: "Read", agent: nil}}, 5_000
+  end
+
+  test "a heavy command's wrapper takes its lease from the tree's Scheduler on the intake's port",
+       ctx do
+    parts = start(%{ctx.config | heavy: [%{match: "^make", class: :heavy}]})
+    wrapper = Path.join(ctx.home, "bin/caf-run")
+    args = ["heavy", "toolu_t1", "app-main", "--", "echo ran; exit 4"]
+
+    assert {:ok, %{status: 4, output: "ran\n"}} =
+             Shell.run(host(), wrapper, args, timeout: 20_000)
+
+    assert {:ok, %{units: %{"slot" => 1}, holder: {"run", _}, module: "app-main"}} =
+             await(
+               fn ->
+                 case Enum.find(
+                        Scheduler.leases(parts.scheduler),
+                        &(&1.request_id == "run:toolu_t1")
+                      ) do
+                   %{released_at: at} = lease when is_integer(at) -> {:ok, lease}
+                   other -> {:held, other}
+                 end
+               end,
+               20_000
+             )
   end
 
   test "the config's extensions are served on the agents' endpoint", ctx do

@@ -55,7 +55,9 @@ defmodule CodingAgentFramework.Copies do
 
   @doc """
   Starts the part. Options: `:dir`, a directory of this machine of its own (the table and the
-  file lists); `:programs`, this machine's `Programs` with `git`, `rsync` and `sh`.
+  file lists); `:programs`, this machine's `Programs` with `git`, `rsync` and `sh`; and
+  optionally `:notify`, a function of one cue: after each write of a row it gets `%{topic:
+  "copies"}`, with no ids, since a copy is keyed by three columns (`Copies.Table.meta/0`).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -337,7 +339,9 @@ defmodule CodingAgentFramework.Copies do
       File.chmod!(shim <> ".new", 0o755)
       File.rename!(shim <> ".new", shim)
       settle(db)
-      {:ok, %{db: db, local: local, dir: dir, shim: shim}}
+      notify = Keyword.get(opts, :notify, fn _ -> :ok end)
+      cue(notify)
+      {:ok, %{db: db, local: local, dir: dir, shim: shim, notify: notify}}
     else
       {:error, reason} -> {:stop, {:dir, reason}}
       refused -> {:stop, refused}
@@ -365,7 +369,7 @@ defmodule CodingAgentFramework.Copies do
     row = Table.get(s.db, key)
 
     if free?(row) do
-      Table.put(s.db, key, %{holder: run, state: "taken", sent: row && row.sent})
+      put(s, key, %{holder: run, state: "taken", sent: row && row.sent})
       {:reply, {:ok, :taken}, s}
     else
       {:reply, {:refused, {:turn_held, row.holder}}, s}
@@ -376,7 +380,7 @@ defmodule CodingAgentFramework.Copies do
     with_turn(s, key, run, ["taken"], fn row ->
       previous = String.split(row.sent, <<0>>, trim: true)
       sent = Enum.join(Enum.uniq(previous ++ current), <<0>>)
-      Table.put(s.db, key, %{row | state: "syncing", until: until, sent: sent})
+      put(s, key, %{row | state: "syncing", until: until, sent: sent})
       {:ok, previous}
     end)
   end
@@ -384,28 +388,44 @@ defmodule CodingAgentFramework.Copies do
   def handle_call({:finish, key, run, how, current}, _from, s) do
     with_turn(s, key, run, ["syncing"], fn row ->
       case how do
-        :synced -> Table.put(s.db, key, %{row | state: "synced", sent: Enum.join(current, <<0>>)})
-        :cut -> Table.put(s.db, key, %{row | state: "cut"})
-        :free -> Table.put(s.db, key, %{row | state: "free", holder: nil, until: nil})
+        :synced -> put(s, key, %{row | state: "synced", sent: Enum.join(current, <<0>>)})
+        :cut -> put(s, key, %{row | state: "cut"})
+        :free -> put(s, key, %{row | state: "free", holder: nil, until: nil})
       end
     end)
   end
 
   def handle_call({:starting, key, run}, _from, s),
-    do: with_turn(s, key, run, ["synced"], &Table.put(s.db, key, %{&1 | state: "starting"}))
+    do: with_turn(s, key, run, ["synced"], &put(s, key, %{&1 | state: "starting"}))
 
   def handle_call({:give_back, key, run}, _from, s) do
     with_turn(s, key, run, ~w(taken synced starting), fn row ->
-      Table.put(s.db, key, %{row | state: "free", holder: nil, until: nil})
+      put(s, key, %{row | state: "free", holder: nil, until: nil})
       {:ok, :given}
     end)
   end
 
   def handle_call({:delete, key}, _from, s) do
     with_turn(s, key, @removal, ["taken"], fn _ ->
-      Table.delete(s.db, key)
+      delete(s, key)
       {:ok, :removed}
     end)
+  end
+
+  # Each write of a row, then its cue. A copy's key is three columns, so the cue names no ids.
+  defp put(s, key, fields) do
+    :ok = Table.put(s.db, key, fields)
+    cue(s.notify)
+  end
+
+  defp delete(s, key) do
+    :ok = Table.delete(s.db, key)
+    cue(s.notify)
+  end
+
+  defp cue(notify) do
+    notify.(%{topic: "copies"})
+    :ok
   end
 
   defp with_turn(s, key, run, states, fun) do

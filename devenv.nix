@@ -18,6 +18,7 @@ let
   #   - wc, lsof: a service's log offset at its start, and whether a forward's own ssh holds its
   #     local port (Services).
   #   - curl: a main session's waiter hook (Intake.waiter_hook), run by its contract test.
+  #   - sysctl: the macOS kernel's memory-pressure level, the Scheduler's pressure there.
   #   - ssh-keygen: the home's commit signing key (bin/caf-login --git) and git's check of a
   #     signature (gpg.ssh.program).
   #   - cloudflared: a tunnel an app or a person configures; the framework never runs it.
@@ -39,6 +40,7 @@ let
     LSOF = lib.getExe pkgs.lsof;
     CURL = lib.getExe pkgs.curl;
     SSH_KEYGEN = lib.getExe' pkgs.openssh "ssh-keygen";
+    SYSCTL = lib.getExe' pkgs.procps "sysctl";
     CLOUDFLARED = lib.getExe pkgs.cloudflared;
     SH = lib.getExe' pkgs.bash "sh";
     BASH = lib.getExe pkgs.bash;

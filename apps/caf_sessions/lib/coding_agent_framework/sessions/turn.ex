@@ -5,7 +5,9 @@ defmodule CodingAgentFramework.Sessions.Turn do
   the `Tracker` and `Sessions` judge one turn by one rule, each over what it has read.
 
   - **A headless session** (`headless/2`): `Stream`'s fold of its event log. The log is written
-    in order and a `result` closes a turn, so one read of the fold decides.
+    in order and a `result` closes a turn, so one read of the fold decides. A background command
+    of its own that still runs (the fold's `tasks`) keeps it `:running` after its `result`: the
+    command's end wakes it (F-171).
   - **An interactive session** (`interactive/3`): its session file's `status`, as `Registry`
     reads it, and whether `Intake` holds its waiter (`Intake.waiter?/4`). The file alone is one
     read, and one read is never the only sign that a turn has ended when it decides a write
@@ -61,12 +63,14 @@ defmodule CodingAgentFramework.Sessions.Turn do
 
   @doc """
   What a `Stream` fold alone says of the turn, whatever the row: `:unread` with no fold,
-  `:gone`, `:ending`, `:ended` once the turn's `result` was read, `:waiting` while a
-  `can_use_tool` request is held, else `:running`. A fold as the `Tracker`'s view holds it is
-  read the same way.
+  `:gone`, `:ending`, `:ended` once the turn's `result` was read and no background command of
+  its own runs, `:waiting` while a `can_use_tool` request is held, else `:running`. A fold as
+  the `Tracker`'s view holds it is read the same way.
 
       iex> CodingAgentFramework.Sessions.Turn.stream(%{idle: true, gone: false, ending: false})
       :ended
+      iex> CodingAgentFramework.Sessions.Turn.stream(%{idle: true, tasks: %{"b1" => %{}}})
+      :running
   """
   @spec stream(map | nil) :: t
   def stream(nil), do: :unread
@@ -75,7 +79,7 @@ defmodule CodingAgentFramework.Sessions.Turn do
     cond do
       fold[:gone] == true -> :gone
       fold[:ending] == true -> :ending
-      fold[:idle] == true -> :ended
+      fold[:idle] == true and Enum.empty?(fold[:tasks] || %{}) -> :ended
       held?(fold[:requests]) -> :waiting
       true -> :running
     end

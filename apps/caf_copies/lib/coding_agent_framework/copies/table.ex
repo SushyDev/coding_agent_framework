@@ -27,6 +27,31 @@ defmodule CodingAgentFramework.Copies.Table do
   @type db :: Store.db()
   @type key :: {String.t(), String.t(), String.t()}
 
+  @doc """
+  The table's metadata for `CodingAgentFramework.Reader`'s `Tracker` source (F-171): a
+  writer's table, read now; topic `copies` (`Copies` cues one topic for every host), scope
+  `{host, "copies"}`, rows of kind `:copies`. A copy is keyed by three columns, so each row
+  is given the id `<host>/<project>/<name>`, and a cue names no ids: the source reads every
+  row. `sent` is left out, as a view needs only the turn.
+  """
+  @spec meta() :: map
+  def meta do
+    %{
+      schema: @schema,
+      table: "copies",
+      reads: nil,
+      columns: @columns -- [:sent],
+      scope: [],
+      order: "host, project, name",
+      topic: "copies",
+      host_topic: false,
+      group: "copies",
+      kind: :copies,
+      name: nil,
+      load: &Map.put(&1, :id, "#{&1.host}/#{&1.project}/#{&1.name}")
+    }
+  end
+
   @doc "Opens (and creates) the file at `path`, with the table."
   @spec open(String.t()) :: {:ok, db} | {:refused, term}
   def open(path), do: Store.open(path, @schema)

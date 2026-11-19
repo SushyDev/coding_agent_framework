@@ -14,7 +14,9 @@ defmodule CodingAgentFramework.MCP do
   refusal included. It answers `{:ok, value}`, `{:refused, reason}` or `{:unknown, reason}`:
 
   - `message(to, text)`: `Grants.may_message?/3`, then the mailbox's `message/5`;
-  - `run(host, argv, timeout, opts)`: `Grants.may_use?/2`, then the jobs' `run/6`, as job
+  - `run(host, argv, timeout, opts)`, served but listed to no agent (F-171: an agent runs a
+    heavy command with its own `Bash`, under a lease, `CodingAgentFramework.Runs`; the tool
+    and its late end go in a later unit): `Grants.may_use?/2`, then the jobs' `run/6`, as job
     `mcp-<instance>-<call id>` in the copy of the caller's worktree that `place` names, with
     `timeout` (ms, at most the `:cap`, a day unless the app says) as the job's and the call's.
     `opts` may name `fetch` (paths) and `class` (`heavy` by default, `builder` or `landing`):
@@ -166,16 +168,9 @@ defmodule CodingAgentFramework.MCP do
         "settles unknown"
   }
 
-  @tools [
-    %{
-      name: "message",
-      description: "Sends a message to an agent along an edge of the tree.",
-      inputSchema: %{
-        type: "object",
-        properties: %{to: %{type: "string"}, text: %{type: "string"}},
-        required: ["to", "text"]
-      }
-    },
+  # Served, but no agent's list names it (F-171): an agent runs a heavy command with its own
+  # `Bash`, which the framework's PreToolUse policy puts under a lease (`Runs`).
+  @unlisted [
     %{
       name: "run",
       description: "Runs a job on a host in a copy of your worktree; answers its exit and log.",
@@ -199,6 +194,18 @@ defmodule CodingAgentFramework.MCP do
           }
         },
         required: ["host", "argv", "timeout"]
+      }
+    }
+  ]
+
+  @tools [
+    %{
+      name: "message",
+      description: "Sends a message to an agent along an edge of the tree.",
+      inputSchema: %{
+        type: "object",
+        properties: %{to: %{type: "string"}, text: %{type: "string"}},
+        required: ["to", "text"]
       }
     },
     %{
@@ -542,7 +549,8 @@ defmodule CodingAgentFramework.MCP do
   """
   @spec extensions(term, pos_integer, pos_integer) :: {:ok, [map]} | {:refused, term}
   def extensions(extensions, tool_timeout, margin),
-    do: Extension.check(extensions, Enum.map(@tools, & &1.name), tool_timeout - margin)
+    do:
+      Extension.check(extensions, Enum.map(@tools ++ @unlisted, & &1.name), tool_timeout - margin)
 
   defp app_tools(ctx, agent) do
     for t <- ctx.app_tools,
@@ -972,7 +980,7 @@ defmodule CodingAgentFramework.MCP do
   end
 
   defp act(_ctx, _caller, _id, tool, _args) do
-    if Enum.any?(@tools, &(&1.name == tool)),
+    if Enum.any?(@tools ++ @unlisted, &(&1.name == tool)),
       do: {:refused, {:bad, :args}},
       else: {:refused, {:unknown_tool, tool}}
   end

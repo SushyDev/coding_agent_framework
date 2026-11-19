@@ -51,8 +51,10 @@ defmodule CodingAgentFramework.Intake do
     goes on, told the reason); deadline `stop_deadline:`, 570 s by default, under the hook's
     600 s timeout (`hooks/4` with `:stop`), and a pass at it. Claude Code honors 8 blocks in a
     row with no tool call between and overrides the 9th (measured on 2.1.322), so `Intake`
-    keeps each session's count in its table, written before a block goes out and reset only
-    by a `PostToolUse` post. At the cap's last honored block (`stop_cap:` 8, less one) a block
+    keeps each session's count in its table, written before a block goes out and reset by a
+    `PostToolUse` post and by a `Stop` it passes (its deadline's included): the turn ends, and
+    Claude Code gives the next turn, a person's prompt's or a wake's, the full 8 again
+    (measured on 2.1.322, F-171). At the cap's last honored block (`stop_cap:` 8, less one) a block
     is not sent: the row waits on a person as a `stop_cap` prompt (its `prompt` column), whom
     `answer/4` answers `:go_on` (that block) or `:end`; past it the hold passes at once, its
     actor `capped`. A pause (`pause/4`, per agent or per project) holds a `Stop` until it is
@@ -728,6 +730,12 @@ defmodule CodingAgentFramework.Intake do
   # `opts`: `actor:` (who passed it) and `problem:` (why an answer was no decision).
   defp release(state, id, hold, row_end, opts \\ []) do
     move(state, id, hold, "held", row_end, nil, opts)
+
+    # Spec actions StopTaken, CapAnswered and StopDeadline: a Stop passed ends the turn, and
+    # Claude Code starts the next one with its count at 0 (measured on 2.1.322, F-171).
+    if hold.kind == :stop and row_end in ["passed", "expired"],
+      do: Table.reset_blocks(state.db, state.host, hold.account, hold.session, now())
+
     send(hold.pid, {hold.ref, :release})
     drop(state, id, hold)
   end

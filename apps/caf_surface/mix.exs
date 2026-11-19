@@ -33,6 +33,7 @@ defmodule CafSurface.MixProject do
       {:caf_mcp, in_umbrella: true},
       {:caf_mover, in_umbrella: true},
       {:caf_recoveries, in_umbrella: true},
+      {:caf_runs, in_umbrella: true},
       {:caf_registry, in_umbrella: true},
       {:caf_sampler, in_umbrella: true},
       {:caf_services, in_umbrella: true},
@@ -46,6 +47,7 @@ defmodule CafSurface.MixProject do
       {:caf_transcripts, in_umbrella: true},
       {:caf_usage, in_umbrella: true},
       {:bandit, "~> 1.14"},
+      {:plug, "~> 1.20"},
       {:caf_test, in_umbrella: true, only: :test}
     ]
   end

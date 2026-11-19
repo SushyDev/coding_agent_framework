@@ -362,7 +362,7 @@ built. Each belongs to one box (`Prompts` is new, B6, and fronts mechanisms that
 `caf_registry`, `caf_transcripts`, `caf_sampler`, `caf_cli`, `caf_accounts` and `caf_tmux`;
 `Mailbox` holds `caf_mailbox`; `Team` holds `caf_delegates`, `caf_mains`, `caf_grants` and
 `caf_mcp`; the `Scheduler` holds `caf_scheduler` and `caf_usage`; `Hosts` holds `caf_copies`,
-`caf_jobs` and `caf_services`; the `Watch` holds `caf_tracker` and `caf_recoveries`.
+`caf_jobs`, `caf_services` and `caf_runs`; the `Watch` holds `caf_tracker` and `caf_recoveries`.
 `caf_shell`, `caf_holder`, `caf_store` and the `Ledger`'s `caf_acts` and `caf_cues` are the
 base under every box. From B2, a call into a
 box from outside it goes only through the box's own module.
@@ -406,6 +406,7 @@ flowchart BT
     copies[caf_copies]
     jobs[caf_jobs]
     services[caf_services]
+    runs[caf_runs]
   end
 
   tmux --> shell
@@ -491,6 +492,9 @@ flowchart BT
   services --> holder
   services --> grants
   services --> copies
+  runs --> shell
+  runs --> holder
+  runs --> scheduler
 ```
 
 `caf_test` holds the shared test aids and is used only in tests. `caf_surface` is the app's

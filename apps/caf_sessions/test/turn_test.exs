@@ -39,6 +39,20 @@ defmodule CodingAgentFramework.Sessions.TurnTest do
     assert Turn.headless(%{row | status: "stopping"}, fold) == :not_running
   end
 
+  test "a headless delegate is not idle while a background command of its own runs" do
+    alias CodingAgentFramework.Stream.Fold
+    row = %{status: "running", role: "delegate"}
+    started = %{"type" => "system", "subtype" => "task_started", "task_id" => "b1"}
+    fold = Fold.event(Fold.event(Fold.new(), %{"type" => "result"}), started)
+    assert Turn.headless(row, fold) == :running
+
+    ended = %{"type" => "system", "subtype" => "task_notification", "task_id" => "b1"}
+    assert Turn.headless(row, Fold.event(fold, Map.put(ended, "status", "completed"))) == :ended
+    # The process's exit ends its commands with it.
+    assert Turn.headless(row, Fold.exit_seen(fold, fn _ -> false end)) == :gone
+    assert Fold.again(Fold.exit_seen(fold, fn _ -> false end)).tasks == %{}
+  end
+
   test "of/2 takes the function for the row's kind" do
     fold = %{idle: true, gone: false, ending: false}
     assert Turn.of(%{status: "running", role: "delegate"}, %{fold: fold}) == :ended
