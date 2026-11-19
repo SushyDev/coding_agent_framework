@@ -158,6 +158,24 @@
 (* parent's (RestartParent), which cuts a hand of a report to it. Each     *)
 (* re-adopts from the row and starts nothing; all are bounded together by *)
 (* MaxRestarts.                                                            *)
+(*                                                                         *)
+(* A start whose lease is queued answers at once (F-170). The start asks  *)
+(* the Scheduler for a lease (Schedule.tla's request): granted, it goes on *)
+(* as above; queued, exactly one more answer comes later, the lease or a  *)
+(* refusal (Schedule.tla's QueuedIsAnswered). For a delegate in Queued the *)
+(* caller does not wait for it: the start answers queued at once, and the  *)
+(* row says first that its parent is owed the start's outcome (`owed`,     *)
+(* durable). Delegates waits for the one more answer in memory (call is    *)
+(* "lease"); a restart loses that wait, the Scheduler's answer then        *)
+(* reaches no one, and the row is refused at its deadline (Settled). Once  *)
+(* the row leaves starting, the outcome (running, or refused with its      *)
+(* reason) is told to the parent as a notice stored under the row's key,   *)
+(* which Mailbox takes once (`keys`), and the mark is cleared after.       *)
+(* StartToldOnce and StartNoticed; StartOwedInMemory forgets the mark at a *)
+(* restart, and StartNoKey stores the notice under no key. Left abstract:  *)
+(* a caller that waits for a queued lease (the code's default for the      *)
+(* operator), whose answer is the outcome itself; the queue's position;    *)
+(* a start again (StartAgain), whose lease is granted at once here.        *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -174,6 +192,7 @@ CONSTANTS
     Stalls,          \* the delegates whose turn may end with no report (F-150)
     MaxAgain,        \* starts of a branch again, its row with no report and its process gone
     MaxWakes,        \* turns of a delegate's own, a background command's wake (F-155)
+    Queued,          \* the delegates whose start's lease is queued, the caller not waiting (F-170)
     Break            \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -195,7 +214,9 @@ Breaks == {
     "BriefAfterInit",        \* a headless start waits for its init before its message
     "StatusEndsWork",        \* the lease's owner says a refused, finished or failed row ended
     "TurnInMemory",          \* an own turn's notice mark is kept in memory, not as Mailbox's key
-    "TakeStale"              \* Sessions takes a request whose caller's deadline passed
+    "TakeStale",             \* Sessions takes a request whose caller's deadline passed
+    "StartOwedInMemory",     \* the parent owed a queued start's outcome is kept in memory only
+    "StartNoKey"             \* a queued start's outcome is told under no key Mailbox checks
 }
 
 ASSUME Break \in Breaks
@@ -203,6 +224,7 @@ ASSUME Interactive \subseteq Delegates /\ MaxPersonTurns \in Nat
 ASSUME Cap \in Nat /\ MaxRestarts \in Nat /\ MaxKills \in Nat /\ MaxParentStops \in Nat
 ASSUME Awaited \subseteq Delegates /\ ClientLeaves \in BOOLEAN
 ASSUME Stalls \subseteq Delegates /\ MaxAgain \in Nat /\ MaxWakes \in Nat
+ASSUME Queued \subseteq Delegates
 
 Parent == "parent"
 
@@ -229,7 +251,8 @@ VARIABLES
     rsrc,         \* table: d -> the turn its report was read from: "none" (a notice),
                   \*          "brief", "person"
     stops,        \* in memory: delegates whose Stop event Intake holds, not yet handled
-    call,         \* in memory: d -> "none", "start", "resume": Delegates' call of Sessions
+    call,         \* in memory: d -> "none", "start", "resume": Delegates' call of Sessions;
+                  \*            "lease": its wait for a queued lease's one more answer
     queue,        \* Sessions' mailbox: d -> the request of the latest call not yet taken:
                   \*           "none", "start", "resume"
     late,         \* d -> the caller's deadline of that request has passed
@@ -249,14 +272,21 @@ VARIABLES
     woken,        \* d -> its own turns begun so far: the current one's number
     ownDone,      \* the log or transcript: <<d, n>> whose own turn n ended, with its result
     ownTold,      \* <<d, n>> -> notices told of that own turn
+    sched,        \* the Scheduler: d -> "none", or "queued" (its request waits in the queue)
+    owed,         \* table: d -> the parent is owed the queued start's outcome
+    atOnce,       \* ghost: d -> the start answered queued at once
+    startTold,    \* ghost: d -> notices told of the queued start's outcome
     \* Delivery's, for the reports: row d is d's report
     row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, lost, wrong
 
 parentVars == <<parentRuns, turn, parentStops, parentTurned>>
 delegateVars == <<status, held, resumes, proc, reply, kills, persons, rsrc>>
 callVars == <<call, queue, late, sess, marked, pipe, taken, resumed>>
-\* Item 14's: the idle notice and the start idempotent per branch (F-150).
-policyVars == <<idles, overdue, told, keys, againStarts, woken, ownDone, ownTold>>
+\* Item 14's: the idle notice and the start idempotent per branch (F-150); the
+\* queued start's lease and its notice (F-170).
+policyVars == <<idles, overdue, told, keys, againStarts, woken, ownDone, ownTold,
+                sched, owed, atOnce, startTold>>
+leaseVars == <<sched, owed, atOnce, startTold>>
 dvars == <<row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, lost, wrong>>
 vars == <<up, restarts, parentVars, delegateVars, stops, callVars, policyVars, dvars>>
 
@@ -275,7 +305,8 @@ D == INSTANCE Delivery WITH
        over <- [a \in {Parent} |-> FALSE],
        turned <- [a \in {Parent} |-> parentTurned], Long <- Delegates, Launched <- {},
        call <- dcall,
-       restarts <- 0, lives <- 0, ends <- 0, prompts <- 0, stops <- 0, readAt <- 0
+       restarts <- 0, lives <- 0, ends <- 0, prompts <- 0, stops <- 0, readAt <- 0,
+       forced <- {}
 
 \* Delegates that count against the cap: started, or starting, and not yet ended.
 Active == {d \in Delegates :
@@ -311,6 +342,9 @@ WorkEnded(d) ==
 TurnKey(d, n) == <<"turn", d, n>>
 Turns == Delegates \X (1..MaxWakes)
 
+\* The key a queued start's notice is stored under: its row's.
+StartKey(d) == <<"start", d>>
+
 -----------------------------------------------------------------------------
 Init ==
     /\ up = TRUE /\ restarts = 0
@@ -337,6 +371,8 @@ Init ==
     /\ keys = {}
     /\ againStarts = 0
     /\ woken = [d \in Delegates |-> 0] /\ ownDone = {} /\ ownTold = [t \in Turns |-> 0]
+    /\ sched = [d \in Delegates |-> "none"] /\ owed = [d \in Delegates |-> FALSE]
+    /\ atOnce = [d \in Delegates |-> FALSE] /\ startTold = [d \in Delegates |-> 0]
     /\ row =[d \in Delegates |-> D!NoRow] /\ hand = {} /\ claimed = {}
     /\ wire = [d \in Delegates |-> 0] /\ waiter = [a \in {Parent} |-> 0]
     /\ dcall = [d \in Delegates |-> "none"]
@@ -363,10 +399,13 @@ FrameworkDies ==
     /\ keys' = CASE Break = "IdleInMemory" -> {}
                  [] Break = "TurnInMemory" -> {k \in keys : k[1] # "turn"}
                  [] OTHER -> keys
+    \* The Scheduler is another process: its queue runs on. Under StartOwedInMemory
+    \* the parent owed a queued start's outcome is forgotten.
+    /\ owed' = IF Break = "StartOwedInMemory" THEN [d \in Delegates |-> FALSE] ELSE owed
     /\ D!Restart
     /\ UNCHANGED <<parentVars, status, resumes, proc, reply, kills, persons, rsrc,
                    queue, late, sess, marked, pipe, taken, resumed, idles, told, againStarts,
-                   woken, ownDone, ownTold>>
+                   woken, ownDone, ownTold, sched, atOnce, startTold>>
 
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
@@ -382,11 +421,12 @@ FrameworkStarts ==
 \* SessionsDecides and Confirmed still stand for; or an orphan, a headless
 \* process held with no line when the crash fell between the hold and the
 \* write, which never confirms and which Recoveries ends (OrphanEnded). A
-\* request not yet taken goes with the process's mailbox.
+\* request not yet taken goes with the process's mailbox. Delegates' own wait
+\* for a queued lease is not the agent's, and runs on.
 RestartAgent(d) ==
     /\ up /\ restarts < MaxRestarts
     /\ restarts' = restarts + 1
-    /\ call' = [call EXCEPT ![d] = "none"]
+    /\ call' = [call EXCEPT ![d] = IF @ = "lease" THEN @ ELSE "none"]
     /\ queue' = [queue EXCEPT ![d] = "none"]
     /\ stops' \in {stops, stops \ {d}}
     /\ \/ UNCHANGED <<sess, proc, resumed>>
@@ -454,20 +494,52 @@ Request(d, kind) ==
 
 \* In a turn the parent calls start_delegate. The project and branch
 \* checks may refuse it, and the cap must when it is reached. The row is
-\* written first, as starting, and the call of Sessions begins. The brief
-\* is marked before the call: by launch for an interactive delegate, whose
-\* start carries it, and by stream for a headless one, whose start writes
-\* it right after the hold (under BriefAfterInit, only once it runs).
+\* written first, as starting, and its lease asked. Granted, the call of
+\* Sessions begins. The brief is marked before the call: by launch for an
+\* interactive delegate, whose start carries it, and by stream for a
+\* headless one, whose start writes it right after the hold (under
+\* BriefAfterInit, only once it runs). Queued, for a delegate in Queued: the
+\* row says its parent is owed the outcome, Delegates waits for the lease in
+\* memory, and the start answers queued at once.
 StartAsked(d) ==
     /\ up /\ parentRuns /\ turn /\ status[d] = "none"
     /\ \/ /\ status' = [status EXCEPT ![d] = "refused"]
-          /\ UNCHANGED <<call, queue, late, marked>>
+          /\ UNCHANGED <<call, queue, late, marked, leaseVars>>
        \/ /\ Cardinality(Counted) < Cap \/ Break = "NoCap"
           /\ status' = [status EXCEPT ![d] = "starting"]
           /\ Request(d, "start")
           /\ marked' = [marked EXCEPT ![d] = MarkedFirst(d)]
-    /\ UNCHANGED <<others, held, resumes, proc, reply, kills, persons, rsrc, sess, pipe, taken,
-                   resumed>>
+          /\ UNCHANGED leaseVars
+       \/ /\ d \in Queued /\ (Cardinality(Counted) < Cap \/ Break = "NoCap")
+          /\ status' = [status EXCEPT ![d] = "starting"]
+          /\ call' = [call EXCEPT ![d] = "lease"]
+          /\ sched' = [sched EXCEPT ![d] = "queued"]
+          /\ owed' = [owed EXCEPT ![d] = TRUE]
+          /\ atOnce' = [atOnce EXCEPT ![d] = TRUE]
+          /\ UNCHANGED <<queue, late, marked, startTold>>
+    /\ UNCHANGED <<up, restarts, parentVars, stops, idles, overdue, told, keys, againStarts,
+                   woken, ownDone, ownTold, dvars, held, resumes, proc, reply, kills, persons,
+                   rsrc, sess, pipe, taken, resumed>>
+
+\* The queued lease's one more answer (Schedule.tla's Tell). Delegates waits
+\* for it in memory: granted, the call of Sessions begins as StartAsked's
+\* does; refused, the row is refused with the reason and nothing held. With
+\* no wait in memory (a restart), the answer reaches no one, and the row is
+\* refused at its deadline (Settled).
+LeaseAnswered(d) ==
+    /\ sched[d] = "queued"
+    /\ sched' = [sched EXCEPT ![d] = "none"]
+    /\ IF call[d] = "lease"
+         THEN \/ /\ Request(d, "start")
+                 /\ marked' = [marked EXCEPT ![d] = MarkedFirst(d)]
+                 /\ UNCHANGED status
+              \/ /\ status' = [status EXCEPT ![d] = "refused"]
+                 /\ call' = [call EXCEPT ![d] = "none"]
+                 /\ UNCHANGED <<queue, late, marked>>
+         ELSE UNCHANGED <<status, call, queue, late, marked>>
+    /\ UNCHANGED <<up, restarts, parentVars, stops, idles, overdue, told, keys, againStarts,
+                   woken, ownDone, ownTold, owed, atOnce, startTold, dvars, held, resumes, proc,
+                   reply, kills, persons, rsrc, sess, pipe, taken, resumed>>
 
 \* In a turn the parent starts the branch again. While the delegate's
 \* session is live the start answers it and writes nothing: no step. A row
@@ -490,7 +562,7 @@ StartAgain(d) ==
     /\ taken' = [taken EXCEPT ![d] = 0]
     /\ resumed' = [resumed EXCEPT ![d] = 0]
     /\ UNCHANGED <<up, restarts, parentVars, stops, idles, overdue, told, keys, woken, ownDone,
-                   ownTold, dvars, held, reply, kills, persons, rsrc, pipe>>
+                   ownTold, leaseVars, dvars, held, reply, kills, persons, rsrc, pipe>>
 
 \* Sessions takes the request from its mailbox, whether Delegates runs or
 \* not. In the caller's time it writes its own row first (Start.tla). Past
@@ -578,7 +650,7 @@ Settle(d, s) ==
 \* Sessions answered the call under way: its row settled, or, with no row, a
 \* request taken past the caller's deadline while the call still waited.
 CallAnswered(d) ==
-    /\ up /\ call[d] # "none"
+    /\ up /\ call[d] \in {"start", "resume"}
     /\ \/ sess[d] \in {"running", "refused"}
        \/ sess[d] = "none" /\ queue[d] = "none"
     /\ call' = [call EXCEPT ![d] = "none"]
@@ -659,7 +731,7 @@ TurnEndsBare(d) ==
     /\ overdue' = [overdue EXCEPT ![d] = FALSE]
     /\ told' = [told EXCEPT ![d] = 0]
     /\ UNCHANGED <<up, restarts, parentVars, status, held, resumes, reply, kills, persons, rsrc,
-                   stops, callVars, keys, againStarts, woken, ownDone, ownTold, dvars>>
+                   stops, callVars, keys, againStarts, woken, ownDone, ownTold, leaseVars, dvars>>
 
 \* A background command of its own ends and wakes it: a turn that answers no
 \* message (F-155). Its row may still be running, its report not yet read.
@@ -669,7 +741,7 @@ OwnWakes(d) ==
     /\ woken' = [woken EXCEPT ![d] = @ + 1]
     /\ UNCHANGED <<up, restarts, parentVars, status, held, resumes, reply, kills, persons, rsrc,
                    stops, callVars, idles, overdue, told, keys, againStarts, ownDone, ownTold,
-                   dvars>>
+                   leaseVars, dvars>>
 
 \* That turn ends with its last reply and its result, which the log or the
 \* transcript keeps, and its Stop event comes.
@@ -680,7 +752,7 @@ OwnTurnEnds(d) ==
     /\ ownDone' = ownDone \cup {<<d, woken[d]>>}
     /\ stops' = IF up THEN stops \cup {d} ELSE stops
     /\ UNCHANGED <<up, restarts, parentVars, status, held, resumes, kills, persons, rsrc, callVars,
-                   idles, overdue, told, keys, againStarts, woken, ownTold, dvars>>
+                   idles, overdue, told, keys, againStarts, woken, ownTold, leaseVars, dvars>>
 
 DelegateKilled(d) ==
     /\ proc[d] \in {"waiting", "working", "person", "idle", "stalled", "own"} /\ kills < MaxKills
@@ -746,7 +818,7 @@ BoundPasses(d) ==
     /\ up /\ Idle(d) /\ ~overdue[d]
     /\ overdue' = [overdue EXCEPT ![d] = TRUE]
     /\ UNCHANGED <<up, restarts, parentVars, delegateVars, stops, callVars, idles, told, keys,
-                   againStarts, woken, ownDone, ownTold, dvars>>
+                   againStarts, woken, ownDone, ownTold, leaseVars, dvars>>
 
 \* Past the bound, the parent is told once per idle state: a notice stored
 \* in Mailbox under the state's key, which Mailbox takes once. Nothing is
@@ -756,7 +828,7 @@ IdleTold(d) ==
     /\ keys' = keys \cup {IdleKey(d)}
     /\ told' = [told EXCEPT ![d] = @ + 1]
     /\ UNCHANGED <<up, restarts, parentVars, delegateVars, stops, callVars, idles, overdue,
-                   againStarts, woken, ownDone, ownTold, dvars>>
+                   againStarts, woken, ownDone, ownTold, leaseVars, dvars>>
 
 \* An own turn's last reply goes to the parent once the report is handed
 \* on: a notice stored under the turn's key, which Mailbox takes once.
@@ -765,7 +837,26 @@ TurnTold(d, n) ==
     /\ keys' = keys \cup {TurnKey(d, n)}
     /\ ownTold' = [ownTold EXCEPT ![<<d, n>>] = @ + 1]
     /\ UNCHANGED <<up, restarts, parentVars, delegateVars, stops, callVars, idles, overdue, told,
-                   againStarts, woken, ownDone, dvars>>
+                   againStarts, woken, ownDone, leaseVars, dvars>>
+
+\* A queued start's outcome, once its row has left starting: a notice to the
+\* parent stored under the row's key, which Mailbox takes once. StartNoKey
+\* stores it whether or not the key was taken.
+StartTold(d) ==
+    /\ up /\ owed[d] /\ status[d] # "starting"
+    /\ StartKey(d) \notin keys \/ Break = "StartNoKey"
+    /\ keys' = keys \cup {StartKey(d)}
+    /\ startTold' = [startTold EXCEPT ![d] = @ + 1]
+    /\ UNCHANGED <<up, restarts, parentVars, delegateVars, stops, callVars, idles, overdue, told,
+                   againStarts, woken, ownDone, ownTold, sched, owed, atOnce, dvars>>
+
+\* The row's mark cleared once Mailbox has the notice: a write of its own, so
+\* a restart may fall between the two.
+StartCleared(d) ==
+    /\ up /\ owed[d] /\ StartKey(d) \in keys
+    /\ owed' = [owed EXCEPT ![d] = FALSE]
+    /\ UNCHANGED <<up, restarts, parentVars, delegateVars, stops, callVars, idles, overdue, told,
+                   keys, againStarts, woken, ownDone, ownTold, sched, atOnce, startTold, dvars>>
 
 \* The delegate ends, its process with it, only once its report is delivered.
 DelegateEnds(d) ==
@@ -812,12 +903,14 @@ Framework(d) ==
     \/ StopHandled(d) \/ TranscriptRead(d) \/ HeldStored(d) \/ KillSeen(d)
     \/ DelegateEnds(d) \/ BoundPasses(d) \/ IdleTold(d)
     \/ \E n \in 1..MaxWakes : TurnTold(d, n)
+    \/ StartTold(d) \/ StartCleared(d)
 
 Next ==
     \/ FrameworkDies \/ FrameworkStarts \/ RestartParent
     \/ PromptSent \/ TurnEnds \/ ParentStops \/ ParentRuns
     \/ Mailbox(D!Connects(Parent))
     \/ \E d \in Delegates : StartAsked(d) \/ StartAgain(d) \/ Called(d) \/ CallerLate(d)
+                            \/ LeaseAnswered(d)
                             \/ SessionsDecides(d) \/ Confirmed(d)
                             \/ InputTaken(d) \/ PersonTypes(d) \/ DelegateFinishes(d)
                             \/ TurnEndsBare(d) \/ DelegateKilled(d)
@@ -841,6 +934,7 @@ Fairness ==
          /\ WF_vars(KillSeen(d)) /\ WF_vars(DelegateEnds(d))
          /\ WF_vars(BoundPasses(d)) /\ WF_vars(IdleTold(d))
          /\ \A n \in 1..MaxWakes : WF_vars(TurnTold(d, n))
+         /\ WF_vars(LeaseAnswered(d)) /\ WF_vars(StartTold(d)) /\ WF_vars(StartCleared(d))
          /\ SF_vars(\E t \in {"waiter", "typed", "call"} : Mailbox(D!Mark(d, t)))
          /\ SF_vars(Mailbox(D!Handed(d))) /\ SF_vars(Takes(d))
          /\ SF_vars(RowSteps(d))
@@ -859,7 +953,9 @@ TypeOK ==
                                "dead"}]
     /\ reply \in [Delegates -> {"none", "brief", "person", "own"}]
     /\ rsrc \in [Delegates -> {"none", "brief", "person", "own"}]
-    /\ call \in [Delegates -> {"none", "start", "resume"}]
+    /\ call \in [Delegates -> {"none", "start", "resume", "lease"}]
+    /\ sched \in [Delegates -> {"none", "queued"}] /\ owed \in [Delegates -> BOOLEAN]
+    /\ atOnce \in [Delegates -> BOOLEAN] /\ startTold \in [Delegates -> Nat]
     /\ queue \in [Delegates -> {"none", "start", "resume"}]
     /\ late \in [Delegates -> BOOLEAN]
     /\ \A d \in Delegates : queue[d] # "none" => sess[d] = "none"
@@ -868,6 +964,7 @@ TypeOK ==
     /\ idles \in [Delegates -> Nat] /\ overdue \in [Delegates -> BOOLEAN]
     /\ told \in [Delegates -> Nat] /\ againStarts \in Nat
     /\ keys \subseteq (Delegates \X Nat) \cup ({"turn"} \X Delegates \X Nat)
+                      \cup ({"start"} \X Delegates)
     /\ woken \in [Delegates -> Nat] /\ ownDone \subseteq Turns /\ ownTold \in [Turns -> Nat]
     /\ turn => parentRuns
     /\ D!TypeOK
@@ -950,5 +1047,12 @@ TurnNotReport == \A d \in Delegates : rsrc[d] # "own"
 
 \* ... and always: every own turn that ended is told.
 TurnNoticed == \A t \in Turns : t \in ownDone ~> ownTold[t] >= 1
+
+\* A start answered queued at once has its outcome told to its parent at most
+\* once, whatever restarts come (F-170) ...
+StartToldOnce == \A d \in Delegates : startTold[d] <= 1
+
+\* ... and always: its row leaves starting, and the outcome is told.
+StartNoticed == \A d \in Delegates : atOnce[d] ~> startTold[d] >= 1
 
 =============================================================================

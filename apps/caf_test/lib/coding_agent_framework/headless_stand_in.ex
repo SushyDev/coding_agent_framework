@@ -9,7 +9,7 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     (`:at_start`, only for a test that needs it so and says why), or never (`:never`);
   - for a user line: its replay (`isReplay` and its uuid), then `assistant`, a
     `rate_limit_event` and a `result` naming the uuid, whose text is `done <uuid>`. A message
-    whose text starts with `ask` first asks a `can_use_tool` permission (`request_id`
+    whose text starts with `ask` (after a `From <name> (<kind>): ` sender line, F-170) first asks a `can_use_tool` permission (`request_id`
     `req-<uuid>`), and ends its turn when the answer comes; so does every message while a file
     `<dir>/hold` exists; the answer is replayed. `half` ends its turn with half a
     `rate_limit_event` line, and the next message finishes it; `self` ends its turn, then
@@ -102,15 +102,15 @@ defmodule CodingAgentFramework.HeadlessStandIn do
           ev '{"type":"user","isReplay":true,"session_id":"'"$sid"'","uuid":"'"$u"'","message":{"role":"user","content":""}}'
           [ -e "DIR/hold" ] && line='"content":"ask'
           case $line in
-            *'"content":"ask'*)
+            *'"content":"ask'*|*'"content":"From '*'): ask'*)
               pending="req-$u" asker=$u
               ev '{"type":"control_request","request_id":"'"$pending"'","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"true"},"tool_use_id":"tu-'"$u"'"}}' ;;
-            *'"content":"self'*)
+            *'"content":"self'*|*'"content":"From '*'): self'*)
               turn_end "$u"
               ev '{"type":"result","subtype":"success","is_error":false,"result":"on its own","session_id":"'"$sid"'","uuid":"r-self-'"$u"'","user_message_uuids":[]}' ;;
-            *'"content":"quiet'*)
+            *'"content":"quiet'*|*'"content":"From '*'): quiet'*)
               ev '{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"'"$sid"'","uuid":"r-quiet-'"$u"'","user_message_uuids":[]}' ;;
-            *'"content":"half'*)
+            *'"content":"half'*|*'"content":"From '*'): half'*)
               turn_end "$u"; half=1
               printf '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed",' ;;
             *) turn_end "$u" ;;

@@ -25,11 +25,41 @@ defmodule CodingAgentFramework.Operator do
 
   @type answer :: {:ok, term} | {:refused, term} | {:unknown, term}
 
-  @doc "Starts a delegate of main session `parent` on `branch` of `project`; its report goes to `parent`."
-  @spec start_delegate(GenServer.server(), s, s, s, s, s) :: answer when s: String.t()
-  def start_delegate(mcp, parent, project, branch, model, brief) do
+  @doc """
+  Starts a delegate of main session `parent` on `branch` of `project`; its report goes to
+  `parent`. `opts` are the tool's own options (F-170), so an app never names the tool:
+  `interactive:` (a boolean), `meta:` (the app's map on the agent row), `options:` (the
+  delegate's launch options, `ClaudeCLI.Options`) and `wait:`. The operator's start waits for a
+  queued lease by default; with `wait: false` it answers `{:ok, %{delegate: name, queued:
+  position}}` at once, and the start's outcome is told to `parent` later as a notice, once. Any
+  other option is refused `{:bad, {:option, key}}`, with no call made.
+
+      Operator.start_delegate(mcp, "app-main", "app", "unit/api", "opus", "Build it.",
+        meta: %{"card" => 41}, wait: false)
+      #=> {:ok, %{delegate: "app-unit-api", queued: 2}}
+  """
+  @spec start_delegate(GenServer.server(), s, s, s, s, s, keyword) :: answer when s: String.t()
+  def start_delegate(mcp, parent, project, branch, model, brief, opts \\ []) do
     args = %{"parent" => parent, "project" => project, "branch" => branch}
-    MCP.operate(mcp, "start_delegate", Map.merge(args, %{"model" => model, "brief" => brief}))
+    args = Map.merge(args, %{"model" => model, "brief" => brief})
+
+    with {:ok, args} <- start_options(opts, args),
+         do: MCP.operate(mcp, "start_delegate", args)
+  end
+
+  @start_options ~w(interactive meta options wait)a
+
+  defp start_options(opts, args) do
+    Enum.reduce_while(opts, {:ok, args}, fn
+      {key, value}, {:ok, args} when key in @start_options ->
+        {:cont, {:ok, Map.put(args, Atom.to_string(key), value)}}
+
+      {key, _value}, _ ->
+        {:halt, {:refused, {:bad, {:option, key}}}}
+
+      other, _ ->
+        {:halt, {:refused, {:bad, {:option, other}}}}
+    end)
   end
 
   @doc """
@@ -53,9 +83,18 @@ defmodule CodingAgentFramework.Operator do
 
       Operator.end_main(mcp, "app-epic")
       #=> {:ok, :ended}
+
+  With `force: true` (F-170) the end does not wait for a row in flight to the session, which a
+  session that never takes a turn (one not logged in, say) never settles: it is stopped once
+  idle, and each row still `sending` to it settles `unknown` (`ended_while_sending`), never
+  resent and never counted delivered. The act and each row's settle are rows in `Acts`.
+
+      Operator.end_main(mcp, "app-epic", force: true)
+      #=> {:ok, %{done: :ended, act: 12, unknown: [7]}}
   """
-  @spec end_main(GenServer.server(), String.t()) :: answer
-  def end_main(mcp, name), do: MCP.operate(mcp, "end_main", %{"name" => name})
+  @spec end_main(GenServer.server(), String.t(), keyword) :: answer
+  def end_main(mcp, name, opts \\ []),
+    do: MCP.operate(mcp, "end_main", forced(%{"name" => name}, opts))
 
   @doc "Sends `text` to agent `to`, stored first and typed into an ended turn, as any message."
   @spec message(GenServer.server(), String.t(), String.t()) :: answer
@@ -95,9 +134,17 @@ defmodule CodingAgentFramework.Operator do
   @spec resume(GenServer.server(), String.t()) :: answer
   def resume(mcp, agent), do: fix(mcp, "resume", agent)
 
-  @doc "Ends `agent` once its report is delivered, under a claim."
-  @spec stop(GenServer.server(), String.t()) :: answer
-  def stop(mcp, agent), do: fix(mcp, "stop", agent)
+  @doc """
+  Ends `agent` once its report is delivered, under a claim. With `force: true` (F-170) the stop
+  does not wait for the rows to it, and each row still `sending` to it settles `unknown`, as a
+  forced `end_main/3`'s do; its answer then names them (`unknown: ids`).
+  """
+  @spec stop(GenServer.server(), String.t(), keyword) :: answer
+  def stop(mcp, agent, opts \\ []),
+    do: MCP.operate(mcp, "stop", forced(%{"agent" => agent}, opts))
+
+  defp forced(args, opts),
+    do: if(Keyword.get(opts, :force) == true, do: Map.put(args, "force", true), else: args)
 
   @doc """
   Moves `agent`, a main session or a delegate, to account `to`, or with `nil` to the one with

@@ -9,7 +9,9 @@ defmodule CodingAgentFramework.Mailbox.Table do
   the answers themselves, labels and text, as JSON in `answer`, F-138's new-3). `status` is
   `queued` (due), `sending` (marked
   before it goes, with its transport `via`, `stream`, `waiter` or `call`, the `session_id` and
-  the process `at` it is for), then `delivered` or `ended`, or `queued` again if it did not go
+  the process `at` it is for), then `delivered` or `ended`, or `unknown` (still `sending` when
+  the operator forced its addressee's end, F-170: never resent, never counted delivered), or
+  `queued` again if it did not go
   in, under the `uuid` it was stored with; `again` says it was made due again, so it goes first.
   A row to the operator (a reply, a notice or an ask) is `kept` from its store: it is no
   session's, and no settle reads it (F-138's new-1, `Delivery.tla`'s `StoreRow`).

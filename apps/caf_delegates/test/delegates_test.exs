@@ -348,6 +348,41 @@ defmodule CodingAgentFramework.DelegatesTest do
       assert session_row(ctx, "app-unit-one") == nil
     end
 
+    # Delegate.tla's Queued, StartTold and StartCleared (F-170): the caller is answered at once,
+    # and the outcome is the parent's notice, once.
+    test "queued with wait: false: its place at once, then its refusal told once", ctx do
+      with_scheduler(ctx, resources: %{"seat" => 0}, max_wait: 200)
+      delegates = current(ctx)
+      opts = [wait: false]
+
+      assert {:ok, %{id: id, name: "app-unit-one", queued: position, session_id: nil}} =
+               Delegates.start_delegate(delegates, "main", "app", "unit/one", "opus", "Go.", opts)
+
+      assert is_integer(position)
+      assert %{status: "starting", tell: "main"} = Table.get(ctx.dtable, id)
+
+      {:ok, notice} = await(fn -> ok(start_notice(ctx)) end)
+      assert notice.from_agent == "framework" and notice.to_agent == "main"
+      assert notice.kind == "notice"
+      assert notice.text =~ "app-unit-one, queued for a seat, did not start"
+      assert notice.text =~ "refused its lease (deadline); ask again after"
+      assert %{status: "refused", tell: nil} = Table.get(ctx.dtable, id)
+
+      # A restart between the notice and the mark's clear tells nothing twice: Mailbox has the
+      # row's key.
+      :ok = Table.update(ctx.dtable, id, tell: "main")
+      cue(ctx, delegates)
+      {:ok, _} = await(fn -> if Table.get(ctx.dtable, id).tell == nil, do: {:ok, 1} end)
+      assert [_one] = Enum.filter(rows(ctx), &(&1.kind == "notice" and &1.to_agent == "main"))
+    end
+
+    test "queued with wait: true (the default): the caller waits for the outcome", ctx do
+      with_scheduler(ctx, resources: %{"seat" => 0}, max_wait: 50)
+      assert {:refused, {:lease, {:deadline, _}}} = start(ctx, "app", "unit/one")
+      assert [%{tell: nil}] = Table.rows(ctx.dtable, "test")
+      assert start_notice(ctx) == nil
+    end
+
     test "granted: the start runs under a lease that names its row", ctx do
       %{scheduler: scheduler, work: work} = with_scheduler(ctx, [])
       assert {:ok, %{id: id}} = start(ctx, "app", "unit/one")
@@ -804,6 +839,10 @@ defmodule CodingAgentFramework.DelegatesTest do
   end
 
   defp rows(ctx), do: Enum.reject(Enum.map(1..50, &Mailbox.Table.get(ctx.mtable, &1)), &is_nil/1)
+
+  # The framework's notice of a queued start's outcome (F-170).
+  defp start_notice(ctx),
+    do: Enum.find(rows(ctx), &(&1.kind == "notice" and &1.text =~ "queued for a seat"))
 
   # The framework's notices that a delegate is idle with no report.
   defp notices(ctx),

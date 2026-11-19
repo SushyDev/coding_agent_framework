@@ -122,13 +122,18 @@ defmodule CodingAgentFramework.MoverTest do
     # Claude Code writes the prompt as the first turn's user line, in the transcript the agent
     # row names now, which settles row one.
     spare = paths(ctx, "spare", main.sid)
-    user = %{"type" => "user", "message" => %{"content" => "report one\n\n[delivery #{u1}]"}}
+
+    user = %{
+      "type" => "user",
+      "message" => %{"content" => "From d0 (message): report one\n\n[delivery #{u1}]"}
+    }
+
     File.write!(spare.transcript, [JSON.encode!(user), "\n"], [:append])
     assert {:ok, _} = mrow_when(ctx, one, &(&1.status == "delivered"))
 
     # That turn's end brings the new process's first waiter, which takes row two.
     turn = WaiterStandIn.turn_end(spare.settings, main.sid, spare.transcript, :idle)
-    assert {2, "report two" <> _} = Task.await(turn, 10_000)
+    assert {2, "From d0 (message): report two" <> _} = Task.await(turn, 10_000)
     assert {:ok, _} = mrow_when(ctx, two, &(&1.status == "delivered"))
     assert %{status: "delivered"} = mrow(ctx, one)
 

@@ -10,7 +10,7 @@ defmodule CodingAgentFramework.MCPTest do
 
   import CodingAgentFramework.TestHost, only: [test_dir: 0, program!: 1, programs: 0]
 
-  alias CodingAgentFramework.{Copies, Grants, Jobs, MCP}
+  alias CodingAgentFramework.{Acts, Copies, Grants, Jobs, MCP, Operator}
 
   defmodule StandIn do
     @moduledoc false
@@ -23,9 +23,26 @@ defmodule CodingAgentFramework.MCPTest do
 
     # A `Delegates` whose every start answers at once, and a `Mailbox` whose every report is
     # ready at once; each tells the test what it was told.
-    def start_delegate(test, parent, _project, branch, _model, _brief, _opts) do
+    # A start of `unit/queued` that does not wait answers its place in the queue (F-170).
+    def start_delegate(test, parent, _project, branch, _model, _brief, opts) do
       send(test, {:start, parent, branch})
-      {:ok, %{id: 9, name: "app-" <> String.replace(branch, "/", "-"), brief_uuid: "b9"}}
+      send(test, {:start_opts, branch, opts})
+      answer = %{id: 9, name: "app-" <> String.replace(branch, "/", "-"), brief_uuid: "b9"}
+
+      if branch == "unit/queued" and opts[:wait] == false,
+        do: {:ok, Map.put(answer, :queued, 2)},
+        else: {:ok, answer}
+    end
+
+    # A `Mains` whose every end ends, and a `Mailbox` with two rows in flight to its session.
+    def end_main(test, name, opts \\ []) do
+      send(test, {:end_main, name, opts})
+      {:ok, :ended}
+    end
+
+    def ended_while_sending(test, agent, _opts) do
+      send(test, {:ended_while_sending, agent})
+      {:ok, [5, 6]}
     end
 
     def await(test, _to, key, left) do
@@ -425,6 +442,114 @@ defmodule CodingAgentFramework.MCPTest do
     assert_received {:told, 4, :failed}
     refute_received {:told, _, :written}
     assert [%{state: "answered"}, %{state: "answered"}] = Enum.take(MCP.calls(mcp), -2)
+  end
+
+  # F-170: an agent's start keeps working while no seat is free; the operator's waits unless it
+  # says not to, and names the tool's options as an Elixir call's.
+  test "a start's wait: an agent's by default no, the operator's by default yes", ctx do
+    %{mcp: mcp, tokens: t} = ctx
+    args = %{"project" => "app", "model" => "opus", "brief" => "Go."}
+
+    assert tool(mcp, t["app-main"], "start_delegate", Map.put(args, "branch", "unit/queued")) ==
+             %{"ok" => %{"delegate" => "app-unit-queued", "queued" => 2}}
+
+    assert_received {:start_opts, "unit/queued", opts}
+    assert opts[:wait] == false
+
+    waits = Map.merge(args, %{"branch" => "unit/one", "wait" => true})
+
+    assert %{"ok" => %{"delegate" => "app-unit-one"}} =
+             tool(mcp, t["app-main"], "start_delegate", waits)
+
+    assert_received {:start_opts, "unit/one", [_ | _] = opts}
+    assert opts[:wait] == true
+
+    bad = Map.merge(args, %{"branch" => "unit/one", "wait" => "no"})
+    assert tool(mcp, t["app-main"], "start_delegate", bad) == %{"refused" => ["bad", "args"]}
+
+    operator = operating(ctx)
+
+    assert {:ok, %{delegate: "app-unit-one"}} =
+             Operator.start_delegate(operator, "app-main", "app", "unit/one", "opus", "Go.",
+               interactive: true,
+               meta: %{"card" => 41},
+               options: %{"env" => %{"APP_MODE" => "review"}}
+             )
+
+    assert_received {:start_opts, "unit/one", opts}
+    assert opts[:wait] == true and opts[:interactive] == true
+    assert opts[:meta] == %{"card" => 41}
+    assert opts[:options] == %{"env" => %{"APP_MODE" => "review"}}
+
+    assert {:ok, %{delegate: "app-unit-queued", queued: 2}} =
+             Operator.start_delegate(operator, "app-main", "app", "unit/queued", "opus", "Go.",
+               wait: false
+             )
+
+    assert Operator.start_delegate(operator, "app-main", "app", "unit/one", "opus", "Go.",
+             model: "haiku"
+           ) == {:refused, {:bad, {:option, :model}}}
+  end
+
+  # F-170, Team.tla's ForcedByOperator: the forced end is the operator's alone, a row in Acts
+  # before it acts, and each row left sending settles unknown, a row in Acts each.
+  test "a forced end: the operator's, the act and each row's settle in the ledger", ctx do
+    operator = operating(ctx)
+    t = ctx.tokens
+
+    for caller <- ~w(app-fix app-main) do
+      assert tool(ctx.mcp, t[caller], "end_main", %{"name" => "app-main", "force" => true}) ==
+               %{"refused" => "operator_only"}
+    end
+
+    assert {:ok, %{done: :ended, act: act, unknown: [5, 6]}} =
+             Operator.end_main(operator, "app-main", force: true)
+
+    assert_received {:end_main, "app-main", [force: true]}
+    assert_received {:ended_while_sending, "app-main"}
+    acts = Process.get(:acts)
+
+    assert {:ok, %{actor: "op", target: "app-main", act: "end_main", outcome: "verified"}} =
+             Acts.get(acts, act)
+
+    assert {:ok, settles} = Acts.rows(acts, act: "settle")
+    assert [~s({"row":5}), ~s({"row":6})] = Enum.map(settles, & &1.detail)
+    assert Enum.all?(settles, &(&1.reason == "ended_while_sending" and &1.outcome == "unknown"))
+
+    # Unforced, it is the end as before, and settles nothing.
+    assert Operator.end_main(operator, "app-main") == {:ok, :ended}
+    assert_received {:end_main, "app-main", []}
+    refute_received {:ended_while_sending, _}
+
+    assert MCP.operate(operator, "end_main", %{"name" => "app-main", "force" => "yes"}) ==
+             {:refused, {:bad, :args}}
+
+    # An agent's stop is never forced.
+    assert tool(ctx.mcp, t["app-main"], "stop", %{"agent" => "app-fix", "force" => true}) ==
+             %{"refused" => ["operator_only", "force"]}
+  end
+
+  # An `MCP` with an operator, real `Acts` and the stand-in `Mains`, beside the setup's.
+  defp operating(ctx) do
+    tree = fn -> [%{name: "app-main", parent: nil}, %{name: "app-fix", parent: "app-main"}] end
+    stand_in = {StandIn, self()}
+    dir = Path.join(ctx[:dir] || test_dir(), "operating")
+    File.mkdir_p!(dir)
+
+    acts =
+      start_supervised!(
+        {Acts, db: Path.join(dir, "acts.db"), start_id: "s1", host: "t", instance: "o"}
+      )
+
+    Process.put(:acts, acts)
+
+    opts =
+      [dir: dir, port: 4793, grants: Grants.new(tree, operator: "op"), acts: acts] ++
+        Enum.map(~w(mailbox jobs delegates services tracker stream mains)a, &{&1, stand_in}) ++
+        [workstation: "ws", transcripts: nil, place: fn _ -> {:refused, :no_worktree} end] ++
+        [instance: "three", tool_timeout: 600_000, margin: 60_000]
+
+    start_supervised!(Supervisor.child_spec({MCP, opts}, id: :operating))
   end
 
   # A move is a fix's act: a parent's of its delegate, never an agent's of a main session or of
