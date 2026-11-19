@@ -80,6 +80,68 @@ defmodule CodingAgentFramework.IntakeToolsTest do
     assert r4.data == nil
   end
 
+  test "a correction: the input and the context go out, and the row keeps both",
+       %{db: db, start: start} do
+    answers = %{
+      "t1" => {:allow, updated_input: %{"x" => 2}, additional_context: "`land` runs the gates."},
+      "t2" => {:deny, "use land", additional_context: "Landing is `land`'s."},
+      "t3" => {:allow, additional_context: "The tests take a minute."}
+    }
+
+    intake = start.(pre_tool_use: &answers[&1.tool_use_id])
+
+    assert decision(post(intake, tool("PreToolUse", "t1"))) == %{
+             "hookEventName" => "PreToolUse",
+             "permissionDecision" => "allow",
+             "updatedInput" => %{"x" => 2},
+             "additionalContext" => "`land` runs the gates."
+           }
+
+    assert decision(post(intake, tool("PreToolUse", "t2"))) == %{
+             "hookEventName" => "PreToolUse",
+             "permissionDecision" => "deny",
+             "permissionDecisionReason" => "use land",
+             "additionalContext" => "Landing is `land`'s."
+           }
+
+    t3 = decision(post(intake, tool("PreToolUse", "t3")))
+    assert t3["additionalContext"] == "The tests take a minute."
+    refute Map.has_key?(t3, "updatedInput")
+
+    assert [r1, r2, r3] = rows(db)
+    assert Enum.map([r1, r2, r3], &{&1.actor, &1.hold}) == List.duplicate({"app", "answered"}, 3)
+    # The row keeps what the agent asked and what the app sent in its place.
+    assert JSON.decode!(r1.data)["tool_input"] == %{"x" => 1}
+    assert JSON.decode!(r1.decision)["hookSpecificOutput"]["updatedInput"] == %{"x" => 2}
+  end
+
+  test "an answer out of shape is a pass, and its row names why", %{db: db, start: start} do
+    long = String.duplicate("é", 10_001)
+
+    answers = %{
+      "t1" => {:allow, additional_context: long},
+      "t2" => {:allow, updated_input: "x"},
+      "t3" => {:deny, "no", updated_input: %{}},
+      "t4" => {:allow, nope: 1},
+      "t5" => {:allow, additional_context: String.duplicate("é", 10_000)}
+    }
+
+    intake = start.(pre_tool_use: &answers[&1.tool_use_id])
+
+    for id <- ~w(t1 t2 t3 t4),
+        do: assert(%{status: 200, resp_body: ""} = post(intake, tool("PreToolUse", id)))
+
+    assert %{"additionalContext" => _} = decision(post(intake, tool("PreToolUse", "t5")))
+
+    assert Enum.map(rows(db), &{&1.hold, &1.problem}) == [
+             {"passed", ~s(["context_too_long",10001])},
+             {"passed", ~s(["bad_answer","updated_input"])},
+             {"passed", ~s(["bad_answer","updated_input"])},
+             {"passed", ~s(["bad_answer","nope"])},
+             {"answered", nil}
+           ]
+  end
+
   test "a second post of one call answers the row's decision, and asks no one",
        %{db: db, start: start} do
     intake = start.(pre_tool_use: telling(self(), fn _ -> {:deny, "no"} end))

@@ -306,7 +306,8 @@ defmodule CodingAgentFramework.Copies do
     )
   end
 
-  defp reach(%Host{reach: :local}, shim), do: {shim, "localhost"}
+  # rsync splits `-e` on whitespace, so a home with a space (F-169) needs the shim quoted.
+  defp reach(%Host{reach: :local}, shim), do: {Shell.shell_quote(shim), "localhost"}
   # rsync splits `-e` on whitespace and honors quotes, so each word goes quoted.
   defp reach(%Host{reach: {:ssh, ssh, dest}} = host, _) do
     words = [ssh | Host.ssh_options(host)] ++ ["-o", "BatchMode=yes"]

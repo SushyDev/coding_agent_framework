@@ -14,7 +14,8 @@ defmodule CodingAgentFramework.ToolHomeTest do
 
   setup do
     dir = test_dir()
-    home = Path.join(dir, "home")
+    # A home with a space, as macOS's `~/Library/Application Support/<app>` is (F-169).
+    home = Path.join(dir, "the home")
     File.mkdir_p!(Path.join(home, "git"))
     key(ToolHome.signing_key(home))
     {:ok, dir: dir, home: home}
@@ -81,7 +82,15 @@ defmodule CodingAgentFramework.ToolHomeTest do
     assert git!(ctx, ["-C", other, "log", "-1", "--format=%an"]) == "App Bot\n"
   end
 
-  test "a missing key, a bad author or a home with a space is refused", ctx do
+  test "ssh reads the home's known hosts as one file, its space and all", ctx do
+    assert :ok = prepare(ctx.home, nil, %{})
+    args = ["-G" | ToolHome.ssh_options(ctx.home)] ++ ["box"]
+    {out, 0} = System.cmd(program!(:ssh), args, stderr_to_stdout: true)
+    known = Path.join([ctx.home, "ssh", "known_hosts"])
+    assert out =~ "\nuserknownhostsfile #{known}\n"
+  end
+
+  test "a missing key, a bad author or a home ssh cannot quote is refused", ctx do
     author = %{
       name: "App Bot",
       email: "bot@example.com",
@@ -99,7 +108,9 @@ defmodule CodingAgentFramework.ToolHomeTest do
     git!(ctx, ["init", "-q", "-b", "main", repo])
     assert {out, 128} = git(ctx, ["-C", repo, "commit", "-q", "--allow-empty", "-m", "one"])
     assert out =~ "no name was given and auto-detection is disabled" or out =~ "no email"
-    assert {:refused, {:whitespace, _}} = prepare(ctx.home <> " x", author, %{})
+
+    for bad <- [~s(/a"b), "/a\\b", "/a%d", "/a\nb", "caf"],
+        do: assert({:refused, {:bad_home, ^bad}} = prepare(bad, author, %{}))
   end
 
   defp prepare(home, author, projects) do

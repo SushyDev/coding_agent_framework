@@ -210,7 +210,14 @@ Built, each from a checked model in `model/tla/`:
 - a start whose caller gave up never runs later (F-166, against `Delegate.tla`): a start
   carries its caller's deadline, and one taken past it is refused and starts nothing;
 - gh's token kept as a file in the home, and every program `bin/caf-login` runs taken from
-  devenv (F-168).
+  devenv (F-168);
+- the `Stop` hold (F-157 part A, against `Intake.tla` and `Prompt.tla`): the app decides at each
+  turn's end, Claude Code's cap of eight blocks in a row becomes a person's prompt, a pause per
+  agent and per project holds a turn's end, and of a session's waiters the newest is kept;
+- the app's surface's start (F-169): `CodingAgentFramework.child_spec/1` builds the whole tree
+  from one config with its extensions and hooks, the example app now a thin user of it; a
+  `PreToolUse` callback that corrects a call (`updatedInput`, `additionalContext`) rather than
+  refuses it; and a home whose path has a space.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
@@ -475,8 +482,9 @@ flowchart BT
   services --> copies
 ```
 
-`caf_test` holds the shared test aids and is used only in tests. `caf_example` is an app built
-on the others, as an embedding app would be, and uses every one of them. `caf_cues`,
+`caf_test` holds the shared test aids and is used only in tests. `caf_surface` is the app's
+surface (`CodingAgentFramework.child_spec/1`, one config, one supervisor) and uses every other
+app; `caf_example` is an app built on it, as an embedding app would be. `caf_cues`,
 `caf_grants`, `caf_intake` and `caf_screen` use no other app: the embedding app hands `caf_cues`
 each part's declaration of what it reads and `caf_grants` the tree as a function, and
 `caf_screen` reads a screen's text it is given. `caf_mcp` reaches `Delegates`,
@@ -529,7 +537,7 @@ to this file when it exists. A `pre-commit` this repository did not write is nev
 
 ### Running the example app
 
-`caf_example` is the embedding app that wires every part. To run it against the real Claude
+`caf_example` is an embedding app: a config file and a console over `caf_surface`. To run it against the real Claude
 Code:
 
 1. Write a config file: one JSON object with the framework home, its accounts, its projects

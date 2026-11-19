@@ -1,14 +1,21 @@
-defmodule CodingAgentFramework.Example.Config do
+defmodule CodingAgentFramework.Config do
   @moduledoc """
-  What the example app runs with, as data: the embedding app's whole configuration, read by no
-  part from the environment.
+  What the framework runs with, as data: the embedding app's whole configuration, read by no
+  part from the environment, and checked whole by `new/1` before anything starts, each refusal
+  naming its key.
 
   - `home`: the framework home, an absolute path. Every file the app writes is under it:
     `caf.db` (the readers' and writers' tables, `Acts`' among them), `claims.db` (the claims
     an older build kept, which `Acts` takes once and empties), `accounts/`, `d/` (the dtach
     directory, kept short for macOS's 104-byte socket paths), `tmux.sock` (its own tmux
-    server), `streams/`, `checkouts/` (each project's checkout), `worktrees/`, `parts/` (the tables of `Copies`, `Jobs`, `Services` and
-    `MCP`) and `ws/` (the workstation's copies and service logs);
+    server), `streams/`, `checkouts/` (each project's checkout), `worktrees/`, `parts/` (the
+    tables of `Copies`, `Jobs`, `Services` and `MCP`) and `ws/` (the workstation's copies and
+    service logs). It may hold a space, as macOS's `~/Library/Application Support/<app>` does
+    (F-169). Its sockets (`tmux.sock`, `d/<agent>.sock`, `ws/jobs/<job>.sock`,
+    `ws/services/<service>.sock`) must fit macOS's 103 bytes: a home longer than 93 bytes,
+    where `tmux.sock` does not fit, is refused, `{:bad, :home, {:longer_than, 93}}`, and a name
+    too long for the room its home leaves is refused by name at its start,
+    `{:socket_path_too_long, path}` (a 42-byte home leaves an agent 53 bytes, a service 43);
   - `instance`: this framework instance's name, in each job id `MCP` makes;
   - `workstation`: the workstation's host name, and `programs`, the absolute path of each
     program there (`CodingAgentFramework.Programs`);
@@ -56,18 +63,23 @@ defmodule CodingAgentFramework.Example.Config do
     name the `PreToolUse` hook, since the framework's own callback (`Mover.pre_tool_use/2`, a
     move's drain) decides first and hands any other call to the app's; `post_tool_use` adds its
     hook when given; `stop` holds each turn's end for the app (the `Stop` hold, with its cap
-    and pauses). None by default.
+    and pauses). None by default. A callback may correct a call rather than refuse it
+    (`Intake`'s `{:allow, updated_input: map, additional_context: text}`);
+  - `extensions`: the app's bundles, each `%{name, scope, tools}` as
+    `CodingAgentFramework.Extension` takes them, served on the agents' MCP endpoint beside the
+    framework's tools; checked here with `MCP.extensions/3`, so a clash or a slow tool refuses
+    the config, `{:refused, {:bad, :extensions, reason}}`. None by default.
 
-      iex> {:ok, c} = CodingAgentFramework.Example.Config.new(home: "/srv/caf", instance: "a",
+      iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
       ...>   programs: %{kill: "/bin/kill"}, accounts: ["work"], ports: %{intake: 4790, mcp: 4791},
       ...>   claude: "/bin/claude", env: %{home: "/srv/caf", path: "/bin"})
       iex> {c.workstation, c.hosts, c.projects}
       {"ws", %{}, %{}}
-      iex> CodingAgentFramework.Example.Config.new(home: "caf")
+      iex> CodingAgentFramework.Config.new(home: "caf")
       {:refused, {:bad, :home}}
   """
 
-  alias CodingAgentFramework.Mains
+  alias CodingAgentFramework.{Mains, MCP}
 
   @enforce_keys [:home, :instance, :programs, :accounts, :ports, :claude, :env]
   defstruct [
@@ -92,23 +104,52 @@ defmodule CodingAgentFramework.Example.Config do
     lease: %{"seat" => 1},
     job_lease: %{heavy: %{"slot" => 1}, builder: %{"slot" => 1}, landing: %{"slot" => 1}},
     pressure: nil,
-    tool_hooks: %{}
+    tool_hooks: %{},
+    extensions: []
   ]
 
   @type t :: %__MODULE__{}
 
-  @doc "A config from a keyword list or map; answers `{:ok, config}` or `{:refused, {:bad, key}}`."
-  @spec new(keyword | map) :: {:ok, t} | {:refused, {:bad, atom}}
+  # macOS cuts a unix socket path at 103 bytes (`Holder`). The tmux server's socket,
+  # `<home>/tmux.sock`, is the one whose name is fixed, and tmux would fail on it only at its
+  # first command: 103 - 10.
+  @max_home 93
+
+  @doc """
+  A config from a keyword list or map, checked whole: answers `{:ok, config}`, or
+  `{:refused, {:bad, key}}` for the first key out of shape (a key it does not know included),
+  `{:refused, {:bad, :home, {:longer_than, 93}}}`, or `{:refused, {:bad, :extensions, reason}}`
+  with the extensions' own refusal.
+
+      iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
+      ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{},
+      ...>   tool_hooks: %{pre_tool_use: fn _, _ -> :allow end})
+      {:refused, {:bad, :tool_hooks}}
+      iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
+      ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{},
+      ...>   extensions: [%{name: "message"}])
+      {:refused, {:bad, :extensions, {:extension, "message", :clashes}}}
+      iex> CodingAgentFramework.Config.new(home: "/" <> String.duplicate("a", 93))
+      {:refused, {:bad, :home, {:longer_than, 93}}}
+  """
+  @spec new(keyword | map) :: {:ok, t} | {:refused, {:bad, atom} | {:bad, atom, term}}
   def new(fields) do
     fields = Map.new(fields)
     missing = Enum.find(@enforce_keys, &(not Map.has_key?(fields, &1)))
+    unknown = Enum.find(Map.keys(fields), &(not Map.has_key?(__MODULE__.__struct__(), &1)))
 
     cond do
       not (is_binary(fields[:home]) and Path.type(fields[:home]) == :absolute) ->
         {:refused, {:bad, :home}}
 
+      byte_size(fields.home) > @max_home ->
+        {:refused, {:bad, :home, {:longer_than, @max_home}}}
+
       missing ->
         {:refused, {:bad, missing}}
+
+      unknown ->
+        {:refused, {:bad, unknown}}
 
       not match?(%{intake: i, mcp: m} when is_integer(i) and is_integer(m), fields.ports) ->
         {:refused, {:bad, :ports}}
@@ -116,11 +157,29 @@ defmodule CodingAgentFramework.Example.Config do
       not operator?(fields) ->
         {:refused, {:bad, :operator}}
 
+      not tool_hooks?(Map.get(fields, :tool_hooks, %{})) ->
+        {:refused, {:bad, :tool_hooks}}
+
       true ->
         c = struct!(__MODULE__, fields)
-        projects = Map.new(c.projects, fn {n, p} -> {n, Mains.project(c.home, n, p)} end)
-        {:ok, %{c | projects: projects}}
+
+        with {:ok, _} <- extensions(c) do
+          projects = Map.new(c.projects, fn {n, p} -> {n, Mains.project(c.home, n, p)} end)
+          {:ok, %{c | projects: projects}}
+        end
     end
+  end
+
+  defp extensions(c) do
+    with {:refused, why} <- MCP.extensions(c.extensions, c.tool_timeout, c.margin),
+         do: {:refused, {:bad, :extensions, why}}
+  end
+
+  defp tool_hooks?(hooks) do
+    is_map(hooks) and
+      Enum.all?(hooks, fn {k, f} ->
+        k in [:pre_tool_use, :post_tool_use, :stop] and is_function(f, 1)
+      end)
   end
 
   defp operator?(fields) do

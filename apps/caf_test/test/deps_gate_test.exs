@@ -127,12 +127,12 @@ defmodule CodingAgentFramework.DepsGateTest do
       quoted = Code.string_to_quoted!(group <> Enum.join(singles) <> Enum.join(calls))
 
       expected =
-        Enum.map(grouped, &Module.concat(CodingAgentFramework, &1)) ++
+        Enum.map(grouped, &Module.concat("CodingAgentFramework", &1)) ++
           Enum.flat_map(
             single,
             &[
-              Module.concat([CodingAgentFramework, Sub, &1]),
-              Module.concat([CodingAgentFramework, Sub, &1, Inner])
+              Module.concat(["CodingAgentFramework", "Sub", &1]),
+              Module.concat(["CodingAgentFramework", "Sub", &1, Inner])
             ]
           )
 

@@ -464,7 +464,11 @@ a scope, and its tools, each a name under the bundle's, a schema, a description 
 of the caller and the arguments), served on the agents' MCP endpoint beside the framework's
 tools, listed and called only where its scope holds the agent (`Grants.may_call?/3`), each call
 a row in `mcp_calls`, its crash and its deadline answered `unknown`. Several tools per bundle
-stand until B5 makes the verbs (F-154's new-1).
+stand until B5 makes the verbs (F-154's new-1). The app's `PreToolUse` callback corrects a
+call (F-169): `{:allow, updated_input: map, additional_context: text}` and `{:deny, reason,
+additional_context: text}`, written as Claude Code's `updatedInput` and `additionalContext`
+(at most 10,000 characters; a longer one, or any answer out of shape, is a pass whose row's
+`problem` names why).
 
 An extension adds no protocol of its own: its events go through `Mailbox`'s subscriptions, its
 acts through `Team`'s claims, its questions to a person through `Prompts`, and its context is a
@@ -582,6 +586,14 @@ One config and one supervisor in; a few calls and one stream of cues out.
   `view(caf, scope)`, `metrics(caf, query)`, `digest(caf, window)` and `query(caf, filter)` read.
 - **Cues.** `subscribe(caf, topics)`: one stream of `{topic, ids}` for every write, from the
   `Ledger`. The app re-reads by id, as every view does; `prompts` is the inbox's topic.
+
+Built so far (F-169, B3's start): `CodingAgentFramework.child_spec/1` and `start_link/1` in
+`caf_surface`, from one `CodingAgentFramework.Config` checked whole by `Config.new/1` (a key
+it does not know, the tool callbacks, the extensions by `MCP.extensions/3`, and a home too long
+for its tmux socket are each refused by name); the supervisor is the tree `caf_example` used
+to wire, `Ends` included, since an app that left it out would keep an ended owner's services
+(F-169's new-1). `caf_example` keeps its config file, its console and `Run`. The calls and the
+cues are B3's rest.
 
 An app like a development loop's (views, builders, gates, landings) needs nothing more: a
 builder is a `delegate` with `review`, a gate is a heavy command or a job, a landing a job of
@@ -2770,8 +2782,9 @@ model before the code it describes (B4, B6, B8, B9, B11); B2 and B3 change no be
   their keep, and merging buys only fewer `mix.exs` files (F-162's new-7). About +500, −150.
 - **B3. The app's surface**: `CodingAgentFramework.child_spec/1` from one config struct checked
   whole, one supervisor of the boxes in order, `operate/4`, `view/2`, `query/2` and
-  `subscribe/2`; `caf_example` keeps its config file, its console and its ends, and loses its
-  supervisor's wiring. This is item 15's library supervisor, with the instance's name every
+  `subscribe/2`; `caf_example` keeps its config file and its console, and loses its
+  supervisor's wiring. The ends (an ended agent's services ended) are the library's, since
+  every app needs them (F-169's new-1); F-169 built `child_spec/1` and moved them. This is item 15's library supervisor, with the instance's name every
   per-instance `Registry` is named from. About +500, −800.
 - **B4. One agent process per agent**, against B1's `Restart(a)`: `Sessions` becomes a
   `DynamicSupervisor` of agent processes, each under its own small supervisor with the app's

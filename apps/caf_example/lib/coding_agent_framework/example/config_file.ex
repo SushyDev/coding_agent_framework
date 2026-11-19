@@ -1,7 +1,7 @@
 defmodule CodingAgentFramework.Example.ConfigFile do
   @moduledoc """
   The file the example app starts from (`bin/caf-example <config>`): one JSON object, read and
-  checked whole before anything starts, into a `CodingAgentFramework.Example.Config`. A key it
+  checked whole before anything starts, into a `CodingAgentFramework.Config`. A key it
   does not know is refused, so a misspelled key never falls back to a default.
 
       {
@@ -72,7 +72,7 @@ defmodule CodingAgentFramework.Example.ConfigFile do
       {:refused, {:json, {:unexpected_end, 1}}}
   """
 
-  alias CodingAgentFramework.Example.Config
+  alias CodingAgentFramework.Config
   alias CodingAgentFramework.{Programs, ToolHome}
 
   @top ~w(home instance accounts ports projects scheduler launch operator interval git)

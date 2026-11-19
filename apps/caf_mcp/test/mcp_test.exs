@@ -6,6 +6,7 @@ defmodule CodingAgentFramework.MCPTest do
 
   doctest CodingAgentFramework.MCP.Table
   doctest CodingAgentFramework.MCP.Plug
+  doctest CodingAgentFramework.MCP, only: [extensions: 3]
 
   import CodingAgentFramework.TestHost, only: [test_dir: 0, program!: 1, programs: 0]
 
