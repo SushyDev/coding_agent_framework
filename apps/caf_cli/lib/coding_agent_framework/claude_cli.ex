@@ -29,10 +29,14 @@ defmodule CodingAgentFramework.ClaudeCLI do
     keep their state in the framework home instead (`:tools` below);
   - `PATH`: how its Bash tool finds the programs a session runs, and on macOS how Claude Code
     finds `security`, which reads its login from the Keychain (in 2.1.322), so the launch's
-    `PATH` must hold `/usr/bin`. No `USER` is passed: the Keychain entry is named by `USER`,
-    else by the OS user name, which is the same one;
+    `PATH` must hold `/usr/bin`;
   - `TERM`: the terminal type its screen is drawn for, which dtach does not set;
   - `LANG`: a UTF-8 locale, so text past ASCII is read and drawn as it is;
+  - `USER`, the launch env's `:user` (the OS user's name, which the app gives), when given: on
+    macOS the Keychain item holding the login has the OS user as its account, and Claude Code
+    2.1.322 finds it by `USER` with no fallback (`LOGNAME` or the OS user name does not do), so
+    without it `claude auth status` answers `loggedIn: false`. A non-empty name with no control
+    character, else `{:bad, :user}`. The app requires it on macOS;
   - the CA bundle the embedding app gives as the launch env's `:ca` (a map of variable name to
     an absolute path, such as `NODE_EXTRA_CA_CERTS`), sorted by name: Claude Code runs on Node,
     which reads its own bundle, and a machine whose certificates come from devenv or Nix has them
@@ -90,7 +94,7 @@ defmodule CodingAgentFramework.ClaudeCLI do
   `CodingAgentFramework.Accounts.ready/2`).
 
   Options: `:claude` (its absolute path, from `Programs`), `:model`, `:name`, `:env` (a map of
-  `:home`, `:path`, `:term` and `:lang`), `:tool_timeout` (ms, 1 000 to 2 147 483 647: the MCP
+  `:home`, `:path`, `:term`, `:lang` and optionally `:user`), `:tool_timeout` (ms, 1 000 to 2 147 483 647: the MCP
   tool timeout), and optionally `:resume` (a session id), `:prompt` (the first prompt),
   `:options` and `:settings`. A delegate needs its brief as `:prompt` unless it resumes.
 
@@ -316,6 +320,7 @@ defmodule CodingAgentFramework.ClaudeCLI do
 
   defp env(account, opts, options) do
     with {:ok, given} <- given_env(Keyword.get(opts, :env)),
+         {:ok, user} <- user(Map.get(given, :user)),
          {:ok, ca} <- ca(Map.get(given, :ca, %{})),
          {:ok, tools} <- tools(Map.get(given, :tools, [])),
          {:ok, ms} <- tool_timeout(Keyword.get(opts, :tool_timeout)) do
@@ -324,12 +329,13 @@ defmodule CodingAgentFramework.ClaudeCLI do
       {:ok,
        [{"CLAUDE_CONFIG_DIR", account.config_dir}] ++
          Enum.map(@env, fn {k, v} -> {v, given[k]} end) ++
+         user ++
          ca ++ tools ++ timeouts ++ Enum.sort(Map.get(options, :env, %{})) ++ @fixed}
     end
   end
 
   # The names the launch sets itself, which the tools' state may not set again.
-  @own ~w(CLAUDE_CONFIG_DIR HOME PATH TERM LANG MCP_TOOL_TIMEOUT
+  @own ~w(CLAUDE_CONFIG_DIR HOME PATH TERM LANG USER MCP_TOOL_TIMEOUT
           CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT DISABLE_AUTOUPDATER)
 
   # Where the tools an agent runs keep their state (F-155), as the app gives it: `{name, value}`
@@ -347,6 +353,17 @@ defmodule CodingAgentFramework.ClaudeCLI do
   end
 
   defp tools(_), do: {:refused, {:bad, :tools}}
+
+  # The OS user's name, as the app gives it: optional here (the app requires it on macOS).
+  defp user(nil), do: {:ok, []}
+
+  defp user(name) when is_binary(name) do
+    if name != "" and not (name =~ ~r/[[:cntrl:]]/),
+      do: {:ok, [{"USER", name}]},
+      else: {:refused, {:bad, :user}}
+  end
+
+  defp user(_), do: {:refused, {:bad, :user}}
 
   # The CA bundle's variables, as the app gives them: a name of capitals, digits and `_`, and an
   # absolute path with no control character.

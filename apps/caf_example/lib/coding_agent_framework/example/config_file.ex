@@ -48,7 +48,9 @@ defmodule CodingAgentFramework.Example.ConfigFile do
     `model` (a main session's, `opus`), and its environment, `home` (`HOME`), `path` (devenv's
     programs' directories, then `/usr/bin:/bin:/usr/sbin:/sbin`, so a session's tools are
     devenv's and Claude Code still finds macOS's `security` for its Keychain),
-    `term` (`xterm-256color`) and `lang` (`en_US.UTF-8`).
+    `term` (`xterm-256color`), `lang` (`en_US.UTF-8`) and `user` (the OS user's name, `USER` from
+    the environment the caller hands in; every launch passes it as `USER`, which on macOS names
+    the Keychain item holding a login, the one `bin/caf-login` makes).
   - `instance` (`example`), `operator` (`operator`) and `interval` (ms, 2 000).
 
   Every other program is devenv's, from its `CAF_<NAME>` variable in `env`, the environment the
@@ -78,7 +80,7 @@ defmodule CodingAgentFramework.Example.ConfigFile do
   @top ~w(home instance accounts ports projects scheduler launch operator interval git)
   @project ~w(origin trunk mains branches cap setup setup_timeout env git)
   @git ~w(name email signing_key)
-  @launch ~w(claude model home path term lang)
+  @launch ~w(claude model home path term lang user)
   @scheduler ~w(resources lease job_lease)
   @classes %{"heavy" => :heavy, "builder" => :builder, "landing" => :landing}
   @short ~r/\A[a-z0-9][a-z0-9_-]{0,31}\z/
@@ -131,6 +133,7 @@ defmodule CodingAgentFramework.Example.ConfigFile do
         ports: ports,
         claude: launch.claude,
         env: Map.put(Map.take(launch, [:home, :path, :term, :lang]), :ca, ca_bundle(env)),
+        user: launch.user,
         main_model: launch.model,
         projects: projects,
         mains: mains,
@@ -198,14 +201,20 @@ defmodule CodingAgentFramework.Example.ConfigFile do
       "home" => env["HOME"],
       "path" => devenv_path(env, ~w(/usr/bin /bin /usr/sbin /sbin)),
       "term" => "xterm-256color",
-      "lang" => "en_US.UTF-8"
+      "lang" => "en_US.UTF-8",
+      "user" => env["USER"]
     }
 
     with :ok <- known(launch, @launch, "launch."),
          launch = Map.merge(defaults, launch),
          {:ok, claude} <- absolute(launch, "claude", "launch."),
          {:ok, home} <- absolute(launch, "home", "launch.") do
+      user = launch["user"]
+
       case Enum.find(~w(model path term lang), &(not text?(launch[&1]))) do
+        nil when not (is_binary(user) or is_nil(user)) ->
+          {:refused, {"launch.user", :not_a_string}}
+
         nil ->
           {:ok,
            %{
@@ -214,7 +223,8 @@ defmodule CodingAgentFramework.Example.ConfigFile do
              home: home,
              path: launch["path"],
              term: launch["term"],
-             lang: launch["lang"]
+             lang: launch["lang"],
+             user: launch["user"]
            }}
 
         key ->

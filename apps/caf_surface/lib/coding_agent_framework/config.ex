@@ -46,6 +46,10 @@ defmodule CodingAgentFramework.Config do
     services;
     `tool_timeout` and `margin`, Claude Code's MCP tool timeout and what `run_delegate` keeps
     under it;
+  - `user`: the OS user's name, which every launch passes as `USER` (the app gives it; no part
+    reads it from the environment). Required on macOS, where Claude Code finds the login's
+    Keychain item, whose account is the OS user, by `USER` alone: `{:refused, {:bad, :user}}`
+    when it is missing there. Optional elsewhere. It is added to `env` as `:user`;
   - `interval`: ms between the reads of the readers that read on a timer.
   - `resources`: each resource the `Scheduler` leases, name to capacity; by default
     `%{"seat" => 4, "slot" => 2}`, an agent's seat and a heavy run's slot. Placeholders until
@@ -72,7 +76,7 @@ defmodule CodingAgentFramework.Config do
 
       iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
       ...>   programs: %{kill: "/bin/kill"}, accounts: ["work"], ports: %{intake: 4790, mcp: 4791},
-      ...>   claude: "/bin/claude", env: %{home: "/srv/caf", path: "/bin"})
+      ...>   claude: "/bin/claude", env: %{home: "/srv/caf", path: "/bin"}, user: "me")
       iex> {c.workstation, c.hosts, c.projects}
       {"ws", %{}, %{}}
       iex> CodingAgentFramework.Config.new(home: "caf")
@@ -90,6 +94,7 @@ defmodule CodingAgentFramework.Config do
     :ports,
     :claude,
     :env,
+    user: nil,
     workstation: "ws",
     hosts: %{},
     projects: %{},
@@ -122,11 +127,11 @@ defmodule CodingAgentFramework.Config do
   with the extensions' own refusal.
 
       iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
-      ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{},
+      ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{}, user: "me",
       ...>   tool_hooks: %{pre_tool_use: fn _, _ -> :allow end})
       {:refused, {:bad, :tool_hooks}}
       iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
-      ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{},
+      ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{}, user: "me",
       ...>   extensions: [%{name: "message"}])
       {:refused, {:bad, :extensions, {:extension, "message", :clashes}}}
       iex> CodingAgentFramework.Config.new(home: "/" <> String.duplicate("a", 93))
@@ -160,8 +165,12 @@ defmodule CodingAgentFramework.Config do
       not tool_hooks?(Map.get(fields, :tool_hooks, %{})) ->
         {:refused, {:bad, :tool_hooks}}
 
+      not user?(fields) ->
+        {:refused, {:bad, :user}}
+
       true ->
         c = struct!(__MODULE__, fields)
+        c = if c.user && is_map(c.env), do: %{c | env: Map.put(c.env, :user, c.user)}, else: c
 
         with {:ok, _} <- extensions(c) do
           projects = Map.new(c.projects, fn {n, p} -> {n, Mains.project(c.home, n, p)} end)
@@ -180,6 +189,14 @@ defmodule CodingAgentFramework.Config do
       Enum.all?(hooks, fn {k, f} ->
         k in [:pre_tool_use, :post_tool_use, :stop] and is_function(f, 1)
       end)
+  end
+
+  # A name with no control character; on macOS it must be there (see `user` above).
+  defp user?(fields) do
+    case Map.get(fields, :user) do
+      nil -> :os.type() != {:unix, :darwin}
+      name -> is_binary(name) and name != "" and not (name =~ ~r/[[:cntrl:]]/)
+    end
   end
 
   defp operator?(fields) do

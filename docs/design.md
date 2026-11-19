@@ -2901,7 +2901,8 @@ without them.
     checked at start, with a Homebrew setup documented; the Elixir and OTP floor tested; a
     library supervisor from a config struct, out of `caf_example`; accounts: how to log one in
     (`bin/caf-login`, built in F-146), and Keychain reads for held processes (`security` on the
-    launch's `PATH`; no `USER`, since the OS user name stands in for it, F-146's new-3). Each
+    launch's `PATH`, and `USER`, the OS user's name the app gives: the Keychain item is named by
+    `USER` alone, with no fallback to `LOGNAME` or the OS user name, F-146's new-3 as F-173 corrected it). Each
     pinned release's check confirms both from a held session's login.
 16. **What the app reads and drives**: structured reports with a schema and several per
     delegate; app metadata and names on agents (the metadata built in F-154: `meta:` at a
