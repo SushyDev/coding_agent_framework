@@ -2782,8 +2782,9 @@ model before the code it describes (B4, B6, B8, B9, B11); B2 and B3 change no be
   their keep, and merging buys only fewer `mix.exs` files (F-162's new-7). About +500, −150.
 - **B3. The app's surface**: `CodingAgentFramework.child_spec/1` from one config struct checked
   whole, one supervisor of the boxes in order, `operate/4`, `view/2`, `query/2` and
-  `subscribe/2`; `caf_example` keeps its config file, its console and its ends, and loses its
-  supervisor's wiring. This is item 15's library supervisor, with the instance's name every
+  `subscribe/2`; `caf_example` keeps its config file and its console, and loses its
+  supervisor's wiring. The ends (an ended agent's services ended) are the library's, since
+  every app needs them (F-169's new-1); F-169 built `child_spec/1` and moved them. This is item 15's library supervisor, with the instance's name every
   per-instance `Registry` is named from. About +500, −800.
 - **B4. One agent process per agent**, against B1's `Restart(a)`: `Sessions` becomes a
   `DynamicSupervisor` of agent processes, each under its own small supervisor with the app's
