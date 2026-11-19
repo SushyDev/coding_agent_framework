@@ -41,6 +41,7 @@ defmodule CodingAgentFramework.SurfaceTest do
         ports: %{intake: free_port(), mcp: free_port()},
         claude: HeadlessStandIn.write!(dir, :on_message),
         env: %{home: dir, path: "/nonexistent", term: "xterm-256color", lang: "C.UTF-8"},
+        user: "tester",
         interval: 200
       )
 

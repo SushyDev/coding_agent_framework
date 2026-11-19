@@ -57,6 +57,31 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
     path
   end
 
+  # F-173: the OS user, which Claude Code's Keychain lookup needs on macOS.
+  test "the launch's user is the environment's USER, or the file's; none on macOS is refused",
+       ctx do
+    env = Map.put(ctx.env, "USER", "someone")
+
+    assert {:ok, %Config{user: "someone", env: %{user: "someone"}}} =
+             ConfigFile.read(write!(ctx, ctx.data), env)
+
+    data = Map.put(ctx.data, "launch", %{"user" => "other"})
+    assert {:ok, %Config{user: "other"}} = ConfigFile.read(write!(ctx, data), env)
+
+    data = Map.put(ctx.data, "launch", %{"user" => 1})
+    assert ConfigFile.read(write!(ctx, data), env) == {:refused, {"launch.user", :not_a_string}}
+
+    case :os.type() do
+      {:unix, :darwin} ->
+        assert ConfigFile.read(write!(ctx, ctx.data), Map.delete(env, "USER")) ==
+                 {:refused, {:bad, :user}}
+
+      _ ->
+        assert {:ok, %Config{user: nil}} =
+                 ConfigFile.read(write!(ctx, ctx.data), Map.delete(env, "USER"))
+    end
+  end
+
   test "a config file is read whole into the example app's config", ctx do
     assert {:ok, %Config{} = c} = ConfigFile.read(write!(ctx, ctx.data), ctx.env)
     home = ctx.data["home"]

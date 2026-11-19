@@ -8,7 +8,7 @@ defmodule CodingAgentFramework.ClaudeCLITest do
   doctest Account
 
   @dir "/caf/accounts/work/claude"
-  @env %{home: "/h", path: "/bin", term: "xterm-256color", lang: "C.UTF-8"}
+  @env %{home: "/h", path: "/bin", term: "xterm-256color", lang: "C.UTF-8", user: "me"}
 
   # `more` comes first, so its values win `Keyword.get/2`.
   defp opts(more),
@@ -75,6 +75,7 @@ defmodule CodingAgentFramework.ClaudeCLITest do
       {"PATH", "/bin"},
       {"TERM", "xterm-256color"},
       {"LANG", "C.UTF-8"},
+      {"USER", "me"},
       {"MCP_TOOL_TIMEOUT", "600000"},
       {"CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "600000"},
       {"DISABLE_AUTOUPDATER", "1"}
@@ -89,6 +90,30 @@ defmodule CodingAgentFramework.ClaudeCLITest do
     assert env == expected
   end
 
+  # F-173: Claude Code finds the Keychain item by USER alone.
+  test "USER is the app's, after LANG; a bad one is refused, and none is left out" do
+    assert {:ok, %{env: env}} = ClaudeCLI.session(:parent, account(), opts(prompt: "p"))
+    assert Enum.slice(env, 4, 2) == [{"LANG", "C.UTF-8"}, {"USER", "me"}]
+
+    none = Map.delete(@env, :user)
+
+    assert {:ok, %{env: env}} =
+             ClaudeCLI.session(:parent, account(), opts(env: none, prompt: "p"))
+
+    refute List.keymember?(env, "USER", 0)
+
+    for bad <- ["", "a\nb", :me] do
+      assert ClaudeCLI.session(:parent, account(), opts(env: Map.put(@env, :user, bad))) ==
+               {:refused, {:bad, :user}}
+    end
+
+    assert ClaudeCLI.session(
+             :parent,
+             account(),
+             opts(env: Map.put(@env, :tools, [{"USER", "x"}]))
+           ) == {:refused, {:bad, :tools}}
+  end
+
   # F-151: Claude Code's Node finds devenv's certificates only through these variables.
   test "the CA bundle the app gives is passed on after the four, sorted; a bad one is refused" do
     ca = %{"SSL_CERT_FILE" => "/etc/ca.crt", "NODE_EXTRA_CA_CERTS" => "/etc/ca.crt"}
@@ -98,7 +123,7 @@ defmodule CodingAgentFramework.ClaudeCLITest do
       assert {:ok, %{env: got}} =
                ClaudeCLI.session(role, account(), opts(env: env, prompt: "p"))
 
-      assert Enum.slice(got, 5, 2) ==
+      assert Enum.slice(got, 6, 2) ==
                [{"NODE_EXTRA_CA_CERTS", "/etc/ca.crt"}, {"SSL_CERT_FILE", "/etc/ca.crt"}]
     end
 
@@ -115,7 +140,7 @@ defmodule CodingAgentFramework.ClaudeCLITest do
 
     for role <- [:parent, :delegate] do
       assert {:ok, %{env: got}} = ClaudeCLI.session(role, account(), opts(env: env, prompt: "p"))
-      assert Enum.slice(got, 6, length(tools)) == tools
+      assert Enum.slice(got, 7, length(tools)) == tools
       assert {"GH_CONFIG_DIR", "/caf/gh"} in got
     end
 
