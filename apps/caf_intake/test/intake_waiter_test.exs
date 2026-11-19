@@ -76,27 +76,39 @@ defmodule CodingAgentFramework.IntakeWaiterTest do
     assert rows(db) == []
   end
 
-  test "a second waiter waits behind the first, which gets a heartbeat; it takes its place",
+  # F-157: every Stop starts a waiter, a blocked one too, so a session has several live.
+  test "a newer waiter is the session's, and the older one is answered empty", %{start: start} do
+    intake = start.([])
+    {first, _, ref1} = stand_in(intake)
+    {second, key2, ref2} = stand_in(intake)
+    assert_receive {:got, ^first, {^ref1, :release}}, 5_000
+
+    task = Task.async(fn -> Intake.deliver(intake, "work", "s1", "one") end)
+    assert_receive {:got, ^second, {^ref2, {:decision, "one"}}}, 5_000
+    Intake.written(intake, key2, ref2)
+    assert {:ok, :sent} = Task.await(task)
+    refute_received {:got, ^first, {_, {:decision, _}}}
+    assert {:ok, false} = waiter?(intake)
+  end
+
+  test "a waiter with text in flight is kept; a newer one waits behind it, then takes over",
        %{start: start} do
     intake = start.([])
     {first, key1, ref1} = stand_in(intake)
-    {second, _, ref2} = stand_in(intake)
-    # The first is sent a heartbeat at once, so a death unseen would be found.
-    assert_receive {:got, ^first, {^ref1, :beat}}, 5_000
-
-    # Text goes to the first, the session's, while it is held; one text at a time.
     task = Task.async(fn -> Intake.deliver(intake, "work", "s1", "one") end)
     assert_receive {:got, ^first, {^ref1, {:decision, "one"}}}, 5_000
+
+    {second, _, ref2} = stand_in(intake)
+    {third, _, ref3} = stand_in(intake)
+    # Of the two behind, the older is answered empty; the first's text is not touched.
+    assert_receive {:got, ^second, {^ref2, :release}}, 5_000
     assert {:refused, :no_waiter} = Intake.deliver(intake, "work", "s1", "two")
     Intake.written(intake, key1, ref1)
     assert {:ok, :sent} = Task.await(task)
 
-    # The first's hold ended, so the second is the session's.
-    assert {:ok, true} = waiter?(intake)
     task = Task.async(fn -> Intake.deliver(intake, "work", "s1", "two") end)
-    assert_receive {:got, ^second, {^ref2, {:decision, "two"}}}, 5_000
-    refute_received {:got, ^first, _}
-    send(second, {:stop})
+    assert_receive {:got, ^third, {^ref3, {:decision, "two"}}}, 5_000
+    send(third, {:stop})
     assert {:unknown, {:request_closed, _}} = Task.await(task)
   end
 
@@ -104,43 +116,38 @@ defmodule CodingAgentFramework.IntakeWaiterTest do
   test "a session's waiter coming and going is cued on its own topic", %{start: start} do
     intake = start.([])
     waiters = %{topic: "intake:h:work:waiters", ids: ["s1"]}
-    {first, key1, ref1} = stand_in(intake)
+    {_first, _, _} = stand_in(intake)
     assert_receive ^waiters, 5_000
-    # A second behind the first changes nothing for the session: no cue.
+    # A newer one takes the session's place: a cue.
     {second, key2, ref2} = stand_in(intake)
-    refute_received ^waiters
-
-    # The first's hold ends, the second takes its place: one cue; then the second goes: one.
-    task = Task.async(fn -> Intake.deliver(intake, "work", "s1", "one") end)
-    assert_receive {:got, ^first, {^ref1, {:decision, "one"}}}, 5_000
-    Intake.written(intake, key1, ref1)
-    assert {:ok, :sent} = Task.await(task)
     assert_receive ^waiters, 5_000
-    task = Task.async(fn -> Intake.deliver(intake, "work", "s1", "two") end)
-    assert_receive {:got, ^second, {^ref2, {:decision, "two"}}}, 5_000
+
+    task = Task.async(fn -> Intake.deliver(intake, "work", "s1", "one") end)
+    assert_receive {:got, ^second, {^ref2, {:decision, "one"}}}, 5_000
     Intake.written(intake, key2, ref2)
     assert {:ok, :sent} = Task.await(task)
     assert_receive ^waiters, 5_000
     assert {:ok, false} = waiter?(intake)
   end
 
-  test "a failed write ends the hold: unknown while text is in flight, and the next takes over",
-       %{start: start} do
+  test "a failed write ends the hold: unknown while text is in flight", %{start: start} do
     intake = start.([])
-    {first, key1, ref1} = stand_in(intake)
-    {second, key2, ref2} = stand_in(intake)
-    assert_receive {:got, ^first, {^ref1, :beat}}, 5_000
-
-    # A failed heartbeat of the first: the second is the session's.
-    Intake.closed(intake, key1, ref1)
-    assert {:ok, true} = waiter?(intake)
+    {_first, key1, ref1} = stand_in(intake)
     task = Task.async(fn -> Intake.deliver(intake, "work", "s1", "text") end)
-    assert_receive {:got, ^second, {^ref2, {:decision, "text"}}}, 5_000
+    assert_receive {:got, _, {^ref1, {:decision, "text"}}}, 5_000
 
     # The text's own write fails: it may have been read, so it is unknown, never sent again.
-    Intake.closed(intake, key2, ref2)
+    Intake.closed(intake, key1, ref1)
     assert {:unknown, {:request_closed, :closed}} = Task.await(task)
     assert {:ok, false} = waiter?(intake)
+  end
+
+  test "a failed heartbeat ends the session's waiter, and the session has none",
+       %{start: start} do
+    intake = start.([])
+    {_first, key1, ref1} = stand_in(intake)
+    Intake.closed(intake, key1, ref1)
+    assert {:ok, false} = await_waiter(intake, false)
   end
 
   test "a restart lets the waiter go, and the session has none", %{start: start} do

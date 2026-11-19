@@ -51,11 +51,12 @@ defmodule CodingAgentFramework.Example.Config do
   - `pressure`: how the `Scheduler` reads the host's pressure (`Scheduler.Pressure`), as its
     `pressure:` option; nil by default, which reads stall times where the host has them
     (`/proc/pressure`) and nothing elsewhere;
-  - `tool_hooks`: the app's tool callbacks, `%{pre_tool_use: fun, post_tool_use: fun}`, each
-    optional, as `CodingAgentFramework.Intake` takes them. Every account's settings name the
-    `PreToolUse` hook, since the framework's own callback (`Mover.pre_tool_use/2`, a move's
-    drain) decides first and hands any other call to the app's; `post_tool_use` adds its hook
-    when given. None by default.
+  - `tool_hooks`: the app's hook callbacks, `%{pre_tool_use: fun, post_tool_use: fun, stop:
+    fun}`, each optional, as `CodingAgentFramework.Intake` takes them. Every account's settings
+    name the `PreToolUse` hook, since the framework's own callback (`Mover.pre_tool_use/2`, a
+    move's drain) decides first and hands any other call to the app's; `post_tool_use` adds its
+    hook when given; `stop` holds each turn's end for the app (the `Stop` hold, with its cap
+    and pauses). None by default.
 
       iex> {:ok, c} = CodingAgentFramework.Example.Config.new(home: "/srv/caf", instance: "a",
       ...>   programs: %{kill: "/bin/kill"}, accounts: ["work"], ports: %{intake: 4790, mcp: 4791},

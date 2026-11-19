@@ -103,6 +103,21 @@ defmodule CodingAgentFramework.StoreTest do
     assert [%{id: 1}] = Store.select(db, "t", @columns, "1 = 1", [])
   end
 
+  test "a transaction whose function raises is rolled back, and the next one runs" do
+    {:ok, db} = Store.open(path(), @schema)
+
+    assert_raise RuntimeError, "half done", fn ->
+      Store.transaction(db, fn ->
+        Store.insert(db, "t", host: "h")
+        raise "half done"
+      end)
+    end
+
+    assert Store.select(db, "t", @columns, "1 = 1", []) == []
+    assert :ok = Store.transaction(db, fn -> Store.insert(db, "t", host: "g") && :ok end)
+    assert [%{host: "g"}] = Store.select(db, "t", @columns, "1 = 1", [])
+  end
+
   test "load fills a newer field and names a field it does not know; bad bytes load fresh" do
     fresh = %{a: 0, b: []}
     assert Store.load(:erlang.term_to_binary(%{a: 1}), fresh) == {%{a: 1, b: []}, []}
