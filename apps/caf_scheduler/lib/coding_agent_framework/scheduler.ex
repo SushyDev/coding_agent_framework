@@ -30,7 +30,10 @@ defmodule CodingAgentFramework.Scheduler do
   fencing token.
 
   **The gates.** Pressure (`Scheduler.Pressure`, read on its own interval): `high` admits no new
-  heavy run, `severe` nothing new but a person's main session. A request its class is barred
+  heavy run, `severe` nothing new but a person's main session. Each change of the level is cued,
+  `%{topic: "scheduler:<host>", pressure: level}`, and `pressure/2` answers the level with its
+  source and its last sample's time; a sample that could not be read (an unknown value
+  included) changes nothing and is named there, never read as `ok`. A request its class is barred
   from is refused at once; a queued one waits for its deadline. The allowance, the function
   `allowance:`, answers `:room` or `{:spent, retry_at}` for an account: a spent one is refused at
   once, and a queued request whose account is spent is refused then. Gates stop new starts only:
@@ -68,7 +71,8 @@ defmodule CodingAgentFramework.Scheduler do
   resource's name to its capacity), and optionally `holders:` (each holder kind to a function
   of its key answering `:live`, `:ended` or `{:unknown, reason}`), `allowance:` (a function of
   an account answering `:room` or `{:spent, retry_at}`; without it every account has room),
-  `pressure:` (`source: :psi | {:level, read} | :none`, `dir:` for `:psi`, `interval:` ms, and
+  `pressure:` (`source: :psi | {:level, read} | :none`, `dir:` for `:psi`, `name:` for a
+  `{:level, read}` source as `pressure/2` names it (`level` by default), `interval:` ms, and
   `Scheduler.Pressure`'s thresholds; `:none` by default), `queue_bound:` (requests one class's
   queue holds, default 4, or a map by class), `max_wait:` (ms a queued request waits, default
   240 000, or a map by class), `age:` (ms after which a request goes first in its class, default
@@ -93,8 +97,18 @@ defmodule CodingAgentFramework.Scheduler do
   @spec leases(GenServer.server(), keyword) :: [map] | {:refused, term} | {:unknown, term}
   def leases(scheduler, opts \\ []), do: call(scheduler, :leases, opts)
 
-  @doc "The host's pressure now: `:ok`, `:high` or `:severe`."
-  @spec pressure(GenServer.server(), keyword) :: Pressure.level() | {:unknown, term}
+  @doc """
+  The host's pressure now: `level` (`:ok`, `:high` or `:severe`, as the gates read it), its
+  `source` (`:psi`, `:none`, or a `{:level, read}` source's `name:`), `at` (the wall-clock ms of
+  the last sample read, nil before any) and `unread` (nil, or why the last sample could not be
+  read: it changed nothing).
+
+      Scheduler.pressure(s)
+      #=> %{level: :high, source: "sysctl", at: 1_763_500_000_000, unread: nil}
+  """
+  @spec pressure(GenServer.server(), keyword) ::
+          %{level: Pressure.level(), source: atom | String.t(), at: integer | nil, unread: term}
+          | {:unknown, term}
   def pressure(scheduler, opts \\ []), do: call(scheduler, :pressure, opts)
 
   @doc """
@@ -139,6 +153,9 @@ defmodule CodingAgentFramework.Scheduler do
         notify: Keyword.get(opts, :notify, fn _ -> :ok end),
         clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
         source: Keyword.get(pressure, :source, :none),
+        source_name: Keyword.get(pressure, :name, "level"),
+        sampled_at: nil,
+        unread: nil,
         psi: Keyword.get(pressure, :dir, "/proc/pressure"),
         every: Keyword.get(pressure, :interval, 2_000),
         pressure: Pressure.new(Keyword.take(pressure, Keyword.keys(Pressure.defaults()))),
@@ -170,7 +187,10 @@ defmodule CodingAgentFramework.Scheduler do
   def handle_call(:leases, _from, s),
     do: {:reply, Table.all(s.db), s}
 
-  def handle_call(:pressure, _from, s), do: {:reply, s.pressure.level, s}
+  def handle_call(:pressure, _from, s) do
+    source = with {:level, _} <- s.source, do: s.source_name
+    {:reply, %{level: s.pressure.level, source: source, at: s.sampled_at, unread: s.unread}, s}
+  end
 
   @impl true
   def handle_cast(:check, s), do: {:noreply, check(s)}
@@ -187,11 +207,23 @@ defmodule CodingAgentFramework.Scheduler do
 
     s =
       case sample(s) do
-        {:ok, sample} -> %{s | pressure: Pressure.step(s.pressure, sample, now(s))}
-        _unread -> s
+        {:ok, sample} ->
+          t = now(s)
+          %{s | pressure: Pressure.step(s.pressure, sample, t), sampled_at: t, unread: nil}
+
+        {:unknown, reason} ->
+          %{s | unread: reason}
+
+        other ->
+          %{s | unread: other}
       end
 
-    {:noreply, if(s.pressure.level != before, do: serve(s), else: s)}
+    if s.pressure.level != before do
+      s.notify.(%{topic: "scheduler:#{s.host}", pressure: s.pressure.level})
+      {:noreply, serve(s)}
+    else
+      {:noreply, s}
+    end
   end
 
   def handle_info({:deadline, seq}, s) do

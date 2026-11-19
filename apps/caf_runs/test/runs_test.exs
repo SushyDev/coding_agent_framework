@@ -1,0 +1,237 @@
+defmodule CodingAgentFramework.RunsTest do
+  @moduledoc """
+  Heavy commands under a lease (F-171, `Schedule.tla`'s shape `Native`): the `PreToolUse`
+  rewrite, and the wrapper itself, run with the real `sh`, `curl` and `ps` against a real
+  `Scheduler` behind `Runs.Plug` on a real port.
+  """
+  use ExUnit.Case, async: true
+
+  import CodingAgentFramework.TestHost, except: [await: 1, await: 2]
+
+  alias CodingAgentFramework.{Runs, Scheduler, Shell}
+
+  doctest Runs
+  doctest Runs.Plug
+
+  @secret "s3cret"
+
+  defp runs(dir, heavy \\ [%{match: ~r/\bmake\b/, class: :heavy}]) do
+    {:ok, runs} = Runs.new(dir, programs(), heavy)
+    runs
+  end
+
+  describe "the rewrite" do
+    setup do
+      {:ok, runs: runs("/srv/the home")}
+    end
+
+    defp bash(command, extra \\ %{}) do
+      %{
+        agent: "fix-1",
+        tool_name: "Bash",
+        tool_use_id: "toolu_01A",
+        tool_input: Map.merge(%{"command" => command}, extra)
+      }
+    end
+
+    test "a heavy Bash call runs under the wrapper; every other field stays", %{runs: runs} do
+      pre = Runs.pre_tool_use(runs, nil)
+      event = bash("make test && echo 'done'", %{"run_in_background" => true, "timeout" => 9})
+
+      assert {:allow, updated_input: input} = pre.(event)
+
+      assert input == %{
+               "command" =>
+                 ~S('/srv/the home/bin/caf-run' heavy 'toolu_01A' 'fix-1' -- ) <>
+                   ~S('make test && echo '\''done'\'''),
+               "run_in_background" => true,
+               "timeout" => 9
+             }
+
+      # The wrapped call is not wrapped again.
+      assert pre.(bash(input["command"])) == :pass
+    end
+
+    test "the app answers first: a deny stands, a pass or a correction is rewritten",
+         %{runs: runs} do
+      deny = Runs.pre_tool_use(runs, fn _ -> {:deny, "not here"} end)
+      assert deny.(bash("make")) == {:deny, "not here"}
+
+      fix = fn _ ->
+        {:allow, updated_input: %{"command" => "make -j2"}, additional_context: "c"}
+      end
+
+      assert {:allow, [updated_input: %{"command" => c}, additional_context: "c"]} =
+               Runs.pre_tool_use(runs, fix).(bash("make"))
+
+      assert c =~ "-- 'make -j2'"
+
+      crash = Runs.pre_tool_use(runs, fn _ -> raise "boom" end)
+      assert {:allow, _} = crash.(bash("make"))
+    end
+
+    test "what is not heavy, not Bash, or of no known agent is the app's answer",
+         %{runs: runs} do
+      pre = Runs.pre_tool_use(runs, fn _ -> :ask end)
+      assert pre.(bash("ls")) == :ask
+      assert Runs.pre_tool_use(runs, nil).(bash("ls")) == :pass
+      assert Runs.pre_tool_use(runs, nil).(%{bash("make") | tool_name: "Read"}) == :pass
+      assert Runs.pre_tool_use(runs, nil).(%{bash("make") | agent: nil}) == :pass
+    end
+  end
+
+  describe "the wrapper" do
+    setup do
+      dir = test_dir()
+      runs = runs(dir)
+      {:ok, dir: dir, runs: runs}
+    end
+
+    # A Scheduler on one slot, its owner of a run's lease the process itself, read every 50 ms.
+    defp serve(%{dir: dir, runs: runs}, opts \\ []) do
+      {:ok, s} =
+        Scheduler.start_link(
+          [
+            db: Path.join(dir, "leases.db"),
+            host: "ws",
+            resources: %{"slot" => 1},
+            holders: %{"run" => &Runs.state(runs, &1)},
+            interval: 50
+          ] ++ opts
+        )
+
+      plug =
+        {Runs.Plug,
+         scheduler: fn -> s end, units: fn :heavy, _ -> {:ok, %{"slot" => 1}} end, secret: @secret}
+
+      server =
+        start_supervised!({Bandit, plug: plug, ip: {127, 0, 0, 1}, port: 0, startup_log: false})
+
+      {:ok, {_, port}} = ThousandIsland.listener_info(server)
+      :ok = Runs.prepare(runs, programs(), port, @secret)
+      s
+    end
+
+    defp wrapped(runs, id, command, timeout \\ 20_000) do
+      Shell.run(host(), Runs.wrapper(runs), ["heavy", id, "fix-1", "--", command],
+        timeout: timeout
+      )
+    end
+
+    defp released?(s, id) do
+      case Enum.find(Scheduler.leases(s), &(&1.request_id == "run:" <> id)) do
+        %{released_at: at} = lease when is_integer(at) -> {:ok, lease}
+        other -> {:held, other}
+      end
+    end
+
+    test "the command's own output and exit code, and its end releases the lease once", ctx do
+      s = serve(ctx)
+
+      assert {:ok, %{status: 3, output: "out\nerr\n"}} =
+               wrapped(ctx.runs, "toolu_1", "echo out; echo err >&2; exit 3")
+
+      assert {:ok, lease} = await(fn -> released?(s, "toolu_1") end)
+
+      assert %{class: "heavy", module: "fix-1", holder: {"run", _}, released_by: "monitor"} =
+               lease
+
+      # The same id again takes no second slot: its lease was used.
+      assert {:ok, %{status: 75, output: out}} = wrapped(ctx.runs, "toolu_1", "echo again")
+      assert out =~ "caf-run: not run: the lease was refused (used)"
+      refute out =~ "again\n"
+    end
+
+    test "queued: one line while it waits, then it runs once the slot is free", ctx do
+      s = serve(ctx)
+      gate = Path.join(ctx.dir, "gate")
+      {:ok, _} = Shell.run(host(), program!(:mkfifo), [gate], timeout: 5_000)
+
+      held = ~s(echo held > '#{gate}.ran'; exec cat '#{gate}')
+      first = Task.async(fn -> wrapped(ctx.runs, "toolu_a", held) end)
+
+      {:ok, _} = read_when(gate <> ".ran", "held")
+
+      err = Path.join(ctx.dir, "second.err")
+      cmd = ~s('#{Runs.wrapper(ctx.runs)}' heavy toolu_b fix-1 -- 'echo second' 2> '#{err}')
+
+      second =
+        Task.async(fn -> Shell.run(host(), program!(:sh), ["-c", cmd], timeout: 20_000) end)
+
+      assert {:ok, "caf-run: queued (position 1)\n"} = read_when(err, "caf-run: queued")
+
+      File.write!(gate, "go\n")
+      assert {:ok, %{status: 0, output: "go\n"}} = Task.await(first, 20_000)
+      assert {:ok, %{status: 0, output: "second\n"}} = Task.await(second, 20_000)
+      assert File.read!(err) == "caf-run: queued (position 1)\n"
+      assert {:ok, _} = await(fn -> released?(s, "toolu_b") end)
+    end
+
+    test "refused: one line with the reason and its time, exit 75, nothing run", ctx do
+      serve(ctx, pressure: [source: {:level, fn -> {:ok, 4} end}, interval: 60_000])
+      ran = Path.join(ctx.dir, "ran")
+
+      assert {:ok, %{status: 75, output: out}} =
+               wrapped(ctx.runs, "toolu_p", ~s(echo ran > '#{ran}'))
+
+      assert out =~
+               ~r/\Acaf-run: not run: the lease was refused \(pressure\); try again after 20\d\d-/
+
+      refute File.exists?(ran)
+    end
+
+    test "a kill of the running command releases its lease", ctx do
+      s = serve(ctx)
+      ran = Path.join(ctx.dir, "ran")
+      held = ~s(echo held > '#{ran}'; exec '#{program!(:sleep)}' 60)
+      run = Task.async(fn -> wrapped(ctx.runs, "toolu_k", held) end)
+      {:ok, _} = read_when(ran, "held")
+
+      {:held, %{holder: {"run", key}}} = released?(s, "toolu_k")
+      [pid, _start] = String.split(key, " ", parts: 2)
+      {:ok, _} = kill(pid, "-KILL")
+
+      assert {:ok, %{released_by: "monitor"}} = await(fn -> released?(s, "toolu_k") end)
+      assert {:ok, %{status: status}} = Task.await(run, 20_000)
+      assert status != 0
+      assert Runs.state(ctx.runs, key) == :ended
+    end
+
+    test "with no Scheduler it says so in one line and runs without a lease", ctx do
+      plug =
+        {Runs.Plug,
+         scheduler: fn -> nil end, units: fn _, _ -> {:ok, %{"slot" => 1}} end, secret: @secret}
+
+      server =
+        start_supervised!({Bandit, plug: plug, ip: {127, 0, 0, 1}, port: 0, startup_log: false})
+
+      {:ok, {_, port}} = ThousandIsland.listener_info(server)
+      :ok = Runs.prepare(ctx.runs, programs(), port, @secret)
+
+      assert {:ok, %{status: 0, output: out}} = wrapped(ctx.runs, "toolu_n", "echo ran")
+      assert out == "caf-run: no lease (no_scheduler); the command runs without one\nran\n"
+    end
+  end
+
+  test "the endpoint refuses a wrong secret and a request out of shape" do
+    opts =
+      Runs.Plug.init(scheduler: fn -> nil end, units: fn _, _ -> {:ok, %{}} end, secret: @secret)
+
+    post = fn body, secret ->
+      Plug.Test.conn(:post, "/runs", body)
+      |> Plug.Conn.put_req_header("x-caf-secret", secret)
+      |> Map.put(:remote_ip, {127, 0, 0, 1})
+      |> Runs.Plug.call(opts)
+    end
+
+    assert post.("class=heavy", "wrong").status == 401
+    assert %{status: 200, resp_body: "refused bad_class -\n"} = post.("class=main", @secret)
+  end
+
+  defp await(fun) do
+    case CodingAgentFramework.TestHost.await(fun, 10_000) do
+      {:ok, value} -> {:ok, value}
+      other -> flunk("not reached: #{inspect(other)}")
+    end
+  end
+end

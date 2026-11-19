@@ -144,6 +144,23 @@ defmodule CodingAgentFramework.JobsTest do
 
   defp gone(pid), do: await(fn -> if alive?(pid), do: :alive, else: {:ok, :gone} end)
 
+  test "the table is a Tracker source of every host's jobs, on the topic Jobs cues" do
+    alias CodingAgentFramework.{Jobs.Table, Reader}
+    meta = Table.meta()
+
+    assert %{topic: "jobs", scope: {"ws", "jobs"}, kind: :jobs} =
+             Reader.describe(meta, host: "ws")
+
+    path = Path.join(test_dir(), "jobs.db")
+    {:ok, jobs} = Table.open(path)
+    row = %{id: "j1", host: "box", project: "web", name: "fix", state: "running"}
+    :ok = Table.put(jobs, row)
+    {:ok, db} = Reader.open(meta, path)
+
+    {:ok, %{rows: [%{id: "j1", host: "box", state: "running"}]}} =
+      Reader.source_read(meta, db, [host: "ws"], ["j1"])
+  end
+
   for host <- ["test", "box"] do
     test "AnswerIsReal: a job on #{host} answers its own exit code and its log", c do
       assert {:ok, %{exit: 0, log: "job exit in one\n", fetch: :none}} =

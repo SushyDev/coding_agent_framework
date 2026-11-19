@@ -207,7 +207,7 @@ internal: still `def` where Elixir needs it, but `@moduledoc false`, and the bou
 | **`Prompts`** | everything waiting on a person or a parent, at any depth, answered once from one place; for the app and `steer` | `open/2`, `answer/3`, `read/2` | `prompts` | `Prompt` (new, B1), instancing `Hold` and `Claim` | `Mailbox`'s asks, `Sessions.Dialog`'s answers, `Intake`'s permission answers (their mechanisms stay where they are) |
 | **`Team`** | the tree: who works for whom, what each may do, and the verbs; for agents and the app | `operate/4`, `tree/2`, `tools/2` | `delegates`, `checkouts`, `main_starts`, `mcp_tokens`, `mcp_calls`, `extensions` | `Delegate`, `Team`, `Checkout` (`Stack` when built) | `caf_delegates`, `caf_mains`, `caf_grants`, `caf_mcp` |
 | **`Scheduler`** | admits work in order, within capacity and allowance, on an account; for `Team` and `Hosts` | `request/2`, `read/2` | `leases` | `Schedule` | `caf_scheduler`, `caf_usage` |
-| **`Hosts`** | runs commands and services on any host, in a copy of the worktree; for `Team` | `run/3`, `serve/3`, `steer/3`, `read/2` | `copies`, `jobs`, `services` | `Copy`, `Shell` | `caf_copies`, `caf_jobs`, `caf_services` |
+| **`Hosts`** | runs commands and services on any host, in a copy of the worktree; for `Team` | `run/3`, `serve/3`, `steer/3`, `read/2` | `copies`, `jobs`, `services` | `Copy`, `Shell` | `caf_copies`, `caf_jobs`, `caf_services`, `caf_runs` |
 | **`Watch`** | shows what runs, measures it, and heals only as approved; for the app and `look` | `view/2`, `metrics/2`, `digest/2`, `remedies/3`, `clear/3` | `remedies` | `Heal` (new, B1) | `caf_tracker`, `caf_recoveries` |
 
 Under the boxes is a base every box stands on: `caf_shell` (`Shell`, `Programs`,
@@ -348,7 +348,16 @@ framework's hooks deciding:
 
 - a heavy `Bash` command is rewritten (`updatedInput`) into a wrapper that takes a lease, runs
   where the `Scheduler` places it, streams its output and exits with its code (F-157), so the
-  `run` tool goes once that is built;
+  `run` tool goes once that is built. Built in F-171 on the workstation (`Runs`): the app's
+  list of heavy commands (a pattern and a class each) rewrites a matching call, after the app's
+  own callback lets it run, into `'<home>/bin/caf-run' <class> <tool_use_id> <agent> --
+  '<command>'`; the wrapper asks for the lease over the intake's port under the tool call's id,
+  prints one `queued` line while it waits, then `exec`s the command, so its output and exit
+  code are the command's and the lease's holder is that process (`{"run", "<pid> <start>"}`),
+  released once on any end, a kill included, read by `ps` (`Schedule.tla`'s shape `Native`);
+  a refusal prints one line with its reason and retry time and exits 75; with no answer it
+  runs without a lease and says so, as a hook fails open. `run` is listed to no agent, and
+  stays served until a later unit takes it and its late end out (F-171's new-3);
 - `run_in_background` and `Monitor` stay native; during a move's drain they are denied with a
   reason (as today);
 - Claude Code's own question tool (`AskUserQuestion`), in a session no person attends, opens a
@@ -651,7 +660,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Hosts` | the workstation and the other hosts, how each is reached, and its shell | — |
 | `Shell` | the only module that starts programs, locally or over ssh, each leading a process group of its own, which a timeout ends | — |
 | `Shell.Reaper` | one per host: ends a running command's group when its caller dies first or the VM dies | — |
-| `Programs` | the absolute path of tmux, dtach, claude, git, gh, rsync, ssh, flock, sh, sleep, rm, kill, env, ps, cat, tail, curl (the waiter hook) and ssh-keygen (git's signing) on each host, given (from devenv, as the framework's own development and gates use) or looked up on the host's `PATH`, each checked against its supported versions at start with a clear error per one missing or out of range; no other part names a fixed path. It also names the host's operating system (`uname -s` beside the lookup, the VM's own for a local host), which bounds a launch's argument (F-155) | — |
+| `Programs` | the absolute path of tmux, dtach, claude, git, gh, rsync, ssh, flock, sh, sleep, rm, kill, env, ps, cat, tail, curl (the waiter hook and a heavy command's wrapper), ssh-keygen (git's signing) and sysctl (macOS's memory-pressure level) on each host, given (from devenv, as the framework's own development and gates use) or looked up on the host's `PATH`, each checked against its supported versions at start with a clear error per one missing or out of range; no other part names a fixed path. It also names the host's operating system (`uname -s` beside the lookup, the VM's own for a local host), which bounds a launch's argument (F-155) | — |
 | `ToolHome` | where every tool the framework runs keeps its state, in the home (F-155): the environment every launch, job and service sets (`GH_CONFIG_DIR`, `GIT_CONFIG_GLOBAL` with `GIT_CONFIG_NOSYSTEM`, the four `XDG_*_HOME`, `GIT_SSH_COMMAND`), the options every ssh to a host takes (`-F <home>/ssh/config -o UserKnownHostsFile=<home>/ssh/known_hosts`), and the git config it writes at the app's start: the author it is given, SSH signing with the home's own key, `gh` as GitHub's credential helper, and each project's override for every repository under its checkout. A pure module | — |
 | `Store` | a pure module over SQLite: open with WAL and a busy timeout, the schema and its added columns, `query`, `rows_by_id`, `update`, upsert, a reads row, and a load that fills a newer build's fields with their defaults; every table of the framework is opened through it. A term in a column is stored by one rule (`Store.text/1`): an atom as its name, any other term as canonical JSON, never `inspect` text; a writer converts what an earlier build stored when it opens its file (`Store.convert/3`) | no table |
 | `Reader` | a pure module beside `Store`: the loop every reader runs (read on an interval or a call, diff against what it wrote, write with a reads row, cue), and a `Tracker` source made from the reader's table metadata | no table; each reader its own |
@@ -679,6 +688,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Stacks` | the worktrees and `gh stack` chains of a main session's work | — |
 | `Copies` | a host's copy of each worktree, brought in step by rsync before each job or service, and removed with the worktree | `copies` |
 | `Jobs` | one-off commands on a host, in a copy: held, logged, ended by their exit or their timeout; each asks the `Scheduler` for a lease first, in the class its caller names, its row the holder (`Jobs.Work` answers for it), and its wrapper runs only under the fence of that lease ("A lease") | `jobs`, with each row's lease id and a lease refusal's reason and retry time |
+| `Runs` | a heavy native `Bash` command under a lease (F-171): the `PreToolUse` policy that rewrites a call the app lists as heavy into the wrapper `<home>/bin/caf-run`, the wrapper itself, its endpoint on the intake's port (`Runs.Plug`), and the lease's owner, the wrapper's own process read by `ps` | no table: the lease is the row |
 | `Services` | programs agents start and keep on a host, in a copy: held, owned, read, written to, restarted, with ports forwarded to the workstation; the forward is a second `Holder.Process` record of the service | `services` |
 | `Tracker` | the state views read: the fold of every reader | — |
 | `Recoveries` | detect a broken state, take its act in `Acts`, act once per state, verify; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after its end within its stop's deadline, by `Holder.Process` (`Sessions` itself never kills). Two states wait for a person, whose clear makes the next one new: a viewer lost a third time within a window, and an end whose process outlived the KILL (`unknown`, F-118's new-5); the fault ledger shows both | no table of its own |
@@ -705,7 +715,7 @@ declarations to `Cues`, and names each part's process to it as it starts; no par
 | `intake:<host>:<account>:waiters` | `Intake` | `Mailbox` |
 | `usage:<host>:<account>` | `Usage` | `Scheduler` (a queued request's window ran out) |
 | `jobs` | `Jobs` | `Scheduler` (a job's work ended) |
-| `intake:<host>:<account>`, `acts:…`, `services`, `scheduler:<host>` | their parts | none |
+| `intake:<host>:<account>`, `acts:…`, `services`, `copies`, `scheduler:<host>` (a lease's row, or `pressure: level` at each change of the level) | their parts | none |
 
 No cue says that a host's job or service changed, so `Jobs` and `Services` settle their rows on
 their own interval, as a reader reads, and `Stream` reads its logs on one; each of the three
@@ -810,6 +820,10 @@ any reply does (new-4).
     request at once too. An account with no reading, or a window its reading lacks, has room:
     an account has no reading until a session on it draws its status line. `severe` is taken at
     once; `high`, and a return to a lower state, only once asked for a whole window (F-135).
+    On macOS the level is `sysctl -n kern.memorystatus_vm_pressure_level`: 1 (normal) `ok`, 2
+    (warn) `high`, 4 (critical) `severe`, and any other value unknown, never `ok`: a sample
+    that cannot be read changes nothing and is named in `Scheduler.pressure/2`, beside the
+    level's source and its last sample's time; each change of the level is cued (F-171).
     Gates stop new starts only: an admitted session is never shed. Thresholds, reserves and
     the windows' figures are measured on the workstation, not modeled: each is an option with a
     placeholder default.
@@ -2050,10 +2064,12 @@ section.
   `:pass` (the turn ends) or `{:block, reason}` (`{"decision": "block", "reason": …}`: the
   agent goes on). Claude Code 2.1.322 honors 8 blocks in a row with no tool call between and
   overrides the 9th (measured, F-157), so `Intake` keeps each session's count in its table
-  (`intake_stops`), written before a block goes out and reset only by a `PostToolUse` post,
-  which the `Stop` hold's settings add. It may count more than Claude Code, never fewer: a
-  post lost while the framework is down, or a wake or a person's prompt that Claude Code may
-  take as a reset, leave it high. The 8th block in a row is not sent: the row waits on a person
+  (`intake_stops`), written before a block goes out and reset by a `PostToolUse` post, which
+  the `Stop` hold's settings add, and by a `Stop` it passes (at its deadline too): the turn
+  ends, and Claude Code gives the next turn, a person's prompt's or a wake's, the full 8 again
+  (measured on 2.1.322, F-171; `Intake.tla`'s `NewTurn`). It may count more than Claude Code
+  while a turn runs, never fewer: a post lost while the framework is down, or a turn that
+  ended while it was down, leave it high. The 8th block in a row is not sent: the row waits on a person
   (its `prompt` is `stop_cap`), whose `:go_on` is that block and whose `:end` lets the turn
   end; past it the hold passes at once, its actor `capped`. A pause per agent or per project
   (`intake_pauses`, set by the app or the operator, a pause per agent before one per project)
@@ -2261,7 +2277,13 @@ configuration: two landings and a heavy run on two slots and one lock), `NoStart
 slot) adds the host: a start sent may land at any later step, the wrapper takes the fence
 before it runs, and the owner settles a start never run only once it took the fence;
 `NoRunUnleased` (a job runs only under its unreleased lease) and `HostCapacity` (the running
-jobs never pass a capacity), with Break `NoFence`. It instances neither `Claim` nor `Hold`: a lease is
+jobs never pass a capacity), with Break `NoFence`. Its `Native` shape (F-171: two heavy
+`Bash` commands under the wrapper on one slot) makes the requester the work: the wrapper's
+own process asks, becomes the command once granted, exits after a refusal, and ends at any
+step, waiting or running, by an exit or a kill; the owner reads that end from the process, so
+`GoneIsReleased` (every end releases the lease) and `NoRunUnleased` hold, with Break
+`EndByPost` (an end read from the wrapper's own post, which a kill never sends, holds the
+lease past the command's end). It instances neither `Claim` nor `Hold`: a lease is
 units counted against a capacity for a process's life, not one act per state, and a queued
 request has no row, may be answered twice (queued, then once more) and is asked again after a
 restart rather than settled; the spec's header says so.
@@ -2810,7 +2832,8 @@ held for the app is a `Hold` kind and may go in beside them; it counts its block
 since Claude Code overrides a `Stop` hook's block past 8 in a row with no tool call between, and
 at the cap it hands the agent to a person as a `stop_cap` prompt in place of being overridden
 (decided); the override is an action of the environment in its spec, and whether the waiter's
-wakes count toward the cap is measured per release (F-162's new-11). The `stop_cap` prompt is
+wakes count toward the cap is measured per release (F-162's new-11; on 2.1.322 a turn's end
+resets the count, whether a person's prompt or a wake starts the next, F-171). The `stop_cap` prompt is
 the hold of the cap's last honored block: a person's "go on" is that block, and past it the
 hold passes and the turn ends, recorded `capped`; a person who wants more sends a message
 (F-167's new-1). Built in F-157 with a pause per agent and per project ("Intake"); until B6
@@ -2879,7 +2902,8 @@ model before the code it describes (B4, B6, B8, B9, B11); B2 and B3 change no be
   by facts; a job's end, a service's line, port and exit, a delegate's idle and report, an
   answer. `service_wait`'s poll becomes a fact `Hosts` records. About +400, −150.
 - **F-157**, as decided: the heavy `Bash` command rewritten into a wrapper under a lease; then
-  `run` leaves the agents' list (about −200).
+  `run` leaves the agents' list (about −200). Built in F-171 ("Intercepted, not added"); `run`
+  is listed to no agent and stays served until its late end goes with it (F-171's new-3).
 - **B10. The intercepts**: `AskUserQuestion` opened as a prompt where no person attends; the
   `Agent` tool's named types answered with the `delegate` call to make; the `unenforced` fact
   and the `stuck` event raised from the hooks' rows and told to the parent. About +300.

@@ -201,10 +201,15 @@ defmodule CodingAgentFramework.SchedulerTest do
 
     read = fn ->
       send(test, :read)
-      {:ok, Agent.get(ctx.gates, & &1.level)}
+
+      case Agent.get(ctx.gates, & &1.level) do
+        :unread -> {:unknown, {:level, "3"}}
+        n -> {:ok, n}
+      end
     end
 
-    s = start(ctx.opts, pressure: [source: {:level, read}, interval: 5, window: 0])
+    s =
+      start(ctx.opts, pressure: [source: {:level, read}, name: "kernel", interval: 5, window: 0])
 
     set = fn level ->
       Agent.update(ctx.gates, &%{&1 | level: level})
@@ -215,14 +220,24 @@ defmodule CodingAgentFramework.SchedulerTest do
     end
 
     set.(4)
-    assert :severe = Scheduler.pressure(s)
+    assert %{level: :severe, source: "kernel", at: at, unread: nil} = Scheduler.pressure(s)
+    assert is_integer(at)
+    # Each change of the level is cued once.
+    assert_received {:cue, %{topic: "scheduler:ws", pressure: :severe}}
     assert {:refused, {:pressure, _}} = Scheduler.request(s, req("b", :builder, %{"seat" => 1}))
     assert {:ok, _} = Scheduler.request(s, req("main", :main, %{"seat" => 1}))
 
     set.(2)
-    assert :high = Scheduler.pressure(s)
+    assert %{level: :high} = Scheduler.pressure(s)
+    assert_received {:cue, %{topic: "scheduler:ws", pressure: :high}}
+    refute_received {:cue, %{pressure: _}}
     assert {:refused, {:pressure, _}} = Scheduler.request(s, req("h", :heavy, %{"slot" => 1}))
     assert {:ok, _} = Scheduler.request(s, req("l", :landing, %{"slot" => 1, "lock" => 1}))
+
+    # A value nobody knows changes nothing and is named, never read as ok.
+    set.(:unread)
+    assert %{level: :high, unread: {:level, "3"}} = Scheduler.pressure(s)
+    refute_received {:cue, %{pressure: _}}
   end
 
   test "a requester that ends while it waits leaves the queue", ctx do

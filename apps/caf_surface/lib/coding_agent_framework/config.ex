@@ -70,6 +70,11 @@ defmodule CodingAgentFramework.Config do
     hook when given; `stop` holds each turn's end for the app (the `Stop` hold, with its cap
     and pauses). None by default. A callback may correct a call rather than refuse it
     (`Intake`'s `{:allow, updated_input: map, additional_context: text}`);
+  - `heavy`: the app's heavy commands (F-171), each `%{match: regex_or_string, class: class}`
+    as `CodingAgentFramework.Runs` takes them: an agent's `Bash` call whose command matches
+    runs under the wrapper `<home>/bin/caf-run`, which takes a lease of that class (`heavy`,
+    `builder` or `landing`, its units the `job_lease` of the class) before it runs. None by
+    default;
   - `extensions`: the app's bundles, each `%{name, scope, tools}` as
     `CodingAgentFramework.Extension` takes them, served on the agents' MCP endpoint beside the
     framework's tools; checked here with `MCP.extensions/3`, so a clash or a slow tool refuses
@@ -84,7 +89,7 @@ defmodule CodingAgentFramework.Config do
       {:refused, {:bad, :home}}
   """
 
-  alias CodingAgentFramework.{Mains, MCP}
+  alias CodingAgentFramework.{Mains, MCP, Runs}
 
   @enforce_keys [:home, :instance, :programs, :accounts, :ports, :claude, :env]
   defstruct [
@@ -111,6 +116,7 @@ defmodule CodingAgentFramework.Config do
     job_lease: %{heavy: %{"slot" => 1}, builder: %{"slot" => 1}, landing: %{"slot" => 1}},
     pressure: nil,
     tool_hooks: %{},
+    heavy: [],
     extensions: []
   ]
 
@@ -173,6 +179,9 @@ defmodule CodingAgentFramework.Config do
 
       not user?(fields) ->
         {:refused, {:bad, :user}}
+
+      not match?({:ok, _}, Runs.heavy(Map.get(fields, :heavy, []))) ->
+        {:refused, {:bad, :heavy}}
 
       true ->
         c = struct!(__MODULE__, fields)

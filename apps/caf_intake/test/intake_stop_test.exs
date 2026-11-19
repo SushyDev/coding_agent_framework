@@ -56,7 +56,28 @@ defmodule CodingAgentFramework.IntakeStopTest do
     # The same body again is a Stop of its own, never taken for a second post of the first.
     assert %{status: 200, resp_body: ""} = post(intake, @stop)
     assert [%{hold: "answered", actor: "app"}, %{hold: "passed", actor: "app"}] = rows(db)
-    assert blocks(db) == 1
+    # The pass ended the turn, and the count with it.
+    assert blocks(db) == 0
+  end
+
+  test "a Stop passed resets the count: the next turn has the whole cap again",
+       %{db: db, start: start} do
+    {:ok, answers} = Agent.start_link(fn -> [:block, :block, :pass, :block, :block] end)
+    next = fn _ -> Agent.get_and_update(answers, fn [a | rest] -> {a, rest} end) end
+
+    intake =
+      start_with(start, &if(next.(&1) == :pass, do: :pass, else: {:block, "on"}), stop_cap: 3)
+
+    assert blocked?(post(intake, @stop))
+    assert blocked?(post(intake, @stop))
+    assert %{resp_body: ""} = post(intake, @stop)
+    assert blocks(db) == 0
+
+    # Below the cap's last again: neither waits on a person.
+    assert blocked?(post(intake, @stop))
+    assert blocked?(post(intake, @stop))
+    assert blocks(db) == 2
+    refute Enum.any?(rows(db), &(&1.prompt == "stop_cap"))
   end
 
   test "at the cap's last block a person decides; past it the turn ends, capped",
@@ -78,6 +99,7 @@ defmodule CodingAgentFramework.IntakeStopTest do
     # Past the cap the hold passes at once, whatever the callback says.
     assert %{status: 200, resp_body: ""} = post(intake, @stop)
     assert %{hold: "passed", actor: "capped"} = List.last(rows(db))
+    assert blocks(db) == 0
     assert [_, _, %{actor: "person", prompt: "stop_cap", hold: "answered"} | _] = rows(db)
   end
 

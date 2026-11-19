@@ -43,7 +43,9 @@ defmodule CodingAgentFramework.Example.ConfigFile do
     refuses an agent's commit.
   - `scheduler`: `resources` (name to capacity, `seat` 4 and `slot` 2 by default), `lease` (a
     delegate's start, `{"seat": 1}`), `job_lease` (by class `heavy`, `builder`, `landing`, a
-    slot each). A landing's lock `land:<project>` is the app's, so no resource may take that name.
+    slot each), and `heavy`, the heavy commands an agent's `Bash` runs under a lease (F-171):
+    each `{"match": <regular expression>, "class": "heavy" | "builder" | "landing"}`, none by
+    default. A landing's lock `land:<project>` is the app's, so no resource may take that name.
   - `launch`: what every agent's launch shares: `claude` (by default devenv's, `CAF_CLAUDE`),
     `model` (a main session's, `opus`), and its environment, `home` (`HOME`), `path` (devenv's
     programs' directories, then `/usr/bin:/bin:/usr/sbin:/sbin`, so a session's tools are
@@ -81,7 +83,7 @@ defmodule CodingAgentFramework.Example.ConfigFile do
   @project ~w(origin trunk mains branches cap setup setup_timeout env git)
   @git ~w(name email signing_key)
   @launch ~w(claude model home path term lang user)
-  @scheduler ~w(resources lease job_lease)
+  @scheduler ~w(resources lease job_lease heavy)
   @classes %{"heavy" => :heavy, "builder" => :builder, "landing" => :landing}
   @short ~r/\A[a-z0-9][a-z0-9_-]{0,31}\z/
   @agent ~r/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z/
@@ -142,7 +144,8 @@ defmodule CodingAgentFramework.Example.ConfigFile do
         interval: interval,
         resources: scheduler.resources,
         lease: scheduler.lease,
-        job_lease: scheduler.job_lease
+        job_lease: scheduler.job_lease,
+        heavy: scheduler.heavy
       )
     end
   end
@@ -241,10 +244,27 @@ defmodule CodingAgentFramework.Example.ConfigFile do
          {:ok, resources} <- units(Map.get(s, "resources", default), "scheduler.resources"),
          {:ok, lease} <- units(Map.get(s, "lease", %{"seat" => 1}), "scheduler.lease"),
          :ok <- within(lease, resources, "scheduler.lease"),
-         {:ok, job_lease} <- job_lease(Map.get(s, "job_lease", jobs), resources) do
-      {:ok, %{resources: resources, lease: lease, job_lease: job_lease}}
+         {:ok, job_lease} <- job_lease(Map.get(s, "job_lease", jobs), resources),
+         {:ok, heavy} <- heavy(Map.get(s, "heavy", [])) do
+      {:ok, %{resources: resources, lease: lease, job_lease: job_lease, heavy: heavy}}
     end
   end
+
+  # Each entry as `CodingAgentFramework.Runs` takes it; `Config.new/1` checks its expression.
+  defp heavy(list) when is_list(list) do
+    list
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn
+      {%{"match" => m, "class" => c} = e, _i}, {:ok, acc}
+      when map_size(e) == 2 and is_binary(m) and is_map_key(@classes, c) ->
+        {:cont, {:ok, acc ++ [%{match: m, class: @classes[c]}]}}
+
+      {_, i}, _ ->
+        {:halt, {:refused, {"scheduler.heavy.#{i}", :not_a_command}}}
+    end)
+  end
+
+  defp heavy(_), do: {:refused, {"scheduler.heavy", :not_a_list}}
 
   defp job_lease(classes, resources) do
     with :ok <- known(classes, Map.keys(@classes), "scheduler.job_lease.") do

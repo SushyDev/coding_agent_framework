@@ -22,8 +22,11 @@ defmodule CodingAgentFramework.Reader do
     * `:read`: the reads row's columns besides the scope; `read_at` is one of them.
     * `:topic`, `:kind` and `:name`: a source's topic is `<topic>:<host>:<name option>`, its
       scope `{host, <group><name option>}`, and its rows of kind `kind`. With `name: nil` the
-      table is read per host: topic `<topic>:<host>`, scope `{host, <group>}`.
+      table is read per host: topic `<topic>:<host>`, scope `{host, <group>}`; with `name:
+      nil` and `host_topic: false` too, its writer cues one topic for every host (`jobs`,
+      `copies`), and the topic is `<topic>`.
     * optional `:group` (default `""`), `:filter` (more columns a source narrows rows by),
+      `:order` (the rows' order, `"id"` by default, for a table keyed by several columns),
       `:load` (a row map as stored to the row as read), `:load_read` (the same for a reads
       row), `:dump` (a column and a value to what is stored), `:view` (rows and a source's
       options to the rows it answers) and `:failed` (the word of a read whose reads row has a
@@ -162,7 +165,7 @@ defmodule CodingAgentFramework.Reader do
   @spec select(meta, Store.db(), scope) :: [map]
   def select(meta, db, filter) do
     db
-    |> Store.select(meta.table, columns(meta), where(filter) <> " ORDER BY id", values(filter))
+    |> Store.select(meta.table, columns(meta), where(filter) <> order(meta), values(filter))
     |> Enum.map(&load(meta, &1))
   end
 
@@ -226,6 +229,8 @@ defmodule CodingAgentFramework.Reader do
     do:
       filter |> Enum.with_index(1) |> Enum.map_join(" AND ", fn {{k, _}, i} -> "#{k} = ?#{i}" end)
 
+  defp order(meta), do: " ORDER BY " <> Map.get(meta, :order, "id")
+
   defp values(filter), do: Keyword.values(filter)
 
   # The source.
@@ -237,7 +242,8 @@ defmodule CodingAgentFramework.Reader do
   @spec describe(meta, keyword) :: %{topic: String.t(), scope: {term, String.t()}, kind: atom}
   def describe(%{name: nil} = meta, opts) do
     host = Keyword.fetch!(opts, :host)
-    %{topic: "#{meta.topic}:#{host}", scope: {host, meta.group}, kind: meta.kind}
+    topic = if Map.get(meta, :host_topic, true), do: "#{meta.topic}:#{host}", else: meta.topic
+    %{topic: topic, scope: {host, meta.group}, kind: meta.kind}
   end
 
   def describe(meta, opts) do

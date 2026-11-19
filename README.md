@@ -228,7 +228,13 @@ Built, each from a checked model in `model/tla/`:
 - an ask withdrawn by the app or the operator, settled once against an answer (F-172, against
   `Prompt.tla`); the pointer line naming its sender and its file's path in backticks; a forced
   end's rows settled by `Mailbox` itself, after a restart too; names refused before any row when
-  their socket would not fit under the home; and `Mains`' start carrying its caller's deadline.
+  their socket would not fit under the home; and `Mains`' start carrying its caller's deadline;
+- heavy commands taken transparently (F-171, against `Schedule.tla`): an agent's `Bash` call
+  that matches the app's heavy list is rewritten into `caf-run`, which waits for a lease with
+  one `queued` line, runs the command and releases the lease once on any end; the `Stop` count
+  reset at a turn's end, as measured; pressure cues, macOS's pressure level by default, `Jobs`
+  and `Copies` on the `Tracker`, and a headless delegate busy while its own background command
+  runs.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
@@ -362,7 +368,7 @@ built. Each belongs to one box (`Prompts` is new, B6, and fronts mechanisms that
 `caf_registry`, `caf_transcripts`, `caf_sampler`, `caf_cli`, `caf_accounts` and `caf_tmux`;
 `Mailbox` holds `caf_mailbox`; `Team` holds `caf_delegates`, `caf_mains`, `caf_grants` and
 `caf_mcp`; the `Scheduler` holds `caf_scheduler` and `caf_usage`; `Hosts` holds `caf_copies`,
-`caf_jobs` and `caf_services`; the `Watch` holds `caf_tracker` and `caf_recoveries`.
+`caf_jobs`, `caf_services` and `caf_runs`; the `Watch` holds `caf_tracker` and `caf_recoveries`.
 `caf_shell`, `caf_holder`, `caf_store` and the `Ledger`'s `caf_acts` and `caf_cues` are the
 base under every box. From B2, a call into a
 box from outside it goes only through the box's own module.
@@ -406,6 +412,7 @@ flowchart BT
     copies[caf_copies]
     jobs[caf_jobs]
     services[caf_services]
+    runs[caf_runs]
   end
 
   tmux --> shell
@@ -491,6 +498,9 @@ flowchart BT
   services --> holder
   services --> grants
   services --> copies
+  runs --> shell
+  runs --> holder
+  runs --> scheduler
 ```
 
 `caf_test` holds the shared test aids and is used only in tests. `caf_surface` is the app's

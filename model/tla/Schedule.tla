@@ -68,6 +68,20 @@
 (* even when a start lands after its deadline, which Copy.tla assumes      *)
 (* never happens (NeverLands). In the other shapes the host is left out.   *)
 (*                                                                         *)
+(* The native wrapper (F-171, shape "Native": heavy runs on one slot, as  *)
+(* `caf-run` runs them). A heavy `Bash` command is rewritten into a        *)
+(* wrapper on the workstation, which asks under the tool call's id with    *)
+(* its own process as the holder (`work` is that process as its owner      *)
+(* reads it, by pid and start time). It prints one line while queued; told *)
+(* granted, it becomes the command (exec, so the pid stays) and `run` is   *)
+(* "running"; told refused, it exits without running. It may end at any    *)
+(* step, waiting or running: an exit, a crash or a kill (`run` "done" or   *)
+(* "killed"). The owner reads that end from the process itself, so every   *)
+(* end releases the lease (`GoneIsReleased`), and only an end does         *)
+(* (`NoRunUnleased`). Under EndByPost the owner reads only the wrapper's  *)
+(* own post of its end, which a kill never sends, and the lease is held    *)
+(* past the command's end.                                                 *)
+(*                                                                         *)
 (* Neither Claim nor Hold is instanced. A lease is not a claim: a claim is *)
 (* one per state of a target, acted on once while current, while a lease  *)
 (* is units of a resource counted against a capacity, held as long as a    *)
@@ -95,9 +109,11 @@
 (* (GangAtomic), every request answered and every ended lease released     *)
 (* (QueuedIsAnswered, EndedIsReleased), the order and gates (ClassOrder,   *)
 (* NoHeavyUnderHigh, NoStartUnderSevere, NoStartWithoutBudget), and a job  *)
-(* run only under its lease (NoRunUnleased). Assumed of the owners         *)
-(* (`work`, the environment here): a row is "ended" only once no process   *)
-(* of its work runs. Boxes.tla's Start and Release are Insert with Tell    *)
+(* run only under its lease (NoRunUnleased), and a native wrapper's lease  *)
+(* released on any end of its process (GoneIsReleased). Assumed of the     *)
+(* owners (`work`, the environment here): a row is "ended" only once no    *)
+(* process of its work runs; a native wrapper's owner reads its process.   *)
+(* Boxes.tla's Start and Release are Insert with Tell                      *)
 (* and Release, its WorkEnded this spec's `work`; its SeatsHold is         *)
 (* CapacityHolds with that assumption. The assumption is checked in        *)
 (* Dialog.tla for a start on a dialog, in Boxes.tla for its statuses, and  *)
@@ -131,11 +147,12 @@ Breaks == {
     "NoBudgetGate",       \* a grant does not look at the account's budget
     "NoReask",            \* a requester waiting through a restart does not ask again
     "NoReclaim",          \* after a restart no row is read again
-    "NoFence"             \* a wrapper runs without taking the fence; an owner settles without it
+    "NoFence",            \* a wrapper runs without taking the fence; an owner settles without it
+    "EndByPost"           \* the native wrapper's end is read from its post, not its process
 }
 
 ASSUME Break \in Breaks
-ASSUME Shape \in {"Safety", "Mains", "Liveness", "Hold", "Fence"}
+ASSUME Shape \in {"Safety", "Mains", "Liveness", "Hold", "Fence", "Native"}
 ASSUME QueueBound \in Nat \ {0} /\ MaxWait \in Nat \ {0} /\ MaxCrashes \in Nat
 
 Main == 1
@@ -164,7 +181,7 @@ Table ==
            << [class |-> Landing, module |-> 1, account |-> "a1", units |-> Need(0, 1, 1)],
               [class |-> Landing, module |-> 1, account |-> "a1", units |-> Need(0, 1, 1)],
               [class |-> Heavy,   module |-> 2, account |-> "a1", units |-> Need(0, 1, 0)] >>
-      [] Shape = "Fence" ->
+      [] Shape \in {"Fence", "Native"} ->
            << [class |-> Heavy,   module |-> 1, account |-> "a1", units |-> Need(0, 1, 0)],
               [class |-> Heavy,   module |-> 2, account |-> "a1", units |-> Need(0, 1, 0)] >>
 
@@ -176,6 +193,8 @@ Reqs == 1..Len(Table)
 
 \* Whether the host's wrapper and fence are in the shape.
 Hosted == Shape = "Fence"
+\* Whether the requester is the native wrapper, its process the holder.
+Native == Shape = "Native"
 Accounts == {Table[r].account : r \in Reqs}
 NModules == LET ms == {Table[r].module : r \in Reqs} IN CHOOSE m \in ms : \A k \in ms : k <= m
 
@@ -190,7 +209,9 @@ VARIABLES
     monitored,  \* in memory: the lease ids whose holder this run monitors
     ans,        \* the requester's: r -> the last answer it read ("asking" before any)
     work,       \* the owner's row of the work r admits: "starting", "live" or "ended"
-    run,        \* the host's: r's wrapper: "none", "sent", "running", "done" or "fenced"
+    run,        \* the host's: r's wrapper: "none", "sent", "running", "done" or "fenced";
+                \* a native wrapper's process: "none" (alive, not running the command),
+                \* "running", "done" (ended and posted its end) or "killed" (ended unposted)
     fence,      \* the host's: r's fence: "none", "set" (holds its lease id), "taken" or "revoked"
     pressure,   \* environment: "ok", "high" or "severe"
     budgetOk,   \* environment: account -> its budget has room
@@ -311,7 +332,7 @@ Receive(r) ==
 
 \* A requester asks for the first time, its owner's row written `starting`.
 Ask(r) ==
-    /\ ans[r] = "idle" /\ work[r] = "starting"
+    /\ ans[r] = "idle" /\ work[r] = "starting" /\ run[r] = "none"
     /\ ans' = [ans EXCEPT ![r] = "asking"]
     /\ Receive(r)
     /\ UNCHANGED <<leases, rot, monitored, work, run, fence, pressure, budgetOk, crashes>>
@@ -320,7 +341,7 @@ Ask(r) ==
 \* Only a restart leaves a waiting requester that the scheduler does not hold.
 Reask(r) ==
     /\ Break # "NoReask"
-    /\ ans[r] \in {"asking", "queued"} /\ work[r] = "starting"
+    /\ ans[r] \in {"asking", "queued"} /\ work[r] = "starting" /\ run[r] = "none"
     /\ ~InQueue(r) /\ pending[r] = "none"
     /\ Receive(r)
     /\ UNCHANGED <<leases, rot, monitored, ans, work, run, fence, pressure, budgetOk, crashes>>
@@ -412,12 +433,15 @@ Crash ==
 
 \* The owner starts the work once its requester was told granted. On a host
 \* (shape "Fence") it writes the fence with the lease id, then sends the start.
+\* A native wrapper still alive becomes the command.
 WorkStarts(r) ==
     /\ work[r] = "starting" /\ ans[r] = "granted"
+    /\ Native => run[r] = "none"
     /\ work' = [work EXCEPT ![r] = "live"]
-    /\ IF Hosted
-       THEN run' = [run EXCEPT ![r] = "sent"] /\ fence' = [fence EXCEPT ![r] = "set"]
-       ELSE UNCHANGED <<run, fence>>
+    /\ CASE Hosted ->
+              run' = [run EXCEPT ![r] = "sent"] /\ fence' = [fence EXCEPT ![r] = "set"]
+         [] Native -> run' = [run EXCEPT ![r] = "running"] /\ UNCHANGED fence
+         [] OTHER -> UNCHANGED <<run, fence>>
     /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, pressure, budgetOk, crashes>>
 
 \* The owner settles its row ended: live work's process ended, or a start that
@@ -425,8 +449,11 @@ WorkStarts(r) ==
 \* live work is settled ended only by its end read there, or as a start that
 \* never ran once the owner took its fence; under NoFence, also while the
 \* start is sent and has not landed yet, as a read of the host then finds.
+\* A native wrapper's work ends only once its process ended, read from the
+\* process; under EndByPost only once it posted its end, which a kill skips.
 WorkEnds(r) ==
     /\ work[r] # "ended" /\ ans[r] # "idle"
+    /\ Native => run[r] \in IF Break = "EndByPost" THEN {"done"} ELSE {"done", "killed"}
     /\ work' = [work EXCEPT ![r] = "ended"]
     /\ IF Hosted /\ work[r] = "live"
        THEN \/ run[r] = "done" /\ UNCHANGED <<run, fence>>
@@ -454,6 +481,14 @@ WrapperExits(r) ==
     /\ run' = [run EXCEPT ![r] = "done"]
     /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, fence, pressure, budgetOk, crashes>>
 
+\* A native wrapper's process ends at any step once it asked: the command
+\* exits or crashes, the wrapper exits after a refusal, or a kill ends it
+\* waiting or running. A kill posts nothing.
+WrapperEnds(r) ==
+    /\ Native /\ ans[r] # "idle" /\ run[r] \in {"none", "running"}
+    /\ \E how \in {"done", "killed"} : run' = [run EXCEPT ![r] = how]
+    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, fence, pressure, budgetOk, crashes>>
+
 Pressure(p) ==
     /\ p # pressure
     /\ pressure' = p
@@ -466,6 +501,7 @@ Budget(a) ==
 Next ==
     \/ \E r \in Reqs : Ask(r) \/ Reask(r) \/ Insert(r) \/ Tell(r) \/ Expire(r)
           \/ WorkStarts(r) \/ WorkEnds(r) \/ WrapperRuns(r) \/ WrapperExits(r)
+          \/ WrapperEnds(r)
     \/ Tick
     \/ \E i \in Ids : Release(i) \/ Reclaim(i)
     \/ Crash
@@ -478,6 +514,9 @@ Fairness ==
     /\ WF_vars(Tick)
     /\ WF_vars(\E i \in Ids : Release(i))
     /\ WF_vars(\E i \in Ids : Reclaim(i))
+    \* The owner of a native wrapper's lease is its process, read on the
+    \* scheduler's interval: an end is read.
+    /\ \A r \in Reqs : Native => WF_vars(WorkEnds(r))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -495,7 +534,7 @@ TypeOK ==
     /\ monitored \subseteq Ids
     /\ ans \in [Reqs -> Answers]
     /\ work \in [Reqs -> {"starting", "live", "ended"}]
-    /\ run \in [Reqs -> {"none", "sent", "running", "done", "fenced"}]
+    /\ run \in [Reqs -> {"none", "sent", "running", "done", "fenced", "killed"}]
     /\ fence \in [Reqs -> {"none", "set", "taken", "revoked"}]
     /\ pressure \in {"ok", "high", "severe"}
     /\ budgetOk \in [Accounts -> BOOLEAN]
@@ -557,7 +596,14 @@ EndedIsReleased ==
     \A r \in Reqs : (\E i \in Ids : leases[i].req = r /\ ~Released(i) /\ work[r] = "ended")
                       ~> (\A i \in Ids : leases[i].req = r => Released(i))
 
-\* A job runs on its host only under its own unreleased lease (shape "Fence").
+\* A native wrapper's process that ended, however it ended, holds no lease
+\* (shape "Native").
+GoneIsReleased ==
+    \A r \in Reqs : run[r] \in {"done", "killed"}
+                      ~> (\A i \in Ids : leases[i].req = r => Released(i))
+
+\* A job runs on its host only under its own unreleased lease (shape "Fence"),
+\* and a native wrapper's command only under its own (shape "Native").
 NoRunUnleased ==
     \A r \in Reqs : run[r] = "running" => \E i \in Ids : leases[i].req = r /\ ~Released(i)
 

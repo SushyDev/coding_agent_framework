@@ -94,6 +94,13 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
     assert Regex.match?(c.projects["app"].branches, "unit/one")
     assert c.resources == %{"seat" => 4, "slot" => 2} and c.lease == %{"seat" => 1}
     assert c.job_lease.landing == %{"slot" => 1}
+    assert c.heavy == []
+    heavy = [%{"match" => "^mix test", "class" => "builder"}]
+    data = put_in(ctx.data, ["scheduler"], %{"heavy" => heavy})
+
+    assert {:ok, %Config{heavy: [%{match: "^mix test", class: :builder}]}} =
+             ConfigFile.read(write!(ctx, data), ctx.env)
+
     # F-155: devenv's programs first on a launch's and a project's PATH, the system's last.
     assert %{home: _, path: path, term: _, lang: _} = c.env
     assert [git_dir | _] = String.split(path, ":")
@@ -136,6 +143,8 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
        {"scheduler.lease.gpu", :no_such_resource}},
       {Map.put(ctx.data, "scheduler", %{"job_lease" => %{"nightly" => %{}}}),
        {"scheduler.job_lease.nightly", :unknown_key}},
+      {Map.put(ctx.data, "scheduler", %{"heavy" => [%{"match" => "x"}]}),
+       {"scheduler.heavy.0", :not_a_command}},
       {Map.put(ctx.data, "scheduler", %{
          "resources" => %{"seat" => 1, "slot" => 1, "land:app" => 1}
        }), {"scheduler.resources.land:app", :reserved}},

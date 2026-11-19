@@ -73,9 +73,10 @@ defmodule CodingAgentFramework do
     Services
   }
 
-  alias CodingAgentFramework.{Scheduler, Sessions, Shell, Stream, Tmux, TmuxSampler, Tracker}
+  alias CodingAgentFramework.{Runs, Scheduler, Sessions, Shell, Stream, Tmux, TmuxSampler}
+  alias CodingAgentFramework.Tracker
   alias CodingAgentFramework.{ToolHome, Transcripts, Usage}
-  alias CodingAgentFramework.{Config, Ends}
+  alias CodingAgentFramework.{Config, Endpoint, Ends}
 
   require Logger
 
@@ -130,11 +131,13 @@ defmodule CodingAgentFramework do
          {:ok, mains_work} <-
            Mains.Work.open(Config.path(c, "caf.db"), Config.path(c, "caf.db"), c.workstation),
          {:ok, secret} <- Intake.secret(Config.path(c, "intake.secret")),
-         :ok <- prepare(c, accounts, programs, secret) do
+         :ok <- prepare(c, accounts, programs, secret),
+         {:ok, runs} <- Runs.new(c.home, programs, c.heavy),
+         :ok <- Runs.prepare(runs, programs, c.ports.intake, secret) do
       w = %{c: c, programs: programs, tmux: tmux, accounts: accounts, holder: holder}
       w = Map.merge(w, %{agents: agents, secret: secret, start_id: token()})
       w = Map.merge(w, %{work: work, allowance: allowance, jobs_work: jobs_work})
-      w = Map.put(w, :mains_work, mains_work)
+      w = Map.merge(w, %{mains_work: mains_work, runs: runs})
       Supervisor.start_link(__MODULE__, Map.put(w, :db, Config.path(c, "caf.db")))
     end
   end
@@ -275,8 +278,10 @@ defmodule CodingAgentFramework do
        end},
       {:intake,
        fn _ ->
-         # The framework's PreToolUse callback first (a move's drain), then the app's.
-         pre = Mover.pre_tool_use(w.agents, c.tool_hooks[:pre_tool_use])
+         # The framework's PreToolUse callback first (a move's drain), then the app's, whose
+         # answer a heavy command's wrapper corrects.
+         heavy = Runs.pre_tool_use(w.runs, c.tool_hooks[:pre_tool_use])
+         pre = Mover.pre_tool_use(w.agents, heavy)
 
          tools =
            [pre_tool_use: pre] ++ Map.to_list(Map.take(c.tool_hooks, [:post_tool_use, :stop]))
@@ -286,10 +291,13 @@ defmodule CodingAgentFramework do
          project = fn name -> Map.get(Sessions.Agents.get(w.agents, name) || %{}, :project) end
          {Intake, [db: db, host: host, notify: notify, agent: agent, project: project] ++ tools}
        end},
+      # The hooks, and the heavy commands' wrapper, which asks the `Scheduler` started later:
+      # it is looked up at each request.
       {:intake_http,
        fn pid ->
-         plug = {Intake.Plug, intake: pid.(:intake), secret: w.secret}
-         {Bandit, plug: plug, ip: @local, port: c.ports.intake, startup_log: false}
+         runs = [scheduler: fn -> pid.(:scheduler) end, units: &run_units(c, w, &1, &2)]
+         opts = [intake: pid.(:intake), secret: w.secret, runs: runs]
+         {Bandit, plug: {Endpoint, opts}, ip: @local, port: c.ports.intake, startup_log: false}
        end},
       {:sampler,
        fn _ ->
@@ -344,10 +352,11 @@ defmodule CodingAgentFramework do
             holders: %{
               "delegate" => &Delegates.Work.state(w.work, &1),
               "job" => &Jobs.Work.state(w.jobs_work, &1),
-              "main" => &Mains.Work.state(w.mains_work, &1)
+              "main" => &Mains.Work.state(w.mains_work, &1),
+              "run" => &Runs.state(w.runs, &1)
             },
             allowance: &Usage.Allowance.check(w.allowance, &1),
-            pressure: pressure(c),
+            pressure: pressure(c, p),
             interval: every,
             notify: notify}
          end},
@@ -444,7 +453,8 @@ defmodule CodingAgentFramework do
              notify: notify
            }
          end},
-        {:copies, fn _ -> {Copies, dir: Config.path(c, "parts/copies"), programs: p} end},
+        {:copies,
+         fn _ -> {Copies, dir: Config.path(c, "parts/copies"), programs: p, notify: notify} end},
         {:jobs,
          fn pid ->
            {Jobs,
@@ -527,7 +537,11 @@ defmodule CodingAgentFramework do
         {Tracker.TableSource, [table: Scheduler.Table] ++ on},
         {Tracker.TableSource, [table: Mains.Table] ++ on},
         {Tracker.TableSource, [table: TmuxSampler.Table] ++ on ++ [server: server]},
-        {Tracker.TableSource, [table: Acts.Table] ++ on ++ [instance: c.instance]}
+        {Tracker.TableSource, [table: Acts.Table] ++ on ++ [instance: c.instance]},
+        {Tracker.TableSource,
+         table: Jobs.Table, db: Config.path(c, "parts/jobs/jobs.db"), host: c.workstation},
+        {Tracker.TableSource,
+         table: Copies.Table, db: Config.path(c, "parts/copies/copies.db"), host: c.workstation}
       ]
   end
 
@@ -586,12 +600,35 @@ defmodule CodingAgentFramework do
     end
   end
 
-  # Stall times where the host has them; elsewhere no pressure gate, only the static capacities.
-  defp pressure(%Config{pressure: nil}) do
-    if File.dir?("/proc/pressure"), do: [source: :psi], else: [source: :none]
+  # A heavy command's units, by its class and its agent's project, as a job's are.
+  defp run_units(c, w, class, agent) do
+    project = Map.get(Sessions.Agents.get(w.agents, agent) || %{}, :project)
+    job_units(c, class, project)
   end
 
-  defp pressure(%Config{pressure: pressure}), do: pressure
+  # Stall times where the host has them, the kernel's memory-pressure level on macOS; elsewhere
+  # no pressure gate, only the static capacities.
+  defp pressure(%Config{pressure: nil}, p) do
+    cond do
+      File.dir?("/proc/pressure") ->
+        [source: :psi]
+
+      Programs.os(p) == :darwin and match?({:ok, _}, Programs.fetch(p, :sysctl)) ->
+        {:ok, sysctl} = Programs.fetch(p, :sysctl)
+        args = ["-n", "kern.memorystatus_vm_pressure_level"]
+
+        read = fn ->
+          Scheduler.Pressure.sysctl(Shell.run(p.host, sysctl, args, timeout: 5_000))
+        end
+
+        [source: {:level, read}, name: "sysctl kern.memorystatus_vm_pressure_level"]
+
+      true ->
+        [source: :none]
+    end
+  end
+
+  defp pressure(%Config{pressure: pressure}, _p), do: pressure
 
   defp issue(nil, _agent), do: {:refused, :no_mcp}
   defp issue(mcp, agent), do: MCP.issue(mcp, agent)
@@ -678,7 +715,7 @@ defmodule CodingAgentFramework do
   end
 
   defp mkdirs(c) do
-    Enum.reduce_while(["d", "parts", "ws"], :ok, fn dir, :ok ->
+    Enum.reduce_while(["d", "parts/jobs", "parts/copies", "ws"], :ok, fn dir, :ok ->
       case File.mkdir_p(Config.path(c, dir)) do
         :ok -> {:cont, :ok}
         {:error, reason} -> {:halt, {:unknown, {Config.path(c, dir), reason}}}

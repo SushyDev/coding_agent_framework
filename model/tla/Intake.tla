@@ -88,10 +88,12 @@
 (* call between and overrides the next (measured: 8 on 2.1.322); the      *)
 (* override is the environment's act here (StopRead). Intake keeps its own *)
 (* count of the session's blocks in a row in its table, written with the   *)
-(* block's row before the response goes out, and reset only by a          *)
-(* PostToolUse post: it may count more than Claude Code (a post lost      *)
-(* while down, a wake or a person's prompt that Claude Code may count as a *)
-(* reset), never fewer. Below Cap - 1 the callback's block is handed. At   *)
+(* block's row before the response goes out, and reset by a PostToolUse   *)
+(* post and by a Stop it passes, which ends the turn: Claude Code starts  *)
+(* the next turn, a person's prompt's or a wake's, with its count at 0    *)
+(* (measured on 2.1.322, F-171). It may count more than Claude Code (a     *)
+(* post lost while down, a turn ended while down), never fewer while a     *)
+(* turn runs. Below Cap - 1 the callback's block is handed. At             *)
 (* Cap - 1 a block is not handed: the hold becomes a `stop_cap` prompt     *)
 (* (Prompt.tla), whose person's "go on" is the last block Claude Code      *)
 (* honors and whose "end" lets the turn end (F-167's new-1). At Cap or     *)
@@ -705,8 +707,8 @@ StopTaken(s) ==
               /\ faults' = IF paused THEN faults \cup {"whilePaused"} ELSE faults
               /\ UNCHANGED <<turn, stp, sconn, srow, smarking, sout, swrong, fBlocks, ccBlocks>>
          [] OTHER ->
-              /\ HS!Passed(s) /\ StopRead(s, "passed")
-              /\ UNCHANGED <<capq, fBlocks>>
+              /\ HS!Passed(s) /\ StopRead(s, "passed") /\ fBlocks' = 0
+              /\ UNCHANGED capq
     /\ StopOnly /\ UNCHANGED <<toolsRun, paused, pauses>>
 
 \* A person answers the `stop_cap` prompt: "go on" is the last block Claude
@@ -714,7 +716,7 @@ StopTaken(s) ==
 CapAnswered(s) ==
     /\ up /\ s \in capq /\ srow[s] = "held" /\ sconn[s]
     /\ \/ HS!Asked(s, s) /\ fBlocks' = fBlocks + 1 /\ UNCHANGED <<turn, stp, ccBlocks, faults>>
-       \/ HS!Passed(s) /\ StopRead(s, "passed") /\ UNCHANGED fBlocks
+       \/ HS!Passed(s) /\ StopRead(s, "passed") /\ fBlocks' = 0
     /\ StopOnly /\ UNCHANGED <<scb, capq, toolsRun, paused, pauses>>
 
 \* The block is the response, and the request closes.
@@ -728,11 +730,12 @@ StopMarked(s) ==
     /\ StopOnly
     /\ UNCHANGED <<turn, stp, scb, capq, ccBlocks, fBlocks, toolsRun, paused, pauses, faults>>
 
-\* Intake's deadline, under the hook's timeout: an empty body, the turn ends.
+\* Intake's deadline, under the hook's timeout: an empty body, the turn ends,
+\* and Intake's count with it.
 StopDeadline(s) ==
     /\ up /\ HS!Expires(s)
-    /\ StopRead(s, "passed")
-    /\ StopOnly /\ UNCHANGED <<scb, capq, fBlocks, toolsRun, paused, pauses>>
+    /\ StopRead(s, "passed") /\ fBlocks' = 0
+    /\ StopOnly /\ UNCHANGED <<scb, capq, toolsRun, paused, pauses>>
 
 StopSettled(s) ==
     /\ up /\ HS!Settles(s)
@@ -750,12 +753,12 @@ ToolRuns ==
     /\ UNCHANGED <<turn, stp, scb, capq, sconn, srow, smarking, sout, swrong, paused, pauses,
                    faults>>
 
-\* A person's prompt or a wake starts a new turn. Whether Claude Code then
-\* resets its count is not measured: it may or may not; Intake does not.
+\* A person's prompt or a wake starts a new turn, and Claude Code's count
+\* starts again at 0 (measured on 2.1.322, F-171).
 NewTurn ==
     /\ turn = "ended" /\ \E s \in Stops : stp[s] = "none"
     /\ turn' = "working"
-    /\ \E reset \in BOOLEAN : ccBlocks' = IF reset THEN 0 ELSE ccBlocks
+    /\ ccBlocks' = 0
     /\ StopOnly
     /\ UNCHANGED <<stp, scb, capq, sconn, srow, smarking, sout, swrong, fBlocks, toolsRun, paused,
                    pauses, faults>>
@@ -925,8 +928,9 @@ StopLateDropped == HS!LateDropped
 \* block a person decides, and past it the hold passes.
 NeverOverridden == "overridden" \notin faults
 
-\* Intake never counts fewer blocks in a row than Claude Code.
-CountKept == fBlocks >= ccBlocks
+\* While a turn runs, Intake never counts fewer blocks in a row than Claude
+\* Code. A turn that ended holds no Stop, and the next starts at 0.
+CountKept == turn # "ended" => fBlocks >= ccBlocks
 
 \* No Stop is decided by the app's callback while its agent or project is paused.
 NotWhilePaused == "whilePaused" \notin faults

@@ -195,7 +195,7 @@ defmodule CodingAgentFramework.MCPTest do
              rpc.("initialize")
 
     assert rpc.("tools/list")["tools"] |> Enum.map(& &1["name"]) ==
-             ~w(message run start_delegate run_delegate start_main) ++
+             ~w(message start_delegate run_delegate start_main) ++
                ~w(service_start services service_logs service_send service_wait) ++
                ~w(service_restart service_stop service_hand agents look transcript) ++
                ~w(interrupt answer resume stop move answer_startup end_main ask withdraw reload)
@@ -635,7 +635,7 @@ defmodule CodingAgentFramework.MCPTest do
     assert JSON.decode!(text) == %{
              "ok" => %{
                "tools" =>
-                 ~w(message run start_delegate run_delegate start_main) ++
+                 ~w(message start_delegate run_delegate start_main) ++
                    ~w(service_start services service_logs service_send service_wait) ++
                    ~w(service_restart service_stop service_hand agents look transcript) ++
                    ~w(interrupt answer resume stop move answer_startup end_main ask withdraw reload)

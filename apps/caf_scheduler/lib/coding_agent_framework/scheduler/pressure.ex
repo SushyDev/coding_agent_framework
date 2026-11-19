@@ -13,7 +13,10 @@ defmodule CodingAgentFramework.Scheduler.Pressure do
   **macOS** (`source: {:level, read}`): no stall times; `read` is a function the embedding app
   gives that answers `{:ok, level}`, the kernel's memory-pressure level as an integer. A level
   at or above `level_severe:` asks for `severe`, at or above `level_high:` for `high`. Heavy
-  runs there are bounded by a static slot count, the capacity of their resource.
+  runs there are bounded by a static slot count, the capacity of their resource. The app's
+  default `read` runs `sysctl -n kern.memorystatus_vm_pressure_level`, read by `sysctl/1`:
+  1 (normal) is `ok`, 2 (warn) `high`, 4 (critical) `severe`; any other value is unknown, never
+  `ok`.
 
   **Hysteresis.** `severe` is taken at once. `high` is taken once it was asked for a whole
   `window:` (ms), and a lower state only once it was asked for a whole `window:` too, so one
@@ -131,6 +134,28 @@ defmodule CodingAgentFramework.Scheduler.Pressure do
       _ -> 0.0
     end
   end
+
+  @doc """
+  The macOS kernel's memory-pressure level as `sysctl -n kern.memorystatus_vm_pressure_level`
+  prints it (`Shell`'s outcome of that run), as a `{:level, read}` source's `read` answers:
+  `{:ok, n}` for 1 (normal), 2 (warn) and 4 (critical), the values the kernel reports there, or `{:unknown, reason}` for any other
+  value, output or failure, so a reading nobody knows is never taken for `ok`.
+
+      iex> alias CodingAgentFramework.Scheduler.Pressure
+      iex> Pressure.sysctl({:ok, %{status: 0, output: "2\\n"}})
+      {:ok, 2}
+      iex> Pressure.sysctl({:ok, %{status: 0, output: "3\\n"}})
+      {:unknown, {:level, "3"}}
+  """
+  @spec sysctl(term) :: {:ok, 1 | 2 | 4} | {:unknown, term}
+  def sysctl({:ok, %{status: 0, output: out}}) do
+    case String.trim(out) do
+      n when n in ["1", "2", "4"] -> {:ok, String.to_integer(n)}
+      other -> {:unknown, {:level, other}}
+    end
+  end
+
+  def sysctl(other), do: {:unknown, {:sysctl, other}}
 
   @doc """
   Reads `<dir>/{cpu,memory,io}` once: `{:ok, {:psi, sample}}`, each file's lines by kind with

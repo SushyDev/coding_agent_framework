@@ -46,7 +46,8 @@ defmodule CodingAgentFramework.TestHost do
           :tail,
           :head,
           :mkdir,
-          :mkfifo
+          :mkfifo,
+          :sysctl
         ],
         &{&1, program!(&1)}
       )
@@ -81,6 +82,7 @@ defmodule CodingAgentFramework.TestHost do
     :head,
     :mkdir,
     :mkfifo,
+    :sysctl,
     :stty,
     :echo,
     :sleep,

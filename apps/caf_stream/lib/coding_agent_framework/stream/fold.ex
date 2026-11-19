@@ -13,8 +13,11 @@ defmodule CodingAgentFramework.Stream.Fold do
   by itself, never replaces it. A result that names none of the framework's messages ends such a
   turn of the delegate's own (a background command of its own woke it, F-155): it is kept in
   `own`, in order, with its uuid, for `Delegates` to tell the parent once per turn; one with no
-  uuid is counted as a problem. It is total: a line that is not a JSON object is counted as a
-  problem.
+  uuid is counted as a problem. It keeps the delegate's own background commands (`tasks`, by
+  task id): a `system` event `task_started` adds one and `task_notification` (its end, however
+  it ended) removes it, so the turn is not idle while one runs (F-171; the shapes are Claude
+  Code's stream messages as its own types name them, not yet checked against a recorded log:
+  F-171's new-4). It is total: a line that is not a JSON object is counted as a problem.
 
       iex> alias CodingAgentFramework.Stream.Fold
       iex> fold = Fold.mark(Fold.new(), {:message, "u1", "hi"}, ~s({"x":1}\\n), 0)
@@ -36,6 +39,7 @@ defmodule CodingAgentFramework.Stream.Fold do
           lines: %{String.t() => map},
           last_result: map | nil,
           own: [map],
+          tasks: %{String.t() => map},
           rate_limit: map | nil,
           events: non_neg_integer,
           problems: non_neg_integer
@@ -57,6 +61,7 @@ defmodule CodingAgentFramework.Stream.Fold do
       lines: %{},
       last_result: nil,
       own: [],
+      tasks: %{},
       rate_limit: nil,
       events: 0,
       problems: 0
@@ -95,6 +100,15 @@ defmodule CodingAgentFramework.Stream.Fold do
   def event(fold, %{"type" => "system", "subtype" => "init", "session_id" => id})
       when is_binary(id),
       do: %{fold | session_id: id}
+
+  # A background command of the delegate's own starts, and ends whatever its status.
+  def event(fold, %{"type" => "system", "subtype" => "task_started", "task_id" => id})
+      when is_binary(id),
+      do: %{fold | tasks: Map.put(Map.get(fold, :tasks, %{}), id, %{state: :running})}
+
+  def event(fold, %{"type" => "system", "subtype" => "task_notification", "task_id" => id})
+      when is_binary(id),
+      do: %{fold | tasks: Map.delete(Map.get(fold, :tasks, %{}), id)}
 
   def event(fold, %{"type" => "user", "isReplay" => true, "uuid" => uuid}),
     do: settle(fold, :messages, uuid, :writing, :delivered)
@@ -282,7 +296,8 @@ defmodule CodingAgentFramework.Stream.Fold do
         other -> other
       end)
 
-    %{fold | gone: true, messages: messages, requests: requests, lines: %{}}
+    # A background command is a child of the process, and ended with it.
+    %{fold | gone: true, messages: messages, requests: requests, lines: %{}, tasks: %{}}
   end
 
   defp cut(%{state: :delivered, result: nil} = m), do: %{m | exited: true}
@@ -308,7 +323,8 @@ defmodule CodingAgentFramework.Stream.Fold do
         live_seen: false,
         session_id: nil,
         idle: true,
-        ending: false
+        ending: false,
+        tasks: %{}
     }
   end
 
@@ -383,7 +399,7 @@ defmodule CodingAgentFramework.Stream.Fold do
           other
       end)
 
-    %{fold | messages: messages}
+    Map.put_new(%{fold | messages: messages}, :tasks, %{})
   end
 
   def upgrade(fold), do: fold
