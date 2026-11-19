@@ -306,7 +306,7 @@ D == INSTANCE Delivery WITH
        turned <- [a \in {Parent} |-> parentTurned], Long <- Delegates, Launched <- {},
        call <- dcall,
        restarts <- 0, lives <- 0, ends <- 0, prompts <- 0, stops <- 0, readAt <- 0,
-       forced <- {}
+       forced <- {}, fcall <- {}
 
 \* Delegates that count against the cap: started, or starting, and not yet ended.
 Active == {d \in Delegates :

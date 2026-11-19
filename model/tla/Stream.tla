@@ -226,7 +226,7 @@ D == INSTANCE Delivery WITH
        fold <- [m \in Msgs |-> "none"], rmem <- {}, last <- [a \in {Dg} |-> -1],
        unsure <- {}, lost <- {},
        restarts <- 0, lives <- 0, ends <- 0, prompts <- 0, stops <- 0, readAt <- 0,
-       forced <- {}
+       forced <- {}, fcall <- {}
 
 \* A message's row: due, then sending (Stream's "writing"), then delivered;
 \* one found undelivered at an exit is due again.

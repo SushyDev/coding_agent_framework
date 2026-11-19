@@ -214,6 +214,17 @@ defmodule CodingAgentFramework.SurfaceTest do
     svc = Path.join(ctx.dir, "svc")
     argv = [program!(:sh), "-c", echo_tail!(svc), Path.join(svc, "it")]
 
+    # A service's name past the room the home leaves for its socket is refused before any row
+    # (F-172).
+    room = Config.name_room(ctx.config).service
+    long = String.duplicate("s", room + 1)
+    args = %{"name" => long, "argv" => argv}
+
+    assert {:refused, {:bad, :name, {:longer_than, ^room}}} =
+             MCP.call(parts.mcp, "app-unit-one", "service_start", args)
+
+    refute Enum.any?(Services.list(parts.services), &(&1.name == long))
+
     for {name, keep} <- [{"plain", false}, {"kept", true}] do
       {:ok, %{state: "running"}} =
         MCP.call(parts.mcp, "app-unit-one", "service_start", %{
@@ -413,7 +424,7 @@ defmodule CodingAgentFramework.SurfaceTest do
 
     answer = [%{"labels" => ["Rebase"], "text" => "then push"}]
     assert {:ok, {:queued, a}} = Mailbox.answer(parts.mailbox, id, answer)
-    assert {:refused, :answered} = Mailbox.answer(parts.mailbox, id, answer)
+    assert {:refused, :settled} = Mailbox.answer(parts.mailbox, id, answer)
 
     {:ok, %{answer: %{id: ^a, text: "Ask " <> _}}} =
       await(
@@ -560,6 +571,27 @@ defmodule CodingAgentFramework.SurfaceTest do
 
     assert {:refused, {:unknown_project, "web"}} =
              Operator.start_main(parts.mcp, "web", "web-main", "Go.")
+
+    # A name past the room the home leaves for its socket (F-169's new-2, F-172) is refused
+    # before any row: a main session's, and a delegate's from its branch.
+    room = Config.name_room(ctx.config).agent
+    long = "app-" <> String.duplicate("m", room)
+
+    assert {:refused, {:bad, :name, {:longer_than, ^room}}} =
+             Operator.start_main(parts.mcp, "app", long, "Go.")
+
+    assert {:refused, {:bad, :name, {:longer_than, ^room}}} =
+             MCP.call(
+               parts.mcp,
+               "app-main",
+               "start_delegate",
+               args("unit/" <> String.duplicate("b", room))
+             )
+
+    {:ok, ddb} = Delegates.Table.open(Path.join(ctx.home, "caf.db"))
+    assert Delegates.Table.rows(ddb, "ws") == []
+    {:ok, starts} = Mains.Starts.open(Path.join(ctx.home, "caf.db"))
+    assert Mains.Starts.rows(starts, "ws") == []
 
     # The operator's resume of a main session (F-143's new-1) claims its state and goes to
     # `Mains`, which resumes only one whose process ended: a declared one has none. That is

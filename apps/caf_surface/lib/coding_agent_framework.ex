@@ -36,7 +36,9 @@ defmodule CodingAgentFramework do
   **Asks.** An agent asks a person through its `ask` tool, which answers at once. The app shows
   the open asks (`Mailbox.open_asks(parts(sup).mailbox)`, one by id with `Mailbox.asked/3`) as
   dialogs, and answers each once with `Mailbox.answer/4`; the answer goes to the agent that
-  asked as a message from the operator, one line per question.
+  asked as a message from the operator, one line per question. An ask a person dismisses in the
+  app is withdrawn (`Mailbox.withdraw/4`, or the operator's `Operator.withdraw/3`): the agent
+  reads the reason in the answer's place, and the first of the two settles the ask (F-172).
 
   **The tree.** It opens no part's table: the tree `Grants` reads, an agent's worktree, the
   agent a hook names and whether an agent has ended are `Sessions.Agents`' functions over the
@@ -365,12 +367,14 @@ defmodule CodingAgentFramework do
             registry: pid.(:registry),
             home: c.home,
             os: Programs.os(p),
+            acts: pid.(:acts),
             notify: notify}
          end},
         {:delegates,
          fn pid ->
            {Delegates,
             host: host,
+            name_room: Config.name_room(c).agent,
             db: db,
             sessions_db: db,
             sessions: pid.(:sessions),
@@ -413,6 +417,7 @@ defmodule CodingAgentFramework do
              # The operator answers a main session's held permission request through it.
              host: host,
              home: c.home,
+             name_room: Config.name_room(c).agent,
              db: db,
              sessions_db: db,
              programs: p,
@@ -456,6 +461,7 @@ defmodule CodingAgentFramework do
            {Services,
             [
               dir: Config.path(c, "parts/services"),
+              name_room: Config.name_room(c).service,
               copies: pid.(:copies),
               grants: grants,
               ended: &Sessions.Agents.ended?(Sessions.Agents.get(w.agents, &1)),

@@ -28,6 +28,22 @@ defmodule CodingAgentFramework.Mailbox.Transport do
   def settle(%{via: "typed"} = row, evidence), do: Typed.settle(row, evidence.typed)
   def settle(%{via: "launch"} = row, evidence), do: Launch.settle(row, evidence.launch)
   def settle(row, evidence), do: Stream.settle(row, evidence.fold, evidence[:now])
+
+  @doc """
+  The sentence that names the file a row's whole text is in, for a row too long to type or to
+  launch with (F-142, F-155). The path is in backticks, so a home with a space in it reads as
+  one path (F-169's new-3). `Mailbox` frames it with the row's sender, as it frames the text
+  itself, so the agent knows whose it is before it reads the file (F-170's new-6); a brief and a
+  word to go on, which are not framed, take it with a capital, as `pointer_line(path, false)`.
+
+      iex> CodingAgentFramework.Mailbox.Transport.pointer_line("/h/my home/due/main/7.md")
+      "a message for you is in `/h/my home/due/main/7.md`; read it."
+  """
+  @spec pointer_line(Path.t(), boolean) :: String.t()
+  def pointer_line(path, framed \\ true) do
+    line = "message for you is in `#{path}`; read it."
+    if framed, do: "a " <> line, else: "A " <> line
+  end
 end
 
 defmodule CodingAgentFramework.Mailbox.Transport.Waiter do
@@ -272,14 +288,17 @@ defmodule CodingAgentFramework.Mailbox.Transport.Typed do
   end
 
   @doc """
-  The line typed for a row too long to type: it names the file its whole text is in, which the
-  session may read, and carries the uuid at its end as `text/2` does.
+  The line typed for a row too long to type: `line`, the framed sentence that names the file
+  its whole text is in (`Transport.pointer_line/2`), which the session may read, with the uuid
+  at its end as `text/2` does. It is typed whatever its length: it is the short form.
 
-      iex> CodingAgentFramework.Mailbox.Transport.Typed.pointer("/h/due/main/7.md", "u1")
-      "A message for you is in /h/due/main/7.md; read it. [delivery u1]"
+      iex> alias CodingAgentFramework.Mailbox.Transport
+      iex> line = "From d1 (message): " <> Transport.pointer_line("/h/due/main/7.md")
+      iex> Transport.Typed.pointer(line, "u1")
+      "From d1 (message): a message for you is in `/h/due/main/7.md`; read it. [delivery u1]"
   """
-  @spec pointer(Path.t(), String.t()) :: String.t()
-  def pointer(path, uuid), do: text("A message for you is in #{path}; read it.", uuid)
+  @spec pointer(String.t(), String.t()) :: String.t()
+  def pointer(line, uuid), do: text(line, uuid)
 
   @doc """
   What the transcript `bytes` show of the row under `uuid`, as `Waiter.seen/2` reads them: a user
@@ -412,15 +431,16 @@ defmodule CodingAgentFramework.Mailbox.Transport.Launch do
   defp text_of(_), do: ""
 
   @doc """
-  The prompt a start carries for a row longer than the host's argument holds: one line that
-  names the file its whole text is in (the agent's due directory, which each interactive start
-  may read), and its uuid, as `text/2` (F-155).
+  The prompt a start carries for a row longer than the host's argument holds: `line`, the
+  sentence that names the file its whole text is in (`Transport.pointer_line/2`, in the agent's
+  due directory, which each interactive start may read), and its uuid, as `text/2` (F-155).
 
-      iex> CodingAgentFramework.Mailbox.Transport.Launch.pointer("/h/due/main/7.md", "u1")
-      "A message for you is in /h/due/main/7.md; read it.\\n\\n[delivery u1]"
+      iex> alias CodingAgentFramework.Mailbox.Transport
+      iex> Transport.Launch.pointer(Transport.pointer_line("/h/due/main/7.md", false), "u1")
+      "A message for you is in `/h/due/main/7.md`; read it.\\n\\n[delivery u1]"
   """
-  @spec pointer(Path.t(), String.t()) :: String.t()
-  def pointer(path, uuid), do: text("A message for you is in #{path}; read it.", uuid)
+  @spec pointer(String.t(), String.t()) :: String.t()
+  def pointer(line, uuid), do: text(line, uuid)
 
   @doc """
   Settles `row` by `evidence`: `%{seen: seen/2's answer | :unread, gone: whether no process of

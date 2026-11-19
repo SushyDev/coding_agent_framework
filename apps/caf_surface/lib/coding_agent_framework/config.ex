@@ -13,9 +13,10 @@ defmodule CodingAgentFramework.Config do
     service logs). It may hold a space, as macOS's `~/Library/Application Support/<app>` does
     (F-169). Its sockets (`tmux.sock`, `d/<agent>.sock`, `ws/jobs/<job>.sock`,
     `ws/services/<service>.sock`) must fit macOS's 103 bytes: a home longer than 93 bytes,
-    where `tmux.sock` does not fit, is refused, `{:bad, :home, {:longer_than, 93}}`, and a name
-    too long for the room its home leaves is refused by name at its start,
-    `{:socket_path_too_long, path}` (a 42-byte home leaves an agent 53 bytes, a service 43);
+    where `tmux.sock` does not fit, is refused, `{:bad, :home, {:longer_than, 93}}`. The room
+    it leaves for a name is `name_room/1`'s: a delegate's or a main session's start, and a
+    service's, refuse a longer name before any row, `{:bad, :name, {:longer_than, n}}` (a
+    42-byte home leaves an agent 53 bytes, a service 43; F-169's new-2, F-172);
   - `instance`: this framework instance's name, in each job id `MCP` makes;
   - `workstation`: the workstation's host name, and `programs`, the absolute path of each
     program there (`CodingAgentFramework.Programs`);
@@ -119,6 +120,11 @@ defmodule CodingAgentFramework.Config do
   # `<home>/tmux.sock`, is the one whose name is fixed, and tmux would fail on it only at its
   # first command: 103 - 10.
   @max_home 93
+  # What a socket path holds beside the home and the name: `/d/<agent>.sock` and
+  # `/ws/services/<service>.sock`.
+  @socket 103
+  @agent_around byte_size("/d/.sock")
+  @service_around byte_size("/ws/services/.sock")
 
   @doc """
   A config from a keyword list or map, checked whole: answers `{:ok, config}`, or
@@ -202,6 +208,24 @@ defmodule CodingAgentFramework.Config do
   defp operator?(fields) do
     op = Map.get(fields, :operator, "operator")
     is_binary(op) and op not in ["", "framework" | Map.keys(Map.get(fields, :mains, %{}))]
+  end
+
+  @doc """
+  The room the home leaves for a name, in bytes, so its socket fits macOS's 103 (F-172): an
+  agent's, `<home>/d/<agent>.sock`, and a workstation service's,
+  `<home>/ws/services/<service>.sock`. The tree hands each to the parts that start them,
+  `Delegates`, `Mains` and `Services` (`name_room:`), which refuse a longer name before any row.
+
+      iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/" <> String.duplicate("h", 41),
+      ...>   instance: "a", programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2},
+      ...>   claude: "/bin/claude", env: %{})
+      iex> CodingAgentFramework.Config.name_room(c)
+      %{agent: 53, service: 43}
+  """
+  @spec name_room(t) :: %{agent: non_neg_integer, service: non_neg_integer}
+  def name_room(%__MODULE__{home: home}) do
+    left = @socket - byte_size(home)
+    %{agent: max(left - @agent_around, 0), service: max(left - @service_around, 0)}
   end
 
   @doc "A path under the home."

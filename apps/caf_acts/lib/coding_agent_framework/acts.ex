@@ -67,11 +67,16 @@ defmodule CodingAgentFramework.Acts do
   Claims `target` in `state` for `act` by `actor`: writes its row `claimed` before the act.
   Refused `{:claimed, by}` while another claim of that state is open, and `{:already_claimed,
   by}` once one has ended, whatever its end. A `skipped` row of the state is taken over.
+  Option `detail:` is written on the row with the claim, so a reader knows the act's kind
+  before it runs: the operator's forced end, `%{force: true}` (F-172).
   """
   @spec claim(GenServer.server(), String.t(), String.t(), term, atom | String.t(), keyword) ::
           answer(id)
-  def claim(acts, actor, target, state, act, opts \\ []),
-    do: call(acts, {:claim, row(actor, target, state, act)}, opts)
+  def claim(acts, actor, target, state, act, opts \\ []) do
+    row = row(actor, target, state, act)
+    row = if d = opts[:detail], do: Map.put(row, :detail, Store.text(d)), else: row
+    call(acts, {:claim, row}, opts)
+  end
 
   @doc """
   Writes a state seen and not acted on as `skipped`, with `reason`: a later claim takes it over.

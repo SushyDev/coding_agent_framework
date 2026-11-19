@@ -89,7 +89,7 @@ defmodule CodingAgentFramework.MailboxTypedTest do
 
     file = Path.join(due, "#{one}.md")
     %{uuid: u1} = Table.get(ctx.mtable, one)
-    line1 = "A message for you is in #{file}; read it. [delivery #{u1}]"
+    line1 = "From d1 (message): a message for you is in `#{file}`; read it. [delivery #{u1}]"
     assert {:ok, [^line1]} = submitted(ctx, 1)
     assert File.read!(file) == "From d1 (message): " <> long
     assert %{status: "sending", via: "typed"} = Table.get(ctx.mtable, one)
@@ -101,7 +101,10 @@ defmodule CodingAgentFramework.MailboxTypedTest do
 
     %{uuid: u2} = Table.get(ctx.mtable, two)
     file2 = Path.join(due, "#{two}.md")
-    assert {:ok, [^line1, "A message for you is in " <> _ = line2]} = submitted(ctx, 2)
+
+    assert {:ok, [^line1, "From d1 (message): a message for you is in `" <> _ = line2]} =
+             submitted(ctx, 2)
+
     assert line2 =~ "[delivery #{u2}]"
     assert File.read!(file2) == "From d1 (message):\n\nline one\nline two"
   end

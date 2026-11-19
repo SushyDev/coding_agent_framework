@@ -50,7 +50,8 @@ defmodule CodingAgentFramework.Mailbox do
     box. The transcript settles it, as a waiter's row. A row too long to type (more than one
     line, a control character, or longer than `Transport.Typed.short/0`) is written whole to
     `<home>/due/<agent>/<id>.md` (`Sessions.due_dir/2`, which each interactive start of the agent
-    may read by `--add-dir`), and the line typed names that file (`Transport.Typed.pointer/2`);
+    may read by `--add-dir`), and the line typed names that file in backticks, framed with the
+    row's sender (`Transport.pointer_line/2`, `Transport.Typed.pointer/2`, F-172);
     the file goes once the row is delivered. A row whose line the `Inlet` refused anyway (the
     box narrower than the line), or one too long with no `home:`, is not typed again: it waits
     for a waiter.
@@ -82,7 +83,9 @@ defmodule CodingAgentFramework.Mailbox do
   **Asks.** An agent asks a person through `ask/4`: a row from it to the operator, kept for the
   app and never delivered, read by `open_asks/2` and `asked/3`. The app answers through
   `answer/4`: a row from the operator to the agent that asked, under the ask's uuid, delivered
-  as any row is (`Team.tla`'s `Ask`, `Answers`).
+  as any row is (`Team.tla`'s `Ask`, `Answers`). A person who dismisses the ask in the app
+  withdraws it (`withdraw/4`, F-172): a row under the same key that tells the agent why, so an
+  answer and a withdrawal race to one settle (`Prompt.tla`'s `AnswerNow`, `WithdrawNow`).
 
   **Ended.** Once a delegate's session ended for good (its `end_session` went in and its
   process is gone, or its agent row says it ended), or its start was refused (`ended/3`), its
@@ -96,7 +99,8 @@ defmodule CodingAgentFramework.Mailbox do
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, Grants, Inlet, Intake, Registry, Sessions, Store, Stream}
+  alias CodingAgentFramework.{Accounts, Acts, Grants, Inlet, Intake, Registry, Sessions, Store}
+  alias CodingAgentFramework.Stream
   alias CodingAgentFramework.{ClaudeCLI, Programs, Transcripts}
   alias CodingAgentFramework.Sessions.{Agents, Turn}
   alias CodingAgentFramework.Mailbox.{Ask, Table, Transport}
@@ -122,7 +126,9 @@ defmodule CodingAgentFramework.Mailbox do
   was given, whose due directories carry a row too long to type or to launch with; `os:`, the
   workstation's operating system (`Programs.os/1`, this VM's own by default), whose argument
   limit (`ClaudeCLI.prompt_max/1`) bounds a launch's prompt; `frame:`, a function that frames a
-  row's text with its sender (`frame/1` by default, F-170).
+  row's text with its sender (`frame/1` by default, F-170); `acts:`, the instance's `Acts`,
+  whose forced end of an agent settles its rows left `sending` at `Mailbox`'s own settle
+  (F-172; without it only `ended_while_sending/3` settles them).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -268,7 +274,9 @@ defmodule CodingAgentFramework.Mailbox do
 
   @doc """
   Agent `to`'s end was forced by the operator (F-170, `Delivery.tla`'s ForceSettled): each row
-  still `sending` to it settles `unknown`, `attempt` `ended_while_sending`. Its text may or may
+  still `sending` to it settles `unknown`, `attempt` `ended_while_sending`. `Mailbox` given
+  `acts:` does the same at each of its own settles, for every ended agent whose forced end's row
+  `Acts` holds (F-172), so a restart between the end and this call leaves no row `sending`. Its text may or may
   not have gone in, and no evidence will come: it is never due again, so never sent twice, and
   never counted delivered. A hand-on of it still under way answers into nothing. Only once no
   process of `to` may live (`Sessions.Agents.free?/1`): else `{:refused, {:not_free, status}}`,
@@ -310,10 +318,11 @@ defmodule CodingAgentFramework.Mailbox do
 
   @doc """
   Ask `id`, for the app: `{:ok, %{id, from, questions, asked_at, answer}}`, `answer` nil until
-  it is answered, then `%{id, text, status, answers}`, the text the agent gets, its row's status
-  (`queued`, `sending`, `delivered`, or `ended` when the agent ended first) and the answers as
-  `answer/4` took them, labels and text (nil for an answer an earlier build stored); or
-  `{:refused, :no_ask}`.
+  it is settled, then `%{id, kind, text, status, answers}`: `kind` `answer` or `withdrawn`
+  (`withdraw/4`), the text the agent gets, its row's status (`queued`, `sending`, `delivered`,
+  or `ended` when the agent ended first) and the answers as `answer/4` took them, labels and
+  text (nil for a withdrawal, and for an answer an earlier build stored); or `{:refused,
+  :no_ask}`.
   """
   def asked(mailbox, id, opts \\ []), do: call(mailbox, {:asked, id}, opts)
 
@@ -322,15 +331,29 @@ defmodule CodingAgentFramework.Mailbox do
   order, each `%{"labels" => [label], "text" => text}` as `Mailbox.Ask.answers/2` checks it. It
   is stored as a row from the operator to the agent that asked, under the ask's uuid, and
   delivered as any row is, one line per question, so an idle agent wakes to it; to an agent that
-  ended first it is stored and settled `ended`. The ask's one answer is the first: the table's
-  unique key refuses a second. Answers `{:ok, {:queued, id}}`, or `{:refused, reason}`:
-  `:no_ask`, `:answered`, or `{:bad, :answers}`.
+  ended first it is stored and settled `ended`. The ask settles once: the table's unique key
+  refuses a second answer, or an answer after a withdrawal (`withdraw/4`). Answers `{:ok,
+  {:queued, id}}`, or `{:refused, reason}`: `:no_ask`, `:settled`, or `{:bad, :answers}`.
 
       Mailbox.answer(mailbox, 12, [%{"labels" => ["Rebase"], "text" => ""}])
       #=> {:ok, {:queued, 13}}
   """
   def answer(mailbox, ask_id, answers, opts \\ []),
     do: call(mailbox, {:answer, ask_id, answers}, opts)
+
+  @doc """
+  Withdraws open ask `ask_id` (F-172, `Prompt.tla`'s `WithdrawNow`): the person dismissed it in
+  the app, and the agent that asked should stop waiting. `reason`, a non-empty string, goes to
+  the agent once, as an answer does: a row from the operator under the ask's uuid, kind
+  `withdrawn`, delivered as any row is. An answer and a withdrawal race to one settle: the
+  first is stored, and the second is refused `:settled`. Answers `{:ok, {:queued, id}}`, or
+  `{:refused, reason}`: `:no_ask`, `:settled`, or `{:bad, :reason}`.
+
+      Mailbox.withdraw(mailbox, 12, "Dismissed: the release went out without it.")
+      #=> {:ok, {:queued, 13}}
+  """
+  def withdraw(mailbox, ask_id, reason, opts \\ []),
+    do: call(mailbox, {:withdraw, ask_id, reason}, opts)
 
   @doc """
   Waits up to `timeout` ms for the answer to the row stored under `key` (a delegate's report,
@@ -470,6 +493,7 @@ defmodule CodingAgentFramework.Mailbox do
 
       s = Map.merge(s, %{hands: %{}, launching: MapSet.new()})
       s = Map.put(s, :frame, Keyword.get(opts, :frame, &frame/1))
+      s = Map.put(s, :acts, opts[:acts])
       {:ok, Map.merge(s, %{waiter: waiter, typed: typed}), {:continue, :read}}
     else
       {:refused, reason} -> {:stop, reason}
@@ -579,10 +603,20 @@ defmodule CodingAgentFramework.Mailbox do
       # The labels as the app gave them, beside the agent's text (F-138's new-3).
       row = Map.put(row, :answer, JSON.encode!(answers))
 
-      case put(s, row) do
-        nil -> {:reply, {:refused, :answered}, s}
-        answer -> stored(s, answer)
-      end
+      settle_ask(s, row)
+    else
+      %{} -> {:reply, {:refused, :no_ask}, s}
+      refused -> {:reply, refused, s}
+    end
+  end
+
+  # The withdrawal takes the same key as an answer, so the first of the two is the one settle.
+  def handle_call({:withdraw, id, reason}, _from, s) do
+    with %{kind: "ask"} = m <- Table.get(s.db, id) || {:refused, :no_ask},
+         true <- (is_binary(reason) and String.trim(reason) != "") or {:refused, {:bad, :reason}} do
+      text = "Ask #{id} was withdrawn: " <> (reason |> String.split() |> Enum.join(" "))
+      row = %{from: m.to_agent, to: m.from_agent, text: text, kind: "withdrawn"}
+      settle_ask(s, Map.merge(row, %{uuid: Stream.uuid(), reply_to: m.uuid}))
     else
       %{} -> {:reply, {:refused, :no_ask}, s}
       refused -> {:reply, refused, s}
@@ -694,10 +728,8 @@ defmodule CodingAgentFramework.Mailbox do
 
     if srow != nil and Agents.free?(srow) do
       rows = for %{to_agent: ^to, status: "sending"} = m <- Table.open_rows(s.db), do: m
-      for m <- rows, do: write(s, m, status: "unknown", attempt: :ended_while_sending)
-      ids = Enum.map(rows, & &1.id)
-      s = Enum.reduce(ids, s, &unwatch(&2, &1))
-      {:reply, {:ok, ids}, %{s | launching: MapSet.difference(s.launching, MapSet.new(ids))}}
+      {ids, s} = unknown(s, rows)
+      {:reply, {:ok, ids}, s}
     else
       {:reply, {:refused, {:not_free, srow && srow.status}}, s}
     end
@@ -867,6 +899,13 @@ defmodule CodingAgentFramework.Mailbox do
     s
   end
 
+  defp settle_ask(s, row) do
+    case put(s, row) do
+      nil -> {:reply, {:refused, :settled}, s}
+      id -> stored(s, id)
+    end
+  end
+
   defp stored(s, nil), do: {:reply, {:ok, :stored_before}, s}
 
   defp stored(s, id) do
@@ -895,7 +934,8 @@ defmodule CodingAgentFramework.Mailbox do
           nil
 
         a ->
-          %{id: a.id, text: a.text, status: a.status, answers: a.answer && JSON.decode!(a.answer)}
+          answers = a.answer && JSON.decode!(a.answer)
+          %{id: a.id, kind: a.kind, text: a.text, status: a.status, answers: answers}
       end
 
     %{
@@ -912,6 +952,8 @@ defmodule CodingAgentFramework.Mailbox do
   # cue of the transcripts or the waiters, at its take bound and at the start. A launch row is
   # read at every cue, as a typed one is: its process's end, a `sessions` cue, is its evidence too.
   defp settle(s, transcript? \\ false) do
+    s = forced(s)
+
     with {:ok, %{rows: rows}} <- Stream.rows(s.stream, timeout: @step) do
       folds = Map.new(rows, &{&1.session, &1})
 
@@ -941,6 +983,59 @@ defmodule CodingAgentFramework.Mailbox do
       |> take_waiting()
     else
       _ -> take_waiting(s)
+    end
+  end
+
+  # Rows still `sending` at a forced end settle unknown, never resent, never delivered
+  # (`Delivery.tla`'s ForceSettled, ForcedSettles; F-170, F-172).
+  defp unknown(s, rows) do
+    for m <- rows, do: write(s, m, status: "unknown", attempt: :ended_while_sending)
+    ids = Enum.map(rows, & &1.id)
+    s = Enum.reduce(ids, s, &unwatch(&2, &1))
+    {ids, %{s | launching: MapSet.difference(s.launching, MapSet.new(ids))}}
+  end
+
+  # Mailbox's own ForceSettled, before any transport reads its evidence: a row `sending` to an
+  # agent whose row ended, with no process of it left, whose end the operator forced (the
+  # end's claim in `Acts`, `detail` `force`, made before that end). Each settle is a row of
+  # `Acts`, as the operator's call writes it. A read of `Acts` that fails decides nothing.
+  defp forced(%{acts: nil} = s), do: s
+
+  defp forced(s) do
+    Table.open_rows(s.db)
+    |> Enum.filter(&(&1.status == "sending"))
+    |> Enum.group_by(& &1.to_agent)
+    |> Enum.reduce(s, fn {to, rows}, s ->
+      srow = Agents.get(s.agents, to)
+
+      with true <- srow != nil and Agents.ended?(srow) and Agents.free?(srow),
+           %{actor: actor} <- forced_end(s, srow) do
+        {ids, s} = unknown(s, rows)
+
+        for id <- ids do
+          Acts.record(s.acts, actor, to, "settle", :unknown,
+            reason: :ended_while_sending,
+            detail: %{row: id}
+          )
+        end
+
+        s
+      else
+        _ -> s
+      end
+    end)
+  end
+
+  defp forced_end(s, srow) do
+    case Acts.rows(s.acts, [target: srow.name, act: ["end_main", "stop"]], timeout: @step) do
+      {:ok, acts} ->
+        Enum.find(acts, fn a ->
+          a.detail == Store.text(%{force: true}) and a.outcome != "failed" and
+            (not is_integer(srow.ended_at) or a.claimed_at <= srow.ended_at)
+        end)
+
+      _ ->
+        nil
     end
   end
 
@@ -1237,10 +1332,17 @@ defmodule CodingAgentFramework.Mailbox do
         else:
           with(
             {:ok, path} <- due_file(s, srow.name, m, text),
-            do: {:ok, Transport.Typed.pointer(path, m.uuid)}
+            {:ok, line} <- pointer(s, m, path),
+            do: {:ok, Transport.Typed.pointer(line, m.uuid)}
           )
     end
   end
+
+  # The line that names the file a row's text is in, framed with its sender as the text is.
+  defp pointer(_s, %{kind: kind}, path) when kind in ["brief", "resume"],
+    do: {:ok, Transport.pointer_line(path, false)}
+
+  defp pointer(s, m, path), do: framed(s, %{m | text: Transport.pointer_line(path)})
 
   # The text an agent reads of row `m`, framed with its sender by `frame/1` or the app's
   # `frame:` (F-170); a brief and a word to go on are the delegate's own prompt, as they are.
@@ -1296,7 +1398,8 @@ defmodule CodingAgentFramework.Mailbox do
         else:
           with(
             {:ok, path} <- due_file(s, to, m, framed),
-            do: {:ok, Transport.Launch.pointer(path, m.uuid)}
+            {:ok, line} <- pointer(s, m, path),
+            do: {:ok, Transport.Launch.pointer(line, m.uuid)}
           )
     end
   end
