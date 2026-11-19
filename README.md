@@ -210,7 +210,14 @@ Built, each from a checked model in `model/tla/`:
 - a start whose caller gave up never runs later (F-166, against `Delegate.tla`): a start
   carries its caller's deadline, and one taken past it is refused and starts nothing;
 - gh's token kept as a file in the home, and every program `bin/caf-login` runs taken from
-  devenv (F-168).
+  devenv (F-168);
+- the `Stop` hold (F-157 part A, against `Intake.tla` and `Prompt.tla`): the app decides at each
+  turn's end, Claude Code's cap of eight blocks in a row becomes a person's prompt, a pause per
+  agent and per project holds a turn's end, and of a session's waiters the newest is kept;
+- the app's surface's start (F-169): `CodingAgentFramework.child_spec/1` builds the whole tree
+  from one config with its extensions and hooks, the example app now a thin user of it; a
+  `PreToolUse` callback that corrects a call (`updatedInput`, `additionalContext`) rather than
+  refuses it; and a home whose path has a space.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
