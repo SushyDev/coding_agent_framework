@@ -217,7 +217,12 @@ Built, each from a checked model in `model/tla/`:
 - the app's surface's start (F-169): `CodingAgentFramework.child_spec/1` builds the whole tree
   from one config with its extensions and hooks, the example app now a thin user of it; a
   `PreToolUse` callback that corrects a call (`updatedInput`, `additionalContext`) rather than
-  refuses it; and a home whose path has a space.
+  refuses it; and a home whose path has a space;
+- for an app that starts its builders through the operator (F-170, against `Delegate.tla` and
+  `Delivery.tla`): the operator's start takes the tool's options; a start whose lease is queued
+  answers at once with its place, and its outcome reaches the parent once, as a notice; every
+  report, reply and notice names its sender; and the operator's forced end of a session a
+  delivery can never settle, its rows in flight settled unknown.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
