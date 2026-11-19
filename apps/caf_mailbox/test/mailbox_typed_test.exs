@@ -54,11 +54,11 @@ defmodule CodingAgentFramework.MailboxTypedTest do
   test "typed one at a time into an ended turn, settled by the transcript's user line", ctx do
     main = main(ctx)
     assert %{release: "2.1.322"} = Sessions.Table.get(ctx.table, "test", "main")
-    {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "d1", "main", "report one")
-    {:ok, {:queued, two}} = Mailbox.message(ctx.mailbox, "d1", "main", "report two")
+    {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "d1", "main", "one")
+    {:ok, {:queued, two}} = Mailbox.message(ctx.mailbox, "d1", "main", "two")
 
     %{uuid: u1} = Table.get(ctx.mtable, one)
-    line1 = "report one [delivery #{u1}]"
+    line1 = "From d1 (message): one [delivery #{u1}]"
     assert {:ok, [^line1]} = submitted(ctx, 1)
     assert %{status: "sending", via: "typed", at: pid} = Table.get(ctx.mtable, one)
     assert pid == main.pid
@@ -68,7 +68,7 @@ defmodule CodingAgentFramework.MailboxTypedTest do
     assert {:ok, %{status: "delivered"}} = until(ctx, one, &(&1.status == "delivered"))
 
     %{uuid: u2} = Table.get(ctx.mtable, two)
-    line2 = "report two [delivery #{u2}]"
+    line2 = "From d1 (message): two [delivery #{u2}]"
     assert {:ok, [^line1, ^line2]} = submitted(ctx, 2)
     user_line(main, line2)
     assert {:ok, %{via: "typed", again: 0}} = until(ctx, two, &(&1.status == "delivered"))
@@ -91,19 +91,19 @@ defmodule CodingAgentFramework.MailboxTypedTest do
     %{uuid: u1} = Table.get(ctx.mtable, one)
     line1 = "A message for you is in #{file}; read it. [delivery #{u1}]"
     assert {:ok, [^line1]} = submitted(ctx, 1)
-    assert File.read!(file) == long
+    assert File.read!(file) == "From d1 (message): " <> long
     assert %{status: "sending", via: "typed"} = Table.get(ctx.mtable, one)
 
     user_line(main, line1)
     assert {:ok, %{status: "delivered"}} = until(ctx, one, &(&1.status == "delivered"))
     # The file stays after delivery: the agent reads it in the turn the line starts.
-    assert File.read!(file) == long
+    assert File.read!(file) == "From d1 (message): " <> long
 
     %{uuid: u2} = Table.get(ctx.mtable, two)
     file2 = Path.join(due, "#{two}.md")
     assert {:ok, [^line1, "A message for you is in " <> _ = line2]} = submitted(ctx, 2)
     assert line2 =~ "[delivery #{u2}]"
-    assert File.read!(file2) == "line one\nline two"
+    assert File.read!(file2) == "From d1 (message):\n\nline one\nline two"
   end
 
   # With no framework home there is nowhere to write the file: the row is not typed, and waits
@@ -131,7 +131,7 @@ defmodule CodingAgentFramework.MailboxTypedTest do
     main = main(ctx)
     {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "d1", "main", "lost one")
     %{uuid: u1} = Table.get(ctx.mtable, one)
-    assert {:ok, ["lost one [delivery " <> _]} = submitted(ctx, 1)
+    assert {:ok, ["From d1 (message): lost one [delivery " <> _]} = submitted(ctx, 1)
     assert {:ok, %{uuid: ^u1, again: 1}} = until(ctx, one, &(&1.again == 1))
 
     assert {:ok, [line, line]} = submitted(ctx, 2)

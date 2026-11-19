@@ -813,6 +813,17 @@ any reply does (new-4).
   - **The queue** is bounded per class and in memory (decided): a restart loses it, and a
     requester told `queued` asks again under its request id, which answers its lease if the
     grant was written before the restart. A queued request is refused at its deadline.
+  - **A queued start that does not wait** (F-170; `Delegate.tla`'s `Queued`, `StartTold`,
+    `StartToldOnce`, `StartNoticed`). `start_delegate` with `wait: false`, an agent's default
+    on the tool (an agent that waits for a seat does no other work meanwhile), answers a queued
+    lease at once with `{:ok, %{delegate: name, queued: position}}` and goes on. The operator's
+    start waits by default (`Operator.start_delegate/7`'s `wait:`). The parent is owed the
+    start's outcome, a mark on the delegate's row (`tell`) written before the answer, so a
+    restart keeps it. Once the start has an outcome, started or refused with its reason and the
+    time to ask again, `Delegates` tells the parent once, as a notice stored in `Mailbox` under
+    a key of the row's own (`start:<host>:<id>:<created>`), then clears the mark: a restart
+    between the two stores nothing twice (`Break_Delegate_StartNoKey`), and a mark kept in
+    memory only would leave the parent never told (`Break_Delegate_StartOwedInMemory`).
   - **The end.** The lease lasts as long as its work. The `Scheduler` asks the owner of the
     work's row whether the work ended, which the owner answers by the row and its
     `Holder.Process` record (`Delegates.Work` for a delegate's row: live while it may still
@@ -1939,6 +1950,31 @@ fixtures are. For the waiter it is `Mailbox`'s `take_bound:`, 10 s by default: C
 is idle or a turn runs (measured for F-127). The bound runs from the hand-on's wall-clock time,
 kept on the row, so a restart keeps it.
 
+**The sender** (F-170). An agent reads who a row is from in its text, since a turn's input
+names no sender of its own. Every row but a brief and a word to go on (both the parent's, and
+both read as the delegate's own task) goes with a first line in one fixed form, `From <name>
+(<kind>):`, then the text: on the same line when the text has one line, after a blank line
+when it has several. The kind is `message`, `report` (a reply or notice to a brief, whoever
+sent it), `notice` (the framework's, naming the agent it is about), or the row's own kind
+(`ask`, `answer`, `reply`). The frame is put on at the hand-on, not in the stored text, so a
+row due again goes with the same frame, and the uuid mark still comes last: the settle finds
+each row by its own uuid line, as before. An app may give `Mailbox` a `frame:` function of the
+row's sender, kind and text that answers the text to hand on; one that answers no text hands
+nothing on, and the row stays due, its `attempt` `{:bad, :frame}`. The `call` transport's
+answer is not framed: its JSON names the delegate.
+
+**A forced end** (F-170; `Delivery.tla`'s `ForcedEnd` and `ForceSettled`, `Team.tla`'s
+`ForcedByOperator`). An end waits for every row in flight to the session to settle (`{:sending,
+ids}`), and a session that never takes a turn (one not logged in, say) never settles one. The
+operator's `end_main` and `stop` take `force: true`: the session is ended as usual, SIGTERM once
+its file reads idle, but whatever row to it is in flight. Once its process is gone, each row
+still `sending` to it settles `unknown` with reason `ended_while_sending`
+(`Mailbox.ended_while_sending/3`): never resent, never counted delivered, and no later evidence
+changes it (`UnknownStays`). The forced end is the operator's alone; an agent's is refused
+`{:operator_only, :force}`. The act is a row in `Acts` before it acts, and each row's settle is
+a row of its own (`settle`, outcome `unknown`, detail the row's id). A forced stop of a delegate
+still needs its report delivered, as any stop does (`EndsAfterDelivery`).
+
 The restart policy lives with the transport, as one module per transport in `Mailbox` beside
 the one mark and settle, and `Delivery.tla` models each transport's policy as its own choice.
 The common part (the row first, refused undoes, unknown keeps, a settle by evidence at a cue
@@ -2123,6 +2159,10 @@ worktree on its branch whose setup finished).
      under way counts against the cap; after a restart a starting or resuming row is settled
      by `Sessions`' row of its call, never while that call runs; a resume is counted before it
      is asked; each process takes one turn's message, under the uuid the row holds.
+   - The spec settles (F-170): a start in `Queued` answers at once and leaves the parent owed
+     its outcome on the row; once it has one, the parent is told once, by a key `Mailbox`
+     keeps, across restarts (`StartToldOnce`, `StartNoticed`; Breaks `StartNoKey`,
+     `StartOwedInMemory`).
 4. **`Team.tla`**: two main sessions and their delegates, their messages, claims and
    services, and restarts of the framework. Events: a message is sent, a turn ends, an agent
    sticks, dies or ends, two fixes of one child, a service's owner ends.
@@ -2133,7 +2173,9 @@ worktree on its branch whose setup finished).
      answer to its own message, and no message goes to it; an ask has at most one answer, the
      operator's, to the agent that asked (F-138); a main session ends only by the operator's
      `end_main`, idle or with its process gone, and never while a delegate of it has not ended
-     (F-143).
+     (F-143); a forced end is the operator's only, and each row it leaves in flight settles
+     `unknown`, never delivered or resent (F-170, `ForcedByOperator`, `Delivery.tla`'s
+     `ForceSettled` and `UnknownStays`; Breaks `Team_ForceByAgent`, `Delivery_ForceEnded`).
    - Liveness: a message to a live agent is delivered; a claim is released or its fix verified;
      a service whose owner ended without keeping it ends, and one an ended main session owned,
      kept or not.

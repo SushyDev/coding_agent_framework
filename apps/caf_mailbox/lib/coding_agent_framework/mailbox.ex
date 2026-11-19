@@ -121,10 +121,36 @@ defmodule CodingAgentFramework.Mailbox do
   host's `Registry`), `transcripts:` and `accounts:`, and `home:`, the framework home `Sessions`
   was given, whose due directories carry a row too long to type or to launch with; `os:`, the
   workstation's operating system (`Programs.os/1`, this VM's own by default), whose argument
-  limit (`ClaudeCLI.prompt_max/1`) bounds a launch's prompt.
+  limit (`ClaudeCLI.prompt_max/1`) bounds a launch's prompt; `frame:`, a function that frames a
+  row's text with its sender (`frame/1` by default, F-170).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+  @doc """
+  The sender's frame on the text an agent reads (F-170): every row but a brief and a word to go
+  on, which are the delegate's own first prompt, names whose it is, so a main session with
+  several delegates always knows. `row` is `%{from: name, kind: kind, to: name, text: text}`:
+  `kind` is `"message"`, `"reply"`, `"report"` (the answer to a brief), `"notice"` or
+  `"answer"` (a person's answer to an ask), and `from` the agent the row is from, or for the
+  framework's notice in a reply's or a report's place, the agent whose row it answers. The
+  frame is a first line of its own, `From <name> (<kind>):`, or for a one-line text the start
+  of that line, so a short typed row stays one line. An app's `frame:` answers the text in its
+  place: a non-empty string, or the row is not handed on (`attempt` `{:bad, :frame}`). The
+  delivery mark goes after the framed text, so each row is still settled by its own uuid line.
+
+      iex> CodingAgentFramework.Mailbox.frame(%{from: "app-api", kind: "report", to: "app-main",
+      ...>   text: "Done.\\nAll tests pass."})
+      "From app-api (report):\\n\\nDone.\\nAll tests pass."
+      iex> CodingAgentFramework.Mailbox.frame(%{from: "app-main", kind: "message", to: "app-api",
+      ...>   text: "Rebase first."})
+      "From app-main (message): Rebase first."
+  """
+  @spec frame(map) :: String.t()
+  def frame(%{from: from, kind: kind, text: text}) do
+    label = "From #{from} (#{kind}):"
+    if String.contains?(text, "\n"), do: label <> "\n\n" <> text, else: label <> " " <> text
+  end
 
   @doc """
   Sends `text` from agent `from` to agent `to`: `{:ok, {:queued, id}}` once its row is stored,
@@ -241,6 +267,20 @@ defmodule CodingAgentFramework.Mailbox do
   def ended(mailbox, to, opts \\ []), do: call(mailbox, {:ended, to}, opts)
 
   @doc """
+  Agent `to`'s end was forced by the operator (F-170, `Delivery.tla`'s ForceSettled): each row
+  still `sending` to it settles `unknown`, `attempt` `ended_while_sending`. Its text may or may
+  not have gone in, and no evidence will come: it is never due again, so never sent twice, and
+  never counted delivered. A hand-on of it still under way answers into nothing. Only once no
+  process of `to` may live (`Sessions.Agents.free?/1`): else `{:refused, {:not_free, status}}`,
+  and nothing is settled. Answers `{:ok, ids}`, the rows it settled.
+
+      Mailbox.ended_while_sending(mailbox, "app-epic")
+      #=> {:ok, [7]}
+  """
+  def ended_while_sending(mailbox, to, opts \\ []),
+    do: call(mailbox, {:ended_while_sending, to}, opts)
+
+  @doc """
   The one row stored under `uuid` will never go in: the brief of a main session's start that
   was refused (`Mains`, F-143), while other rows to that name stay queued for its next start.
   A `queued` row is settled `ended`; answers `{:ok, :ended}`, `{:ok, status}` for a row already
@@ -322,7 +362,8 @@ defmodule CodingAgentFramework.Mailbox do
 
   @doc """
   What became of row `id`: `{:ok, %{id, from, to, kind, status, via, attempt, reply_to, subtype,
-  is_error}}`, `status` being `queued`, `sending`, `delivered`, `ended` or `kept` (a row to the operator, never delivered), `reply_to` the uuid
+  is_error}}`, `status` being `queued`, `sending`, `delivered`, `ended`, `kept` (a row to the operator, never
+  delivered) or `unknown` (in flight at a forced end, never resent, F-170), `reply_to` the uuid
   of the row an answer answers (`key:<key>` for a `notify/4` stored under a key, nil for any
   other), and `subtype` and `is_error` a reply's result's; or `{:refused, :no_message}`.
   """
@@ -428,6 +469,7 @@ defmodule CodingAgentFramework.Mailbox do
         Map.merge(s, %{home: opts[:home], os: Keyword.get_lazy(opts, :os, &Programs.local_os/0)})
 
       s = Map.merge(s, %{hands: %{}, launching: MapSet.new()})
+      s = Map.put(s, :frame, Keyword.get(opts, :frame, &frame/1))
       {:ok, Map.merge(s, %{waiter: waiter, typed: typed}), {:continue, :read}}
     else
       {:refused, reason} -> {:stop, reason}
@@ -572,11 +614,15 @@ defmodule CodingAgentFramework.Mailbox do
       # Delivery.tla's stream row for a start: marked while no process of it runs (`at` nil),
       # for the session the agent row names at a resume, or the start's answer names.
       {[], [m | _]} when via == :stream ->
-        srow = Agents.get(s.agents, to)
-        mark = [status: "sending", via: "stream", session_id: srow && srow.session_id, at: nil]
-        write(s, m, mark ++ [attempt: nil, sent_at: deadline])
-        s = %{s | launching: MapSet.put(s.launching, m.id)}
-        {:reply, {:ok, %{id: m.id, uuid: m.uuid, text: m.text}}, s}
+        with {:ok, text} <- framed(s, m) do
+          srow = Agents.get(s.agents, to)
+          mark = [status: "sending", via: "stream", session_id: srow && srow.session_id, at: nil]
+          write(s, m, mark ++ [attempt: nil, sent_at: deadline])
+          s = %{s | launching: MapSet.put(s.launching, m.id)}
+          {:reply, {:ok, %{id: m.id, uuid: m.uuid, text: text}}, s}
+        else
+          refused -> {:reply, refused, s}
+        end
 
       {[], [m | _]} ->
         with {:ok, text} <- launch_text(s, to, m) do
@@ -641,6 +687,20 @@ defmodule CodingAgentFramework.Mailbox do
     ids = for %{to_agent: ^to, status: "queued"} = m <- Table.open_rows(s.db), do: m.id
     for id <- ids, do: write(s, %{id: id}, status: "ended")
     {:reply, {:ok, ids}, s}
+  end
+
+  def handle_call({:ended_while_sending, to}, _from, s) do
+    srow = Agents.get(s.agents, to)
+
+    if srow != nil and Agents.free?(srow) do
+      rows = for %{to_agent: ^to, status: "sending"} = m <- Table.open_rows(s.db), do: m
+      for m <- rows, do: write(s, m, status: "unknown", attempt: :ended_while_sending)
+      ids = Enum.map(rows, & &1.id)
+      s = Enum.reduce(ids, s, &unwatch(&2, &1))
+      {:reply, {:ok, ids}, %{s | launching: MapSet.difference(s.launching, MapSet.new(ids))}}
+    else
+      {:reply, {:refused, {:not_free, srow && srow.status}}, s}
+    end
   end
 
   def handle_call({:settle_row, uuid}, _from, s) do
@@ -893,10 +953,11 @@ defmodule CodingAgentFramework.Mailbox do
 
   defp handing(s), do: MapSet.new(Map.values(s.hands), fn {m, _} -> m.id end)
 
+  # A row settled while its hand-on ran (`ended_while_sending/3`) takes no answer of it.
   defp handed(s, ref, answer) do
     {{m, after_hand}, hands} = Map.pop(s.hands, ref)
     s = %{s | hands: hands}
-    after_hand.(s, m, answer)
+    if match?(%{status: "sending"}, Table.get(s.db, m.id)), do: after_hand.(s, m, answer)
     s
   end
 
@@ -1095,14 +1156,16 @@ defmodule CodingAgentFramework.Mailbox do
 
   # Mark, then the hand-on: refused undoes the mark (nothing was marked in Stream); unknown
   # stays sending for Stream's fold to settle.
-  defp mark(s, m, sid, at) do
+  defp mark(s, m, sid, at), do: with_framed(s, m, &mark(&1, m, sid, at, &2))
+
+  defp mark(s, m, sid, at, text) do
     write(s, m, status: "sending", via: "stream", session_id: sid, at: at)
     stream = s.stream
 
     hand_on(
       s,
       m,
-      fn -> Stream.write(stream, sid, {:message, m.uuid, m.text}, timeout: @step) end,
+      fn -> Stream.write(stream, sid, {:message, m.uuid, text}, timeout: @step) end,
       fn
         _s, _m, {:ok, _} -> :ok
         s, m, {:refused, why} -> write(s, m, status: "queued", via: nil, at: nil, attempt: why)
@@ -1113,11 +1176,13 @@ defmodule CodingAgentFramework.Mailbox do
 
   # Mark, then the hand-on, as `mark/4`; the transcript's offset read before the mark bounds
   # what its settle reads. Sent or unknown starts the take bound: the text may have been read.
-  defp hand(s, m, srow) do
+  defp hand(s, m, srow), do: with_framed(s, m, &hand(&1, m, srow, &2))
+
+  defp hand(s, m, srow, text) do
     from = offset(s, srow)
     mark = [status: "sending", via: "waiter", session_id: srow.session_id, at: srow.pid]
     write(s, m, mark ++ [from_byte: from, sent_at: nil])
-    text = Transport.Waiter.text(m.text, m.uuid)
+    text = Transport.Waiter.text(text, m.uuid)
     intake = s.waiter.intake
 
     hand_on(
@@ -1166,39 +1231,84 @@ defmodule CodingAgentFramework.Mailbox do
   # The line typed: the row's own, or for a row too long to type, one that names the file its
   # text is written to in the agent's due directory, which its start may read (F-142).
   defp line(s, m, srow) do
-    if Transport.Typed.short?(m.text, m.uuid),
-      do: {:ok, Transport.Typed.text(m.text, m.uuid)},
-      else:
-        with(
-          {:ok, path} <- due_file(s, srow.name, m),
-          do: {:ok, Transport.Typed.pointer(path, m.uuid)}
-        )
+    with {:ok, text} <- framed(s, m) do
+      if Transport.Typed.short?(text, m.uuid),
+        do: {:ok, Transport.Typed.text(text, m.uuid)},
+        else:
+          with(
+            {:ok, path} <- due_file(s, srow.name, m, text),
+            do: {:ok, Transport.Typed.pointer(path, m.uuid)}
+          )
+    end
+  end
+
+  # The text an agent reads of row `m`, framed with its sender by `frame/1` or the app's
+  # `frame:` (F-170); a brief and a word to go on are the delegate's own prompt, as they are.
+  defp framed(_s, %{kind: kind} = m) when kind in ["brief", "resume"], do: {:ok, m.text}
+
+  defp framed(s, m) do
+    {from, kind} = sender_of(s, m)
+
+    case s.frame.(%{from: from, kind: kind, to: m.to_agent, text: m.text}) do
+      text when is_binary(text) and text != "" -> {:ok, text}
+      _ -> {:refused, {:bad, :frame}}
+    end
+  end
+
+  # Whose the row is: a reply's or a report's agent; for the framework's notice in a reply's
+  # or a report's place, the agent whose row it answers.
+  defp sender_of(s, %{kind: kind} = m) when kind in ["reply", "notice"] do
+    case m.reply_to && Table.by_uuid(s.db, m.reply_to) do
+      %{kind: "brief", to_agent: to} ->
+        {if(kind == "reply", do: m.from_agent, else: to), "report"}
+
+      %{to_agent: to} when kind == "notice" ->
+        {to, "notice"}
+
+      _ ->
+        {m.from_agent, kind}
+    end
+  end
+
+  defp sender_of(_s, %{kind: kind} = m) when kind in [nil, "msg"], do: {m.from_agent, "message"}
+  defp sender_of(_s, m), do: {m.from_agent, m.kind}
+
+  # A transport's mark with the framed text, or none: a frame refused is the row's attempt.
+  defp with_framed(s, m, mark) do
+    case framed(s, m) do
+      {:ok, text} ->
+        mark.(s, text)
+
+      {:refused, why} ->
+        if m.attempt != Store.text(why), do: write(s, m, attempt: why)
+        s
+    end
   end
 
   # The launch's prompt: the row's text, or for one longer than the host's argument carries,
   # a short line naming the file its text is in, as a typed row's pointer (F-155).
   defp launch_text(s, to, m) do
-    text = Transport.Launch.text(m.text, m.uuid)
-
-    with {:ok, max} <- ClaudeCLI.prompt_max(s.os) do
+    with {:ok, framed} <- framed(s, m),
+         text = Transport.Launch.text(framed, m.uuid),
+         {:ok, max} <- ClaudeCLI.prompt_max(s.os) do
       if byte_size(text) <= max,
         do: {:ok, text},
         else:
           with(
-            {:ok, path} <- due_file(s, to, m),
+            {:ok, path} <- due_file(s, to, m, framed),
             do: {:ok, Transport.Launch.pointer(path, m.uuid)}
           )
     end
   end
 
   # The row's whole text in the agent's due directory, written whole and renamed into place.
-  defp due_file(%{home: nil}, _name, _m), do: {:refused, {:too_long, :no_home}}
+  defp due_file(%{home: nil}, _name, _m, _text), do: {:refused, {:too_long, :no_home}}
 
-  defp due_file(s, name, m) do
+  defp due_file(s, name, m, text) do
     path = Path.join(Sessions.due_dir(s.home, name), "#{m.id}.md")
 
     with :ok <- File.mkdir_p(Path.dirname(path)),
-         :ok <- File.write(path <> ".tmp", m.text),
+         :ok <- File.write(path <> ".tmp", text),
          :ok <- File.rename(path <> ".tmp", path) do
       {:ok, path}
     else

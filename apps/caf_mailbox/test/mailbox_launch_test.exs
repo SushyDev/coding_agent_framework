@@ -58,7 +58,7 @@ defmodule CodingAgentFramework.MailboxLaunchTest do
     deadline = System.os_time(:millisecond) + 30_000
 
     assert {:ok, %{id: ^one, uuid: uuid, text: text}} = Mailbox.launch(m, "main", deadline)
-    assert text == "Review it.\nTwo lines.\n\n[delivery #{uuid}]"
+    assert text == "From d1 (message):\n\nReview it.\nTwo lines.\n\n[delivery #{uuid}]"
     assert %{status: "sending", via: "launch", at: nil} = Table.get(ctx.mtable, one)
     # One row in flight per addressee.
     assert {:refused, {:sending, [^one]}} = Mailbox.launch(m, "main", deadline)
@@ -167,7 +167,7 @@ defmodule CodingAgentFramework.MailboxLaunchTest do
     assert {:ok, %{id: ^one, uuid: uuid, text: text}} = Mailbox.launch(m, "main", deadline)
     file = Path.join([home, "due", "main", "#{one}.md"])
     assert text == Transport.Launch.pointer(file, uuid)
-    assert File.read!(file) == long
+    assert File.read!(file) == "From d1 (message): " <> long
 
     launch = SessionsSetup.launch(ctx, :at_start)
     launch = Keyword.merge(launch, claude: ScreenStandIn.write!(ctx.dir), prompt: text)

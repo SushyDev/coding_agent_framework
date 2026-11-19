@@ -12,7 +12,8 @@ defmodule CodingAgentFramework.Delegates.Table do
   are the uuids of `Mailbox`'s rows of the brief and of the word to go on, chosen before they
   are stored. `report` is `none`, then `held` with its `text` until `Mailbox` takes it, then
   `taken`; how it is delivered is `Mailbox`'s row, the reply to `brief_uuid`. `model` is what
-  its start and its resume launch with.
+  its start and its resume launch with. `tell` names the parent while it is owed the outcome of
+  a start that answered queued at once (F-170), and is cleared once `Mailbox` has its notice.
 
   **Migration** (F-129): a file an earlier build made also has `parent`, `project`, `account`,
   `brief`, `session_id`, `mark` and `options`, and the status `ended`. `old_tree/1` reads what
@@ -28,16 +29,18 @@ defmodule CodingAgentFramework.Delegates.Table do
   alias CodingAgentFramework.Store
 
   @columns ~w(id host name branch model brief_uuid resume_uuid status reason resumes report
-              text called_at deadline created_at updated_at)a
+              text called_at deadline created_at updated_at tell)a
 
   @create """
   (id INTEGER PRIMARY KEY, host TEXT NOT NULL, name TEXT NOT NULL, branch TEXT NOT NULL,
     model TEXT NOT NULL, brief_uuid TEXT NOT NULL, resume_uuid TEXT, status TEXT NOT NULL,
     reason TEXT, resumes INTEGER NOT NULL, report TEXT NOT NULL, text TEXT,
     called_at INTEGER NOT NULL, deadline INTEGER NOT NULL, created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL)
+    updated_at INTEGER NOT NULL, tell TEXT)
   """
   @schema "CREATE TABLE IF NOT EXISTS delegates #{@create};"
+  # Added after a file's table may have been made (F-170).
+  @added [delegates: ["tell TEXT"]]
 
   # Every status, once, and the lists read from it, checked when the module compiles.
   @statuses ~w(starting resuming running finished failed refused)
@@ -93,7 +96,7 @@ defmodule CodingAgentFramework.Delegates.Table do
   """
   @spec open(String.t()) :: {:ok, db} | {:refused, term}
   def open(path) do
-    with {:ok, db} <- Store.open(path, @schema) do
+    with {:ok, db} <- Store.open(path, @schema, added: @added) do
       Store.convert(db, "delegates", [:reason])
       {:ok, db}
     end
@@ -101,7 +104,7 @@ defmodule CodingAgentFramework.Delegates.Table do
 
   @doc "Opens the file at `path` for a reader of its own (`Delegates.Work`): it converts nothing."
   @spec open_read(String.t()) :: {:ok, db} | {:refused, term}
-  def open_read(path), do: Store.open(path, @schema)
+  def open_read(path), do: Store.open(path, @schema, added: @added)
 
   @doc """
   What an earlier build's table holds that `Sessions` keeps now: per name, from its latest row,
@@ -182,6 +185,10 @@ defmodule CodingAgentFramework.Delegates.Table do
   @spec latest(db, String.t()) :: [map]
   def latest(db, host),
     do: select(db, "id IN (SELECT max(id) FROM delegates WHERE host = ?1 GROUP BY name)", [host])
+
+  @doc "The host's rows whose parent is owed a queued start's outcome (`tell` names it)."
+  @spec owed(db, String.t()) :: [map]
+  def owed(db, host), do: select(db, "host = ?1 AND tell IS NOT NULL", [host])
 
   @doc "Row `id`, or nil."
   @spec get(db, integer) :: map | nil

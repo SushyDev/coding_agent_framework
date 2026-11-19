@@ -194,6 +194,8 @@ defmodule CodingAgentFramework.Mains do
   delegates has not ended (`{:delegates, names}`), stops it once idle, and marks its agent row
   `ended`, so the app's end of an owner's services ends every one it owns, kept ones too. Its
   name never starts again. Answers `{:ok, :ended}` or what `Sessions.end_main/3` answers.
+  Options: `:timeout`, and `force: true` (F-170), the operator's forced end, whose stop does not
+  wait for the rows to the session (`Sessions.stop/3`).
 
       Mains.end_main(mains, "app-epic")
       #=> {:ok, :ended}
@@ -201,7 +203,12 @@ defmodule CodingAgentFramework.Mains do
   """
   @spec end_main(GenServer.server(), String.t(), keyword) :: outcome(:ended)
   def end_main(mains, name, opts \\ []),
-    do: call(mains, {:end_main, name}, Keyword.get(opts, :timeout, @call + @slack))
+    do:
+      call(
+        mains,
+        {:end_main, name, Keyword.get(opts, :force, false)},
+        Keyword.get(opts, :timeout, @call + @slack)
+      )
 
   @doc """
   Something landed in `project`'s trunk: a pull of its checkout is owed, and goes as soon as no
@@ -413,12 +420,12 @@ defmodule CodingAgentFramework.Mains do
   end
 
   # A start of the name under way would run a second process; Sessions refuses the rest.
-  def handle_call({:end_main, name}, from, s) do
+  def handle_call({:end_main, name, force}, from, s) do
     if Enum.any?(Starts.starting_rows(s.starts, s.host), &(&1.name == name)) do
       {:reply, {:refused, {:starting, name}}, s}
     else
       sessions = s.sessions
-      task = Task.async(fn -> Sessions.end_main(sessions, name, timeout: @call) end)
+      task = Task.async(fn -> Sessions.end_main(sessions, name, timeout: @call, force: force) end)
       {:noreply, put_in(s.ends[task.ref], from)}
     end
   end

@@ -79,6 +79,15 @@
 (* to it is sending (F-118's new-2; F-122's new-1). A session that ended  *)
 (* for good gets none either: a due row says it ended first.              *)
 (*                                                                         *)
+(* The operator's forced end (F-170; Team.tla's, its act alone): a session *)
+(* that never takes a turn (one not logged in, say) never settles the row  *)
+(* in flight to it, so its stop would wait forever. A forced stop waits    *)
+(* for its turn to have ended, or never begun, not for the rows sending   *)
+(* (ForcedEnd), and the session ends for good. Each row still sending to  *)
+(* it then settles unknown (ForceSettled): never due again, so never sent *)
+(* twice (AtMostOnce, UnknownStays), and never counted delivered.          *)
+(* ForceEnded settles it ended, which says it never went in.               *)
+(*                                                                         *)
 (* Models these modules of CodingAgentFramework (R7 and R8 build them):    *)
 (*   Mailbox   the table of rows (durable); the mark, the hand-on in       *)
 (*             memory, one module per transport with its restart policy;   *)
@@ -194,7 +203,8 @@ Breaks == {
     "NoPointer",             \* a long row is not typed: it waits for a waiter (F-132)
     "BriefAfterInit",        \* a headless start waits for its init before its first row
     "LaunchBound",           \* a launch with no line is due again while its process lives (F-153)
-    "AgentCutUndoes"         \* a hand its addressee's agent process's crash cut is due again
+    "AgentCutUndoes",        \* a hand its addressee's agent process's crash cut is due again
+    "ForceEnded"             \* a row a forced end left sending is settled ended, not unknown
 }
 
 ASSUME Break \in Breaks
@@ -237,11 +247,12 @@ VARIABLES
     lost,      \* <<i, why>>: a call's write succeeded to a client that had gone
     wrong,     \* what a guard should have refused
     \* alone only: the sessions, Sessions' stop, and restarts
-    restarts, lives, ends, prompts, stops, readAt
+    restarts, lives, ends, prompts, stops, readAt,
+    forced     \* alone: the sessions whose end the operator forced (F-170)
 
 dvars == <<row, hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
 avars == <<up, pr, idle, stopping, over, turned>>
-alone == <<restarts, lives, ends, prompts, stops, readAt>>
+alone == <<restarts, lives, ends, prompts, stops, readAt, forced>>
 vars == <<avars, dvars, alone>>
 
 -----------------------------------------------------------------------------
@@ -613,6 +624,18 @@ EndedFirst(i) ==
     /\ row' = [row EXCEPT ![i].st = "ended"]
     /\ UNCHANGED <<hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
 
+\* A row still sending to a session whose end the operator forced (F-170),
+\* once that session ended for good: its text may or may not have gone in,
+\* and no evidence will come that Mailbox would read for it. It settles
+\* unknown, with reason ended_while_sending: never due again, never
+\* delivered. A hand of it still under way answers into nothing.
+\* ForceEnded settles it ended, which says it never went in.
+ForceSettled(i) ==
+    /\ up /\ row[i].st = "sending" /\ row[i].to \in forced /\ over[row[i].to]
+    /\ row' = [row EXCEPT ![i].st = IF Break = "ForceEnded" THEN "ended" ELSE "unknown"]
+    /\ hand' = hand \ {i}
+    /\ UNCHANGED <<claimed, wire, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
+
 -----------------------------------------------------------------------------
 (* Replies and notices, one per key; a resumed process's row to go on *)
 
@@ -673,7 +696,7 @@ Init ==
     /\ lives = [a \in Addrs |-> IF a \in Launched THEN 0 ELSE 1]
     /\ idle = [a \in Addrs |-> TRUE] /\ stopping = [a \in Addrs |-> FALSE]
     /\ over = [a \in Addrs |-> FALSE] /\ turned = [a \in Addrs |-> FALSE]
-    /\ ends = 0 /\ prompts = 0 /\ stops = 0 /\ readAt = [a \in Addrs |-> 0]
+    /\ ends = 0 /\ prompts = 0 /\ stops = 0 /\ readAt = [a \in Addrs |-> 0] /\ forced = {}
     /\ row = [i \in Ids |-> NoRow] /\ hand = {} /\ claimed = {}
     /\ wire = [i \in Ids |-> 0] /\ waiter = [a \in Addrs |-> 0]
     /\ call = [i \in Ids |-> "none"]
@@ -696,7 +719,8 @@ Takes(i) == Take(i) /\ idle' = [idle EXCEPT ![row[i].to] = FALSE]
 Prompted(a) ==
     /\ a \notin Headless /\ pr[a] # 0 /\ idle[a] /\ prompts < MaxPrompts
     /\ idle' = [idle EXCEPT ![a] = FALSE] /\ prompts' = prompts + 1
-    /\ UNCHANGED <<up, pr, stopping, over, turned, dvars, restarts, lives, ends, stops, readAt>>
+    /\ UNCHANGED <<up, pr, stopping, over, turned, dvars, restarts, lives, ends, stops, readAt,
+                   forced>>
 
 SelfStarts(a) ==
     /\ SelfTurns /\ a \in Headless /\ pr[a] # 0 /\ idle[a]
@@ -716,7 +740,7 @@ ProcEnds(a, term) ==
 
 Ends(a) ==
     /\ pr[a] # 0 /\ ends < MaxEnds /\ ends' = ends + 1 /\ ProcEnds(a, FALSE)
-    /\ UNCHANGED <<up, stopping, over, restarts, lives, prompts, stops>>
+    /\ UNCHANGED <<up, stopping, over, restarts, lives, prompts, stops, forced>>
 
 \* Sessions starts a new process of the session, its turn not begun. A
 \* launched session starts only by a launch, which carries its first row.
@@ -731,12 +755,12 @@ Resumed(a) ==
     /\ up /\ pr[a] = 0 /\ ~over[a]
     /\ a \notin Launched \/ (a \in Headless /\ Break = "BriefAfterInit")
     /\ NewProcess(a)
-    /\ UNCHANGED <<up, over, dvars, restarts, ends, prompts, stops, readAt>>
+    /\ UNCHANGED <<up, over, dvars, restarts, ends, prompts, stops, readAt, forced>>
 
 Launches(i) ==
     LET a == row[i].to IN
     /\ a \in Addrs /\ Launch(i, lives[a] + 1) /\ NewProcess(a)
-    /\ UNCHANGED <<up, over, restarts, ends, prompts, stops, readAt>>
+    /\ UNCHANGED <<up, over, restarts, ends, prompts, stops, readAt, forced>>
 
 \* The stop: the row says stopping first; the idle read waits until the
 \* turn has ended and no row to the session is sending; then the SIGTERM,
@@ -744,30 +768,43 @@ Launches(i) ==
 StopAsked(a) ==
     /\ up /\ pr[a] # 0 /\ ~stopping[a] /\ stops < MaxStops
     /\ stopping' = [stopping EXCEPT ![a] = TRUE] /\ stops' = stops + 1
-    /\ UNCHANGED <<up, pr, idle, over, turned, dvars, restarts, lives, ends, prompts, readAt>>
+    /\ UNCHANGED <<up, pr, idle, over, turned, dvars, restarts, lives, ends, prompts, readAt,
+                   forced>>
 
 IdleRead(a) ==
     /\ up /\ stopping[a] /\ pr[a] # 0 /\ idle[a] /\ readAt[a] = 0
     /\ Break = "StopWhileSending" \/ ~\E i \in To(a) : row[i].st = "sending"
     /\ readAt' = [readAt EXCEPT ![a] = pr[a]]
-    /\ UNCHANGED <<avars, dvars, restarts, lives, ends, prompts, stops>>
+    /\ UNCHANGED <<avars, dvars, restarts, lives, ends, prompts, stops, forced>>
 
 Term(a) ==
     /\ readAt[a] # 0 /\ readAt[a] = pr[a] /\ ProcEnds(a, TRUE)
-    /\ UNCHANGED <<up, stopping, over, restarts, lives, ends, prompts, stops>>
+    /\ UNCHANGED <<up, stopping, over, restarts, lives, ends, prompts, stops, forced>>
+
+\* The operator's forced end (F-170): a stop that does not wait for the rows
+\* sending to the session. Once its turn has ended, or none ever began (a
+\* new process is idle until it takes its first row: a session that is not
+\* logged in never takes it), its process ends by SIGTERM and the session
+\* ends for good, in one step. The rows still sending to it settle unknown
+\* (ForceSettled).
+ForcedEnd(a) ==
+    /\ up /\ a \notin Headless /\ stopping[a] /\ pr[a] # 0 /\ idle[a]
+    /\ over' = [over EXCEPT ![a] = TRUE] /\ forced' = forced \cup {a}
+    /\ ProcEnds(a, FALSE)
+    /\ UNCHANGED <<up, stopping, restarts, lives, ends, prompts, stops>>
 
 \* A headless session ends for good (a delegate's end): rows still due to
 \* it are marked ended; one in flight is settled first.
 Over(a) ==
     /\ up /\ a \in Headless /\ ~over[a] /\ pr[a] # 0
     /\ over' = [over EXCEPT ![a] = TRUE] /\ ProcEnds(a, FALSE)
-    /\ UNCHANGED <<up, stopping, restarts, lives, ends, prompts, stops>>
+    /\ UNCHANGED <<up, stopping, restarts, lives, ends, prompts, stops, forced>>
 
 FrameworkDies ==
     /\ up /\ restarts < MaxRestarts
     /\ up' = FALSE /\ restarts' = restarts + 1 /\ readAt' = [a \in Addrs |-> 0]
     /\ Restart
-    /\ UNCHANGED <<pr, idle, stopping, over, turned, lives, ends, prompts, stops>>
+    /\ UNCHANGED <<pr, idle, stopping, over, turned, lives, ends, prompts, stops, forced>>
 
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
@@ -780,7 +817,7 @@ AgentRestart(a) ==
     /\ up /\ restarts < MaxRestarts
     /\ restarts' = restarts + 1 /\ readAt' = [readAt EXCEPT ![a] = 0]
     /\ \E went \in BOOLEAN : AgentCut(a, went)
-    /\ UNCHANGED <<up, pr, idle, stopping, over, turned, lives, ends, prompts, stops>>
+    /\ UNCHANGED <<up, pr, idle, stopping, over, turned, lives, ends, prompts, stops, forced>>
 
 \* The agent calls run_delegate in a turn, on a row stored for it.
 CallMade(i) ==
@@ -795,6 +832,7 @@ Next ==
     \/ FrameworkDies \/ FrameworkStarts
     \/ \E a \in Addrs : \/ Prompted(a) \/ SelfStarts(a) \/ TurnEnds(a) \/ Ends(a)
                         \/ Resumed(a) \/ StopAsked(a) \/ IdleRead(a) \/ Term(a) \/ Over(a)
+                        \/ ForcedEnd(a)
                         \/ Mailbox(Connects(a)) \/ Mailbox(WaiterEnds(a))
                         \/ AgentRestart(a)
     \/ \E i \in Ids : \/ \E s \in Senders, a \in Addrs : Sends(i, s, a)
@@ -805,7 +843,7 @@ Next ==
                       \/ CallMade(i)
                       \/ Mailbox(Deadline(i) \/ Written(i) \/ Told(i) \/ CallerEnds(i)
                                  \/ CallerSeen(i) \/ SettleCut(i))
-                      \/ Mailbox(EndedFirst(i))
+                      \/ Mailbox(EndedFirst(i)) \/ Mailbox(ForceSettled(i))
                       \/ Mailbox(ReplyStored(i) \/ NoticeStored(i) \/ GoOn(i))
 
 \* One row's steps after its mark and hand-on, but the take: each is the
@@ -815,7 +853,7 @@ Next ==
 RowSteps(i) ==
     Mailbox(\/ Refused(i) \/ Reclaim(i) \/ Settle(i) \/ Deadline(i) \/ Written(i) \/ Told(i)
                \/ CallerSeen(i) \/ SettleCut(i) \/ EndedFirst(i) \/ ReplyStored(i)
-               \/ NoticeStored(i) \/ GoOn(i))
+               \/ NoticeStored(i) \/ GoOn(i) \/ ForceSettled(i))
 
 Fairness ==
     /\ WF_vars(FrameworkStarts)
@@ -832,7 +870,8 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 (* What must hold *)
 
 TypeOK ==
-    /\ \A i \in Ids : /\ row[i].st \in {"none", "due", "sending", "delivered", "ended", "kept"}
+    /\ \A i \in Ids : /\ row[i].st \in {"none", "due", "sending", "delivered", "ended", "kept",
+                                       "unknown"}
                       /\ row[i].via \in Transports \cup {"none"}
                       /\ row[i].kind \in {"none", "msg", "brief", "resume", "reply", "notice",
                                          "ask", "answer"}
@@ -887,13 +926,21 @@ ReplyNamesItsRow ==
 AnswersTheBrief ==
     \A j \in Ids : row[j].kind \in {"reply", "notice"} => row[row[j].re].kind \in {"msg", "brief"}
 
+\* A row a forced end settled unknown stays so: it is never due again, so
+\* never sent twice, and never counted delivered (F-170).
+UnknownStays == [][\A i \in Ids : row[i].st = "unknown" => row'[i].st = "unknown"]_row
+
 \* A row in flight settles.
 SendingSettles == \A i \in Ids : row[i].st = "sending" ~> row[i].st # "sending"
 
 \* A due row is delivered, or marked ended once its session ended. None
 \* waits for a person's prompt: a long row is typed as a pointer (F-142).
-\* NoPointer breaks it.
-Arrives == \A i \in Ids : row[i].st = "due" ~> row[i].st \in {"delivered", "ended"}
+\* NoPointer breaks it. A row in flight at the operator's forced end of its
+\* session is settled unknown instead, and only then (F-170).
+Arrives ==
+    \A i \in Ids : row[i].st = "due"
+                     ~> (row[i].st \in {"delivered", "ended"}
+                         \/ (row[i].st = "unknown" /\ row[i].to \in forced))
 
 \* A delivered row whose turn ends, with a result or with its process's
 \* end, is answered under its key, unless its session ended for good.

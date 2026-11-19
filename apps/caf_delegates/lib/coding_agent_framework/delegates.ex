@@ -175,10 +175,18 @@ defmodule CodingAgentFramework.Delegates do
   and `interactive: true` for the terminal interface, refused
   `:no_registry` by a `Delegates` given no `registry:`. A brief longer than a launch's argument
   carries goes as a pointer to its file (`Mailbox.launch/4`, F-155).
+
+  `wait: false` (F-170; `Delegate.tla`'s Queued): a start whose lease is queued answers at
+  once, `{:ok, %{id, name, brief_uuid, session_id: nil, account, queued: position}}`, and goes
+  on. Its row says first that its parent is owed the outcome; once the row leaves `starting`
+  (running, or refused with its reason: a lease refused with its retry time, or a start a
+  restart cut, at its deadline) the parent is told by a notice from `framework`
+  (`Mailbox.notify/4`, `kind: :notice`) stored under the row's key, which `Mailbox` takes once,
+  across restarts. By default (`wait: true`) the caller waits for the lease, as before.
   """
   def start_delegate(delegates, parent, project, branch, model, brief, opts \\ []) do
     how = if Keyword.get(opts, :interactive, false), do: :interactive, else: :headless
-    own = {Keyword.get(opts, :options), Keyword.get(opts, :meta)}
+    own = {Keyword.get(opts, :options), Keyword.get(opts, :meta), Keyword.get(opts, :wait, true)}
     call(delegates, {:start, parent, project, branch, model, brief, own, how}, opts, 300_000)
   end
 
@@ -250,6 +258,7 @@ defmodule CodingAgentFramework.Delegates do
     end
   end
 
+  def fix_check({:stop, :force}, state), do: fix_check(:stop, state)
   def fix_check(:stop, %{report: "taken"}), do: :ok
   def fix_check(:stop, %{report: report}), do: {:refused, {:report, report}}
   def fix_check(:interrupt, %{gone: true}), do: {:refused, :gone}
@@ -351,7 +360,11 @@ defmodule CodingAgentFramework.Delegates do
   def handle_cast(:cue, s), do: {:noreply, settle(s)}
 
   @impl true
-  def handle_call({:start, parent, project, branch, model, brief, {options, meta}, how}, from, s) do
+  def handle_call(
+        {:start, parent, project, branch, model, brief, {options, meta, wait}, how},
+        from,
+        s
+      ) do
     with true <-
            Enum.all?([parent, model, brief], &(is_binary(&1) and &1 != "")) or
              {:refused, {:bad, :start}},
@@ -383,9 +396,18 @@ defmodule CodingAgentFramework.Delegates do
         {:ok, _lease} ->
           begin(s, row, start, from)
 
-        {:queued, %{id: request}} ->
+        {:queued, %{id: request}} when wait ->
           waiting = %{id: row.id, from: from, parent: parent, name: row.name, start: start}
           {:noreply, put_in(s.pending[request], waiting)}
+
+        # Delegate.tla's Queued: the row says first that its parent is owed the outcome, then
+        # the caller is answered; the one more answer of the lease comes to no caller.
+        {:queued, %{id: request} = queued} ->
+          write(s, row, tell: parent)
+          waiting = %{id: row.id, from: nil, parent: parent, name: row.name, start: start}
+          answer = %{started(row, nil) | account: account.name}
+          answer = Map.put(answer, :queued, queued[:position])
+          {:reply, {:ok, answer}, put_in(s.pending[request], waiting)}
 
         not_granted ->
           reply(answered(s, row, {:refused, {:lease, lease_refusal(not_granted)}}))
@@ -440,7 +462,7 @@ defmodule CodingAgentFramework.Delegates do
 
         cond do
           now != state -> moved(now, s)
-          fix == :stop -> stop_starting(s, row, from)
+          fix in [:stop, {:stop, :force}] -> stop_starting(s, row, from)
           true -> {:reply, {:refused, {:not_started, "starting"}}, s}
         end
 
@@ -462,7 +484,7 @@ defmodule CodingAgentFramework.Delegates do
         if call[:act], do: Acts.answered(s.acts, call.act, answer)
         {reply, s} = answered(s, Table.get(s.db, id), answer)
         if from, do: GenServer.reply(from, reply)
-        {:noreply, s}
+        {:noreply, tell_starts(s)}
     end
   end
 
@@ -479,10 +501,12 @@ defmodule CodingAgentFramework.Delegates do
           {:ok, _lease} ->
             # The call of Sessions starts now: its agent row is told from an earlier one by it.
             write(s, row, called_at: s.clock.(), deadline: deadline(s, start.p))
-            began(begin(s, Table.get(s.db, id), start, from), from)
+            {:noreply, s} = began(begin(s, Table.get(s.db, id), start, from), from)
+            {:noreply, tell_starts(s)}
 
           {:refused, why} ->
-            began(reply(answered(s, row, {:refused, {:lease, why}})), from)
+            {:noreply, s} = began(reply(answered(s, row, {:refused, {:lease, why}})), from)
+            {:noreply, tell_starts(s)}
         end
 
       {nil, _} ->
@@ -519,6 +543,7 @@ defmodule CodingAgentFramework.Delegates do
 
   # What `begin/4` or a refusal answers, handed to a caller that waited for a queued lease.
   defp began({:noreply, s}, _from), do: {:noreply, s}
+  defp began({:reply, _reply, s}, nil), do: {:noreply, s}
 
   defp began({:reply, reply, s}, from) do
     GenServer.reply(from, reply)
@@ -700,8 +725,57 @@ defmodule CodingAgentFramework.Delegates do
   # running ones idle with no report.
   defp settle(s) do
     s = Enum.reduce(movable(s), s, &settle_row(&2, &1, agent(&2, &1)))
-    idle(s, Enum.filter(movable(s), &(&1.status == "running")))
+    s = idle(s, Enum.filter(movable(s), &(&1.status == "running")))
+    tell_starts(s)
   end
+
+  # Delegate.tla's StartTold and StartCleared (F-170): a start that answered queued at once,
+  # once its row has left starting with no call under way, is told to the parent its row names,
+  # by a notice under the row's key, which Mailbox takes once; the row's mark is cleared after,
+  # so a restart between the two tells nothing twice. A notice not taken stays owed for the
+  # next settle.
+  defp tell_starts(s) do
+    busy = MapSet.new(Map.values(s.pending), & &1.id)
+
+    for row <- Table.owed(s.db, s.host),
+        row.status not in Table.calling(),
+        not MapSet.member?(busy, row.id),
+        match?({:ok, _}, tell_start(s, row)),
+        do: write(s, row, tell: nil)
+
+    s
+  end
+
+  defp tell_start(s, row) do
+    key = "start:#{s.host}:#{row.id}:#{row.created_at}"
+    Mailbox.notify(s.mailbox, row.tell, start_text(row), key: key, kind: :notice)
+  end
+
+  defp start_text(%{status: "refused"} = row) do
+    "Your delegate #{row.name}, queued for a seat, did not start: " <> refusal(row.reason) <> "."
+  end
+
+  defp start_text(row),
+    do:
+      "Your delegate #{row.name}, queued for a seat, has started. Its report comes as a message."
+
+  # The reason as `Store.text/1` kept it; a lease's refusal names its retry time.
+  defp refusal(reason) when is_binary(reason) do
+    case JSON.decode(reason) do
+      {:ok, ["lease", [why, at]]} when is_integer(at) ->
+        retry = at |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
+        "the Scheduler refused its lease (#{why}); ask again after #{retry}"
+
+      {:ok, ["lease", why]} ->
+        "the Scheduler refused its lease (#{JSON.encode!(why)})"
+
+      _ ->
+        reason
+    end
+  end
+
+  defp refusal(nil), do: "no reason was kept"
+  defp refusal(reason), do: to_string(reason)
 
   defp movable(s) do
     busy = MapSet.new(Map.values(s.pending), & &1.id)
@@ -1195,16 +1269,25 @@ defmodule CodingAgentFramework.Delegates do
   defp act(s, row, agent, fold, :resume, _from),
     do: resumed(exited(s, row, agent, fold), row.id)
 
+  # The operator's forced stop (F-170): the report delivered as for any stop, and no wait for
+  # the rows to it; its caller settles each one left sending (`Mailbox.ended_while_sending/3`).
+  defp act(s, row, agent, fold, {:stop, :force}, from),
+    do: act(s, row, agent, fold, :stop, from, true)
+
+  defp act(s, row, agent, fold, :stop, from), do: act(s, row, agent, fold, :stop, from, false)
+
   # The report delivered and nothing open to it, by Mailbox; Sessions waits for the exit, and
   # this process does not wait with it. An ended delegate has nothing left to stop.
-  defp act(s, row, agent, _fold, :stop, from) do
+
+  defp act(s, row, agent, _fold, :stop, from, force) do
     with true <- not Agents.ended?(agent) or {:refused, {:status, "ended"}},
          {:ok, %{status: "delivered"}} <- report(s, row),
-         {:ok, []} <- Mailbox.open_to(s.mailbox, row.name) |> open() do
+         {:ok, []} <-
+           if(force, do: {:ok, []}, else: Mailbox.open_to(s.mailbox, row.name)) |> open() do
       me = self()
 
       Task.start(fn ->
-        reply = Sessions.stop(s.sessions, row.name, timeout: @call)
+        reply = Sessions.stop(s.sessions, row.name, timeout: @call, force: force)
         GenServer.reply(from, reply)
         # The process is gone once Sessions answers: the row is read again for its end.
         GenServer.cast(me, :cue)

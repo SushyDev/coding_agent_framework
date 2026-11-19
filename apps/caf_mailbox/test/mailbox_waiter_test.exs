@@ -92,7 +92,7 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
     turn = WaiterStandIn.turn_end(main.settings, main.sid, main.transcript, :idle)
     assert {2, text} = Task.await(turn, 10_000)
     %{uuid: u1} = Table.get(ctx.mtable, one)
-    assert text == "report one\n\n[delivery #{u1}]"
+    assert text == "From d1 (message): report one\n\n[delivery #{u1}]"
     # The waiter's going cue may settle it from the lines before this read: sending or taken.
     assert %{status: status, via: "waiter", at: pid} = Table.get(ctx.mtable, one)
     assert status in ~w(sending delivered) and pid == main.pid
@@ -101,7 +101,7 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
     # The turn it started ends: the next waiter's cue settles the first from its lines, and the
     # second goes, this time queued by Claude Code into a person's running turn.
     turn = WaiterStandIn.turn_end(main.settings, main.sid, main.transcript, :busy)
-    assert {2, "report two\n\n[delivery " <> _} = Task.await(turn, 10_000)
+    assert {2, "From d1 (message): report two\n\n[delivery " <> _} = Task.await(turn, 10_000)
     assert %{status: "delivered", attempt: nil} = Table.get(ctx.mtable, one)
     assert {:ok, %{status: "delivered"}} = until(ctx, two, &(&1.status == "delivered"))
     assert %{via: "waiter", again: 0} = Table.get(ctx.mtable, two)
@@ -127,7 +127,7 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
     # It goes again first, before the row stored after it, under its same uuid. Enqueued, it
     # waits past the bound for its take, across a restart of Mailbox.
     turn = WaiterStandIn.turn_end(main.settings, main.sid, main.transcript, :enqueued)
-    assert {2, "lost one\n\n[delivery " <> rest} = Task.await(turn, 10_000)
+    assert {2, "From d1 (message): lost one\n\n[delivery " <> rest} = Task.await(turn, 10_000)
     assert rest == u1 <> "]"
     GenServer.stop(mailbox(ctx))
     %{sent_at: sent_at} = Table.get(ctx.mtable, one)
@@ -182,6 +182,72 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
 
     assert {:ok, %{status: "queued"}} = Mailbox.status(m, two)
     refute_received {:held, _, _}
+  end
+
+  # F-170: an app's frame names the sender in its own words; a frame that answers no text hands
+  # nothing on, and the row says why.
+  test "an app's frame in place of the framework's, the mark after it", ctx do
+    main(ctx)
+    GenServer.stop(ctx.mailbox)
+    held = start_supervised!({HeldIntake, self()})
+
+    frame = fn
+      %{text: "no frame"} -> nil
+      %{from: from, kind: kind, text: text} -> "[#{kind} from #{from}] " <> text
+    end
+
+    mopts = Keyword.merge(ctx.mopts, intake: held, frame: frame)
+    m = restart(Map.put(ctx, :mopts, mopts))
+    Process.put(:mailbox, m)
+    {:ok, {:queued, one}} = Mailbox.message(m, "d1", "main", "no frame")
+    {:ok, {:queued, two}} = Mailbox.message(m, "d1", "main", "framed")
+
+    {:ok, %{attempt: ~s(["bad","frame"])}} = until(ctx, one, &(&1.attempt != nil))
+    assert %{status: "queued"} = Table.get(ctx.mtable, one)
+    refute_received {:held, _, _}
+
+    # The first row stays due, and holds the rows after it from its sender.
+    :ok = Table.update(ctx.mtable, one, status: "ended")
+    cue(ctx)
+    assert_receive {:held, from, text}, 5_000
+    %{uuid: u2} = Table.get(ctx.mtable, two)
+    assert text == "[message from d1] framed\n\n[delivery #{u2}]"
+    GenServer.reply(from, {:ok, :sent})
+  end
+
+  # Delivery.tla's ForceSettled (F-170): once the session is free after a forced end, the row
+  # in flight to it is unknown, never due again, and its hand-on's late answer changes nothing.
+  test "a row still sending at a forced end settles unknown, never resent", ctx do
+    main(ctx)
+    GenServer.stop(ctx.mailbox)
+    held = start_supervised!({HeldIntake, self()})
+    m = restart(Map.put(ctx, :mopts, Keyword.put(ctx.mopts, :intake, held)))
+    Process.put(:mailbox, m)
+    {:ok, {:queued, one}} = Mailbox.message(m, "d1", "main", "in flight")
+    assert_receive {:held, from, _text}, 5_000
+
+    assert {:refused, {:not_free, "running"}} = Mailbox.ended_while_sending(m, "main")
+
+    [pid] = File.ls!(Path.join(ctx.dir, "pids"))
+    {_, 0} = System.cmd(program!(:kill), ["-KILL", pid])
+
+    {:ok, _} =
+      await(
+        fn ->
+          Sessions.cue(ctx.waiting, %{topic: "tmux:test:caf", ids: []})
+          Sessions.viewer_argv(ctx.waiting, "main")
+          if Sessions.Table.get(ctx.table, "test", "main").status != "running", do: {:ok, 1}
+        end,
+        10_000
+      )
+
+    assert {:ok, [^one]} = Mailbox.ended_while_sending(m, "main")
+    assert {:ok, %{status: "unknown", attempt: "ended_while_sending"}} = Mailbox.status(m, one)
+
+    GenServer.reply(from, {:refused, :closed})
+    cue(ctx)
+    assert {:ok, %{status: "unknown"}} = Mailbox.status(m, one)
+    assert {:ok, []} = Mailbox.open_to(m, "main")
   end
 
   # The waiter's hook in a main session's start: the overlay carries it beside the account's.

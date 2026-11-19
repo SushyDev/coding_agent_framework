@@ -27,7 +27,10 @@ defmodule CodingAgentFramework.MCP do
     delegates' `start_delegate/7` with the caller as parent (the operator names a main session
     as `parent`); answers `%{delegate: name}`, with `already: true` when the branch's delegate
     was running already and is answered in place of a new one, or the start's refusal. The
-    report comes later as a message. Both take optional `options`;
+    report comes later as a message. Both take optional `options`. With `wait: false`, the
+    default for an agent (it keeps working), a start whose lease is queued answers `%{delegate:
+    name, queued: position}` at once, and its outcome comes later as a notice from `framework`,
+    once (F-170); the operator's start waits for the lease unless it says `wait: false`;
   - `run_delegate(project, branch, model, brief, timeout)`: as `start_delegate`, then the
     mailbox's `await/4` on the report, the answer to the brief's uuid, all within `timeout`
     (ms, capped as `run`'s, and under the client's tool timeout less the margin:
@@ -134,6 +137,12 @@ defmodule CodingAgentFramework.MCP do
   # The most a delegate's start may take of a `run_delegate`'s timeout: `Delegates`' own default.
   @start_wait 300_000
   @options %{type: "object", description: "the delegate's own launch options (ClaudeCLI.Options)"}
+  @wait %{
+    type: "boolean",
+    description:
+      "wait for a seat when none is free; by default the start answers its place in the " <>
+        "queue at once and its outcome comes as a message"
+  }
   @start Map.new(~w(project branch model brief)a, &{&1, %{type: "string"}})
          |> Map.put(:options, @options)
          |> Map.put(:interactive, %{
@@ -146,6 +155,12 @@ defmodule CodingAgentFramework.MCP do
   @row ~w(name host owner state restarts port local)a
   @str %{type: "string"}
   @fixes ~w(interrupt answer resume stop)
+  @force %{
+    type: "boolean",
+    description:
+      "the operator's: end it without waiting for a message in flight to it, which then " <>
+        "settles unknown"
+  }
 
   @tools [
     %{
@@ -185,10 +200,11 @@ defmodule CodingAgentFramework.MCP do
     %{
       name: "start_delegate",
       description:
-        "Starts a delegate on a branch; answers its name. Its report comes as a message.",
+        "Starts a delegate on a branch; answers its name, and its place in the queue while " <>
+          "no seat is free. Its report comes as a message.",
       inputSchema: %{
         type: "object",
-        properties: @start,
+        properties: Map.put(@start, :wait, @wait),
         required: ["project", "branch", "model", "brief"]
       }
     },
@@ -364,7 +380,11 @@ defmodule CodingAgentFramework.MCP do
     %{
       name: "stop",
       description: "Ends your delegate once its report is delivered, under a claim.",
-      inputSchema: %{type: "object", properties: %{agent: @str}, required: ["agent"]}
+      inputSchema: %{
+        type: "object",
+        properties: %{agent: @str, force: @force},
+        required: ["agent"]
+      }
     },
     %{
       name: "move",
@@ -396,7 +416,11 @@ defmodule CodingAgentFramework.MCP do
       description:
         "The operator's: ends a main session for good, once every delegate of it has ended; " <>
           "what it owns ends with it.",
-      inputSchema: %{type: "object", properties: %{name: @str}, required: ["name"]}
+      inputSchema: %{
+        type: "object",
+        properties: %{name: @str, force: @force},
+        required: ["name"]
+      }
     },
     %{
       name: "ask",
@@ -667,9 +691,10 @@ defmodule CodingAgentFramework.MCP do
   end
 
   defp act(ctx, caller, _id, "start_delegate", args) do
-    with {:ok, start} <- start_args(ctx, args, caller),
-         {:ok, %{name: name} = started} <- start_delegate(ctx, caller, start, @start_wait),
-         do: {:ok, Map.merge(%{delegate: name}, Map.take(started, [:already]))}
+    with {:ok, wait} <- lease_wait(ctx, caller, args),
+         {:ok, start} <- start_args(ctx, args, caller),
+         {:ok, %{name: name} = started} <- start_delegate(ctx, caller, start, @start_wait, wait),
+         do: {:ok, Map.merge(%{delegate: name}, Map.take(started, [:already, :queued]))}
   end
 
   defp act(ctx, caller, _id, "run_delegate", %{"timeout" => t} = args)
@@ -681,7 +706,7 @@ defmodule CodingAgentFramework.MCP do
     with true <- t < under or {:refused, {:timeout, {:under, under}}},
          {:ok, [parent | _] = start} <- start_args(ctx, args, caller),
          {:ok, %{name: name, brief_uuid: key}} <-
-           start_delegate(ctx, caller, start, min(t, @start_wait)) do
+           start_delegate(ctx, caller, start, min(t, @start_wait), true) do
       left = deadline - now()
       answer = if left > 0, do: mod.await(server, parent, key, left), else: {:unknown, :timeout}
 
@@ -707,11 +732,12 @@ defmodule CodingAgentFramework.MCP do
   end
 
   # A main session's end is the operator's alone (Team.tla's MainEnds): no agent ends one.
-  defp act(ctx, caller, _id, "end_main", %{"name" => name}) when is_binary(name) do
+  defp act(ctx, caller, _id, "end_main", %{"name" => name} = a) when is_binary(name) do
     with true <- caller == Grants.operator(ctx.grants) or {:refused, :operator_only},
-         true <- ctx.mains != nil or {:refused, :no_mains} do
+         true <- ctx.mains != nil or {:refused, :no_mains},
+         {:ok, force} <- force(a) do
       {mod, server} = ctx.mains
-      mod.end_main(server, name)
+      if force, do: forced(ctx, caller, name), else: mod.end_main(server, name)
     end
   end
 
@@ -878,6 +904,7 @@ defmodule CodingAgentFramework.MCP do
   defp act(ctx, caller, _id, tool, %{"agent" => agent} = a)
        when tool in @fixes and is_binary(agent) do
     with {:ok, fix} <- fix(tool, a),
+         :ok <- forced_by(ctx, caller, fix),
          :ok <- Grants.may_fix?(ctx.grants, caller, agent),
          {:ok, by} <- fixer(ctx, caller, agent, tool),
          {:ok, state} <- by.state.(),
@@ -897,8 +924,15 @@ defmodule CodingAgentFramework.MCP do
       settled = Acts.settle(ctx.acts, claim, verdict, answer: outcome, acted: acted)
 
       case outcome do
-        {:ok, done} -> {:ok, %{done: done, claim: claim, settled: settled}}
-        other -> other
+        {:ok, done} when fix == {:stop, :force} ->
+          with {:ok, ids} <- unknown_rows(ctx, caller, agent),
+               do: {:ok, %{done: done, claim: claim, settled: settled, unknown: ids}}
+
+        {:ok, done} ->
+          {:ok, %{done: done, claim: claim, settled: settled}}
+
+        other ->
+          other
       end
     end
   end
@@ -923,7 +957,65 @@ defmodule CodingAgentFramework.MCP do
     do: {:ok, {:answer, d, l}}
 
   defp fix("answer", _args), do: {:refused, {:bad, :args}}
+
+  defp fix("stop", args) do
+    with {:ok, force} <- force(args), do: {:ok, if(force, do: {:stop, :force}, else: :stop)}
+  end
+
   defp fix(tool, _args), do: {:ok, String.to_existing_atom(tool)}
+
+  defp force(args) do
+    case Map.get(args, "force", false) do
+      force when is_boolean(force) -> {:ok, force}
+      _ -> {:refused, {:bad, :args}}
+    end
+  end
+
+  # A forced stop or end is the operator's alone (`Team.tla`'s ForcedByOperator, F-170).
+  defp forced_by(ctx, caller, {:stop, :force}) do
+    if caller == Grants.operator(ctx.grants), do: :ok, else: {:refused, {:operator_only, :force}}
+  end
+
+  defp forced_by(_ctx, _caller, _fix), do: :ok
+
+  # The operator's forced end of a main session (F-170, `Team.tla`'s MainEnds with `f`): the act
+  # is a row in `Acts` before it acts, with no state to claim (each call is an act of its own);
+  # then the end, which waits for no row to the session; then each row left `sending` to it is
+  # settled `unknown` in `Mailbox`, each settle a row in `Acts`. Answers `%{done: :ended, act:
+  # id, unknown: ids}`, or the end's refusal or unknown, which settles nothing in `Mailbox`: a
+  # later forced end of the ended row settles them.
+  defp forced(ctx, caller, name) do
+    {mod, server} = ctx.mains
+
+    with {:ok, act} <- Acts.claim(ctx.acts, caller, name, nil, "end_main") do
+      outcome = mod.end_main(server, name, force: true)
+      outcome = with {:ok, done} <- outcome, do: with_unknown(ctx, caller, name, done, act)
+      Acts.answered(ctx.acts, act, outcome)
+      outcome
+    end
+  end
+
+  defp with_unknown(ctx, caller, name, done, act) do
+    with {:ok, ids} <- unknown_rows(ctx, caller, name),
+         do: {:ok, %{done: done, act: act, unknown: ids}}
+  end
+
+  # Mailbox's ForceSettled: each row still sending to an agent whose end was forced, settled
+  # unknown, and each settle recorded in `Acts`, actor the operator.
+  defp unknown_rows(ctx, caller, agent) do
+    {mod, server} = ctx.mailbox
+
+    with {:ok, ids} <- mod.ended_while_sending(server, agent, timeout: @step) do
+      for id <- ids do
+        Acts.record(ctx.acts, caller, agent, "settle", :unknown,
+          reason: :ended_while_sending,
+          detail: %{row: id}
+        )
+      end
+
+      {:ok, ids}
+    end
+  end
 
   # `Team.tla`'s AnswerClaimed: the id an answer names is one the state holds, else no claim is
   # taken. A state that names no `held` holds none.
@@ -1029,10 +1121,21 @@ defmodule CodingAgentFramework.MCP do
     end
   end
 
-  # The start's own wait is at most `wait`. `Delegates` checks the options and the metadata.
-  defp start_delegate(ctx, caller, [parent, project, branch, model, brief, options, i, m], wait) do
+  # Whether a start waits for a queued lease (F-170): an agent keeps working unless it asks to
+  # wait; the operator's call waits unless it says not to.
+  defp lease_wait(ctx, caller, args) do
+    case Map.get(args, "wait") do
+      nil -> {:ok, caller == Grants.operator(ctx.grants)}
+      wait when is_boolean(wait) -> {:ok, wait}
+      _ -> {:refused, {:bad, :args}}
+    end
+  end
+
+  # The start's own wait is at most `timeout`. `Delegates` checks the options and the metadata.
+  defp start_delegate(ctx, caller, start, timeout, wait) do
+    [parent, project, branch, model, brief, options, i, m] = start
     {mod, server} = ctx.delegates
-    opts = [timeout: wait, options: options, interactive: i, meta: m]
+    opts = [timeout: timeout, options: options, interactive: i, meta: m, wait: wait]
 
     with :ok <- Grants.may_start_delegate?(ctx.grants, caller, parent),
          do: mod.start_delegate(server, parent, project, branch, model, brief, opts)

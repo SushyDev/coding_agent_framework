@@ -172,7 +172,8 @@ D == INSTANCE Delivery WITH
        over <- [a \in {Main} |-> FALSE],
        turned <- [a \in {Main} |-> turned], Long <- Ids, Launched <- {},
        lost <- dlost,
-       restarts <- 0, lives <- 0, ends <- 0, prompts <- 0, stops <- 0, readAt <- 0
+       restarts <- 0, lives <- 0, ends <- 0, prompts <- 0, stops <- 0, readAt <- 0,
+       forced <- {}
 
 \* Starts are refused from the drain on until the session has moved.
 Draining == phase \in {"draining", "clear", "stopping", "ending"} /\ Break # "NoDrain"
