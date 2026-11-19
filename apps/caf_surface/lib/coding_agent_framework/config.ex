@@ -218,7 +218,7 @@ defmodule CodingAgentFramework.Config do
 
       iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/" <> String.duplicate("h", 41),
       ...>   instance: "a", programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2},
-      ...>   claude: "/bin/claude", env: %{})
+      ...>   claude: "/bin/claude", env: %{}, user: "me")
       iex> CodingAgentFramework.Config.name_room(c)
       %{agent: 53, service: 43}
   """
