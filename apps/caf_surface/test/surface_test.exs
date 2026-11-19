@@ -28,8 +28,9 @@ defmodule CodingAgentFramework.SurfaceTest do
     # The project's repository: Mains clones its checkout from it, under the home.
     project = %{origin: repo, trunk: "main", setup: [], setup_timeout: 10_000}
     project = Map.merge(project, %{env: %{"HOME" => dir}, branches: ~r/\Aunit\//, cap: 2})
-    # A home with a space, as macOS's `~/Library/Application Support/<app>` is (F-169).
-    home = Path.join(dir, "the home")
+    # A home with a space, as macOS's `~/Library/Application Support/<app>/framework` is
+    # (F-169, F-175).
+    home = Path.join([dir, "Application Support", "app", "framework"])
 
     {:ok, config} =
       Config.new(
@@ -579,6 +580,29 @@ defmodule CodingAgentFramework.SurfaceTest do
 
   # The checkout is the framework's own clone, and `start_main` goes through `MCP` to `Mains`:
   # a reserved name is refused for a main session and for the operator alike.
+  test "the whole tree runs under a home whose path has a space (F-175)", ctx do
+    assert ctx.home =~ "Application Support/app/framework"
+    parts = start(ctx.config)
+    checkout = Path.join([ctx.home, "checkouts", "app"])
+    assert {:ok, %{path: ^checkout, clean: "true"}} = Mains.checkout(parts.mains, "app")
+
+    assert {:ok, %{delegate: "app-unit-one"}} =
+             MCP.call(parts.mcp, "app-main", "start_delegate", args("unit/one"))
+
+    # The stand-in answers its brief at once: the delegate's report is taken, and its session
+    # row exists, never refused.
+    {:ok, ddb} = Delegates.Table.open(Path.join(ctx.home, "caf.db"))
+    {:ok, %{report: "taken"}} = row(ddb, &(&1.report == "taken"))
+    assert %{session_id: id} = Table.get(ctx.sessions, "ws", "app-unit-one")
+    assert is_binary(id)
+
+    # The declared main session is the delegate's parent in the tree.
+    {:ok, tree} = MCP.call(parts.mcp, "app-main", "agents", %{})
+
+    assert [%{name: "app-main", kind: "main"}, %{name: "app-unit-one", parent: "app-main"}] =
+             tree.agents
+  end
+
   test "Mains holds the project's checkout and serves start_main", ctx do
     parts = start(ctx.config)
     checkout = Path.join([ctx.home, "checkouts", "app"])
