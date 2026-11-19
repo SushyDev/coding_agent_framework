@@ -17,7 +17,8 @@ defmodule CodingAgentFramework.Config do
     it leaves for a name is `name_room/1`'s: a delegate's or a main session's start, and a
     service's, refuse a longer name before any row, `{:bad, :name, {:longer_than, n}}` (a
     42-byte home leaves an agent 53 bytes, a service 43; F-169's new-2, F-172);
-  - `instance`: this framework instance's name, in each job id `MCP` makes;
+  - `instance`: this framework instance's name, in each job id `MCP` makes, and the name the
+    app finds it by (`CodingAgentFramework.subscribe/2`): 1 to 100 bytes, no control character;
   - `workstation`: the workstation's host name, and `programs`, the absolute path of each
     program there (`CodingAgentFramework.Programs`);
   - `hosts`: the other hosts, name to `%{programs: programs, dir: dir}` as `Jobs` and `Services`
@@ -171,6 +172,9 @@ defmodule CodingAgentFramework.Config do
       not match?(%{intake: i, mcp: m} when is_integer(i) and is_integer(m), fields.ports) ->
         {:refused, {:bad, :ports}}
 
+      not instance?(fields.instance) ->
+        {:refused, {:bad, :instance}}
+
       not operator?(fields) ->
         {:refused, {:bad, :operator}}
 
@@ -213,6 +217,9 @@ defmodule CodingAgentFramework.Config do
       name -> is_binary(name) and name != "" and not (name =~ ~r/[[:cntrl:]]/)
     end
   end
+
+  defp instance?(name),
+    do: is_binary(name) and byte_size(name) in 1..100 and not (name =~ ~r/[[:cntrl:]]/)
 
   defp operator?(fields) do
     op = Map.get(fields, :operator, "operator")

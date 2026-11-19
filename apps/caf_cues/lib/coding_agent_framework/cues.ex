@@ -24,6 +24,18 @@ defmodule CodingAgentFramework.Cues do
 
   A part's `notify:` is then `&Cues.cue(cues, &1)`. Nothing here keeps a cue: a cue is a hint
   to read rows again, never the data.
+
+  **The app's subscribers.** A process outside the parts, the app's own (a view, a sync of its
+  own rows), gets the cues of the topics it names with `subscribe/3`: each as a message
+  `{:caf_cue, cue}`, by a plain `send`, after the parts got theirs. A subscriber may name only
+  topics the parts declare (`topics/1`), as patterns of the same shape. It is monitored and
+  removed when it exits. The subscriptions are rows in an ETS table its starter may own
+  (`subscriptions:`), so a `Cues` a restart replaced re-adopts them, and a subscriber that
+  exited meanwhile is removed then.
+
+      {:ok, ref} = Cues.subscribe(cues, self(), ["sessions"])
+      Cues.cue(cues, %{topic: "sessions:ws", ids: [4]})
+      #=> the subscriber gets {:caf_cue, %{topic: "sessions:ws", ids: [4]}}
   """
 
   use GenServer
@@ -32,8 +44,13 @@ defmodule CodingAgentFramework.Cues do
 
   @type declaration :: %{topics: :all | [String.t()], cue: (pid, map -> term)}
 
+  @timeout 5_000
+
   @doc """
-  Starts it. Option: `parts:`, a keyword list (or map) of each part's key to its declaration.
+  Starts it. Options: `parts:`, a keyword list (or map) of each part's key to its declaration;
+  `subscriptions:`, a public ETS set its starter owns, which keeps the subscriptions across a
+  restart of `Cues` (without it, one of its own); and `registry: {name, key}`, a `Registry` it
+  registers itself in under `key`, so the app finds it by its instance's name.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -50,6 +67,87 @@ defmodule CodingAgentFramework.Cues do
   @spec started(GenServer.server() | nil, term, pid) :: :ok
   def started(nil, _key, _pid), do: :ok
   def started(cues, key, pid) when is_pid(pid), do: GenServer.cast(cues, {:started, key, pid})
+
+  @doc """
+  Sends `pid` each later cue whose topic one of `topics` matches, as `{:caf_cue, cue}`, until
+  `pid` exits or `unsubscribe/2`. Each topic is a pattern as a declaration's are, so
+  `"sessions"` matches `"sessions:ws"`; a trailing `:` is the same as none. Answers `{:ok,
+  ref}`, `{:refused, {:bad, :topics}}` when `topics` is not a list of such patterns, or
+  `{:refused, {:undeclared, topic}}` for the first topic no part declares (`topics/1`), or
+  `{:unknown, reason}` when `Cues` did not answer.
+  """
+  @spec subscribe(GenServer.server(), pid, [String.t()]) ::
+          {:ok, reference} | {:refused, term} | {:unknown, term}
+  def subscribe(cues, pid, topics) when is_pid(pid), do: call(cues, {:subscribe, pid, topics})
+
+  @doc """
+  Ends the subscription `ref`. Answers `:ok`, `{:refused, :no_subscription}` for a ref it does
+  not hold, or `{:unknown, reason}` when `Cues` did not answer.
+  """
+  @spec unsubscribe(GenServer.server(), reference) :: :ok | {:refused, term} | {:unknown, term}
+  def unsubscribe(cues, ref) when is_reference(ref), do: call(cues, {:unsubscribe, ref})
+
+  @doc "The subscriptions it holds now, as `{ref, pid, topics}`."
+  @spec subscriptions(GenServer.server()) :: {:ok, list} | {:unknown, term}
+  def subscriptions(cues), do: call(cues, :subscriptions)
+
+  defp call(cues, request) do
+    GenServer.call(cues, request, @timeout)
+  catch
+    :exit, reason -> {:unknown, {:no_answer, reason}}
+  end
+
+  @doc ~S"""
+  The topics the parts declare, each once and in order: the patterns an app may subscribe to.
+  A part that reads every topic (`:all`) adds none.
+
+      iex> parts = [a: %{topics: ["stream", "intake:*:*:waiters"], cue: nil},
+      ...>          b: %{topics: :all, cue: nil}, c: %{topics: ["stream", "registry"], cue: nil}]
+      iex> CodingAgentFramework.Cues.topics(parts)
+      ["intake:*:*:waiters", "registry", "stream"]
+  """
+  @spec topics(Enumerable.t()) :: [String.t()]
+  def topics(parts) do
+    parts
+    |> Enum.flat_map(fn {_key, %{topics: t}} -> if t == :all, do: [], else: t end)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  @doc ~S"""
+  `topics` checked against the parts' declarations, each with its trailing `:` cut: a topic is
+  declared when a declared pattern matches it.
+
+      iex> parts = [a: %{topics: ["sessions", "intake:*:*:waiters"], cue: nil}]
+      iex> CodingAgentFramework.Cues.check(parts, ["sessions:", "intake:ws:work:waiters"])
+      {:ok, ["sessions", "intake:ws:work:waiters"]}
+      iex> CodingAgentFramework.Cues.check(parts, ["acts"])
+      {:refused, {:undeclared, "acts"}}
+      iex> CodingAgentFramework.Cues.check(parts, [])
+      {:refused, {:bad, :topics}}
+  """
+  @spec check(Enumerable.t(), term) :: {:ok, [String.t()]} | {:refused, term}
+  def check(parts, [_ | _] = topics) do
+    declared = topics(parts)
+
+    Enum.reduce_while(topics, {:ok, []}, fn topic, {:ok, acc} ->
+      cond do
+        not topic?(topic) -> {:halt, {:refused, {:bad, :topics}}}
+        reads?(declared, words(topic)) -> {:cont, {:ok, [cut(topic) | acc]}}
+        true -> {:halt, {:refused, {:undeclared, topic}}}
+      end
+    end)
+    |> then(fn
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      refused -> refused
+    end)
+  end
+
+  def check(_parts, _topics), do: {:refused, {:bad, :topics}}
+
+  defp topic?(topic), do: is_binary(topic) and Enum.all?(words(topic), &(&1 != ""))
+  defp words(topic), do: String.split(cut(topic), ":")
+  defp cut(topic), do: String.replace_suffix(topic, ":", "")
 
   @doc ~S"""
   The keys of the parts a cue of `topic` reaches, in the declarations' order.
@@ -80,18 +178,75 @@ defmodule CodingAgentFramework.Cues do
   @impl true
   def init(opts) do
     parts = Keyword.fetch!(opts, :parts) |> Enum.to_list()
-    {:ok, %{parts: parts, pids: %{}}}
+    subs = Keyword.get_lazy(opts, :subscriptions, fn -> :ets.new(__MODULE__, [:set]) end)
+
+    with {name, key} <- Keyword.get(opts, :registry),
+         do: {:ok, _} = Registry.register(name, key, nil)
+
+    # Re-adopted: each subscriber monitored again; one that exited meanwhile is removed by
+    # its `:DOWN`, which comes at once.
+    watched =
+      for {ref, pid, _topics} <- :ets.tab2list(subs),
+          into: %{},
+          do: {Process.monitor(pid), ref}
+
+    {:ok, %{parts: parts, pids: %{}, subs: subs, watched: watched}}
   end
+
+  @impl true
+  def handle_call({:subscribe, pid, topics}, _from, s) do
+    case check(s.parts, topics) do
+      {:ok, topics} ->
+        ref = make_ref()
+        true = :ets.insert(s.subs, {ref, pid, topics})
+        {:reply, {:ok, ref}, put_in(s.watched[Process.monitor(pid)], ref)}
+
+      refused ->
+        {:reply, refused, s}
+    end
+  end
+
+  def handle_call({:unsubscribe, ref}, _from, s) do
+    case Enum.find(s.watched, fn {_mon, r} -> r == ref end) do
+      {mon, ^ref} ->
+        Process.demonitor(mon, [:flush])
+        true = :ets.delete(s.subs, ref)
+        {:reply, :ok, %{s | watched: Map.delete(s.watched, mon)}}
+
+      nil ->
+        {:reply, {:refused, :no_subscription}, s}
+    end
+  end
+
+  def handle_call(:subscriptions, _from, s), do: {:reply, {:ok, :ets.tab2list(s.subs)}, s}
 
   @impl true
   def handle_cast({:started, key, pid}, s), do: {:noreply, put_in(s.pids[key], pid)}
 
   def handle_cast({:cue, %{topic: topic} = cue}, s) when is_binary(topic) do
     for key <- routes(s.parts, topic), pid = s.pids[key], do: hand(s, key, pid, cue)
+    words = String.split(topic, ":")
+
+    # A plain send: a subscriber that is slow, or gone, costs this nothing.
+    :ets.foldl(
+      fn {_ref, pid, topics}, :ok ->
+        if reads?(topics, words), do: send(pid, {:caf_cue, cue}), else: :ok
+      end,
+      :ok,
+      s.subs
+    )
+
     {:noreply, s}
   end
 
   def handle_cast({:cue, _not_a_cue}, s), do: {:noreply, s}
+
+  @impl true
+  def handle_info({:DOWN, mon, :process, _pid, _reason}, s) do
+    {ref, watched} = Map.pop(s.watched, mon)
+    if ref, do: :ets.delete(s.subs, ref)
+    {:noreply, %{s | watched: watched}}
+  end
 
   defp hand(s, key, pid, cue) do
     {^key, part} = List.keyfind(s.parts, key, 0)
