@@ -64,7 +64,7 @@ defmodule CodingAgentFramework.SurfaceTest do
 
   defp start(config) do
     parts = CodingAgentFramework.parts(start_supervised!({CodingAgentFramework, config}))
-    keys = ~w(reaper cues inlet usage stream intake intake_http sampler sessions acts)a
+    keys = ~w(reaper names cues inlet usage stream intake intake_http sampler sessions acts)a
     keys = keys ++ ~w(recoveries tracker scheduler delegates mover mailbox copies jobs services)a
     keys = keys ++ ~w(mains mcp mcp_http ends)a
 

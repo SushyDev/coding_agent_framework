@@ -27,7 +27,8 @@ defmodule CodingAgentFramework do
   Each part is named to `Cues` as it starts, so a part a restart replaced gets the cues from
   then on, and one not started yet misses nothing: every part reads its whole table when it
   starts. `Stream`, `Jobs` and `Services` read on the config's `interval` as the other readers
-  do; no ticker sends a made-up topic.
+  do; no ticker sends a made-up topic. The app's own processes get the cues too, by
+  `subscribe/2`: the instance is found by its name in its own `Registry`, never a global name.
 
   **The operator.** The app's own acts on agents, from a view say, go through
   `CodingAgentFramework.Operator` with `parts(sup).mcp`, under the config's `operator` name,
@@ -81,6 +82,7 @@ defmodule CodingAgentFramework do
   require Logger
 
   @local {127, 0, 0, 1}
+  @names "Elixir.CodingAgentFramework.Instance."
 
   @doc """
   The tree as one child of the app's own supervisor, by the instance's name, so two instances
@@ -112,12 +114,14 @@ defmodule CodingAgentFramework do
 
   @doc """
   Starts the tree from a config `Config.new/1` checked. Answers `{:ok, pid}`, `{:refused,
-  reason}` when the config's programs, accounts or home cannot be used, or `{:unknown,
+  reason}` when the config's programs, accounts or home cannot be used or an instance of its
+  name already runs in this app (`{:instance_running, name}`), or `{:unknown,
   reason}` when a write under the home fails.
   """
   @spec start_link(Config.t()) :: Supervisor.on_start() | {:refused, term} | {:unknown, term}
   def start_link(%Config{} = c) do
-    with :ok <- mkdirs(c),
+    with :ok <- unique(c),
+         :ok <- mkdirs(c),
          {:ok, programs} <- programs(c),
          {:ok, c} <- tools(c, programs),
          {:ok, tmux} <- server(c),
@@ -154,6 +158,104 @@ defmodule CodingAgentFramework do
   def parts(sup), do: Map.new(Supervisor.which_children(sup), fn {k, pid, _, _} -> {k, pid} end)
 
   @doc """
+  The calling process gets each later cue on `topics` as a message `{:caf_cue, cue}`, for as
+  long as it lives, from the instance the config named `instance`. Delivery is a plain `send`
+  after the parts got the cue, so a slow or crashed subscriber touches nothing in the tree; a
+  subscriber is monitored and removed when it exits. It survives a restart of `Cues`.
+
+  A topic is a pattern of words joined by `:`, `*` for any one word, matching each topic that
+  begins with its words: `"sessions"` matches `"sessions:ws"`, and `"sessions:"` is the same.
+  The topics an app may name are the ones the parts declare (`topics/1`); any other is refused.
+  Answers `{:ok, ref}` for `unsubscribe/2`, `{:refused, :no_instance}`, `{:refused, {:bad,
+  :topics}}`, `{:refused, {:undeclared, topic}}`, or `{:unknown, reason}` when the instance's
+  `Cues` did not answer (a restart under way).
+
+  **A cue** is `%{topic: topic, ids: ids}`: a hint to read rows again by their ids, never the
+  data. Each topic's last words name where the rows are (`<host>` the workstation's name, as the
+  config gives it, and `<account>` a Claude account), and `ids` are:
+
+  | topic | `ids` |
+  | --- | --- |
+  | `sessions:<host>` | the agent rows' ids (`Sessions.Table`) |
+  | `delegates:<host>` | the delegate rows' ids (`Delegates.Table`) |
+  | `mains:<host>` | the project checkouts' row ids (`Mains.Table`) |
+  | `mailbox` | the message rows' ids (`Mailbox`) |
+  | `jobs` | the job ids (`Jobs`) |
+  | `stream:<host>` | the stream rows' ids (`Stream.Table`) |
+  | `registry:<host>:<account>` | Claude Code's session rows' ids (`Registry.Table`) |
+  | `transcripts:<host>:<account>` | the transcript rows' ids (`Transcripts.Table`) |
+  | `usage:<host>:<account>` | the usage rows' ids (`Usage.Table`) |
+  | `tmux:<host>:<server>` | the tmux sampler's row ids, `[]` for a failed sample |
+  | `intake:<host>:<account>:waiters` | the session id whose waiter came or went |
+
+      {:ok, ref} = CodingAgentFramework.subscribe("a", ["sessions", "mailbox"])
+      receive do
+        {:caf_cue, %{topic: "sessions:" <> _host, ids: ids}} -> reread_agents(ids)
+      end
+      :ok = CodingAgentFramework.unsubscribe("a", ref)
+  """
+  @spec subscribe(String.t(), [String.t()]) ::
+          {:ok, reference} | {:refused, term} | {:unknown, term}
+  def subscribe(instance, topics) do
+    with {:ok, cues} <- cues(instance), do: Cues.subscribe(cues, self(), topics)
+  end
+
+  @doc """
+  Ends a subscription `subscribe/2` made. Answers `:ok`, `{:refused, :no_instance}`,
+  `{:refused, :no_subscription}`, or `{:unknown, reason}`.
+  """
+  @spec unsubscribe(String.t(), reference) :: :ok | {:refused, term} | {:unknown, term}
+  def unsubscribe(instance, ref) do
+    with {:ok, cues} <- cues(instance), do: Cues.unsubscribe(cues, ref)
+  end
+
+  @doc """
+  The topics an app may subscribe to: the ones the parts declare. Answers `{:ok, topics}` or
+  `{:refused, :no_instance}`.
+
+      {:ok, topics} = CodingAgentFramework.topics("a")
+      "sessions" in topics
+      #=> true
+  """
+  @spec topics(String.t()) :: {:ok, [String.t()]} | {:refused, :no_instance}
+  def topics(instance) do
+    with {:ok, _name} <- registry(instance), do: {:ok, Cues.topics(reads())}
+  end
+
+  # The instance's `Registry` is named from its name, so two instances in one app have two;
+  # the atom is made only at a start, and an app's lookup never makes one.
+  defp names(instance), do: String.to_atom(@names <> instance)
+
+  defp registry(instance) when is_binary(instance) do
+    name = String.to_existing_atom(@names <> instance)
+    if Process.whereis(name), do: {:ok, name}, else: {:refused, :no_instance}
+  rescue
+    ArgumentError -> {:refused, :no_instance}
+  end
+
+  defp registry(_instance), do: {:refused, :no_instance}
+
+  defp cues(instance) do
+    with {:ok, name} <- registry(instance) do
+      case Elixir.Registry.lookup(name, :cues) do
+        [{pid, _}] -> {:ok, pid}
+        [] -> {:unknown, :no_cues}
+      end
+    end
+  rescue
+    # The registry ended between the two looks.
+    ArgumentError -> {:refused, :no_instance}
+  end
+
+  # Two instances of one name in one app would share a name to find them by.
+  defp unique(c) do
+    case registry(c.instance) do
+      {:ok, _} -> {:refused, {:instance_running, c.instance}}
+      {:refused, :no_instance} -> :ok
+    end
+  end
+
+  @doc """
   What each part it starts reads, as the part declares it: the declarations it hands `Cues`,
   and all the routing it does.
   """
@@ -176,6 +278,8 @@ defmodule CodingAgentFramework do
   def init(w) do
     tab = :ets.new(__MODULE__, [:public, read_concurrency: true])
     notify = fn cue -> Cues.cue(lookup(tab, :cues), cue) end
+    # The app's subscriptions, owned by this supervisor so a restarted `Cues` keeps them.
+    w = Map.put(w, :subscriptions, :ets.new(Cues, [:public]))
 
     children =
       for {key, build} <- children(w, notify),
@@ -255,7 +359,13 @@ defmodule CodingAgentFramework do
 
     [
       {:reaper, fn _ -> {Shell.Reaper, programs: p} end},
-      {:cues, fn _ -> {Cues, parts: reads()} end},
+      # The instance's own `Registry`, named from its name: how the app finds it.
+      {:names, fn _ -> {Elixir.Registry, keys: :unique, name: names(c.instance)} end},
+      {:cues,
+       fn _ ->
+         {Cues,
+          parts: reads(), subscriptions: w.subscriptions, registry: {names(c.instance), :cues}}
+       end},
       # Before every part that writes its acts there.
       {:acts,
        fn _ ->

@@ -234,7 +234,10 @@ Built, each from a checked model in `model/tla/`:
   one `queued` line, runs the command and releases the lease once on any end; the `Stop` count
   reset at a turn's end, as measured; pressure cues, macOS's pressure level by default, `Jobs`
   and `Copies` on the `Tracker`, and a headless delegate busy while its own background command
-  runs.
+  runs;
+- `subscribe/2` on the app's surface (F-174): an app's own processes get the tree's cues on the
+  topics they name, found by the instance's name in its own `Registry`, removed when they exit,
+  and never able to slow or break the tree.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

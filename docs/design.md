@@ -601,9 +601,11 @@ Built so far (F-169, B3's start): `CodingAgentFramework.child_spec/1` and `start
 it does not know, the tool callbacks, the extensions by `MCP.extensions/3`, and a home too long
 for its tmux socket are each refused by name); the supervisor is the tree `caf_example` used
 to wire, `Ends` included, since an app that left it out would keep an ended owner's services
-(F-169's new-1). `caf_example` keeps its config file, its console and `Run`. The calls and the
-cues are B3's rest. The config answers the room the home leaves for an agent's and a service's
-name (`Config.name_room/1`, F-172), and the tree hands it to `Delegates`, `Mains` and
+(F-169's new-1). `caf_example` keeps its config file, its console and `Run`. F-174 built the
+cues: `subscribe/2`, `unsubscribe/2` and `topics/1`, the instance found by its name in its own
+`Registry` (the tree's `:names` child, after the reaper), the subscriptions held by `Cues` in a
+table the tree's supervisor owns, and a topic no part declares refused. The calls are B3's rest.
+The config answers the room the home leaves for an agent's and a service's name (`Config.name_room/1`, F-172), and the tree hands it to `Delegates`, `Mains` and
 `Services`, which refuse a longer name `{:bad, :name, {:longer_than, n}}` before any row;
 sockets stay in the home.
 
@@ -664,7 +666,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `ToolHome` | where every tool the framework runs keeps its state, in the home (F-155): the environment every launch, job and service sets (`GH_CONFIG_DIR`, `GIT_CONFIG_GLOBAL` with `GIT_CONFIG_NOSYSTEM`, the four `XDG_*_HOME`, `GIT_SSH_COMMAND`), the options every ssh to a host takes (`-F <home>/ssh/config -o UserKnownHostsFile=<home>/ssh/known_hosts`), and the git config it writes at the app's start: the author it is given, SSH signing with the home's own key, `gh` as GitHub's credential helper, and each project's override for every repository under its checkout. A pure module | — |
 | `Store` | a pure module over SQLite: open with WAL and a busy timeout, the schema and its added columns, `query`, `rows_by_id`, `update`, upsert, a reads row, and a load that fills a newer build's fields with their defaults; every table of the framework is opened through it. A term in a column is stored by one rule (`Store.text/1`): an atom as its name, any other term as canonical JSON, never `inspect` text; a writer converts what an earlier build stored when it opens its file (`Store.convert/3`) | no table |
 | `Reader` | a pure module beside `Store`: the loop every reader runs (read on an interval or a call, diff against what it wrote, write with a reads row, cue), and a `Tracker` source made from the reader's table metadata | no table; each reader its own |
-| `Cues` | one per instance: each part declares the topics it reads, and `Cues` hands each cue to the `Tracker` and to every part that declared its topic; the order in which the system settles is the library's, not the app's | no table |
+| `Cues` | one per instance: each part declares the topics it reads, and `Cues` hands each cue to the `Tracker`, to every part that declared its topic, and to each of the app's processes that subscribed to it (`subscribe/2`, by a plain send, monitored); the order in which the system settles is the library's, not the app's | no table |
 | `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` | — |
 | `Usage` | each account's allowance, its weekly and five-hour windows, from what Claude Code hands its status line; picks the account with the most left ("Allowance"); `Usage.Allowance` answers whether both windows have room, for the `Scheduler`; a `Reader` | its readings |
 | `Tmux` | sessions, panes, tags, keys and viewers on one server, and the one-command check of every write to a pane; a contract with a CLI (its fake is a test aid) | — |
