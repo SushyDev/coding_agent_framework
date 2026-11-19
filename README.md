@@ -228,7 +228,13 @@ Built, each from a checked model in `model/tla/`:
 - an ask withdrawn by the app or the operator, settled once against an answer (F-172, against
   `Prompt.tla`); the pointer line naming its sender and its file's path in backticks; a forced
   end's rows settled by `Mailbox` itself, after a restart too; names refused before any row when
-  their socket would not fit under the home; and `Mains`' start carrying its caller's deadline.
+  their socket would not fit under the home; and `Mains`' start carrying its caller's deadline;
+- heavy commands taken transparently (F-171, against `Schedule.tla`): an agent's `Bash` call
+  that matches the app's heavy list is rewritten into `caf-run`, which waits for a lease with
+  one `queued` line, runs the command and releases the lease once on any end; the `Stop` count
+  reset at a turn's end, as measured; pressure cues, macOS's pressure level by default, `Jobs`
+  and `Copies` on the `Tracker`, and a headless delegate busy while its own background command
+  runs.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
