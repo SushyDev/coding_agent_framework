@@ -111,7 +111,7 @@ defmodule CodingAgentFramework.MailboxAskTest do
     ]
 
     assert {:ok, {:queued, a}} = Mailbox.answer(ctx.mailbox, id, answers)
-    assert {:refused, :answered} = Mailbox.answer(ctx.mailbox, id, answers)
+    assert {:refused, :settled} = Mailbox.answer(ctx.mailbox, id, answers)
     assert {:refused, :no_ask} = Mailbox.answer(ctx.mailbox, a, answers)
 
     assert {:ok, %{uuid: u, from_agent: "operator", to_agent: "d1", text: text}} =
@@ -127,6 +127,45 @@ defmodule CodingAgentFramework.MailboxAskTest do
              Mailbox.asked(ctx.mailbox, id)
 
     assert {:ok, []} = Mailbox.open_asks(ctx.mailbox)
+    assert {:ok, _} = Stream.end_session(ctx.stream, sid)
+  end
+
+  # Prompt.tla's WithdrawNow and AnsweredOnce (F-172): a person dismisses the ask in the app; the
+  # agent reads why, once, as it reads an answer, and the answer and the withdrawal race to
+  # one settle.
+  test "a withdrawn ask goes to the agent with its reason, and settles the ask once", ctx do
+    {sid, brief} = started(ctx, "d1")
+    until_taken(ctx, ["message #{brief}"])
+    {:ok, {:asked, id}} = Mailbox.ask(ctx.mailbox, "d1", [question("Base")])
+    {:ok, {:asked, other}} = Mailbox.ask(ctx.mailbox, "d1", [question("Do")])
+
+    assert {:refused, {:bad, :reason}} = Mailbox.withdraw(ctx.mailbox, id, " ")
+    assert {:refused, :no_ask} = Mailbox.withdraw(ctx.mailbox, 999, "gone")
+    assert {:ok, {:queued, w}} = Mailbox.withdraw(ctx.mailbox, id, "Dismissed:\nnot needed.")
+    assert {:refused, :settled} = Mailbox.withdraw(ctx.mailbox, id, "again")
+    answer = [%{"labels" => ["Rebase"], "text" => ""}]
+    assert {:refused, :settled} = Mailbox.answer(ctx.mailbox, id, answer)
+
+    # The other way round: answered first, the withdrawal is refused.
+    assert {:ok, {:queued, _}} = Mailbox.answer(ctx.mailbox, other, answer)
+    assert {:refused, :settled} = Mailbox.withdraw(ctx.mailbox, other, "late")
+
+    assert {:ok, %{uuid: u, kind: "withdrawn", text: text}} =
+             until(ctx, w, &(&1.status == "delivered"))
+
+    assert text == "Ask #{id} was withdrawn: Dismissed: not needed."
+
+    assert {:ok, %{answer: %{id: ^w, kind: "withdrawn", answers: nil}}} =
+             Mailbox.asked(ctx.mailbox, id)
+
+    assert {:ok, []} = Mailbox.open_asks(ctx.mailbox)
+
+    {:ok, _} =
+      await(
+        fn -> cue(ctx) && ("message #{u}" in HeadlessStandIn.taken(ctx.dir) && {:ok, 1}) end,
+        10_000
+      )
+
     assert {:ok, _} = Stream.end_session(ctx.stream, sid)
   end
 

@@ -593,7 +593,10 @@ it does not know, the tool callbacks, the extensions by `MCP.extensions/3`, and 
 for its tmux socket are each refused by name); the supervisor is the tree `caf_example` used
 to wire, `Ends` included, since an app that left it out would keep an ended owner's services
 (F-169's new-1). `caf_example` keeps its config file, its console and `Run`. The calls and the
-cues are B3's rest.
+cues are B3's rest. The config answers the room the home leaves for an agent's and a service's
+name (`Config.name_room/1`, F-172), and the tree hands it to `Delegates`, `Mains` and
+`Services`, which refuse a longer name `{:bad, :name, {:longer_than, n}}` before any row;
+sockets stay in the home.
 
 An app like a development loop's (views, builders, gates, landings) needs nothing more: a
 builder is a `delegate` with `review`, a gate is a heavy command or a job, a landing a job of
@@ -1857,10 +1860,18 @@ and one by id (`Mailbox.open_asks/2`, `Mailbox.asked/3`) and answers through one
 Those answers are kept as JSON beside the text the agent gets, and `asked/3` shows them
 (F-138's new-3).
 The answer is a row from the operator to the agent that asked, keyed by the ask's uuid, so the
-table's unique key keeps the first answer and refuses a second (`:answered`). It is delivered
+table's unique key keeps the first answer and refuses a second (`:settled`). It is delivered
 as any row is, by the agent's transport, one line per question, so an idle agent wakes to it;
 with no waiter, its several lines go as the typed pointer to its file (F-138's new-2, F-142).
 To an agent that ended first it is stored and settled `ended`, never delivered.
+
+**An ask withdrawn** (F-172; `Prompt.tla`'s `WithdrawNow`, `AnsweredOnce`, `Prompt_Asks`). An
+app that shows the open asks in its own inbox lets a person dismiss one there. The app says so
+with `Mailbox.withdraw/4` (the operator's `withdraw` tool, `Operator.withdraw/3`): a row from
+the operator to the asking agent under the ask's uuid, kind `withdrawn`, its text `Ask <id>
+was withdrawn: <reason>`, delivered once as an answer is. The withdrawal takes the answer's
+key, so an answer and a withdrawal race to one settle: the first is stored, the second refused
+`:settled`. `asked/3` shows the settle, its `kind` `answer` or `withdrawn`.
 
 **Services** belong to the agent that started them. When the owner ends, its services end too,
 unless it handed them on with `service_hand`, or started them with `keep: true`, which hands them
@@ -1935,9 +1946,12 @@ carries at most 124 KiB, 4 KiB under it. The cap is the host's operating system'
 (`Programs.os/1`, `ClaudeCLI.prompt_max/1`; an operating system never measured has none, and its
 launch with a prompt is refused). A first row longer than the cap goes as the typed transport's
 long rows do (F-155): `Mailbox.launch/4` writes its text to `<home>/due/<agent>/<row id>.md`,
-which every interactive start may read by `--add-dir`, and the prompt is one line, "A message
-for you is in <path>; read it.", with the row's uuid on its last line, settled as any launch by
-the transcript's user line. With no home it is refused, and nothing is marked. So neither
+which every interactive start may read by `--add-dir`, and the prompt is one line naming it,
+with the row's uuid on its last line, settled as any launch by the transcript's user line. The
+line names the path in backticks, so a home with a space reads as one path, and carries the
+sender as the text does: ``From <name> (<kind>): a message for you is in `<path>`; read it.``,
+or for a brief or a word to go on, which are not framed, ``A message for you is in `<path>`;
+read it.`` (F-172; the typed pointer is the same line). The typed short limit stays. With no home it is refused, and nothing is marked. So neither
 `Delegates` nor `Mains` refuses a long brief.
 
 **The take bound** (F-122's new-2): the time after a waiter's answer, or a typed write, by which
@@ -1969,11 +1983,20 @@ ids}`), and a session that never takes a turn (one not logged in, say) never set
 operator's `end_main` and `stop` take `force: true`: the session is ended as usual, SIGTERM once
 its file reads idle, but whatever row to it is in flight. Once its process is gone, each row
 still `sending` to it settles `unknown` with reason `ended_while_sending`
-(`Mailbox.ended_while_sending/3`): never resent, never counted delivered, and no later evidence
+(`Mailbox.ended_while_sending/3`, and `Mailbox`'s own settle, F-172): never resent, never
+counted delivered, and no later evidence
 changes it (`UnknownStays`). The forced end is the operator's alone; an agent's is refused
 `{:operator_only, :force}`. The act is a row in `Acts` before it acts, and each row's settle is
 a row of its own (`settle`, outcome `unknown`, detail the row's id). A forced stop of a delegate
 still needs its report delivered, as any stop does (`EndsAfterDelivery`).
+
+The settle is `Mailbox`'s own step too (F-172, `Delivery.tla`'s `ForcedSettles`,
+`Break_Delivery_SettleInCall`): the forced act's claim in `Acts` carries `detail` `{"force":
+true}`, written before the act, and `Mailbox`, given `acts:`, settles at each of its settles,
+before any transport reads its evidence, every row `sending` to an agent whose row ended, with
+no process left, after such a claim. So a restart between the end and the operator's call
+leaves no row `sending`, and none is made due again by its process's end and then `ended`,
+which would say it never went in. Each of those settles is a row in `Acts` as the call's are.
 
 The restart policy lives with the transport, as one module per transport in `Mailbox` beside
 the one mark and settle, and `Delivery.tla` models each transport's policy as its own choice.

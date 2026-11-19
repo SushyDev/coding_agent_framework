@@ -149,7 +149,9 @@ defmodule CodingAgentFramework.Delegates do
   reach a main session (F-137's new-3): its interrupt is Escape through the `Inlet`, and its
   answer goes to the `PermissionRequest` `Intake` holds for it. With `idle_bound:` (ms), a
   delegate idle with no report for longer than it is told to its parent, once per idle state;
-  an interactive one's needs `registry:` and `intake:`.
+  an interactive one's needs `registry:` and `intake:`. With `name_room:` (bytes, the room the
+  home leaves for an agent's socket, `Config.name_room/1`), a start whose delegate's name is
+  longer is refused `{:bad, :name, {:longer_than, n}}` before any row (F-172).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -327,6 +329,7 @@ defmodule CodingAgentFramework.Delegates do
           # The delegates idle with no report: row id to its idle state's key, when this
           # process first read it, and whether its parent was told.
           idle_bound: Keyword.get(opts, :idle_bound),
+          name_room: Keyword.get(opts, :name_room),
           idle: %{},
           # The turns of a delegate's own told to its parent: row id to their keys. Mailbox
           # holds the keys; this only spares it a repeat at each cue.
@@ -359,6 +362,13 @@ defmodule CodingAgentFramework.Delegates do
   @impl true
   def handle_cast(:cue, s), do: {:noreply, settle(s)}
 
+  # The room the home leaves for the delegate's socket (`Config.name_room/1`, F-172), checked
+  # before any row.
+  defp fits(%{name_room: room}, name) when is_integer(room) and byte_size(name) > room,
+    do: {:refused, {:bad, :name, {:longer_than, room}}}
+
+  defp fits(_s, _name), do: :ok
+
   @impl true
   def handle_call(
         {:start, parent, project, branch, model, brief, {options, meta, wait}, how},
@@ -373,6 +383,7 @@ defmodule CodingAgentFramework.Delegates do
          true <- meta == nil or is_map(meta) or {:refused, {:bad, :meta}},
          {:ok, p} <- Turn.check(s.projects, project, branch),
          name = Turn.name(p, branch),
+         :ok <- fits(s, name),
          old = Enum.find(Table.latest(s.db, s.host), &(&1.name == name)),
          {:go, again} <- again(s, old, parent),
          # Move.tla's NoStartWhileDraining: no delegate starts under a parent a move drains.

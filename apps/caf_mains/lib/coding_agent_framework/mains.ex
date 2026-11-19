@@ -79,7 +79,12 @@ defmodule CodingAgentFramework.Mains do
   `%{"seat" => 1}`), `operator:` (a name no main session may take), `interval:` (ms between the
   checkouts' reads, default 5 000), `clone_timeout:` (ms, default 600 000), `intake:` (the
   host's `Intake`) and `intake_db:` (its file), through which the operator answers a main
-  session's held permission request (`answer/5`), `notify:` and `clock:` (wall-clock ms).
+  session's held permission request (`answer/5`), `notify:`, `clock:` (wall-clock ms), and
+  `name_room:` (bytes, the room the home leaves for an agent's socket, `Config.name_room/1`): a
+  start of a longer name is refused `{:bad, :name, {:longer_than, n}}` before any row (F-172).
+  A start's call of `Sessions` carries the caller's deadline, the row's less its slack, so a
+  request still queued there when `settle` reads the absent agent row at the row's deadline is
+  refused `:caller_gone` and makes nothing (F-166's new-1).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -266,6 +271,7 @@ defmodule CodingAgentFramework.Mains do
           scheduler: Keyword.get(opts, :scheduler),
           lease: Keyword.get(opts, :lease, %{"seat" => 1}),
           reserved: [@framework | List.wrap(Keyword.get(opts, :operator))],
+          name_room: Keyword.get(opts, :name_room),
           operator: Keyword.get(opts, :operator),
           interval: Keyword.get(opts, :interval, 5_000),
           clone_timeout: Keyword.get(opts, :clone_timeout, 600_000),
@@ -735,9 +741,18 @@ defmodule CodingAgentFramework.Mains do
 
   defp name_ok(s, name) do
     cond do
-      name in s.reserved -> {:refused, {:running, name}}
-      not Worktree.name?(name) -> {:refused, {:bad, :name}}
-      true -> :ok
+      name in s.reserved ->
+        {:refused, {:running, name}}
+
+      # The room the home leaves for its socket (`Config.name_room/1`, F-172).
+      (is_binary(name) and s.name_room) && byte_size(name) > s.name_room ->
+        {:refused, {:bad, :name, {:longer_than, s.name_room}}}
+
+      not Worktree.name?(name) ->
+        {:refused, {:bad, :name}}
+
+      true ->
+        :ok
     end
   end
 
@@ -845,7 +860,7 @@ defmodule CodingAgentFramework.Mains do
           answer =
             with {:ok, config} <- mcp.(row.name) do
               launch = if config, do: launch ++ [mcp: config], else: launch
-              session(sessions, row.name, start, launch)
+              session(sessions, row, start, launch)
             end
 
           if launched, do: Mailbox.launched(mailbox, launched.id, answer)
@@ -867,11 +882,20 @@ defmodule CodingAgentFramework.Mains do
     end
   end
 
-  defp session(sessions, name, %{resume: nil} = start, launch),
-    do: Sessions.start(sessions, name, start.account, launch, timeout: @call)
+  # The call carries the caller's deadline, the row's less the slack (F-166's new-1, F-172), as
+  # `Delegates`' does (`Delegate.tla`'s Called, CallerLate, TakeStale): `settle/1` reads an
+  # absent agent row at the row's deadline as a call that never reached `Sessions`, so a
+  # request still in `Sessions`' queue by then must be refused there, not started under a row
+  # `Mains` refused.
+  defp session(sessions, row, %{resume: nil} = start, launch) do
+    opts = [timeout: @call, caller_deadline: row.deadline - @slack]
+    Sessions.start(sessions, row.name, start.account, launch, opts)
+  end
 
-  defp session(sessions, name, start, launch),
-    do: Sessions.resume(sessions, name, start.account, start.resume, launch, timeout: @call)
+  defp session(sessions, row, start, launch) do
+    opts = [timeout: @call, caller_deadline: row.deadline - @slack]
+    Sessions.resume(sessions, row.name, start.account, start.resume, launch, opts)
+  end
 
   # The model the caller names (F-141's new-8), else the app's; a resume that names none runs
   # the one its row keeps, as a move's resume does.

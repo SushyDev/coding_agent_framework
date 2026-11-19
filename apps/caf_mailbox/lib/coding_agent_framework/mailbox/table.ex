@@ -5,8 +5,9 @@ defmodule CodingAgentFramework.Mailbox.Table do
 
   `kind` is `msg` (a message, or the app's word), `brief`, `resume` (a resumed delegate's word to
   go on with its brief), `reply`, `notice`, `ask` (an agent's questions to the operator, as
-  JSON, kept for the app) or `answer` (the operator's answer to an ask, `reply_to` its uuid, and
-  the answers themselves, labels and text, as JSON in `answer`, F-138's new-3). `status` is
+  JSON, kept for the app), `answer` (the operator's answer to an ask, `reply_to` its uuid, and
+  the answers themselves, labels and text, as JSON in `answer`, F-138's new-3) or `withdrawn`
+  (the ask withdrawn in its answer's place, with the reason in its text, F-172). `status` is
   `queued` (due), `sending` (marked
   before it goes, with its transport `via`, `stream`, `waiter` or `call`, the `session_id` and
   the process `at` it is for), then `delivered` or `ended`, or `unknown` (still `sending` when
@@ -143,7 +144,7 @@ defmodule CodingAgentFramework.Mailbox.Table do
   @spec answer(db, String.t()) :: map | nil
   def answer(db, uuid), do: List.first(select(db, "reply_to = ?1", [uuid]))
 
-  @doc "The asks with no answer yet, oldest first."
+  @doc "The asks not settled yet, by an answer or a withdrawal, oldest first."
   @spec open_asks(db) :: [map]
   def open_asks(db) do
     where =

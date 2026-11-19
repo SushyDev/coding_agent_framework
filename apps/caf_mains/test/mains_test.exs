@@ -228,6 +228,40 @@ defmodule CodingAgentFramework.MainsTest do
     assert {:refused, {:running, "app-epic"}} = Mains.start_main(mains, "app", "app-epic", "Go.")
   end
 
+  # `Delegate.tla`'s CallerLate and Called past the deadline, for `Mains`' start (F-166's new-1,
+  # F-172): a request that waited in `Sessions`' queue past its caller's deadline is refused
+  # there and makes nothing, so no session runs under a row `Mains` refuses at its own deadline.
+  test "a start Sessions takes past its caller's deadline is refused and makes nothing", ctx do
+    clock = fn -> Agent.get(ctx.clock, & &1) end
+    me = self()
+
+    # The start's MCP config is made in its task right before its call of `Sessions`: held
+    # there, the test suspends `Sessions` after the declare and before the start's request.
+    mcp = fn _name ->
+      send(me, {:mcp, self()})
+      receive do: (:go -> {:ok, nil})
+    end
+
+    mains = mains(%{ctx | mains_opts: ctx.mains_opts ++ [clock: clock, mcp: mcp]})
+    assert {:ok, _} = level(ctx, mains)
+
+    late = Task.async(fn -> Mains.start_main(mains, "app", "app-epic", "Plan.") end)
+    assert_receive {:mcp, task}, 10_000
+    :ok = :sys.suspend(ctx.sessions)
+    send(task, :go)
+    assert {:ok, _} = await(fn -> start_queued(ctx.sessions, "app-epic") end)
+
+    # The caller's deadline is the row's less its slack, 60 s: the row's own has not passed.
+    [%{id: id, status: "starting", deadline: deadline}] = Starts.rows(ctx.starts, "test")
+    Agent.update(ctx.clock, fn _ -> deadline - 60_000 end)
+    :ok = :sys.resume(ctx.sessions)
+
+    assert {:refused, :caller_gone} = Task.await(late, 10_000)
+    assert {:ok, %{status: "refused"}} = await(fn -> start_row(ctx, id, "refused") end)
+    assert %{status: "declared", pid: nil} = Agents.get(ctx.agents, "app-epic")
+    assert ScreenStandIn.prompts(ctx.dir) == []
+  end
+
   # F-143 (`Team.tla`'s `MainEnds`): the end is refused while a delegate of the main session has
   # not ended (`NoDelegateWithoutParent`); then the session is stopped while idle and its row is
   # ended, so it owns nothing more; no delegate starts under it, and its name never runs again.
@@ -484,6 +518,13 @@ defmodule CodingAgentFramework.MainsTest do
       %{status: ^want} = row -> {:ok, row}
       row -> row
     end
+  end
+
+  defp start_queued(sessions, name) do
+    {:messages, messages} = Process.info(sessions, :messages)
+
+    if Enum.any?(messages, &match?({:"$gen_call", _, {{:start, ^name, _, _, _, _}, _}}, &1)),
+      do: {:ok, :queued}
   end
 
   defp nonempty([]), do: :none

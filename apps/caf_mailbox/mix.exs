@@ -16,6 +16,7 @@ defmodule CafMailbox.MixProject do
   defp deps do
     [
       {:caf_accounts, in_umbrella: true},
+      {:caf_acts, in_umbrella: true},
       {:caf_cli, in_umbrella: true},
       {:caf_grants, in_umbrella: true},
       {:caf_inlet, in_umbrella: true},

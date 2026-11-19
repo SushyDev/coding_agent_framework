@@ -156,8 +156,10 @@ defmodule CodingAgentFramework.MailboxLaunchTest do
   # F-155: Linux refuses one argument over 131 072 bytes, so on Linux a first row over its cap
   # goes as a pointer: its text in the agent's due directory, the prompt one line naming it with
   # the row's uuid, settled by that line as any launch. With no home it is refused unmarked.
+  # The home has a space, as macOS's `Application Support` has: the pointer names the path in
+  # backticks, with the row's sender (F-172).
   test "a first row longer than the host's argument carries goes as a pointer", ctx do
-    home = Path.join(ctx.dir, "home")
+    home = Path.join(ctx.dir, "the home")
     m = restart(ctx.mopts ++ [home: home, os: :linux])
     {:ok, max} = CodingAgentFramework.ClaudeCLI.prompt_max(:linux)
     long = String.duplicate("brief ", div(max, 6) + 1)
@@ -166,7 +168,10 @@ defmodule CodingAgentFramework.MailboxLaunchTest do
 
     assert {:ok, %{id: ^one, uuid: uuid, text: text}} = Mailbox.launch(m, "main", deadline)
     file = Path.join([home, "due", "main", "#{one}.md"])
-    assert text == Transport.Launch.pointer(file, uuid)
+
+    assert text ==
+             "From d1 (message): a message for you is in `#{file}`; read it.\n\n[delivery #{uuid}]"
+
     assert File.read!(file) == "From d1 (message): " <> long
 
     launch = SessionsSetup.launch(ctx, :at_start)

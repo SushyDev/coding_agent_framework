@@ -120,7 +120,9 @@ defmodule CodingAgentFramework.Services do
   are held on (its programs also with `lsof`); and optionally `:acts`, the instance's `Acts`,
   where each `stop/4` of a running service and each `restart/4` is a row, act `service_stop`
   or `service_restart`, target `service:<name>`, and so is an end `owner_ended/3` makes; `:interval` (ms between settles, as `cue/2`
-  settles; without it, rows settle only at its start and at `cue/2`); and `:notify`, a function
+  settles; without it, rows settle only at its start and at `cue/2`); `:name_room` (bytes, the
+  room the home leaves for a service's socket, `Config.name_room/1`: a longer name is refused
+  `{:bad, :name, {:longer_than, n}}` before any row, F-172); and `:notify`, a function
   of one cue: after each write of a row it gets `%{topic: "services", ids: [name]}`.
   """
   @spec start_link(keyword) :: GenServer.on_start()
@@ -165,6 +167,13 @@ defmodule CodingAgentFramework.Services do
       else: {:refused, {:name, name}}
   end
 
+  # The room the home leaves for the service's socket (`Config.name_room/1`, F-172), checked
+  # before any row.
+  defp fits(%{name_room: room}, name) when is_integer(room) and byte_size(name) > room,
+    do: {:refused, {:bad, :name, {:longer_than, room}}}
+
+  defp fits(_config, _name), do: :ok
+
   # A step's timeout, cut to what is left of the start's deadline (none: as it is).
   defp within(opts, key, default) do
     t = Keyword.get(opts, key, default)
@@ -179,6 +188,7 @@ defmodule CodingAgentFramework.Services do
     host = Keyword.fetch!(opts, :host)
 
     with {:ok, config} <- call(services, :config),
+         :ok <- fits(config, name),
          {:ok, port, local} <- forward_of(config, host, Keyword.get(opts, :forward)) do
       {:ok,
        %{
@@ -941,6 +951,7 @@ defmodule CodingAgentFramework.Services do
       config = Map.new(keys, &{&1, Keyword.fetch!(opts, &1)})
       config = Map.put(config, :workstation, Keyword.get(opts, :workstation))
       config = Map.put(config, :acts, Keyword.get(opts, :acts))
+      config = Map.put(config, :name_room, Keyword.get(opts, :name_room))
       # A start not yet sent lost its call with the restart: nothing runs.
       for %{state: "asked"} = row <- Table.all(db),
           do: Table.put(db, %{row | state: "refused", owner: nil})

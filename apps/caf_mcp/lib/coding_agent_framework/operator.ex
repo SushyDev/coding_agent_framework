@@ -117,6 +117,18 @@ defmodule CodingAgentFramework.Operator do
     do: MCP.operate(mcp, "answer", %{"agent" => agent, "dialog" => dialog, "label" => label})
 
   @doc """
+  Withdraws an agent's open ask `ask` (F-172): a person dismissed it in the app's inbox, and
+  the agent reads `reason` once, in the answer's place. The answer and the withdrawal race to
+  one settle: the second is refused `:settled`.
+
+      Operator.withdraw(mcp, 12, "Dismissed: the release went out without it.")
+      #=> {:ok, {:queued, 13}}
+  """
+  @spec withdraw(GenServer.server(), integer, String.t()) :: answer
+  def withdraw(mcp, ask, reason),
+    do: MCP.operate(mcp, "withdraw", %{"ask" => ask, "reason" => reason})
+
+  @doc """
   Answers the startup dialog `agent`'s start waits on (F-140): `kind` `"trust"` or
   `"imports"`, as the agent row shows it, by its option's `label`. Nothing answers one unless
   the operator does, or the app's callback chose to.

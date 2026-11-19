@@ -56,6 +56,11 @@ defmodule CodingAgentFramework.MCPTest do
     end
 
     # A `Mailbox` that stores every well-formed ask as ask 12.
+    def withdraw(test, ask, reason, _opts) do
+      send(test, {:withdraw, ask, reason})
+      {:ok, {:queued, 13}}
+    end
+
     def ask(test, from, questions, _opts) do
       send(test, {:ask, from, questions})
       if is_list(questions), do: {:ok, {:asked, 12}}, else: {:refused, {:bad, :questions}}
@@ -193,7 +198,7 @@ defmodule CodingAgentFramework.MCPTest do
              ~w(message run start_delegate run_delegate start_main) ++
                ~w(service_start services service_logs service_send service_wait) ++
                ~w(service_restart service_stop service_hand agents look transcript) ++
-               ~w(interrupt answer resume stop move answer_startup end_main ask reload)
+               ~w(interrupt answer resume stop move answer_startup end_main ask withdraw reload)
   end
 
   test "a call is the agent's whose token it carries, whatever its arguments say",
@@ -524,6 +529,16 @@ defmodule CodingAgentFramework.MCPTest do
     assert MCP.operate(operator, "end_main", %{"name" => "app-main", "force" => "yes"}) ==
              {:refused, {:bad, :args}}
 
+    # The forced act says so on its claim, before it acts: `Mailbox`'s own evidence (F-172).
+    assert {:ok, %{detail: ~s({"force":true})}} = Acts.get(acts, act)
+
+    # An ask's withdrawal is the operator's alone (F-172).
+    assert tool(ctx.mcp, t["app-main"], "withdraw", %{"ask" => 12, "reason" => "no"}) ==
+             %{"refused" => "operator_only"}
+
+    assert {:ok, {:queued, 13}} = Operator.withdraw(operator, 12, "Dismissed.")
+    assert_received {:withdraw, 12, "Dismissed."}
+
     # An agent's stop is never forced.
     assert tool(ctx.mcp, t["app-main"], "stop", %{"agent" => "app-fix", "force" => true}) ==
              %{"refused" => ["operator_only", "force"]}
@@ -623,7 +638,7 @@ defmodule CodingAgentFramework.MCPTest do
                  ~w(message run start_delegate run_delegate start_main) ++
                    ~w(service_start services service_logs service_send service_wait) ++
                    ~w(service_restart service_stop service_hand agents look transcript) ++
-                   ~w(interrupt answer resume stop move answer_startup end_main ask reload)
+                   ~w(interrupt answer resume stop move answer_startup end_main ask withdraw reload)
              }
            }
 

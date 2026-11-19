@@ -11,7 +11,7 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, Grants, Intake, Mailbox, Sessions, SessionsSetup}
+  alias CodingAgentFramework.{Accounts, Acts, Grants, Intake, Mailbox, Sessions, SessionsSetup}
   alias CodingAgentFramework.{Transcripts, WaiterStandIn}
   alias CodingAgentFramework.Mailbox.{Table, Transport}
   alias CodingAgentFramework.MailboxWaiterTest.HeldIntake
@@ -248,6 +248,51 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
     cue(ctx)
     assert {:ok, %{status: "unknown"}} = Mailbox.status(m, one)
     assert {:ok, []} = Mailbox.open_to(m, "main")
+  end
+
+  # Delivery.tla's ForcedSettles (F-172): `Mailbox` was down between the forced end and the
+  # operator's settle; at its own start it reads the end's claim in `Acts` and settles the row.
+  test "a forced end's row settles unknown at Mailbox's own settle, across a restart", ctx do
+    main(ctx)
+    GenServer.stop(ctx.mailbox)
+    clock = fn -> Agent.get(ctx.clock, & &1) end
+    acts_db = Path.join(ctx.dir, "acts.db")
+
+    acts =
+      start_supervised!(
+        {Acts, db: acts_db, start_id: "s1", host: "test", instance: "t", clock: clock}
+      )
+
+    held = start_supervised!({HeldIntake, self()})
+    mopts = Keyword.merge(ctx.mopts, intake: held, acts: acts)
+    m = restart(Map.put(ctx, :mopts, mopts))
+    Process.put(:mailbox, m)
+    {:ok, {:queued, one}} = Mailbox.message(m, "d1", "main", "in flight")
+    assert_receive {:held, _from, _text}, 5_000
+
+    # An end not forced is no evidence: the claim must say so.
+    {:ok, plain} = Acts.claim(acts, "op", "main", "s0", "stop")
+    {:ok, act} = Acts.claim(acts, "op", "main", nil, "end_main", detail: %{force: true})
+    GenServer.stop(m)
+    assert {:ok, :ended} = Sessions.end_main(ctx.waiting, "main", force: true, timeout: 10_000)
+    {:ok, _} = Acts.answered(acts, act, {:ok, :ended})
+    {:ok, _} = Acts.answered(acts, plain, {:refused, :not_held})
+    assert %{status: "sending"} = Table.get(ctx.mtable, one)
+
+    m = restart(Map.put(ctx, :mopts, mopts))
+    Process.put(:mailbox, m)
+
+    assert {:ok, %{status: "unknown", attempt: "ended_while_sending"}} =
+             await(fn ->
+               with {:ok, %{status: "unknown"}} = ok <- Mailbox.status(m, one), do: ok
+             end)
+
+    assert {:ok, [%{actor: "op", target: "main", outcome: "unknown", detail: detail}]} =
+             Acts.rows(acts, act: "settle")
+
+    assert detail == ~s({"row":#{one}})
+    # Nothing is left for the operator's call to settle.
+    assert {:ok, []} = Mailbox.ended_while_sending(m, "main")
   end
 
   # The waiter's hook in a main session's start: the overlay carries it beside the account's.

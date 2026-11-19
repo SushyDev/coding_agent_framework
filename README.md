@@ -222,7 +222,13 @@ Built, each from a checked model in `model/tla/`:
   `Delivery.tla`): the operator's start takes the tool's options; a start whose lease is queued
   answers at once with its place, and its outcome reaches the parent once, as a notice; every
   report, reply and notice names its sender; and the operator's forced end of a session a
-  delivery can never settle, its rows in flight settled unknown.
+  delivery can never settle, its rows in flight settled unknown;
+- `USER` in every launch on macOS, which names the Keychain item that holds an account's login
+  (F-173, measured);
+- an ask withdrawn by the app or the operator, settled once against an answer (F-172, against
+  `Prompt.tla`); the pointer line naming its sender and its file's path in backticks; a forced
+  end's rows settled by `Mailbox` itself, after a restart too; names refused before any row when
+  their socket would not fit under the home; and `Mains`' start carrying its caller's deadline.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

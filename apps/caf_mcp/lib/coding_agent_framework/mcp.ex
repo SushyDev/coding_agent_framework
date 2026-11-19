@@ -48,7 +48,11 @@ defmodule CodingAgentFramework.MCP do
     in use or reserved);
   - `ask(questions)`: the mailbox's `ask/4`, which checks the questions and the caller and
     stores the ask for the app; answers `%{ask: id}` at once. The person's answer comes later
-    as a message (`Mailbox.answer/4`);
+    as a message (`Mailbox.answer/4`), or its withdrawal with the reason (`Mailbox.withdraw/4`);
+  - `withdraw(ask, reason)`: the operator's alone (F-172); any other caller is refused
+    `:operator_only`. The mailbox's `withdraw/4`: a person dismissed the ask in the app, and
+    the agent reads the reason once, in the answer's place. Answers `Mailbox`'s answer, refused
+    `:settled` once the ask was answered or withdrawn;
   - `reload()`: `Grants.may_use?/2`, then the tools' names; the endpoint sends the client
     `notifications/tools/list_changed` first;
   - the service tools, each through the services' own function, which makes its own `Grants`
@@ -459,6 +463,17 @@ defmodule CodingAgentFramework.MCP do
       }
     },
     %{
+      name: "withdraw",
+      description:
+        "The operator's: withdraws an agent's open ask a person dismissed, with the reason " <>
+          "the agent reads in the answer's place.",
+      inputSchema: %{
+        type: "object",
+        properties: %{ask: %{type: "integer"}, reason: @str},
+        required: ["ask", "reason"]
+      }
+    },
+    %{
       name: "reload",
       description: "Reloads your own tools.",
       inputSchema: %{type: "object", properties: %{}}
@@ -774,6 +789,16 @@ defmodule CodingAgentFramework.MCP do
     end
   end
 
+  # A person's dismissal of an ask, through the app: the operator's alone (F-172). The answer and
+  # the withdrawal race in `Mailbox` to one settle.
+  defp act(ctx, caller, _id, "withdraw", %{"ask" => ask, "reason" => reason})
+       when is_integer(ask) and is_binary(reason) do
+    with true <- caller == Grants.operator(ctx.grants) or {:refused, :operator_only} do
+      {mod, server} = ctx.mailbox
+      mod.withdraw(server, ask, reason, timeout: @step)
+    end
+  end
+
   defp act(ctx, caller, _id, "reload", _args) do
     with :ok <- Grants.may_use?(ctx.grants, caller),
          do: {:ok, %{tools: Enum.map(@tools ++ app_tools(ctx, caller), & &1.name)}}
@@ -910,7 +935,7 @@ defmodule CodingAgentFramework.MCP do
          {:ok, state} <- by.state.(),
          :ok <- held(fix, state),
          :ok <- by.check.(fix, state),
-         {:ok, claim} <- Acts.claim(ctx.acts, caller, agent, state, tool) do
+         {:ok, claim} <- Acts.claim(ctx.acts, caller, agent, state, tool, forced_detail(fix)) do
       outcome = by.fix.(fix, state)
 
       verdict =
@@ -978,6 +1003,11 @@ defmodule CodingAgentFramework.MCP do
 
   defp forced_by(_ctx, _caller, _fix), do: :ok
 
+  # A forced act says so on its claim, before it acts: `Mailbox` reads it as the evidence that
+  # settles the rows left sending unknown, at its own settle (F-172).
+  defp forced_detail({:stop, :force}), do: [detail: %{force: true}]
+  defp forced_detail(_fix), do: []
+
   # The operator's forced end of a main session (F-170, `Team.tla`'s MainEnds with `f`): the act
   # is a row in `Acts` before it acts, with no state to claim (each call is an act of its own);
   # then the end, which waits for no row to the session; then each row left `sending` to it is
@@ -987,7 +1017,8 @@ defmodule CodingAgentFramework.MCP do
   defp forced(ctx, caller, name) do
     {mod, server} = ctx.mains
 
-    with {:ok, act} <- Acts.claim(ctx.acts, caller, name, nil, "end_main") do
+    with {:ok, act} <-
+           Acts.claim(ctx.acts, caller, name, nil, "end_main", forced_detail({:stop, :force})) do
       outcome = mod.end_main(server, name, force: true)
       outcome = with {:ok, done} <- outcome, do: with_unknown(ctx, caller, name, done, act)
       Acts.answered(ctx.acts, act, outcome)

@@ -43,8 +43,9 @@
 (* it does not use to constants.                                           *)
 (*                                                                         *)
 (* Alone, the spec has one asker (`child`), its parent (`main`) and a      *)
-(* sibling (`other`); Prompt_Holds has the two held prompts, and           *)
-(* Prompt_Owners the limit and the restarts prompt. One stop_cap per run:  *)
+(* sibling (`other`); Prompt_Holds has the two held prompts,               *)
+(* Prompt_Owners the limit and the restarts prompt, and Prompt_Asks an ask *)
+(* a person answers or withdraws (F-172). One stop_cap per run:            *)
 (* a tool call resets the count only before the cap's hold.                *)
 (*                                                                         *)
 (* Left abstract: time (a deadline is a step); the text and the options    *)
@@ -66,8 +67,9 @@
 (* AutoAnswer and RetryUnknown and Team.tla's AnswerTwice are this spec's  *)
 (* AnyAnswerer, RetryUnknown and AnswerTwice in their instances.           *)
 (*                                                                         *)
-(* The Prompts box's contract: OneAnswer, OnlyRightful, NotAfterDeadline,  *)
-(* DefaultOnlyDeclared, KeptAcrossRestart, NeverOverridden, and the        *)
+(* The Prompts box's contract: OneAnswer, AnsweredOnce, OnlyRightful,      *)
+(* NotAfterDeadline, DefaultOnlyDeclared, KeptAcrossRestart,               *)
+(* NeverOverridden, and the                                                *)
 (* Ledger's OneClaimPerState and NoActOnCutOffClaim on the answers;        *)
 (* liveness PromptsEnd (answered, expired, withdrawn, or lost with its     *)
 (* owner's request) and Escalated. How they imply what Boxes.tla assumes   *)
@@ -119,7 +121,8 @@ Breaks == {
     "InMemory",      \* an open prompt is kept in memory, so a whole restart loses it
     "NoEvidence",    \* an answering row a restart cut waits for its owner's answer, lost with it
     "SilentGiveUp",  \* a restart budget run out opens no prompt
-    "NoCap"          \* the app's callback decides every Stop hold, past Claude Code's cap
+    "NoCap",         \* the app's callback decides every Stop hold, past Claude Code's cap
+    "WithdrawSettled" \* a withdrawal does not check its prompt is still open: an answered one is withdrawn
 }
 
 ASSUME Break \in Breaks
@@ -215,6 +218,19 @@ AnswerNow(p, who, label) ==
     /\ Move(p, "answered")
     /\ pwrong' = pwrong \cup (IF st[p] = "expired" THEN {"late"} ELSE {})
 
+\* For an owner that settles in the same call (Mailbox's ask, F-172): a rightful answerer
+\* withdraws an open prompt (a person dismissed it in the app's inbox), with a reason its asker
+\* reads once, as it reads an answer. The claim on the prompt's state and the settle are one
+\* step, as AnswerNow's, so an answer and a withdrawal race to one settle: the first moves the
+\* row, and the second finds it no longer open (refused `settled`). Under WithdrawSettled the
+\* withdrawal takes an answered prompt too, and the asker reads two settles.
+WithdrawNow(p, who) ==
+    /\ st[p] = "open" \/ (Break = "WithdrawSettled" /\ st[p] = "answered")
+    /\ Rightful(p, who) \/ Break = "AnyAnswerer"
+    /\ C!TakeAndAct(who, p, "withdraw")
+    /\ Move(p, "withdrawn")
+    /\ pwrong' = pwrong \cup (IF st[p] # "open" THEN {"settled twice"} ELSE {})
+
 \* At its deadline a kind that declares a safe default takes it, as the framework's answer.
 \* Under DefaultAny a kind with no default takes one too.
 Default(p) ==
@@ -309,13 +325,19 @@ ClaimSettled(c) == C!Settle(c) /\ UNCHANGED <<st, ep, pwrong>>
 (*   limit     limit, Team.operate/4 its owner (a move, or nothing), whose *)
 (*             outcome may be unsure; its default, the wait;               *)
 (*   restarts  restarts, opened by the asker's supervisor past its budget; *)
-(*             the answer starts the agent process again.                  *)
+(*             the answer starts the agent process again;                  *)
+(*   ask       question, the asker's ask (F-172): Mailbox, its owner,      *)
+(*             stores the answer row in the answer's call (AnswerNow), or  *)
+(*             a person withdraws it (WithdrawNow); no deadline, no        *)
+(*             default, a person its one answerer.                         *)
 
-AllPs == {"perm", "cap", "limit", "restarts"}
-KindOf == [perm |-> "permission", cap |-> "stop_cap", limit |-> "limit", restarts |-> "restarts"]
+AllPs == {"perm", "cap", "limit", "restarts", "ask"}
+KindOf == [perm |-> "permission", cap |-> "stop_cap", limit |-> "limit", restarts |-> "restarts",
+           ask |-> "question"]
 TreeAgents == {"main", "child", "other"}
 TreeParent == [main |-> "person", child |-> "main", other |-> "main"]
 AloneHeld == Ps \cap {"perm", "cap"}
+AskPs == Ps \cap {"ask"}
 
 \* The labels a prompt offers: only the cap's matter here.
 Options(p) == IF kind[p] = "stop_cap" THEN {"yes", "no"} ELSE {"yes"}
@@ -412,10 +434,26 @@ AtLimit ==
     /\ Open("limit")
     /\ UNCHANGED <<Rest, up, restarts, holdVars, ownVars, askerVars>>
 
-\* Someone answers, through answer/3 (a person, the app) or steer (an agent).
+\* Someone answers, through answer/3 (a person, the app) or steer (an agent). An ask's owner
+\* stores the answer row in the same call: it took.
 Answers(p, who, l) ==
     /\ up /\ l \in Options(p)
-    /\ Answer(p, who, l)
+    /\ IF p \in AskPs
+       THEN AnswerNow(p, who, l) /\ took' = [took EXCEPT ![p] = @ + 1] /\ UNCHANGED <<orec, otold>>
+       ELSE Answer(p, who, l) /\ UNCHANGED ownVars
+    /\ UNCHANGED <<Rest, up, restarts, holdVars, askerVars>>
+
+\* The asker asks: Mailbox stores the ask, the prompt open.
+Asks ==
+    /\ up /\ "ask" \in Ps
+    /\ Open("ask")
+    /\ UNCHANGED <<Rest, up, restarts, holdVars, ownVars, askerVars>>
+
+\* A person withdraws an ask, through the app (Mailbox.withdraw/4): the row to the asker with
+\* the reason is stored in the same call, so it is read once, as an answer is.
+Withdraws(p, who) ==
+    /\ up /\ p \in AskPs
+    /\ WithdrawNow(p, who)
     /\ UNCHANGED <<Rest, up, restarts, holdVars, ownVars, askerVars>>
 
 \* The deadline. A hold's: the empty response, and the prompt expired, or its default taken
@@ -552,11 +590,12 @@ Init ==
 
 Next ==
     \/ FrameworkDies \/ FrameworkStarts \/ RestartAgent
-    \/ Requests \/ StopFires \/ ToolCall \/ AtLimit \/ Passed
+    \/ Requests \/ StopFires \/ ToolCall \/ AtLimit \/ Passed \/ Asks
     \/ \E p \in Ps : \/ Held(p) \/ Opened(p) \/ Deadline(p) \/ Decides(p) \/ Marked(p)
                      \/ Settles(p) \/ SettleHeld(p) \/ LostHeld(p) \/ OwnerTold(p)
                      \/ SettleOwner(p) \/ Clears(p)
                      \/ \E who \in Answerers, l \in {"yes", "no"} : Answers(p, who, l)
+                     \/ \E who \in Answerers : Withdraws(p, who)
     \/ \E c \in acting : HandHeld(c) \/ HandOwner(c)
     \/ \E c \in claims : ClaimEnds(c)
 
@@ -564,7 +603,7 @@ Next ==
 \* the deadline, the app's callback, other answerers, Claude Code's hooks and calls, and
 \* restarts happen or not.
 Fairness ==
-    /\ WF_vars(FrameworkStarts) /\ WF_vars(Passed)
+    /\ WF_vars(FrameworkStarts) /\ WF_vars(Passed) /\ WF_vars(Asks)
     /\ \A p \in Ps :
           /\ WF_vars(Held(p)) /\ WF_vars(Opened(p)) /\ WF_vars(Decides(p))
           /\ WF_vars(Marked(p)) /\ WF_vars(Settles(p)) /\ WF_vars(SettleHeld(p))
@@ -596,6 +635,10 @@ OnlyRightful == \A c \in claims \cup acting : c.by = "framework" \/ Rightful(c.t
 
 \* No answer is taken once its prompt's deadline passed.
 NotAfterDeadline == "late" \notin pwrong
+
+\* A prompt settled by its answerers is settled once: an answer and a withdrawal race, and the
+\* first wins (F-172).
+AnsweredOnce == "settled twice" \notin pwrong
 
 \* The framework answers only by a default its kind declares.
 DefaultOnlyDeclared ==
