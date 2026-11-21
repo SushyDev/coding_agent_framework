@@ -367,7 +367,9 @@ framework's hooks deciding:
   program that reads it waits for ever and holds a delegate's report; every background `Bash`
   command the app's callback lets run runs as `exec </dev/null; <command>`, a correction of the
   framework's own, always on (built in F-180, `Intake.Background`). A pass carries it with no
-  decision, so Claude Code's own permission rules still decide (measured on 2.1.322);
+  decision, so Claude Code's own permission rules still decide (measured on 2.1.322); an ask
+  carries it beside the ask, whose prompt shows the corrected command, and a corrected pass
+  still meets the prompt (both measured on 2.1.322 in the default permission mode; F-182);
 - Claude Code's own question tool (`AskUserQuestion`), in a session no person attends, opens a
   prompt as `ask` does and is denied with a reason that says the answer comes as a message, so
   the agent asks with its natural tool;
@@ -450,10 +452,46 @@ restarts"); the two meet at the top, where a budget run out is a prompt too.
 The healer never ends a working agent (a remedy whose target's turn runs is refused before the
 claim), never changes code, and never retries: a remedy that did not help is a new symptom for a
 person. Today's `Recoveries` (detect, act once, verify) is the healer, and its acts are the
-default allow-list the app may narrow. `Heal.tla` (B1) is its contract: it instances `Claim`,
-and checks `OnlyApproved`, `OncePerState`, `CapHolds`, `AskedWhenCapped`, `NeverWorking`, and
-that every symptom is acted on or asked (`ActedOrAsked`), each with a `Break_Heal_*`
-configuration.
+default allow-list the app may narrow. `Heal.tla` (F-182) is its contract: it instances `Claim`,
+and checks `OncePerState`, `RecordedFirst` (the remedy's row before its act),
+`UnknownNotRetried` (an unknown outcome is a prompt, never tried again), `CapToPrompt` (no kind
+passes its cap in a bound, and the next is asked), `NarrowsAlone` (no widening but the
+operator's, and a remedy whose verify failed is off the list), `OnlyApproved`, `OnlyOnSymptom`
+(`Boxes.tla`'s `NeverWorking`) and, as liveness, that every symptom state is acted on or asked
+(`ActedOrAsked`), each with a `Break_Heal_*` configuration. `Boxes.tla` instances it with the
+stuck turn as its one kind, so the parent's fix and the healer's remedy race on one `Ledger`.
+
+**One shape for every remedy** (F-182). A remedy is never a mechanism of its own: it is an
+entry on the allow-list (a symptom kind, its one remedy, its cap per bound), and the healer
+takes it in one order. The symptom's state is recorded in `Watch` first; a state with a row in
+`Acts` is decided by that row's outcome; a kind off the list, or past its cap, is asked; else
+the remedy is claimed in `Acts` on the symptom's state (its key the symptom's), acts, and its
+answer is read: ok is verified after, and a failed verify drops the kind from the list and asks;
+refused, unknown or cut by a restart is asked. A kind whose remedy is nil is shown, never asked.
+The cap's count is a fold of the healer's rows in `Acts` within the bound, so a restart keeps
+it. A `remedy` prompt's answers are "approve" (the kind back on the list, the operator's
+widening) and "leave"; "act once" is the operator's own act through `Team.operate/4`. A
+prompt stays while its target shows the kind at all, and passes with it.
+
+Built so far (F-182): `Heal.tla`; `Watch` (`caf_watch`) with the record, the list from the
+config's `remedies` and `remedy_bound`, and the cue `watch`; `Recoveries` as the healer of its
+two acts (`lost_viewer` by `reopen`, `end_owed` by `end`, the default list, 10 per hour); the
+`remedy` kind in `Prompts`; the app's `symptoms/2` and `remedies/2`. A viewer lost a third time
+within its window, and an end whose outcome is unknown, still wait for a person's
+`Recoveries.clear/2` as well as their prompt (F-182's new-2).
+
+The first remedies on this shape, decided (F-180's new-6), each a small unit:
+
+| Symptom | Read from | Remedy | Its bound |
+|---|---|---|---|
+| `stuck_background` | a delegate whose turn ended with its report owed while a background command of it used no CPU time for a bound, read from its process tree on Linux; on macOS it reads `unknown`, never stuck | hand the parent the delegate's last reply as its report marked `partial` ("The delegate protocol"), and end the hung command's group by its record (pid and start time) | once per state |
+| `absent_main` | a declared main session whose process is gone while the tree runs | one resume through `Mains` under the `Scheduler` | once per absence; a second absence within a bound is a `remedy` prompt |
+| `mcp_dropped`, `hooks_silent` | an agent's MCP connection or hooks gone quiet | none yet: shown only | — |
+| `limited` | an account's usage limit ("Usage limits", F-181) | `press_stop`, `go_on`, `move` | as "Usage limits" says |
+
+A usage-limit remedy is an instance of this healer: its symptom `limited`, its remedies
+`press_stop`, `go_on` and `move`, each an entry on the list with its cap, recorded, claimed,
+verified and asked as every other; `Limit.tla` says when each is legal.
 
 ### Extensions
 
@@ -568,7 +606,7 @@ by label, a default, a deadline, its owner and its status (`open`, `answering`, 
 | `usage_credits` | `Sessions`, at Claude Code's limit menu, only where the account's record allows credits | `Sessions`' checked press of the label answered: "stop and wait" (its default at the deadline) or the credits |
 | `login` | `Sessions`, from a session whose account's login expired | a person, at `bin/caf-login`; the prompt settles when a session on it starts |
 | `exit` | `Sessions`, from Claude Code's own exit prompt read on the pane | `Sessions`' checked press |
-| `remedy` | the `Watch` | `Team.operate/4` and the allow-list |
+| `remedy` | the `Watch`, for a symptom state its healer leaves to a person (F-182) | the `Watch`: "approve" puts the kind's remedy back on the allow-list; "leave" |
 | `restarts` | a supervisor whose budget ran out | its process started again |
 | `stop_cap` | the `Stop` hold, at Claude Code's cap of 8 blocks in a row, in place of being overridden (decided) | `Intake`'s hold: go on, or let the turn end |
 | `policy` | the app (confirm a landing, say) | the app's callback |
@@ -597,6 +635,9 @@ ask's answer and withdrawal share a key, a dialog's press is marked first); a la
 answer is refused `{:refused, :settled}`, and `{:withdraw, reason}` withdraws an ask. When a
 delegate's prompt opens, its parent gets one notice through `Mailbox` (kind `prompt`, from the
 delegate, keyed by the prompt). The operator's `answer_startup` and `withdraw` go through it.
+F-182 added the `remedy` kind: the `Watch`'s symptom row the healer asked, open while it is
+`asked`, answered by `Watch.answer/5`; it is not told to the agent's parent, since it is the
+`Watch`'s wait, not the agent's.
 Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
 `expired` prompts kept shown, and the kinds that need a reading first.
 
@@ -641,7 +682,9 @@ table the tree's supervisor owns, and a topic no part declares refused. F-176 ma
 written topic subscribable (`writes/0`, the cue table in `subscribe/2`'s doc), named the tree
 in `subscribe/2`'s answer, listed the operator's own tools to the operator alone, and removed
 `run`. F-179 built `prompts/2` and `answer/4`, whose fourth argument names who answers
-("Prompts"), and the `prompts` topic. The other calls are B3's rest.
+("Prompts"), and the `prompts` topic. F-182 added `symptoms/2` (the `Watch`'s record), `remedies/2`
+(the allow-list, and the operator's `approve` and `revoke`), the config's `remedies` and
+`remedy_bound`, and the topic `watch`. The other calls are B3's rest.
 The config answers the room the home leaves for an agent's and a service's name (`Config.name_room/1`, F-172), and the tree hands it to `Delegates`, `Mains` and
 `Services`, which refuse a longer name `{:bad, :name, {:longer_than, n}}` before any row;
 sockets stay in the home.
@@ -730,7 +773,8 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Runs` | a heavy native `Bash` command under a lease (F-171): the `PreToolUse` policy that rewrites a call the app lists as heavy into the wrapper `<home>/bin/caf-run`, the wrapper itself, its endpoint on the intake's port (`Runs.Plug`), and the lease's owner, the wrapper's own process read by `ps` | no table: the lease is the row |
 | `Services` | programs agents start and keep on a host, in a copy: held, owned, read, written to, restarted, with ports forwarded to the workstation; the forward is a second `Holder.Process` record of the service | `services` |
 | `Tracker` | the state views read: the fold of every reader | — |
-| `Recoveries` | detect a broken state, take its act in `Acts`, act once per state, verify; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after its end within its stop's deadline, by `Holder.Process` (`Sessions` itself never kills). Two states wait for a person, whose clear makes the next one new: a viewer lost a third time within a window, and an end whose process outlived the KILL (`unknown`, F-118's new-5); the fault ledger shows both | no table of its own |
+| `Watch` | the symptom record and the healer's allow-list (F-182, `Heal.tla`): each symptom state a fact (kind, target, state, since, evidence, source), recorded before anything acts on it and passed when no longer read; the list's acts (the healer's drop, the operator's revoke and approve), so a restart reads it as left; a state the healer leaves to a person is `asked`, the `remedy` prompt `Prompts` reads | `symptoms`, `remedy_acts` |
+| `Recoveries` | the healer (F-182): records each broken state in `Watch`, acts only by the allow-list's remedy for its kind and under its cap, takes its act in `Acts`, acts once per state, verifies, drops a remedy whose verify failed, and asks for the rest; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after its end within its stop's deadline, by `Holder.Process` (`Sessions` itself never kills). Two states wait for a person, whose clear makes the next one new: a viewer lost a third time within a window, and an end whose process outlived the KILL (`unknown`, F-118's new-5); the fault ledger shows both | no table of its own |
 | `Grants` | decides whether a caller may act on a target, by the edges of `Sessions`' tree; a pure module, handed the tree's function | — |
 | `MCP` | the agent tools ("Agents working together"); each call is checked by `Grants` once, and each fix takes its act in `Acts` | `mcp_tokens`, `mcp_calls` |
 | `Ghostty` | opens or focuses a session's terminal window | — |
@@ -750,6 +794,7 @@ write fails its tests; an app's default routes it as any other. A cue of each to
 | `registry:<host>:<account>` | `Registry` | `Sessions`, `Mover` (a move's stop is asked again only on this cue and the stream's) |
 | `stream:<host>` | `Stream` | `Sessions`, `Delegates`, `Mailbox`, `Mover` |
 | `tmux:<host>:<server>` | `TmuxSampler` | `Sessions`, `Recoveries` |
+| `watch` | `Watch` | `Prompts` (a `remedy` prompt opened or closed) |
 | `sessions:<host>` | `Sessions` | `Delegates`, `Mailbox`, `Mover`, `Scheduler`, `Mains` (a start that runs or is refused), the app's end of an owner's services |
 | `mains:<host>` | `Mains` | `Scheduler` (a main session's start ended) |
 | `transcripts:<host>:<account>` | `Transcripts` | `Delegates`, `Mailbox` (a waiter row's lines are read only on this cue, the waiters' and the take bound) |
@@ -1367,6 +1412,13 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
 6. resumes it once when it is killed before its last reply, and reports a second such kill
    instead of retrying. That report is held and delivered like a finish. A kill after the last
    reply is a finish, read from the transcript.
+
+**A `partial` report** (decided, F-182; built with `stuck_background`'s remedy, "Metrics and
+healing"). When the healer hands the parent a delegate's last reply because a background command
+of its turn hangs, the report is marked `partial`: its row in `Mailbox` and the parent's text say
+so, and the delegate's row stays as it was, its report still owed. A later report of the same
+brief is still taken and delivered, as the brief's reply; the `partial` one never stands in for
+it.
 
 **A second start of a branch** (F-150, `Delegate.tla`'s `StartAgain`) looks up the name's
 latest row and its agent row before anything is written. While the parent's delegate of that
@@ -2630,7 +2682,9 @@ read takes as it finds it and which withdraws the prompt it answered. The `limit
    its reset, and the word handed by `launch` to a gone process under a lease.
 6. **The `Scheduler`**: `limited_until` read as a spent window by the budget gate.
 7. **The `Watch`**: a symptom `limited`, each limit with its window, its agents, the time each
-   waited and the remedy taken.
+   waited and the remedy taken. Each remedy above is an instance of the healer ("Metrics and
+   healing", F-182): the symptom `limited`, its remedies `press_stop`, `go_on` and `move` as
+   entries on the allow-list, never a mechanism of their own.
 
 **Still to measure** (the code unit measures each first, and its build note keeps the result):
 
@@ -3140,10 +3194,12 @@ model before the code it describes (B4, B6, B8, B9, B11); B2 and B3 change no be
   About +600, −300, then +150 to +250 per kind.
 - **B7. Facts and metrics**: `Store` appends a status fact to the table's own history in the
   transaction of each status write; the `Watch`'s named folds, `metrics/2` and `digest/2`;
-  `look(what: :stuck)`. Detect and record only. About +600.
+  `look(what: :stuck)`. Detect and record only. About +600. Started in F-182: the `Watch`'s
+  symptom record.
 - **B8. Healing on an allow-list**, against `Heal.tla`: `Recoveries` becomes the `Watch`'s
   healer acting through `Team.operate/4`, its acts the default allow-list, the cap, and the
-  `remedy` prompt. About +400, −250.
+  `remedy` prompt. About +400, −250. Built in F-182 but the acts through `Team.operate/4`,
+  which B5 makes; then each remedy of "One shape for every remedy" as its own small unit.
 - **B9. `wait_for`**, against `Delivery.tla`'s subscription: `Mailbox`'s `subscriptions`, fired
   by facts; a job's end, a service's line, port and exit, a delegate's idle and report, an
   answer. `service_wait`'s poll becomes a fact `Hosts` records. About +400, −150.

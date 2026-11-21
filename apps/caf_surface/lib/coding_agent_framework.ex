@@ -75,7 +75,8 @@ defmodule CodingAgentFramework do
     Prompts,
     Recoveries,
     Registry,
-    Services
+    Services,
+    Watch
   }
 
   alias CodingAgentFramework.{Runs, Scheduler, Sessions, Shell, Stream, Tmux, TmuxSampler}
@@ -205,6 +206,7 @@ defmodule CodingAgentFramework do
   | `intake:<host>:<account>` | `ids`: the hooks' rows' ids (`Intake.Table`) |
   | `intake:<host>:<account>:waiters` | `ids`: the session id whose waiter came or went |
   | `prompts` | `ids`: the prompts that opened, moved or closed (`prompts/2`, `Prompts`) |
+  | `watch` | `ids`: the symptom rows' ids (`symptoms/2`, `Watch`); none for an act on the allow-list |
 
   An app's process that subscribes again whenever its tree comes back:
 
@@ -309,9 +311,43 @@ defmodule CodingAgentFramework do
     with {:ok, prompts} <- part(instance, :prompts), do: Prompts.answer(prompts, id, choice, who)
   end
 
+  @doc """
+  The symptoms the `Watch` keeps in the instance the config named `instance` (F-182,
+  `CodingAgentFramework.Watch`), oldest first: each `%{kind, target, state, since, evidence,
+  status, remedy, reason, …}`, its status `open`, `asked` (a `remedy` prompt waits on a person),
+  `answered` or `passed`. `filter` narrows them: `kind:`, `target:`, `source:`, `status:`, each a
+  value or a list. Each write is cued on `watch`. Answers `{:ok, symptoms}`, `{:refused,
+  :no_instance}`, `{:refused, {:bad, :filter}}`, or `{:unknown, reason}`.
+
+      {:ok, [%{kind: "lost_viewer", target: "app-main", status: "asked"}]} =
+        CodingAgentFramework.symptoms("a", status: ["open", "asked"])
+  """
+  @spec symptoms(String.t(), keyword) :: {:ok, [map]} | {:refused, term} | {:unknown, term}
+  def symptoms(instance, filter \\ []) do
+    with {:ok, watch} <- part(instance, :watch), do: Watch.read(watch, filter)
+  end
+
+  @doc """
+  The healer's allow-list in the instance the config named `instance`, and the operator's acts
+  on it (`Watch.remedies/3`): `:list`, `{:approve, kind, who}` (the only widening) or
+  `{:revoke, kind, who}`.
+
+      {:ok, %{"lost_viewer" => %{remedy: "reopen", cap: 10, allowed: true}}} =
+        CodingAgentFramework.remedies("a", :list)
+  """
+  @spec remedies(String.t(), term) :: {:ok, term} | {:refused, term} | {:unknown, term}
+  def remedies(instance, request) do
+    with {:ok, watch} <- part(instance, :watch) do
+      case request do
+        {:drop, _, _} -> {:refused, {:bad, :request}}
+        request -> Watch.remedies(watch, request)
+      end
+    end
+  end
+
   defp cues(instance), do: part(instance, :cues)
 
-  # A part the tree registered in the instance's own `Registry` (`Cues`, `Prompts`).
+  # A part the tree registered in the instance's own `Registry` (`Cues`, `Prompts`, `Watch`).
   defp part(instance, key) do
     with {:ok, name} <- registry(instance) do
       case Elixir.Registry.lookup(name, key) do
@@ -386,7 +422,8 @@ defmodule CodingAgentFramework do
       copies: Copies.writes(),
       jobs: Jobs.writes(),
       services: Services.writes(),
-      prompts: Prompts.writes()
+      prompts: Prompts.writes(),
+      watch: Watch.writes()
     ]
   end
 
@@ -564,9 +601,21 @@ defmodule CodingAgentFramework do
              acts: pid.(:acts)
            }
          end},
+        # Before the healer, which records each symptom in it and reads its allow-list; the app
+        # finds it in the instance's `Registry`.
+        {:watch,
+         fn _ ->
+           {Watch,
+            db: db,
+            remedies: c.remedies,
+            bound: c.remedy_bound,
+            notify: notify,
+            name: {:via, Elixir.Registry, {names(c.instance), :watch}}}
+         end},
         {:recoveries,
          fn pid ->
            {Recoveries,
+            watch: pid.(:watch),
             server: w.tmux,
             holder: w.holder,
             programs: w.programs,
@@ -623,6 +672,8 @@ defmodule CodingAgentFramework do
             sessions: pid.(:sessions),
             sessions_db: db,
             mailbox: pid.(:mailbox),
+            watch: pid.(:watch),
+            watch_db: db,
             notify: notify,
             name: {:via, Elixir.Registry, {names(c.instance), :prompts}}}
          end},

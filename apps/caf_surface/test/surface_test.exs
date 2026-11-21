@@ -67,7 +67,8 @@ defmodule CodingAgentFramework.SurfaceTest do
   defp start(config) do
     parts = CodingAgentFramework.parts(start_supervised!({CodingAgentFramework, config}))
     keys = ~w(reaper names cues inlet usage stream intake intake_http sampler sessions acts)a
-    keys = keys ++ ~w(recoveries tracker scheduler delegates mover mailbox copies jobs services)a
+    keys = keys ++ ~w(watch recoveries tracker scheduler delegates mover mailbox copies jobs)a
+    keys = keys ++ ~w(services)a
     keys = keys ++ ~w(prompts mains mcp mcp_http ends)a
 
     assert Enum.sort(Map.keys(parts)) ==
@@ -647,7 +648,9 @@ defmodule CodingAgentFramework.SurfaceTest do
     "mailbox" => [:delegates, :mover, :prompts],
     # The inbox reads every hook row's cue: a held request opens a prompt (F-179).
     "intake" => [:prompts],
-    "waiters" => [:mailbox, :prompts]
+    "waiters" => [:mailbox, :prompts],
+    # A symptom the healer asks about is a remedy prompt (F-182).
+    "watch" => [:prompts]
   }
 
   test "an app that wires only the parts' declarations hands each part every cue it needs" do
@@ -775,6 +778,36 @@ defmodule CodingAgentFramework.SurfaceTest do
     # The operator's answer of a dialog the agent never showed: the inbox has none.
     assert {:refused, :settled} =
              CodingAgentFramework.Operator.answer_startup(parts.mcp, name, "trust", "Yes")
+  end
+
+  # The Watch on the whole tree (F-182): a symptom the healer asks about is cued on `watch`,
+  # read by `symptoms/2`, and is a remedy prompt; the list is the config's, widened only by
+  # the operator.
+  test "the Watch's symptoms and allow-list are the app's to read, and its prompt answered",
+       ctx do
+    parts = start(ctx.config)
+    {:ok, _} = CodingAgentFramework.subscribe("t", ["watch", "prompts"])
+
+    assert {:ok, %{"lost_viewer" => %{remedy: "reopen", cap: 10, allowed: true}}} =
+             CodingAgentFramework.remedies("t", :list)
+
+    assert {:refused, {:bad, :request}} =
+             CodingAgentFramework.remedies("t", {:drop, "lost_viewer", :why})
+
+    assert {:ok, false} = CodingAgentFramework.remedies("t", {:revoke, "end_owed", "sam"})
+
+    sym = %{kind: "end_owed", target: "app-main", state: "k1", source: "healer", since: 1}
+    {:ok, %{id: sid}} = CodingAgentFramework.Watch.record(parts.watch, sym)
+    {:ok, ^sid} = CodingAgentFramework.Watch.ask(parts.watch, sym, :not_on_list)
+    assert_receive {:caf_cue, %{topic: "watch", ids: [^sid]}}, 20_000
+
+    assert {:ok, [%{id: ^sid, status: "asked"}]} =
+             CodingAgentFramework.symptoms("t", kind: "end_owed")
+
+    assert_receive {:caf_cue, %{topic: "prompts", ids: ["remedy:" <> _ = id]}}, 20_000
+    assert {:ok, :answered} = CodingAgentFramework.answer("t", id, "approve", "sam")
+    assert {:ok, %{"end_owed" => %{allowed: true}}} = CodingAgentFramework.remedies("t", :list)
+    assert {:refused, :no_instance} = CodingAgentFramework.symptoms("nope")
   end
 
   defp ok(nil), do: nil

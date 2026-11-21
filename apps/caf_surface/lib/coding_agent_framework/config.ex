@@ -85,6 +85,12 @@ defmodule CodingAgentFramework.Config do
     `CodingAgentFramework.Extension` takes them, served on the agents' MCP endpoint beside the
     framework's tools; checked here with `MCP.extensions/3`, so a clash or a slow tool refuses
     the config, `{:refused, {:bad, :extensions, reason}}`. None by default;
+  - `remedies`: the healer's allow-list (F-182, `CodingAgentFramework.Watch`), symptom kind to
+    `%{remedy: remedy | nil, cap: count}`: the one remedy the healer may take for that kind
+    (nil for a symptom only shown), and how many of them in one `remedy_bound` (ms, an hour by
+    default). By default `Watch.default_remedies/0`, the healer's two acts. The list narrows
+    alone (a remedy whose verify failed is dropped) and widens only by the operator, each act a
+    row, so a restart never reads this again over them;
   - `undeclared_cues`: what becomes of a cue whose topic no part declares it writes
     (`CodingAgentFramework.Cues.notify/3`): `:route` by default, handed on as any other, or
     `:raise`, which the framework's own tests set, so a part that writes such a topic fails
@@ -99,7 +105,7 @@ defmodule CodingAgentFramework.Config do
       {:refused, {:bad, :home}}
   """
 
-  alias CodingAgentFramework.{Mains, MCP, Runs}
+  alias CodingAgentFramework.{Mains, MCP, Runs, Watch}
   alias CodingAgentFramework.Mains.Checkout
 
   @enforce_keys [:home, :instance, :programs, :accounts, :ports, :claude, :env]
@@ -129,6 +135,8 @@ defmodule CodingAgentFramework.Config do
     tool_hooks: %{},
     heavy: [],
     extensions: [],
+    remedies: Watch.default_remedies(),
+    remedy_bound: 3_600_000,
     undeclared_cues: :route
   ]
 
@@ -200,6 +208,12 @@ defmodule CodingAgentFramework.Config do
 
       Map.get(fields, :undeclared_cues, :route) not in [:route, :raise] ->
         {:refused, {:bad, :undeclared_cues}}
+
+      Watch.check_remedies(Map.get(fields, :remedies, %{})) != :ok ->
+        {:refused, {:bad, :remedies}}
+
+      not match?(n when is_integer(n) and n > 0, Map.get(fields, :remedy_bound, 1)) ->
+        {:refused, {:bad, :remedy_bound}}
 
       true ->
         c = struct!(__MODULE__, fields)

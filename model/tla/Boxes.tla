@@ -72,9 +72,13 @@
 (*   Hosts (Copy, Shell)  a job runs only under its unreleased lease       *)
 (*        (Schedule.tla's NoRunUnleased, shape Fence). No interaction the  *)
 (*        design names here needs more of Hosts; it is left out.           *)
-(*   Watch (Heal.tla, B1's later part)  a remedy only through operate/4,   *)
-(*        under the Ledger's claim, its precondition read before the claim *)
-(*        and never on a working agent: `seen`, the healer's acts.         *)
+(*   Watch (Heal.tla, F-182)  a symptom recorded before a remedy; a remedy *)
+(*        only through operate/4, on the allow-list, under its cap and the *)
+(*        Ledger's claim, its precondition read before the claim and never *)
+(*        on a working agent; its outcome read after, a failed verify      *)
+(*        dropping it from the list, anything else a remedy prompt: H, an  *)
+(*        instance of Heal.tla with the stuck turn as its one kind:        *)
+(*        `facts`, `res`, `count`, `allow`, `dropped`, `asked`.            *)
 (*                                                                         *)
 (* One agent's restart against the contract specs (F-164). RestartAgent    *)
 (* here is the step each of them has, named the same, beside its whole     *)
@@ -100,8 +104,9 @@
 (*                                                                         *)
 (* Seams for B1's later parts. Prompts' `pr` and `rp` are the state        *)
 (* Prompt.tla refines (F-167: Boxes' unknown is its cut, its Answer        *)
-(* Prompt's Answer then Hand); the healer's steps are Heal.tla's           *)
-(* (OnlyApproved, the cap and ActedOrAsked are left to it); Delivery.tla's *)
+(* Prompt's Answer then Hand); the healer's steps are Heal.tla's (F-182;  *)
+(* the cap's bound, a person's answer and ActedOrAsked are left to it);    *)
+(* Delivery.tla's                                                          *)
 (* subscription adds a row's way to become due, which this spec leaves     *)
 (* out.                                                                    *)
 (*                                                                         *)
@@ -112,10 +117,11 @@
 (* queue, classes and gates (a request is granted or not asked); how a     *)
 (* row's text goes in (every transport is one `hand`); the senders, edges *)
 (* and order (Team.tla, Delivery.tla); which dialog and which label; the   *)
-(* allow-list and the cap (Heal.tla); hooks; time. One sender, so rows     *)
-(* are marked oldest first. A fix is an interrupt of a stuck turn, and it  *)
-(* may not help (the state stays). An agent is started once and may be    *)
-(* resumed until `MaxGen` processes; it shows at most one dialog.          *)
+(* bound of the cap and a person's answer (Heal.tla); hooks; time. One    *)
+(* sender, so rows are marked oldest first. A fix is an interrupt of a    *)
+(* stuck turn, and it may not help (the state stays). An agent is started  *)
+(* once and may be resumed until `MaxGen` processes; it shows at most one  *)
+(* dialog.                                                                 *)
 (*                                                                         *)
 (* Fairness: the boxes' steps happen while possible; Claude Code's turns   *)
 (* end unless stuck, and keys sent land; a person answers an open prompt,  *)
@@ -197,9 +203,11 @@ VARIABLES
     \* Usage: the account's record (F-178, Limit.tla)
     acct,      \* "open", or "limited" until its reset
     limits,    \* the limits so far
-    \* Ledger (Claim.tla), and the Watch's memory
+    \* Ledger (Claim.tla)
     claims, acting, cdone, acted, twice, cut,
-    seen,      \* the agents the healer read a symptom of (in memory)
+    \* Watch (Heal.tla, F-182), all durable: the symptom record, the remedies' outcomes, the
+    \* cap's count, the allow-list's entry for a stuck turn, and the remedy prompts
+    facts, res, count, allow, dropped, asked,
     whole,     \* restarts of the whole framework so far
     \* ghosts
     tx,        \* i -> times i went into a transcript
@@ -212,13 +220,26 @@ memVars == <<task, stopRead, gaveUp, crashes, keys>>
 mailVars == <<mst, mgen, call, ev, tx>>
 claimVars == <<claims, acting, cdone, acted, twice, cut>>
 limVars == <<acct, limits>>
-vars == <<sessVars, memVars, mailVars, lease, pr, rp, told, claimVars, seen, whole, limVars,
+hvars == <<facts, res, count, allow, dropped, asked>>
+vars ==<<sessVars, memVars, mailVars, lease, pr, rp, told, claimVars, hvars, whole, limVars,
           applied, own, wrong>>
 
 \* The Ledger: Claim.tla whole, on each agent's state number.
 L == INSTANCE Claim WITH Targets <- Agents, Actors <- Actors, MaxState <- 0, Break <- "none",
                           now <- ep, rows <- claims, acting <- acting, done <- cdone,
                           acted <- acted, twice <- twice, cut <- cut
+
+\* The Watch's healer: Heal.tla with a stuck turn as its one kind, on the agent's state number,
+\* on the same Ledger, a cap of one remedy per bound (a bound passes in no configuration here),
+\* and no person's answer to its prompts. Its remedy is an interrupt. Under StaleSymptom it
+\* claims on the fact it recorded before.
+HealBreak == IF Break = "StaleSymptom" THEN "StaleSymptom" ELSE "none"
+
+H == INSTANCE Heal WITH Symptoms <- Agents, Kinds <- {"stuck"}, Kind <- LAMBDA s : "stuck",
+                        Approved <- {"stuck"}, Actors <- Actors, MaxActs <- 1, MaxState <- 0,
+                        MaxRestarts <- 0, MaxBounds <- 0, Break <- HealBreak,
+                        on <- stuck, st <- ep, mem <- count, closed <- {},
+                        restarts <- 0, bounds <- 0
 
 \* The agent process runs: supervised, its budget not run out.
 Up(a) == ~gaveUp[a]
@@ -249,7 +270,7 @@ Start(a) ==
     /\ lease' = [lease EXCEPT ![a] = "held"]
     /\ live' = [live EXCEPT ![a] = 1]
     /\ gen' = [gen EXCEPT ![a] = 1]
-    /\ UNCHANGED <<turn, stuck, ep, memVars, mailVars, pr, rp, told, claimVars, seen, whole,
+    /\ UNCHANGED <<turn, stuck, ep, memVars, mailVars, pr, rp, told, claimVars, hvars, whole,
                    limVars, applied, own, wrong>>
 
 \* The pane shows a startup dialog: the row says so and a prompt opens for it.
@@ -257,7 +278,7 @@ ShowDialog(a) ==
     /\ row[a] = "starting" /\ live[a] > 0 /\ pr[a] = "none" /\ Up(a)
     /\ row' = [row EXCEPT ![a] = "dialog"]
     /\ pr' = [pr EXCEPT ![a] = "open"]
-    /\ UNCHANGED <<live, gen, turn, stuck, ep, memVars, mailVars, lease, rp, told, claimVars, seen,
+    /\ UNCHANGED <<live, gen, turn, stuck, ep, memVars, mailVars, lease, rp, told, claimVars, hvars,
                    whole, limVars, applied, own, wrong>>
 
 \* The session file names the process: the row runs, its turn ended.
@@ -265,7 +286,7 @@ Confirm(a) ==
     /\ row[a] = "starting" /\ live[a] > 0 /\ Up(a)
     /\ row' = [row EXCEPT ![a] = "running"]
     /\ UNCHANGED <<live, gen, turn, stuck, ep, memVars, mailVars, lease, pr, rp, told, claimVars,
-                   seen, whole, limVars, applied, own, wrong>>
+                   hvars, whole, limVars, applied, own, wrong>>
 
 \* No row is sending to a.
 NoneSending(a) == \A i \in Ids : a = Addressee => mst[i] # "sending"
@@ -279,7 +300,7 @@ StopRead(a) ==
     /\ row' = [row EXCEPT ![a] = "stopping"]
     /\ stopRead' = [stopRead EXCEPT ![a] = TRUE]
     /\ UNCHANGED <<live, gen, turn, stuck, ep, task, gaveUp, crashes, keys, mailVars, lease, pr,
-                   rp, told, claimVars, seen, whole, limVars, applied, own, wrong>>
+                   rp, told, claimVars, hvars, whole, limVars, applied, own, wrong>>
 
 \* The SIGTERM, by the record's pid and start time. It cuts a turn that runs.
 Term(a) ==
@@ -291,7 +312,7 @@ Term(a) ==
     /\ turn' = [turn EXCEPT ![a] = "ended"]
     /\ wrong' = IF turn[a] = "row" THEN wrong \cup {"cut by stop"} ELSE wrong
     /\ UNCHANGED <<row, gen, task, gaveUp, crashes, keys, mailVars, lease, pr, rp, told, claimVars,
-                   seen, whole, limVars, applied, own>>
+                   hvars, whole, limVars, applied, own>>
 
 \* Claude Code exits by itself.
 Exits(a) ==
@@ -300,7 +321,7 @@ Exits(a) ==
     /\ stuck' = [stuck EXCEPT ![a] = FALSE]
     /\ ep' = [ep EXCEPT ![a] = IF stuck[a] THEN @ + 1 ELSE @]
     /\ turn' = [turn EXCEPT ![a] = "ended"]
-    /\ UNCHANGED <<row, gen, memVars, mailVars, lease, pr, rp, told, claimVars, seen, whole,
+    /\ UNCHANGED <<row, gen, memVars, mailVars, lease, pr, rp, told, claimVars, hvars, whole,
                    limVars, applied, own, wrong>>
 
 \* A row whose process is gone settles stopped; its dialog's prompt, if one
@@ -312,7 +333,7 @@ Settle(a) ==
     /\ pr' = [pr EXCEPT ![a] = IF @ \in {"open", "answering", "unknown"} THEN "withdrawn" ELSE @]
     /\ task' = [task EXCEPT ![a] = "none"]
     /\ UNCHANGED <<live, gen, turn, stuck, ep, stopRead, gaveUp, crashes, keys, mailVars, lease,
-                   rp, told, claimVars, seen, whole, limVars, applied, own, wrong>>
+                   rp, told, claimVars, hvars, whole, limVars, applied, own, wrong>>
 
 \* A resume, a move's on the other account among them, under the same lease.
 Resume(a) ==
@@ -321,7 +342,7 @@ Resume(a) ==
     /\ live' = [live EXCEPT ![a] = 1]
     /\ gen' = [gen EXCEPT ![a] = @ + 1]
     /\ turn' = [turn EXCEPT ![a] = "ended"]
-    /\ UNCHANGED <<stuck, ep, memVars, mailVars, lease, pr, rp, told, claimVars, seen, whole,
+    /\ UNCHANGED <<stuck, ep, memVars, mailVars, lease, pr, rp, told, claimVars, hvars, whole,
                    limVars, applied, own, wrong>>
 
 \* Done for good.
@@ -329,7 +350,7 @@ End(a) ==
     /\ row[a] = "stopped" /\ Up(a)
     /\ row' = [row EXCEPT ![a] = "ended"]
     /\ UNCHANGED <<live, gen, turn, stuck, ep, memVars, mailVars, lease, pr, rp, told, claimVars,
-                   seen, whole, limVars, applied, own, wrong>>
+                   hvars, whole, limVars, applied, own, wrong>>
 
 \* What the owner of a lease's row answers the Scheduler: the work ended.
 \* Under DialogEndsWork a start on a dialog counts as ended (its deadline
@@ -339,7 +360,7 @@ WorkEnded(a) == row[a] = "ended" \/ (Break = "DialogEndsWork" /\ row[a] = "dialo
 Release(a) ==
     /\ lease[a] = "held" /\ WorkEnded(a)
     /\ lease' = [lease EXCEPT ![a] = "released"]
-    /\ UNCHANGED <<sessVars, memVars, mailVars, pr, rp, told, claimVars, seen, whole, limVars,
+    /\ UNCHANGED <<sessVars, memVars, mailVars, pr, rp, told, claimVars, hvars, whole, limVars,
                    applied, own, wrong>>
 
 -----------------------------------------------------------------------------
@@ -349,21 +370,21 @@ TurnEnds(a) ==
     /\ live[a] > 0 /\ turn[a] \notin {"ended", "limited"} /\ ~stuck[a]
     /\ turn' = [turn EXCEPT ![a] = "ended"]
     /\ UNCHANGED <<row, live, gen, stuck, ep, memVars, mailVars, lease, pr, rp, told, claimVars,
-                   seen, whole, limVars, applied, own, wrong>>
+                   hvars, whole, limVars, applied, own, wrong>>
 
 \* A person's prompt starts a turn (Remote Control, or at the viewer).
 PersonTurn(a) ==
     /\ row[a] \in {"running", "stopping"} /\ live[a] > 0 /\ turn[a] = "ended"
     /\ turn' = [turn EXCEPT ![a] = "person"]
     /\ UNCHANGED <<row, live, gen, stuck, ep, memVars, mailVars, lease, pr, rp, told, claimVars,
-                   seen, whole, limVars, applied, own, wrong>>
+                   hvars, whole, limVars, applied, own, wrong>>
 
 \* A turn sticks: a new state, which the Watch and the parent may act on.
 Sticks(a) ==
     /\ live[a] > 0 /\ turn[a] \notin {"ended", "limited"} /\ ~stuck[a] /\ ep[a] < 2 * MaxStuck
     /\ stuck' = [stuck EXCEPT ![a] = TRUE]
     /\ ep' = [ep EXCEPT ![a] = @ + 1]
-    /\ UNCHANGED <<row, live, gen, turn, memVars, mailVars, lease, pr, rp, told, claimVars, seen,
+    /\ UNCHANGED <<row, live, gen, turn, memVars, mailVars, lease, pr, rp, told, claimVars, hvars,
                    whole, limVars, applied, own, wrong>>
 
 \* It goes on by itself: a new state again, a working one.
@@ -371,7 +392,7 @@ Unsticks(a) ==
     /\ stuck[a]
     /\ stuck' = [stuck EXCEPT ![a] = FALSE]
     /\ ep' = [ep EXCEPT ![a] = @ + 1]
-    /\ UNCHANGED <<row, live, gen, turn, memVars, mailVars, lease, pr, rp, told, claimVars, seen,
+    /\ UNCHANGED <<row, live, gen, turn, memVars, mailVars, lease, pr, rp, told, claimVars, hvars,
                    whole, limVars, applied, own, wrong>>
 
 \* A turn that runs ends at the account's usage limit, and Usage's record says the account is
@@ -382,13 +403,13 @@ HitLimit(a) ==
     /\ turn' = [turn EXCEPT ![a] = "limited"]
     /\ acct' = "limited" /\ limits' = limits + 1
     /\ UNCHANGED <<row, live, gen, stuck, ep, memVars, mailVars, lease, pr, rp, told, claimVars,
-                   seen, whole, applied, own, wrong>>
+                   hvars, whole, applied, own, wrong>>
 
 \* Time reaches the reset the record names.
 ResetLimit ==
     /\ acct = "limited"
     /\ acct' = "open"
-    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, told, claimVars, seen, whole, limits,
+    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, told, claimVars, hvars, whole, limits,
                    applied, own, wrong>>
 
 -----------------------------------------------------------------------------
@@ -407,7 +428,7 @@ Mark(i) ==
     /\ mst' = [mst EXCEPT ![i] = "sending"]
     /\ mgen' = [mgen EXCEPT ![i] = gen[a]]
     /\ call' = [call EXCEPT ![i] = "asked"]
-    /\ UNCHANGED <<sessVars, memVars, ev, tx, lease, pr, rp, told, claimVars, seen, whole, limVars,
+    /\ UNCHANGED <<sessVars, memVars, ev, tx, lease, pr, rp, told, claimVars, hvars, whole, limVars,
                    applied, own, wrong>>
 
 \* Sessions' hand, in the agent process: it writes the row into an ended turn
@@ -434,28 +455,28 @@ Hand(i) ==
        ELSE /\ call' = [call EXCEPT ![i] = "none"]
             /\ mst' = [mst EXCEPT ![i] = "due"]
             /\ UNCHANGED <<tx, ev, turn, wrong>>
-    /\ UNCHANGED <<row, live, gen, stuck, ep, memVars, mgen, lease, pr, rp, told, claimVars, seen,
+    /\ UNCHANGED <<row, live, gen, stuck, ep, memVars, mgen, lease, pr, rp, told, claimVars, hvars,
                    whole, limVars, applied, own>>
 
 \* The hand's answer, sent, reaches Mailbox; the mark stays for the evidence.
 Answered(i) ==
     /\ call[i] = "handing"
     /\ call' = [call EXCEPT ![i] = "none"]
-    /\ UNCHANGED <<sessVars, memVars, mst, mgen, ev, tx, lease, pr, rp, told, claimVars, seen,
+    /\ UNCHANGED <<sessVars, memVars, mst, mgen, ev, tx, lease, pr, rp, told, claimVars, hvars,
                    whole, limVars, applied, own, wrong>>
 
 \* A row in flight with no call under way settles by the evidence alone.
 SettleRow(i) ==
     /\ mst[i] = "sending" /\ call[i] = "none"
     /\ mst' = [mst EXCEPT ![i] = IF i \in ev THEN "delivered" ELSE "due"]
-    /\ UNCHANGED <<sessVars, memVars, mgen, call, ev, tx, lease, pr, rp, told, claimVars, seen,
+    /\ UNCHANGED <<sessVars, memVars, mgen, call, ev, tx, lease, pr, rp, told, claimVars, hvars,
                    whole, limVars, applied, own, wrong>>
 
 \* A row due to a session that ended for good says so.
 EndedRow(i) ==
     /\ mst[i] = "due" /\ row[Addressee] = "ended"
     /\ mst' = [mst EXCEPT ![i] = "ended"]
-    /\ UNCHANGED <<sessVars, memVars, mgen, call, ev, tx, lease, pr, rp, told, claimVars, seen,
+    /\ UNCHANGED <<sessVars, memVars, mgen, call, ev, tx, lease, pr, rp, told, claimVars, hvars,
                    whole, limVars, applied, own, wrong>>
 
 -----------------------------------------------------------------------------
@@ -470,7 +491,7 @@ Answer(a) ==
     /\ pr' = [pr EXCEPT ![a] = "answering"]
     /\ task' = [task EXCEPT ![a] = "press"]
     /\ UNCHANGED <<sessVars, stopRead, gaveUp, crashes, keys, mailVars, lease, rp, told, claimVars,
-                   seen, whole, limVars, applied, own, wrong>>
+                   hvars, whole, limVars, applied, own, wrong>>
 
 \* The checked press: only while the pane still shows the dialog.
 Press(a) ==
@@ -478,7 +499,7 @@ Press(a) ==
     /\ keys' = [keys EXCEPT ![a] = @ + 1]
     /\ task' = [task EXCEPT ![a] = "told"]
     /\ UNCHANGED <<sessVars, stopRead, gaveUp, crashes, mailVars, lease, pr, rp, told, claimVars,
-                   seen, whole, limVars, applied, own, wrong>>
+                   hvars, whole, limVars, applied, own, wrong>>
 
 \* The checked press refused: the dialog is gone. Told as refused.
 PressRefused(a) ==
@@ -486,7 +507,7 @@ PressRefused(a) ==
     /\ task' = [task EXCEPT ![a] = "none"]
     /\ pr' = [pr EXCEPT ![a] = IF @ = "answering" THEN "open" ELSE @]
     /\ UNCHANGED <<sessVars, stopRead, gaveUp, crashes, keys, mailVars, lease, rp, told, claimVars,
-                   seen, whole, limVars, applied, own, wrong>>
+                   hvars, whole, limVars, applied, own, wrong>>
 
 \* Keys sent land: the dialog passes and the start goes on, or, past it,
 \* they land on the session itself.
@@ -496,7 +517,7 @@ Lands(a) ==
     /\ applied' = [applied EXCEPT ![a] = @ + 1]
     /\ row' = [row EXCEPT ![a] = IF @ = "dialog" /\ live[a] > 0 THEN "running" ELSE @]
     /\ UNCHANGED <<live, gen, turn, stuck, ep, task, stopRead, gaveUp, crashes, mailVars, lease,
-                   pr, rp, told, claimVars, seen, whole, limVars, own, wrong>>
+                   pr, rp, told, claimVars, hvars, whole, limVars, own, wrong>>
 
 \* The owner tells Prompts the press went: answered.
 Told(a) ==
@@ -504,7 +525,7 @@ Told(a) ==
     /\ task' = [task EXCEPT ![a] = "none"]
     /\ pr' = [pr EXCEPT ![a] = IF @ = "answering" THEN "answered" ELSE @]
     /\ UNCHANGED <<sessVars, stopRead, gaveUp, crashes, keys, mailVars, lease, rp, told, claimVars,
-                   seen, whole, limVars, applied, own, wrong>>
+                   hvars, whole, limVars, applied, own, wrong>>
 
 \* An answer a restart cut, settled by the owner's evidence: the dialog gone,
 \* answered; still shown, unknown, since keys may be on their way, for a
@@ -513,7 +534,7 @@ SettlePrompt(a) ==
     /\ pr[a] = "answering" /\ task[a] = "none"
     /\ pr' = [pr EXCEPT ![a] = IF row[a] # "dialog" THEN "answered"
                                ELSE IF Break = "ReopenCut" THEN "open" ELSE "unknown"]
-    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, rp, told, claimVars, seen, whole, limVars,
+    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, rp, told, claimVars, hvars, whole, limVars,
                    applied, own, wrong>>
 
 \* A person who sees the pane still show the dialog, nothing on its way,
@@ -521,7 +542,7 @@ SettlePrompt(a) ==
 Clear(a) ==
     /\ pr[a] = "unknown" /\ keys[a] = 0
     /\ pr' = [pr EXCEPT ![a] = IF row[a] = "dialog" THEN "open" ELSE "answered"]
-    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, rp, told, claimVars, seen, whole, limVars,
+    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, rp, told, claimVars, hvars, whole, limVars,
                    applied, own, wrong>>
 
 \* The addressee is a delegate, and its parent an agent (F-179): once its prompt opened,
@@ -533,7 +554,7 @@ Notice ==
     /\ Delegated /\ pr[Addressee] # "none"
     /\ told = 0 \/ (Break = "NoticeUnkeyed" /\ told = 1)
     /\ told' = told + 1
-    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, claimVars, seen, whole, limVars,
+    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, claimVars, hvars, whole, limVars,
                    applied, own, wrong>>
 
 -----------------------------------------------------------------------------
@@ -551,61 +572,64 @@ Interrupt(a, helps) ==
 FixClaim(a) ==
     /\ stuck[a]
     /\ L!Take("parent", a, "interrupt")
-    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, told, seen, whole, limVars, applied,
+    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, told, hvars, whole, limVars, applied,
                    own, wrong>>
 
-\* The Watch reads a symptom from the facts: a stuck turn.
-Detect(a) ==
-    /\ stuck[a] /\ a \notin seen
-    /\ seen' = seen \cup {a}
-    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, told, claimVars, whole, limVars,
-                   applied, own, wrong>>
+\* What the healer's steps leave as they are: Heal.tla's own say what they write.
+others == <<memVars, mailVars, lease, pr, rp, told, whole, limVars, applied, own>>
 
-\* The healer's remedy through Team.operate/4: its precondition checked
-\* against the state the claim takes. Under StaleSymptom the symptom read
-\* before stands for it.
-HealClaim(a) ==
-    /\ a \in seen
-    /\ stuck[a] \/ Break = "StaleSymptom"
-    /\ Break # "HealerOwnClaim"
-    /\ L!Take("healer", a, "interrupt")
-    /\ seen' = seen \ {a}
-    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, told, whole, limVars, applied, own,
-                   wrong>>
+\* The Watch records a symptom from the facts: a stuck turn, in its state.
+Detect(a) == H!Detect(a) /\ UNCHANGED <<sessVars, others>>
+
+\* The healer's remedy through Team.operate/4, on the allow-list and under its cap: its
+\* precondition (the symptom recorded in the state now) checked against the state the claim
+\* takes. Under StaleSymptom the fact recorded before stands for it.
+HealClaim(a) == Break # "HealerOwnClaim" /\ H!Claim(a) /\ UNCHANGED <<sessVars, others>>
 
 \* Under HealerOwnClaim the healer keeps its own record of what it did, and
 \* acts on the symptom with no claim in the Ledger.
 HealOwn(a) ==
     LET k == <<a, ep[a]>> IN
-    /\ Break = "HealerOwnClaim" /\ a \in seen /\ stuck[a] /\ Up(a) /\ live[a] > 0
-    /\ seen' = seen \ {a}
+    /\ Break = "HealerOwnClaim" /\ k \in facts /\ stuck[a] /\ Up(a) /\ live[a] > 0
     /\ acted' = acted \cup {k}
     /\ twice' = (twice \/ k \in acted)
     /\ \E helps \in BOOLEAN : Interrupt(a, helps)
     /\ UNCHANGED <<row, live, gen, memVars, mailVars, lease, pr, rp, told, claims, acting, cdone,
-                   cut, whole, limVars, applied, own, wrong>>
+                   cut, hvars, whole, limVars, applied, own, wrong>>
 
-\* A claimed fix or remedy acts through Sessions (the agent process): an
-\* interrupt, which may not help. It never acts on a working turn: a
-\* healer's act on a turn that is not stuck is the fault NeverWorking names.
-FixAct(c) ==
-    /\ Up(c.t) /\ live[c.t] > 0
+\* A parent's claimed fix acts through Sessions (the agent process): an interrupt, which may
+\* not help.
+ParentAct(c) ==
+    /\ c.by = "parent" /\ Up(c.t) /\ live[c.t] > 0
     /\ L!Act(c)
     /\ \E helps \in BOOLEAN : Interrupt(c.t, helps)
-    /\ wrong' = IF c.by = "healer" /\ ~stuck[c.t] THEN wrong \cup {"healed working"} ELSE wrong
-    /\ UNCHANGED <<row, live, gen, memVars, mailVars, lease, pr, rp, told, seen, whole, limVars,
-                   applied, own>>
+    /\ UNCHANGED <<row, live, gen, others, hvars, wrong>>
+
+\* The healer's claimed remedy, the same interrupt, its answer read: ok, refused (nothing
+\* sent) or unknown (it may have gone). Heal.tla's Act says a remedy on a turn that is not
+\* stuck is a fault, which NeverWorking names.
+HealAct(c) ==
+    /\ Up(c.t) /\ live[c.t] > 0
+    /\ \E out \in H!Outcomes :
+          /\ H!Act(c, out)
+          /\ IF out = "refused" THEN UNCHANGED <<stuck, ep, turn>>
+                                ELSE \E helps \in BOOLEAN : Interrupt(c.t, helps)
+    /\ UNCHANGED <<row, live, gen, others>>
+
+\* An ok remedy read again after; a stuck turn that needs a person is a remedy prompt.
+HealVerify == \E r \in res : H!Verify(r) /\ UNCHANGED <<sessVars, others>>
+HealAsk(a) == H!Ask(a) /\ UNCHANGED <<sessVars, others>>
 
 \* A claim whose state passed, or whose agent has no process to act on, is let go.
 FixLetGo(c) ==
     /\ ~L!Current(c) \/ ~Up(c.t) \/ live[c.t] = 0
     /\ L!LetGo(c)
-    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, told, seen, whole, limVars, applied,
+    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, told, hvars, whole, limVars, applied,
                    own, wrong>>
 
 FixSettle(c) ==
     /\ L!Settle(c)
-    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, told, seen, whole, limVars, applied,
+    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, told, hvars, whole, limVars, applied,
                    own, wrong>>
 
 -----------------------------------------------------------------------------
@@ -640,7 +664,7 @@ RestartAgent(a) ==
        THEN /\ live' = [live EXCEPT ![a] = @ + 1]
             /\ gen' = [gen EXCEPT ![a] = @ + 1]
        ELSE UNCHANGED <<live, gen>>
-    /\ UNCHANGED <<row, turn, stuck, ep, keys, mgen, ev, tx, lease, pr, told, claimVars, seen,
+    /\ UNCHANGED <<row, turn, stuck, ep, keys, mgen, ev, tx, lease, pr, told, claimVars, hvars,
                    whole, limVars, applied, wrong>>
 
 \* A person answers the `restarts` prompt: the agent process starts again
@@ -650,12 +674,12 @@ AnswerRestarts(a) ==
     /\ rp' = [rp EXCEPT ![a] = FALSE]
     /\ gaveUp' = [gaveUp EXCEPT ![a] = FALSE]
     /\ crashes' = [crashes EXCEPT ![a] = 0]
-    /\ UNCHANGED <<sessVars, task, stopRead, keys, mailVars, lease, pr, told, claimVars, seen,
+    /\ UNCHANGED <<sessVars, task, stopRead, keys, mailVars, lease, pr, told, claimVars, hvars,
                    whole, limVars, applied, own, wrong>>
 
 \* The whole framework restarts: every process's memory goes (the agent
-\* processes', Mailbox's calls, the healer's symptoms read, the Ledger's
-\* calls), every row stays, each agent process starts again under a new
+\* processes', Mailbox's calls, the Ledger's calls; Heal.tla's Restart),
+\* every row stays (the symptom record and the allow-list among them), each agent process starts again under a new
 \* budget and re-adopts. Under PromptInMemory the open prompts go too.
 RestartAll ==
     /\ whole < MaxWhole
@@ -666,8 +690,7 @@ RestartAll ==
     /\ crashes' = [a \in Agents |-> 0]
     /\ rp' = [a \in Agents |-> FALSE]
     /\ CutCalls(Agents)
-    /\ seen' = {}
-    /\ L!Restart
+    /\ H!Restart
     /\ pr' = [a \in Agents |-> IF Break = "PromptInMemory" /\ pr[a] = "open" THEN "none"
                                ELSE pr[a]]
     /\ UNCHANGED <<sessVars, keys, mgen, ev, tx, lease, told, applied, own, wrong, limVars>>
@@ -695,7 +718,8 @@ Init ==
     /\ rp = [a \in Agents |-> FALSE]
     /\ told = 0
     /\ claims = {} /\ acting = {} /\ cdone = {} /\ acted = {} /\ twice = FALSE /\ cut = {}
-    /\ seen = {}
+    /\ facts = {} /\ res = {} /\ count = [k \in {"stuck"} |-> 0]
+    /\ allow = [k \in {"stuck"} |-> TRUE] /\ dropped = [k \in {"stuck"} |-> FALSE] /\ asked = {}
     /\ whole = 0
     /\ acct = "open" /\ limits = 0
     /\ tx = [i \in Ids |-> 0]
@@ -714,13 +738,14 @@ Next ==
           \/ Start(a) \/ StopRead(a) \/ Exits(a) \/ Resume(a) \/ End(a)
           \/ TurnEnds(a) \/ PersonTurn(a) \/ Sticks(a) \/ Unsticks(a) \/ Lands(a)
           \/ Answer(a) \/ Clear(a) \/ AnswerRestarts(a)
-          \/ FixClaim(a) \/ Detect(a) \/ HealClaim(a) \/ HealOwn(a)
+          \/ FixClaim(a) \/ Detect(a) \/ HealClaim(a) \/ HealOwn(a) \/ HealAsk(a)
           \/ RestartAgent(a) \/ HitLimit(a)
     \/ \E a \in Agents \ {Addressee} :
           \/ Start(a) \/ Confirm(a) \/ Exits(a) \/ Settle(a) \/ End(a) \/ Release(a)
           \/ AnswerRestarts(a)
     \/ \E i \in Ids : Mark(i) \/ Hand(i) \/ Answered(i) \/ SettleRow(i) \/ EndedRow(i)
-    \/ \E c \in acting : FixAct(c) \/ FixLetGo(c)
+    \/ \E c \in acting : ParentAct(c) \/ HealAct(c) \/ FixLetGo(c)
+    \/ HealVerify
     \/ \E c \in claims : FixSettle(c)
     \/ RestartAll
     \/ ResetLimit
@@ -738,7 +763,7 @@ Fairness ==
           /\ WF_vars(Answer(a)) /\ WF_vars(Clear(a)) /\ WF_vars(AnswerRestarts(a))
     /\ \A i \in Ids : /\ SF_vars(Mark(i)) /\ WF_vars(Hand(i)) /\ WF_vars(Answered(i))
                       /\ WF_vars(SettleRow(i)) /\ WF_vars(EndedRow(i))
-    /\ WF_vars(\E c \in acting : FixAct(c) \/ FixLetGo(c))
+    /\ WF_vars(\E c \in acting : ParentAct(c) \/ HealAct(c) \/ FixLetGo(c))
     /\ WF_vars(\E c \in claims : FixSettle(c))
     /\ WF_vars(ResetLimit)
     /\ WF_vars(Notice)
@@ -762,7 +787,9 @@ TypeOK ==
     /\ lease \in [Agents -> {"none", "held", "released"}]
     /\ pr \in [Agents -> {"none", "open", "answering", "unknown", "answered", "withdrawn"}]
     /\ rp \in [Agents -> BOOLEAN] /\ told \in 0..2
-    /\ seen \subseteq Agents /\ whole \in 0..MaxWhole
+    /\ \A f \in facts \cup asked : f[1] \in Agents /\ f[2] \in Nat
+    /\ count \in [{"stuck"} -> 0..1] /\ allow \in [{"stuck"} -> BOOLEAN]
+    /\ whole \in 0..MaxWhole
     /\ acct \in {"open", "limited"} /\ limits \in 0..MaxLimits
 
 \* A delivery during a move. No turn a row started is cut by a stop's
@@ -794,7 +821,13 @@ KeptAcrossRestart ==
 OneActPerState == L!OneActPerState
 
 \* ... and the healer never acts on a working agent.
-NeverWorking == "healed working" \notin wrong
+NeverWorking == H!OnlyOnSymptom
+
+\* The healer's contract (Heal.tla, F-182): a remedy only on the allow-list, its row in the
+\* Ledger before it acts, and a list that only narrows here, where no person widens it.
+OnlyApproved == H!OnlyApproved
+RecordedFirst == H!RecordedFirst
+NarrowsAlone == H!NarrowsAlone
 
 \* The Ledger's own, across the whole restart.
 OneClaimPerState == L!OneClaimPerState

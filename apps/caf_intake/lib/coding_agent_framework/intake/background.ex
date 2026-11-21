@@ -19,8 +19,9 @@ defmodule CodingAgentFramework.Intake.Background do
   answers first, on the call as the agent made it, so its patterns match what the agent wrote,
   and the correction applies to the input its answer lets run. A pass becomes `{:pass,
   updated_input: …}`, which leaves the decision to Claude Code's own permission rules; an allow
-  keeps its decision and context; a deny or an ask is the app's, unchanged. A line of context
-  says why the command changed.
+  keeps its decision and context; an ask stays an ask, its prompt showing the corrected command
+  (measured on 2.1.322, F-182), so a person's approval runs it with its stdin closed; a deny is
+  the app's, unchanged. A line of context says why the command changed.
   """
 
   @prefix "exec </dev/null; "
@@ -66,6 +67,9 @@ defmodule CodingAgentFramework.Intake.Background do
       iex> event = %{tool_name: "Bash", tool_input: %{"command" => "ls", "run_in_background" => true}}
       iex> Background.correct(event, {:deny, "no"})
       {:deny, "no"}
+      iex> {:ask, asked} = Background.correct(event, :ask)
+      iex> asked[:updated_input]["command"]
+      "exec </dev/null; ls"
       iex> {:allow, opts} = Background.correct(event, :allow)
       iex> opts[:updated_input]
       %{"command" => "exec </dev/null; ls", "run_in_background" => true}
@@ -88,9 +92,9 @@ defmodule CodingAgentFramework.Intake.Background do
   end
 
   # The decision an answer that lets the call run keeps, and its options.
-  defp lets_run(answer) when answer in [:pass, :allow], do: {:ok, answer, []}
+  defp lets_run(answer) when answer in [:pass, :allow, :ask], do: {:ok, answer, []}
 
-  defp lets_run({decision, opts}) when decision in [:pass, :allow] and is_list(opts) do
+  defp lets_run({decision, opts}) when decision in [:pass, :allow, :ask] and is_list(opts) do
     if Keyword.keyword?(opts), do: {:ok, decision, opts}, else: :no
   end
 
