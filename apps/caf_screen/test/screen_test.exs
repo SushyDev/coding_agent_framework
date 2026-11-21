@@ -19,6 +19,11 @@ defmodule CodingAgentFramework.ScreenTest do
     "Yes, and switch to auto mode · auto mode handles these prompts for you",
     "No"
   ]
+  @menu [
+    "Stop and wait for limit to reset",
+    "Wait here, then continue automatically at Nov 22 at 11:58pm",
+    "Upgrade your plan"
+  ]
 
   # What each state the capture script records reads as. A state the manifest names and this
   # map does not fails the test below, so a new capture is read before it is trusted.
@@ -55,7 +60,17 @@ defmodule CodingAgentFramework.ScreenTest do
     },
     # A main session as the framework launches it, its name in the rule above the box (F-153).
     "main-idle" => %{state: :idle, box: :empty},
-    "main-text" => %{state: :idle, box: {:text, "a short draft"}}
+    "main-text" => %{state: :idle, box: {:text, "a short draft"}},
+    # A usage limit's two screens and what each leaves (F-181's captures).
+    "usage-limit-menu" => %{
+      state: :dialog,
+      kind: :usage_limit_menu,
+      options: @menu,
+      selected: "Stop and wait for limit to reset"
+    },
+    "usage-limit-wait" => %{state: :usage_limit_wait, at: "7:57am"},
+    "usage-limit-stopped" => %{state: :idle, box: :empty},
+    "usage-limit-went-on" => %{state: :idle, box: :empty}
   }
 
   defp fixture(name), do: File.read!(Path.join(@fixtures, name))
@@ -240,6 +255,36 @@ defmodule CodingAgentFramework.ScreenTest do
       assert Screen.read(screen, @release) == {:unknown, {:unrecognized, @release}}
     end
 
+    test "the wait's notice makes no empty box an ended turn, and its time is read" do
+      screen = edit("usage-limit-wait.txt", "at 7:57am · Esc", "at Nov 22 at 11:58pm · Esc")
+
+      assert Screen.read(screen, @release) ==
+               {:ok, %{state: :usage_limit_wait, at: "Nov 22 at 11:58pm"}}
+
+      gone =
+        edit(
+          "usage-limit-wait.txt",
+          "    Continuing automatically at 7:57am · Esc to cancel\n",
+          ""
+        )
+
+      assert Screen.read(gone, @release) == {:ok, %{state: :idle, box: :empty}}
+    end
+
+    test "the menu's third option is read by its label, whatever it is" do
+      screen = edit("usage-limit-menu.ansi", "Upgrade your plan", "Use usage credits")
+
+      assert {:ok, %{kind: :usage_limit_menu, options: [_, _, "Use usage credits"]}} =
+               Screen.read(screen, @release)
+    end
+
+    test "the menu's options under a rule of ─ are not the menu" do
+      screen =
+        edit("usage-limit-menu.txt", String.duplicate("▔", 120), String.duplicate("─", 120))
+
+      assert Screen.read(screen, @release) == {:unknown, {:unrecognized, @release}}
+    end
+
     test "a resume line with more under it is not an exit" do
       screen = fixture("exited.txt") <> "$ \n"
       assert Screen.read(screen, @release) == {:unknown, {:unrecognized, @release}}
@@ -287,6 +332,12 @@ defmodule CodingAgentFramework.ScreenTest do
       {:ok, screen} = Screen.read(fixture("imports-dialog.ansi"), @release)
       assert Screen.option_keys(screen, "No, disable external imports") == {:ok, []}
       assert Screen.option_keys(screen, "Yes, allow external imports") == {:ok, ["Down"]}
+    end
+
+    test "moves from the usage limit menu's selected option to its stop" do
+      {:ok, screen} = Screen.read(fixture("usage-limit-menu.ansi"), @release)
+      assert Screen.option_keys(screen, "Stop and wait for limit to reset") == {:ok, []}
+      assert Screen.option_keys(screen, "Upgrade your plan") == {:ok, ["Down", "Down"]}
     end
 
     test "refuses a label the dialog does not show, and a screen with no dialog" do

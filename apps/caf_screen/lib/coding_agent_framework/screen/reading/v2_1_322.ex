@@ -11,6 +11,11 @@ defmodule CodingAgentFramework.Screen.Reading.V2_1_322 do
   a permission dialog's are numbered. A session started with `--name` draws its name inside the
   rule above the box, one space either side and one `─` after it, at any width (F-153's capture
   of a main session at 120 and 400 columns).
+
+  At a usage limit (F-181's captures, against a local endpoint): Claude Code's own wait draws
+  the empty box with its notice under the lower rule, "Continuing automatically at <time> · Esc
+  to cancel", and the menu replaces the box, under a rule of `▔`, its numbered options three
+  columns in under "What do you want to do?".
   """
 
   @behaviour CodingAgentFramework.Screen.Reading
@@ -23,6 +28,7 @@ defmodule CodingAgentFramework.Screen.Reading.V2_1_322 do
       named_rule: ~r/\A─+ \S(?:.*\S)? ─\z/u,
       placeholder: ~r/\ATry ".*"\z/u,
       running: "esc to interrupt",
+      wait: ~r/\AContinuing automatically at (.+) · Esc to cancel\z/u,
       exited: "Resume this session with:",
       resume: "claude --resume ",
       dialogs: [
@@ -49,6 +55,14 @@ defmodule CodingAgentFramework.Screen.Reading.V2_1_322 do
           footer: "Esc to cancel",
           numbered: true,
           indent: 1
+        },
+        %{
+          kind: :usage_limit_menu,
+          title: "What do you want to do?",
+          footer: "Enter to confirm · Esc to cancel",
+          numbered: true,
+          indent: 3,
+          rule: "▔"
         }
       ]
     }

@@ -20,13 +20,19 @@ defmodule CodingAgentFramework.Screen do
     * `%{state: :idle, box: {:text, text}}`: text typed in the box and not sent;
     * `%{state: :running}`: a turn runs. Only the footer under the box says so; a spinner line
       alone does not, and an ended turn's `… · done` line stays above the box;
+    * `%{state: :usage_limit_wait, at: time}`: Claude Code's own wait at a usage limit, `at` the
+      time its notice under the box names as drawn ("Continuing automatically at <time> · Esc to
+      cancel"). The box is drawn empty under it, as at an ended turn, but the wait is no ended
+      turn: a text typed into it would start a turn into the limit (F-181's new-3);
     * `%{state: :dialog, kind: kind, options: [label], selected: label}`: a dialog, its
       options' labels in order and the one the `❯` marks. Answer it by label (`option_keys/2`).
       Its kinds: `:trust` (the folder trust dialog), `:imports` (external `CLAUDE.md` imports,
       with `paths:`, the external paths it lists, and `shortened:`, those of them drawn
       shortened: a path wider than the pane is cut in its middle with `…` on one line, never
-      wrapped, so it reads as one path that is not whole) and `:permission`. The two a start meets
-      first, `:trust` and `:imports`, send no hook event;
+      wrapped, so it reads as one path that is not whole), `:permission` and `:usage_limit_menu`
+      (the menu at a usage limit, in place of the input box; its options are read by label,
+      since the third is what the account allows, F-181's new-4). The two a start meets first,
+      `:trust` and `:imports`, send no hook event;
     * `%{state: :exited}`: Claude Code has exited.
 
   A screen the release's reading cannot place, or places only by a guess, is unrecognized: a
@@ -53,6 +59,7 @@ defmodule CodingAgentFramework.Screen do
               optional(:paths) => [String.t()],
               optional(:shortened) => [String.t()]
             }
+          | %{state: :usage_limit_wait, at: String.t()}
           | %{state: :exited}
 
   @doc """
@@ -122,9 +129,15 @@ defmodule CodingAgentFramework.Screen do
 
   defp place(lines, reading) do
     with :error <- exited(lines, reading),
-         {:ok, above, below} <- split_at_last_rule(lines),
-         :error <- box(above, below, reading) do
-      dialog(below, reading)
+         :error <- boxed(lines, reading) do
+      dialog(lines, reading)
+    end
+  end
+
+  defp boxed(lines, reading) do
+    case split_at_last_rule(lines) do
+      {:ok, above, below} -> box(above, below, reading)
+      :error -> :error
     end
   end
 
@@ -142,7 +155,14 @@ defmodule CodingAgentFramework.Screen do
 
     with {:ok, _, [first | _] = inside} <- split_at_last_rule(above, upper?),
          true <- first == reading.prompt or String.starts_with?(first, reading.box) do
+      wait =
+        Enum.find_value(
+          footer,
+          &Regex.run(reading.wait, String.trim(&1), capture: :all_but_first)
+        )
+
       cond do
+        wait -> {:ok, %{state: :usage_limit_wait, at: hd(wait)}}
         Enum.any?(footer, &String.contains?(&1, reading.running)) -> {:ok, %{state: :running}}
         length(inside) == 1 -> {:ok, %{state: :idle, box: box_text(first, reading)}}
         true -> :error
@@ -161,12 +181,16 @@ defmodule CodingAgentFramework.Screen do
     end
   end
 
-  # A dialog is drawn under its rule, with its footer last and its options just above it.
-  defp dialog(region, reading) do
-    footer = region |> List.last("") |> String.trim_leading()
-
+  # A dialog is drawn under its rule, with its footer last and its options just above it. A
+  # kind names its rule's character when it is not `─` (the usage limit's menu, `▔`).
+  defp dialog(lines, reading) do
     Enum.find_value(reading.dialogs, :error, fn kind ->
-      String.starts_with?(footer, kind.footer) && options(Enum.drop(region, -1), kind)
+      with {:ok, _, region} <- split_at_last_rule(lines, &rule?(&1, Map.get(kind, :rule, "─"))) do
+        footer = region |> List.last("") |> String.trim_leading()
+        String.starts_with?(footer, kind.footer) && options(Enum.drop(region, -1), kind)
+      else
+        :error -> nil
+      end
     end)
   end
 
@@ -252,7 +276,7 @@ defmodule CodingAgentFramework.Screen do
 
   defp indent(line), do: String.length(line) - String.length(String.trim_leading(line, " "))
 
-  defp rule?(line), do: line != "" and String.trim(line, "─") == ""
+  defp rule?(line, char \\ "─"), do: line != "" and String.trim(line, char) == ""
 
   defp drop_trailing_blanks(lines),
     do: lines |> Enum.reverse() |> Enum.drop_while(&(&1 == "")) |> Enum.reverse()

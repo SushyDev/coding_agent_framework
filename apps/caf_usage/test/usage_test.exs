@@ -134,6 +134,52 @@ defmodule CodingAgentFramework.UsageTest do
     def rows(agent, _opts), do: {:ok, %{rows: Agent.get(agent, & &1)}}
   end
 
+  test "a transcript's limit line is the account's record, once, on its account's cue" do
+    alias CodingAgentFramework.Transcripts
+
+    tdb = Path.join(CodingAgentFramework.TestHost.test_dir(), "transcripts.db")
+    {:ok, conn} = Transcripts.Table.open(tdb)
+    %{usage: usage} = start(~w(a b), transcripts_db: tdb, clock: fn -> @now end)
+
+    line = fn uuid, resets ->
+      JSON.encode!(%{
+        "type" => "assistant",
+        "uuid" => uuid,
+        "timestamp" => "2026-11-21T06:48:44.124Z",
+        "isApiErrorMessage" => true,
+        "apiError" => "usage_limit_reached",
+        "quotaLimits" => %{
+          "status" => "rejected",
+          "resetsAt" => resets,
+          "rateLimitType" => "seven_day"
+        },
+        "message" => %{"id" => uuid, "stop_reason" => "stop_sequence", "content" => []}
+      }) <> "\n"
+    end
+
+    put = fn bytes ->
+      {:ok, fold} = Transcripts.Fold.take(Transcripts.Fold.new(), bytes)
+      row = %{path: "/t/s1.jsonl", fold: fold, rewrites: 0, problem: nil}
+      Transcripts.Table.write(conn, "h", [{"b", [{"s1", row}]}], @now * 1000)
+      :ok = Usage.cue(usage, %{topic: "transcripts:h:b", ids: [1]})
+    end
+
+    put.(line.("l1", @now + 600))
+    assert_receive %{topic: "usage:h:b", ids: [_]}
+    {:ok, %{readings: %{"b" => b}}} = Usage.readings(usage)
+    assert %{limited_until: until, limit_window: "seven_day"} = b
+    assert until == @now + 600
+    assert b.evidence == %{"source" => "transcript", "session" => "s1", "line" => "l1"}
+
+    # The same line read again adds nothing; a later limit's line replaces it.
+    put.(line.("l1", @now + 600))
+    refute_receive %{topic: "usage:h:b"}, 100
+    put.(line.("l1", @now + 600) <> line.("l2", @now + 900))
+    assert_receive %{topic: "usage:h:b", ids: [_]}
+    assert {:ok, %{readings: %{"b" => %{limited_until: later}}}} = Usage.readings(usage)
+    assert later == @now + 900
+  end
+
   test "a headless session's stream gives the windows and the limit, on its cue" do
     {:ok, rows} = Agent.start_link(fn -> [] end)
     %{accounts: accounts, usage: usage} = start(~w(a b), stream: {FakeStream, rows})

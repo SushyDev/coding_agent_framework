@@ -550,7 +550,8 @@ defmodule CodingAgentFramework do
        fn _ ->
          {Stream, [programs: p, holder: w.holder, home: c.home, db: db] ++ notify_every}
        end},
-      # After `Stream`, whose rows give a headless session's readings and limit.
+      # After `Stream`, whose rows give a headless session's readings and limit; a transcript's
+      # limit it reads from `Transcripts`' table, on that reader's cues.
       {:usage,
        fn pid ->
          {Usage,
@@ -558,6 +559,7 @@ defmodule CodingAgentFramework do
           host: host,
           db: db,
           stream: {Stream, pid.(:stream)},
+          transcripts_db: db,
           notify: notify,
           interval: every}
        end},

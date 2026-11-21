@@ -24,6 +24,10 @@ defmodule CodingAgentFramework.Sessions.Turn do
   - `:gone`: the process the evidence names is gone;
   - `:dialog`: an interactive session's row waits on a dialog its pane shows (`status`
     `dialog`, F-140): a person or the app answers it, and it is never idle (F-180);
+  - `:limited`: the row's last turn ended at a usage limit (`Sessions.Agents.limit/1`, F-185):
+    never idle, never stuck and never an ended turn, until a turn of it runs after the limit
+    and the row says so. `Mailbox` reads its turn as for any row once the limit's reset passed
+    (`Sessions.Agents.held?/2`), so the word to go on goes into an ended turn;
   - `:not_running`: the agent row is not `running`, so no turn is read;
   - `:unread`: nothing read names the session's process yet.
 
@@ -49,6 +53,7 @@ defmodule CodingAgentFramework.Sessions.Turn do
           | :ending
           | :gone
           | :dialog
+          | :limited
           | :not_running
           | :unread
 
@@ -64,12 +69,16 @@ defmodule CodingAgentFramework.Sessions.Turn do
   end
 
   @doc """
-  A headless session's turn: `:not_running` unless its row is `running`; then `stream/1` of
-  its `Stream` fold (nil when `Stream` follows none).
+  A headless session's turn: `:not_running` unless its row is `running`, `:limited` while it
+  is; then `stream/1` of its `Stream` fold (nil when `Stream` follows none).
   """
   @spec headless(map, map | nil) :: t
   def headless(row, fold) do
-    if Agents.running?(row), do: stream(fold), else: :not_running
+    cond do
+      not Agents.running?(row) -> :not_running
+      Agents.limit(row) -> :limited
+      true -> stream(fold)
+    end
   end
 
   @doc """
@@ -101,7 +110,7 @@ defmodule CodingAgentFramework.Sessions.Turn do
 
   @doc """
   An interactive session's turn: `:dialog` while its row waits on a dialog, `:not_running` for
-  any other row that is not `running`; then its session file among `files` (`file/2`) and
+  any other row that is not `running`, `:limited` while it is; then its session file among `files` (`file/2`) and
   `waiter`, `true` when `Intake` holds the session's waiter,
   `false` when it does not, `:unread` when it was not read. Only a file that reads idle with a
   waiter held is `:ended`; a waiter held while the file reads busy is a turn a person's prompt
@@ -113,6 +122,9 @@ defmodule CodingAgentFramework.Sessions.Turn do
   @spec interactive(map, [map], boolean | :unread) :: t
   def interactive(row, files, waiter) do
     cond do
+      Agents.running?(row) and Agents.limit(row) != nil ->
+        :limited
+
       Agents.running?(row) ->
         case file_state(file(row, files)) do
           :idle when waiter == true -> :ended

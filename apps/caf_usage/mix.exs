@@ -22,6 +22,7 @@ defmodule CafUsage.MixProject do
     [
       {:caf_accounts, in_umbrella: true},
       {:caf_store, in_umbrella: true},
+      {:caf_transcripts, in_umbrella: true},
       {:caf_test, in_umbrella: true, only: :test},
       {:stream_data, "~> 1.4", only: :test}
     ]

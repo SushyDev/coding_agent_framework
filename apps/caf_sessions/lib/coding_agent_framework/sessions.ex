@@ -461,6 +461,22 @@ defmodule CodingAgentFramework.Sessions do
     do: call(sessions, {:put_meta, name, meta}, Keyword.get(opts, :timeout, @read))
 
   @doc """
+  Writes the usage limit agent `name`'s last turn ended at, or its remedy's phase, on its row
+  (`Sessions.Table`'s `usage_limit`, F-185): `limit` a map with `"until"` (the reset, Unix
+  seconds) and the remedy's own keys (`"step"`, `"window"`, `"line"`), or nil once a turn ran
+  after the limit. The limit's reader and its remedies are its callers (`model/tla/Limit.tla`'s
+  `Read`, `Continued` and each phase); the row is announced, so `Mailbox` reads its turn again.
+  Answers `{:ok, row}`, `{:refused, :no_session}` or `{:refused, {:bad, :limit}}`. Option:
+  `:timeout` (ms, default 5 000).
+
+      Sessions.put_limit(sessions, "app-fix", %{"until" => 1_795_254_036, "step" => "look"})
+      #=> {:ok, %{name: "app-fix", usage_limit: ~s({"step":"look","until":1795254036}), ...}}
+  """
+  @spec put_limit(GenServer.server(), String.t(), map | nil, keyword) :: outcome(map)
+  def put_limit(sessions, name, limit, opts \\ []),
+    do: call(sessions, {:put_limit, name, limit}, Keyword.get(opts, :timeout, @read))
+
+  @doc """
   Delegate `name` is done for good: its report went in and no process of it may live. Its row
   becomes `ended`, so it frees its parent's cap and what it owns ends with it; it keeps its
   place in the tree, so what it kept goes to its parent.
@@ -796,6 +812,18 @@ defmodule CodingAgentFramework.Sessions do
       with {:ok, text} <- Table.meta_text(meta),
            %{} = row <- Table.get(state.db, state.host.name, name) || {:refused, :no_session} do
         Table.update(state.db, row.id, meta: text)
+        announce(state, row)
+        {:ok, Table.get(state.db, state.host.name, name)}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:put_limit, name, limit}, _from, state) do
+    reply =
+      with {:ok, text} <- limit_text(limit),
+           %{} = row <- Table.get(state.db, state.host.name, name) || {:refused, :no_session} do
+        Table.update(state.db, row.id, usage_limit: text)
         announce(state, row)
         {:ok, Table.get(state.db, state.host.name, name)}
       end
@@ -1576,6 +1604,13 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   defp delegate?(row), do: row.role == "delegate"
+
+  defp limit_text(nil), do: {:ok, nil}
+
+  defp limit_text(%{"until" => until} = limit) when is_integer(until) and not is_struct(limit),
+    do: {:ok, Store.text(limit)}
+
+  defp limit_text(_), do: {:refused, {:bad, :limit}}
 
   # Adopt: a starting row waits for its deadline before it is given up, and a failed read
   # decides nothing.

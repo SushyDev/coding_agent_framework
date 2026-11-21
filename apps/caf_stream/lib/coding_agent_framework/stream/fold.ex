@@ -8,7 +8,9 @@ defmodule CodingAgentFramework.Stream.Fold do
   waits for the next read. Each event writes what `Stream.tla`'s `Handle` says: a replay
   delivers its message, a `result` ends the turn, a `can_use_tool` request is held, an answer's
   replay answers it, a cancel cancels it. It also keeps the session id of `system`/`init` and the
-  latest `rate_limit_event`, and the last `result` with its text. Each result is also kept on the
+  latest `rate_limit_event`, and the last `result` with its text and its `api_error`:
+  `"usage_limit_reached"` for a turn that ended at a usage limit (F-181's measure: `is_error`
+  true, `api_error_status` 429), the agent's evidence of a limited turn. Each result is also kept on the
   messages it names (`messages[uuid].result`), so a later one, such as a turn the delegate starts
   by itself, never replaces it. A result that names none of the framework's messages ends such a
   turn of the delegate's own (a background command of its own woke it, F-155): it is kept in
@@ -137,7 +139,7 @@ defmodule CodingAgentFramework.Stream.Fold do
     # `text` is the turn's last message, a finished delegate's report (`Delegates`).
     text = if is_binary(e["result"]), do: e["result"]
     result = %{subtype: e["subtype"], is_error: e["is_error"], user_message_uuids: uuids}
-    result = Map.put(result, :text, text)
+    result = Map.merge(result, %{text: text, api_error: e["api_error"]})
     messages = Enum.reduce(uuids, fold.messages, &keep(&2, &1, result))
     fold = %{fold | idle: true, last_result: result, messages: messages}
     if Enum.any?(uuids, &Map.has_key?(messages, &1)), do: fold, else: own(fold, e["uuid"], result)

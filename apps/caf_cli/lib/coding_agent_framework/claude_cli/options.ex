@@ -25,7 +25,7 @@ defmodule CodingAgentFramework.ClaudeCLI.Options do
     allowed_tools: "--allowedTools",
     disallowed_tools: "--disallowedTools"
   ]
-  @own_settings ~w(hooks statusLine remoteControlAtStartup disableAllHooks env)
+  @own_settings ~w(hooks statusLine remoteControlAtStartup autoContinueAtUsageLimit disableAllHooks env)
   @own_env ~w(CLAUDE_CONFIG_DIR HOME PATH TERM LANG MCP_TOOL_TIMEOUT
               CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT DISABLE_AUTOUPDATER CLAUDECODE)
   @rules ~w(allow deny ask additionalDirectories)

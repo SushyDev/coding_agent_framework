@@ -194,6 +194,46 @@ defmodule CodingAgentFramework.Sessions.Agents do
 
   def meta(_), do: %{}
 
+  @doc """
+  The usage limit the row's last turn ended at (F-185, `Sessions.Table`'s `usage_limit`), as
+  JSON gives it back (string keys: `until`, the reset in Unix seconds, `window`, `line`,
+  `step`), or nil when the row is not `limited`. `Sessions.Turn` answers `:limited` for such a
+  row: never idle, never an ended turn, until a turn of it runs after the limit.
+
+      iex> CodingAgentFramework.Sessions.Agents.limit(%{usage_limit: ~s({"until":1800000000,"step":"look"})})
+      %{"until" => 1800000000, "step" => "look"}
+      iex> CodingAgentFramework.Sessions.Agents.limit(%{usage_limit: nil})
+      nil
+  """
+  @spec limit(row | nil) :: map | nil
+  def limit(%{usage_limit: text}) when is_binary(text) do
+    case JSON.decode(text) do
+      {:ok, %{"until" => until} = limit} when is_integer(until) -> limit
+      _ -> nil
+    end
+  end
+
+  def limit(_), do: nil
+
+  @doc """
+  The row as `Mailbox` reads its turn at `now` (Unix seconds): with its limit while the limit's
+  reset has not passed, so its turn is `:limited` and no row goes in (`Boxes.tla`'s
+  `NoRowIntoLimit`: a row would start a turn that hits the limit again), and without it after,
+  so the word to go on and the rows held go into its ended turn as into any.
+
+      iex> alias CodingAgentFramework.Sessions.Agents
+      iex> row = %{usage_limit: ~s({"until":100,"step":"idle"})}
+      iex> {Agents.unheld(row, 99) == row, Agents.unheld(row, 100).usage_limit}
+      {true, nil}
+  """
+  @spec unheld(row | nil, integer) :: row | nil
+  def unheld(row, now) do
+    case limit(row) do
+      %{"until" => until} when now >= until -> %{row | usage_limit: nil}
+      _ -> row
+    end
+  end
+
   @doc "Whether the row runs headless (a delegate's stream), not Claude Code's terminal interface."
   @spec headless?(row | nil) :: boolean
   def headless?(%{role: "delegate"}), do: true
