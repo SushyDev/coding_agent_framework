@@ -64,6 +64,13 @@ defmodule CodingAgentFramework.Transcripts do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc """
+  The topics of the cues it writes, each as its whole shape, `*` for a word it fills in
+  (`CodingAgentFramework.Cues`): `transcripts:<host>:<account>`.
+  """
+  @spec writes() :: [String.t()]
+  def writes, do: ~w(transcripts:*:*)
+
+  @doc """
   The transcript's path for a session started in `cwd`: every character other than a letter or
   digit becomes `-`. Claude Code shortens a name over 200 characters and adds a hash this does
   not compute, so such a `cwd` is refused; the hook's `transcript_path` names that file.

@@ -132,6 +132,17 @@ defmodule CodingAgentFramework.CuesTest do
       assert Cues.subscriptions(cues) == {:ok, []}
     end
 
+    test "a topic a part writes is subscribable, by the first words of its shape" do
+      writes = [b: ["acts:*:*"]]
+      {:ok, cues} = start_supervised({Cues, parts: [a: part(["sessions"])], writes: writes})
+      assert {:ok, _} = Cues.subscribe(cues, self(), ["acts", "acts:ws", "acts:*:a"])
+
+      assert Cues.subscribe(cues, self(), ["actsx"]) == {:refused, {:undeclared, "actsx"}}
+      assert Cues.subscribe(cues, self(), ["acts:ws:a:b"]) |> elem(0) == :ok
+
+      assert Cues.subscribe(cues, self(), ["*"]) == {:refused, {:undeclared, "*"}}
+    end
+
     test "a subscriber that exits is removed; one that crashes touches nothing" do
       parts = [a: part(["sessions", "last"])]
       {:ok, cues} = start_supervised({Cues, parts: parts})

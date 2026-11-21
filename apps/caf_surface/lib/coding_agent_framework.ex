@@ -23,7 +23,9 @@ defmodule CodingAgentFramework do
   two HTTP endpoints start after the part they serve, on 127.0.0.1.
 
   **Cues.** It routes no cue itself. One `CodingAgentFramework.Cues` starts after the reaper,
-  with each reading part's own declaration (`reads/0`), and every part's `notify:` goes to it.
+  with each reading part's own declaration (`reads/0`) and the topics each writing part
+  declares (`writes/0`), and every part's `notify:` goes to it (`Cues.notify/3`, with the
+  config's `undeclared_cues`).
   Each part is named to `Cues` as it starts, so a part a restart replaced gets the cues from
   then on, and one not started yet misses nothing: every part reads its whole table when it
   starts. `Stream`, `Jobs` and `Services` read on the config's `interval` as the other readers
@@ -161,43 +163,76 @@ defmodule CodingAgentFramework do
   The calling process gets each later cue on `topics` as a message `{:caf_cue, cue}`, for as
   long as it lives, from the instance the config named `instance`. Delivery is a plain `send`
   after the parts got the cue, so a slow or crashed subscriber touches nothing in the tree; a
-  subscriber is monitored and removed when it exits. It survives a restart of `Cues`.
+  subscriber is monitored and removed when it exits.
 
   A topic is a pattern of words joined by `:`, `*` for any one word, matching each topic that
   begins with its words: `"sessions"` matches `"sessions:ws"`, and `"sessions:"` is the same.
-  The topics an app may name are the ones the parts declare (`topics/1`); any other is refused.
-  Answers `{:ok, ref}` for `unsubscribe/2`, `{:refused, :no_instance}`, `{:refused, {:bad,
-  :topics}}`, `{:refused, {:undeclared, topic}}`, or `{:unknown, reason}` when the instance's
-  `Cues` did not answer (a restart under way).
+  The topics an app may name are the ones the parts declare they read or write (`topics/1`);
+  any other is refused. Answers `{:ok, %{ref: ref, tree: pid}}`, `{:refused, :no_instance}`,
+  `{:refused, {:bad, :topics}}`, `{:refused, {:undeclared, topic}}`, or `{:unknown, reason}`
+  when the instance's `Cues` did not answer (a restart under way).
 
-  **A cue** is `%{topic: topic, ids: ids}`: a hint to read rows again by their ids, never the
-  data. Each topic's last words name where the rows are (`<host>` the workstation's name, as the
-  config gives it, and `<account>` a Claude account), and `ids` are:
+  **The tree.** A subscription lives as long as the tree it was made in: it survives a restart
+  of `Cues`, whose table the tree's supervisor owns, and ends with that supervisor. `tree` is
+  that supervisor's pid. The app monitors it, and when it exits subscribes again once the tree
+  is back (until then `subscribe/2` answers `{:refused, :no_instance}`), and re-reads what it
+  shows, since the cues in between went to no one. Nothing claims to keep a subscription across
+  a restart of the whole tree; `ref` is for `unsubscribe/2`.
 
-  | topic | `ids` |
+  **A cue** is a hint to read rows again by their ids, never the data. Each topic's last words
+  name where the rows are (`<host>` the workstation's name, as the config gives it, `<account>`
+  a Claude account, `<instance>` the config's `instance`, `<server>` the tmux server's name):
+
+  | topic | the cue |
   | --- | --- |
-  | `sessions:<host>` | the agent rows' ids (`Sessions.Table`) |
-  | `delegates:<host>` | the delegate rows' ids (`Delegates.Table`) |
-  | `mains:<host>` | the project checkouts' row ids (`Mains.Table`) |
-  | `mailbox` | the message rows' ids (`Mailbox`) |
-  | `jobs` | the job ids (`Jobs`) |
-  | `stream:<host>` | the stream rows' ids (`Stream.Table`) |
-  | `registry:<host>:<account>` | Claude Code's session rows' ids (`Registry.Table`) |
-  | `transcripts:<host>:<account>` | the transcript rows' ids (`Transcripts.Table`) |
-  | `usage:<host>:<account>` | the usage rows' ids (`Usage.Table`) |
-  | `tmux:<host>:<server>` | the tmux sampler's row ids, `[]` for a failed sample |
-  | `intake:<host>:<account>:waiters` | the session id whose waiter came or went |
+  | `sessions:<host>` | `ids`: the agent rows' ids (`Sessions.Table`) |
+  | `delegates:<host>` | `ids`: the delegate rows' ids (`Delegates.Table`) |
+  | `mains:<host>` | `ids`: the project checkouts' row ids (`Mains.Table`) |
+  | `mailbox` | `ids`: the message rows' ids (`Mailbox`) |
+  | `jobs` | `ids`: the job ids (`Jobs`); a late end is in its job's row |
+  | `services` | `ids`: the services' names (`Services`) |
+  | `copies` | no `ids`: a copy's key is three columns, so the app re-reads the copies (`Copies`) |
+  | `acts:<host>:<instance>` | `ids`: the act rows' ids, the fault ledger (`Acts.Table`) |
+  | `scheduler:<host>` | `ids`: the lease rows' ids (`Scheduler.Table`); or no `ids`, and `pressure:` the host's new level |
+  | `stream:<host>` | `ids`: the stream rows' ids (`Stream.Table`) |
+  | `registry:<host>:<account>` | `ids`: Claude Code's session rows' ids (`Registry.Table`) |
+  | `transcripts:<host>:<account>` | `ids`: the transcript rows' ids (`Transcripts.Table`) |
+  | `usage:<host>:<account>` | `ids`: the usage rows' ids (`Usage.Table`) |
+  | `tmux:<host>:<server>` | `ids`: the tmux sampler's row ids, `[]` for a failed sample |
+  | `intake:<host>:<account>` | `ids`: the hooks' rows' ids (`Intake.Table`) |
+  | `intake:<host>:<account>:waiters` | `ids`: the session id whose waiter came or went |
 
-      {:ok, ref} = CodingAgentFramework.subscribe("a", ["sessions", "mailbox"])
-      receive do
-        {:caf_cue, %{topic: "sessions:" <> _host, ids: ids}} -> reread_agents(ids)
+  An app's process that subscribes again whenever its tree comes back:
+
+      def init(instance), do: {:ok, subscribe(%{instance: instance, tree: nil})}
+
+      def handle_info({:caf_cue, %{topic: "sessions:" <> _host, ids: ids}}, s),
+        do: {:noreply, reread_agents(s, ids)}
+
+      def handle_info({:DOWN, _, :process, tree, _}, %{tree: tree} = s),
+        do: {:noreply, subscribe(%{s | tree: nil})}
+
+      def handle_info(:subscribe, s), do: {:noreply, subscribe(s)}
+
+      defp subscribe(s) do
+        case CodingAgentFramework.subscribe(s.instance, ["sessions", "acts"]) do
+          {:ok, %{tree: tree}} ->
+            Process.monitor(tree)
+            reread_all(%{s | tree: tree})
+
+          _not_back ->
+            Process.send_after(self(), :subscribe, 1_000)
+            s
+        end
       end
-      :ok = CodingAgentFramework.unsubscribe("a", ref)
   """
   @spec subscribe(String.t(), [String.t()]) ::
-          {:ok, reference} | {:refused, term} | {:unknown, term}
+          {:ok, %{ref: reference, tree: pid}} | {:refused, term} | {:unknown, term}
   def subscribe(instance, topics) do
-    with {:ok, cues} <- cues(instance), do: Cues.subscribe(cues, self(), topics)
+    with {:ok, cues} <- cues(instance),
+         {:ok, tree} <- tree(instance),
+         {:ok, ref} <- Cues.subscribe(cues, self(), topics),
+         do: {:ok, %{ref: ref, tree: tree}}
   end
 
   @doc """
@@ -219,7 +254,7 @@ defmodule CodingAgentFramework do
   """
   @spec topics(String.t()) :: {:ok, [String.t()]} | {:refused, :no_instance}
   def topics(instance) do
-    with {:ok, _name} <- registry(instance), do: {:ok, Cues.topics(reads())}
+    with {:ok, _name} <- registry(instance), do: {:ok, Cues.topics(reads(), writes())}
   end
 
   # The instance's `Registry` is named from its name, so two instances in one app have two;
@@ -244,6 +279,18 @@ defmodule CodingAgentFramework do
     end
   rescue
     # The registry ended between the two looks.
+    ArgumentError -> {:refused, :no_instance}
+  end
+
+  # The tree's supervisor, as the `Registry` it started keeps it.
+  defp tree(instance) do
+    with {:ok, name} <- registry(instance) do
+      case Elixir.Registry.meta(name, :tree) do
+        {:ok, pid} -> {:ok, pid}
+        :error -> {:unknown, :no_tree}
+      end
+    end
+  rescue
     ArgumentError -> {:refused, :no_instance}
   end
 
@@ -274,10 +321,35 @@ defmodule CodingAgentFramework do
     ]
   end
 
+  @doc """
+  What each part it starts writes, as the part declares it (`writes/0`): the topics of the
+  cues the parts send, which an app may subscribe to beside the ones they read.
+  """
+  @spec writes() :: [{atom, [String.t()]}]
+  def writes do
+    [
+      acts: Acts.writes(),
+      usage: Usage.writes(),
+      stream: Stream.writes(),
+      intake: Intake.writes(),
+      sampler: TmuxSampler.writes(),
+      registry: Registry.writes(),
+      transcripts: Transcripts.writes(),
+      sessions: Sessions.writes(),
+      scheduler: Scheduler.writes(),
+      mailbox: Mailbox.writes(),
+      delegates: Delegates.writes(),
+      mains: Mains.writes(),
+      copies: Copies.writes(),
+      jobs: Jobs.writes(),
+      services: Services.writes()
+    ]
+  end
+
   @impl true
   def init(w) do
     tab = :ets.new(__MODULE__, [:public, read_concurrency: true])
-    notify = fn cue -> Cues.cue(lookup(tab, :cues), cue) end
+    notify = Cues.notify(fn -> lookup(tab, :cues) end, writes(), w.c.undeclared_cues)
     # The app's subscriptions, owned by this supervisor so a restarted `Cues` keeps them.
     w = Map.put(w, :subscriptions, :ets.new(Cues, [:public]))
 
@@ -359,12 +431,19 @@ defmodule CodingAgentFramework do
 
     [
       {:reaper, fn _ -> {Shell.Reaper, programs: p} end},
-      # The instance's own `Registry`, named from its name: how the app finds it.
-      {:names, fn _ -> {Elixir.Registry, keys: :unique, name: names(c.instance)} end},
+      # The instance's own `Registry`, named from its name: how the app finds it, and the
+      # tree's supervisor, in which this runs, for a subscriber to watch.
+      {:names,
+       fn _ ->
+         {Elixir.Registry, keys: :unique, name: names(c.instance), meta: [tree: self()]}
+       end},
       {:cues,
        fn _ ->
          {Cues,
-          parts: reads(), subscriptions: w.subscriptions, registry: {names(c.instance), :cues}}
+          parts: reads(),
+          writes: writes(),
+          subscriptions: w.subscriptions,
+          registry: {names(c.instance), :cues}}
        end},
       # Before every part that writes its acts there.
       {:acts,
@@ -574,7 +653,9 @@ defmodule CodingAgentFramework do
               dir: Config.path(c, "parts/jobs"),
               copies: pid.(:copies),
               hosts: hosts,
-              on_late_end: &late_end(c, pid, &1),
+              # A late end is stored in its job's row, which `Jobs` marks told: the app's own
+              # caller of the run reads it there, on the `jobs` cue.
+              on_late_end: fn _late -> :ok end,
               scheduler: pid.(:scheduler)
             ] ++ notify_every}
          end},
@@ -599,7 +680,6 @@ defmodule CodingAgentFramework do
             port: c.ports.mcp,
             grants: grants,
             mailbox: {Mailbox, pid.(:mailbox)},
-            jobs: {Jobs, pid.(:jobs)},
             delegates: {Delegates, pid.(:delegates)},
             services: {Services, pid.(:services)},
             workstation: host,
@@ -607,14 +687,12 @@ defmodule CodingAgentFramework do
             stream: {Stream, pid.(:stream)},
             transcripts: {Transcripts, pid.(:transcripts)},
             place: &Sessions.Agents.place(w.agents, &1),
-            instance: c.instance,
             tool_timeout: c.tool_timeout,
             margin: c.margin,
             acts: pid.(:acts),
             mover: {Mover, pid.(:mover)},
             sessions: {Sessions, pid.(:sessions)},
             mains: {Mains, pid.(:mains)},
-            lease: &job_units(c, &1, &2),
             extensions: c.extensions}
          end},
         {:mcp_http,
@@ -749,26 +827,6 @@ defmodule CodingAgentFramework do
     case Services.owner_ended(services, owner) do
       {:ok, _} -> :ok
       other -> Logger.warning("caf: services of #{owner}, who ended: #{inspect(other)}")
-    end
-  end
-
-  # A job's end that its call did not wait for goes to the job's caller as a message from
-  # `framework`, once per job. It runs in `Jobs`' process, which may be starting before `MCP`,
-  # so the caller is read from `MCP`'s call log on disk. An end that cannot be stored (`Mailbox`
-  # did not answer) is `{:unknown, reason}`: `Jobs` keeps it owed and hands it again at its next
-  # cue. One with no caller is logged, and answered `:ok`: nothing will ever store it.
-  defp late_end(c, pid, %{job: job, end: e}) do
-    text = "Your job #{job} ended after its call answered: #{inspect(e)}. Nothing was fetched."
-
-    with {:ok, agent} <- MCP.caller(Config.path(c, "parts/mcp"), c.instance, job),
-         {:ok, _} <- Mailbox.notify(pid.(:mailbox), agent, text, key: "job:" <> job) do
-      :ok
-    else
-      {:refused, reason} when reason != :no_mailbox ->
-        Logger.warning("caf: job #{job}'s late end has no caller: #{inspect(reason)}")
-
-      other ->
-        {:unknown, {:not_stored, other}}
     end
   end
 

@@ -36,9 +36,14 @@
 # email (the config's git.email) is one of the account's verified emails.
 #
 # It runs devenv's pinned programs (CAF_CLAUDE, CAF_GH, CAF_SSH_KEYGEN, CAF_MKDIR, CAF_MKTEMP,
-# CAF_RM, CAF_CAT), with Claude Code's updater off; outside devenv it runs itself again through
-# `devenv shell`. Nothing of a Claude
-# Code session this was typed in (CLAUDECODE, CLAUDE_CODE_*) reaches the login.
+# CAF_RM, CAF_CAT, CAF_ID), with Claude Code's updater off; outside devenv it runs itself again
+# through `devenv shell`. Nothing of a Claude Code session this was typed in (CLAUDECODE,
+# CLAUDE_CODE_*) reaches the login.
+#
+# USER is set to the OS user's name (`id -un`), whatever the shell had: on macOS Claude Code
+# names the login's Keychain item by USER alone, and every launch the framework holds passes the
+# OS user as USER, so a login from a shell whose USER is missing or names another user still
+# writes the item those sessions read (F-173).
 set -euo pipefail
 
 usage() {
@@ -89,6 +94,8 @@ if [[ -z "${CAF_CLAUDE:-}" ]]; then
 fi
 
 unset CLAUDECODE TMUX TMUX_PANE
+USER="$("$CAF_ID" -un)" || fail "the OS user's name could not be read"
+export USER
 while IFS= read -r name; do
   if [[ "$name" == CLAUDE_CODE_* ]]; then unset "$name"; fi
 done < <(compgen -e)

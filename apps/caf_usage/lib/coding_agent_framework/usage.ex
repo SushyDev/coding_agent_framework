@@ -92,6 +92,13 @@ defmodule CodingAgentFramework.Usage do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc """
+  The topics of the cues it writes, each as its whole shape, `*` for a word it fills in
+  (`CodingAgentFramework.Cues`): `usage:<host>:<account>`.
+  """
+  @spec writes() :: [String.t()]
+  def writes, do: ~w(usage:*:*)
+
+  @doc """
   Reads every account's file now. Returns `{:ok, %{readings: n, problems: n, ids: ids}}`, where
   `ids` are the `{account, id}` of the rows written.
   """

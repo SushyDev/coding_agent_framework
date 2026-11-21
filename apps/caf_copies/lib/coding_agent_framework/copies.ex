@@ -62,6 +62,13 @@ defmodule CodingAgentFramework.Copies do
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
+  @doc """
+  The topics of the cues it writes, each as its whole shape, `*` for a word it fills in
+  (`CodingAgentFramework.Cues`): `copies`, a cue with no ids.
+  """
+  @spec writes() :: [String.t()]
+  def writes, do: ~w(copies)
+
   @doc "The copy's path and its lock's path on its host. Pure."
   @spec place(copy) :: {:ok, {String.t(), String.t()}} | {:refused, term}
   def place(%{dir: dir, project: project, name: name}) do

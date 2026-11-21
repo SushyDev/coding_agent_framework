@@ -95,7 +95,6 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
          grants: grants,
          acts: acts,
          mailbox: {Mailbox, mailbox},
-         jobs: {__MODULE__, :unused},
          delegates: {Delegates, delegates},
          services: {__MODULE__, :unused},
          workstation: "ws",
@@ -103,7 +102,6 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
          stream: {Stream, ctx.stream},
          transcripts: {Transcripts, transcripts},
          place: fn _ -> {:refused, :none} end,
-         instance: "d",
          tool_timeout: 600_000,
          margin: 60_000}
       )

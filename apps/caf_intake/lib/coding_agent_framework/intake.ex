@@ -150,6 +150,13 @@ defmodule CodingAgentFramework.Intake do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
 
   @doc """
+  The topics of the cues it writes, each as its whole shape, `*` for a word it fills in
+  (`CodingAgentFramework.Cues`): `intake:<host>:<account>` and `intake:<host>:<account>:waiters`.
+  """
+  @spec writes() :: [String.t()]
+  def writes, do: ~w(intake:*:* intake:*:*:waiters)
+
+  @doc """
   The settings' `hooks` for `account`: an `http` hook per event of `Event.names/0`, and one for
   each tool callback named in `tools` (`:pre_tool_use`, `:post_tool_use`), posting to this
   host's port with the secret in the `x-caf-secret` header. PermissionRequest waits 600 s and

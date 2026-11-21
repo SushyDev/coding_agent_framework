@@ -134,6 +134,13 @@ defmodule CodingAgentFramework.Mailbox do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc """
+  The topics of the cues it writes, each as its whole shape, `*` for a word it fills in
+  (`CodingAgentFramework.Cues`): `mailbox`.
+  """
+  @spec writes() :: [String.t()]
+  def writes, do: ~w(mailbox)
+
+  @doc """
   The sender's frame on the text an agent reads (F-170): every row but a brief and a word to go
   on, which are the delegate's own first prompt, names whose it is, so a main session with
   several delegates always knows. `row` is `%{from: name, kind: kind, to: name, text: text}`:

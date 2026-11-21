@@ -55,7 +55,6 @@ defmodule CodingAgentFramework.MCPServicesTest do
          grants: grants,
          acts: acts,
          mailbox: {__MODULE__, :unused},
-         jobs: {__MODULE__, :unused},
          delegates: {__MODULE__, :unused},
          services: {Services, services},
          workstation: "ws",
@@ -63,7 +62,6 @@ defmodule CodingAgentFramework.MCPServicesTest do
          stream: {__MODULE__, :unused},
          transcripts: nil,
          place: fn agent -> {:ok, %{project: "app", name: agent, worktree: wt}} end,
-         instance: "s",
          cap: 60_000,
          tool_timeout: 600_000,
          margin: 60_000}

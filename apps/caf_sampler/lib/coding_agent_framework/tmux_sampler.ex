@@ -50,6 +50,13 @@ defmodule CodingAgentFramework.TmuxSampler do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc """
+  The topics of the cues it writes, each as its whole shape, `*` for a word it fills in
+  (`CodingAgentFramework.Cues`): `tmux:<host>:<server>`.
+  """
+  @spec writes() :: [String.t()]
+  def writes, do: ~w(tmux:*:*)
+
+  @doc """
   Samples now. Returns `{:ok, %{up, generation, held, unviewed, viewers, problems, ids}}`, where
   `ids` are the rows written, or `{:unknown, reason}` when a read failed.
   """

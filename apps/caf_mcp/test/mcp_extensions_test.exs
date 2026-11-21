@@ -85,12 +85,10 @@ defmodule CodingAgentFramework.MCPExtensionsTest do
       mains: {StandIn, self()},
       services: {StandIn, self()},
       workstation: "ws",
-      jobs: {StandIn, self()},
       tracker: {StandIn, self()},
       stream: {StandIn, self()},
       transcripts: nil,
       place: fn _ -> {:refused, :no_worktree} end,
-      instance: "ext",
       tool_timeout: 600_000,
       margin: 60_000
     ]

@@ -157,6 +157,13 @@ defmodule CodingAgentFramework.Delegates do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc """
+  The topics of the cues it writes, each as its whole shape, `*` for a word it fills in
+  (`CodingAgentFramework.Cues`): `delegates:<host>`.
+  """
+  @spec writes() :: [String.t()]
+  def writes, do: ~w(delegates:*)
+
+  @doc """
   Starts a delegate of `parent` (a main session's name) on `branch` of `project`, with `model`,
   and `brief` as its first message, stored in `Mailbox`. Answers `{:ok, %{id, name,
   session_id, account, brief_uuid}}`, the report being the reply to `brief_uuid`; `{:refused,

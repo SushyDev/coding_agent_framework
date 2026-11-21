@@ -144,6 +144,13 @@ defmodule CodingAgentFramework.Jobs do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc """
+  The topics of the cues it writes, each as its whole shape, `*` for a word it fills in
+  (`CodingAgentFramework.Cues`): `jobs`.
+  """
+  @spec writes() :: [String.t()]
+  def writes, do: ~w(jobs)
+
+  @doc """
   Runs `argv` as job `id` (a socket name: letters, digits, `-`, `_`) in the copy `where` names
   of `worktree`. Options: `:timeout` (ms), the job's, kept on the host and the call's deadline;
   `:sync_timeout` and `:lock_wait` (ms) for the sync; `:start_timeout` (ms) for dtach's reply;

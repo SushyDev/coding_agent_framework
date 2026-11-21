@@ -17,8 +17,9 @@ defmodule CodingAgentFramework.Config do
     it leaves for a name is `name_room/1`'s: a delegate's or a main session's start, and a
     service's, refuse a longer name before any row, `{:bad, :name, {:longer_than, n}}` (a
     42-byte home leaves an agent 53 bytes, a service 43; F-169's new-2, F-172);
-  - `instance`: this framework instance's name, in each job id `MCP` makes, and the name the
-    app finds it by (`CodingAgentFramework.subscribe/2`): 1 to 100 bytes, no control character;
+  - `instance`: this framework instance's name, the name the app finds it by
+    (`CodingAgentFramework.subscribe/2`), and so unique in the app (a second start of a running
+    name is refused): 1 to 100 bytes, no control character;
   - `workstation`: the workstation's host name, and `programs`, the absolute path of each
     program there (`CodingAgentFramework.Programs`);
   - `hosts`: the other hosts, name to `%{programs: programs, dir: dir}` as `Jobs` and `Services`
@@ -81,7 +82,11 @@ defmodule CodingAgentFramework.Config do
   - `extensions`: the app's bundles, each `%{name, scope, tools}` as
     `CodingAgentFramework.Extension` takes them, served on the agents' MCP endpoint beside the
     framework's tools; checked here with `MCP.extensions/3`, so a clash or a slow tool refuses
-    the config, `{:refused, {:bad, :extensions, reason}}`. None by default.
+    the config, `{:refused, {:bad, :extensions, reason}}`. None by default;
+  - `undeclared_cues`: what becomes of a cue whose topic no part declares it writes
+    (`CodingAgentFramework.Cues.notify/3`): `:route` by default, handed on as any other, or
+    `:raise`, which the framework's own tests set, so a part that writes such a topic fails
+    them.
 
       iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
       ...>   programs: %{kill: "/bin/kill"}, accounts: ["work"], ports: %{intake: 4790, mcp: 4791},
@@ -121,7 +126,8 @@ defmodule CodingAgentFramework.Config do
     pressure: nil,
     tool_hooks: %{},
     heavy: [],
-    extensions: []
+    extensions: [],
+    undeclared_cues: :route
   ]
 
   @type t :: %__MODULE__{}
@@ -189,6 +195,9 @@ defmodule CodingAgentFramework.Config do
 
       not match?({:ok, _}, Runs.heavy(Map.get(fields, :heavy, []))) ->
         {:refused, {:bad, :heavy}}
+
+      Map.get(fields, :undeclared_cues, :route) not in [:route, :raise] ->
+        {:refused, {:bad, :undeclared_cues}}
 
       true ->
         c = struct!(__MODULE__, fields)

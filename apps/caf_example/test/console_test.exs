@@ -357,6 +357,23 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
     assert out =~ "onboarding: passed"
   end
 
+  # F-173's new-2: the login names the OS user as USER, whatever the shell had, as every held
+  # launch does, so it writes the Keychain item those sessions read.
+  test "bin/caf-login sets USER to the OS user", ctx do
+    login = Path.join(@root, "bin/caf-login")
+    claude = Path.join(ctx.dir, "claude-user")
+    File.write!(claude, "#!#{program!(:bash)}\necho \"user: ${USER-unset}\"\n")
+    File.chmod!(claude, 0o755)
+    home = Path.join(ctx.dir, "user-home")
+    {me, 0} = System.cmd(program!(:id), ["-un"])
+
+    for user <- [{"USER", "someone-else"}, {"USER", nil}] do
+      env = [{"CAF_CLAUDE", claude}, user]
+      {out, _} = System.cmd(login, ["--check", home, "one"], env: env, stderr_to_stdout: true)
+      assert out =~ "user: #{String.trim(me)}\n"
+    end
+  end
+
   # The script as a person runs it, in this VM's devenv environment, compiled for tests.
   defp script(config) do
     port =

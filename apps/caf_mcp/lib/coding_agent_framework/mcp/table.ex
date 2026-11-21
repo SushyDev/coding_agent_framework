@@ -15,7 +15,6 @@ defmodule CodingAgentFramework.MCP.Table do
   """
 
   alias CodingAgentFramework.Store
-  alias Exqlite.Sqlite3
 
   @schema """
   CREATE TABLE IF NOT EXISTS mcp_tokens (agent TEXT PRIMARY KEY, hash BLOB NOT NULL UNIQUE);
@@ -87,30 +86,6 @@ defmodule CodingAgentFramework.MCP.Table do
             []
           ),
         do: %{id: id, agent: agent, tool: tool, args: args, state: state, outcome: outcome}
-  end
-
-  @doc """
-  The agent that made `run` call `id`, read from the file at `path` by a reader of its own,
-  opened read-only, so no part's process is asked and the writer's open marks nothing `cut`.
-  Answers `{:ok, agent}`, `{:refused, {:no_call, id}}`, or `{:unknown, reason}` when the file
-  cannot be read.
-  """
-  @spec caller(String.t(), integer) :: {:ok, String.t()} | {:refused, term} | {:unknown, term}
-  def caller(path, id) do
-    with {:ok, db} <- Sqlite3.open(path, mode: :readonly) do
-      try do
-        case Store.query(db, "SELECT agent FROM mcp_calls WHERE id = ?1 AND tool = 'run'", [id]) do
-          [[agent]] -> {:ok, agent}
-          [] -> {:refused, {:no_call, id}}
-        end
-      rescue
-        e in MatchError -> {:unknown, {:read, e.term}}
-      after
-        Sqlite3.close(db)
-      end
-    else
-      {:error, reason} -> {:unknown, {:open, reason}}
-    end
   end
 
   defp hash(token), do: :crypto.hash(:sha256, token)

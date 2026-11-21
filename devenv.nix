@@ -25,6 +25,7 @@ let
   #   - sh, bash, rm, mv, env, kill, ps, cat, tail, head, mkdir, mktemp, mkfifo, stty, echo, sleep,
   #     true: the POSIX tools the tests and scripts call (stty: the screen stand-in reads keys
   #     raw; mktemp and rm: bin/caf-login's scratch folder for Claude Code's first run).
+  #   - id: the OS user's name, which bin/caf-login sets as USER (F-173's new-2).
   #   - tlc and java: TLA+ checks of model/tla (bin/check-model). Development only.
   programs = {
     TMUX = lib.getExe pkgs.tmux;
@@ -54,6 +55,7 @@ let
     HEAD = lib.getExe' pkgs.coreutils "head";
     MKDIR = lib.getExe' pkgs.coreutils "mkdir";
     MKTEMP = lib.getExe' pkgs.coreutils "mktemp";
+    ID = lib.getExe' pkgs.coreutils "id";
     MKFIFO = lib.getExe' pkgs.coreutils "mkfifo";
     STTY = lib.getExe' pkgs.coreutils "stty";
     ECHO = lib.getExe' pkgs.coreutils "echo";

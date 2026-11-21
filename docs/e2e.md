@@ -56,13 +56,15 @@ The framework home must be short: macOS cuts a socket path at 104 bytes.
          "cap": 3
        }
      },
-     "git": {"name": "Demo Bot", "email": "you@example.com"}
+     "git": {"name": "Demo Bot", "email": "you@example.com"},
+     "scheduler": {"heavy": [{"match": "^sleep 30", "class": "heavy"}]}
    }
    ```
 
    `git` is the author every agent commits as, distinct from you. For GitHub to show its
    commits Verified, `email` must be one of your GitHub account's verified emails (its noreply
-   address works); the name may be anything.
+   address works); the name may be anything. `scheduler.heavy` names the one heavy command
+   step 6 runs under a lease.
 
 3. **Log both accounts in**, each with its own config directory under the home:
 
@@ -203,17 +205,18 @@ to `one`, the first name, and its status line gives the first real reading.
 - **Type**:
 
   ```elixir
-  message(caf, "demo-main", "Use your run tool: host ws, argv [\"/bin/sh\", \"-c\", \"sleep 30; echo job done\"], timeout 120000. Then report its exit code and its log in one line.")
+  message(caf, "demo-main", "Run this with your Bash tool, in the foreground: sleep 30; echo job done. Then report its exit code and its output in one line.")
   ```
 
-  and `leases(caf)` while the job runs, `leases(caf, true)` after it.
-- **Watch** `demo-main`'s screen. If Claude Code asks to allow the `run` tool, answer from the
+  and `leases(caf)` while it runs, `leases(caf, true)` after it.
+- **Watch** `demo-main`'s screen. If Claude Code asks to allow the command, answer from the
   console: `requests(caf, "demo-main")`, then `answer_request(caf, "demo-main", "<id>",
   "allow")`.
 - **Passed when**, while it runs, `leases(caf)` shows a lease of class `heavy` with a slot,
-  held by `job mcp-e2e-<n>`; after it, the same lease reads `released by monitor`, and
-  `demo-main` reports exit 0 and `job done`. The job ran in a copy under
-  `/Users/me/caf-e2e/ws/`, not in the checkout.
+  held by `run <pid> <start>`, the wrapper `<home>/bin/caf-run` the hook rewrote the command
+  into (F-171); after it, the same lease reads `released by monitor`, and `demo-main` reports
+  exit 0 and `job done`. There is no `run` tool (F-176): an agent's heavy command is its own
+  `Bash` under a lease.
 
 ## 7. A move to the second account and back
 

@@ -167,7 +167,9 @@ Built, each from a checked model in `model/tla/`:
   names (a heavy run, a builder's suite, a landing's gates), its row the holder, released once
   `Jobs` read the job's end; a refused job is a row that says why and when to ask again; a
   heavy slot is the first fenced resource, so a start that lands late runs nothing; and a
-  landing takes its slot and its project's lock in one gang lease, through the `run` tool;
+  landing takes its slot and its project's lock in one gang lease, run by the app through
+  `Jobs` (the `run` tool is gone since F-176; an agent's heavy command is its own `Bash`
+  under a lease, F-171);
 - `Mains` (F-141), against `Checkout.tla`: each project's checkout, the framework's own clone
   of its repository, made once under a temporary name and renamed whole; the pull after a
   landing, fast-forward only and only while the checkout is clean, owed again after a restart

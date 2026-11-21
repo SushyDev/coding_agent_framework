@@ -14,17 +14,6 @@ defmodule CodingAgentFramework.MCP do
   refusal included. It answers `{:ok, value}`, `{:refused, reason}` or `{:unknown, reason}`:
 
   - `message(to, text)`: `Grants.may_message?/3`, then the mailbox's `message/5`;
-  - `run(host, argv, timeout, opts)`, served but listed to no agent (F-171: an agent runs a
-    heavy command with its own `Bash`, under a lease, `CodingAgentFramework.Runs`; the tool
-    and its late end go in a later unit): `Grants.may_use?/2`, then the jobs' `run/6`, as job
-    `mcp-<instance>-<call id>` in the copy of the caller's worktree that `place` names, with
-    `timeout` (ms, at most the `:cap`, a day unless the app says) as the job's and the call's.
-    `opts` may name `fetch` (paths) and `class` (`heavy` by default, `builder` or `landing`):
-    with the app's `lease:` function, of the class and the caller's project, the job asks the
-    `Scheduler` for a lease of the units it answers, in that class, all in one request, so a
-    landing's slot and lock are one gang lease. The answer is `Jobs`' own, except an unknown one: it is
-    `{:unknown, %{job: id, reason: reason}}`, so the caller can match the job's late end,
-    which comes as a message, to the call;
   - `start_delegate(project, branch, model, brief)`: `Grants.may_start_delegate?/3`, then the
     delegates' `start_delegate/7` with the caller as parent (the operator names a main session
     as `parent`); answers `%{delegate: name}`, with `already: true` when the branch's delegate
@@ -35,7 +24,7 @@ defmodule CodingAgentFramework.MCP do
     once (F-170); the operator's start waits for the lease unless it says `wait: false`;
   - `run_delegate(project, branch, model, brief, timeout)`: as `start_delegate`, then the
     mailbox's `await/4` on the report, the answer to the brief's uuid, all within `timeout`
-    (ms, capped as `run`'s, and under the client's tool timeout less the margin:
+    (ms, at most the `:cap`, a day unless the app says, and under the client's tool timeout less the margin:
     `:tool_timeout` and `:margin`, so the client never gives up first). Answers `%{delegate:
     name, status: status, report: text}`, `status` `finished` for the delegate's reply and
     `failed` for the framework's notice, or at the timeout `{:unknown, %{delegate: name,
@@ -61,11 +50,11 @@ defmodule CodingAgentFramework.MCP do
     check, and answers as it does: `service_start(name, argv, opts)` (`start/5` in the copy
     `place` names, on `opts`' `host`, the `:workstation` unless named, with its `forward`, the
     `local` port it is forwarded to (the same port unless named), and `keep`; its `timeout`,
-    capped as `run`'s, bounds the whole start), `service_send(name, input)` (`send/5`), `service_restart(name)` (`restart/4`),
+    at most the `:cap`, bounds the whole start), `service_send(name, input)` (`send/5`), `service_restart(name)` (`restart/4`),
     `service_stop(name)` (`stop/4`), `service_hand(name, to)` (`hand/4`). Those open to any
     agent take `Grants.may_use?/2` first: `services()` (`list/1`, each row's name, host,
     owner, state, restarts and ports), `service_logs(name, from)` (`logs/4`), and
-    `service_wait(name, until, timeout)` (`wait/4`, `timeout` capped as `run`'s), where `until`
+    `service_wait(name, until, timeout)` (`wait/4`, `timeout` at most the `:cap`), where `until`
     is `{"line": pattern}` (from the current start's offset), `{"port": n}` or `"exit"`;
   - `agents(all)`: `Grants.may_use?/2`, then the tree as the `Tracker` reads it from its view
     (`Tracker.agents/2`, `CodingAgentFramework.Tracker.Tree`), never a copy kept here; a
@@ -113,15 +102,21 @@ defmodule CodingAgentFramework.MCP do
   the agent row, `start_delegate`, `run_delegate` and `start_main`) is the operator's alone:
   an agent's call that names it is refused `{:operator_only, :meta}`.
 
+  An agent runs a heavy command with its own `Bash`, which the framework's `PreToolUse` policy
+  puts under a lease (`CodingAgentFramework.Runs`, F-171); there is no `run` tool, and an app's
+  landing runs through `CodingAgentFramework.Jobs` itself.
+
   **The operator** calls the same tools through `operate/3`, which writes its row under the
   operator's name, so each act it makes names it as the actor; `issue/2` never makes it a
-  token. The design's other tools come in later parts (`docs/build-notes/F-86.md`).
+  token. The operator's own tools (`answer_startup`, `end_main`, `withdraw`) are refused
+  `:operator_only` to any other caller, and no agent's list names them (`tools/2`). The
+  design's other tools come in later parts (`docs/build-notes/F-86.md`).
 
       {:ok, mcp} = MCP.start_link(dir: dir, port: 4791, grants: grants, acts: acts,
-        mailbox: {Mailbox, mailbox}, jobs: {Jobs, jobs}, delegates: {Delegates, delegates},
+        mailbox: {Mailbox, mailbox}, delegates: {Delegates, delegates},
         services: {Services, services}, workstation: "ws", tracker: {Tracker, tracker},
         stream: {Stream, stream}, transcripts: {Transcripts, t}, place: &place/1,
-        instance: "a", tool_timeout: 3_600_000, margin: 60_000)
+        tool_timeout: 3_600_000, margin: 60_000)
       {:ok, config} = MCP.issue(mcp, "app-fix")
       MCP.call(mcp, "app-fix", "message", %{"to" => "app-main", "text" => "Done."})
       #=> {:ok, {:queued, 3}}
@@ -137,7 +132,7 @@ defmodule CodingAgentFramework.MCP do
   @window 16_384
   # A read takes one byte past the window, so `lines/2` can tell a longer line from one that fits.
   @read_max @window + 1
-  # The default cap on a `run`'s timeout: a job the caller forgot still ends within a day.
+  # The default cap on a call's timeout: a wait the caller forgot still ends within a day.
   @day 86_400_000
   @agent ~r/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z/
   # The most a delegate's start may take of a `run_delegate`'s timeout: `Delegates`' own default.
@@ -168,35 +163,8 @@ defmodule CodingAgentFramework.MCP do
         "settles unknown"
   }
 
-  # Served, but no agent's list names it (F-171): an agent runs a heavy command with its own
-  # `Bash`, which the framework's PreToolUse policy puts under a lease (`Runs`).
-  @unlisted [
-    %{
-      name: "run",
-      description: "Runs a job on a host in a copy of your worktree; answers its exit and log.",
-      inputSchema: %{
-        type: "object",
-        properties: %{
-          host: %{type: "string"},
-          argv: %{type: "array", items: %{type: "string"}},
-          timeout: %{type: "integer", description: "ms, at most a day"},
-          opts: %{
-            type: "object",
-            properties: %{
-              fetch: %{type: "array", items: %{type: "string"}},
-              class: %{
-                type: "string",
-                enum: ["heavy", "builder", "landing"],
-                description:
-                  "the lease's class: a heavy run (default), a builder's suite, or a landing's gates"
-              }
-            }
-          }
-        },
-        required: ["host", "argv", "timeout"]
-      }
-    }
-  ]
+  # The operator's alone: each is refused `:operator_only` to an agent, and listed to none.
+  @operator ~w(answer_startup end_main withdraw)
 
   @tools [
     %{
@@ -490,26 +458,21 @@ defmodule CodingAgentFramework.MCP do
   @doc """
   Starts the part. Options: `:dir` (a directory of its own: the table and the agents' configs),
   `:port` (where the embedding app serves the endpoint on 127.0.0.1), `:grants`, `:mailbox`,
-  `:jobs`, `:delegates`, `:services`, `:tracker` and `:stream` (each `{module, server}`:
-  `{CodingAgentFramework.Mailbox, pid}`, `{CodingAgentFramework.Jobs, pid}`,
-  `{CodingAgentFramework.Delegates, pid}`, `{CodingAgentFramework.Services, pid}`,
+  `:delegates`, `:services`, `:tracker` and `:stream` (each `{module, server}`:
+  `{CodingAgentFramework.Mailbox, pid}`, `{CodingAgentFramework.Delegates, pid}`, `{CodingAgentFramework.Services, pid}`,
   `{CodingAgentFramework.Tracker, pid}`, `{CodingAgentFramework.Stream, pid}`, or a stand-in
   module with the same functions), `:transcripts` (the host's
   `{CodingAgentFramework.Transcripts, pid}`, or nil), `:workstation` (the host a service starts on
   unless its call names one), and
   `:place`, a function of an agent's name that answers `{:ok, %{project: p, name: n, worktree:
-  path}}` (the copy jobs and services run in) or `{:refused, reason}`. `:acts` is the
+  path}}` (the copy services run in) or `{:refused, reason}`. `:acts` is the
   instance's `CodingAgentFramework.Acts`, where each fix takes its claim. `:mover` (optional)
   is `{CodingAgentFramework.Mover, pid}`, which the `move` tool calls; without it `move` is
   refused `:no_mover`. `:sessions` (optional) is `{CodingAgentFramework.Sessions, pid}`, which
   `answer_startup` calls; without it that tool is refused `:no_sessions`. `:mains` (optional) is
   `{CodingAgentFramework.Mains, pid}`, which `start_main` calls; without it that tool is refused
-  `:no_mains`. `:lease` (optional) is
-  a function of a job's class (`:heavy`, `:builder`, `:landing`) and the caller's project that
-  answers `{:ok, units}`, the units of each resource the `Scheduler` leases that the job needs,
-  or `{:refused, reason}`; without it `run` names no lease. `:instance` (a string, required)
-  is this part's name in its jobs' ids, so two of them sharing one `Jobs` never make the same
-  id. `:cap` (ms, default a day) is the most a `run`'s or a `service_wait`'s `timeout` may be.
+  `:no_mains`. `:cap` (ms, default a day) is the most a `run_delegate`'s, a `service_start`'s
+  or a `service_wait`'s `timeout` may be.
   `:tool_timeout` (ms) is the MCP tool timeout `CodingAgentFramework.ClaudeCLI` sets for every
   agent at launch, and `:margin` (ms, under it) how far under it a `run_delegate`'s `timeout`
   must stay: both required, positive integers. `:extensions` (optional, F-154) is the app's
@@ -526,7 +489,8 @@ defmodule CodingAgentFramework.MCP do
   def tools, do: @tools
 
   @doc """
-  The tools `agent` sees, as its `tools/list` answers them: the framework's, then the app's
+  The tools `agent` sees, as its `tools/list` answers them: the framework's but the operator's
+  own (`answer_startup`, `end_main`, `withdraw`, which only the operator sees), then the app's
   that its scope holds (`Grants.may_call?/3`), in the order the app gave them. An agent the tree
   does not hold sees none of the app's.
 
@@ -535,7 +499,16 @@ defmodule CodingAgentFramework.MCP do
   """
   @spec tools(GenServer.server(), String.t()) :: [map] | {:refused, term} | {:unknown, term}
   def tools(mcp, agent) do
-    with {:ok, ctx} <- ask(mcp, :ctx), do: @tools ++ app_tools(ctx, agent)
+    with {:ok, ctx} <- ask(mcp, :ctx), do: listed(ctx, agent)
+  end
+
+  defp listed(ctx, agent) do
+    own =
+      if agent == Grants.operator(ctx.grants),
+        do: @tools,
+        else: Enum.reject(@tools, &(&1.name in @operator))
+
+    own ++ app_tools(ctx, agent)
   end
 
   @doc """
@@ -549,8 +522,7 @@ defmodule CodingAgentFramework.MCP do
   """
   @spec extensions(term, pos_integer, pos_integer) :: {:ok, [map]} | {:refused, term}
   def extensions(extensions, tool_timeout, margin),
-    do:
-      Extension.check(extensions, Enum.map(@tools ++ @unlisted, & &1.name), tool_timeout - margin)
+    do: Extension.check(extensions, Enum.map(@tools, & &1.name), tool_timeout - margin)
 
   defp app_tools(ctx, agent) do
     for t <- ctx.app_tools,
@@ -639,28 +611,6 @@ defmodule CodingAgentFramework.MCP do
   defp taken({:taken, id, outcome}), do: {outcome, id}
   defp taken(outcome), do: {outcome, nil}
 
-  @doc """
-  The caller of job `job`, as `run` named it (`mcp-<instance>-<call id>`), read from the call
-  log in `dir` (the `:dir` the part was started with). It asks no process, so the embedding
-  app can route a job's late end while `MCP` is not running: `Jobs` hands the ends it owes as
-  it starts, before `MCP`, which is given `Jobs`, has started. Answers `{:ok, agent}`,
-  `{:refused, {:not_ours, job}}` for an id this instance did not make, `{:refused, {:no_call,
-  id}}`, or `{:unknown, reason}`.
-
-      MCP.caller("/srv/caf/parts/mcp", "a", "mcp-a-7")
-      #=> {:ok, "app-unit-review"}
-  """
-  @spec caller(String.t(), String.t(), String.t()) ::
-          {:ok, String.t()} | {:refused, term} | {:unknown, term}
-  def caller(dir, instance, job) do
-    with ["", id] <- String.split(job, "mcp-#{instance}-", parts: 2),
-         {id, ""} <- Integer.parse(id) do
-      Table.caller(Path.join(dir, "mcp.db"), id)
-    else
-      _ -> {:refused, {:not_ours, job}}
-    end
-  end
-
   @doc "Every call's row, oldest first."
   @spec calls(GenServer.server()) :: [map] | {:unknown, term}
   def calls(mcp), do: ask(mcp, :calls)
@@ -683,34 +633,6 @@ defmodule CodingAgentFramework.MCP do
 
     with :ok <- Grants.may_message?(ctx.grants, caller, to),
          do: mod.message(server, caller, to, text, timeout: @step)
-  end
-
-  defp act(
-         ctx,
-         caller,
-         id,
-         "run",
-         %{"host" => host, "argv" => [_ | _] = argv, "timeout" => t} = a
-       )
-       when is_binary(host) and is_integer(t) and t > 0 and t <= ctx.cap do
-    {mod, server} = ctx.jobs
-    fetch = get_in(a, ["opts", "fetch"]) || []
-
-    with true <-
-           (is_list(fetch) and Enum.all?(argv ++ fetch, &is_binary/1)) or
-             {:refused, {:bad, :args}},
-         {:ok, class} <- job_class(get_in(a, ["opts", "class"])),
-         :ok <- Grants.may_use?(ctx.grants, caller),
-         {:ok, %{project: p, name: n, worktree: w}} <- ctx.place.(caller),
-         {:ok, lease} <- job_lease(ctx, class, p) do
-      job = "mcp-#{ctx.instance}-#{id}"
-      where = %{host: host, project: p, name: n}
-
-      case mod.run(server, job, where, w, argv, [timeout: t, fetch: fetch] ++ lease) do
-        {:unknown, reason} -> {:unknown, %{job: job, reason: reason}}
-        answer -> answer
-      end
-    end
   end
 
   defp act(ctx, caller, _id, "start_delegate", args) do
@@ -809,7 +731,7 @@ defmodule CodingAgentFramework.MCP do
 
   defp act(ctx, caller, _id, "reload", _args) do
     with :ok <- Grants.may_use?(ctx.grants, caller),
-         do: {:ok, %{tools: Enum.map(@tools ++ app_tools(ctx, caller), & &1.name)}}
+         do: {:ok, %{tools: Enum.map(listed(ctx, caller), & &1.name)}}
   end
 
   defp act(_ctx, _caller, _id, "service_start", %{"opts" => o}) when not is_map(o),
@@ -980,7 +902,7 @@ defmodule CodingAgentFramework.MCP do
   end
 
   defp act(_ctx, _caller, _id, tool, _args) do
-    if Enum.any?(@tools ++ @unlisted, &(&1.name == tool)),
+    if Enum.any?(@tools, &(&1.name == tool)),
       do: {:refused, {:bad, :args}},
       else: {:refused, {:unknown_tool, tool}}
   end
@@ -1063,21 +985,6 @@ defmodule CodingAgentFramework.MCP do
   end
 
   defp held(_fix, _state), do: :ok
-
-  defp job_class(nil), do: {:ok, :heavy}
-  defp job_class("heavy"), do: {:ok, :heavy}
-  defp job_class("builder"), do: {:ok, :builder}
-  defp job_class("landing"), do: {:ok, :landing}
-  defp job_class(_), do: {:refused, {:bad, :class}}
-
-  # The units a job of `class` in `project` asks for, as the app declares them; with no `lease`
-  # function the jobs ask for no lease.
-  defp job_lease(%{lease: nil}, _class, _project), do: {:ok, []}
-
-  defp job_lease(ctx, class, project) do
-    with {:ok, units} <- ctx.lease.(class, project),
-         do: {:ok, [lease: %{class: class, module: project, units: units}]}
-  end
 
   defp service_ok(name) do
     if is_binary(name), do: :ok, else: {:refused, {:bad, :args}}
@@ -1264,8 +1171,8 @@ defmodule CodingAgentFramework.MCP do
          {:ok, db} <- Table.open(Path.join(dir, "mcp.db")) do
       ctx =
         Map.new(
-          ~w(grants acts mailbox jobs delegates services workstation tracker stream)a ++
-            ~w(transcripts place instance)a,
+          ~w(grants acts mailbox delegates services workstation tracker stream)a ++
+            ~w(transcripts place)a,
           &{&1, Keyword.fetch!(opts, &1)}
         )
 
@@ -1274,7 +1181,6 @@ defmodule CodingAgentFramework.MCP do
       ctx = Map.put(ctx, :mover, Keyword.get(opts, :mover))
       ctx = Map.put(ctx, :sessions, Keyword.get(opts, :sessions))
       ctx = Map.put(ctx, :mains, Keyword.get(opts, :mains))
-      ctx = Map.put(ctx, :lease, Keyword.get(opts, :lease))
       ctx = Map.merge(ctx, %{app_tools: app, app: Map.new(app, &{&1.name, &1})})
       {:ok, %{db: db, dir: dir, port: Keyword.fetch!(opts, :port), ctx: ctx}}
     else

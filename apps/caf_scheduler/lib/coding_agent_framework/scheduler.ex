@@ -84,6 +84,13 @@ defmodule CodingAgentFramework.Scheduler do
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
+  @doc """
+  The topics of the cues it writes, each as its whole shape, `*` for a word it fills in
+  (`CodingAgentFramework.Cues`): `scheduler:<host>`, a lease's row or the pressure's level.
+  """
+  @spec writes() :: [String.t()]
+  def writes, do: ~w(scheduler:*)
+
   @doc "Asks for a lease (see the module's doc). Option `timeout:` (ms, default 5 000)."
   @spec request(GenServer.server(), map, keyword) ::
           {:ok, map}
