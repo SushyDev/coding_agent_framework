@@ -274,6 +274,27 @@ defmodule CodingAgentFramework.Intake.Table do
   end
 
   @doc """
+  When the newest row of a session was written (ms), or nil for none: whether its hooks spoke
+  since a tool call (`HooksSilent`, F-184); `:unread` before a start.
+
+      iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "newest.db")
+      iex> {:ok, db} = CodingAgentFramework.Intake.Table.open(path)
+      iex> CodingAgentFramework.Intake.Table.newest(db, "laptop", "work", "s1")
+      :unread
+  """
+  @spec newest(db, String.t(), String.t(), String.t()) :: :unread | {:ok, integer | nil}
+  def newest(db, host, account, session_id) do
+    with {:ok, _} <- last_read(db, host, account) do
+      sql =
+        "SELECT max(written_at) FROM intake_events " <>
+          "WHERE host = ?1 AND account = ?2 AND session_id = ?3"
+
+      [[at]] = Store.query(db, sql, [host, account, session_id])
+      {:ok, at}
+    end
+  end
+
+  @doc """
   The host's holds that wait on a person (F-179, `Prompts`), oldest first: each
   `PermissionRequest` row and each `Stop` row at Claude Code's cap (`prompt` `stop_cap`) whose
   hold is `held`, or `deciding` (an answer on its way out).

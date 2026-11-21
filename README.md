@@ -273,7 +273,12 @@ Built, each from a checked model in `model/tla/`:
 - the first remedy on that shape and one clear (F-183, against `Remedies.tla`): a main session
   whose process exited by itself is resumed once per absence through `Mains`, and a second
   absence within the bound is asked (`AbsentMains`); a `remedy` prompt's answer is the person's
-  clear of its state (`Watch.clear/3`), and `Recoveries.clear/2` is gone.
+  clear of its state (`Watch.clear/3`), and `Recoveries.clear/2` is gone;
+- a background command that outlives its delegate's report (F-184, against `Remedies.tla`): the
+  report is taken at the result Claude Code writes while the command runs, and the turn the
+  command's end begins is never a second report; a command whose group used no CPU time for a
+  bound after the report is ended by its record, on Linux (`StuckBackgrounds`); and a tool call
+  with no hook row of its session within a bound is shown as `hooks_silent` (`HooksSilent`).
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

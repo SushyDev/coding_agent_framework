@@ -97,10 +97,13 @@ defmodule CodingAgentFramework.AgentsTest do
 
   test "a delegate ends only once no process of it may live, and frees its parent's cap", ctx do
     {:ok, agents} = Agents.open(ctx.opts[:db], "test")
-    {:ok, _} = Sessions.start(ctx.sessions, "app-fix", ctx.account, headless(ctx, :on_message))
+    launch = headless(ctx, :on_message)
+    {:ok, %{session_id: id}} = Sessions.start(ctx.sessions, "app-fix", ctx.account, launch)
     assert Agents.children(agents, "main") == 1
     assert {:refused, {:not_free, "running"}} = Sessions.ended(ctx.sessions, "app-fix")
 
+    # Its first line opens a turn, and a stop refuses a running turn: it waits for Stream's cue.
+    turn_ended(ctx, id)
     {:ok, :stopped} = Sessions.stop(ctx.sessions, "app-fix")
     assert Agents.holds?(Agents.get(agents, "app-fix"))
     assert {:ok, :ended} = Sessions.ended(ctx.sessions, "app-fix")

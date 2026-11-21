@@ -22,9 +22,12 @@ defmodule CafRecoveries.MixProject do
     [
       {:caf_acts, in_umbrella: true},
       {:caf_holder, in_umbrella: true},
+      {:caf_intake, in_umbrella: true},
+      {:caf_shell, in_umbrella: true},
       {:caf_sampler, in_umbrella: true},
       {:caf_sessions, in_umbrella: true},
       {:caf_tmux, in_umbrella: true},
+      {:caf_transcripts, in_umbrella: true},
       {:caf_watch, in_umbrella: true},
       {:caf_test, in_umbrella: true, only: :test}
     ]

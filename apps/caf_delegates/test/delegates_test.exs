@@ -14,6 +14,7 @@ defmodule CodingAgentFramework.DelegatesTest do
   alias CodingAgentFramework.ClaudeCLI.Options
   alias CodingAgentFramework.Delegates.{Table, Work}
   alias CodingAgentFramework.Sessions.Agents
+  alias CodingAgentFramework.Sessions.Turn, as: SessionsTurn
 
   setup {SessionsSetup, :sessions}
 
@@ -228,6 +229,51 @@ defmodule CodingAgentFramework.DelegatesTest do
     cue(ctx, current(ctx))
     cue(ctx, restart(ctx))
     assert [_] = turn_notices(ctx)
+  end
+
+  # Remedies.tla's BriefResult, TaskEnds and OwnResult (F-184): OneReport. The stand-in's `bg`
+  # plays the order measured on Claude Code 2.1.322: the brief's result while its background
+  # command runs, then, at the test's word, the command's end and a turn of Claude Code's own.
+  test "a turn a background command's end begins is never a second report or a reply", ctx do
+    fifo = Path.join(ctx.dir, "bg.fifo")
+    {_, 0} = System.cmd(program!(:mkfifo), [fifo])
+
+    assert {:ok, %{id: id, name: name, brief_uuid: u}} =
+             Delegates.start_delegate(current(ctx), "main", "app", "unit/one", "opus", "bg go")
+
+    # The report is taken at the brief's result, while the command runs: never held up by it.
+    assert {:ok, %{report: "taken", text: report}} =
+             cue_until(ctx, id, &(&1.status == "finished"))
+
+    assert report == "done #{u}"
+    running = stream_row(ctx, id, &(&1.background.tasks == ["t-#{u}"]))
+    assert SessionsTurn.stream(running) == :running
+
+    # A parent's message waits while the command runs, and through the turn its end begins.
+    {:ok, {:queued, m}} = Mailbox.message(ctx.mailbox, "main", name, "Later.")
+    File.write!(fifo, "end\n")
+    own = stream_row(ctx, id, &(&1.background.changes == 2 and not &1.idle))
+    assert {own.tasks, SessionsTurn.stream(own)} == {%{}, :running}
+    cue(ctx, current(ctx))
+    assert %{status: "queued"} = Mailbox.Table.get(ctx.mtable, m)
+
+    # Its result names no message: told once as a turn of its own, never as the report.
+    File.write!(fifo, "end\n")
+    {:ok, %{uuid: mu}} = mailbox_until(ctx, m, &(&1.status == "delivered"))
+
+    {:ok, _} =
+      await(fn ->
+        cue(ctx, current(ctx))
+        if turn_notices(ctx) != [], do: {:ok, :told}
+      end)
+
+    key = "key:turn:test:r-bg-#{u}"
+    assert [%{reply_to: ^key, text: text}] = turn_notices(ctx)
+    assert text =~ "in a turn of its own after its report:\n\nthe command ended"
+
+    assert [%{kind: "reply", text: ^report}] = Enum.filter(rows(ctx), &(&1.reply_to == u))
+    assert %{status: "finished", report: "taken", text: ^report} = Table.get(ctx.dtable, id)
+    assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "message #{mu}"]
   end
 
   # Delegate.tla's StartAgain: a start idempotent per branch.

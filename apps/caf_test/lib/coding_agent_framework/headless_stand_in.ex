@@ -15,6 +15,11 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     `rate_limit_event` line, and the next message finishes it; `self` ends its turn, then
     starts one of its own at once, whose `result` (`on its own`, uuid `r-self-<uuid>`) names no message; `quiet`
     ends its turn with an empty `result` that names no message, so no report is read from it;
+    `bg` plays a background command as Claude Code 2.1.322 does (F-184): `task_started` and
+    `background_tasks_changed` listing it, then the turn's `result` while it runs; a line the
+    test writes to the FIFO `<dir>/bg.fifo` ends it (`task_updated`, `task_notification`, the
+    list empty, and a new `system`/`init` that begins a turn of its own), and a second line ends
+    that turn with a `result` (`the command ended`, uuid `r-bg-<uuid>`) that names no message;
   - for `interrupt`: a cancel of the request pending, and a `result`;
   - `end_session` ends it; a line that is not a JSON object ends it with status 1.
 
@@ -111,6 +116,21 @@ defmodule CodingAgentFramework.HeadlessStandIn do
             *'"content":"self'*|*'"content":"From '*'): self'*)
               turn_end "$u"
               ev '{"type":"result","subtype":"success","is_error":false,"result":"on its own","session_id":"'"$sid"'","uuid":"r-self-'"$u"'","user_message_uuids":[]}' ;;
+            *'"content":"bg'*|*'"content":"From '*'): bg'*)
+              t='"task_id":"t-'"$u"'","run_id":"run-'"$u"'","task_type":"local_bash","description":"wait"'
+              ev '{"type":"system","subtype":"task_started",'"$t"',"tool_use_id":"tu-'"$u"'","session_id":"'"$sid"'"}'
+              ev '{"type":"system","subtype":"background_tasks_changed","tasks":[{'"$t"'}],"session_id":"'"$sid"'"}'
+              turn_end "$u"
+              (
+                : > "DIR/pids/$BASHPID"
+                read -r _ < "DIR/bg.fifo"
+                ev '{"type":"system","subtype":"task_updated","task_id":"t-'"$u"'","patch":{"status":"completed"}}'
+                ev '{"type":"system","subtype":"task_notification","task_id":"t-'"$u"'","status":"completed"}'
+                ev '{"type":"system","subtype":"background_tasks_changed","tasks":[],"session_id":"'"$sid"'"}'
+                init
+                read -r _ < "DIR/bg.fifo"
+                ev '{"type":"result","subtype":"success","is_error":false,"result":"the command ended","session_id":"'"$sid"'","uuid":"r-bg-'"$u"'","user_message_uuids":[]}'
+              ) & ;;
             *'"content":"quiet'*|*'"content":"From '*'): quiet'*)
               ev '{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"'"$sid"'","uuid":"r-quiet-'"$u"'","user_message_uuids":[]}' ;;
             *'"content":"half'*|*'"content":"From '*'): half'*)

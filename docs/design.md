@@ -488,21 +488,43 @@ its state still open is asked (`Heal.tla`'s `Ended`), so a cut ask is not lost.
 
 Built in F-183: `absent_main` (`AbsentMains`, in `caf_recoveries`, after `Mains` in the tree),
 modeled with `stuck_background` in `Remedies.tla`, which instances `Heal.tla` beside
-`Boxes.tla`'s stuck turn: `PartialOnce`, `ResumeOncePerBound` and, as liveness, `ReportTaken`
-(a partial never stands in for the brief's reply), each with a `Break_Remedies_*`, and every
-property of `Heal.tla` through it. An absence is a main's agent row `stopped` with reason
-`exited`, one state per process that went (its `started_at`); its resume is
-`Mains.resume_main/3`, which takes the `Scheduler`'s lease; an ok is verified from the row at
-once. Not built: `stuck_background`'s detector and remedy, and `mcp_dropped` and
-`hooks_silent` (F-183's new-1 and new-2).
+`Boxes.tla`'s stuck turn, with `ResumeOncePerBound` and every property of `Heal.tla` through
+it. An absence is a main's agent row `stopped` with reason `exited`, one state per process
+that went (its `started_at`); its resume is `Mains.resume_main/3`, which takes the
+`Scheduler`'s lease; an ok is verified from the row at once.
+
+**A background command outlives its report** (measured on Claude Code 2.1.322, F-184): a
+headless turn that starts a background `Bash` command writes its `result` while the command
+runs, so `Delegates` takes the report then, never held up. The command's end
+(`task_notification`, and `background_tasks_changed` listing none) starts a turn of Claude
+Code's own, which opens with a new `system`/`init` and ends with a `result` that names no
+message: `Stream.Fold` reads that init as a turn running, so nothing is written into it, and
+its result is told to the parent as a turn of its own (F-155), never as a second report or a
+reply (`Remedies.tla`'s `OneReport`, `Break_Remedies_LastResult`). The process meanwhile holds
+its cap and lease, and `Sessions.stop/2` refuses it `turn_running`.
+
+Built in F-184: `stuck_background` (`StuckBackgrounds`, in `caf_recoveries`, one per host):
+a running headless delegate whose fold's turn ended with a result while Claude Code still
+lists a task (`Stream.Fold`'s `background`), and a process group its process started that has
+used no CPU time for `quiet:` (ten minutes), read from `/proc/<pid>/stat` of the group's
+members on Linux (`StuckBackgrounds.Groups`) and `unknown` on macOS, never stuck. Claude Code
+spawns each shell command detached, its own group, and no event names its pid, so a group is
+any led by a descendant of the delegate's process outside its own group (F-184's new-1). One
+state per group (its leader's pid and start time); the remedy is TERM to the group by that
+record, once per state; its outcome is read from the next `background_tasks_changed`: a task
+gone from it is recovered, all still listed fails the verify. No partial report goes
+(`StuckAfterReport`). And `hooks_silent` (`HooksSilent`): the newest tool call in an agent's
+transcript older than a bound with no `Intake` row of its session written since, shown only.
+Not built: `mcp_dropped` (F-183's new-2).
 
 The first remedies on this shape, decided (F-180's new-6), each a small unit:
 
 | Symptom | Read from | Remedy | Its bound |
 |---|---|---|---|
-| `stuck_background` | a delegate whose turn ended with its report owed while a background command of it used no CPU time for a bound, read from its process tree on Linux; on macOS it reads `unknown`, never stuck | hand the parent the delegate's last reply as its report marked `partial` ("The delegate protocol"), and end the hung command's group by its record (pid and start time) | once per state |
+| `stuck_background` | a delegate whose report was taken while Claude Code still lists a background task of it, and a process group of its process used no CPU time for a bound, read from `/proc` on Linux; on macOS it reads `unknown`, never stuck (F-184) | end that group by its record (its leader's pid and start time); its outcome read from the next `background_tasks_changed`; no partial report; off by default (shown only) until a run on Linux records the group's shape, since a quiet stdio MCP server spawned the same way would read as stuck; an operator turns it on with `remedies:` | once per state |
 | `absent_main` | a declared main session whose process is gone while the tree runs | one resume through `Mains` under the `Scheduler` | once per absence; a second absence within a bound is a `remedy` prompt |
-| `mcp_dropped`, `hooks_silent` | an agent's MCP connection or hooks gone quiet | none yet: shown only | — |
+| `hooks_silent` | a tool call the transcript shows with no `Intake` row of its session within a bound (F-184) | none: shown only | — |
+| `mcp_dropped` | an agent's MCP connection gone | none yet: shown only | — |
 | `limited` | an account's usage limit ("Usage limits", F-181) | `press_stop`, `go_on`, `move` | as "Usage limits" says |
 
 A usage-limit remedy is an instance of this healer: its symptom `limited`, its remedies
@@ -1433,13 +1455,11 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
    instead of retrying. That report is held and delivered like a finish. A kill after the last
    reply is a finish, read from the transcript.
 
-**A `partial` report** (decided, F-182; built with `stuck_background`'s remedy, "Metrics and
-healing"). When the healer hands the parent a delegate's last reply because a background command
-of its turn hangs, the report is marked `partial`: its row in `Mailbox` and the parent's text say
-so, and the delegate's row stays as it was, its report still owed. A later report of the same
-brief is still taken and delivered, as the brief's reply; the `partial` one never stands in for
-it, and one state's partial goes once (`Remedies.tla`'s `ReportTaken` and `PartialOnce`,
-F-183). Not built yet: when such a report is owed is not read today (F-183's new-1).
+**No `partial` report** (F-184; F-182 had decided one). Claude Code writes a turn's `result`
+while a background command of it runs (measured on 2.1.322), so a delegate's report is never
+owed behind a hung command, and the healer hands no partial one: `stuck_background` only ends
+the hung group ("Metrics and healing"). The turn the command's end begins is Claude Code's own,
+told as such, never a second report (`Remedies.tla`'s `OneReport`).
 
 **A second start of a branch** (F-150, `Delegate.tla`'s `StartAgain`) looks up the name's
 latest row and its agent row before anything is written. While the parent's delegate of that
@@ -3269,7 +3289,7 @@ model before the code it describes (B4, B6, B8, B9, B11); B2 and B3 change no be
   healer acting through `Team.operate/4`, its acts the default allow-list, the cap, and the
   `remedy` prompt. About +400, −250. Built in F-182 but the acts through `Team.operate/4`,
   which B5 makes; then each remedy of "One shape for every remedy" as its own small unit
-  (`absent_main` and one clear built in F-183).
+  (`absent_main` and one clear built in F-183; `stuck_background` and `hooks_silent` in F-184).
 - **B9. `wait_for`**, against `Delivery.tla`'s subscription: `Mailbox`'s `subscriptions`, fired
   by facts; a job's end, a service's line, port and exit, a delegate's idle and report, an
   answer. `service_wait`'s poll becomes a fact `Hosts` records. About +400, −150.

@@ -1,25 +1,29 @@
 ------------------------------ MODULE Remedies ------------------------------
 (***************************************************************************)
-(* The first remedies on the healer's one shape (F-183; docs/design.md,   *)
-(* "Metrics and healing", "One shape for every remedy"; "The delegate     *)
-(* protocol", a `partial` report): Heal.tla instanced as H with two kinds  *)
-(* beside Boxes.tla's stuck turn.                                          *)
+(* The first remedies on the healer's one shape (F-183, F-184;            *)
+(* docs/design.md, "Metrics and healing", "One shape for every remedy"):   *)
+(* Heal.tla instanced as H with two kinds beside Boxes.tla's stuck turn,   *)
+(* and a headless delegate's turns across a background command.           *)
 (*                                                                         *)
 (* Models CodingAgentFramework.AbsentMains (the `absent_main` entry of     *)
 (* CodingAgentFramework.Watch's allow-list, its detector and its resume    *)
-(* through CodingAgentFramework.Mains), and, ahead of its code (F-183's    *)
-(* new-1), the `stuck_background` entry with the `partial` report's row in *)
-(* CodingAgentFramework.Mailbox.                                           *)
+(* through CodingAgentFramework.Mains), CodingAgentFramework.              *)
+(* StuckBackgrounds (the `stuck_background` entry), and the report         *)
+(* CodingAgentFramework.Delegates takes from CodingAgentFramework.Stream.  *)
+(* Fold across a background command's turn.                                *)
 (*                                                                         *)
-(*   stuck_background  a delegate d whose turn ended with its report owed  *)
-(*                     while a background command of it hangs. Its remedy  *)
-(*                     hands the parent d's last reply as a `partial`      *)
-(*                     report, under the remedy's claim, and ends the hung *)
+(*   a delegate d      its brief's turn may start a background command;    *)
+(*                     the turn's result comes while the command runs,     *)
+(*                     and is the report (measured on Claude Code          *)
+(*                     2.1.322, F-184). The command's end starts a turn of *)
+(*                     Claude Code's own, whose result is never a second   *)
+(*                     report (OneReport). d ends only with no turn and no *)
+(*                     command running (Sessions.stop's turn_running).     *)
+(*   stuck_background  d's report was taken while its background command   *)
+(*                     runs and uses no CPU time. Its remedy ends the      *)
 (*                     command's group by its record, which may help or    *)
-(*                     not. d's own report is still owed: when d writes    *)
-(*                     it, the parent takes it, whatever partial went      *)
-(*                     before (ReportTaken), and a state's partial goes    *)
-(*                     once (PartialOnce).                                 *)
+(*                     not; no partial report goes (StuckAfterReport: the  *)
+(*                     report was taken before the symptom).               *)
 (*   absent_main       a declared main session m whose process is gone.    *)
 (*                     Its remedy is one resume; once per absence (H's     *)
 (*                     OncePerState), and a second absence of m within a   *)
@@ -27,8 +31,8 @@
 (*                     then H's ActedOrAsked).                             *)
 (*                                                                         *)
 (* Every property of Heal.tla is checked through H. Left abstract: how the *)
-(* reply is read, the process tree's CPU time, the Scheduler's lease of    *)
-(* the resume, and Mailbox's own delivery (Delivery.tla).                  *)
+(* CPU time is read, the Scheduler's lease of the resume, and Mailbox's    *)
+(* own delivery (Delivery.tla).                                            *)
 (*                                                                         *)
 (* Break: "none" is the design. Every other value removes one guard and    *)
 (* has a Break_Remedies_<value>.cfg that TLC must fail.                    *)
@@ -44,9 +48,8 @@ CONSTANTS
 
 Breaks == {
     "none",
-    "PartialStands",  \* a partial report takes the brief's reply: d's own report is not taken
-    "PartialTwice",   \* the partial is handed at each read of the state, not under the claim
-    "ResumeTwice"     \* a second absence of a main within the bound is resumed again
+    "LastResult",   \* the report is read from the latest result, not the brief's own
+    "ResumeTwice"   \* a second absence of a main within the bound is resumed again
 }
 
 ASSUME Break \in Breaks /\ Delegates \cap Mains = {}
@@ -56,14 +59,15 @@ Kind(s) == IF s \in Delegates THEN "stuck_background" ELSE "absent_main"
 VARIABLES
     on, st, facts, claims, acting, cdone, acted, twice, cut, res, count, mem, allow,
     dropped, asked, closed, wrong, restarts, bounds,  \* Heal.tla's
-    hands,     \* <<d, n>> -> the partial reports handed for d's state n (Mailbox's row)
-    made,      \* d -> d wrote its own report, the brief's reply
-    took,      \* d -> its parent took that report
+    turn,      \* d -> "brief" (its brief's turn runs), "idle", "own" (a turn of its own), "ended"
+    bg,        \* d -> a background command of d runs
+    reports,   \* d -> the reports taken as the brief's reply
     resumes    \* m -> the resumes of m claimed in the bound: a fold of the rows (durable)
 
 healVars == <<facts, claims, acting, cdone, acted, twice, cut, res, count, mem, allow,
               dropped, asked, closed, wrong>>
-mine == <<hands, made, took, resumes>>
+dvars == <<turn, bg, reports>>
+mine == <<turn, bg, reports, resumes>>
 vars == <<on, st, healVars, restarts, bounds, mine>>
 
 H == INSTANCE Heal WITH Symptoms <- Delegates \cup Mains,
@@ -71,17 +75,15 @@ H == INSTANCE Heal WITH Symptoms <- Delegates \cup Mains,
                         Approved <- {"stuck_background", "absent_main"},
                         Actors <- {"healer"}, Break <- "none"
 
-States == (Delegates \cup Mains) \X (0..MaxState)
-
 -----------------------------------------------------------------------------
 (* The healer: Heal.tla's steps, with these kinds' effects *)
 
-\* A resume is claimed only while its main has none in the bound; a partial needs no more.
+\* A resume is claimed only while its main has none in the bound; a group's end needs no more.
 Claim(s) ==
     /\ H!Claim(s)
     /\ s \in Mains => resumes[s] < 1 \/ Break = "ResumeTwice"
     /\ resumes' = IF s \in Mains THEN [resumes EXCEPT ![s] = @ + 1] ELSE resumes
-    /\ UNCHANGED <<hands, made, took>>
+    /\ UNCHANGED dvars
 
 \* A second absence of a main within the bound, with no claim on it: a person's.
 AskAgain(m) ==
@@ -91,69 +93,90 @@ AskAgain(m) ==
     /\ UNCHANGED <<on, st, facts, claims, acting, cdone, acted, twice, cut, res, count, mem,
                    allow, dropped, closed, wrong, mine>>
 
-\* The remedy acts under its claim. A delegate's: the partial report handed (unless the hand
-\* was refused) and the hung group ended, which may end the symptom; a main's: the resume,
-\* which may bring it back. Either is Heal.tla's Effect.
+\* The remedy acts under its claim: Heal.tla's Effect. A delegate's group ended (the symptom
+\* gone) is its command's end, which starts a turn of Claude Code's own; a main's is its resume.
 Act(c, out) ==
     /\ H!Act(c, out) /\ H!Effect(c, out)
-    /\ hands' = IF c.t \in Delegates /\ out # "refused"
-                THEN [hands EXCEPT ![<<c.t, c.s>>] = @ + 1] ELSE hands
-    /\ UNCHANGED <<made, took, resumes>>
-
-\* Under PartialTwice the detector hands the partial at each read of a recorded state.
-HandOnRead(d) ==
-    /\ Break = "PartialTwice" /\ d \in Delegates /\ on[d] /\ H!Key(d) \in facts
-    /\ hands[H!Key(d)] < 2
-    /\ hands' = [hands EXCEPT ![H!Key(d)] = @ + 1]
-    /\ UNCHANGED <<on, st, healVars, made, took, resumes>>
+    /\ IF c.t \in Delegates /\ on[c.t] /\ ~on'[c.t]
+       THEN bg' = [bg EXCEPT ![c.t] = FALSE] /\ turn' = [turn EXCEPT ![c.t] = "own"]
+       ELSE UNCHANGED <<bg, turn>>
+    /\ UNCHANGED <<reports, resumes>>
 
 Healer ==
     \/ \E s \in Delegates \cup Mains :
           \/ (H!Detect(s) \/ H!Ask(s)) /\ UNCHANGED <<on, st, mine>>
           \/ Claim(s) /\ UNCHANGED <<on, st>>
           \/ AskAgain(s)
-          \/ HandOnRead(s)
     \/ \E c \in acting, out \in H!Outcomes : Act(c, out)
     \/ \E c \in acting : H!LetGo(c) /\ UNCHANGED <<on, st, mine>>
     \/ \E c \in claims : H!SettleCut(c) /\ UNCHANGED <<on, st, mine>>
     \/ \E r \in res : H!Verify(r) /\ UNCHANGED <<on, st, mine>>
 
 -----------------------------------------------------------------------------
+(* The delegate *)
+
+\* Its brief's turn starts a background command.
+Background(d) ==
+    /\ turn[d] = "brief" /\ ~bg[d]
+    /\ bg' = [bg EXCEPT ![d] = TRUE]
+    /\ UNCHANGED <<on, st, healVars, restarts, bounds, turn, reports, resumes>>
+
+\* The brief's turn ends with its result, whether a command runs or not: the report, taken.
+BriefResult(d) ==
+    /\ turn[d] = "brief"
+    /\ turn' = [turn EXCEPT ![d] = "idle"] /\ reports' = [reports EXCEPT ![d] = @ + 1]
+    /\ UNCHANGED <<on, st, healVars, restarts, bounds, bg, resumes>>
+
+\* The command ends by itself. Its end starts a turn of Claude Code's own when none runs; a
+\* stuck symptom of it goes with it.
+TaskEnds(d) ==
+    /\ bg[d] /\ turn[d] # "ended"
+    /\ IF on[d] THEN H!Goes(d) ELSE UNCHANGED <<on, st, healVars>>
+    /\ bg' = [bg EXCEPT ![d] = FALSE]
+    /\ turn' = [turn EXCEPT ![d] = IF @ = "idle" THEN "own" ELSE @]
+    /\ UNCHANGED <<restarts, bounds, reports, resumes>>
+
+\* The turn of its own ends with a result that names no brief: never the report. Under
+\* LastResult the report is read from the latest result, so it is taken again.
+OwnResult(d) ==
+    /\ turn[d] = "own"
+    /\ turn' = [turn EXCEPT ![d] = "idle"]
+    /\ reports' = IF Break = "LastResult" THEN [reports EXCEPT ![d] = @ + 1] ELSE reports
+    /\ UNCHANGED <<on, st, healVars, restarts, bounds, bg, resumes>>
+
+\* Its stop: only with its report taken and no turn or command running.
+End(d) ==
+    /\ turn[d] = "idle" /\ ~bg[d] /\ reports[d] >= 1
+    /\ turn' = [turn EXCEPT ![d] = "ended"]
+    /\ UNCHANGED <<on, st, healVars, restarts, bounds, bg, reports, resumes>>
+
+-----------------------------------------------------------------------------
 (* The world *)
 
-\* A delegate's symptom comes only while its report is owed.
-Comes(s) == H!Comes(s) /\ (s \in Delegates => ~made[s]) /\ UNCHANGED mine
+\* A delegate's symptom comes only after its report was taken, while its command runs.
+Comes(s) ==
+    /\ H!Comes(s)
+    /\ s \in Delegates => turn[s] = "idle" /\ bg[s] /\ reports[s] >= 1
+    /\ UNCHANGED mine
+
+\* The command used CPU time again.
 Goes(s) == H!Goes(s) /\ UNCHANGED mine
-
-\* The delegate writes its own report once its background command is done (no symptom).
-Write(d) ==
-    /\ ~on[d] /\ ~made[d]
-    /\ made' = [made EXCEPT ![d] = TRUE]
-    /\ UNCHANGED <<on, st, healVars, restarts, bounds, hands, took, resumes>>
-
-\* The parent takes d's own report, as the brief's reply. Under PartialStands a partial
-\* handed before has taken that place.
-Take(d) ==
-    /\ made[d] /\ ~took[d]
-    /\ Break = "PartialStands" => \A n \in 0..MaxState : hands[<<d, n>>] = 0
-    /\ took' = [took EXCEPT ![d] = TRUE]
-    /\ UNCHANGED <<on, st, healVars, restarts, bounds, hands, made, resumes>>
 
 Bound ==
     /\ H!Bound
     /\ resumes' = [m \in Mains |-> 0]
-    /\ UNCHANGED <<hands, made, took>>
+    /\ UNCHANGED dvars
 
 Init ==
     /\ H!Init
-    /\ hands = [k \in States |-> 0]
-    /\ made = [d \in Delegates |-> FALSE] /\ took = [d \in Delegates |-> FALSE]
+    /\ turn = [d \in Delegates |-> "brief"] /\ bg = [d \in Delegates |-> FALSE]
+    /\ reports = [d \in Delegates |-> 0]
     /\ resumes = [m \in Mains |-> 0]
 
 Next ==
     \/ Healer /\ UNCHANGED <<restarts, bounds>>
     \/ \E s \in Delegates \cup Mains : Comes(s) \/ Goes(s)
-    \/ \E d \in Delegates : Write(d) \/ Take(d)
+    \/ \E d \in Delegates : Background(d) \/ BriefResult(d) \/ TaskEnds(d) \/ OwnResult(d) \/ End(d)
     \/ restarts < MaxRestarts /\ H!Restart /\ restarts' = restarts + 1
        /\ UNCHANGED <<on, st, bounds, mine>>
     \/ Bound
@@ -170,7 +193,7 @@ Fairness ==
     /\ WF_vars(\E c \in acting : H!LetGo(c) /\ UNCHANGED <<on, st, restarts, bounds, mine>>)
     /\ WF_vars(\E c \in claims : H!SettleCut(c) /\ UNCHANGED <<on, st, restarts, bounds, mine>>)
     /\ WF_vars(\E r \in res : H!Verify(r) /\ UNCHANGED <<on, st, restarts, bounds, mine>>)
-    /\ \A d \in Delegates : WF_vars(Take(d))
+    /\ \A d \in Delegates : WF_vars(BriefResult(d)) /\ WF_vars(OwnResult(d))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -179,18 +202,27 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 
 TypeOK ==
     /\ H!TypeOK
-    /\ hands \in [States -> 0..2]
-    /\ made \in [Delegates -> BOOLEAN] /\ took \in [Delegates -> BOOLEAN]
+    /\ turn \in [Delegates -> {"brief", "idle", "own", "ended"}]
+    /\ bg \in [Delegates -> BOOLEAN]
+    /\ reports \in [Delegates -> 0..2]
     /\ resumes \in [Mains -> Nat]
 
-\* A delegate's state gets one partial report at most: the hand is the remedy's act, once.
-PartialOnce == \A k \in States : hands[k] <= 1
+\* One report per brief across a background command's turn: the brief's result, once.
+OneReport == \A d \in Delegates : reports[d] <= 1
+
+\* No partial report: a delegate's symptom is read only once its report was taken, while its
+\* command runs and no turn does.
+StuckAfterReport ==
+    \A d \in Delegates : on[d] => reports[d] = 1 /\ bg[d] /\ turn[d] = "idle"
+
+\* An ended delegate has no command left to wake it.
+EndedQuiet == \A d \in Delegates : turn[d] = "ended" => ~bg[d]
 
 \* A main is resumed at most once in a bound; a second absence in it is asked.
 ResumeOncePerBound == \A m \in Mains : resumes[m] <= 1
 
-\* A partial never stands in for the report: d's own report, once written, is taken.
-ReportTaken == \A d \in Delegates : made[d] ~> took[d]
+\* The report is never held up by a background command.
+ReportTaken == \A d \in Delegates : <>(reports[d] >= 1)
 
 \* Heal.tla's, through H.
 OncePerState == H!OncePerState

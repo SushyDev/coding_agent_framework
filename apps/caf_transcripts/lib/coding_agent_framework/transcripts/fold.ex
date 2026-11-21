@@ -223,6 +223,37 @@ defmodule CodingAgentFramework.Transcripts.Fold do
   end
 
   @doc """
+  The tool calls whole lines of `bytes` show, oldest first: each `tool_use` block of an
+  assistant entry, with its id, its tool's name and its entry's time in ms (nil when it has
+  none). A cut first line, as a read from inside the file leaves it, is skipped. `HooksSilent`
+  reads it (F-184).
+
+      iex> alias CodingAgentFramework.Transcripts.Fold
+      iex> call = ~s({"type":"assistant","timestamp":"2026-11-21T09:00:00.000Z",) <>
+      ...>   ~s("message":{"content":[{"type":"tool_use","id":"tu-1","name":"Bash"}]}}\\n)
+      iex> Fold.tool_calls(~s(cut"}\\n) <> call)
+      [%{id: "tu-1", name: "Bash", at: 1795251600000}]
+  """
+  @spec tool_calls(binary) :: [%{id: String.t(), name: String.t(), at: integer | nil}]
+  def tool_calls(bytes) do
+    for line <- bytes |> String.split("\n") |> Enum.drop(-1),
+        {:ok, %{"type" => "assistant", "message" => %{"content" => c}} = e} <- [JSON.decode(line)],
+        is_list(c),
+        %{"type" => "tool_use", "id" => id, "name" => name} <- c,
+        is_binary(id),
+        do: %{id: id, name: name, at: ms(e["timestamp"])}
+  end
+
+  defp ms(stamp) when is_binary(stamp) do
+    case DateTime.from_iso8601(stamp) do
+      {:ok, at, _} -> DateTime.to_unix(at, :millisecond)
+      _ -> nil
+    end
+  end
+
+  defp ms(_), do: nil
+
+  @doc """
   The byte offset in `bytes` of the first user line that carries `mark`, or nil: where a reader
   that found it reads from next time (F-137's new-4). Only whole lines count.
 
