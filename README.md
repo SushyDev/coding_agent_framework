@@ -258,7 +258,12 @@ Built, each from a checked model in `model/tla/`:
   place (`CodingAgentFramework.prompts/2`) as one function of their owners' rows, cued on
   `prompts`, and answered once through `answer/4`, which hands the choice to the part that
   owns it; a delegate's parent told once that it waits; the operator's `answer_startup` and
-  `withdraw` through the same inbox.
+  `withdraw` through the same inbox;
+- the first guards an app drops when it runs its agents on the framework (F-180): every
+  background `Bash` command runs with its stdin at end of file, whatever the app's callback
+  answers, so a program that reads stdin never waits for ever; a session on a startup dialog
+  reads `dialog` by its turn and in the tree, never idle; and `bin/capture-screen` captures the
+  exit dialog, for its reading.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

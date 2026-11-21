@@ -512,9 +512,10 @@ defmodule CodingAgentFramework do
       {:intake,
        fn _ ->
          # The framework's PreToolUse callback first (a move's drain), then the app's, whose
-         # answer a heavy command's wrapper corrects.
+         # answer a heavy command's wrapper corrects, and a background command's stdin closed
+         # in what that answer runs.
          heavy = Runs.pre_tool_use(w.runs, c.tool_hooks[:pre_tool_use])
-         pre = Mover.pre_tool_use(w.agents, heavy)
+         pre = Mover.pre_tool_use(w.agents, Intake.Background.pre_tool_use(heavy))
 
          tools =
            [pre_tool_use: pre] ++ Map.to_list(Map.take(c.tool_hooks, [:post_tool_use, :stop]))

@@ -44,7 +44,7 @@ fi
 export PATH="$CAF_TOOLS_PATH"
 unset TMUX TMUX_PANE
 
-readonly WIDTH=120 HEIGHT=40 STATES=8
+readonly WIDTH=120 HEIGHT=40 STATES=10
 
 usage() {
   echo "usage: bin/capture-screen [--dry-run] [--out <dir>] [--name <text>]... <config dir>"
@@ -122,8 +122,14 @@ draw idle-empty "$(box)"
 while next_key; do
   case "$key" in
     "")
-      if [[ "$text" == /exit ]]; then
+      if [[ "$text" == /exit && -n "${background:-}" ]]; then
+        # Its own words, not Claude Code's: a dry run checks the steps, not the reading.
+        text=""; draw exit-dialog "A background command still runs." "> 1. Exit" "  2. Stay"
+        next_key; draw exited "Goodbye."; printf '\n'; exit 0
+      elif [[ "$text" == /exit ]]; then
         text=""; draw exited "Goodbye."; printf '\n'; exit 0
+      elif [[ "$text" == *run_in_background* ]]; then
+        text=""; background=1; draw turn-ended-background "⏺ Started sleep in the background." "" "$(box)"
       elif [[ "$text" == *touch* ]]; then
         text=""; draw permission-dialog "Bash command" "  touch capture-screen.txt" \
           "Do you want to proceed?" "> 1. Yes" "  2. No"
@@ -298,6 +304,8 @@ step() {
 typed="hello from the capture script"
 running="Write forty short numbered lines about how a terminal draws text. Use no tools."
 command="Use the Bash tool to run exactly this command and nothing else: touch capture-screen.txt"
+# A command that runs past the capture's end unless the exit stops it, and ends on its own.
+background="Use the Bash tool with run_in_background set to true to run exactly this command and nothing else: sleep 300"
 
 say "Capturing $version_line in a ${WIDTH}x${HEIGHT} pane."
 if ((!dry_run)); then
@@ -327,9 +335,15 @@ step permission-dialog "A permission dialog for a shell command." \
 step turn-ended-after-tool "The turn ended after the shell command, with an empty input box." \
   "Answer Yes in the attached pane, and wait until the turn ends and the input box is empty." \
   dry_keys Enter
-step exited "The last screen after /exit." \
-  "The script types /exit; wait until Claude Code has exited." \
+step turn-ended-background "The turn ended with a background command still running." \
+  "The script asks for a background command; answer Yes in the attached pane if it asks, and wait until the turn ends and the input box is empty." \
+  type_line "$background"
+step exit-dialog "The dialog at /exit while a background command runs." \
+  "The script types /exit; wait for the dialog about background work, and do not answer it yet." \
   type_line "/exit"
+step exited "The last screen after /exit." \
+  "Answer the dialog in the attached pane with the option that exits and stops the background command, and wait until Claude Code has exited." \
+  dry_keys Enter
 
 # The names to scrub, each with its placeholder, the longest form of each first: the scratch
 # repository's path as macOS resolves it holds the path as given.

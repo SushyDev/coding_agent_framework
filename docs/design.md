@@ -363,7 +363,11 @@ framework's hooks deciding:
   `MCP.caller/3` were removed in F-176 (F-171's new-3); the operator keeps no `run`, since a
   landing is the app's own `Jobs.run/6`;
 - `run_in_background` and `Monitor` stay native; during a move's drain they are denied with a
-  reason (as today);
+  reason (as today). Claude Code gives a background command a stdin that never closes, so a
+  program that reads it waits for ever and holds a delegate's report; every background `Bash`
+  command the app's callback lets run runs as `exec </dev/null; <command>`, a correction of the
+  framework's own, always on (built in F-180, `Intake.Background`). A pass carries it with no
+  decision, so Claude Code's own permission rules still decide (measured on 2.1.322);
 - Claude Code's own question tool (`AskUserQuestion`), in a session no person attends, opens a
   prompt as `ask` does and is denied with a reason that says the answer comes as a message, so
   the agent asks with its natural tool;

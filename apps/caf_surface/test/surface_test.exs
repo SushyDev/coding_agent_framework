@@ -460,13 +460,15 @@ defmodule CodingAgentFramework.SurfaceTest do
     {:ok, _} = Application.ensure_all_started(:inets)
     headers = for {k, v} <- headers, do: {to_charlist(k), to_charlist(v)}
 
-    post = fn event, tool ->
+    post_input = fn event, tool, input ->
       body = %{"hook_event_name" => event, "session_id" => "s1", "tool_use_id" => tool}
-      body = JSON.encode!(Map.merge(body, %{"tool_name" => tool, "tool_input" => %{}}))
+      body = JSON.encode!(Map.merge(body, %{"tool_name" => tool, "tool_input" => input}))
       request = {to_charlist(url), headers, ~c"application/json", body}
       {:ok, {{_, 200, _}, _, answer}} = :httpc.request(:post, request, [timeout: 10_000], [])
       to_string(answer)
     end
+
+    post = fn event, tool -> post_input.(event, tool, %{}) end
 
     assert %{"permissionDecision" => "deny", "permissionDecisionReason" => "No fetches" <> _} =
              JSON.decode!(post.("PreToolUse", "WebFetch"))["hookSpecificOutput"]
@@ -477,6 +479,13 @@ defmodule CodingAgentFramework.SurfaceTest do
     assert correction["additionalContext"] == "Code is in src."
     assert post.("PreToolUse", "Read") == ""
     assert post.("PostToolUse", "Read") == ""
+
+    # A background command the app passes runs with its stdin at end of file, and the decision
+    # stays Claude Code's (F-180).
+    background = %{"command" => "ls", "run_in_background" => true}
+    answer = JSON.decode!(post_input.("PreToolUse", "Bash", background))["hookSpecificOutput"]
+    assert answer["updatedInput"] == %{background | "command" => "exec </dev/null; ls"}
+    refute Map.has_key?(answer, "permissionDecision")
     assert_receive {:after, %{tool_name: "Read", agent: nil}}, 5_000
   end
 

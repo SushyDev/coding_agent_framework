@@ -10,7 +10,7 @@ defmodule CodingAgentFramework.CaptureScreenTest do
 
   @script Path.expand("../../../bin/capture-screen", __DIR__)
   @states ~w(trust-dialog idle-empty text-typed turn-running turn-ended permission-dialog
-             turn-ended-after-tool exited)
+             turn-ended-after-tool turn-ended-background exit-dialog exited)
 
   setup do
     dir = test_dir()

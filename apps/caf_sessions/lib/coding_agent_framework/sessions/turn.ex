@@ -22,6 +22,8 @@ defmodule CodingAgentFramework.Sessions.Turn do
   - `:waiting`: a turn waits on a person (a held `can_use_tool` request, the file's `waiting`);
   - `:ending`: a headless session's `end_session` was written;
   - `:gone`: the process the evidence names is gone;
+  - `:dialog`: an interactive session's row waits on a dialog its pane shows (`status`
+    `dialog`, F-140): a person or the app answers it, and it is never idle (F-180);
   - `:not_running`: the agent row is not `running`, so no turn is read;
   - `:unread`: nothing read names the session's process yet.
 
@@ -39,7 +41,16 @@ defmodule CodingAgentFramework.Sessions.Turn do
   alias CodingAgentFramework.Holder
   alias CodingAgentFramework.Sessions.Agents
 
-  @type t :: :ended | :idle | :running | :waiting | :ending | :gone | :not_running | :unread
+  @type t ::
+          :ended
+          | :idle
+          | :running
+          | :waiting
+          | :ending
+          | :gone
+          | :dialog
+          | :not_running
+          | :unread
 
   @doc """
   The turn state of `row` by its kind: `headless/2` with `evidence.fold` for a headless
@@ -89,21 +100,31 @@ defmodule CodingAgentFramework.Sessions.Turn do
   defp held?(_), do: false
 
   @doc """
-  An interactive session's turn: `:not_running` unless its row is `running`; then its session
-  file among `files` (`file/2`) and `waiter`, `true` when `Intake` holds the session's waiter,
+  An interactive session's turn: `:dialog` while its row waits on a dialog, `:not_running` for
+  any other row that is not `running`; then its session file among `files` (`file/2`) and
+  `waiter`, `true` when `Intake` holds the session's waiter,
   `false` when it does not, `:unread` when it was not read. Only a file that reads idle with a
   waiter held is `:ended`; a waiter held while the file reads busy is a turn a person's prompt
   started, `:running`.
+
+      iex> CodingAgentFramework.Sessions.Turn.interactive(%{status: "dialog"}, [], false)
+      :dialog
   """
   @spec interactive(map, [map], boolean | :unread) :: t
   def interactive(row, files, waiter) do
-    if Agents.running?(row) do
-      case file_state(file(row, files)) do
-        :idle when waiter == true -> :ended
-        state -> state
-      end
-    else
-      :not_running
+    cond do
+      Agents.running?(row) ->
+        case file_state(file(row, files)) do
+          :idle when waiter == true -> :ended
+          state -> state
+        end
+
+      # No session file exists while a startup dialog is shown, so the row is the evidence.
+      row[:status] == "dialog" ->
+        :dialog
+
+      true ->
+        :not_running
     end
   end
 

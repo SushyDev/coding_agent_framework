@@ -15,6 +15,7 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
   alias CodingAgentFramework.{Sessions, SessionsSetup, Transcripts, Usage}
   alias CodingAgentFramework.Delegates.Table
   alias CodingAgentFramework.Sessions.Agents
+  alias CodingAgentFramework.Sessions.Turn, as: SessionsTurn
 
   setup {SessionsSetup, :sessions}
 
@@ -291,6 +292,60 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
 
     assert notice =~ "Delegate #{name} is idle with no report"
     assert %{status: "running", report: "none"} = Table.get(ctx.dtable, id)
+  end
+
+  # F-180: a builder waiting on a startup dialog that nothing answers is `dialog` by its turn,
+  # never idle with no report, past its idle bound too: no session file exists while the dialog
+  # is shown, and its row is the evidence. (The prompt and its parent's one notice are
+  # `Prompts`', F-179.)
+  test "an interactive delegate on a dialog is `dialog`, never idle with no report", ctx do
+    Process.exit(ctx.delegates, :kill)
+    # A Sessions whose app answers no dialog, so a person must.
+    asking =
+      Supervisor.child_spec({Sessions, ctx.opts ++ [inlet: ctx.dopts[:inlet]]}, id: :asking)
+
+    sessions = start_supervised!(asking)
+    opts = Keyword.merge(ctx.dopts, sessions: sessions, idle_bound: 60_000)
+    child = Supervisor.child_spec({Delegates, opts}, id: make_ref(), restart: :temporary)
+    delegates = start_supervised!(child)
+
+    started =
+      Delegates.start_delegate(delegates, "main", "app", "unit/one", "opus", "Look.",
+        interactive: true
+      )
+
+    # The start answers unknown while the dialog waits, and the delegate row stays starting: its
+    # turn has not begun, so nothing reads it idle.
+    assert started == {:unknown, {:dialog, :trust}}
+
+    {:ok, %{name: name} = row} =
+      await(fn ->
+        case Agents.read_tree(ctx.agents) do
+          [%{name: name}] ->
+            with %{status: "dialog"} = row <- Agents.get(ctx.agents, name), do: {:ok, row}
+
+          _ ->
+            :none
+        end
+      end)
+
+    assert SessionsTurn.of(row, %{files: [], waiter: false}) == :dialog
+
+    # Past the bound, nothing tells the parent it is idle.
+    for _ <- 1..2 do
+      Delegates.cue(delegates, %{topic: "transcripts:test:work"})
+      :sys.get_state(delegates)
+      Agent.update(ctx.clock, &(&1 + 60_000))
+    end
+
+    Delegates.cue(delegates, %{topic: "registry:test:work"})
+    assert :sys.get_state(delegates).idle == %{}
+    {:ok, mtable} = Mailbox.Table.open(Path.join(ctx.dir, "caf.db"))
+    rows = Enum.reject(Enum.map(1..20, &Mailbox.Table.get(mtable, &1)), &is_nil/1)
+    refute Enum.any?(rows, &(&1.text =~ "idle with no report"))
+    assert ScreenStandIn.prompts(ctx.dir) == []
+    assert Agents.get(ctx.agents, name).status == "dialog"
+    assert [%{status: "starting", report: "none"}] = Table.latest(ctx.dtable, "test")
   end
 
   # A brief longer than a launch carries goes as a pointer to its file in the due directory

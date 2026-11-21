@@ -21,6 +21,8 @@ defmodule CodingAgentFramework.Tracker.Tree do
     done for good), `unread` with no `Stream` row.
   - **An interactive delegate** (role `parent`) has no `Stream` row: its state is its session
     file's, as a main session's is (F-153's new-6).
+  - **A session on a startup dialog** (its row `dialog`, F-140) is `dialog`, never `idle`
+    (`Sessions.Turn.interactive/3`), and `waits_on` names the dialog's kind and options (F-180).
   - Each agent's subagents are its transcript's.
 
   A delegate that ended keeps its place in the tree, but `agents/2` leaves it out unless asked
@@ -116,6 +118,10 @@ defmodule CodingAgentFramework.Tracker.Tree do
       Agents.free?(row) ->
         {"gone", []}
 
+      # No session file exists while a startup dialog is shown: the row is the evidence.
+      Turn.interactive(row, [], false) == :dialog ->
+        {"dialog", dialog(row)}
+
       true ->
         {word(Turn.file_state(Turn.file(row, ev.files[{row[:host], row[:account]}] || []))), []}
     end
@@ -133,6 +139,13 @@ defmodule CodingAgentFramework.Tracker.Tree do
 
     for {id, %{state: :held} = r} <- requests,
         do: %{request: id, tool: r[:tool_name], input: r[:input]}
+  end
+
+  defp dialog(row) do
+    case Agents.dialog(row) do
+      %{kind: kind, options: options} -> [%{dialog: kind, options: options}]
+      _unreadable -> []
+    end
   end
 
   # The view's words for a turn state: what a person reads, never what decides a write.

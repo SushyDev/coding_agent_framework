@@ -73,7 +73,9 @@ defmodule CodingAgentFramework.Config do
     move's drain) decides first and hands any other call to the app's; `post_tool_use` adds its
     hook when given; `stop` holds each turn's end for the app (the `Stop` hold, with its cap
     and pauses). None by default. A callback may correct a call rather than refuse it
-    (`Intake`'s `{:allow, updated_input: map, additional_context: text}`);
+    (`Intake`'s `{:allow, updated_input: map, additional_context: text}`). Whatever it answers,
+    a background `Bash` command it lets run runs with its stdin at end of file
+    (`Intake.Background`, always on);
   - `heavy`: the app's heavy commands (F-171), each `%{match: regex_or_string, class: class}`
     as `CodingAgentFramework.Runs` takes them: an agent's `Bash` call whose command matches
     runs under the wrapper `<home>/bin/caf-run`, which takes a lease of that class (`heavy`,
