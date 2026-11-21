@@ -16,15 +16,28 @@ defmodule CodingAgentFramework.Usage.Table do
   alias CodingAgentFramework.Reader
   alias CodingAgentFramework.Usage.Reading
 
-  @data ~w(used resets_at five_used five_resets_at seen_at problem)a
-  # A file made before the five-hour window gains its columns; a newer file already has them.
-  @added [usage_readings: ["five_used REAL", "five_resets_at INTEGER"]]
+  @data ~w(used resets_at five_used five_resets_at seen_at problem source limited_until limit_window
+           can_spend evidence)a
+  # A file made before the five-hour window, or before the limit (F-181), gains its columns; a
+  # newer file already has them.
+  @added [
+    usage_readings: [
+      "five_used REAL",
+      "five_resets_at INTEGER",
+      "source TEXT",
+      "limited_until INTEGER",
+      "limit_window TEXT",
+      "can_spend INTEGER",
+      "evidence TEXT"
+    ]
+  ]
 
   @schema """
   CREATE TABLE IF NOT EXISTS usage_readings (
     id INTEGER PRIMARY KEY, account TEXT NOT NULL UNIQUE,
     used REAL, resets_at INTEGER, five_used REAL, five_resets_at INTEGER, seen_at INTEGER,
-    problem TEXT, written_at INTEGER NOT NULL);
+    problem TEXT, source TEXT, limited_until INTEGER, limit_window TEXT, can_spend INTEGER,
+    evidence TEXT, written_at INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS usage_reads (
     one INTEGER PRIMARY KEY CHECK (one = 1), read_at INTEGER NOT NULL);
   """
@@ -35,7 +48,7 @@ defmodule CodingAgentFramework.Usage.Table do
   @doc """
   The table as `Reader` reads and writes it. As a `Tracker` source, for one account (options
   `db:`, `host:`, the name `Usage` was started with, and `account:`), each row has `assumed`:
-  true when its window has reset since it was written (`Usage.Reading.status/3`), so a view
+  true when its weekly window has reset since it was written (`Usage.Reading.status/2`), so a view
   shows it as 0 % used and assumed. The clock is option `clock:`, a function of no arguments
   that answers Unix seconds; without it, the system's.
   """

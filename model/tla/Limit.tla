@@ -35,6 +35,14 @@
 (* row counts the go-ons in a row that each hit a limit again; past        *)
 (* Bound of them the agent is a `limit` prompt, with no deadline.          *)
 (*                                                                         *)
+(* The move (F-181, decided by the operator): before the reset, where it   *)
+(* is more than `move_after` away and another usable account has room, a   *)
+(* delegate moves on its own, once per limit, the claim on its row first:  *)
+(* one move through the Mover, resumed on the other account. A move        *)
+(* refused, failed or unknown leaves it to a `limit` prompt, never to a    *)
+(* second move. A main session never moves on its own: its `limit` prompt *)
+(* offers the move beside the wait, and only a person's answer moves it.   *)
+(*                                                                         *)
 (* Models Usage (the account's record: `limited_until`, read from any      *)
 (* agent's evidence), the Scheduler's gate on it, Sessions' turn state     *)
 (* (`limited`, its remedy's phase on the agent row, and the checked press  *)
@@ -48,8 +56,9 @@
 (* Left abstract: time but the reset's order (a reset is one step, and the *)
 (* framework's clock reads it as the record's `resetsAt` passed); the      *)
 (* windows' kinds (five-hour, weekly, a model family's: one window here,   *)
-(* which may close again after its reset); other accounts and moves (a     *)
-(* move at a limit is the `limit` prompt's answer, Move.tla's); every row  *)
+(* which may close again after its reset); the other accounts, as one      *)
+(* that has room or not and never limits here, and the move as one step    *)
+(* (its drain, end, copy and resume are Move.tla's); every row             *)
 (* to the agent but the word (Mailbox holds the others for a limited       *)
 (* agent until the reset, as it holds the word); the statusline's numbers  *)
 (* (evidence of the same record, earlier); a person's answer's claim and   *)
@@ -78,6 +87,8 @@ EXTENDS Integers, FiniteSets
 CONSTANTS
     Agents,       \* the agents on the account
     Headless,     \* the headless ones; the rest are interactive
+    Mains,        \* the main sessions; the rest are delegates
+    Others,       \* another account exists that a move may go to
     CanSpend,     \* the account's record allows usage credits (`overageStatus`)
     MaxLimits,    \* the most times the account's window closes in one behavior
     Bound,        \* go-ons in a row that each hit a limit again, before a person's prompt
@@ -95,11 +106,13 @@ Breaks == {
     "TrustOwnWait",    \* Claude Code's own wait is trusted to go on: its end is not watched
     "RetryUnknown",    \* a press whose outcome is unknown is pressed again
     "Unchecked",       \* the press goes without the screen read to show the menu
-    "NoBound"          \* go-ons that hit the limit again are not counted
+    "NoBound",         \* go-ons that hit the limit again are not counted
+    "MoveMain",        \* a main session is moved as a delegate is, on the framework's own
+    "MoveTwice"        \* the move's claim is not checked, so a limit may be moved from twice
 }
 
 ASSUME Break \in Breaks
-ASSUME Headless \subseteq Agents
+ASSUME Headless \subseteq Agents /\ Mains \subseteq Agents /\ Others \in BOOLEAN
 ASSUME CanSpend \in BOOLEAN
 ASSUME MaxLimits \in Nat \ {0} /\ Bound \in Nat \ {0} /\ AutoMax \in Nat
 ASSUME MaxOutside \in Nat /\ MaxRestarts \in Nat
@@ -118,14 +131,18 @@ Labels == {"stop", "spend"}
 \*   send      the word to go on is owed, and counted
 \*   word      the word to go on is stored, its turn not yet seen
 \*   prompt    a person's `limit` prompt is open
+\*   move      a move to another account is claimed, its act to run
+\*   moved     the move ran: the agent runs on the other account
 Steps == {"none", "look", "own", "credits", "press", "unknown", "idle", "send", "word",
-          "prompt"}
+          "prompt", "move", "moved"}
 
 VARIABLES
     \* the account's window, the environment
     n,          \* the limits so far: the window closed n times
     win,        \* "open" or "closed"
     near,       \* the current limit's reset is under 24 h away
+    far,        \* ... and more than `move_after` away (only where Others)
+    room,       \* another usable account has room (only where Others)
     \* Claude Code, per agent
     cc,         \* a -> its turn: "working", "done" (ended), "hit" (ended at a limit), "idle"
                 \* (ended at a limit, the menu or the wait left)
@@ -151,6 +168,9 @@ VARIABLES
     due,        \* Mailbox: a -> words to go on due to a
     wkey,       \* Mailbox: a -> the limit of the word stored under a's key (0: none)
     req,        \* Scheduler: another start's request: "none", "asked", "granted", "refused"
+    where,      \* Sessions: a -> "here", or "there" once moved to the other account
+    mv,         \* Acts: a -> the limit whose move was claimed (or asked of a person; 0: none)
+    mvBy,       \* Sessions: a -> the claimed move is a person's answer
     \* the framework, in memory
     pend,       \* a -> the limit of a word stored whose agent row does not yet say so (0: none)
     restarts,
@@ -159,13 +179,16 @@ VARIABLES
     ownGone,    \* a -> the limits at which Claude Code's own wait went on
     pressedOn,  \* a -> the menu of a the framework last pressed (0: none)
     streak,     \* a -> the framework's go-ons since a turn ended by itself or a person answered
-    grants,     \* leases granted
+    grants,     \* leases granted on the account
+    moves,      \* a -> k -> the framework's own moves of a at limit k
     wrong       \* the faults a guard failed to stop, by name
 
 ccVars == <<cc, screen, live, autos, stale, hits, hitLim, menus>>
 rowVars == <<seen, lim, step, label, byPerson, cp, pp, goes, noted>>
-ghosts == <<stored, ownGone, pressedOn, streak, grants, wrong>>
-vars == <<n, win, near, ccVars, outside, rec, rowVars, due, wkey, req, pend, restarts, ghosts>>
+moveVars == <<far, room, where, mv, mvBy>>
+ghosts == <<stored, ownGone, pressedOn, streak, grants, moves, wrong>>
+vars == <<n, win, near, ccVars, outside, rec, rowVars, due, wkey, req, pend, restarts, ghosts,
+          moveVars>>
 
 -----------------------------------------------------------------------------
 (* Reading the state *)
@@ -198,18 +221,20 @@ Close ==
     /\ win = "open" /\ n < MaxLimits
     /\ win' = "closed" /\ n' = n + 1
     /\ near' \in BOOLEAN
-    /\ UNCHANGED <<ccVars, outside, rec, rowVars, due, wkey, req, pend, restarts, ghosts>>
+    /\ far' \in IF Others THEN BOOLEAN ELSE {FALSE}
+    /\ UNCHANGED <<ccVars, outside, rec, rowVars, due, wkey, req, pend, restarts, ghosts, room,
+                   where, mv, mvBy>>
 
 \* Time reaches the reset.
 Reset ==
     /\ win = "closed"
     /\ win' = "open"
-    /\ UNCHANGED <<n, near, ccVars, outside, rec, rowVars, due, wkey, req, pend, restarts, ghosts>>
+    /\ UNCHANGED <<n, near, ccVars, outside, rec, rowVars, due, wkey, req, pend, restarts, ghosts, moveVars>>
 
 \* A turn that runs while the window is closed ends at the limit, and its record is written.
 \* An interactive session waits by itself where it can, or shows the menu.
 Hit(a) ==
-    /\ live[a] /\ cc[a] = "working" /\ win = "closed"
+    /\ live[a] /\ cc[a] = "working" /\ win = "closed" /\ where[a] = "here"
     /\ cc' = [cc EXCEPT ![a] = "hit"]
     /\ hits' = [hits EXCEPT ![a] = @ + 1]
     /\ hitLim' = [hitLim EXCEPT ![a] = n]
@@ -218,7 +243,7 @@ Hit(a) ==
        IN  /\ screen' = [screen EXCEPT ![a] = s]
            /\ menus' = [menus EXCEPT ![a] = IF s = "menu" THEN @ + 1 ELSE @]
     /\ UNCHANGED <<n, win, near, live, autos, stale, outside, rec, rowVars, due, wkey, req, pend,
-                   restarts, ghosts>>
+                   restarts, ghosts, moveVars>>
 
 \* A turn ends by itself.
 TurnEnds(a) ==
@@ -227,7 +252,7 @@ TurnEnds(a) ==
     /\ autos' = [autos EXCEPT ![a] = 0]
     /\ streak' = [streak EXCEPT ![a] = 0]
     /\ UNCHANGED <<n, win, near, screen, live, stale, hits, hitLim, menus, outside, rec, rowVars,
-                   due, wkey, req, pend, restarts, stored, ownGone, pressedOn, grants, wrong>>
+                   due, wkey, req, pend, restarts, stored, ownGone, pressedOn, grants, wrong, moveVars, moves>>
 
 \* Claude Code's own wait goes on at the reset: the turn continues, no message resent.
 AutoGo(a) ==
@@ -237,7 +262,7 @@ AutoGo(a) ==
     /\ autos' = [autos EXCEPT ![a] = @ + 1]
     /\ ownGone' = [ownGone EXCEPT ![a] = @ \cup {hitLim[a]}]
     /\ UNCHANGED <<n, win, near, live, stale, hits, hitLim, menus, outside, rec, rowVars, due, wkey,
-                   req, pend, restarts, stored, pressedOn, streak, grants, wrong>>
+                   req, pend, restarts, stored, pressedOn, streak, grants, wrong, moveVars, moves>>
 
 \* The outside: a person's acts and a stale wait, bounded together.
 Outside == outside < MaxOutside /\ outside' = outside + 1
@@ -248,7 +273,7 @@ GoesStale(a) ==
     /\ live[a] /\ screen[a] = "wait" /\ ~stale[a]
     /\ stale' = [stale EXCEPT ![a] = TRUE]
     /\ UNCHANGED <<n, win, near, cc, screen, live, autos, hits, hitLim, menus, rec, rowVars, due,
-                   wkey, req, pend, restarts, ghosts>>
+                   wkey, req, pend, restarts, ghosts, moveVars>>
 
 \* A person at the viewer presses Esc on the wait: it ends, the turn ended.
 Esc(a) ==
@@ -258,7 +283,7 @@ Esc(a) ==
     /\ cc' = [cc EXCEPT ![a] = "idle"]
     /\ stale' = [stale EXCEPT ![a] = FALSE]
     /\ UNCHANGED <<n, win, near, live, autos, hits, hitLim, menus, rec, rowVars, due, wkey, req,
-                   pend, restarts, ghosts>>
+                   pend, restarts, ghosts, moveVars>>
 
 \* What an option of the menu does, whoever presses it.
 Apply(a, l) ==
@@ -276,7 +301,7 @@ Choose(a, l) ==
     /\ l = "spend" => CanSpend
     /\ Apply(a, l)
     /\ UNCHANGED <<n, win, near, live, autos, stale, hits, hitLim, menus, rec, rowVars, due, wkey,
-                   req, pend, restarts, ghosts>>
+                   req, pend, restarts, ghosts, moveVars>>
 
 \* A person types a prompt into an ended turn.
 Type(a) ==
@@ -284,7 +309,7 @@ Type(a) ==
     /\ a \in Interactive /\ live[a] /\ screen[a] = "input" /\ cc[a] \in {"done", "idle"}
     /\ cc' = [cc EXCEPT ![a] = "working"]
     /\ UNCHANGED <<n, win, near, screen, live, autos, stale, hits, hitLim, menus, rec, rowVars, due,
-                   wkey, req, pend, restarts, ghosts>>
+                   wkey, req, pend, restarts, ghosts, moveVars>>
 
 \* The process ends, its turn not running: a person exits, or a headless process ends.
 Exit(a) ==
@@ -294,13 +319,13 @@ Exit(a) ==
     /\ screen' = [screen EXCEPT ![a] = "input"]
     /\ stale' = [stale EXCEPT ![a] = FALSE]
     /\ UNCHANGED <<n, win, near, cc, autos, hits, hitLim, menus, rec, rowVars, due, wkey, req, pend,
-                   restarts, ghosts>>
+                   restarts, ghosts, moveVars>>
 
 \* Another start, resume or lease on the account is asked for.
 Ask ==
     /\ req = "none"
     /\ req' = "asked"
-    /\ UNCHANGED <<n, win, near, ccVars, outside, rec, rowVars, due, wkey, pend, restarts, ghosts>>
+    /\ UNCHANGED <<n, win, near, ccVars, outside, rec, rowVars, due, wkey, pend, restarts, ghosts, moveVars>>
 
 -----------------------------------------------------------------------------
 (* The framework *)
@@ -316,7 +341,7 @@ Read(a) ==
     /\ step' = [step EXCEPT ![a] = IF @ = "unknown" THEN @ ELSE "look"]
     /\ cp' = [cp EXCEPT ![a] = FALSE]
     /\ UNCHANGED <<n, win, near, ccVars, outside, label, byPerson, pp, goes, noted, due, wkey, req,
-                   pend, restarts, ghosts>>
+                   pend, restarts, ghosts, moveVars>>
 
 \* The screen read: Claude Code's own wait is watched; the menu is pressed, or first asked of
 \* a person where the account can spend; an ended turn waits for the reset.
@@ -336,7 +361,7 @@ Look(a) ==
               /\ byPerson' = [byPerson EXCEPT ![a] = FALSE]
               /\ UNCHANGED cp
     /\ UNCHANGED <<n, win, near, ccVars, outside, rec, seen, lim, pp, goes, noted, due, wkey, req,
-                   pend, restarts, ghosts>>
+                   pend, restarts, ghosts, moveVars>>
 
 \* A person answers the usage_credits prompt.
 AnswerCredits(a, l) ==
@@ -347,7 +372,7 @@ AnswerCredits(a, l) ==
     /\ label' = [label EXCEPT ![a] = l]
     /\ byPerson' = [byPerson EXCEPT ![a] = TRUE]
     /\ UNCHANGED <<n, win, near, ccVars, rec, seen, lim, pp, goes, noted, due, wkey, req, pend,
-                   restarts, ghosts>>
+                   restarts, ghosts, moveVars>>
 
 \* Its deadline takes the default, the stop, as the framework's. Under DefaultSpends, credits.
 CreditsDefault(a) ==
@@ -357,7 +382,7 @@ CreditsDefault(a) ==
     /\ label' = [label EXCEPT ![a] = IF Break = "DefaultSpends" THEN "spend" ELSE "stop"]
     /\ byPerson' = [byPerson EXCEPT ![a] = FALSE]
     /\ UNCHANGED <<n, win, near, ccVars, outside, rec, seen, lim, pp, goes, noted, due, wkey, req,
-                   pend, restarts, ghosts>>
+                   pend, restarts, ghosts, moveVars>>
 
 \* The menu is gone before the answer (a person at the viewer, an exit): withdrawn, and the
 \* screen read again.
@@ -366,7 +391,7 @@ CreditsGone(a) ==
     /\ cp' = [cp EXCEPT ![a] = FALSE]
     /\ step' = [step EXCEPT ![a] = "look"]
     /\ UNCHANGED <<n, win, near, ccVars, outside, rec, seen, lim, label, byPerson, pp, goes, noted,
-                   due, wkey, req, pend, restarts, ghosts>>
+                   due, wkey, req, pend, restarts, ghosts, moveVars>>
 
 \* The checked press, in one step: the screen must show the menu, or nothing goes and the
 \* screen is read again. A press that goes lands, with its outcome known or not, or does not
@@ -389,7 +414,7 @@ Press(a) ==
             /\ UNCHANGED <<cc, screen, pressedOn, wrong>>
     /\ UNCHANGED <<n, win, near, live, autos, stale, hits, hitLim, menus, outside, rec, seen, lim,
                    label, byPerson, cp, pp, goes, noted, due, wkey, req, pend, restarts, stored,
-                   ownGone, streak, grants>>
+                   ownGone, streak, grants, moveVars, moves>>
 
 \* A press whose outcome is unknown is never sent again: the screen read shows where it went.
 \* The menu still shown is a person's prompt. Under RetryUnknown it is pressed again.
@@ -401,7 +426,7 @@ Unsure(a) ==
             ELSE step' = [step EXCEPT ![a] = "prompt"] /\ pp' = [pp EXCEPT ![a] = TRUE]
        ELSE step' = [step EXCEPT ![a] = "look"] /\ UNCHANGED pp
     /\ UNCHANGED <<n, win, near, ccVars, outside, rec, seen, lim, label, byPerson, cp, goes, noted,
-                   due, wkey, req, pend, restarts, ghosts>>
+                   due, wkey, req, pend, restarts, ghosts, moveVars>>
 
 \* Claude Code's own wait, watched: ended with no turn (Esc, an exit), it is the menu's stop;
 \* still shown once the reset passed, a person's prompt (the margin is left abstract: this step
@@ -413,7 +438,7 @@ Abandoned(a) ==
     /\ ~live[a] \/ screen[a] # "wait"
     /\ step' = [step EXCEPT ![a] = "look"]
     /\ UNCHANGED <<n, win, near, ccVars, outside, rec, seen, lim, label, byPerson, cp, pp, goes,
-                   noted, due, wkey, req, pend, restarts, ghosts>>
+                   noted, due, wkey, req, pend, restarts, ghosts, moveVars>>
 
 Overdue(a) ==
     /\ Break # "TrustOwnWait"
@@ -421,7 +446,7 @@ Overdue(a) ==
     /\ step' = [step EXCEPT ![a] = "prompt"]
     /\ pp' = [pp EXCEPT ![a] = TRUE]
     /\ UNCHANGED <<n, win, near, ccVars, outside, rec, seen, lim, label, byPerson, cp, goes, noted,
-                   due, wkey, req, pend, restarts, ghosts>>
+                   due, wkey, req, pend, restarts, ghosts, moveVars>>
 
 \* At the reset, the agent row says first that a word to go on is owed, and counts it once per
 \* limit; past Bound go-ons in a row, a person's prompt instead. Under IgnoreOwnWait a word goes
@@ -440,7 +465,7 @@ GoOn(a) ==
             /\ streak' = [streak EXCEPT ![a] = @ + 1]
             /\ UNCHANGED pp
     /\ UNCHANGED <<n, win, near, ccVars, outside, rec, seen, lim, label, byPerson, cp, due, wkey,
-                   req, pend, restarts, stored, ownGone, pressedOn, grants, wrong>>
+                   req, pend, restarts, stored, ownGone, pressedOn, grants, wrong, moveVars, moves>>
 
 \* Mailbox stores the word under a's key for the limit, then the agent row says it is on its
 \* way; a restart between the two sends it again, and the key stores nothing more. Under NoKey
@@ -455,7 +480,7 @@ Send(a) ==
        ELSE UNCHANGED <<due, wkey, stored>>
     /\ pend' = [pend EXCEPT ![a] = lim[a]]
     /\ UNCHANGED <<n, win, near, ccVars, outside, rec, rowVars, req, restarts, ownGone, pressedOn,
-                   streak, grants, wrong>>
+                   streak, grants, wrong, moveVars, moves>>
 
 \* Mailbox's answer comes back: the row says the word of that limit is on its way.
 Sent(a) ==
@@ -463,7 +488,7 @@ Sent(a) ==
     /\ pend' = [pend EXCEPT ![a] = 0]
     /\ step' = [step EXCEPT ![a] = IF @ = "send" /\ lim[a] = pend[a] THEN "word" ELSE @]
     /\ UNCHANGED <<n, win, near, ccVars, outside, rec, seen, lim, label, byPerson, cp, pp, goes,
-                   noted, due, wkey, req, restarts, ghosts>>
+                   noted, due, wkey, req, restarts, ghosts, moveVars>>
 
 \* Mailbox hands a word into an ended turn; to a process that is gone, by `launch`, as the
 \* prompt of a resume, under a lease the gate admits.
@@ -479,7 +504,7 @@ Deliver(a) ==
     /\ cc' = [cc EXCEPT ![a] = "working"]
     /\ screen' = [screen EXCEPT ![a] = "input"]
     /\ UNCHANGED <<n, win, near, autos, stale, hits, hitLim, menus, outside, rec, rowVars, wkey,
-                   req, pend, restarts, stored, ownGone, pressedOn, streak>>
+                   req, pend, restarts, stored, ownGone, pressedOn, streak, moveVars, moves>>
 
 \* A turn ran after the limit: a's own wait, the word, a person. The row is no longer limited,
 \* and its open prompts are withdrawn.
@@ -490,14 +515,14 @@ Continued(a) ==
     /\ cp' = [cp EXCEPT ![a] = FALSE]
     /\ pp' = [pp EXCEPT ![a] = FALSE]
     /\ UNCHANGED <<n, win, near, ccVars, outside, rec, seen, label, byPerson, goes, noted, due,
-                   wkey, req, pend, restarts, ghosts>>
+                   wkey, req, pend, restarts, ghosts, moveVars>>
 
 \* A turn that ended by itself ends the go-ons in a row.
 Ended(a) ==
     /\ lim[a] = 0 /\ cc[a] = "done" /\ goes[a] > 0
     /\ goes' = [goes EXCEPT ![a] = 0]
     /\ UNCHANGED <<n, win, near, ccVars, outside, rec, seen, lim, step, label, byPerson, cp, pp,
-                   noted, due, wkey, req, pend, restarts, ghosts>>
+                   noted, due, wkey, req, pend, restarts, ghosts, moveVars>>
 
 \* A person answers the limit prompt, "go on": the go-ons in a row start again, and the screen
 \* is read again. A person who saw the menu still shown after a press whose outcome is unknown
@@ -511,7 +536,77 @@ AnswerLimit(a) ==
     /\ step' = [step EXCEPT ![a] = IF @ = "prompt" THEN "look" ELSE @]
     /\ pressedOn' = [pressedOn EXCEPT ![a] = 0]
     /\ UNCHANGED <<n, win, near, ccVars, rec, seen, lim, label, byPerson, cp, noted, due, wkey, req,
-                   pend, restarts, stored, ownGone, grants, wrong>>
+                   pend, restarts, stored, ownGone, grants, wrong, moveVars, moves>>
+
+\* Another usable account has room, or no longer has: another agent's use, its reset. Its
+\* room is its own, never its usage credits.
+Rooms ==
+    /\ Others
+    /\ room' = ~room
+    /\ UNCHANGED <<n, win, near, ccVars, outside, rec, rowVars, due, wkey, req, pend, restarts,
+                   ghosts, far, where, mv, mvBy>>
+
+\* Before the reset, an agent whose limit's reset is more than `move_after` away (`far`), with
+\* another usable account that has room, is moved: the agent row says first that this limit's
+\* move is claimed (the act's row in Acts), once per limit. A delegate moves on its own; a main
+\* session never does: its limit prompt opens, offering the move beside the wait. Under MoveMain
+\* a main moves as a delegate does; under MoveTwice the claim is not checked.
+Away(a) ==
+    /\ Others
+    /\ step[a] \in {"idle", "own"} /\ cc[a] \notin {"working", "done"}
+    /\ ~Passed(lim[a]) /\ far /\ room /\ Current(a)
+    /\ mv[a] # lim[a] \/ Break = "MoveTwice"
+    /\ mv' = [mv EXCEPT ![a] = lim[a]]
+    /\ IF a \in Mains /\ Break # "MoveMain"
+       THEN /\ step' = [step EXCEPT ![a] = "prompt"]
+            /\ pp' = [pp EXCEPT ![a] = TRUE]
+            /\ UNCHANGED mvBy
+       ELSE /\ step' = [step EXCEPT ![a] = "move"]
+            /\ mvBy' = [mvBy EXCEPT ![a] = FALSE]
+            /\ UNCHANGED pp
+    /\ UNCHANGED <<n, win, near, ccVars, outside, rec, seen, lim, label, byPerson, cp, goes, noted,
+                   due, wkey, req, pend, restarts, ghosts, far, room, where>>
+
+\* A person answers a limit prompt "move": the move is theirs, a main's or a delegate's.
+AnswerMove(a) ==
+    /\ Outside
+    /\ Others /\ pp[a] /\ step[a] = "prompt"
+    /\ pp' = [pp EXCEPT ![a] = FALSE]
+    /\ step' = [step EXCEPT ![a] = "move"]
+    /\ mvBy' = [mvBy EXCEPT ![a] = TRUE]
+    /\ goes' = [goes EXCEPT ![a] = 0]
+    /\ streak' = [streak EXCEPT ![a] = 0]
+    /\ UNCHANGED <<n, win, near, ccVars, rec, seen, lim, label, byPerson, cp, noted, due, wkey, req,
+                   pend, restarts, stored, ownGone, pressedOn, grants, wrong, far, room, where, mv,
+                   moves>>
+
+\* The Mover's one move, decided on the newest record: drained, ended, the conversation
+\* copied, resumed on the other account under its name and session id, where it runs. Refused
+\* (no account with room) or failed, it stays here, limited and idle, and a limit prompt tells a
+\* person. Unknown, it may have moved: a person's prompt, never a second move.
+Moved(a) ==
+    /\ where' = [where EXCEPT ![a] = "there"]
+    /\ live' = [live EXCEPT ![a] = TRUE]
+    /\ cc' = [cc EXCEPT ![a] = "working"]
+    /\ screen' = [screen EXCEPT ![a] = "input"]
+    /\ stale' = [stale EXCEPT ![a] = FALSE]
+
+MoveAct(a) ==
+    /\ step[a] = "move" /\ cc[a] \notin {"working", "done"} /\ Current(a)
+    /\ moves' = [moves EXCEPT ![a][lim[a]] = IF mvBy[a] THEN @ ELSE @ + 1]
+    /\ wrong' = wrong \cup (IF a \in Mains /\ ~mvBy[a] THEN {"moved a main unasked"} ELSE {})
+    /\ \/ /\ room /\ Moved(a)
+          /\ step' = [step EXCEPT ![a] = "moved"]
+          /\ UNCHANGED pp
+       \/ /\ step' = [step EXCEPT ![a] = "prompt"]
+          /\ pp' = [pp EXCEPT ![a] = TRUE]
+          /\ UNCHANGED <<cc, screen, live, stale, where>>
+       \/ /\ room /\ Moved(a)
+          /\ step' = [step EXCEPT ![a] = "prompt"]
+          /\ pp' = [pp EXCEPT ![a] = TRUE]
+    /\ UNCHANGED <<n, win, near, autos, hits, hitLim, menus, outside, rec, seen, lim, label,
+                   byPerson, cp, goes, noted, due, wkey, req, pend, restarts, stored, ownGone,
+                   pressedOn, streak, grants, far, room, mv, mvBy>>
 
 \* The Scheduler answers the other request at once: granted only where the gate admits.
 Answer ==
@@ -520,19 +615,29 @@ Answer ==
        THEN req' = "granted" /\ grants' = grants + 1
        ELSE req' = "refused" /\ UNCHANGED grants
     /\ UNCHANGED <<n, win, near, ccVars, outside, rec, rowVars, due, wkey, pend, restarts, stored,
-                   ownGone, pressedOn, streak, wrong>>
+                   ownGone, pressedOn, streak, wrong, moveVars, moves>>
 
 \* A restart of the framework: its memory goes, every row stays.
 Restart ==
     /\ restarts < MaxRestarts
     /\ restarts' = restarts + 1
     /\ pend' = [a \in Agents |-> 0]
-    /\ UNCHANGED <<n, win, near, ccVars, outside, rec, rowVars, due, wkey, req, ghosts>>
+    \* A move claimed and not yet acted on: the claim a restart cut is a person's prompt
+    \* (Heal.tla's Ask), never acted on again.
+    /\ step' = [a \in Agents |-> IF step[a] = "move" THEN "prompt" ELSE step[a]]
+    /\ pp' = [a \in Agents |-> pp[a] \/ step[a] = "move"]
+    /\ UNCHANGED <<n, win, near, ccVars, outside, rec, seen, lim, label, byPerson, cp, goes, noted,
+                   due, wkey, req, ghosts, moveVars>>
 
 -----------------------------------------------------------------------------
 
 Init ==
-    /\ n = 0 /\ win = "open" /\ near = FALSE
+    /\ n = 0 /\ win = "open" /\ near = FALSE /\ far = FALSE
+    /\ room \in IF Others THEN BOOLEAN ELSE {FALSE}
+    /\ where = [a \in Agents |-> "here"]
+    /\ mv = [a \in Agents |-> 0]
+    /\ mvBy = [a \in Agents |-> FALSE]
+    /\ moves = [a \in Agents |-> [k \in Limits |-> 0]]
     /\ cc = [a \in Agents |-> "working"]
     /\ screen = [a \in Agents |-> "input"]
     /\ live = [a \in Agents |-> TRUE]
@@ -567,15 +672,15 @@ Init ==
 Framework(a) ==
     \/ Read(a) \/ Look(a) \/ CreditsDefault(a) \/ CreditsGone(a) \/ Press(a) \/ Unsure(a)
     \/ Abandoned(a) \/ Overdue(a) \/ GoOn(a) \/ Send(a) \/ Sent(a) \/ Deliver(a) \/ Continued(a)
-    \/ Ended(a)
+    \/ Ended(a) \/ Away(a) \/ MoveAct(a)
 
 Person(a) ==
-    \/ GoesStale(a) \/ Esc(a) \/ Type(a) \/ Exit(a) \/ AnswerLimit(a)
+    \/ GoesStale(a) \/ Esc(a) \/ Type(a) \/ Exit(a) \/ AnswerLimit(a) \/ AnswerMove(a)
     \/ \E l \in {"stop", "wait", "spend"} : Choose(a, l)
     \/ \E l \in Labels : AnswerCredits(a, l)
 
 Next ==
-    \/ Close \/ Reset \/ Ask \/ Answer \/ Restart
+    \/ Close \/ Reset \/ Ask \/ Answer \/ Restart \/ Rooms
     \/ \E a \in Agents : Hit(a) \/ TurnEnds(a) \/ AutoGo(a) \/ Framework(a) \/ Person(a)
 
 Fairness ==
@@ -586,7 +691,7 @@ Fairness ==
           /\ WF_vars(CreditsGone(a)) /\ WF_vars(Press(a)) /\ WF_vars(Unsure(a))
           /\ WF_vars(Abandoned(a)) /\ WF_vars(Overdue(a)) /\ WF_vars(GoOn(a))
           /\ WF_vars(Send(a)) /\ WF_vars(Sent(a)) /\ WF_vars(Deliver(a)) /\ WF_vars(Continued(a))
-          /\ WF_vars(Ended(a))
+          /\ WF_vars(Ended(a)) /\ WF_vars(Away(a)) /\ WF_vars(MoveAct(a))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -608,6 +713,8 @@ TypeOK ==
     /\ req \in {"none", "asked", "granted", "refused"}
     /\ noted \in [Agents -> Limits]
     /\ pend \in [Agents -> Limits] /\ restarts \in 0..MaxRestarts
+    /\ far \in BOOLEAN /\ room \in BOOLEAN /\ where \in [Agents -> {"here", "there"}]
+    /\ mv \in [Agents -> Limits] /\ mvBy \in [Agents -> BOOLEAN]
 
 \* No usage credits but by a person's answer: the framework presses the credits only as a
 \* person answered its usage_credits prompt.
@@ -633,6 +740,13 @@ MenuPressedOnce == {"pressed twice", "pressed off the menu"} \cap wrong = {}
 \* The framework's go-ons in a row, with no turn ended by itself and no person's answer
 \* between, never pass Bound.
 BoundedRetries == \A a \in Agents : streak[a] <= Bound
+
+\* A main session is moved only by a person's answer of its limit prompt.
+NeverMovesMain == "moved a main unasked" \notin wrong
+
+\* The framework moves an agent at most once per limit; a refused, failed or unknown move
+\* leaves it to a person.
+MoveOnce == \A a \in Agents : \A k \in Limits : moves[a][k] <= 1
 
 \* Liveness: every agent marked limited, once its limit's reset passed, goes on or is a
 \* person's prompt.

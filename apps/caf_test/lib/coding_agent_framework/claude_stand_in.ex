@@ -13,7 +13,8 @@ defmodule CodingAgentFramework.ClaudeStandIn do
     which it ignores SIGTERM, as a process that does not end would; after the line
     `cut <path>` it first appends `{"type":"cut"}` to that file, as Claude Code keeps what a turn
     the SIGTERM cut wrote in its transcript;
-  - prints `2.1.322 (Claude Code)` for `--version`, as Claude Code prints its release;
+  - prints `2.1.322 (Claude Code)` for `--version`, as Claude Code prints its release, and a
+    logged-in login for `auth status` (`CodingAgentFramework.Logins.Status`'s JSON);
   - echoes each line of its input, and exits on `/exit`, or after `idle` seconds with none
     (`TestHost.stand_in_idle/0` by default), so no run leaves it for long;
   - records its pid in `<dir>/pids/`, so a test ends what it started by pid (`kill_all/1`,
@@ -54,6 +55,9 @@ defmodule CodingAgentFramework.ClaudeStandIn do
     ~s"""
     #!#{program!(:bash)}
     name='' resume=''
+    if [ "$1 $2" = "auth status" ]; then
+      printf '{"loggedIn": true, "authMethod": "stand_in", "loginExpiresAt": null}\\n'; exit 0
+    fi
     while [ $# -gt 0 ]; do
       case $1 in
         --version) printf '2.1.322 (Claude Code)\\n'; exit 0 ;;

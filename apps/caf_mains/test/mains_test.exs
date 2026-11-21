@@ -31,8 +31,6 @@ defmodule CodingAgentFramework.MainsTest do
     commit!(ctx, origin, "init")
 
     {:ok, accounts} = Accounts.new(Path.join(ctx.dir, "home"), ["work"])
-    # Claude Code ran there: the account is not logged out (`Accounts.login/2`).
-    File.write!(Path.join(ctx.account.config_dir, ".claude.json"), "{}")
     {:ok, file} = Accounts.usage_file(accounts, "work")
     File.mkdir_p!(Path.dirname(file))
     week = %{"seven_day" => %{"used_percentage" => 25, "resets_at" => 4_000_000_000}}
@@ -572,7 +570,17 @@ defmodule CodingAgentFramework.MainsTest do
     acts_db = Path.join(ctx.dir, "acts.db")
     acts = start_supervised!({Acts, db: acts_db, start_id: "s1", host: "test", instance: "t"})
     allowance = fn account -> Agent.get(room, &Map.get(&1, account, :room)) end
-    more = [accounts: accounts, usage: usage, allowance: allowance, acts: acts]
+    # The login as `Logins.check/3` answers it (F-181): `spare` not logged in at first.
+    login = start_supervised!(Supervisor.child_spec({Agent, fn -> %{} end}, id: :login))
+    Agent.update(login, &Map.put(&1, "spare", {:refused, {:login, :logged_out}}))
+
+    usable = fn account ->
+      with {:ok, a} <- Accounts.ready(accounts, account),
+           :ok <- Agent.get(login, &Map.get(&1, account, :ok)),
+           do: {:ok, a}
+    end
+
+    more = [accounts: accounts, usage: usage, allowance: allowance, acts: acts, usable: usable]
     mains = mains(%{ctx | mains_opts: Keyword.merge(ctx.mains_opts, more)})
     assert {:ok, _} = level(ctx, mains)
 
@@ -600,7 +608,7 @@ defmodule CodingAgentFramework.MainsTest do
              Mains.resume_main(mains, "app-epic")
 
     # `spare` logged in, but the copy refused: the row stays on `work`, stopped (CopyRefused).
-    File.write!(Path.join(spare.config_dir, ".claude.json"), "{}")
+    Agent.update(login, &Map.delete(&1, "spare"))
     File.rename!(transcript, transcript <> ".away")
     assert {:refused, {:copy, {:no_transcript, :enoent}}} = Mains.resume_main(mains, "app-epic")
     assert %{account: "work", status: "stopped"} = Agents.get(ctx.agents, "app-epic")

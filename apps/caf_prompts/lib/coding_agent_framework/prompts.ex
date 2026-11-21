@@ -14,16 +14,18 @@ defmodule CodingAgentFramework.Prompts do
   | `dialog` | `Sessions`' agent row on a startup dialog (`trust`, `imports`) | the row shows it, no press marked |
   | `ask` | `Mailbox`'s ask, from an agent to the operator | no answer row and no withdrawal |
   | `remedy` | `Watch`'s symptom state the healer left to a person (F-182) | the row is `asked` |
+  | `login` | `Logins`' row of an account whose login a check refused (F-181) | no check found it logged in since |
 
   A later kind is one more clause of `list/2` and of `answer/5`, and the same data.
 
   Each prompt is `%{id, kind, status, agent, parent, project, subagent, text, options,
   opened_at, deadline}`: `id` names its owner's key, so one state is one prompt
   (`"permission:<intake id>"`, `"stop_cap:<intake id>"`, `"dialog:<agent>:<start>:<dialog>"`,
-  `"ask:<mailbox id>"`, `"remedy:<symptom id>"`); `status` is `open`, `answering` (an answer is on its way to the owner),
+  `"ask:<mailbox id>"`, `"remedy:<symptom id>"`, `"login:<account>"`); `status` is `open`, `answering` (an answer is on its way to the owner),
   or for a dialog `cut` or `unknown` (a restart cut its press: a person clears it,
   `Sessions.clear_dialog/4`); `agent` is the agent whose session asks (nil for a session no
-  agent row names; a remedy's is its symptom's target when an agent row has that name),
+  agent row names; a remedy's is its symptom's target when an agent row has that name; a
+  login's is nil, since an account waits, not an agent),
   `parent` and `project` its row's; `options` the labels a choice is one of,
   or for an ask its questions, each with its options; `opened_at` and `deadline` wall-clock ms,
   `deadline` nil for a kind that waits for ever.
@@ -47,7 +49,7 @@ defmodule CodingAgentFramework.Prompts do
 
   use GenServer
 
-  alias CodingAgentFramework.{Intake, Mailbox, Sessions, Watch}
+  alias CodingAgentFramework.{Intake, Logins, Mailbox, Sessions, Watch}
   alias CodingAgentFramework.Sessions.Agents
 
   @timeout 5_000
@@ -56,7 +58,7 @@ defmodule CodingAgentFramework.Prompts do
   # The most characters of a tool call's input a permission prompt's text carries.
   @input 300
 
-  @kinds ~w(permission stop_cap dialog ask remedy)
+  @kinds ~w(permission stop_cap dialog ask remedy login)
 
   @typedoc "A prompt, as the module doc says."
   @type prompt :: %{
@@ -76,7 +78,8 @@ defmodule CodingAgentFramework.Prompts do
   @doc """
   Starts the inbox of one host. Options: `host:`, `intake:` (the host's `Intake`) and
   `intake_db:` (its file), `sessions:` (the `Sessions`) and `sessions_db:` (its file), `mailbox:`,
-  `watch:` (the `Watch`) and `watch_db:` (its file), and optionally `notify:` (a function of one cue) and `name:` (for the embedding app's tree;
+  `watch:` (the `Watch`) and `watch_db:` (its file), and optionally `logins:` (the instance's
+  `Logins`) with `logins_db:` (its file), `notify:` (a function of one cue) and `name:` (for the embedding app's tree;
   the library looks up no name).
   """
   @spec start_link(keyword) :: GenServer.on_start()
@@ -91,7 +94,7 @@ defmodule CodingAgentFramework.Prompts do
 
   @doc "What it reads, for `Cues`: its owners' topics, each cue a read of every prompt."
   @spec reads() :: %{topics: [String.t()], cue: (pid, map -> :ok)}
-  def reads, do: %{topics: ~w(intake sessions mailbox watch), cue: &cue/2}
+  def reads, do: %{topics: ~w(intake sessions mailbox watch logins), cue: &cue/2}
 
   @doc "The kinds it reads."
   @spec kinds() :: [String.t()]
@@ -124,7 +127,9 @@ defmodule CodingAgentFramework.Prompts do
   - `ask`: one answer per question, as `Mailbox.answer/4` takes them, or `{:withdraw, reason}`
     (a person dismissed it, `Mailbox.withdraw/4`: one more settle);
   - `remedy`: `"approve"` (its kind's remedy back on the allow-list, the operator's widening)
-    or `"leave"` (`Watch.answer/5`).
+    or `"leave"` (`Watch.answer/5`);
+  - `login`: `"check"`, once a person logged the account in (`bin/caf-login`): its login is
+    checked again now (`Logins.recheck/3`), and the prompt closes when it is logged in.
 
   The prompt is read now and must be `open`, and the choice one it offers; the owner then takes
   it (`Intake.answer/4` with `by: who`, `Sessions.answer_dialog/5` with `by: who`,
@@ -197,13 +202,17 @@ defmodule CodingAgentFramework.Prompts do
 
     with {:ok, idb} <- Intake.Table.open(Keyword.fetch!(opts, :intake_db)),
          {:ok, agents} <- Agents.open(Keyword.fetch!(opts, :sessions_db), host),
-         {:ok, wdb} <- Watch.Table.open(Keyword.fetch!(opts, :watch_db)) do
+         {:ok, wdb} <- Watch.Table.open(Keyword.fetch!(opts, :watch_db)),
+         {:ok, ldb} <- logins_db(opts[:logins_db]) do
+      owners = Map.new(~w(intake sessions mailbox watch)a, &{&1, Keyword.fetch!(opts, &1)})
+
       s = %{
         host: host,
         idb: idb,
         agents: agents,
         wdb: wdb,
-        owners: Map.new(~w(intake sessions mailbox watch)a, &{&1, Keyword.fetch!(opts, &1)}),
+        ldb: ldb,
+        owners: Map.put(owners, :logins, opts[:logins]),
         notify: Keyword.get(opts, :notify, fn _ -> :ok end),
         # id -> status, as the last read found them: what the next cue says moved.
         shown: %{},
@@ -217,6 +226,9 @@ defmodule CodingAgentFramework.Prompts do
       {:refused, reason} -> {:stop, reason}
     end
   end
+
+  defp logins_db(nil), do: {:ok, nil}
+  defp logins_db(path), do: Logins.Table.open(path)
 
   @impl true
   def handle_continue(:read, s), do: {:noreply, reread(s)}
@@ -293,7 +305,8 @@ defmodule CodingAgentFramework.Prompts do
 
     with {:ok, asks} <- asks(s.owners.mailbox) do
       prompts =
-        holds(s, rows) ++ dialogs(rows) ++ Enum.map(asks, &ask(&1, rows)) ++ remedies(s, rows)
+        holds(s, rows) ++
+          dialogs(rows) ++ Enum.map(asks, &ask(&1, rows)) ++ remedies(s, rows) ++ logins(s)
 
       {:ok, Enum.sort_by(prompts, &{&1.opened_at || 0, &1.id})}
     end
@@ -409,6 +422,29 @@ defmodule CodingAgentFramework.Prompts do
     end
   end
 
+  defp logins(%{ldb: nil}), do: []
+
+  defp logins(s) do
+    for row <- Logins.Table.refused(s.ldb) do
+      text =
+        "account #{row.account} is not logged in (#{row.state}): log it in with bin/caf-login, " <>
+          "then answer check"
+
+      fields = %{
+        id: "login:#{row.account}",
+        kind: "login",
+        status: "open",
+        subagent: nil,
+        text: text,
+        options: ~w(check),
+        opened_at: row.refused_at,
+        deadline: nil
+      }
+
+      Map.merge(of(nil), fields)
+    end
+  end
+
   defp of(nil), do: %{agent: nil, parent: nil, project: nil}
 
   defp of(row),
@@ -437,6 +473,9 @@ defmodule CodingAgentFramework.Prompts do
 
       ["remedy", n] ->
         settled_if(Watch.Table.select(s.wdb, "id = ?1", [int(n)]) != [])
+
+      ["login", account] when s.ldb != nil ->
+        settled_if(Map.has_key?(Logins.Table.rows(s.ldb), account))
 
       _ ->
         {:refused, :no_prompt}
@@ -473,6 +512,8 @@ defmodule CodingAgentFramework.Prompts do
   defp choose(%{kind: "remedy"}, choice, _who) when choice in ["approve", "leave"],
     do: {:ok, choice}
 
+  defp choose(%{kind: "login"}, "check", _who), do: {:ok, :check}
+
   defp choose(_prompt, _choice, _who), do: {:refused, {:bad, :choice}}
 
   # The owner takes the answer, in the caller's process; its refusal of a request no longer
@@ -508,6 +549,14 @@ defmodule CodingAgentFramework.Prompts do
 
   defp hand(owners, %{kind: "remedy", id: "remedy:" <> n}, choice, who),
     do: Watch.answer(owners.watch, int(n), choice, who)
+
+  # A check that finds it logged in closes the prompt; one still refused leaves it open.
+  defp hand(owners, %{kind: "login", id: "login:" <> account}, :check, _who) do
+    case Logins.recheck(owners.logins, account) do
+      :ok -> {:ok, :logged_in}
+      other -> other
+    end
+  end
 
   defp check_filter(filter) when is_list(filter) do
     ok? =

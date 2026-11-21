@@ -61,8 +61,8 @@ defmodule CodingAgentFramework do
 
   use Supervisor
 
-  alias CodingAgentFramework.{AbsentMains, Accounts, Acts, Copies, Delegates, Grants, Holder}
-  alias CodingAgentFramework.{Host, Inlet}
+  alias CodingAgentFramework.{AbsentMains, Accounts, Acts, ClaudeCLI, Copies, Delegates, Grants}
+  alias CodingAgentFramework.{Holder, Host, Inlet, Logins}
 
   alias CodingAgentFramework.{
     Cues,
@@ -208,6 +208,7 @@ defmodule CodingAgentFramework do
   | `intake:<host>:<account>:waiters` | `ids`: the session id whose waiter came or went |
   | `prompts` | `ids`: the prompts that opened, moved or closed (`prompts/2`, `Prompts`) |
   | `watch` | `ids`: the symptom rows' ids (`symptoms/2`, `Watch`); none for an act on the allow-list |
+  | `logins:<host>` | `ids`: the login rows' ids (`Logins.Table`), at a change of an account's login state |
 
   An app's process that subscribes again whenever its tree comes back:
 
@@ -389,6 +390,7 @@ defmodule CodingAgentFramework do
   def reads do
     [
       sessions: Sessions.reads(),
+      usage: Usage.reads(),
       recoveries: Recoveries.reads(),
       tracker: Tracker.reads(),
       mailbox: Mailbox.reads(),
@@ -425,7 +427,8 @@ defmodule CodingAgentFramework do
       jobs: Jobs.writes(),
       services: Services.writes(),
       prompts: Prompts.writes(),
-      watch: Watch.writes()
+      watch: Watch.writes(),
+      logins: Logins.writes()
     ]
   end
 
@@ -540,13 +543,26 @@ defmodule CodingAgentFramework do
           claims: Config.path(c, "claims.db")}
        end},
       {:inlet, fn _ -> {Inlet, tmux: w.tmux} end},
-      {:usage,
-       fn _ ->
-         {Usage, accounts: w.accounts, host: host, db: db, notify: notify, interval: every}
-       end},
       {:stream,
        fn _ ->
          {Stream, [programs: p, holder: w.holder, home: c.home, db: db] ++ notify_every}
+       end},
+      # After `Stream`, whose rows give a headless session's readings and limit.
+      {:usage,
+       fn pid ->
+         {Usage,
+          accounts: w.accounts,
+          host: host,
+          db: db,
+          stream: {Stream, pid.(:stream)},
+          notify: notify,
+          interval: every}
+       end},
+      # Before every part that starts or resumes on an account, which reads its login first.
+      {:logins,
+       fn _ ->
+         {Logins,
+          accounts: w.accounts, host: host, db: db, run: &auth_status(c, w, &1), notify: notify}
        end},
       {:intake,
        fn _ ->
@@ -676,6 +692,8 @@ defmodule CodingAgentFramework do
             mailbox: pid.(:mailbox),
             watch: pid.(:watch),
             watch_db: db,
+            logins: pid.(:logins),
+            logins_db: db,
             notify: notify,
             name: {:via, Elixir.Registry, {names(c.instance), :prompts}}}
          end},
@@ -702,6 +720,7 @@ defmodule CodingAgentFramework do
             acts: pid.(:acts),
             scheduler: pid.(:scheduler),
             lease: c.lease,
+            usable: &Logins.usable(pid.(:logins), w.accounts, &1),
             notify: notify}
          end},
         # After `Delegates`, whose launch a delegate's move resumes with.
@@ -715,6 +734,7 @@ defmodule CodingAgentFramework do
             accounts: w.accounts,
             usage: pid.(:usage),
             acts: pid.(:acts),
+            usable: &Logins.usable(pid.(:logins), w.accounts, &1),
             launch: &launch(c, pid, &1)}
          end},
         # After `Sessions`, `Mailbox` and the `Scheduler`, and before `MCP`, whose `start_main`
@@ -738,6 +758,7 @@ defmodule CodingAgentFramework do
              mailbox: pid.(:mailbox),
              usage: pid.(:usage),
              allowance: &Usage.Allowance.check(w.mains_allowance, &1),
+             usable: &Logins.usable(pid.(:logins), w.accounts, &1),
              accounts: w.accounts,
              projects: c.projects,
              mains: c.mains,
@@ -945,6 +966,22 @@ defmodule CodingAgentFramework do
   end
 
   defp pressure(%Config{pressure: pressure}, _p), do: pressure
+
+  # `claude auth status` on an account, with the launch's own environment (F-181): what
+  # `Logins` checks before a start or a resume. Bounded, as every run is.
+  defp auth_status(c, w, name) do
+    with {:ok, account} <- Accounts.ready(w.accounts, name),
+         {:ok, %{argv: argv, env: env}} <-
+           ClaudeCLI.auth_status(account,
+             claude: c.claude,
+             env: c.env,
+             tool_timeout: c.tool_timeout
+           ),
+         {:ok, %{env: env_program}} <- Programs.take(w.programs, [:env]) do
+      vars = Enum.map(env, fn {k, v} -> "#{k}=#{v}" end)
+      Shell.run(w.programs.host, env_program, ["-i" | vars] ++ argv, timeout: 30_000)
+    end
+  end
 
   defp issue(nil, _agent), do: {:refused, :no_mcp}
   defp issue(mcp, agent), do: MCP.issue(mcp, agent)

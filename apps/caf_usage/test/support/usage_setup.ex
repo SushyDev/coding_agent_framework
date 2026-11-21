@@ -23,12 +23,15 @@ defmodule CodingAgentFramework.UsageSetup do
     }
 
   @doc "`Accounts` of `names` and a `Usage` over them on host `h`; its cues come to the caller."
-  def start(names) do
+  def start(names, opts \\ []) do
     # A quote in the home's path shows the status line command quotes its words.
     {:ok, accounts} = Accounts.new(Path.join(test_dir(), "caf o'home"), names)
     me = self()
     db = Path.join(test_dir(), "usage.db")
-    {:ok, usage} = Usage.start_link(accounts: accounts, host: "h", db: db, notify: &send(me, &1))
+
+    {:ok, usage} =
+      Usage.start_link([accounts: accounts, host: "h", db: db, notify: &send(me, &1)] ++ opts)
+
     %{accounts: accounts, usage: usage, db: db}
   end
 end

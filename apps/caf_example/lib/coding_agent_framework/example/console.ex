@@ -306,7 +306,7 @@ defmodule CodingAgentFramework.Example.Console do
     end
   end
 
-  @doc "Moves `agent` to account `to`, or with nil to the one with the most allowance left."
+  @doc "Moves `agent` to account `to`, or with nil to the usable one with the most room."
   @spec move(pid, String.t(), String.t() | nil) :: :ok
   def move(caf, agent, to \\ nil), do: show(Operator.move(mcp(caf), agent, to))
 

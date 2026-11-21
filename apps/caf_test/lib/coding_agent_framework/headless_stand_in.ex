@@ -73,6 +73,9 @@ defmodule CodingAgentFramework.HeadlessStandIn do
   defp script(dir, mode, idle) do
     ~S"""
     #!BASH
+    if [ "$1 $2" = "auth status" ]; then
+      printf '{"loggedIn": true, "authMethod": "stand_in", "loginExpiresAt": null}\n'; exit 0
+    fi
     sid='' args=("$@")
     while [ $# -gt 0 ]; do
       case $1 in --session-id|--resume) sid=$2; shift 2 ;; *) shift ;; esac
