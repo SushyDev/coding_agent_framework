@@ -478,6 +478,21 @@ actor is the person, never counted in the healer's cap (`Heal.tla`'s `AnswerAct`
 `ActOnlyForBound`, `Break_Heal_ActAnyPrompt`, `Break_Heal_ActAsHealer`). A prompt stays while
 its target shows the kind at all, and passes with it.
 
+**A person's act, read** (decided in F-192, from F-190's new-1, new-2 and new-4). The answer
+"act" is `{:ok, :answered}` before the act runs: the act's outcome is its row in `Acts`, the
+person's claim and then how it ended, and the inbox shows the prompt answered and, once the act
+settles, the act's row. A person's claim names its healer in its `detail` (`healer`, the
+healer's actor, `Acts.claim/6`'s `healer:`), and each healer's `init` closes, through
+`Acts.interrupt/2`, the claims its restart cut whose actor is its own or whose `detail` names
+it. So a healer cut between a person's claim and its act leaves the row `interrupted`, never
+acted on, not `claimed` until the framework's next start (`Heal.tla`'s `SettleCut`, which
+settles any claim; `Break_Heal_CutOwnOnly` settles only the healer's own and fails
+`ClaimsEnd`). A person's act is verified as the healer's is, and one that fails its verify
+narrows the list as the healer's does, since narrowing is always safe; only the operator's
+approve widens it again. Built in F-192: the claim's `healer` and its close. Not built: the
+inbox's reading of the act, which is not yet one function of the rows (F-192's new-1); until
+then the act's row is read with the console's `acts(caf, …)`.
+
 Built so far (F-182): `Heal.tla`; `Watch` (`caf_watch`) with the record, the list from the
 config's `remedies` and `remedy_bound`, and the cue `watch`; `Recoveries` as the healer of its
 two acts (`lost_viewer` by `reopen`, `end_owed` by `end`, the default list, 10 per hour); the

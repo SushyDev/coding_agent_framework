@@ -213,7 +213,7 @@ defmodule CodingAgentFramework.Limits do
       timer: nil
     }
 
-    # A claim this actor wrote and did not settle: its act may have gone. A press is never
+    # A claim this actor wrote, or a person's it took (F-192), and did not settle: its act may have gone. A press is never
     # made again, and a word cut is a person's (`Limit.tla`'s Restart, Heal.tla's Ask).
     case Acts.interrupt(s.acts, s.actor) do
       {:ok, cut} ->
@@ -467,7 +467,15 @@ defmodule CodingAgentFramework.Limits do
     # `send_word/4`.
     with {:ok, sym, actor} <- symptom(s, "limit_far", row, state, l),
          :go <- if(actor == s.actor, do: may_act(s, list, "limit_far", sym), else: :go),
-         {:ok, id} <- Acts.claim(s.acts, actor, row.name, state, :move, detail: %{to: to}) do
+         {:ok, id} <-
+           Acts.claim(
+             s.acts,
+             actor,
+             row.name,
+             state,
+             :move,
+             [detail: %{to: to}] ++ healer(s, actor)
+           ) do
       l = Map.merge(l, %{"away" => l["until"], "move_to" => to})
       claimed_move(s, id, row, l, if(actor == s.actor, do: "framework", else: actor))
     else
@@ -592,7 +600,15 @@ defmodule CodingAgentFramework.Limits do
 
     with {:go, actor} <-
            if(is_binary(l["by"]), do: {:go, s.actor}, else: own_press(s, list, row, state, l)),
-         {:ok, id} <- Acts.claim(s.acts, actor, row.name, claim, :press_stop, detail: by(l)) do
+         {:ok, id} <-
+           Acts.claim(
+             s.acts,
+             actor,
+             row.name,
+             claim,
+             :press_stop,
+             [detail: by(l)] ++ healer(s, actor)
+           ) do
       case s.press.(row.name, l["label"]) do
         {:ok, _} ->
           Acts.settle(s.acts, id, :recovered, answer: "sent", acted: true)
@@ -631,7 +647,7 @@ defmodule CodingAgentFramework.Limits do
 
     with {:ok, sym, actor} <- symptom(s, "limit_reset", row, state, l),
          :go <- if(actor == s.actor, do: may_act(s, list, "limit_reset", sym), else: :go),
-         {:ok, id} <- Acts.claim(s.acts, actor, row.name, state, :go_on) do
+         {:ok, id} <- Acts.claim(s.acts, actor, row.name, state, :go_on, healer(s, actor)) do
       key = "limit:#{row.name}:#{l["until"]}"
       if delegate?(row), do: delegate_word(s, id, row, l, key), else: own_word(s, id, row, l, key)
       id
@@ -803,6 +819,10 @@ defmodule CodingAgentFramework.Limits do
 
   defp by(%{"by" => by}) when is_binary(by), do: %{by: by}
   defp by(_), do: %{by: "framework"}
+
+  # A person's claim names this healer, whose restart closes it if cut (F-192).
+  defp healer(%{actor: actor}, actor), do: []
+  defp healer(s, _person), do: [healer: s.actor]
 
   defp key(kind, row, l), do: "#{kind}:#{row.name}:#{l["until"]}"
 

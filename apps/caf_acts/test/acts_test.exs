@@ -91,6 +91,23 @@ defmodule CodingAgentFramework.ActsTest do
     assert {:ok, [%{id: ^open}]} = Acts.faults(restarted)
   end
 
+  # F-192: a healer's restart closes the person's claims it held, whatever else a row's detail
+  # holds: text that is not JSON, a map beside the healer, or another healer's name.
+  test "an actor that restarts closes the claims that name it as their healer", %{acts: acts} do
+    {:ok, pane} = Acts.claim(acts, "r1", "alpha", "k1", :reopen, detail: "%3")
+    {:ok, word} = Acts.claim(acts, "sam", "beta", "k1", :reopen, detail: "plain words")
+
+    {:ok, press} =
+      Acts.claim(acts, "sam", "gamma", "k1", :press_stop, detail: %{by: "sam"}, healer: "r1")
+
+    {:ok, other} = Acts.claim(acts, "sam", "delta", "k1", :reopen, healer: "r2")
+    assert {:ok, %{detail: ~s({"by":"sam","healer":"r1"})}} = Acts.get(acts, press)
+    assert Acts.interrupt(acts, "r1") == {:ok, [pane, press]}
+
+    assert Enum.map([pane, word, press, other], &status(acts, &1)) ==
+             ~w(interrupted claimed interrupted claimed)
+  end
+
   test "an actor that restarts closes its own claims; a person clears what waits", %{acts: acts} do
     {:ok, mine} = Acts.claim(acts, "r1", "alpha", "k1", :reopen)
     {:ok, other} = Acts.claim(acts, "r2", "alpha", "k2", :reopen)

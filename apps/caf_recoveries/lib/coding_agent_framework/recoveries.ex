@@ -44,7 +44,7 @@ defmodule CodingAgentFramework.Recoveries do
 
   A state's row is written first (the claim), then acted on, so each state is acted on at most
   once, across restarts of this process: a row a restart left `claimed` is closed
-  `interrupted` when this process starts (`Acts.interrupt/3`), and never acted on. The act asks
+  `interrupted` when this process starts (`Acts.interrupt/2`, a person's claim it took among them), and never acted on. The act asks
   the host's `Sessions` for the viewer's command (`Sessions.viewer_argv/3`: `dtach -a` for an
   interactive session, the log-following command for a delegate) and opens the viewer with it
   through `Sessions.viewer/4` (tagged as it opens, one row short, then grown); tmux starts the
@@ -193,7 +193,7 @@ defmodule CodingAgentFramework.Recoveries do
 
     watch = Keyword.fetch!(opts, :watch)
 
-    # A claim this actor wrote and did not act on: the restart cut it, and it is never acted on;
+    # A claim this actor wrote, or a person's it took (F-192), and did not act on: the restart cut it, and it is never acted on;
     # its symptom waits on a person (Heal.tla's SettleCut, then Ask).
     with :ok <- same_host(host, holder.host.name),
          {:ok, procs} <- Holder.Process.new(Keyword.fetch!(opts, :programs), holder),
@@ -551,7 +551,12 @@ defmodule CodingAgentFramework.Recoveries do
     )
   end
 
-  defp claim(state, actor, target, key, act), do: Acts.claim(state.acts, actor, target, key, act)
+  # A person's claim names this healer, whose restart closes it if cut (F-192).
+  defp claim(%{actor: actor} = state, actor, target, key, act),
+    do: Acts.claim(state.acts, actor, target, key, act)
+
+  defp claim(state, person, target, key, act),
+    do: Acts.claim(state.acts, person, target, key, act, healer: state.actor)
 
   @doc """
   The rows of `act` that are `acted` and wait for `actor`'s verify: the healer's own, and those

@@ -101,7 +101,8 @@ defmodule CodingAgentFramework.AbsentMains do
       clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end)
     }
 
-    # A claim this actor wrote and did not act on: never acted on; its state is a person's.
+    # A claim this actor wrote, or a person's it took (F-192), and did not act on: never
+    # acted on; its state is a person's.
     case Acts.interrupt(s.acts, s.actor) do
       {:ok, cut} ->
         for id <- cut, {:ok, row} <- [Acts.get(s.acts, id)], do: ask(s, row, :interrupted)
@@ -202,7 +203,8 @@ defmodule CodingAgentFramework.AbsentMains do
   end
 
   defp resume(s, sym, actor \\ nil) do
-    with {:ok, id} <- Acts.claim(s.acts, actor || s.actor, sym.target, sym.state, :resume) do
+    with {:ok, id} <-
+           Acts.claim(s.acts, actor || s.actor, sym.target, sym.state, :resume, healer(s, actor)) do
       case s.resume.(sym.target) do
         {:ok, _} -> verify(s, id, sym)
         {:refused, why} -> settle(s, id, sym, :failed, {:refused, why}, acted: false)
@@ -245,6 +247,10 @@ defmodule CodingAgentFramework.AbsentMains do
     Watch.ask(s.watch, %{kind: @kind, target: target, state: key}, why)
     true
   end
+
+  # A person's claim names this healer, whose restart closes it if cut (F-192).
+  defp healer(_s, nil), do: []
+  defp healer(s, person), do: if(person == s.actor, do: [], else: [healer: s.actor])
 
   defp now(s), do: s.clock.()
 end
