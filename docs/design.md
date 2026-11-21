@@ -416,6 +416,7 @@ a fact, nothing pruned. No metric is counted by code sprinkled through the parts
 | `unenforced` | a held hook that went on unanswered (the framework down or past its deadline) |
 | `restarted` | an agent's, host's or account's process restarted by its supervisor, and one whose restart budget ran out |
 | `prompt_wait` | each prompt's time open, by kind and depth, and the ones past their deadline |
+| `limited` | each usage limit of an account: its window and reset, the agents it ended, the time each waited and the remedy taken ("Usage limits") |
 
 Time in each state (per agent, per status) is a fold of the status facts. `look(what: :stuck)`
 is the agent-facing view of the same folds for its own subtree.
@@ -559,7 +560,8 @@ by label, a default, a deadline, its owner and its status (`open`, `answering`, 
 | `startup` | `Sessions`, from a dialog read on the pane: trust, imports, onboarding | `Sessions`' checked press |
 | `plan` | `Sessions`, from a held call of Claude Code's plan exit | `Intake`'s hold |
 | `elicitation` | `Sessions`, from an MCP server's request for input, held by its hook | `Intake`'s hold |
-| `limit` | the `Scheduler` and `Sessions`, at an account's usage limit: wait or move | `Team.operate/4`: a move, or nothing |
+| `limit` | the `Scheduler`, for a start refused at an account's usage limit: wait (its default) or move; `Sessions`, with no deadline, for a `limited` agent past its bound of go-ons, a menu still shown after a press whose outcome is unknown, or a wait still shown past its reset ("Usage limits") | `Team.operate/4`: a move, or nothing; `Sessions`: go on now (the press cleared, the bound started again), or leave it |
+| `usage_credits` | `Sessions`, at Claude Code's limit menu, only where the account's record allows credits | `Sessions`' checked press of the label answered: "stop and wait" (its default at the deadline) or the credits |
 | `login` | `Sessions`, from a session whose account's login expired | a person, at `bin/caf-login`; the prompt settles when a session on it starts |
 | `exit` | `Sessions`, from Claude Code's own exit prompt read on the pane | `Sessions`' checked press |
 | `remedy` | the `Watch` | `Team.operate/4` and the allow-list |
@@ -682,7 +684,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Reader` | a pure module beside `Store`: the loop every reader runs (read on an interval or a call, diff against what it wrote, write with a reads row, cue), and a `Tracker` source made from the reader's table metadata | no table; each reader its own |
 | `Cues` | one per instance: each part declares the topics it reads and the ones it writes, and `Cues` hands each cue to the `Tracker`, to every part that declared its topic, and to each of the app's processes that subscribed to it (`subscribe/2`, by a plain send, monitored); the order in which the system settles is the library's, not the app's | no table |
 | `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` | — |
-| `Usage` | each account's allowance, its weekly and five-hour windows, from what Claude Code hands its status line; picks the account with the most left ("Allowance"); `Usage.Allowance` answers whether both windows have room, for the `Scheduler`; a `Reader` | its readings |
+| `Usage` | each account's allowance, its weekly and five-hour windows, from what Claude Code hands its status line; picks the account with the most left ("Allowance"); `Usage.Allowance` answers whether both windows have room, for the `Scheduler`; the account limited until its reset, from any agent's limit record ("Usage limits"); a `Reader` | its readings |
 | `Tmux` | sessions, panes, tags, keys and viewers on one server, and the one-command check of every write to a pane; a contract with a CLI (its fake is a test aid) | — |
 | `TmuxSampler` | samples each server's panes and each host's held sockets, reports a held agent with no viewer, and cues when a held socket goes away; a `Reader` | `tmux_samples` |
 | `Holder` | dtach: hold a process in a clean environment, open a viewer, list sockets and whether each lives | — |
@@ -2390,6 +2392,16 @@ the `stop_cap` hold at Claude Code's cap with the override as the environment's 
 and `Team.tla`'s ask are its instances: the dialog's mark is the prompt's row, and an ask opens
 one and is answered by `AnswerNow`. Its header says how it implies `Boxes.tla`'s `pr` and `rp`.
 
+`Limit.tla` (F-178) models an account's usage limit ("Usage limits"): the window that closes
+and resets, agents interactive or headless whose turns end at it, Claude Code's own wait and its
+menu, a person at the viewer, and the framework's record, gate, checked press, prompts and word
+to go on, with a restart. Invariants `NeverSpends`, `GoOnOnce`, `MenuPressedOnce`,
+`BoundedRetries`, `NoResumeOnLimited`; the action property `NoStartOnLimited`; liveness
+`NoAgentLeftLimited` and `RecordRead`; each with a `Break_Limit_*` configuration.
+`Boxes.tla` composes its contracts (`MaxLimits` above 0 only in `Boxes_Limit`): the
+`Scheduler`'s gate and `Mailbox`'s mark against a `limited` turn, with a dialog, a stop and the
+restarts, as `NoStartOnLimited` and `NoRowIntoLimit`.
+
 **The remodel's model** (F-115). Each mechanism is written once, and the specs above are
 reshaped around three new ones, in R4 and R6, before the code they describe:
 
@@ -2458,6 +2470,132 @@ Each failure is its own answer, and none falls back to another way:
 
 Ghostty's AppleScript is a preview, so the framework pins the Ghostty version it was tested
 with. Every agent's session is on the workstation, so a window always attaches locally.
+
+## Usage limits
+
+An account, not an agent, reaches a usage limit, and the framework takes it as the account's
+state with bounded remedies (F-178, `Limit.tla`). Limits are routine: 170 hits in one
+workstation's transcripts, 94 of the five-hour window and 76 of the weekly one. Once, two
+builders sat at Claude Code's limit menu for two days: nothing read the limit, nothing told a
+person, nothing went on at the reset, and the app started more agents on the same account into
+the same wall.
+
+**What Claude Code does** (2.1.322; measured, or documented with its names checked in the
+pinned binary):
+
+- A turn that hits a limit writes one transcript line: `type: assistant`, `isApiErrorMessage:
+  true`, `error: "rate_limit"`, `apiError: "usage_limit_reached"`, `apiErrorStatus: 429`, and
+  `quotaLimits` (`status: "rejected"`, `resetsAt` in epoch seconds, `rateLimitType`
+  `five_hour` or `seven_day`, `overageStatus`, `overageDisabledReason`, `isUsingOverage`), the
+  same under `apiErrorParams.rate_limit_info`. A `turn_duration` line follows. Only a rejection
+  writes `quotaLimits`. The `StopFailure` hook fires at a turn an API error ended, matcher
+  `rate_limit`, with `error`, `error_details` and `last_assistant_message`.
+- Interactive, with the setting `autoContinueAtUsageLimit` on and the reset under 24 hours
+  away, the session waits ("Continuing automatically at … · Esc to cancel") and at the reset
+  goes on with the same turn, no message resent; at most three automatic continuations, then
+  the menu. Esc or an exit ends the wait, and a resume does not start it again. The Notification
+  hook's `quota_auto_resume_fired`, `_stale` and `_disabled` fire at the wait's end. Otherwise
+  (the setting off, the reset 24 hours away or more, as a weekly limit's usually is, or a model
+  family's limit) the menu shows: "Stop and wait for limit to reset" (the session idles until a
+  prompt), "Wait here, then continue automatically", and usage credits, which spend money where
+  the account allows them.
+- Headless, there is no wait: the turn ends with the limit, or a request blocks up to
+  `CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS`. The stream carries a `rate_limit_event`
+  whose shape is not documented.
+- The status line's JSON has `rate_limits.five_hour` and `.seven_day`, each `used_percentage`
+  and `resets_at`. Usage credits are turned on per account or per organization on the web; no
+  setting of Claude Code forbids them, and the record's `overageStatus` says whether this
+  account may spend.
+
+**The evidence and its one reader.** `Usage` is the one reader of an account's limit. It takes
+the record from any agent on the account: the transcript line (`Transcripts`), the
+`StopFailure` hook's input (`Intake`), a headless stream's result (`Stream`), and the status
+line's numbers, a window at 100 % with its `resets_at`. Its reading per account gains
+`limited_until` (the reset), the window, `can_spend` (from `overageStatus`: true only for a
+value that says credits are on) and the evidence it came from (the agent, the line or the
+event). A later reset or a newer record replaces it; each record is a fact in the `Ledger`.
+`Usage` cues `usage:<host>:<account>` as before, which now reaches `Sessions` and `Mailbox`
+beside the `Scheduler`.
+
+**The account's state.** Limited until `limited_until`. The `Scheduler`'s budget gate already
+refuses a spent window at once with `retry_at` its reset ("A lease"); the record is that spent
+window, exact where the status line's reading may be hours old, so no start, resume or heavy
+lease is granted on the account until then, in any class, and a refusal is `{:refused,
+{:allowance, retry_at}}` (`NoStartOnLimited`). A start may go to another account by the app's
+policy; the framework never moves one on its own.
+
+**The agent's state.** `Sessions`' turn function answers `limited` (the window and the reset)
+for an agent whose turn ended at a limit, until a turn of it runs after the record: never idle,
+never stuck, and `limited` is not an ended turn. The remedy's phase is a field of the agent row,
+as a move's is, so a restart reads it again. `Mailbox` hands no row to a `limited` agent before
+the reset (`Boxes.tla`'s `NoRowIntoLimit`): a row would start a turn that hits the limit again.
+Every action below is decided on the newest record and the screen read before it
+(`Limit.tla`'s `Current`): a record read late never makes a press or a word go.
+
+**The remedies**, each a row before it acts, once per limit:
+
+| The agent shows | The framework | Its bound |
+|---|---|---|
+| Claude Code's own wait | watches: a turn after the reset clears `limited`; the wait ended with no turn (Esc, an exit, `_disabled`) is taken as the menu's stop; the wait still shown at the reset plus a margin (`_stale`, or nothing) is a `limit` prompt | sends nothing into the wait |
+| the menu, the account unable to spend | presses "Stop and wait for limit to reset" at once, found by its label, checked on the screen in the same step (`Inlet`'s checked press, as a startup dialog's) | once per menu shown; a press whose outcome is unknown is never sent again, and the menu still shown after it is a `limit` prompt, whose answer clears that press once (`MenuPressedOnce`) |
+| the menu, the account able to spend | opens a `usage_credits` prompt: "stop and wait" or "use credits"; its default at its deadline is the stop; the answer is pressed as above | credits only by a person's answer (`NeverSpends`) |
+| a headless turn ended | nothing until the reset | — |
+| at the reset, for each `limited` agent whose own wait did not go on | writes on its row that a word is owed, then stores one word to go on in `Mailbox` under the key `limit:<agent>:<resets_at>`; `Mailbox` hands it into an ended turn, or by `launch` as the prompt of a resume when the process is gone, under a lease the gate grants | at most one word per agent per limit, none to an agent whose own wait went on (`GoOnOnce`); past three go-ons in a row that each hit a limit again, a `limit` prompt in place of the fourth (`BoundedRetries`) |
+
+The go-ons in a row are counted on the agent row and start again when a turn ends by itself or
+a person answers. A delegate's resume that carries the word is not the resume after a kill:
+it does not count toward `Delegates`' one. After a reset every `limited` agent goes on or is a
+person's prompt (`NoAgentLeftLimited`).
+
+**What is a person's**: usage credits, only by the `usage_credits` prompt's answer and only
+where the account allows them; the `limit` prompt's answer (go on now, move to another account,
+or leave it), opened by `Sessions` with no deadline, so it waits for a person; and anything a
+person does at the viewer first (an Esc, a menu's option, a prompt typed), which the next screen
+read takes as it finds it and which withdraws the prompt it answered. The `limit` prompt the
+`Scheduler` opens for a start refused at a limit keeps its deadline and its default, the wait.
+
+**The code unit's list** (one unit after this one, against `Limit.tla` and `Boxes.tla`):
+
+1. **Settings per account**, written where the status line command is written today, in each
+   account's `settings.json`: `autoContinueAtUsageLimit: true`; the `StopFailure` hook with
+   matcher `rate_limit`; the `Notification` hook with matchers `quota_auto_resume_fired`,
+   `quota_auto_resume_stale` and `quota_auto_resume_disabled`. A headless launch sets
+   `CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS` explicitly, to the value the
+   measurement below shows makes a request fail at once, since a request that blocks for hours
+   reads as a turn still running.
+2. **What each reader parses.** `Transcripts`: the assistant line with `isApiErrorMessage:
+   true` and `apiError: "usage_limit_reached"`, its `quotaLimits` (`resetsAt`,
+   `rateLimitType`, `overageStatus`), and whether a turn followed it. `Intake`: the
+   `StopFailure` event (`error`, `error_details`) and the three Notification matchers, each a
+   fact. `Stream`: the result that ends a turn at a limit and the `rate_limit_event`, by the
+   shape measured. `Usage`: the fields above on its reading, from any of these and from the
+   status line.
+3. **`Screen`'s kinds** `usage_limit_menu` (its three options by label, the selected one) and
+   `usage_limit_wait` (its reset time), from fixtures captured on 2.1.322 with
+   `bin/capture-screen`, and `Inlet`'s checked press of the menu's option by label.
+4. **`Sessions`**: the turn state `limited`, the phase on the agent row, the timer to the
+   record's reset plus the margin, after which it reads the turn and the screen and acts only on
+   what it reads; the `limit` and `usage_credits` prompts opened through `Prompts`.
+5. **`Mailbox`**: the word's kind `go_on` and its key, rows held from a `limited` agent until
+   its reset, and the word handed by `launch` to a gone process under a lease.
+6. **The `Scheduler`**: `limited_until` read as a spent window by the budget gate.
+7. **The `Watch`**: a symptom `limited`, each limit with its window, its agents, the time each
+   waited and the remedy taken.
+
+**Still to measure** (the code unit measures each first, and its build note keeps the result):
+
+- A headless hit in stream-json: the `rate_limit_event`'s fields, the `result` line, the exit
+  code, and what `CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS` does at 0 and unset. No
+  test starts the real Claude Code, so it is measured by hand on the pinned binary, at the next
+  real hit, with a script that keeps the stream whole and scrubbed as `Screen`'s fixtures are;
+  the tests then use a stand-in that writes that stream. If no hit comes, a local endpoint that
+  answers every request with the 429 and the headers a real hit's response carried, reached by
+  `ANTHROPIC_BASE_URL`, makes one, and the record it makes is checked against the measured one.
+- The menu's labels, the wait's text and what Esc leaves on the screen, captured the same way.
+- Whether `StopFailure` and the `quota_auto_resume_*` matchers fire on 2.1.322, and their
+  inputs; whether the three automatic continuations are counted in a row or per session.
+- Whether the 94 five-hour hits waited and went on by themselves: a fold of the transcripts
+  after each hit. `autoContinueAtUsageLimit`'s default is moot, since the framework sets it.
 
 ## Rules learned from running such a system
 
@@ -2945,8 +3083,9 @@ model before the code it describes (B4, B6, B8, B9, B11); B2 and B3 change no be
   and the `prompts` cue; an ask, a held permission request (a subagent's included) and a startup
   dialog opened as prompts and answered through it; `answer_startup`, `Mailbox.answer/4` and the
   operator's request answer become the app's one `answer/3`; the `restarts` kind from B4. Then,
-  one small unit each, the kinds that need a reading first: `plan`, `elicitation`, `limit`,
-  `login`, `exit` and onboarding, each checked against the pinned release (F-162's new-10).
+  one small unit each, the kinds that need a reading first: `plan`, `elicitation`, `limit` and
+  `usage_credits` ("Usage limits", F-178), `login`, `exit` and onboarding, each checked against
+  the pinned release (F-162's new-10).
   About +600, −300, then +150 to +250 per kind.
 - **B7. Facts and metrics**: `Store` appends a status fact to the table's own history in the
   transaction of each status write; the `Watch`'s named folds, `metrics/2` and `digest/2`;

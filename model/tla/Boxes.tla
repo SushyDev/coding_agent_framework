@@ -26,6 +26,14 @@
 (*        cut answers unknown, and the mark is kept), OwnBudget (an        *)
 (*        agent's restart budget is its own), and liveness Escalated (a    *)
 (*        budget run out is a prompt).                                     *)
+(*   a usage limit (F-178)   a running turn of the addressee ends at the   *)
+(*        account's limit, which Usage records until its reset: the        *)
+(*        Scheduler admits no start or resume meanwhile, and Mailbox marks *)
+(*        no row into the turn before the reset: NoStartOnLimited,         *)
+(*        NoRowIntoLimit. How each remedy goes on is Limit.tla's; here     *)
+(*        the gate and the mark meet a dialog, a stop, a move and the      *)
+(*        restarts. MaxLimits is 0 but in Boxes_Limit, so the other        *)
+(*        configurations keep their state counts.                          *)
 (*                                                                         *)
 (* The contracts, by box, and the spec that keeps each (its header says    *)
 (* how its properties imply what is assumed here, and what it does not):  *)
@@ -38,12 +46,14 @@
 (*        nothing sending to the session; `hand` writes a row only into an *)
 (*        ended turn of the process it was marked for, else refuses; a     *)
 (*        dialog's press only on the dialog it names, at most once; a      *)
-(*        restart re-adopts from the row. Here: `row`, `live`, `gen`,      *)
+(*        restart re-adopts from the row; a turn ended at a usage limit is *)
+(*        `limited`, never ended (Limit.tla). Here: `row`, `live`, `gen`,  *)
 (*        `turn`, `stuck`, `ep`, the agent process's memory (`task`,       *)
 (*        `stopRead`, `call`'s hand) and its budget.                       *)
 (*   Mailbox (Delivery)  one row in flight per addressee, marked only into *)
-(*        a running row's ended turn, refused undoes the mark, unknown     *)
-(*        keeps it, settled only by the evidence: `mst`, `mgen`, `call`.   *)
+(*        a running row's ended turn, or a limited one past its reset,     *)
+(*        refused undoes the mark, unknown keeps it, settled only by the   *)
+(*        evidence: `mst`, `mgen`, `call`.                                 *)
 (*   Prompts (Prompt.tla, F-167, which Dialog.tla's answer and Team.tla's  *)
 (*        ask instance)  one prompt per state, a row; an answer marked     *)
 (*        answering before it is handed; a cut answer settled by the       *)
@@ -54,7 +64,10 @@
 (*        Ledger claim, its need checked against the state the claim takes *)
 (*        (Team.tla's Needed): the parent's fix here.                      *)
 (*   Scheduler (Schedule)  a lease within capacity, released once and only *)
-(*        when the owner of its row says the work ended: `lease`.          *)
+(*        when the owner of its row says the work ended: `lease`; none     *)
+(*        granted on an account Usage's record says limited (Limit.tla's   *)
+(*        NoStartOnLimited; Schedule.tla's budget gate is the same gate):  *)
+(*        `acct`.                                                          *)
 (*   Hosts (Copy, Shell)  a job runs only under its unreleased lease       *)
 (*        (Schedule.tla's NoRunUnleased, shape Fence). No interaction the  *)
 (*        design names here needs more of Hosts; it is left out.           *)
@@ -124,6 +137,7 @@ CONSTANTS
     Budget,       \* an agent process's restart budget (crashes before it gives up)
     MaxCrashes,   \* crashes of each agent process
     MaxWhole,     \* restarts of the whole framework
+    MaxLimits,    \* times the account reaches its usage limit (0: never)
     Break         \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -138,11 +152,13 @@ Breaks == {
     "Relaunch",          \* an agent process's restart starts its program again
     "UnknownUndoes",     \* Mailbox takes a hand a crash cut (unknown) as refused
     "SharedBudget",      \* one agent's crash counts against every agent's budget
-    "SilentGiveUp"       \* a budget run out opens no prompt
+    "SilentGiveUp",      \* a budget run out opens no prompt
+    "StartOnLimited",    \* the Scheduler grants a start or a resume on a limited account
+    "MarkIntoLimited"    \* Mailbox marks a row into a turn ended at a limit before its reset
 }
 
 ASSUME Break \in Breaks
-ASSUME Addressee \in Agents /\ Cap \in Nat /\ Budget \in Nat \ {0}
+ASSUME Addressee \in Agents /\ Cap \in Nat /\ Budget \in Nat \ {0} /\ MaxLimits \in Nat
 
 Ids == 1..NIds
 Actors == {"parent", "healer"}
@@ -152,7 +168,8 @@ VARIABLES
     row,       \* a -> none, starting, dialog, running, stopping, stopped, ended
     live,      \* a -> the processes of a that run (0 or 1; 2 is a relaunch's fault)
     gen,       \* a -> the number of a's newest process, which its row names
-    turn,      \* a -> the newest process's turn: "ended", or running: "row" (a row started it) or "person"
+    turn,      \* a -> the newest process's turn: "ended", or running: "row" (a row started it) or
+               \* "person", or "limited" (ended at a usage limit)
     stuck,     \* a -> its running turn is stuck
     ep,        \* a -> the number of a's state as the framework reads it, a claim's state
     \* Sessions: the agent process's memory, lost when it restarts
@@ -172,6 +189,9 @@ VARIABLES
     \* Prompts
     pr,        \* a -> its dialog's prompt: none, open, answering, unknown, answered, withdrawn
     rp,        \* a -> a `restarts` prompt is open for it
+    \* Usage: the account's record (F-178, Limit.tla)
+    acct,      \* "open", or "limited" until its reset
+    limits,    \* the limits so far
     \* Ledger (Claim.tla), and the Watch's memory
     claims, acting, cdone, acted, twice, cut,
     seen,      \* the agents the healer read a symptom of (in memory)
@@ -186,7 +206,9 @@ sessVars == <<row, live, gen, turn, stuck, ep>>
 memVars == <<task, stopRead, gaveUp, crashes, keys>>
 mailVars == <<mst, mgen, call, ev, tx>>
 claimVars == <<claims, acting, cdone, acted, twice, cut>>
-vars == <<sessVars, memVars, mailVars, lease, pr, rp, claimVars, seen, whole, applied, own, wrong>>
+limVars == <<acct, limits>>
+vars == <<sessVars, memVars, mailVars, lease, pr, rp, claimVars, seen, whole, limVars, applied, own,
+          wrong>>
 
 \* The Ledger: Claim.tla whole, on each agent's state number.
 L == INSTANCE Claim WITH Targets <- Agents, Actors <- Actors, MaxState <- 0, Break <- "none",
@@ -195,6 +217,17 @@ L == INSTANCE Claim WITH Targets <- Agents, Actors <- Actors, MaxState <- 0, Bre
 
 \* The agent process runs: supervised, its budget not run out.
 Up(a) == ~gaveUp[a]
+
+\* The Scheduler's gate on Usage's record (F-178): no start or resume while the account is
+\* limited. Under StartOnLimited it admits one anyway.
+Admits == acct = "open" \/ Break = "StartOnLimited"
+
+\* A turn Mailbox may mark a row into: an ended one, or one ended at a limit once its reset
+\* passed (the word to go on comes first, as Limit.tla's GoOn stores it then). Under
+\* MarkIntoLimited, one ended at a limit before its reset too.
+Open(a) ==
+    \/ turn[a] = "ended"
+    \/ turn[a] = "limited" /\ (acct = "open" \/ Break = "MarkIntoLimited")
 
 -----------------------------------------------------------------------------
 (* Sessions and the Scheduler: a start under a lease, a dialog, a stop and  *)
@@ -206,12 +239,13 @@ Seats == {a \in Agents : lease[a] = "held"}
 \* capacity, and the program is held: one step here (Start.tla, Schedule.tla).
 Start(a) ==
     /\ row[a] = "none" /\ lease[a] = "none" /\ Cardinality(Seats) < Cap /\ Up(a)
+    /\ Admits
     /\ row' = [row EXCEPT ![a] = "starting"]
     /\ lease' = [lease EXCEPT ![a] = "held"]
     /\ live' = [live EXCEPT ![a] = 1]
     /\ gen' = [gen EXCEPT ![a] = 1]
-    /\ UNCHANGED <<turn, stuck, ep, memVars, mailVars, pr, rp, claimVars, seen, whole, applied,
-                   own, wrong>>
+    /\ UNCHANGED <<turn, stuck, ep, memVars, mailVars, pr, rp, claimVars, seen, whole, limVars,
+                   applied, own, wrong>>
 
 \* The pane shows a startup dialog: the row says so and a prompt opens for it.
 ShowDialog(a) ==
@@ -219,14 +253,14 @@ ShowDialog(a) ==
     /\ row' = [row EXCEPT ![a] = "dialog"]
     /\ pr' = [pr EXCEPT ![a] = "open"]
     /\ UNCHANGED <<live, gen, turn, stuck, ep, memVars, mailVars, lease, rp, claimVars, seen,
-                   whole, applied, own, wrong>>
+                   whole, limVars, applied, own, wrong>>
 
 \* The session file names the process: the row runs, its turn ended.
 Confirm(a) ==
     /\ row[a] = "starting" /\ live[a] > 0 /\ Up(a)
     /\ row' = [row EXCEPT ![a] = "running"]
     /\ UNCHANGED <<live, gen, turn, stuck, ep, memVars, mailVars, lease, pr, rp, claimVars, seen,
-                   whole, applied, own, wrong>>
+                   whole, limVars, applied, own, wrong>>
 
 \* No row is sending to a.
 NoneSending(a) == \A i \in Ids : a = Addressee => mst[i] # "sending"
@@ -236,11 +270,11 @@ NoneSending(a) == \A i \in Ids : a = Addressee => mst[i] # "sending"
 \* restart cut it.
 StopRead(a) ==
     /\ row[a] \in {"running", "stopping"} /\ live[a] > 0 /\ ~stopRead[a] /\ Up(a)
-    /\ turn[a] = "ended" /\ NoneSending(a)
+    /\ turn[a] \in {"ended", "limited"} /\ NoneSending(a)
     /\ row' = [row EXCEPT ![a] = "stopping"]
     /\ stopRead' = [stopRead EXCEPT ![a] = TRUE]
     /\ UNCHANGED <<live, gen, turn, stuck, ep, task, gaveUp, crashes, keys, mailVars, lease, pr,
-                   rp, claimVars, seen, whole, applied, own, wrong>>
+                   rp, claimVars, seen, whole, limVars, applied, own, wrong>>
 
 \* The SIGTERM, by the record's pid and start time. It cuts a turn that runs.
 Term(a) ==
@@ -252,7 +286,7 @@ Term(a) ==
     /\ turn' = [turn EXCEPT ![a] = "ended"]
     /\ wrong' = IF turn[a] = "row" THEN wrong \cup {"cut by stop"} ELSE wrong
     /\ UNCHANGED <<row, gen, task, gaveUp, crashes, keys, mailVars, lease, pr, rp, claimVars,
-                   seen, whole, applied, own>>
+                   seen, whole, limVars, applied, own>>
 
 \* Claude Code exits by itself.
 Exits(a) ==
@@ -261,8 +295,8 @@ Exits(a) ==
     /\ stuck' = [stuck EXCEPT ![a] = FALSE]
     /\ ep' = [ep EXCEPT ![a] = IF stuck[a] THEN @ + 1 ELSE @]
     /\ turn' = [turn EXCEPT ![a] = "ended"]
-    /\ UNCHANGED <<row, gen, memVars, mailVars, lease, pr, rp, claimVars, seen, whole, applied,
-                   own, wrong>>
+    /\ UNCHANGED <<row, gen, memVars, mailVars, lease, pr, rp, claimVars, seen, whole, limVars,
+                   applied, own, wrong>>
 
 \* A row whose process is gone settles stopped; its dialog's prompt, if one
 \* waits, is withdrawn (Start.tla's settles, Prompts' withdrawn).
@@ -273,24 +307,24 @@ Settle(a) ==
     /\ pr' = [pr EXCEPT ![a] = IF @ \in {"open", "answering", "unknown"} THEN "withdrawn" ELSE @]
     /\ task' = [task EXCEPT ![a] = "none"]
     /\ UNCHANGED <<live, gen, turn, stuck, ep, stopRead, gaveUp, crashes, keys, mailVars, lease,
-                   rp, claimVars, seen, whole, applied, own, wrong>>
+                   rp, claimVars, seen, whole, limVars, applied, own, wrong>>
 
 \* A resume, a move's on the other account among them, under the same lease.
 Resume(a) ==
-    /\ row[a] = "stopped" /\ lease[a] = "held" /\ gen[a] < MaxGen /\ Up(a)
+    /\ row[a] = "stopped" /\ lease[a] = "held" /\ gen[a] < MaxGen /\ Up(a) /\ Admits
     /\ row' = [row EXCEPT ![a] = "running"]
     /\ live' = [live EXCEPT ![a] = 1]
     /\ gen' = [gen EXCEPT ![a] = @ + 1]
     /\ turn' = [turn EXCEPT ![a] = "ended"]
-    /\ UNCHANGED <<stuck, ep, memVars, mailVars, lease, pr, rp, claimVars, seen, whole, applied,
-                   own, wrong>>
+    /\ UNCHANGED <<stuck, ep, memVars, mailVars, lease, pr, rp, claimVars, seen, whole, limVars,
+                   applied, own, wrong>>
 
 \* Done for good.
 End(a) ==
     /\ row[a] = "stopped" /\ Up(a)
     /\ row' = [row EXCEPT ![a] = "ended"]
     /\ UNCHANGED <<live, gen, turn, stuck, ep, memVars, mailVars, lease, pr, rp, claimVars, seen,
-                   whole, applied, own, wrong>>
+                   whole, limVars, applied, own, wrong>>
 
 \* What the owner of a lease's row answers the Scheduler: the work ended.
 \* Under DialogEndsWork a start on a dialog counts as ended (its deadline
@@ -300,32 +334,32 @@ WorkEnded(a) == row[a] = "ended" \/ (Break = "DialogEndsWork" /\ row[a] = "dialo
 Release(a) ==
     /\ lease[a] = "held" /\ WorkEnded(a)
     /\ lease' = [lease EXCEPT ![a] = "released"]
-    /\ UNCHANGED <<sessVars, memVars, mailVars, pr, rp, claimVars, seen, whole, applied, own,
-                   wrong>>
+    /\ UNCHANGED <<sessVars, memVars, mailVars, pr, rp, claimVars, seen, whole, limVars, applied,
+                   own, wrong>>
 
 -----------------------------------------------------------------------------
 (* Claude Code's turns *)
 
 TurnEnds(a) ==
-    /\ live[a] > 0 /\ turn[a] # "ended" /\ ~stuck[a]
+    /\ live[a] > 0 /\ turn[a] \notin {"ended", "limited"} /\ ~stuck[a]
     /\ turn' = [turn EXCEPT ![a] = "ended"]
     /\ UNCHANGED <<row, live, gen, stuck, ep, memVars, mailVars, lease, pr, rp, claimVars, seen,
-                   whole, applied, own, wrong>>
+                   whole, limVars, applied, own, wrong>>
 
 \* A person's prompt starts a turn (Remote Control, or at the viewer).
 PersonTurn(a) ==
     /\ row[a] \in {"running", "stopping"} /\ live[a] > 0 /\ turn[a] = "ended"
     /\ turn' = [turn EXCEPT ![a] = "person"]
     /\ UNCHANGED <<row, live, gen, stuck, ep, memVars, mailVars, lease, pr, rp, claimVars, seen,
-                   whole, applied, own, wrong>>
+                   whole, limVars, applied, own, wrong>>
 
 \* A turn sticks: a new state, which the Watch and the parent may act on.
 Sticks(a) ==
-    /\ live[a] > 0 /\ turn[a] # "ended" /\ ~stuck[a] /\ ep[a] < 2 * MaxStuck
+    /\ live[a] > 0 /\ turn[a] \notin {"ended", "limited"} /\ ~stuck[a] /\ ep[a] < 2 * MaxStuck
     /\ stuck' = [stuck EXCEPT ![a] = TRUE]
     /\ ep' = [ep EXCEPT ![a] = @ + 1]
     /\ UNCHANGED <<row, live, gen, turn, memVars, mailVars, lease, pr, rp, claimVars, seen,
-                   whole, applied, own, wrong>>
+                   whole, limVars, applied, own, wrong>>
 
 \* It goes on by itself: a new state again, a working one.
 Unsticks(a) ==
@@ -333,7 +367,24 @@ Unsticks(a) ==
     /\ stuck' = [stuck EXCEPT ![a] = FALSE]
     /\ ep' = [ep EXCEPT ![a] = @ + 1]
     /\ UNCHANGED <<row, live, gen, turn, memVars, mailVars, lease, pr, rp, claimVars, seen,
+                   whole, limVars, applied, own, wrong>>
+
+\* A turn that runs ends at the account's usage limit, and Usage's record says the account is
+\* limited until its reset (Limit.tla: Hit and Read in one step). The turn is `limited`, not
+\* ended: Claude Code's menu or its own wait shows, or a headless result is an error.
+HitLimit(a) ==
+    /\ limits < MaxLimits /\ live[a] > 0 /\ turn[a] \in {"row", "person"} /\ ~stuck[a]
+    /\ turn' = [turn EXCEPT ![a] = "limited"]
+    /\ acct' = "limited" /\ limits' = limits + 1
+    /\ UNCHANGED <<row, live, gen, stuck, ep, memVars, mailVars, lease, pr, rp, claimVars, seen,
                    whole, applied, own, wrong>>
+
+\* Time reaches the reset the record names.
+ResetLimit ==
+    /\ acct = "limited"
+    /\ acct' = "open"
+    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, claimVars, seen, whole, limits,
+                   applied, own, wrong>>
 
 -----------------------------------------------------------------------------
 (* Mailbox, and Sessions' hand *)
@@ -347,12 +398,12 @@ Mark(i) ==
     /\ NoneSending(a)
     /\ \/ row[a] = "running"
        \/ Break = "MarkWhileStopping" /\ row[a] = "stopping"
-    /\ live[a] > 0 /\ turn[a] = "ended"
+    /\ live[a] > 0 /\ Open(a)
     /\ mst' = [mst EXCEPT ![i] = "sending"]
     /\ mgen' = [mgen EXCEPT ![i] = gen[a]]
     /\ call' = [call EXCEPT ![i] = "asked"]
-    /\ UNCHANGED <<sessVars, memVars, ev, tx, lease, pr, rp, claimVars, seen, whole, applied,
-                   own, wrong>>
+    /\ UNCHANGED <<sessVars, memVars, ev, tx, lease, pr, rp, claimVars, seen, whole, limVars,
+                   applied, own, wrong>>
 
 \* Sessions' hand, in the agent process: it writes the row into an ended turn
 \* of the process the mark names, and the answer goes back (Answered); else
@@ -360,7 +411,7 @@ Mark(i) ==
 \* whatever process runs.
 HandOk(i) ==
     LET a == Addressee IN
-    /\ live[a] > 0 /\ turn[a] = "ended"
+    /\ live[a] > 0 /\ Open(a)
     /\ gen[a] = mgen[i] \/ Break = "NoProcessCheck"
 
 Hand(i) ==
@@ -371,34 +422,36 @@ Hand(i) ==
             /\ tx' = [tx EXCEPT ![i] = @ + 1]
             /\ ev' = ev \cup {i}
             /\ turn' = [turn EXCEPT ![a] = "row"]
-            /\ wrong' = IF gen[a] # mgen[i] THEN wrong \cup {"other process"} ELSE wrong
+            /\ wrong' = wrong \cup (IF gen[a] # mgen[i] THEN {"other process"} ELSE {})
+                               \cup (IF turn[a] = "limited" /\ acct = "limited"
+                                     THEN {"into a limit"} ELSE {})
             /\ UNCHANGED mst
        ELSE /\ call' = [call EXCEPT ![i] = "none"]
             /\ mst' = [mst EXCEPT ![i] = "due"]
             /\ UNCHANGED <<tx, ev, turn, wrong>>
     /\ UNCHANGED <<row, live, gen, stuck, ep, memVars, mgen, lease, pr, rp, claimVars, seen,
-                   whole, applied, own>>
+                   whole, limVars, applied, own>>
 
 \* The hand's answer, sent, reaches Mailbox; the mark stays for the evidence.
 Answered(i) ==
     /\ call[i] = "handing"
     /\ call' = [call EXCEPT ![i] = "none"]
     /\ UNCHANGED <<sessVars, memVars, mst, mgen, ev, tx, lease, pr, rp, claimVars, seen, whole,
-                   applied, own, wrong>>
+                   limVars, applied, own, wrong>>
 
 \* A row in flight with no call under way settles by the evidence alone.
 SettleRow(i) ==
     /\ mst[i] = "sending" /\ call[i] = "none"
     /\ mst' = [mst EXCEPT ![i] = IF i \in ev THEN "delivered" ELSE "due"]
     /\ UNCHANGED <<sessVars, memVars, mgen, call, ev, tx, lease, pr, rp, claimVars, seen, whole,
-                   applied, own, wrong>>
+                   limVars, applied, own, wrong>>
 
 \* A row due to a session that ended for good says so.
 EndedRow(i) ==
     /\ mst[i] = "due" /\ row[Addressee] = "ended"
     /\ mst' = [mst EXCEPT ![i] = "ended"]
     /\ UNCHANGED <<sessVars, memVars, mgen, call, ev, tx, lease, pr, rp, claimVars, seen, whole,
-                   applied, own, wrong>>
+                   limVars, applied, own, wrong>>
 
 -----------------------------------------------------------------------------
 (* Prompts and the dialog's press *)
@@ -412,7 +465,7 @@ Answer(a) ==
     /\ pr' = [pr EXCEPT ![a] = "answering"]
     /\ task' = [task EXCEPT ![a] = "press"]
     /\ UNCHANGED <<sessVars, stopRead, gaveUp, crashes, keys, mailVars, lease, rp, claimVars, seen,
-                   whole, applied, own, wrong>>
+                   whole, limVars, applied, own, wrong>>
 
 \* The checked press: only while the pane still shows the dialog.
 Press(a) ==
@@ -420,7 +473,7 @@ Press(a) ==
     /\ keys' = [keys EXCEPT ![a] = @ + 1]
     /\ task' = [task EXCEPT ![a] = "told"]
     /\ UNCHANGED <<sessVars, stopRead, gaveUp, crashes, mailVars, lease, pr, rp, claimVars, seen,
-                   whole, applied, own, wrong>>
+                   whole, limVars, applied, own, wrong>>
 
 \* The checked press refused: the dialog is gone. Told as refused.
 PressRefused(a) ==
@@ -428,7 +481,7 @@ PressRefused(a) ==
     /\ task' = [task EXCEPT ![a] = "none"]
     /\ pr' = [pr EXCEPT ![a] = IF @ = "answering" THEN "open" ELSE @]
     /\ UNCHANGED <<sessVars, stopRead, gaveUp, crashes, keys, mailVars, lease, rp, claimVars,
-                   seen, whole, applied, own, wrong>>
+                   seen, whole, limVars, applied, own, wrong>>
 
 \* Keys sent land: the dialog passes and the start goes on, or, past it,
 \* they land on the session itself.
@@ -438,7 +491,7 @@ Lands(a) ==
     /\ applied' = [applied EXCEPT ![a] = @ + 1]
     /\ row' = [row EXCEPT ![a] = IF @ = "dialog" /\ live[a] > 0 THEN "running" ELSE @]
     /\ UNCHANGED <<live, gen, turn, stuck, ep, task, stopRead, gaveUp, crashes, mailVars, lease,
-                   pr, rp, claimVars, seen, whole, own, wrong>>
+                   pr, rp, claimVars, seen, whole, limVars, own, wrong>>
 
 \* The owner tells Prompts the press went: answered.
 Told(a) ==
@@ -446,7 +499,7 @@ Told(a) ==
     /\ task' = [task EXCEPT ![a] = "none"]
     /\ pr' = [pr EXCEPT ![a] = IF @ = "answering" THEN "answered" ELSE @]
     /\ UNCHANGED <<sessVars, stopRead, gaveUp, crashes, keys, mailVars, lease, rp, claimVars,
-                   seen, whole, applied, own, wrong>>
+                   seen, whole, limVars, applied, own, wrong>>
 
 \* An answer a restart cut, settled by the owner's evidence: the dialog gone,
 \* answered; still shown, unknown, since keys may be on their way, for a
@@ -455,16 +508,16 @@ SettlePrompt(a) ==
     /\ pr[a] = "answering" /\ task[a] = "none"
     /\ pr' = [pr EXCEPT ![a] = IF row[a] # "dialog" THEN "answered"
                                ELSE IF Break = "ReopenCut" THEN "open" ELSE "unknown"]
-    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, rp, claimVars, seen, whole, applied, own,
-                   wrong>>
+    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, rp, claimVars, seen, whole, limVars, applied,
+                   own, wrong>>
 
 \* A person who sees the pane still show the dialog, nothing on its way,
 \* clears the unknown answer: the prompt is open again.
 Clear(a) ==
     /\ pr[a] = "unknown" /\ keys[a] = 0
     /\ pr' = [pr EXCEPT ![a] = IF row[a] = "dialog" THEN "open" ELSE "answered"]
-    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, rp, claimVars, seen, whole, applied, own,
-                   wrong>>
+    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, rp, claimVars, seen, whole, limVars, applied,
+                   own, wrong>>
 
 -----------------------------------------------------------------------------
 (* Team and the Watch: a parent's fix and the healer's remedy, one Ledger *)
@@ -481,14 +534,15 @@ Interrupt(a, helps) ==
 FixClaim(a) ==
     /\ stuck[a]
     /\ L!Take("parent", a, "interrupt")
-    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, seen, whole, applied, own, wrong>>
+    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, seen, whole, limVars, applied, own,
+                   wrong>>
 
 \* The Watch reads a symptom from the facts: a stuck turn.
 Detect(a) ==
     /\ stuck[a] /\ a \notin seen
     /\ seen' = seen \cup {a}
-    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, claimVars, whole, applied, own,
-                   wrong>>
+    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, claimVars, whole, limVars, applied,
+                   own, wrong>>
 
 \* The healer's remedy through Team.operate/4: its precondition checked
 \* against the state the claim takes. Under StaleSymptom the symptom read
@@ -499,7 +553,7 @@ HealClaim(a) ==
     /\ Break # "HealerOwnClaim"
     /\ L!Take("healer", a, "interrupt")
     /\ seen' = seen \ {a}
-    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, whole, applied, own, wrong>>
+    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, whole, limVars, applied, own, wrong>>
 
 \* Under HealerOwnClaim the healer keeps its own record of what it did, and
 \* acts on the symptom with no claim in the Ledger.
@@ -511,7 +565,7 @@ HealOwn(a) ==
     /\ twice' = (twice \/ k \in acted)
     /\ \E helps \in BOOLEAN : Interrupt(a, helps)
     /\ UNCHANGED <<row, live, gen, memVars, mailVars, lease, pr, rp, claims, acting, cdone, cut,
-                   whole, applied, own, wrong>>
+                   whole, limVars, applied, own, wrong>>
 
 \* A claimed fix or remedy acts through Sessions (the agent process): an
 \* interrupt, which may not help. It never acts on a working turn: a
@@ -521,17 +575,20 @@ FixAct(c) ==
     /\ L!Act(c)
     /\ \E helps \in BOOLEAN : Interrupt(c.t, helps)
     /\ wrong' = IF c.by = "healer" /\ ~stuck[c.t] THEN wrong \cup {"healed working"} ELSE wrong
-    /\ UNCHANGED <<row, live, gen, memVars, mailVars, lease, pr, rp, seen, whole, applied, own>>
+    /\ UNCHANGED <<row, live, gen, memVars, mailVars, lease, pr, rp, seen, whole, limVars, applied,
+                   own>>
 
 \* A claim whose state passed, or whose agent has no process to act on, is let go.
 FixLetGo(c) ==
     /\ ~L!Current(c) \/ ~Up(c.t) \/ live[c.t] = 0
     /\ L!LetGo(c)
-    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, seen, whole, applied, own, wrong>>
+    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, seen, whole, limVars, applied, own,
+                   wrong>>
 
 FixSettle(c) ==
     /\ L!Settle(c)
-    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, seen, whole, applied, own, wrong>>
+    /\ UNCHANGED <<sessVars, memVars, mailVars, lease, pr, rp, seen, whole, limVars, applied, own,
+                   wrong>>
 
 -----------------------------------------------------------------------------
 (* Restarts: one agent process's, and the whole framework's *)
@@ -566,7 +623,7 @@ RestartAgent(a) ==
             /\ gen' = [gen EXCEPT ![a] = @ + 1]
        ELSE UNCHANGED <<live, gen>>
     /\ UNCHANGED <<row, turn, stuck, ep, keys, mgen, ev, tx, lease, pr, claimVars, seen, whole,
-                   applied, wrong>>
+                   limVars, applied, wrong>>
 
 \* A person answers the `restarts` prompt: the agent process starts again
 \* under a new budget, and re-adopts.
@@ -576,7 +633,7 @@ AnswerRestarts(a) ==
     /\ gaveUp' = [gaveUp EXCEPT ![a] = FALSE]
     /\ crashes' = [crashes EXCEPT ![a] = 0]
     /\ UNCHANGED <<sessVars, task, stopRead, keys, mailVars, lease, pr, claimVars, seen, whole,
-                   applied, own, wrong>>
+                   limVars, applied, own, wrong>>
 
 \* The whole framework restarts: every process's memory goes (the agent
 \* processes', Mailbox's calls, the healer's symptoms read, the Ledger's
@@ -595,7 +652,7 @@ RestartAll ==
     /\ L!Restart
     /\ pr' = [a \in Agents |-> IF Break = "PromptInMemory" /\ pr[a] = "open" THEN "none"
                                ELSE pr[a]]
-    /\ UNCHANGED <<sessVars, keys, mgen, ev, tx, lease, applied, own, wrong>>
+    /\ UNCHANGED <<sessVars, keys, mgen, ev, tx, lease, applied, own, wrong, limVars>>
 
 -----------------------------------------------------------------------------
 
@@ -621,6 +678,7 @@ Init ==
     /\ claims = {} /\ acting = {} /\ cdone = {} /\ acted = {} /\ twice = FALSE /\ cut = {}
     /\ seen = {}
     /\ whole = 0
+    /\ acct = "open" /\ limits = 0
     /\ tx = [i \in Ids |-> 0]
     /\ applied = [a \in Agents |-> 0]
     /\ own = [a \in Agents |-> 0]
@@ -638,7 +696,7 @@ Next ==
           \/ TurnEnds(a) \/ PersonTurn(a) \/ Sticks(a) \/ Unsticks(a) \/ Lands(a)
           \/ Answer(a) \/ Clear(a) \/ AnswerRestarts(a)
           \/ FixClaim(a) \/ Detect(a) \/ HealClaim(a) \/ HealOwn(a)
-          \/ RestartAgent(a)
+          \/ RestartAgent(a) \/ HitLimit(a)
     \/ \E a \in Agents \ {Addressee} :
           \/ Start(a) \/ Confirm(a) \/ Exits(a) \/ Settle(a) \/ End(a) \/ Release(a)
           \/ AnswerRestarts(a)
@@ -646,6 +704,7 @@ Next ==
     \/ \E c \in acting : FixAct(c) \/ FixLetGo(c)
     \/ \E c \in claims : FixSettle(c)
     \/ RestartAll
+    \/ ResetLimit
 
 \* The boxes' steps, the end of a turn that is not stuck, keys landing and a
 \* person's answers are weakly fair. The mark is strongly fair: a person's
@@ -661,6 +720,7 @@ Fairness ==
                       /\ WF_vars(SettleRow(i)) /\ WF_vars(EndedRow(i))
     /\ WF_vars(\E c \in acting : FixAct(c) \/ FixLetGo(c))
     /\ WF_vars(\E c \in claims : FixSettle(c))
+    /\ WF_vars(ResetLimit)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -671,7 +731,7 @@ TypeOK ==
     /\ row \in [Agents -> {"none", "starting", "dialog", "running", "stopping", "stopped",
                            "ended"}]
     /\ live \in [Agents -> 0..2] /\ gen \in [Agents -> 0..MaxGen]
-    /\ turn \in [Agents -> {"ended", "row", "person"}] /\ stuck \in [Agents -> BOOLEAN]
+    /\ turn \in [Agents -> {"ended", "row", "person", "limited"}] /\ stuck \in [Agents -> BOOLEAN]
     /\ ep \in [Agents -> Nat]
     /\ task \in [Agents -> {"none", "press", "told"}] /\ stopRead \in [Agents -> BOOLEAN]
     /\ gaveUp \in [Agents -> BOOLEAN] /\ crashes \in [Agents -> Nat] /\ keys \in [Agents -> Nat]
@@ -682,6 +742,7 @@ TypeOK ==
     /\ pr \in [Agents -> {"none", "open", "answering", "unknown", "answered", "withdrawn"}]
     /\ rp \in [Agents -> BOOLEAN]
     /\ seen \subseteq Agents /\ whole \in 0..MaxWhole
+    /\ acct \in {"open", "limited"} /\ limits \in 0..MaxLimits
 
 \* A delivery during a move. No turn a row started is cut by a stop's
 \* SIGTERM: Mailbox marks nothing for a stopping row, and the idle read
@@ -729,6 +790,12 @@ AtMostOnce == \A i \in Ids : tx[i] <= 1
 \* ... and an agent process's budget is its own: it gives up only after its
 \* own crashes.
 OwnBudget == \A a \in Agents : gaveUp[a] => own[a] >= Budget
+
+\* A usage limit (F-178, Limit.tla). The Scheduler admits no start and no resume on an account
+\* its record says limited, and Mailbox hands no row into a turn ended at the limit before its
+\* reset.
+NoStartOnLimited == [][\A a \in Agents : gen'[a] > gen[a] => acct = "open"]_vars
+NoRowIntoLimit == "into a limit" \notin wrong
 
 \* Liveness. A budget run out is a prompt, and the person's answer starts
 \* the agent process again.
