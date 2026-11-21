@@ -78,7 +78,7 @@
 (*        on a working agent; its outcome read after, a failed verify      *)
 (*        dropping it from the list, anything else a remedy prompt: H, an  *)
 (*        instance of Heal.tla with the stuck turn as its one kind:        *)
-(*        `facts`, `res`, `count`, `allow`, `dropped`, `asked`.            *)
+(*        `facts`, `res`, `count`, `allow`, `dropped`, `asked`, `forBound`. *)
 (*                                                                         *)
 (* One agent's restart against the contract specs (F-164). RestartAgent    *)
 (* here is the step each of them has, named the same, beside its whole     *)
@@ -207,7 +207,7 @@ VARIABLES
     claims, acting, cdone, acted, twice, cut,
     \* Watch (Heal.tla, F-182), all durable: the symptom record, the remedies' outcomes, the
     \* cap's count, the allow-list's entry for a stuck turn, and the remedy prompts
-    facts, res, count, allow, dropped, asked,
+    facts, res, count, allow, dropped, asked, forBound,
     whole,     \* restarts of the whole framework so far
     \* ghosts
     tx,        \* i -> times i went into a transcript
@@ -220,7 +220,7 @@ memVars == <<task, stopRead, gaveUp, crashes, keys>>
 mailVars == <<mst, mgen, call, ev, tx>>
 claimVars == <<claims, acting, cdone, acted, twice, cut>>
 limVars == <<acct, limits>>
-hvars == <<facts, res, count, allow, dropped, asked>>
+hvars == <<facts, res, count, allow, dropped, asked, forBound>>
 vars ==<<sessVars, memVars, mailVars, lease, pr, rp, told, claimVars, hvars, whole, limVars,
           applied, own, wrong>>
 
@@ -720,6 +720,7 @@ Init ==
     /\ claims = {} /\ acting = {} /\ cdone = {} /\ acted = {} /\ twice = FALSE /\ cut = {}
     /\ facts = {} /\ res = {} /\ count = [k \in {"stuck"} |-> 0]
     /\ allow = [k \in {"stuck"} |-> TRUE] /\ dropped = [k \in {"stuck"} |-> FALSE] /\ asked = {}
+    /\ forBound = {}
     /\ whole = 0
     /\ acct = "open" /\ limits = 0
     /\ tx = [i \in Ids |-> 0]

@@ -151,9 +151,12 @@ defmodule CodingAgentFramework.Mailbox do
   several delegates always knows. `row` is `%{from: name, kind: kind, to: name, text: text}`:
   `kind` is `"message"`, `"reply"`, `"report"` (the answer to a brief), `"notice"` or
   `"answer"` (a person's answer to an ask), and `from` the agent the row is from, or for the
-  framework's notice in a reply's or a report's place, the agent whose row it answers. The
-  frame is a first line of its own, `From <name> (<kind>):`, or for a one-line text the start
-  of that line, so a short typed row stays one line. An app's `frame:` answers the text in its
+  framework's notice in a reply's or a report's place, the agent whose row it answers; and
+  optionally `account`, the sender's account, which `Mailbox` reads from the sender's agent row
+  (F-188's new-3), so an app that runs agents on several accounts needs no frame of its own. The
+  frame is a first line of its own, `From <name> (<kind>):` or `From <name> on <account>
+  (<kind>):`, or for a one-line text the start of that line, so a short typed row stays one
+  line. An app's `frame:` answers the text in its
   place: a non-empty string, or the row is not handed on (`attempt` `{:bad, :frame}`). The
   delivery mark goes after the framed text, so each row is still settled by its own uuid line.
 
@@ -163,10 +166,14 @@ defmodule CodingAgentFramework.Mailbox do
       iex> CodingAgentFramework.Mailbox.frame(%{from: "app-main", kind: "message", to: "app-api",
       ...>   text: "Rebase first."})
       "From app-main (message): Rebase first."
+      iex> CodingAgentFramework.Mailbox.frame(%{from: "app-api", kind: "reply", to: "app-main",
+      ...>   text: "Yes.", account: "work"})
+      "From app-api on work (reply): Yes."
   """
   @spec frame(map) :: String.t()
-  def frame(%{from: from, kind: kind, text: text}) do
-    label = "From #{from} (#{kind}):"
+  def frame(%{from: from, kind: kind, text: text} = row) do
+    on = if is_binary(row[:account]), do: " on #{row.account}", else: ""
+    label = "From #{from}#{on} (#{kind}):"
     if String.contains?(text, "\n"), do: label <> "\n\n" <> text, else: label <> " " <> text
   end
 
@@ -1373,8 +1380,10 @@ defmodule CodingAgentFramework.Mailbox do
 
   defp framed(s, m) do
     {from, kind} = sender_of(s, m)
+    account = with %{account: a} <- Agents.get(s.agents, from), do: a
+    row = %{from: from, kind: kind, to: m.to_agent, text: m.text, account: account}
 
-    case s.frame.(%{from: from, kind: kind, to: m.to_agent, text: m.text}) do
+    case s.frame.(row) do
       text when is_binary(text) and text != "" -> {:ok, text}
       _ -> {:refused, {:bad, :frame}}
     end

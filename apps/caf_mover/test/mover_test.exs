@@ -260,6 +260,23 @@ defmodule CodingAgentFramework.MoverTest do
 
   # Move.tla's restart: the phase is a row, so a new Mover goes on from it; an act cut before
   # its row began nothing, and is settled at the next start.
+  # F-189's new-3: a named account is read by `usable:` before the claim, as the pick reads one;
+  # one not logged in is refused, and nothing begins.
+  test "a move to a named account usable: refuses begins nothing", ctx do
+    main(ctx)
+    usable = fn a -> if a == "spare", do: {:refused, {:not_logged_in, a}}, else: {:ok, a} end
+    ctx = %{ctx | mover_opts: Keyword.put(ctx.mover_opts, :usable, usable)}
+    MoverSetup.restart(ctx)
+
+    assert {:refused, {:account, "spare", {:not_logged_in, "spare"}}} =
+             Mover.move(mover(), "operator", "main", to: "spare")
+
+    assert %{account: "work", move: nil, status: "running"} = row(ctx, "main")
+
+    assert {:refused, {:unknown_account, "nine"}} =
+             Mover.move(mover(), "operator", "main", to: "nine")
+  end
+
   test "a restart of the Mover goes on from the phase on the row", ctx do
     main = main(ctx)
     me = self()

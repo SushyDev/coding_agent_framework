@@ -20,12 +20,13 @@ session's or an interactive delegate's own screen, or a headless delegate's even
 viewer with tmux's prefix and `d`; the agent runs on. A person may type into a main session's
 or an interactive delegate's screen; never into a headless delegate's.
 
-**The inbox.** Everything that waits on a person is a prompt, read with the app's
-`prompts/2` and answered once with `answer/4` (`CodingAgentFramework`, F-179). The console has
-no function of its own for them, so the steps call the app's surface by the config's instance,
-`"e2e"`, as `me`. Each prompt below is answered so wherever the inbox lists it; the console's
-`answer_request` remains only for a headless delegate's request, which the inbox does not list
-(step 3).
+**The inbox.** Everything that waits on a person is a prompt, read with the console's
+`prompts(caf, filter)` and answered once with `answer(caf, id, choice)`, as the config's
+operator (`operator`): the app's `prompts/2` and `answer/4` (F-179; the console's calls,
+F-190). Each prompt below is answered so wherever the inbox lists it, a headless delegate's
+permission request among them (F-190). `symptoms(caf, filter)`, `acts(caf, filter)`,
+`usage(caf)` and `groups(caf, agent)` read the `Watch`, the ledger, the usage readings and a
+delegate's process groups the same way.
 
 Never interrupt the console's shell (Ctrl+C, or Ctrl+G and a new shell) to get past a slow
 call: wait for it, or run a long one as a task (`Task.async(fn -> checkout(caf) end)`). A new
@@ -34,8 +35,8 @@ a shell that started the app a second time, failed on its ports and stopped the 
 
 **If a usage limit comes** in any step (an agent `limited` in `agents(caf)`, or Claude Code's
 limit text on a screen), press nothing on the screen. Record `usage-limit`: the screen
-(`attach`), `App.prompts("e2e")` (a `limit` or `usage_credits` prompt), `App.symptoms("e2e",
-kind: ["limited", "limit_menu", "limit_reset"])`, `Usage.readings(Run.parts(caf).usage)` and
+(`attach`), `prompts(caf)` (a `limit` or `usage_credits` prompt), `symptoms(caf,
+kind: ["limited", "limit_menu", "limit_reset"])`, `usage(caf)` and
 the time. The healer (`Limits`) presses the menu's stop and goes on at the reset by itself; a
 real limit is a reading no test has.
 
@@ -143,15 +144,13 @@ real reading, and `three` is never picked.
 ## 1. The app starts, and the project is cloned
 
 - **Type** in a terminal: `bin/caf-example /Users/me/caf-e2e.json`. The first run compiles.
-  Then at the console: `checkout(caf)`, again until it is ready. Then the names the later steps
-  use:
+  Then at the console: `checkout(caf)`, again until it is ready. Then the two readers no console
+  call makes (an agent row's record, steps 12 and 13; the login check, step 11), and the inbox:
 
   ```elixir
-  alias CodingAgentFramework, as: App
-  alias CodingAgentFramework.{Acts, Logins, Usage}
+  alias CodingAgentFramework.{Logins, Sessions.Agents}
   alias CodingAgentFramework.Example.Run
-  alias CodingAgentFramework.Sessions.Agents
-  App.prompts("e2e")
+  prompts(caf)
   ```
 
 - **Watch** the banner: the home, the three accounts' directories, the two ports.
@@ -160,7 +159,7 @@ real reading, and `three` is never picked.
   log --oneline` shows the seed commit, and `agents(caf)` shows `demo-main: main of demo, on no
   account, gone (row declared)`. `ls -l /Users/me/caf-e2e/intake.secret` shows the hooks'
   secret, readable and writable by you alone (`-rw-------`): the first start made it, and every
-  later start reads it. `App.prompts("e2e")` reads `{:ok, []}`: nothing waits yet. A start
+  later start reads it. `prompts(caf)` reads `{:ok, []}`: nothing waits yet. A start
   refused because of `three` is a finding: record the refusal, take `three` out of the config,
   and leave out step 11's login part.
 
@@ -173,24 +172,24 @@ real reading, and `three` is never picked.
   ```
 
   It reads `unknown: {:dialog, :trust}`: the checkout is a folder Claude Code has not seen.
-  Then `App.prompts("e2e", kind: "dialog")`: one prompt, id
+  Then `prompts(caf, kind: "dialog")`: one prompt, id
   `dialog:demo-main:<start>:trust`, its options the dialog's labels. Answer with the label that
-  trusts the folder, exactly: `App.answer("e2e", "<that id>", "<the label>", "me")`.
+  trusts the folder, exactly: `answer(caf, "<that id>", "<the label>")`.
 - **Watch** `attach(caf, "demo-main")` in a second terminal: the trust dialog, then the brief's
   turn. Do not press anything on the dialog there: the inbox answers it. Claude Code may ask to
   allow a `caf` tool or `Bash` later: each request is a prompt `permission:<n>` in
-  `App.prompts("e2e", agent: "demo-main")`, its text the tool and its input, and
-  `App.answer("e2e", "permission:<n>", "allow", "me")` answers it (the console's
+  `prompts(caf, agent: "demo-main")`, its text the tool and its input, and
+  `answer(caf, "permission:<n>", "allow")` answers it (the console's
   `requests(caf, "demo-main")` lists the same request as `request <n>`). The dialog stays on
   this screen meanwhile, and a person may answer it there first; the inbox's answer is then
   refused `{:refused, :settled}` and changes nothing.
 - **Passed when** the dialog leaves the screen after the inbox's answer (and not before), the
   brief runs as the first turn, `agents(caf)` shows `demo-main` on account `one`, `idle`, and
-  `look(caf, "demo-main")` shows the brief and its one-line reply. `App.prompts("e2e")` then
-  lists no dialog, and `App.answer` of the same dialog's id again reads `{:refused, :settled}`.
+  `look(caf, "demo-main")` shows the brief and its one-line reply. `prompts(caf)` then
+  lists no dialog, and `answer` of the same dialog's id again reads `{:refused, :settled}`.
   It lists `login:three` (the start's pick checked `three` and found it logged out); leave it
   until step 11. `leases(caf)` shows the main session's lease, class `main`, held by it. A
-  request the inbox answered (if one came) leaves the screen once `App.answer` reads `{:ok, _}`,
+  request the inbox answered (if one came) leaves the screen once `answer` reads `{:ok, _}`,
   and the inbox then lists it no more.
 
 ## 3. A headless delegate's report goes into the idle main session by the waiter
@@ -202,23 +201,26 @@ real reading, and `three` is never picked.
   ```
 
   The delegate is `demo-unit-hello`. Its tools wait on a permission: when `agents(caf)` shows
-  it `waits on Write (req-…)` or `Bash`, first `App.prompts("e2e", agent: "demo-unit-hello")`,
-  then answer each from the console: `answer_request(caf, "demo-unit-hello", "<req-…>",
-  "allow")`. A headless delegate's request is Claude Code's own `can_use_tool` over its stream,
-  which the inbox does not read.
+  it `waits on Write (req-…)` or `Bash`, `prompts(caf, agent: "demo-unit-hello")` lists it as
+  `permission:stream:<session>:<req-…>`, its text the tool and its input, no deadline: Claude
+  Code's own `can_use_tool` over the stream, held in its fold (F-190). Answer each with
+  `answer(caf, "<that id>", "allow")`. The console's `answer_request(caf, "demo-unit-hello",
+  "<req-…>", "allow")`, the parent's way, is refused once the inbox answered.
 - **Watch** `attach(caf, "demo-unit-hello")` (its event log) and `demo-main`'s screen.
 - **Passed when** the report wakes `demo-main` with no typing: its transcript (`look(caf,
   "demo-main")`) has a user line that begins `Stop hook blocking error from command`, whose text
-  begins `From demo-unit-hello (report):`, holds the report and ends with a line `[delivery
+  begins `From demo-unit-hello on <its account> (report):`, holds the report and ends with a line `[delivery
   <uuid>]`, and the main session answers it. The commit is on `unit/hello` in
   `/Users/me/caf-e2e/worktrees/demo/demo-unit-hello`. `agents(caf)` shows the delegate `idle`;
   the account it ran on is the usable one with the most room: `two`, which has no reading and
   so has the whole room, unless `one`'s reading leaves the whole room too (0 % used in both
-  windows), when `one`, named first, wins.
-- **Record** `headless-permission`: what `App.prompts("e2e", agent: "demo-unit-hello")` read
-  while the request waited (the code lists none: a prompt there means Claude Code also sent a
-  `PermissionRequest` hook from a headless session), and whether `demo-main` got a `prompt`
-  notice for it.
+  windows), when `one`, named first, wins. `demo-main` got one `prompt` notice per request,
+  `From demo-unit-hello on <its account> (prompt): waiting on permission: …`, and each
+  request's second answer read `{:refused, :settled}`.
+- **Record** `headless-permission`: what `prompts(caf, agent: "demo-unit-hello")` read
+  while the request waited, whole, and the notices `demo-main` got. A second prompt for the same
+  request, `permission:<n>`, means Claude Code also sent a `PermissionRequest` hook from a
+  headless session: a finding.
 
 ## 4. An interactive delegate
 
@@ -228,9 +230,9 @@ real reading, and `three` is never picked.
   start_delegate(caf, "demo-main", "demo", "unit/notes", "Write NOTES.md with three lines about this repository, commit it on your branch, and report the commit's hash in one line.", interactive: true)
   ```
 
-  Its new worktree meets the trust dialog: `App.prompts("e2e", subtree: "demo-main")` lists
+  Its new worktree meets the trust dialog: `prompts(caf, subtree: "demo-main")` lists
   `dialog:demo-unit-notes:<start>:trust`, its `parent` `demo-main`; answer it with
-  `App.answer` as in step 2. Its permission requests are prompts `permission:<n>` with agent
+  `answer` as in step 2. Its permission requests are prompts `permission:<n>` with agent
   `demo-unit-notes`; answer each the same way.
 - **Watch** `attach(caf, "demo-unit-notes")`: its own screen, where its permission requests
   show and a person may answer them, or type. After it reports, type a short turn of your own
@@ -238,7 +240,7 @@ real reading, and `three` is never picked.
 - **Passed when** the brief went in as its first turn with no typing, its report reaches
   `demo-main` as in step 3, and the report is the reply to the brief, not to the turn you typed
   after it. `demo-main` was told once of each prompt of its delegate, by a line that begins
-  `From demo-unit-notes (prompt): waiting on dialog: trust dialog` (or `waiting on
+  `From demo-unit-notes on <its account> (prompt): waiting on dialog: trust dialog` (or `waiting on
   permission: <tool> <input>`) and ends `(prompt <id>)`: one per prompt, none twice.
 
 ## 5. An ask, answered
@@ -249,18 +251,18 @@ real reading, and `three` is never picked.
   message(caf, "demo-main", "Use your ask tool to ask me which name to give a new file, a.txt or b.txt. Then wait for my answer and create nothing.")
   ```
 
-  then `App.prompts("e2e", kind: "ask")` until it lists the ask, `ask:<n>`, its options the
+  then `prompts(caf, kind: "ask")` until it lists the ask, `ask:<n>`, its options the
   ask's questions. Answer it:
 
   ```elixir
-  App.answer("e2e", "ask:<n>", [%{"labels" => ["b.txt"], "text" => ""}], "me")
+  answer(caf, "ask:<n>", [%{"labels" => ["b.txt"], "text" => ""}])
   ```
 
-  Then the same `App.answer` once more, and the console's `answer_ask(caf, <n>, ["b.txt"])`.
+  Then the same `answer` once more, and the console's `answer_ask(caf, <n>, ["b.txt"])`.
 - **Watch** `demo-main`'s screen.
 - **Passed when** the inbox shows one ask from `demo-main` with both options, and `asks(caf)`
   the same ask; the answer reads `{:ok, {:queued, <m>}}` and is delivered (`status(caf, <m>)`),
-  and `demo-main` wakes to it and names `b.txt`; the second `App.answer` is refused
+  and `demo-main` wakes to it and names `b.txt`; the second `answer` is refused
   `{:refused, :settled}` and the console's `answer_ask` is refused too; `asks(caf)` then shows
   none.
 
@@ -274,7 +276,7 @@ real reading, and `three` is never picked.
 
   and `leases(caf)` while it runs, `leases(caf, true)` after it.
 - **Watch** `demo-main`'s screen. If Claude Code asks to allow the command, answer it from the
-  inbox (`App.prompts("e2e", agent: "demo-main")`, then `App.answer`); its text shows the
+  inbox (`prompts(caf, agent: "demo-main")`, then `answer`); its text shows the
   command as the hook rewrote it.
 - **Passed when**, while it runs, `leases(caf)` shows a lease of class `heavy` with a slot,
   held by `run <pid> <start>`, the wrapper `<home>/bin/caf-run` the hook rewrote the command
@@ -304,18 +306,18 @@ real reading, and `three` is never picked.
   start_delegate(caf, "demo-main", "demo", "unit/slow", "Run the shell command sleep 240, then report the word slept.")
   ```
 
-  and allow its `Bash` request (`answer_request`, as in step 3). When `agents(caf)` shows
+  and allow its `Bash` request from the inbox, as in step 3. When `agents(caf)` shows
   `demo-unit-slow` `working`, type `System.halt()`: the framework's node ends at once. Wait
   half a minute; then start it again, `bin/caf-example /Users/me/caf-e2e.json`, and type step
-  1's aliases again.
+  1's two aliases again.
 - **Watch** `attach(caf, "demo-unit-slow")`, opened before the halt: the viewer and the
   delegate run on while the framework is down, since tmux and dtach hold them, not the node.
 - **Passed when** after the restart `agents(caf)` shows `demo-unit-slow` still `working`, the
   same process (its viewer never ended); when it ends, its report reaches `demo-main` once;
   `leases(caf)` shows its lease held until then and released after; `faults(caf)` shows only
   rows the restart cut, as `interrupted`, and nothing `failed`. `intake.secret` is the file the
-  first start wrote, unchanged, so the held sessions' hooks are still taken. `App.prompts("e2e")`
-  lists what it listed before the halt (`login:three`), and `App.symptoms("e2e")` shows no
+  first start wrote, unchanged, so the held sessions' hooks are still taken. `prompts(caf)`
+  lists what it listed before the halt (`login:three`), and `symptoms(caf)` shows no
   `absent_main`: the restart ended no session.
 
 ## 9. A message too long to type goes in by its pointer
@@ -346,22 +348,22 @@ The restart cut `demo-main`'s waiter, so until a turn of it ends, a row for it i
   message(caf, "demo-main", "Use your ask tool to ask me one question: go on, yes or no. Then wait for my answer.")
   message(caf, "demo-main", "Run this with your Bash tool: touch /Users/me/caf-e2e-origin/inbox-check. Then wait.")
   start_delegate(caf, "demo-main", "demo", "unit/inbox", "Reply with the word inbox in one line.", interactive: true)
-  App.prompts("e2e")
-  App.prompts("e2e", subtree: "demo-main")
-  App.prompts("e2e", kind: "permission")
+  prompts(caf)
+  prompts(caf, subtree: "demo-main")
+  prompts(caf, kind: "permission")
   ```
 
   Then answer the three, each once: the permission `allow`, the dialog by its trusting label,
   the ask with its label for yes, as its options name it (`[%{"labels" => ["<label>"],
-  "text" => ""}]`); then each id again; then `App.prompts("e2e")`.
+  "text" => ""}]`); then each id again; then `prompts(caf)`.
 - **Watch** `demo-main`'s screen and `attach(caf, "demo-unit-inbox")`.
-- **Passed when** one read of `App.prompts("e2e")` lists the three, oldest first: `ask:<n>`
+- **Passed when** one read of `prompts(caf)` lists the three, oldest first: `ask:<n>`
   (agent `demo-main`), `permission:<n>` (agent `demo-main`, its text `Bash touch
   /Users/me/caf-e2e-origin/inbox-check`, options `allow` and `deny`, a deadline) and
   `dialog:demo-unit-inbox:<start>:trust` (agent `demo-unit-inbox`, parent `demo-main`), beside
   `login:three`; `subtree: "demo-main"` lists the three without `login:three`; `kind:
   "permission"` the one. `demo-main` is told once of its delegate's dialog (`From
-  demo-unit-inbox (prompt): …`); a main session's own prompts are told to no one. Each answer
+  demo-unit-inbox on <its account> (prompt): …`); a main session's own prompts are told to no one. Each answer
   reads `{:ok, _}` and each second one `{:refused, :settled}`; the last read lists only
   `login:three`. The command ran, the ask's
   answer reached `demo-main`, and `demo-unit-inbox`'s report reaches `demo-main` once.
@@ -369,20 +371,19 @@ The restart cut `demo-main`'s waiter, so until a turn of it ends, a row for it i
 
 ## 11. Usage: the two windows, and the login check
 
-- **Type** while `demo-main` is idle: `Usage.readings(Run.parts(caf).usage)`, and `cat
+- **Type** while `demo-main` is idle: `usage(caf)`, and `cat
   /Users/me/caf-e2e/usage/one.json` in another terminal. Then, on `demo-main`'s screen, type
   `/usage`, read it, and press Esc. Then `message(caf, "demo-main", "Reply with one word.")`,
   and once it replied, both readings again. Then the login check:
 
   ```elixir
   Logins.check(Run.parts(caf).logins, "three")
-  App.prompts("e2e", kind: "login")
-  App.answer("e2e", "login:three", "check", "me")
+  prompts(caf, kind: "login")
+  answer(caf, "login:three", "check")
   ```
 
-  Never `move(caf, <agent>, "three")`: a move to an account it names checks only that the
-  account is prepared, not logged in, so it would end the agent's process and resume it on
-  Claude Code's login screen (F-189's new-3).
+  Then `move(caf, "demo-main", "three")` once: a move to an account it names reads that the
+  account is logged in before anything begins (F-190, from F-189's new-3).
 - **Watch** `demo-main`'s screen.
 - **Passed when** the reading of `one` has both windows, `used` and `resets_at` (the week),
   `five_used` and `five_resets_at` (five hours), `source` `status_line`, and they agree with
@@ -390,8 +391,10 @@ The restart cut `demo-main`'s waiter, so until a turn of it ends, a row for it i
   `seen_at` is later, and each `used` the same or higher, unless its window reset between.
   `two` has a reading from step 7's turns on it. `three` has none. `Logins.check` of `three`
   reads `{:refused, {:login, :logged_out}}`; the inbox shows `login:three`, no agent, its one
-  option `check`; the `check` answer is refused the same, and `login:three` stays open. No
-  agent of the run has run on `three` (`agents(caf, true)`).
+  option `check`; the `check` answer is refused the same, and `login:three` stays open. The
+  move reads `refused: {:account, "three", {:login, :logged_out}}` and `agents(caf)` still
+  shows `demo-main` idle on its account, with no `moving`. No agent of the run has run on
+  `three` (`agents(caf, true)`).
 - **Record** `usage`: both readings of every account, whole, the file's `rate_limits` before
   and after, and the percentages `/usage` showed, with the times.
 
@@ -403,7 +406,7 @@ The restart cut `demo-main`'s waiter, so until a turn of it ends, a row for it i
   start_delegate(caf, "demo-main", "demo", "unit/bg", "Use the Bash tool with run_in_background set to true to run exactly this command and nothing else: sleep 120; echo bg done. Do not wait for it. Then report the words started in background in one line.")
   ```
 
-  Allow its `Bash` request (`answer_request`, as in step 3). Then, for `bg.session_id` and
+  Allow its `Bash` request from the inbox, as in step 3. Then, for `bg.session_id` and
   `bg.account`:
 
   ```elixir
@@ -414,7 +417,7 @@ The restart cut `demo-main`'s waiter, so until a turn of it ends, a row for it i
 - **Passed when** the request's command, as its event log shows it, begins `exec </dev/null; `
   (the framework's correction of a background command's stdin, F-180); the report reaches
   `demo-main` within seconds, while the command still runs, once; when the command ends, `demo-main` gets one `notice` that begins
-  `From demo-unit-bg (notice): Delegate demo-unit-bg, in a turn of its own after its report:`,
+  `From demo-unit-bg on <bg.account> (notice): Delegate demo-unit-bg, in a turn of its own after its report:`,
   and no second report. While Claude Code's own turn runs, `agents(caf)` reads the delegate
   working, not idle. The event log, `/Users/me/caf-e2e/streams/<bg.session_id>/events.jsonl`,
   holds `system`/`init` twice and `result` twice: one of each per turn.
@@ -426,8 +429,8 @@ The restart cut `demo-main`'s waiter, so until a turn of it ends, a row for it i
   for l <- File.stream!(log), e = JSON.decode!(l), do: {e["type"], e["subtype"]}
   ```
 
-  and `Usage.readings` of `bg.account` after the report (a headless session's windows come from
-  its stream: `source` `stream`, if no status line read is newer).
+  and `usage(caf)`'s reading of `bg.account` after the report (a headless session's windows come
+  from its stream: `source` `stream`, if no status line read is newer).
 
 ## 13. An absent main, resumed once
 
@@ -441,21 +444,26 @@ The restart cut `demo-main`'s waiter, so until a turn of it ends, a row for it i
   it before you end it: `ps -o pid,lstart,args -p <pid>` shows Claude Code started at
   `proc_start`, and `/Users/me/caf-e2e/accounts/<account>/claude/sessions/<pid>.json` names the
   row's session id. Then end that process, by that pid alone: `kill <pid>`.
-- **Watch** `agents(caf)` again and again, and `App.symptoms("e2e", kind: "absent_main")`.
+- **Watch** `agents(caf)` again and again, and `symptoms(caf, kind: "absent_main")`.
 - **Passed when** `demo-main` reads stopped, then starting, then idle on `one`, under the same
   session (`look` shows the earlier turns): resumed once, by the healer, with no typing and no
-  dialog. `Acts.rows(Run.parts(caf).acts, act: "resume", target: "demo-main")` shows one row,
+  dialog. `acts(caf, act: "resume", target: "demo-main")` shows one row,
   its actor `absent_mains:<host>`, its state `absent_main:demo-main:<start>`, settled
   `recovered`; the symptom has that state.
 - **Then** end it again within the hour (the bound, `remedy_bound`): read the row again for
   the new pid and `kill` it as above.
-- **Passed when** no second resume runs: `demo-main` stays stopped, `Acts.rows` still shows one
-  row, and `App.prompts("e2e", kind: "remedy")` lists `remedy:<n>` with agent `demo-main`, its
-  text naming `absent_main`, its reason the bound (`again_within`) and the remedy `resume`,
-  options `approve` and `leave`. Then answer it
-  `App.answer("e2e", "remedy:<n>", "leave", "me")`: it reads `{:ok, _}` and the prompt goes.
-  Resume it as the operator, once: `CodingAgentFramework.Operator.resume(Run.parts(caf).mcp,
-  "demo-main")`; it runs again, idle.
+- **Passed when** no second resume runs: `demo-main` stays stopped, `acts(caf, act: "resume",
+  target: "demo-main")` still shows one row, and `prompts(caf, kind: "remedy")` lists
+  `remedy:<n>` with agent `demo-main`, its text naming `absent_main`, its reason the bound
+  (`again_within`) and the remedy `resume`, options `act` and `leave` (F-190: the kind is on
+  the list, so `approve` would widen nothing). Then answer it `answer(caf, "remedy:<n>",
+  "act")`: it reads `{:ok, :answered}` and the prompt goes; a second answer reads `{:refused,
+  :settled}`.
+- **Passed when** the healer resumes it once more by itself at its next check, and it runs
+  again, idle: `acts(caf, act: "resume", target: "demo-main")` shows a second row, its actor
+  `operator` (the person who answered, never the healer), its state the second absence's,
+  settled `recovered`; `symptoms(caf, kind: "absent_main")` shows that state `answered act by
+  operator`. No third row comes.
 - **Record** `absent-main`: both reads of the row, the two `ps` lines, the session file, the
   `Acts` rows, the symptoms and the prompt, whole, with the times.
 
@@ -465,16 +473,16 @@ The restart cut `demo-main`'s waiter, so until a turn of it ends, a row for it i
   not ended. Then end each delegate whose report was delivered: `stop_delegate(caf,
   "demo-unit-hello")`, and the same for `demo-unit-notes`, `demo-unit-slow`, `demo-unit-inbox`
   and `demo-unit-bg`. Then `end_main(caf, "demo-main")` again, and `start_main(caf, "demo",
-  "demo-main", "Again.")`. Then `App.symptoms("e2e")` and `faults(caf)`.
+  "demo-main", "Again.")`. Then `symptoms(caf)` and `faults(caf)`.
 - **Watch** `agents(caf)` and `demo-main`'s screen.
 - **Passed when** the first `end_main` is refused `{:delegates, names}`; each stop answers ok;
   the second `end_main` reads `ok: :ended`; `agents(caf)` reads `no agents` and `agents(caf,
   true)` shows all six `ended`; `demo-main`'s process is gone and its viewer closes; the new
-  start is refused `{:running, "demo-main"}`; `leases(caf)` holds nothing; `App.prompts("e2e")`
+  start is refused `{:running, "demo-main"}`; `leases(caf)` holds nothing; `prompts(caf)`
   lists only `login:three`. Then, if you have a login to give it (any of yours), `bin/caf-login
-  /Users/me/caf-e2e three` and `App.answer("e2e", "login:three", "check", "me")`: it reads
+  /Users/me/caf-e2e three` and `answer(caf, "login:three", "check")`: it reads
   `{:ok, :logged_in}` and the inbox is empty.
-- **Record** `symptoms`: `App.symptoms("e2e")` and `faults(caf)`, whole. A symptom no step made
+- **Record** `symptoms`: `symptoms(caf)` and `faults(caf)`, whole. A symptom no step made
   (`hooks_silent`, `lost_viewer`, `end_owed`) is a finding.
 
 ## 15. The exit dialog's capture
@@ -572,18 +580,12 @@ and the account's `mcp.json` names none), so this check adds one by hand, `bin/q
 
 ### L2. The CPU time the healer reads, against ps
 
-- **Type**, while L1's command sleeps, the read `StuckBackgrounds.Groups` makes (its `@read`),
-  parsed by its own `parse/2`, then the same groups by `ps` in another terminal; again a minute
-  later:
+- **Type**, while L1's command sleeps, the healer's own read of the delegate's groups
+  (`StuckBackgrounds.Groups.read/3` by the agent row's record and the tree's holder, F-190),
+  then the same groups by `ps` in another terminal; again a minute later:
 
   ```elixir
-  read = ~S"""
-  for f in /proc/[0-9]*/stat; do { read -r l < "$f"; } 2>/dev/null && printf '%s\n' "$l"; done
-  echo --
-  LC_ALL=C TZ=UTC ps -A -o pid=,lstart=
-  """
-  {out, 0} = System.cmd("sh", ["-c", read])
-  CodingAgentFramework.StuckBackgrounds.Groups.parse(out, %{pid: bg.pid, start: bg.proc_start})
+  groups(caf, "demo-unit-bg")
   ```
 
   ```sh
@@ -593,19 +595,17 @@ and the account's `mcp.json` names none), so this check adds one by hand, `bin/q
 
   (procps's `-g` selects a session, not a group, so the group is read off its column.)
 
-- **Passed when** `parse/2` answers `{:ok, groups}` with the background command's group (and
-  `quiet-mcp`'s if L1 found it leads one), each `cpu` in clock ticks; that `cpu` divided by
+- **Passed when** `groups` prints the background command's group (and `quiet-mcp`'s if L1
+  found it leads one), each one's CPU time in clock ticks; that time divided by
   `CLK_TCK` is the sum of `ps`'s `TIME` over the group's members, give or take a second (the
   healer also counts the CPU time of children already reaped, which `ps` does not show); and
   neither moves in the minute between.
-- **Then**, eleven minutes after the report, `App.symptoms("e2e", kind: "stuck_background")`.
-  The healer reads only at a `stream` or `watch` cue, and a quiet command sends none
-  (F-189's new-4), so if it shows nothing, ask it for one read and look again:
-  `CodingAgentFramework.StuckBackgrounds.check(Run.parts(caf).stuck_backgrounds)`.
+- **Then**, eleven minutes after the report, `symptoms(caf, kind: "stuck_background")`.
+  The healer reads at the tree's `interval` as well as at its cues (F-190), so a quiet command,
+  which sends none, is read by itself.
 - **Passed when** it shows one symptom per quiet group, its state naming the group's pid,
   shown only: nothing is ended, since the default list has no remedy for it.
-- **Record** `linux-cpu`: both reads of `parse/2` and of `ps`, `CLK_TCK`, the symptoms, and
-  whether they showed before the asked read.
+- **Record** `linux-cpu`: both reads of `groups` and of `ps`, `CLK_TCK`, and the symptoms.
 
 ### L3. One `system`/`init` per turn Claude Code starts on its own
 
@@ -656,17 +656,17 @@ write `/Users/me` (or `/home/me`) for your home and `me` for your name. The reco
 
 | Record | Step | What it settles |
 |---|---|---|
-| `headless-permission` | 3 | whether a headless delegate's request reaches the inbox |
+| `headless-permission` | 3 | a headless delegate's request in the inbox, and whether a hook comes too |
 | `inbox` | 10 | the inbox's read of three kinds at once |
 | `usage` | 11 | `Usage`'s windows against the status line and `/usage` |
 | `background` | 12 | the order of a headless background command's events |
-| `absent-main` | 13 | one resume per absence, a prompt past it |
+| `absent-main` | 13 | one resume per absence, a prompt past it, and its act once |
 | `symptoms` | 14 | what the `Watch` recorded in a whole run |
 | `exit-dialog` | 15 | what the session file says while the exit dialog shows |
 | `usage-limit` | any | a real limit, if one came |
 | `linux-paths` | On Linux | the login's file, the session's `PATH`, writes outside the home |
 | `linux-process-tree` | L1 | whether `stuck_background`'s remedy goes on by default |
-| `linux-cpu` | L2 | the healer's CPU time against `ps`; whether it reads a quiet group alone |
+| `linux-cpu` | L2 | the healer's CPU time against `ps`, and its symptom of a quiet group |
 | `linux-background` | L3 | one `system`/`init` per turn of Claude Code's own |
 | `linux-cap` | L4 | a brief past Linux's argument cap |
 

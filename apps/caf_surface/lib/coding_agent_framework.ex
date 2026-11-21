@@ -168,6 +168,19 @@ defmodule CodingAgentFramework do
          do: Tmux.CLI.new(programs, {:socket, Config.path(c, "tmux.sock")})
   end
 
+  @doc """
+  The holder of processes the tree makes from `config` (`Holder.Process` over `<home>/d`): what
+  reads an agent's process by its record (pid and start time), for a reader outside the tree,
+  such as the example console's `groups/2` (F-189's new-6).
+  """
+  @spec processes(Config.t()) :: {:ok, Holder.Process.t()} | {:refused, term}
+  def processes(%Config{} = c) do
+    with {:ok, programs} <- programs(c),
+         {:ok, holder} <-
+           Holder.new(programs, Config.path(c, "d"), Config.options(c, :holder, [])),
+         do: Holder.Process.new(programs, holder)
+  end
+
   @doc "Each part's process, by its key (`:sessions`, `:registry`, …)."
   @spec parts(Supervisor.supervisor()) :: %{term => pid}
   def parts(sup), do: Map.new(Supervisor.which_children(sup), fn {k, pid, _, _} -> {k, pid} end)
@@ -623,6 +636,7 @@ defmodule CodingAgentFramework do
              # `Mains` declares the main sessions the config names, as agent rows.
              # A startup dialog the config's `dialogs` does not answer waits on a person
              # (F-140), who answers it through the inbox (`answer/4`).
+             # One viewer size for the first open and the healer's reopen (F-188's new-2).
              reaper: pid.(:reaper),
              programs: p,
              dir: Config.path(c, "d"),
@@ -636,7 +650,8 @@ defmodule CodingAgentFramework do
              dialog: &Config.dialog(c, &1, &2),
              open_to: &Mailbox.open_to(pid.(:mailbox), &1, status: &2),
              waiter: %{port: c.ports.intake, secret: w.secret},
-             acts: pid.(:acts)
+             acts: pid.(:acts),
+             size: c.viewer
            }
          end},
         # Before the healer, which records each symptom in it and reads its allow-list; the app
@@ -659,7 +674,8 @@ defmodule CodingAgentFramework do
             programs: w.programs,
             sampler: pid.(:sampler),
             sessions: pid.(:sessions),
-            acts: pid.(:acts)}
+            acts: pid.(:acts),
+            size: c.viewer}
          end},
         {:tracker, fn _ -> {Tracker, sources: sources(w)} end},
         # Before `Delegates` and `Jobs`, which ask it for a lease before each start. The owners'
@@ -703,19 +719,24 @@ defmodule CodingAgentFramework do
         # After every owner of a prompt; the app finds it in the instance's `Registry`.
         {:prompts,
          fn pid ->
-           {Prompts,
-            host: host,
-            intake: pid.(:intake),
-            intake_db: db,
-            sessions: pid.(:sessions),
-            sessions_db: db,
-            mailbox: pid.(:mailbox),
-            watch: pid.(:watch),
-            watch_db: db,
-            logins: pid.(:logins),
-            logins_db: db,
-            notify: notify,
-            name: {:via, Elixir.Registry, {names(c.instance), :prompts}}}
+           {
+             Prompts,
+             # A headless delegate's permission request is its fold's (F-189's new-2).
+             host: host,
+             intake: pid.(:intake),
+             intake_db: db,
+             sessions: pid.(:sessions),
+             sessions_db: db,
+             mailbox: pid.(:mailbox),
+             watch: pid.(:watch),
+             watch_db: db,
+             logins: pid.(:logins),
+             logins_db: db,
+             stream: pid.(:stream),
+             stream_db: db,
+             notify: notify,
+             name: {:via, Elixir.Registry, {names(c.instance), :prompts}}
+           }
          end},
         {:delegates,
          fn pid ->
@@ -835,7 +856,8 @@ defmodule CodingAgentFramework do
             go_on: &Delegates.go_on(delegates, &1, &2, &3)}
          end},
         # The healer of a background command that hangs after its delegate's report (F-184):
-        # it reads `Stream`'s folds and ends a group by its record.
+        # it reads `Stream`'s folds and ends a group by its record. A hung command writes
+        # nothing, so no cue comes: it reads at the interval too (F-189's new-4).
         {:stuck_backgrounds,
          fn pid ->
            stream = pid.(:stream)
@@ -847,7 +869,8 @@ defmodule CodingAgentFramework do
             watch: pid.(:watch),
             host: host,
             holder: w.holder,
-            programs: w.programs}
+            programs: w.programs,
+            interval: every}
          end},
         # The detector of an agent's hooks gone quiet (F-184): shown only, with no remedy. A
         # silence sends no cue, so it reads at the interval too.

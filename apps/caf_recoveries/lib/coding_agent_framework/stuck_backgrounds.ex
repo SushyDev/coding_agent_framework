@@ -18,7 +18,9 @@ defmodule CodingAgentFramework.StuckBackgrounds do
 
   **On the one shape** (F-182), as `AbsentMains` is: each state is recorded in the `Watch`
   first; a state with a row in `Acts` is decided by that row; a kind off the list or past its
-  cap is asked; else the end is claimed in `Acts` under this healer's actor and its state, and
+  cap is asked (a state asked for its bound and answered `act` is ended once at the next check,
+  under a claim whose actor is the person, F-189's new-7); else the end is claimed in `Acts`
+  under this healer's actor and its state, and
   TERM goes to the group, only while its leader still has the record's pid and start time
   (`Holder.Process.signal/4`, `group: true`). A group already gone is refused, nothing sent.
   The row is then `acted`, with the tasks the fold named and how many lists had come; its
@@ -30,7 +32,9 @@ defmodule CodingAgentFramework.StuckBackgrounds do
   The embedding app's tree starts one per host, given the host's `Sessions.Agents` reader,
   `folds:` (a function answering `{:ok, rows}`, `Stream.rows/1`'s rows), its `Holder` and
   `Programs` (ps and kill, for the records), and the instance's `Acts` and `Watch`. It checks
-  at start and at each cue of `stream` or `watch` (`reads/0`), or by `check/2`.
+  at start, at each cue of `stream` or `watch` (`reads/0`), every `interval:` ms when given, or
+  by `check/2`. A hung command writes nothing to the stream, so no cue comes while its group
+  stays quiet: the interval is what reads it again (F-189's new-4), as `HooksSilent` does.
 
       iex> fold = %{session: "s1", gone: false, idle: true, last_result: %{},
       ...>   background: %{tasks: ["t1"], changes: 1}}
@@ -41,7 +45,7 @@ defmodule CodingAgentFramework.StuckBackgrounds do
 
   use GenServer
 
-  alias CodingAgentFramework.{Acts, Holder, Sessions, Watch}
+  alias CodingAgentFramework.{Acts, Holder, Recoveries, Sessions, Watch}
   alias CodingAgentFramework.StuckBackgrounds.Groups
 
   @kind "stuck_background"
@@ -54,7 +58,8 @@ defmodule CodingAgentFramework.StuckBackgrounds do
   `watch:`, `host:` (for its actor, `stuck_backgrounds:<host>`), and either `holder:` and
   `programs:` or the functions they make: `groups:` (a record to `Groups.read/3`'s answer) and
   `signal:` (a group's record to `Holder.Process.signal/4`'s). Optionally `quiet:` (ms with no
-  CPU time, default ten minutes) and `clock:` (ms). Fails to start with `Acts`' answer when it
+  CPU time, default ten minutes), `interval:` (ms between checks; without it, only at cues)
+  and `clock:` (ms). Fails to start with `Acts`' answer when it
   cannot close the rows a restart cut, or with the programs a record needs.
   """
   @spec start_link(keyword) :: GenServer.on_start()
@@ -121,6 +126,7 @@ defmodule CodingAgentFramework.StuckBackgrounds do
         groups: groups,
         signal: signal,
         quiet: Keyword.get(opts, :quiet, @quiet),
+        interval: Keyword.get(opts, :interval),
         actor: "stuck_backgrounds:#{Keyword.fetch!(opts, :host)}",
         clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
         seen: %{}
@@ -130,7 +136,7 @@ defmodule CodingAgentFramework.StuckBackgrounds do
       case Acts.interrupt(s.acts, s.actor) do
         {:ok, cut} ->
           for id <- cut, {:ok, row} <- [Acts.get(s.acts, id)], do: ask(s, row, :interrupted)
-          send(self(), :check)
+          send(self(), :tick)
           {:ok, s}
 
         {_, reason} ->
@@ -164,6 +170,11 @@ defmodule CodingAgentFramework.StuckBackgrounds do
 
   @impl true
   def handle_info(:check, s), do: {:noreply, elem(check_now(s), 1)}
+
+  def handle_info(:tick, s) do
+    if s.interval, do: Process.send_after(self(), :tick, s.interval)
+    {:noreply, elem(check_now(s), 1)}
+  end
 
   defp check_now(s) do
     with {:ok, list} <- Watch.remedies(s.watch, :list),
@@ -211,8 +222,16 @@ defmodule CodingAgentFramework.StuckBackgrounds do
     evidence = %{group: g.group, tasks: g.tasks, cpu_since: g.since, quiet: s.quiet}
     sym = %{kind: @kind, target: g.name, state: g.key, source: s.actor, since: g.since}
 
-    with {:ok, %{status: "open"}} <- Watch.record(s.watch, Map.put(sym, :evidence, evidence)),
-         {:ok, rows} <- Acts.rows(s.acts, actor: s.actor, target: g.name, state: g.key) do
+    case Watch.acting(Watch.record(s.watch, Map.put(sym, :evidence, evidence)), s.actor) do
+      nil -> nil
+      # A person's answer "act" (F-189's new-7): the end once, under their claim.
+      by when by != s.actor -> end_group(s, sym, g, by)
+      _healer -> heal_open(s, list, g, sym)
+    end
+  end
+
+  defp heal_open(s, list, g, sym) do
+    with {:ok, rows} <- Acts.rows(s.acts, actor: s.actor, target: g.name, state: g.key) do
       case rows do
         [] ->
           case may_act(s, list[@kind]) do
@@ -228,7 +247,7 @@ defmodule CodingAgentFramework.StuckBackgrounds do
           nil
       end
     else
-      _recorded_asked_or_unread -> nil
+      _unread -> nil
     end
   end
 
@@ -255,8 +274,8 @@ defmodule CodingAgentFramework.StuckBackgrounds do
     end
   end
 
-  defp end_group(s, sym, g) do
-    with {:ok, id} <- Acts.claim(s.acts, s.actor, sym.target, sym.state, :end) do
+  defp end_group(s, sym, g, actor \\ nil) do
+    with {:ok, id} <- Acts.claim(s.acts, actor || s.actor, sym.target, sym.state, :end) do
       case s.signal.(g.group) do
         {:ok, :sent} ->
           detail = %{tasks: g.tasks, changes: g.changes, group: g.group}
@@ -281,7 +300,7 @@ defmodule CodingAgentFramework.StuckBackgrounds do
   # Heal.tla's Verify, at the first list Claude Code wrote after the end: a task it named then
   # no longer listed is the command's end.
   defp verify(s, folds) do
-    with {:ok, rows} <- Acts.rows(s.acts, actor: s.actor, status: "acted") do
+    with {:ok, rows} <- Recoveries.acted(s.acts, s.watch, s.actor, @remedy) do
       for row <- rows, {:ok, %{"tasks" => tasks, "changes" => changes}} <- [decode(row.detail)] do
         fold = Enum.find(folds, &(&1.session == session(s, row.target)))
         judge(s, row, fold, tasks, changes)

@@ -432,6 +432,23 @@ defmodule CodingAgentFramework.Stream.Fold do
 
   def upgrade(fold), do: fold
 
+  @doc """
+  Stamps each request with no `held_at` with `at` (wall-clock ms), the time of the read that
+  folded it: when `Prompts` shows it opened (F-189's new-2). A request stamped before keeps its
+  time. Pure.
+
+      iex> alias CodingAgentFramework.Stream.Fold
+      iex> fold = %{Fold.new() | requests: %{"r1" => %{state: :held}}}
+      iex> Fold.stamp(Fold.stamp(fold, 5), 9).requests
+      %{"r1" => %{state: :held, held_at: 5}}
+  """
+  @spec stamp(t, integer) :: t
+  def stamp(fold, at),
+    do: %{
+      fold
+      | requests: Map.new(fold.requests, fn {id, r} -> {id, Map.put_new(r, :held_at, at)} end)
+    }
+
   @doc "Messages still waiting for their replay: the ones the transcript settles at the exit."
   @spec writing(t) :: [String.t()]
   def writing(fold), do: for({u, %{state: :writing}} <- fold.messages, do: u)

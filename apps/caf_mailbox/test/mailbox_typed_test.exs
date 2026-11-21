@@ -74,6 +74,20 @@ defmodule CodingAgentFramework.MailboxTypedTest do
     assert {:ok, %{via: "typed", again: 0}} = until(ctx, two, &(&1.status == "delivered"))
   end
 
+  # F-188's new-3: the framework's own frame names the sender's account, read from the sender's
+  # agent row, so an app passes no frame of its own for it.
+  test "the frame names the sender's account from its agent row", ctx do
+    main(ctx)
+    d1 = %{host: "test", name: "d1", socket: "d1", account: "other", cwd: ctx.dir}
+    Sessions.Table.starting(ctx.table, Map.merge(d1, %{role: "delegate", resume: nil}))
+    {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "d1", "main", "one")
+
+    # Typed whole or by its pointer line, the frame is the same.
+    %{uuid: u1} = Table.get(ctx.mtable, one)
+    assert {:ok, ["From d1 on other (message): " <> rest]} = submitted(ctx, 1)
+    assert String.ends_with?(rest, "[delivery #{u1}]")
+  end
+
   # NoLongTyped, Arrives (F-142): a row too long to type, or of several lines, is written whole
   # to the session's due directory, which its start may read by `--add-dir`, and the line typed
   # names that file; its user line settles it, and the file goes. Rows keep their order.

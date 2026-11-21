@@ -172,6 +172,17 @@ defmodule CodingAgentFramework.StuckBackgroundsTest do
     assert {:ok, :alive} = alive(ctx)
   end
 
+  # A hung command writes nothing, so no cue comes: the interval reads it again (F-189's new-4).
+  test "with an interval, it reads by itself, with no cue and no check", ctx do
+    _healer = healer!(ctx, interval: 10)
+    assert_receive {:read, %{pid: 7}}, 5_000
+    tick(ctx, @quiet)
+    key = "stuck_background:app-fix:#{ctx.group.pid}:#{ctx.group.start}"
+    # A read after the bound ends the group; the record is written before the signal.
+    assert {:ok, :ended} = dead?(ctx)
+    assert {:ok, [%{status: "open"}]} = Watch.read(ctx.watch, state: key)
+  end
+
   test "a list that still names the task fails the verify: off the list, and asked", ctx do
     healer = healer!(ctx, signal: fn _record -> {:ok, :sent} end)
     assert {:ok, %{ended: []}} = StuckBackgrounds.check(healer)

@@ -670,8 +670,18 @@ defmodule CodingAgentFramework.SurfaceTest do
   # `Tracker`, which reads every topic.
   @needs %{
     "registry" => [:sessions, :mover],
-    # A headless session's windows and limit are Usage's (F-181).
-    "stream" => [:sessions, :delegates, :mailbox, :mover, :usage, :stuck_backgrounds, :limits],
+    # A headless session's windows and limit are Usage's (F-181); its held request is a
+    # permission prompt (F-190).
+    "stream" => [
+      :sessions,
+      :delegates,
+      :mailbox,
+      :mover,
+      :usage,
+      :stuck_backgrounds,
+      :limits,
+      :prompts
+    ],
     "tmux" => [:sessions, :recoveries],
     "sessions" => [
       :delegates,
