@@ -13,16 +13,18 @@ defmodule CodingAgentFramework.Prompts do
   | `stop_cap` | `Intake`'s hold of a `Stop` at Claude Code's cap of blocks in a row | the hold is `held` |
   | `dialog` | `Sessions`' agent row on a startup dialog (`trust`, `imports`) | the row shows it, no press marked |
   | `ask` | `Mailbox`'s ask, from an agent to the operator | no answer row and no withdrawal |
+  | `remedy` | `Watch`'s symptom state the healer left to a person (F-182) | the row is `asked` |
 
   A later kind is one more clause of `list/2` and of `answer/5`, and the same data.
 
   Each prompt is `%{id, kind, status, agent, parent, project, subagent, text, options,
   opened_at, deadline}`: `id` names its owner's key, so one state is one prompt
   (`"permission:<intake id>"`, `"stop_cap:<intake id>"`, `"dialog:<agent>:<start>:<dialog>"`,
-  `"ask:<mailbox id>"`); `status` is `open`, `answering` (an answer is on its way to the owner),
+  `"ask:<mailbox id>"`, `"remedy:<symptom id>"`); `status` is `open`, `answering` (an answer is on its way to the owner),
   or for a dialog `cut` or `unknown` (a restart cut its press: a person clears it,
   `Sessions.clear_dialog/4`); `agent` is the agent whose session asks (nil for a session no
-  agent row names), `parent` and `project` its row's; `options` the labels a choice is one of,
+  agent row names; a remedy's is its symptom's target when an agent row has that name),
+  `parent` and `project` its row's; `options` the labels a choice is one of,
   or for an ask its questions, each with its options; `opened_at` and `deadline` wall-clock ms,
   `deadline` nil for a kind that waits for ever.
 
@@ -45,7 +47,7 @@ defmodule CodingAgentFramework.Prompts do
 
   use GenServer
 
-  alias CodingAgentFramework.{Intake, Mailbox, Sessions}
+  alias CodingAgentFramework.{Intake, Mailbox, Sessions, Watch}
   alias CodingAgentFramework.Sessions.Agents
 
   @timeout 5_000
@@ -54,7 +56,7 @@ defmodule CodingAgentFramework.Prompts do
   # The most characters of a tool call's input a permission prompt's text carries.
   @input 300
 
-  @kinds ~w(permission stop_cap dialog ask)
+  @kinds ~w(permission stop_cap dialog ask remedy)
 
   @typedoc "A prompt, as the module doc says."
   @type prompt :: %{
@@ -74,7 +76,7 @@ defmodule CodingAgentFramework.Prompts do
   @doc """
   Starts the inbox of one host. Options: `host:`, `intake:` (the host's `Intake`) and
   `intake_db:` (its file), `sessions:` (the `Sessions`) and `sessions_db:` (its file), `mailbox:`,
-  and optionally `notify:` (a function of one cue) and `name:` (for the embedding app's tree;
+  `watch:` (the `Watch`) and `watch_db:` (its file), and optionally `notify:` (a function of one cue) and `name:` (for the embedding app's tree;
   the library looks up no name).
   """
   @spec start_link(keyword) :: GenServer.on_start()
@@ -89,7 +91,7 @@ defmodule CodingAgentFramework.Prompts do
 
   @doc "What it reads, for `Cues`: its owners' topics, each cue a read of every prompt."
   @spec reads() :: %{topics: [String.t()], cue: (pid, map -> :ok)}
-  def reads, do: %{topics: ~w(intake sessions mailbox), cue: &cue/2}
+  def reads, do: %{topics: ~w(intake sessions mailbox watch), cue: &cue/2}
 
   @doc "The kinds it reads."
   @spec kinds() :: [String.t()]
@@ -120,7 +122,9 @@ defmodule CodingAgentFramework.Prompts do
   - `stop_cap`: `"go_on"` (the cap's last block Claude Code honors) or `"end"` (the turn ends);
   - `dialog`: one of its options' labels;
   - `ask`: one answer per question, as `Mailbox.answer/4` takes them, or `{:withdraw, reason}`
-    (a person dismissed it, `Mailbox.withdraw/4`: one more settle).
+    (a person dismissed it, `Mailbox.withdraw/4`: one more settle);
+  - `remedy`: `"approve"` (its kind's remedy back on the allow-list, the operator's widening)
+    or `"leave"` (`Watch.answer/5`).
 
   The prompt is read now and must be `open`, and the choice one it offers; the owner then takes
   it (`Intake.answer/4` with `by: who`, `Sessions.answer_dialog/5` with `by: who`,
@@ -192,12 +196,14 @@ defmodule CodingAgentFramework.Prompts do
     host = Keyword.fetch!(opts, :host)
 
     with {:ok, idb} <- Intake.Table.open(Keyword.fetch!(opts, :intake_db)),
-         {:ok, agents} <- Agents.open(Keyword.fetch!(opts, :sessions_db), host) do
+         {:ok, agents} <- Agents.open(Keyword.fetch!(opts, :sessions_db), host),
+         {:ok, wdb} <- Watch.Table.open(Keyword.fetch!(opts, :watch_db)) do
       s = %{
         host: host,
         idb: idb,
         agents: agents,
-        owners: Map.new(~w(intake sessions mailbox)a, &{&1, Keyword.fetch!(opts, &1)}),
+        wdb: wdb,
+        owners: Map.new(~w(intake sessions mailbox watch)a, &{&1, Keyword.fetch!(opts, &1)}),
         notify: Keyword.get(opts, :notify, fn _ -> :ok end),
         # id -> status, as the last read found them: what the next cue says moved.
         shown: %{},
@@ -258,7 +264,9 @@ defmodule CodingAgentFramework.Prompts do
   defp tell(s, all) do
     rows = Map.new(Agents.rows(s.agents), &{&1.name, &1})
 
+    # A remedy prompt is the Watch's about an agent, not the agent's own wait.
     for %{status: "open", agent: agent, parent: parent} = p <- all,
+        p.kind != "remedy",
         not MapSet.member?(s.told, p.id),
         match?(%{kind: "delegate"}, rows[agent]) and is_binary(parent),
         reduce: s do
@@ -284,7 +292,9 @@ defmodule CodingAgentFramework.Prompts do
     rows = Agents.rows(s.agents)
 
     with {:ok, asks} <- asks(s.owners.mailbox) do
-      prompts = holds(s, rows) ++ dialogs(rows) ++ Enum.map(asks, &ask(&1, rows))
+      prompts =
+        holds(s, rows) ++ dialogs(rows) ++ Enum.map(asks, &ask(&1, rows)) ++ remedies(s, rows)
+
       {:ok, Enum.sort_by(prompts, &{&1.opened_at || 0, &1.id})}
     end
   end
@@ -380,6 +390,25 @@ defmodule CodingAgentFramework.Prompts do
     Map.merge(of(row), fields)
   end
 
+  defp remedies(s, rows) do
+    by_name = Map.new(rows, &{&1.name, &1})
+
+    for sym <- Watch.Table.asked(s.wdb) do
+      fields = %{
+        id: "remedy:#{sym.id}",
+        kind: "remedy",
+        status: "open",
+        subagent: nil,
+        text: "#{sym.kind} of #{sym.target}: #{sym.reason}; its remedy: #{sym.remedy}",
+        options: ~w(approve leave),
+        opened_at: sym.asked_at,
+        deadline: nil
+      }
+
+      Map.merge(of(by_name[sym.target]), fields)
+    end
+  end
+
   defp of(nil), do: %{agent: nil, parent: nil, project: nil}
 
   defp of(row),
@@ -405,6 +434,9 @@ defmodule CodingAgentFramework.Prompts do
 
       ["ask", n] ->
         settled_if(match?({:ok, _}, Mailbox.asked(s.owners.mailbox, int(n))))
+
+      ["remedy", n] ->
+        settled_if(Watch.Table.select(s.wdb, "id = ?1", [int(n)]) != [])
 
       _ ->
         {:refused, :no_prompt}
@@ -437,6 +469,10 @@ defmodule CodingAgentFramework.Prompts do
 
   defp choose(%{kind: "ask"}, {:withdraw, reason}, _who), do: {:ok, {:withdraw, reason}}
   defp choose(%{kind: "ask"}, answers, _who) when is_list(answers), do: {:ok, {:answer, answers}}
+
+  defp choose(%{kind: "remedy"}, choice, _who) when choice in ["approve", "leave"],
+    do: {:ok, choice}
+
   defp choose(_prompt, _choice, _who), do: {:refused, {:bad, :choice}}
 
   # The owner takes the answer, in the caller's process; its refusal of a request no longer
@@ -469,6 +505,9 @@ defmodule CodingAgentFramework.Prompts do
 
   defp hand(owners, %{kind: "ask", id: "ask:" <> n}, {:withdraw, reason}, _who),
     do: Mailbox.withdraw(owners.mailbox, int(n), reason)
+
+  defp hand(owners, %{kind: "remedy", id: "remedy:" <> n}, choice, who),
+    do: Watch.answer(owners.watch, int(n), choice, who)
 
   defp check_filter(filter) when is_list(filter) do
     ok? =

@@ -47,6 +47,7 @@ defmodule CafSurface.MixProject do
       {:caf_tracker, in_umbrella: true},
       {:caf_transcripts, in_umbrella: true},
       {:caf_usage, in_umbrella: true},
+      {:caf_watch, in_umbrella: true},
       {:bandit, "~> 1.14"},
       {:plug, "~> 1.20"},
       {:caf_test, in_umbrella: true, only: :test}

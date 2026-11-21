@@ -11,7 +11,7 @@ defmodule CodingAgentFramework.PromptsTest do
   import CodingAgentFramework.TestHost
 
   alias CodingAgentFramework.{Grants, Inlet, Intake, Mailbox, Prompts, ScreenStandIn, Sessions}
-  alias CodingAgentFramework.{SessionsSetup, Stream}
+  alias CodingAgentFramework.{SessionsSetup, Stream, Watch}
 
   @trust "Yes, I trust this folder"
 
@@ -55,11 +55,14 @@ defmodule CodingAgentFramework.PromptsTest do
     spec = Supervisor.child_spec({Sessions, opts}, id: :dialogs, restart: :temporary)
     sessions = start_supervised!(spec)
 
+    watch = start_supervised!({Watch, db: db, remedies: Watch.default_remedies(), notify: cue})
     popts = [host: "test", intake: intake, intake_db: db, sessions: sessions, sessions_db: db]
-    popts = popts ++ [mailbox: mailbox, notify: &send(me, {:prompts, &1})]
+    popts = popts ++ [mailbox: mailbox, watch: watch, watch_db: db]
+    popts = popts ++ [notify: &send(me, {:prompts, &1})]
 
     {:ok,
      intake: intake,
+     watch: watch,
      mailbox: mailbox,
      mtable: mtable,
      sessions: sessions,
@@ -206,6 +209,31 @@ defmodule CodingAgentFramework.PromptsTest do
     assert {:decision, block} = Task.await(holder)
     assert %{"decision" => "block", "reason" => "Go on."} = JSON.decode!(block)
     assert {:refused, :settled} = Prompts.answer(ctx.prompts, id, "end", "sam")
+  end
+
+  # Heal.tla's Ask and Answer (F-182): a symptom the healer left to a person is a remedy prompt,
+  # answered once; its approve puts the kind's remedy back on the allow-list.
+  test "a remedy prompt is the Watch's asked symptom, answered once", ctx do
+    started(ctx, "d1")
+    sym = %{kind: "lost_viewer", target: "d1", state: "k1", source: "healer", since: 1}
+    {:ok, %{id: sid}} = Watch.record(ctx.watch, sym)
+    {:ok, false} = Watch.remedies(ctx.watch, {:drop, "lost_viewer", :not_viewed})
+    {:ok, ^sid} = Watch.ask(ctx.watch, sym, :not_on_list)
+    id = "remedy:#{sid}"
+    assert cued(ctx) == [id]
+
+    assert {:ok, [%{id: ^id, agent: "d1", parent: "main", options: ["approve", "leave"]} = p]} =
+             Prompts.read(ctx.prompts, kind: "remedy")
+
+    assert p.text == "lost_viewer of d1: not_on_list; its remedy: reopen"
+    # The Watch's prompt about a delegate is not the delegate's own wait: no notice.
+    assert notices(ctx, "main") == []
+
+    assert {:refused, {:bad, :choice}} = Prompts.answer(ctx.prompts, id, "act", "sam")
+    assert {:ok, :answered} = Prompts.answer(ctx.prompts, id, "approve", "sam")
+    assert {:refused, :settled} = Prompts.answer(ctx.prompts, id, "leave", "sam")
+    assert {:ok, %{"lost_viewer" => %{allowed: true}}} = Watch.remedies(ctx.watch, :list)
+    assert {:refused, :no_prompt} = Prompts.answer(ctx.prompts, "remedy:999", "leave", "sam")
   end
 
   # Prompt.tla's AnswerNow and WithdrawNow: an ask is answered or withdrawn, once.

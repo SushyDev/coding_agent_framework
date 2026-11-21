@@ -54,13 +54,13 @@ defmodule CodingAgentFramework.IntakeBackgroundTest do
     assert command({:allow, opts}) == "exec </dev/null; ls"
   end
 
-  test "a deny, an ask, a foreground call, another tool or a closed command is left as it is" do
+  test "a deny, a foreground call, another tool or a closed command is left as it is" do
     assert Background.correct(bash("ls"), {:deny, "no"}) == {:deny, "no"}
 
     assert Background.correct(bash("ls"), {:deny, "no", additional_context: "x"}) ==
              {:deny, "no", additional_context: "x"}
 
-    assert Background.correct(bash("ls"), :ask) == :ask
+    assert Background.correct(bash("ls", false), :ask) == :ask
     assert Background.correct(bash("ls", false), :pass) == :pass
     assert Background.correct(%{bash("ls") | tool_name: "Monitor"}, :pass) == :pass
     assert Background.correct(bash("  exec < /dev/null ; ls"), :allow) == :allow
@@ -110,6 +110,26 @@ defmodule CodingAgentFramework.IntakeBackgroundTest do
     # A correction is a decision as any other: its row keeps what went out.
     assert [row] = rows(db)
     assert {row.actor, row.hold} == {"app", "answered"}
+  end
+
+  # F-180's new-4, measured on 2.1.322 (F-182): `updatedInput` beside `ask` shows the corrected
+  # command in Claude Code's prompt, so an asked background command is corrected too.
+  test "through Intake, an ask's correction goes out beside the ask", %{start: start} do
+    intake = start.(pre_tool_use: Background.pre_tool_use(fn _ -> :ask end))
+    input = %{"command" => "ls", "run_in_background" => true}
+    fields = %{"tool_use_id" => "t1", "tool_name" => "Bash", "tool_input" => input}
+    conn = post(intake, body("PreToolUse", fields))
+
+    assert conn.status == 200
+    output = JSON.decode!(conn.resp_body)["hookSpecificOutput"]
+    assert output["permissionDecision"] == "ask"
+    assert output["updatedInput"] == %{input | "command" => "exec </dev/null; ls"}
+    assert output["additionalContext"] =~ "stdin that never closes"
+
+    # The app's own ask with a correction keeps it, corrected again for the background.
+    app = {:ask, updated_input: %{input | "command" => "ls -a"}}
+    assert {:ask, opts} = Background.correct(bash("ls"), app)
+    assert opts[:updated_input]["command"] == "exec </dev/null; ls -a"
   end
 
   # The corrected command in `sh -c`, its stdin a pipe from this VM that never closes, as

@@ -137,7 +137,8 @@ defmodule CodingAgentFramework.Intake do
   name), and optionally `notify:` (a function of one cue), `deadline:` (ms a hold is kept),
   `pre_tool_use:` (`fun(tool_event) -> :allow | {:deny, reason} | :ask | :pass`, or a
   correction: `{:allow, updated_input: map, additional_context: text}`, `{:pass, updated_input:
-  map, additional_context: text}` or `{:deny, reason, additional_context: text}`),
+  map, additional_context: text}`, `{:ask, updated_input: map, additional_context: text}` or
+  `{:deny, reason, additional_context: text}`),
   `post_tool_use:` (`fun(tool_event)`, its value ignored), `tool_deadline:` (ms the first is
   waited for, under 8 s), `waiter_deadline:` (ms a waiter is held, under the waiter hook's
   `timeout`; 7,080,000 by default, under `waiter_hook/5`'s 7,200 s), `beat:` (ms between a
@@ -1026,7 +1027,8 @@ defmodule CodingAgentFramework.Intake do
   end
 
   # The PreToolUse output in the shape Claude Code 2.1.322 reads. It keeps a reason only beside
-  # deny or ask, so an allow carries none; `updatedInput` only beside allow or with no decision.
+  # deny or ask, so an allow carries none; `updatedInput` beside allow, beside ask (its prompt
+  # shows the corrected call, measured on 2.1.322, F-182), or with no decision.
   defp tool_response(:allow), do: tool_response("allow", %{})
   defp tool_response(:ask), do: tool_response("ask", %{})
 
@@ -1038,6 +1040,13 @@ defmodule CodingAgentFramework.Intake do
   defp tool_response({:allow, opts}) when is_list(opts) and opts != [] do
     with {:ok, fields} <- corrections(opts, [:updated_input, :additional_context]),
          do: tool_response("allow", fields)
+  end
+
+  # An ask with a correction (F-180's new-4, F-182): the person's prompt shows the input given,
+  # and the call runs with it once approved.
+  defp tool_response({:ask, opts}) when is_list(opts) and opts != [] do
+    with {:ok, fields} <- corrections(opts, [:updated_input, :additional_context]),
+         do: tool_response("ask", fields)
   end
 
   # A correction with no decision (F-180): Claude Code 2.1.322 runs the call with the input

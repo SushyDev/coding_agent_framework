@@ -263,7 +263,13 @@ Built, each from a checked model in `model/tla/`:
   background `Bash` command runs with its stdin at end of file, whatever the app's callback
   answers, so a program that reads stdin never waits for ever; a session on a startup dialog
   reads `dialog` by its turn and in the tree, never idle; and `bin/capture-screen` captures the
-  exit dialog, for its reading.
+  exit dialog, for its reading;
+- the healer on an allow-list (F-182, B8 and B7's start, against `Heal.tla` and `Boxes.tla`):
+  each symptom state a fact in the `Watch` (`symptoms/2`, cued on `watch`) before anything
+  acts on it; `Recoveries` acts only by the remedy the config's list names for its kind, under
+  a cap per bound, once per state, and asks a person (a `remedy` prompt) for the rest; a remedy
+  whose verify failed leaves the list, which only the operator widens (`remedies/2`); and an
+  asked background command corrected too, its prompt showing the corrected call.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
@@ -398,7 +404,8 @@ reads and answers the requests whose mechanisms stay in `caf_mailbox`, `caf_inta
 `caf_registry`, `caf_transcripts`, `caf_sampler`, `caf_cli`, `caf_accounts` and `caf_tmux`;
 `Mailbox` holds `caf_mailbox`; `Team` holds `caf_delegates`, `caf_mains`, `caf_grants` and
 `caf_mcp`; the `Scheduler` holds `caf_scheduler` and `caf_usage`; `Hosts` holds `caf_copies`,
-`caf_jobs`, `caf_services` and `caf_runs`; the `Watch` holds `caf_tracker` and `caf_recoveries`.
+`caf_jobs`, `caf_services` and `caf_runs`; the `Watch` holds `caf_tracker`, `caf_recoveries`
+and `caf_watch` (the symptom record and the allow-list, F-182).
 `caf_shell`, `caf_holder`, `caf_store` and the `Ledger`'s `caf_acts` and `caf_cues` are the
 base under every box. From B2, a call into a
 box from outside it goes only through the box's own module.
@@ -428,6 +435,7 @@ flowchart BT
   end
   sessions[caf_sessions]
   recoveries[caf_recoveries]
+  watch[caf_watch]
   tracker[caf_tracker]
   delegates[caf_delegates]
   mover[caf_mover]
@@ -477,6 +485,8 @@ flowchart BT
   recoveries --> sampler
   recoveries --> sessions
   recoveries --> acts
+  recoveries --> watch
+  watch --> store
   tracker --> store
   tracker --> sessions
   sessions & delegates & services --> acts
@@ -522,6 +532,7 @@ flowchart BT
   prompts --> intake
   prompts --> sessions
   prompts --> mailbox
+  prompts --> watch
   copies --> shell
   copies --> holder
   jobs --> shell

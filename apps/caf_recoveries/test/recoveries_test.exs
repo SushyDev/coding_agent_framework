@@ -13,7 +13,7 @@ defmodule CodingAgentFramework.RecoveriesTest do
   import CodingAgentFramework.RecoveriesSetup
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Acts, Holder, Recoveries, RecoveriesSetup, Sessions, Tmux}
+  alias CodingAgentFramework.{Acts, Holder, Recoveries, RecoveriesSetup, Sessions, Tmux, Watch}
   alias CodingAgentFramework.TmuxSampler
 
   doctest Recoveries
@@ -261,6 +261,93 @@ defmodule CodingAgentFramework.RecoveriesTest do
              end)
 
     assert {:ok, %{ends: []}} = Recoveries.check(ctx.recoveries)
+
+    # Its symptom was recorded before the end, and passed once no end was owed.
+    assert {:ok, [%{kind: "end_owed", target: "lost", status: "passed", evidence: evidence}]} =
+             Watch.read(ctx.watch, kind: "end_owed")
+
+    assert evidence =~ ~s("pid":#{pid})
+  end
+
+  test "F-182: a lost viewer is recorded before its claim, and passes once viewed", ctx do
+    hold!(ctx, "alpha")
+    {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
+
+    assert {:ok, id} = agree(ctx, "alpha")
+    [%{state: state, claimed_at: claimed}] = rows(ctx)
+
+    assert {:ok, [%{kind: "lost_viewer", target: "alpha", state: ^state, recorded_at: at}]} =
+             Watch.read(ctx.watch, status: "open")
+
+    assert at < claimed
+    assert %{status: :viewed} = held(ctx, "alpha")
+    assert {:ok, %{ended: [^id]}} = Recoveries.check(ctx.recoveries)
+    assert {:ok, [%{status: "passed"}]} = Watch.read(ctx.watch)
+  end
+
+  test "F-182: past its kind's cap in the bound, a loss is asked, not claimed", ctx do
+    watch = watch!(ctx, %{"lost_viewer" => %{remedy: "reopen", cap: 1}})
+    {:ok, recoveries} = Recoveries.start_link(Keyword.put(ctx.opts, :watch, watch))
+    hold!(ctx, "alpha")
+    hold!(ctx, "beta")
+    {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
+
+    assert held(ctx, "alpha").status == :unviewed
+    assert {:ok, %{claimed: []}} = Recoveries.check(recoveries)
+    assert held(ctx, "alpha").status == :unviewed
+    assert {:ok, %{claimed: [id]}} = Recoveries.check(recoveries)
+    assert [%{id: ^id, target: first}] = rows(ctx)
+
+    assert {:ok, [%{target: other, reason: ~s(["cap",1,3600000]), remedy: "reopen"}]} =
+             Watch.read(watch, status: "asked")
+
+    assert Enum.sort([first, other]) == ["alpha", "beta"]
+    # Asked once: the next check claims nothing and asks nothing more.
+    assert {:ok, %{claimed: []}} = Recoveries.check(recoveries)
+    assert {:ok, [_]} = Watch.read(watch, status: "asked")
+  end
+
+  test "F-182: a remedy whose verify fails leaves the list, and the next loss is asked", ctx do
+    hold!(ctx, "alpha")
+    {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
+    assert {:ok, id} = agree(ctx, "alpha")
+    assert [%{status: "acted", detail: pane}] = rows(ctx)
+
+    # The viewer is gone again before the sample that verifies it.
+    assert {:ok, :killed} = Tmux.kill_pane(ctx.server, pane, "alpha")
+    assert held(ctx, "alpha").status == :unviewed
+    assert {:ok, %{ended: [^id]}} = Recoveries.check(ctx.recoveries)
+    assert [%{outcome: "failed", reason: "not_viewed"}] = rows(ctx)
+
+    assert {:ok, %{"lost_viewer" => %{allowed: false, last: %{act: "drop", by: "healer"}}}} =
+             Watch.remedies(ctx.watch, :list)
+
+    assert {:ok, [%{reason: ~s(["verify_failed","not_viewed"])}]} =
+             Watch.read(ctx.watch, status: "asked")
+
+    # The loss after it is a new state, off the list now: asked, never claimed.
+    assert held(ctx, "alpha").status == :unviewed
+    assert {:ok, %{claimed: []}} = Recoveries.check(ctx.recoveries)
+    assert length(rows(ctx)) == 1
+
+    assert {:ok, [%{reason: ~s(["verify_failed","not_viewed"])}, %{reason: "not_on_list"}]} =
+             Watch.read(ctx.watch, status: "asked")
+  end
+
+  test "F-182: a claim a restart cut is asked", ctx do
+    hold!(ctx, "alpha")
+    {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
+    assert held(ctx, "alpha").status == :unviewed
+    {:ok, read} = TmuxSampler.rows(ctx.sampler)
+    [lost] = Recoveries.lost_viewers(read, %{})
+    state = "test:#{key(ctx)}:#{lost.key}"
+    sym = %{kind: "lost_viewer", target: "alpha", state: state, source: actor(ctx), since: 1}
+    {:ok, %{id: sid}} = Watch.record(ctx.watch, sym)
+    {:ok, _} = Acts.claim(ctx.acts, actor(ctx), "alpha", state, :reopen)
+    GenServer.stop(ctx.recoveries)
+
+    {:ok, _} = Recoveries.start_link(ctx.opts)
+    assert {:ok, [%{id: ^sid, reason: "interrupted"}]} = Watch.read(ctx.watch, status: "asked")
   end
 
   test "F-118 new-5: an end that settled unknown waits for a person, whose clear tries it again",
@@ -328,6 +415,13 @@ defmodule CodingAgentFramework.RecoveriesTest do
   end
 
   defp move(ctx, ms), do: :counters.add(ctx.time, 1, ms)
+
+  # A Watch of its own, with the allow-list `remedies`, on the test's clock.
+  defp watch!(ctx, remedies) do
+    db = Path.join(ctx.dir, "watch.db")
+    {:ok, watch} = Watch.start_link(db: db, remedies: remedies, clock: ctx.clock)
+    watch
+  end
 
   # The command tmux says the viewer pane of session `name` started with, and what it shows,
   # from this test's own tmux server.

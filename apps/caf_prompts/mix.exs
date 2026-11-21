@@ -20,6 +20,7 @@ defmodule CafPrompts.MixProject do
       {:caf_intake, in_umbrella: true},
       {:caf_mailbox, in_umbrella: true},
       {:caf_sessions, in_umbrella: true},
+      {:caf_watch, in_umbrella: true},
       {:caf_grants, in_umbrella: true, only: :test},
       {:caf_inlet, in_umbrella: true, only: :test},
       {:caf_stream, in_umbrella: true, only: :test},

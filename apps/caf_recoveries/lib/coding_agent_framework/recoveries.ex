@@ -5,9 +5,19 @@ defmodule CodingAgentFramework.Recoveries do
   `PersonClears`). It keeps no table of its own: each state it acts on is a row in
   `CodingAgentFramework.Acts`, under the actor `recoveries:<host>:<server>`, and `Acts` cues it.
 
+  **It is the healer** (F-182, `model/tla/Heal.tla`), on the `Watch`'s allow-list. Each state it
+  reads is first recorded as a symptom in `CodingAgentFramework.Watch` (kind `lost_viewer` or
+  `end_owed`, its target the socket, its state the key below), whatever happens next. It acts
+  only by the remedy the list names for that kind (`reopen`, `end`) and under the kind's cap:
+  the claims of that act in the bound, counted from its own rows in `Acts`. A state off the list
+  or past the cap, and a remedy refused, unknown, repeating, cut by a restart or whose verify
+  failed, is asked: a `remedy` prompt for a person (`Watch.ask/4`), once per state. A verify that
+  fails also drops the kind's remedy from the list at once; only the operator puts it back.
+  Each check passes the states it no longer reads.
+
   The caller's supervision tree starts one per host, with no name, given the host's
   `TmuxSampler`, `Holder`, `Sessions`, tmux server (for its key and its viewers) and the instance's
-  `Acts`. It reads the sampler's rows, never a pane's screen: by `check/2`, or after `cue/1`,
+  `Acts` and `Watch`. It reads the sampler's rows, never a pane's screen: by `check/2`, or after `cue/1`,
   which the sampler's `notify` can call.
 
   **The first recovery is a lost viewer** (act `reopen`): a held socket the sampler reads
@@ -69,15 +79,17 @@ defmodule CodingAgentFramework.Recoveries do
 
   use GenServer
 
-  alias CodingAgentFramework.{Acts, Holder, Sessions, Tmux, TmuxSampler}
+  alias CodingAgentFramework.{Acts, Holder, Sessions, Tmux, TmuxSampler, Watch}
 
   @timeout 60_000
   @lost [:unviewed, :no_server]
+  # Each act's symptom kind on the allow-list.
+  @kinds %{"reopen" => "lost_viewer", "end" => "end_owed"}
 
   @doc """
   Starts a `Recoveries`. Options: `sampler:` (the host's `TmuxSampler`), `holder:` (its `Holder`), `programs:` (its `Programs`, with ps, kill and sleep,
   for `Holder.Process`), `sessions:` (its `Sessions`, which answers each viewer's command and
-  the ends owed), `server:` (its `Tmux` server, for the key and the viewers it opens), `acts:` (the instance's `Acts`),
+  the ends owed), `server:` (its `Tmux` server, for the key and the viewers it opens), `acts:` (the instance's `Acts`), `watch:` (the instance's `Watch`: the symptom record and the allow-list),
   and optionally `size:` (a viewer's `{columns, rows}`, default `{200, 50}`), `max_age:` (ms,
   default 30 000), `window:` (ms, default 60 000), `end_grace:` (ms between an end's TERM and
   its KILL, default 5 000) and `clock:` (a function answering the time in ms, by default the
@@ -180,16 +192,22 @@ defmodule CodingAgentFramework.Recoveries do
     acts = Keyword.fetch!(opts, :acts)
     actor = "recoveries:#{host}:#{server}"
 
-    # A claim this actor wrote and did not act on: the restart cut it, and it is never acted on.
+    watch = Keyword.fetch!(opts, :watch)
+
+    # A claim this actor wrote and did not act on: the restart cut it, and it is never acted on;
+    # its symptom waits on a person (Heal.tla's SettleCut, then Ask).
     with :ok <- same_host(host, holder.host.name),
          {:ok, procs} <- Holder.Process.new(Keyword.fetch!(opts, :programs), holder),
-         {:ok, _} <- Acts.interrupt(acts, actor) do
+         {:ok, cut} <- Acts.interrupt(acts, actor) do
+      for id <- cut, {:ok, row} <- [Acts.get(acts, id)], do: ask(watch, row, :interrupted)
+
       {:ok,
        %{
          host: host,
          server: server,
          actor: actor,
          acts: acts,
+         watch: watch,
          procs: procs,
          end_grace: Keyword.get(opts, :end_grace, 5_000),
          sampler: Keyword.fetch!(opts, :sampler),
@@ -245,7 +263,9 @@ defmodule CodingAgentFramework.Recoveries do
   # sockets lost now since the earliest time that changes a state's key or count; and per end
   # owed, that socket's ends.
   defp check_now(state) do
-    with {:ok, open} <- Acts.rows(state.acts, actor: state.actor, status: "acted"),
+    with {:ok, list} <- Watch.remedies(state.watch, :list),
+         state = Map.put(state, :list, list),
+         {:ok, open} <- Acts.rows(state.acts, actor: state.actor, status: "acted"),
          {:ok, waiting} <-
            Acts.rows(state.acts,
              actor: state.actor,
@@ -264,29 +284,101 @@ defmodule CodingAgentFramework.Recoveries do
     end
   end
 
-  # Each end owed, once per state: claimed, ended by the record alone, then the row settles.
+  # Each end owed, once per state: recorded, claimed on the list and under the cap, ended by the
+  # record alone, then the row settles; an end whose outcome is unknown is asked, never tried
+  # again in its state.
   defp end_owed(state) do
     case Sessions.ends_owed(state.sessions) do
       {:ok, owed} ->
-        for o <- owed,
-            {:ok, rows} <- [
-              Acts.rows(state.acts, actor: state.actor, act: "end", target: o.socket)
-            ],
-            {:ok, id} <- [claim(state, o.socket, end_key(state, o, rows), :end)] do
-          case Holder.Process.end_held(state.procs, o.socket, o.record, state.end_grace) do
-            {:ok, :ended} ->
-              Acts.settle(state.acts, id, :recovered, answer: "ended", acted: true)
-
-            {:unknown, why} ->
-              Acts.settle(state.acts, id, :unknown, reason: why, answer: "unknown", acted: true)
+        ends =
+          for o <- owed,
+              {:ok, rows} <- [
+                Acts.rows(state.acts, actor: state.actor, act: "end", target: o.socket)
+              ],
+              key = end_key(state, o, rows) do
+            evidence = %{name: o.name, pid: o.record.pid, start: o.record.start}
+            sym = %{kind: "end_owed", target: o.socket, state: key, evidence: evidence}
+            {key, heal(state, sym, "end", fn -> end_one(state, o, key, sym) end)}
           end
 
-          id
-        end
+        present = %{targets: Enum.map(owed, & &1.socket), states: Enum.map(ends, &elem(&1, 0))}
+        Watch.pass(state.watch, {state.actor, "end_owed"}, present)
+        for {_, id} <- ends, is_integer(id), do: id
 
       _unread ->
         []
     end
+  end
+
+  defp end_one(state, o, key, sym) do
+    with {:ok, id} <- claim(state, o.socket, key, :end) do
+      case Holder.Process.end_held(state.procs, o.socket, o.record, state.end_grace) do
+        {:ok, :ended} ->
+          Acts.settle(state.acts, id, :recovered, answer: "ended", acted: true)
+
+        {:unknown, why} ->
+          Acts.settle(state.acts, id, :unknown, reason: why, answer: "unknown", acted: true)
+          ask(state.watch, sym, {:unknown, why})
+      end
+
+      id
+    end
+  end
+
+  # Heal.tla's Detect, then its Claim or its Ask: the symptom recorded first, whatever happens
+  # next; a state with a row in `Acts` already is decided by that row's outcome; a remedy only
+  # on the list and under its cap, else the state waits on a person. `act` claims and acts, and
+  # answers the row's id.
+  defp heal(state, sym, remedy, act) do
+    sym = Map.merge(sym, %{source: state.actor, since: Map.get(sym, :since, now(state))})
+
+    with {:ok, %{status: "open"}} <- Watch.record(state.watch, sym),
+         {:ok, rows} <-
+           Acts.rows(state.acts, actor: state.actor, target: sym.target, state: sym.state),
+         # A skipped row (a sample too old) is no claim: one taken now takes it over.
+         true <- Enum.all?(rows, &(&1.status == "skipped")) do
+      case may_act(state, remedy) do
+        :ok -> act.()
+        :shown -> nil
+        {:ask, why} -> ask(state.watch, sym, why) && nil
+      end
+    else
+      _recorded_asked_or_claimed -> nil
+    end
+  end
+
+  # The allow-list's entry for `remedy`'s kind, and the cap: the remedies of that kind this
+  # healer claimed in the bound, a fold of its rows in `Acts`, so a restart keeps the count.
+  defp may_act(state, remedy) do
+    case state.list[@kinds[remedy]] do
+      %{remedy: ^remedy, allowed: true, cap: cap, bound: bound} ->
+        from = now(state) - bound
+
+        case Acts.rows(state.acts, actor: state.actor, act: remedy, since: from) do
+          {:ok, rows} ->
+            n = Enum.count(rows, &(&1.status != "skipped" and &1.claimed_at >= from))
+            if n < cap, do: :ok, else: {:ask, {:cap, cap, bound}}
+
+          _unread ->
+            :shown
+        end
+
+      %{remedy: ^remedy} ->
+        {:ask, :not_on_list}
+
+      _none ->
+        :shown
+    end
+  end
+
+  # A symptom state the healer leaves to a person: its remedy prompt, once per state. A row of
+  # `Acts` names its symptom by its act's kind, its target and its state.
+  defp ask(watch, %{act: act, target: target, state: key}, why),
+    do: ask(watch, %{kind: @kinds[act], target: target, state: key}, why)
+
+  defp ask(watch, sym, why) do
+    Watch.ask(watch, Map.take(sym, [:kind, :target, :state]), why)
+    true
   end
 
   # After a person's clear, the same process is a new state, so an end that failed is tried
@@ -373,11 +465,37 @@ defmodule CodingAgentFramework.Recoveries do
 
     claimed =
       for l <- agreed,
-          prior = losses(state, rows, l.socket),
-          {:ok, id} <- [claim(state, l.socket, scoped(state, l.key), :reopen)],
-          do: act(state, id, l, prior)
+          key = scoped(state, l.key),
+          sym = %{
+            kind: "lost_viewer",
+            target: l.socket,
+            state: key,
+            since: l.since,
+            evidence: %{generation: l.generation, read_at: read.read_at}
+          },
+          id = heal(state, sym, "reopen", fn -> reopen(state, l, sym, rows) end),
+          is_integer(id),
+          do: id
 
+    pass_viewers(state, read, lost)
     {{:ok, %{claimed: claimed, ended: ended}}, state}
+  end
+
+  defp reopen(state, l, sym, rows) do
+    prior = losses(state, rows, l.socket)
+
+    with {:ok, id} <- claim(state, l.socket, sym.state, :reopen),
+         do: act(state, id, sym, prior)
+  end
+
+  # The lost viewers recorded that this sample no longer reads pass: a viewer since, or a new
+  # loss under a new key. A state that waits on a person stays while its socket is lost at all.
+  defp pass_viewers(state, read, lost) do
+    targets =
+      for %{kind: :held, socket: :live, status: s, name: n} <- read.rows, s in @lost, do: n
+
+    present = %{targets: targets, states: Enum.map(lost, &scoped(state, &1.key))}
+    Watch.pass(state.watch, {state.actor, "lost_viewer"}, present)
   end
 
   # A sample checked again (the same `read_at`) leaves the last two as they were.
@@ -404,13 +522,14 @@ defmodule CodingAgentFramework.Recoveries do
 
   defp claim(state, target, key, act), do: Acts.claim(state.acts, state.actor, target, key, act)
 
-  # The third loss in the window: the row says so, and nothing is opened.
-  defp act(state, id, _lost, prior) when prior >= 2 do
+  # The third loss in the window: the row says so, nothing is opened, and a person is asked.
+  defp act(state, id, sym, prior) when prior >= 2 do
     Acts.settle(state.acts, id, :failed, reason: :repeating)
+    ask(state.watch, sym, :repeating)
     id
   end
 
-  defp act(state, id, %{socket: name}, _prior) do
+  defp act(state, id, %{target: name} = sym, _prior) do
     answer =
       case Sessions.viewer_argv(state.sessions, name) do
         {:ok, argv} -> Sessions.viewer(state.tmux, name, argv, state.size)
@@ -433,6 +552,7 @@ defmodule CodingAgentFramework.Recoveries do
 
       {:refused, why} ->
         Acts.settle(state.acts, id, :failed, reason: why, answer: answer)
+        ask(state.watch, sym, {:refused, why})
 
       _ ->
         Acts.acted(state.acts, id, answer: answer)
@@ -448,9 +568,22 @@ defmodule CodingAgentFramework.Recoveries do
     for %{status: "acted"} = row <- rows, read.read_at > row.acted_at do
       {outcome, reason} = outcome(row, held[row.target])
       Acts.settle(state.acts, row.id, outcome, reason: reason)
+      judge(state, row, outcome, reason)
       row.id
     end
   end
+
+  # Heal.tla's Verify: a remedy that answered ok and did not help leaves the allow-list at once,
+  # with its reason (decision 11), and its state is asked; one whose outcome is unknown is asked
+  # and never tried again in its state.
+  defp judge(_state, _row, :recovered, _reason), do: :ok
+
+  defp judge(state, row, :failed, reason) do
+    Watch.remedies(state.watch, {:drop, @kinds[row.act], {:verify_failed, row.id, reason}})
+    ask(state.watch, row, {:verify_failed, reason})
+  end
+
+  defp judge(state, row, :unknown, reason), do: ask(state.watch, row, {:unknown, reason})
 
   defp outcome(_row, %{status: :viewed}), do: {:recovered, nil}
   defp outcome(_row, nil), do: {:unknown, :agent_gone}

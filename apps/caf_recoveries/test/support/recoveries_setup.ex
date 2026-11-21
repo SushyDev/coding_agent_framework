@@ -2,7 +2,8 @@ defmodule CodingAgentFramework.RecoveriesSetup do
   @moduledoc """
   The setup and helpers `RecoveriesTest` and `ActsSourceTest` share: a `Recoveries` on a real
   tmux server and real dtach sockets in the test's own directory, with `cat` held as the agent's
-  stand-in, the instance's `Acts`, and the host's `Sessions`, which answers each viewer's
+  stand-in, the instance's `Acts` and `Watch` (with the default allow-list), and the host's
+  `Sessions`, which answers each viewer's
   command from the row `hold!/3` leaves. The sampler, `Acts` and `Recoveries` share a clock the
   test moves: it ticks one ms per reading. `Acts`' cues come to the test as `{:cue, cue}`.
 
@@ -16,7 +17,7 @@ defmodule CodingAgentFramework.RecoveriesSetup do
   import ExUnit.Assertions
   import ExUnit.Callbacks, only: [on_exit: 1]
 
-  alias CodingAgentFramework.{Acts, Holder, Recoveries, Sessions, Tmux, TmuxSampler}
+  alias CodingAgentFramework.{Acts, Holder, Recoveries, Sessions, Tmux, TmuxSampler, Watch}
   alias CodingAgentFramework.Tmux.CLI
 
   @doc """
@@ -61,8 +62,17 @@ defmodule CodingAgentFramework.RecoveriesSetup do
         notify: &send(me, {:cue, &1})
       )
 
+    {:ok, watch} =
+      Watch.start_link(
+        db: db,
+        remedies: Watch.default_remedies(),
+        clock: clock,
+        notify: &send(me, {:cue, &1})
+      )
+
     opts = [
       sampler: sampler,
+      watch: watch,
       holder: holder,
       programs: programs(),
       sessions: sessions,
@@ -79,6 +89,7 @@ defmodule CodingAgentFramework.RecoveriesSetup do
      dir: dir,
      db: db,
      acts: acts,
+     watch: watch,
      server: server,
      holder: holder,
      sessions: sessions,
