@@ -11,7 +11,13 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     `rate_limit_event` and a `result` naming the uuid, whose text is `done <uuid>`. A message
     whose text starts with `ask` (after a `From <name> (<kind>): ` sender line, F-170) first asks a `can_use_tool` permission (`request_id`
     `req-<uuid>`), and ends its turn when the answer comes; so does every message while a file
-    `<dir>/hold` exists; the answer is replayed. `half` ends its turn with half a
+    `<dir>/hold` exists; the answer is replayed. While a file `<dir>/limit` exists (its text a
+    reset in Unix seconds), every message hits a usage limit as Claude Code 2.1.322 does
+    headless (F-181's measure): a `rate_limit_event` `rejected` with that reset, the assistant
+    line with `api_error: "usage_limit_reached"`, a `result` with `is_error` and the same
+    `api_error` naming the message, and an exit with status 1 at once. With a FIFO
+    `<dir>/limit.fifo`, it first waits for a line there, so a test can let the start be
+    confirmed before the exit. `half` ends its turn with half a
     `rate_limit_event` line, and the next message finishes it; `self` ends its turn, then
     starts one of its own at once, whose `result` (`on its own`, uuid `r-self-<uuid>`) names no message; `quiet`
     ends its turn with an empty `result` that names no message, so no report is read from it;
@@ -108,6 +114,14 @@ defmodule CodingAgentFramework.HeadlessStandIn do
           u=$(field uuid); rec "message $u"
           if [ -n "$half" ]; then printf '"utilization":0.5}}\n'; half=''; fi
           ev '{"type":"user","isReplay":true,"session_id":"'"$sid"'","uuid":"'"$u"'","message":{"role":"user","content":""}}'
+          if [ -e "DIR/limit" ]; then
+            [ -p "DIR/limit.fifo" ] && read -r _ < "DIR/limit.fifo"
+            r=$(cat "DIR/limit") w="You've hit your 5-hour limit"
+            ev '{"type":"rate_limit_event","session_id":"'"$sid"'","rate_limit_info":{"status":"rejected","resetsAt":'"$r"',"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":1,"resetsAt":'"$r"',"status":"rejected"}}}}'
+            ev '{"type":"assistant","session_id":"'"$sid"'","uuid":"a-'"$u"'","error":"rate_limit","is_api_error_message":true,"api_error_status":429,"api_error":"usage_limit_reached","message":{"model":"<synthetic>","content":[{"type":"text","text":"'"$w"'"}]}}'
+            ev '{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"api_error":"usage_limit_reached","terminal_reason":"api_error","result":"'"$w"'","session_id":"'"$sid"'","uuid":"r-'"$u"'","user_message_uuids":["'"$u"'"]}'
+            exit 1
+          fi
           [ -e "DIR/hold" ] && line='"content":"ask'
           case $line in
             *'"content":"ask'*|*'"content":"From '*'): ask'*)

@@ -8,7 +8,7 @@ defmodule CodingAgentFramework.Delegates.Work do
   `Delegates`' process, which may be waiting on it.
 
   The work is `:live` while the row may still start or run a process: `starting`, `resuming`,
-  and `running` (a running delegate whose process is gone may be resumed once, under the same
+  `going_on` (the word to go on after a usage limit), and `running` (a running delegate whose process is gone may be resumed once, under the same
   lease). It has `:ended` once it is `refused`, `finished` or `failed` and its agent row is free
   of a process (`Sessions.Agents.free?/1`), or a newer start owns its name. A refused start is
   read as a finished one is: a start may reach `Sessions` after its row was refused, and its
@@ -51,7 +51,8 @@ defmodule CodingAgentFramework.Delegates.Work do
     end
   end
 
-  defp of(_work, %{status: status}) when status in ~w(starting resuming running), do: :live
+  defp of(_work, %{status: status}) when status in ~w(starting resuming going_on running),
+    do: :live
 
   # Refused, finished, failed or ended: no process of it may live once its agent row is free.
   defp of(work, row) do

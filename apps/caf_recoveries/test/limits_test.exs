@@ -84,7 +84,11 @@ defmodule CodingAgentFramework.LimitsTest do
       transcripts: fn _account ->
         {:ok, %{rows: Agent.get(w, &Map.get(&1, :transcripts, []))}}
       end,
-      folds: fn -> {:ok, %{rows: []}} end,
+      folds: fn -> {:ok, %{rows: Agent.get(w, &Map.get(&1, :folds, []))}} end,
+      go_on: fn name, text, key ->
+        send(me, {:go_on, name, text, key})
+        Agent.get(w, &Map.get(&1, {:go_on, name}, {:ok, :resumed}))
+      end,
       look: fn row ->
         send(me, {:looked, row.name})
         Agent.get(w, & &1.screen)
@@ -315,6 +319,47 @@ defmodule CodingAgentFramework.LimitsTest do
     assert_received {:word, "app-api", _, _}
     assert_received {:resumed, "app-api"}
     refute_received {:pressed, "app-api", _}
+  end
+
+  # Limit.tla's Report and Deliver (F-186's new-1): a headless delegate's limit is its stream's
+  # result and event; at the reset its word is `Delegates`' (`go_on:`), which stores it and
+  # resumes the gone process, never a notice and a resume here. Refused, it is a person's.
+  test "a gone headless delegate's word at the reset is Delegates', once", ctx do
+    for name <- ["app-unit-a", "app-unit-b"] do
+      fields = [kind: "delegate", role: "delegate", status: "stopped", reason: "exited"]
+      agent!(ctx, name, fields)
+    end
+
+    record = %{"status" => "rejected", "resetsAt" => @until, "rateLimitType" => "five_hour"}
+
+    folds =
+      for name <- ["app-unit-a", "app-unit-b"] do
+        limit = %{api_error: "usage_limit_reached", user_message_uuids: ["b-" <> name]}
+        %{session: "sid-" <> name, idle: true, last_result: limit, rate_limit: record}
+      end
+
+    Agent.update(ctx.world, &Map.put(&1, :folds, folds))
+
+    Agent.update(
+      ctx.world,
+      &Map.put(&1, {:go_on, "app-unit-b"}, {:refused, {:status, "finished"}})
+    )
+
+    healer = healer!(ctx)
+    assert settle(healer, ctx, "app-unit-a") == "idle"
+    refute_received {:looked, _}
+
+    past_reset!(ctx)
+    assert settle(healer, ctx, "app-unit-a") == "word"
+    key = "limit:app-unit-a:#{@until}"
+    assert_received {:go_on, "app-unit-a", _text, ^key}
+    assert settle(healer, ctx, "app-unit-a") == "word"
+    refute_received {:go_on, "app-unit-a", _, _}
+    refute_received {:word, _, _, _}
+    refute_received {:resumed, _}
+
+    assert step(ctx, "app-unit-b") == "prompt"
+    assert limit(ctx, "app-unit-b")["why"] =~ "refused"
   end
 
   # Unchecked: a press refused as the screen moved reads it again; refused otherwise, it is a

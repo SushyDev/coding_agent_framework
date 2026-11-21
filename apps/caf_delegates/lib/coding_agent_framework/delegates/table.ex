@@ -5,7 +5,8 @@ defmodule CodingAgentFramework.Delegates.Table do
   agent's parent, project, account, session, launch options and whether it has ended are its
   agent row in `Sessions`, read through `Sessions.Agents`.
 
-  `status` is `starting` and `resuming` while a call of `Sessions` is under way (`called_at`,
+  `status` is `starting`, `resuming` (after a kill) and `going_on` (with the word to go on
+  after a usage limit, F-187, not counted in `resumes`) while a call of `Sessions` is under way (`called_at`,
   in wall-clock ms, tells that call's agent row from an earlier one; `deadline` is the
   wall-clock time it is settled by), then `running`, then `finished` (a reply is its report) or
   `failed` (a notice is) once, or `refused` with its `reason`. `brief_uuid` and `resume_uuid`
@@ -43,11 +44,11 @@ defmodule CodingAgentFramework.Delegates.Table do
   @added [delegates: ["tell TEXT"]]
 
   # Every status, once, and the lists read from it, checked when the module compiles.
-  @statuses ~w(starting resuming running finished failed refused)
+  @statuses ~w(starting resuming going_on running finished failed refused)
   # A call of `Sessions` is under way, or was when a restart cut it.
-  @calling ~w(starting resuming)
+  @calling ~w(starting resuming going_on)
   # Rows that may still move.
-  @open ~w(starting resuming running finished failed)
+  @open ~w(starting resuming going_on running finished failed)
   # The report is the row's: a reply for `finished`, a notice for `failed`.
   @reported ~w(finished failed)
 

@@ -124,13 +124,67 @@ defmodule CodingAgentFramework.Delegates.Turn do
   earlier turn's result, as a resume leaves it, names another uuid), with its `text`, `subtype`
   and `is_error`; `:exited` when its process is gone first; `:waiting` otherwise. The message
   itself is `Mailbox`'s row, which goes in, and again when found undelivered, by its own rule.
+
+  `:limited` (F-186's new-1, `Limit.tla`'s `Report`): the result that names the message ended
+  the turn at a usage limit (`api_error: "usage_limit_reached"`), so it is not the report and
+  the turn is still open, whether the process lives or not (Claude Code exits at once, F-181);
+  or the word to go on after it (`Delegates.go_on/5`'s) is not yet written to this process,
+  while the stream's last result is that limit's. A delivered message with no result of its
+  own is at the limit too when the stream's last result is a limit's that names no message:
+  F-181 kept no record of whether that result names it. The limit's healer goes on at the
+  reset.
+
+      iex> alias CodingAgentFramework.Delegates.Turn
+      iex> limit = %{text: "You've hit your limit", api_error: "usage_limit_reached"}
+      iex> fold = %{gone: true, idle: true, last_result: limit,
+      ...>   messages: %{"b1" => %{state: :delivered, result: limit}}}
+      iex> Turn.next(%{brief_uuid: "b1", resume_uuid: nil}, fold)
+      :limited
+      iex> Turn.next(%{brief_uuid: "b1", resume_uuid: "w1"}, fold)
+      :limited
   """
-  @spec next(map, map) :: {:finished, map} | :exited | :waiting
+  @spec next(map, map) :: {:finished, map} | :limited | :exited | :waiting
   def next(row, fold) do
-    case Fold.outcome(fold, uuid(row)) do
-      {:result, result} -> {:finished, result}
-      _ when fold.gone -> :exited
-      _ -> :waiting
+    uuid = uuid(row)
+
+    case Fold.outcome(fold, uuid) do
+      {:result, result} ->
+        if limited?(fold.messages[uuid][:result]), do: :limited, else: {:finished, result}
+
+      outcome ->
+        cond do
+          at_limit?(outcome, fold.last_result) -> :limited
+          fold.gone -> :exited
+          true -> :waiting
+        end
     end
+  end
+
+  defp at_limit?(:none, last), do: limited?(last)
+
+  defp at_limit?(outcome, last) when outcome in [:delivered, :exited],
+    do: limited?(last) and (last[:user_message_uuids] || []) == []
+
+  defp at_limit?(_outcome, _last), do: false
+
+  defp limited?(%{api_error: "usage_limit_reached"}), do: true
+  defp limited?(_result), do: false
+
+  @doc """
+  The uuid of the word to go on after a usage limit, from its key (`limit:<agent>:<until>`),
+  so the word is stored once per limit (`Mailbox` takes one row per uuid): a version 5 shape
+  of the key's SHA-1.
+
+      iex> u = CodingAgentFramework.Delegates.Turn.word_uuid("limit:app-unit-a:1800000000")
+      iex> {u == CodingAgentFramework.Delegates.Turn.word_uuid("limit:app-unit-a:1800000000"),
+      ...>   String.length(u), String.at(u, 14)}
+      {true, 36, "5"}
+  """
+  @spec word_uuid(String.t()) :: String.t()
+  def word_uuid(key) do
+    <<a::48, _::4, b::12, _::2, c::62, _::32>> = :crypto.hash(:sha, key)
+    <<u::128>> = <<a::48, 5::4, b::12, 2::2, c::62>>
+    hex = u |> Integer.to_string(16) |> String.pad_leading(32, "0") |> String.downcase()
+    Enum.map_join([0..7, 8..11, 12..15, 16..19, 20..31], "-", &String.slice(hex, &1))
   end
 end
