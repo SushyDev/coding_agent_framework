@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# A stdio MCP server that offers no tool and, once its handshake is done, waits on its stdin
+# using no CPU time. The Linux pass of docs/e2e.md adds it to a headless delegate's MCP servers
+# to record whether Claude Code spawns a stdio MCP server in a process group of its own, as it
+# does a shell command: if it does, a quiet server reads as a stuck background command
+# (docs/build-notes/F-184.md, new-1). Claude Code starts it; nothing else does:
+#
+#   {"mcpServers": {"quiet": {"command": "/home/me/coding_agent_framework/bin/quiet-mcp"}}}
+#
+# It reads one JSON-RPC message per line and answers each request by its id: `initialize` with
+# the protocol version the client asked for, `tools/list` with no tool, and any other request
+# (`ping` among them) with an empty result. A notification, which has no id, gets nothing. It
+# ends at end of file. It is plain bash with no other program, so it starts no child and its
+# group holds itself alone.
+set -uo pipefail
+
+# Patterns in variables: bash reads a pattern written inside [[ ]] with its own quoting.
+id_re='"id":[[:space:]]*("[^"]*"|[0-9]+)'
+initialize_re='"method":[[:space:]]*"initialize"'
+tools_re='"method":[[:space:]]*"tools/list"'
+version_re='"protocolVersion":[[:space:]]*"([^"]+)"'
+
+while IFS= read -r line; do
+  [[ $line =~ $id_re ]] || continue
+  id=${BASH_REMATCH[1]}
+  if [[ $line =~ $initialize_re ]]; then
+    version=2024-11-05
+    if [[ $line =~ $version_re ]]; then version=${BASH_REMATCH[1]}; fi
+    printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"%s","capabilities":{"tools":{}},"serverInfo":{"name":"quiet","version":"1"}}}\n' "$id" "$version"
+  elif [[ $line =~ $tools_re ]]; then
+    printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id"
+  else
+    printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+  fi
+done
