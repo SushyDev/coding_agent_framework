@@ -46,6 +46,15 @@ defmodule CodingAgentFramework.Extension do
       {:refused, {:extension, "kb", {:unknown_key, :skill}}}
   """
 
+  @doc """
+  The bundle an app's extension module makes (F-188): the config names the module and its
+  options as data, `{module, opts}`, and the app's tree calls this with them and `part`, which
+  answers a part's process by its key, or nil, each time it is called. A tool's `call` looks a
+  part up when it runs, so it reaches the live one after a restart; `bundle/2` itself may be
+  called with a `part` that answers nil, as the config's check calls it.
+  """
+  @callback bundle(opts :: term, part :: (atom -> pid | nil)) :: map
+
   @keys [:name, :scope, :tools]
   @tool_keys [:name, :description, :schema, :call, :scope, :timeout]
   @roles [:main, :delegate]

@@ -558,7 +558,9 @@ Built so far (F-154): the bundle in the config as `CodingAgentFramework.Extensio
 a scope, and its tools, each a name under the bundle's, a schema, a description and a function
 of the caller and the arguments), served on the agents' MCP endpoint beside the framework's
 tools, listed and called only where its scope holds the agent (`Grants.may_call?/3`), each call
-a row in `mcp_calls`, its crash and its deadline answered `unknown`. Several tools per bundle
+a row in `mcp_calls`, its crash and its deadline answered `unknown`. The config names each
+bundle as data, `{module, opts}` (F-188): the tree makes it with the module's `bundle/2`, given
+a lookup of the parts that a tool calls when it runs, so the config holds no function. Several tools per bundle
 stand until B5 makes the verbs (F-154's new-1). The app's `PreToolUse` callback corrects a
 call (F-169): `{:allow, updated_input: map, additional_context: text}` and `{:deny, reason,
 additional_context: text}`, written as Claude Code's `updatedInput` and `additionalContext`
@@ -696,8 +698,8 @@ One config and one supervisor in; a few calls and one stream of cues out.
 
 - **In.** `CodingAgentFramework.child_spec(config)`: one config, checked whole at start with each
   refusal naming its key (the home, hosts, accounts, projects, ports, capacities, the
-  callbacks for dialogs, `PreToolUse` and `Stop`, the idle bound, the restart budgets, the
-  remedies' allow-list and the extensions). One supervisor starts every box in its order; the
+  dialogs' answers, the callbacks for `PreToolUse` and `Stop`, the idle bound, the restart
+  budget, the remedies' allow-list and the extensions; the table below). One supervisor starts every box in its order; the
   app wires nothing else. The config's `instance` names the tree: it is unique per app (a
   second start of a running name is refused `{:instance_running, name}`) and 1 to 100 bytes
   with no control character, as `Config.new/1` checks it (F-174's new-3).
@@ -731,6 +733,37 @@ in `subscribe/2`'s answer, listed the operator's own tools to the operator alone
 The config answers the room the home leaves for an agent's and a service's name (`Config.name_room/1`, F-172), and the tree hands it to `Delegates`, `Mains` and
 `Services`, which refuse a longer name `{:bad, :name, {:longer_than, n}}` before any row;
 sockets stay in the home.
+
+**The config** (`CodingAgentFramework.Config`, whose module doc gives each key's example).
+Every setting the tree reads is a key here, checked once by `Config.new/1`; a value out of
+shape is refused `{:bad, key}`, or `{:bad, key, reason}` where the reason says more. The tree
+takes nothing else from the app (F-188): a part's process is never handed in, only options.
+
+| key | what | default |
+| --- | --- | --- |
+| `home` | the framework home, absolute, at most 93 bytes | required |
+| `instance` | the tree's name in the app, unique, 1 to 100 bytes | required |
+| `programs`, `workstation` | the workstation's programs, and its host name | required, `"ws"` |
+| `hosts` | the other hosts, name to `%{programs, dir}` | none |
+| `accounts` | the Claude accounts' names | required |
+| `projects`, `mains` | the projects, and the main sessions declared on them | none |
+| `main_model`, `operator` | a main session's model; the operator's name | `"opus"`, `"operator"` |
+| `ports` | `%{intake, mcp}` on 127.0.0.1 | required |
+| `git` | the author agents commit as, and each project's override | no author |
+| `claude`, `env`, `user` | what every launch shares; the OS user (required on macOS) | required |
+| `tool_timeout`, `margin` | Claude Code's MCP tool timeout, and what `run_delegate` keeps under it | 1 h, 1 min |
+| `interval` | ms between the timed readers' reads | 2 s |
+| `resources`, `lease`, `job_lease` | the `Scheduler`'s capacities and the units each start asks for | seat 4, slot 2 |
+| `pressure` | how the host's pressure is read | the host's own |
+| `tool_hooks` | the app's `pre_tool_use`, `post_tool_use` and `stop` callbacks | none |
+| `heavy` | the app's heavy commands, run under a lease | none |
+| `extensions` | the app's bundles, each `{module, opts}`, made by the module's `bundle/2` | none |
+| `dialogs` | a startup dialog's kind to the label pressed; any other waits on a person | none |
+| `secret_file` | the file of the hooks' secret, never the secret itself | `<home>/intake.secret` |
+| `restarts` | the tree's `%{max_restarts, max_seconds}` | 3 in 5 s |
+| `parts` | each part's own bounds and deadlines, by its key (`Config.parts/0`) | each part's |
+| `remedies`, `remedy_bound` | the healer's allow-list and its caps' window | the healer's acts, 1 h |
+| `undeclared_cues` | `:route` or `:raise` a cue on a topic no part declares | `:route` |
 
 An app like a development loop's (views, builders, gates, landings) needs nothing more: a
 builder is a `delegate` with `review`, a gate is a heavy command or a job, a landing a job of

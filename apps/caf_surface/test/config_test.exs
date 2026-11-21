@@ -47,4 +47,132 @@ defmodule CodingAgentFramework.ConfigTest do
     assert {:ok, %Config{projects: %{"web" => %{dir: "web"}}}} =
              Config.new([projects: apart] ++ fields)
   end
+
+  # F-188: every setting the tree reads is a key, checked here, each refusal naming it.
+  defmodule Board do
+    @behaviour CodingAgentFramework.Extension
+
+    @impl true
+    def bundle(opts, part) do
+      tool = %{
+        name: "board_cards",
+        description: "The board's cards.",
+        schema: %{type: "object"},
+        call: fn caller, _args ->
+          {:ok, %{caller: caller, board: opts[:board], mcp: part.(:mcp)}}
+        end
+      }
+
+      %{name: Keyword.get(opts, :name, "board"), tools: [tool]}
+    end
+  end
+
+  defmodule Raising do
+    @behaviour CodingAgentFramework.Extension
+
+    @impl true
+    def bundle(_opts, _part), do: raise("no board")
+  end
+
+  defp new(more), do: Config.new([user: "me"] ++ @fields ++ more)
+
+  test "dialogs: a kind's label is pressed when the dialog shows it, else a person answers" do
+    trust = "Yes, I trust this folder"
+    assert {:ok, c} = new(dialogs: %{trust: trust})
+    assert Config.dialog(c, :trust, ["No, exit", trust]) == {:answer, trust}
+    assert Config.dialog(c, :trust, ["No, exit", "Yes"]) == :ask
+    assert Config.dialog(c, :imports, ["Yes", "No"]) == :ask
+
+    assert {:ok, %Config{dialogs: %{}} = c} = new([])
+    assert Config.dialog(c, :trust, ["No, exit", trust]) == :ask
+
+    for bad <- [[], %{permission: "Yes"}, %{trust: ""}, %{trust: "a\nb"}, %{trust: :yes}],
+        do: assert(new(dialogs: bad) == {:refused, {:bad, :dialogs}})
+  end
+
+  test "secret_file: an absolute path, by default in the home" do
+    assert {:ok, %Config{secret_file: "/run/caf/secret"}} = new(secret_file: "/run/caf/secret")
+    assert {:ok, %Config{secret_file: "/srv/caf/intake.secret"}} = new([])
+
+    for bad <- ["secret", "", :secret, ~c"/run/caf/secret"],
+        do: assert(new(secret_file: bad) == {:refused, {:bad, :secret_file}})
+  end
+
+  test "restarts: the tree's budget, OTP's by default" do
+    assert {:ok, %Config{restarts: %{max_restarts: 0, max_seconds: 60}}} =
+             new(restarts: %{max_restarts: 0, max_seconds: 60})
+
+    assert {:ok, %Config{restarts: %{max_restarts: 3, max_seconds: 5}}} = new([])
+
+    for bad <- [
+          %{max_restarts: 3},
+          %{max_restarts: -1, max_seconds: 5},
+          %{max_restarts: 3, max_seconds: 0},
+          %{max_restarts: 3, max_seconds: 5, period: 1},
+          [max_restarts: 3, max_seconds: 5]
+        ],
+        do: assert(new(restarts: bad) == {:refused, {:bad, :restarts}})
+  end
+
+  test "extensions: a module and its options as data, made into its bundle" do
+    assert {:ok, c} = new(extensions: [{Board, board: "web"}])
+    assert c.extensions == [{Board, [board: "web"]}]
+    assert {:ok, [%{name: "board", tools: [tool]}]} = Config.extensions(c, fn :mcp -> :live end)
+    # The part is looked up when the tool is called.
+    assert tool.call.("app-main", %{}) == {:ok, %{caller: "app-main", board: "web", mcp: :live}}
+
+    assert {:ok, %Config{extensions: []}} = new([])
+
+    refusals = [
+      {[%{name: "board", tools: []}], {:not_an_extension, %{name: "board", tools: []}}},
+      {[{Enum, []}], {:not_an_extension, {Enum, []}}},
+      {[{Board, board: fn -> "web" end}], {:not_data, Board}},
+      {[{Board, board: self()}], {:not_data, Board}},
+      {[{Raising, []}], {:raised, Raising, "no board"}},
+      {[{Board, name: "message"}], {:extension, "message", :clashes}},
+      {[{Board, []}, {Board, []}], {:extensions, :names_twice}},
+      {Board, {:not_an_extension, Board}}
+    ]
+
+    for {bad, why} <- refusals,
+        do: assert(new(extensions: bad) == {:refused, {:bad, :extensions, why}})
+  end
+
+  # Each option of each part: a value of its type is passed over the tree's wiring, none
+  # leaves the part's default, and one out of shape is refused naming the part and option.
+  test "parts: each part's own options, accepted, defaulted and refused by name" do
+    good = %{
+      :ms => 1_000,
+      :count => 2,
+      :path => "/srv/caf/old.db",
+      :ms_or_nil => nil,
+      :by_class => %{main: 1, landing: 2, builder: 3, heavy: 4}
+    }
+
+    bad = %{:ms => 0, :count => -1, :path => "old.db", :ms_or_nil => "1", :by_class => %{main: 1}}
+
+    for {part, options} <- Config.parts(), {option, type} <- options do
+      {kind, value} =
+        case type do
+          {:ms, below} -> {{:ms, below}, below - 1}
+          kind -> {kind, good[kind]}
+        end
+
+      refused = if match?({:ms, _}, kind), do: elem(kind, 1), else: bad[kind]
+
+      assert {:ok, c} = new(parts: %{part => %{option => value}})
+      assert Config.options(c, part, wired: 1) == [{:wired, 1}, {option, value}]
+
+      assert {:ok, c} = new([])
+      assert Config.options(c, part, wired: 1) == [wired: 1]
+
+      assert new(parts: %{part => %{option => refused}}) ==
+               {:refused, {:bad, :parts, {part, option}}}
+    end
+
+    assert new(parts: %{tmux: %{}}) == {:refused, {:bad, :parts, :tmux}}
+    assert new(parts: %{intake: [beat: 1]}) == {:refused, {:bad, :parts, :intake}}
+    assert new(parts: %{intake: %{db: "/x"}}) == {:refused, {:bad, :parts, {:intake, :db}}}
+    assert new(parts: []) == {:refused, {:bad, :parts}}
+  end
 end
