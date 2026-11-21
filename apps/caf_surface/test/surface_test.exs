@@ -69,7 +69,7 @@ defmodule CodingAgentFramework.SurfaceTest do
     keys = ~w(reaper names cues inlet usage stream intake intake_http sampler sessions acts)a
     keys = keys ++ ~w(watch recoveries tracker scheduler delegates mover mailbox copies jobs)a
     keys = keys ++ ~w(services)a
-    keys = keys ++ ~w(prompts mains mcp mcp_http ends)a
+    keys = keys ++ ~w(prompts mains absent_mains mcp mcp_http ends)a
 
     assert Enum.sort(Map.keys(parts)) ==
              Enum.sort(keys ++ [:registry, :transcripts])
@@ -639,7 +639,16 @@ defmodule CodingAgentFramework.SurfaceTest do
     "registry" => [:sessions, :mover],
     "stream" => [:sessions, :delegates, :mailbox, :mover],
     "tmux" => [:sessions, :recoveries],
-    "sessions" => [:delegates, :mailbox, :ends, :mover, :scheduler, :mains, :prompts],
+    "sessions" => [
+      :delegates,
+      :mailbox,
+      :ends,
+      :mover,
+      :scheduler,
+      :mains,
+      :prompts,
+      :absent_mains
+    ],
     "mains" => [:scheduler],
     "transcripts" => [:delegates, :mailbox],
     "delegates" => [:mailbox, :scheduler],
@@ -649,8 +658,9 @@ defmodule CodingAgentFramework.SurfaceTest do
     # The inbox reads every hook row's cue: a held request opens a prompt (F-179).
     "intake" => [:prompts],
     "waiters" => [:mailbox, :prompts],
-    # A symptom the healer asks about is a remedy prompt (F-182).
-    "watch" => [:prompts]
+    # A symptom the healer asks about is a remedy prompt (F-182); its answer is the healers'
+    # clear (F-183).
+    "watch" => [:prompts, :recoveries, :absent_mains]
   }
 
   test "an app that wires only the parts' declarations hands each part every cue it needs" do

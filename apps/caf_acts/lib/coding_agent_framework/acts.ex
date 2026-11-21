@@ -161,10 +161,12 @@ defmodule CodingAgentFramework.Acts do
 
   @doc """
   A person clears the ended rows with these ids that wait for one: each takes `cleared_at`, once.
-  Answers the ids it cleared.
+  Answers the ids it cleared. Option `at:` (ms) is the clear's time when the person cleared it
+  elsewhere first (a healer copying a `remedy` prompt's answer onto its own row, F-183); by
+  default it is now.
   """
   @spec clear(GenServer.server(), [id], keyword) :: answer([id])
-  def clear(acts, ids, opts \\ []), do: call(acts, {:clear, ids}, opts)
+  def clear(acts, ids, opts \\ []), do: call(acts, {:clear, ids, Keyword.get(opts, :at)}, opts)
 
   @doc "Row `id`, or `{:refused, :unknown_act}`."
   @spec get(GenServer.server(), id, keyword) :: answer(map)
@@ -326,9 +328,9 @@ defmodule CodingAgentFramework.Acts do
     {:reply, {:ok, ids}, s}
   end
 
-  def handle_call({:clear, []}, _from, s), do: {:reply, {:ok, []}, s}
+  def handle_call({:clear, [], _at}, _from, s), do: {:reply, {:ok, []}, s}
 
-  def handle_call({:clear, ids}, _from, s) do
+  def handle_call({:clear, ids, at}, _from, s) do
     ids =
       for [id] <-
             Store.query(
@@ -336,7 +338,7 @@ defmodule CodingAgentFramework.Acts do
               "UPDATE acts SET cleared_at = ?1 WHERE cleared_at IS NULL " <>
                 "AND status IN ('settled', 'interrupted') " <>
                 "AND id IN (#{Store.marks(length(ids), 2)}) RETURNING id",
-              [now(s) | ids]
+              [at || now(s) | ids]
             ),
           do: id
 

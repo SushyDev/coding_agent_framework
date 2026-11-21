@@ -27,6 +27,12 @@ defmodule CodingAgentFramework.Watch do
   remedy back on the list, the operator's widening) or `"leave"`. A kind with no remedy is never
   asked.
 
+  **One clear** (F-182's new-2). The answer is also a person's clear of the state (`clear/3` is
+  the answer `"leave"`): its `answered_at` is the time the healer reads as the state cleared, so
+  a state that waits on a person (a viewer lost again and again, an end whose outcome is
+  unknown) is acted on again from then. The healer reads a prompt that passed with its target
+  the same way, since no answer can come to it.
+
   **Cues.** Each write calls `notify` with `%{topic: "watch", ids: ids}`, the symptoms' ids
   (none for an act on the list). The embedding app's tree starts one per instance.
 
@@ -51,20 +57,22 @@ defmodule CodingAgentFramework.Watch do
 
   @timeout 5_000
   @bound 3_600_000
-  @filters ~w(kind target source status)a
+  @filters ~w(kind target state source status)a
 
   @typedoc "A kind's entry on the list: its remedy (nil for none) and its cap per bound."
   @type entry :: %{remedy: String.t() | nil, cap: non_neg_integer}
 
   @doc """
   The default allow-list: the healer's two acts (F-182: today's `Recoveries`, a lost viewer
-  reopened and an end owed), each capped at 10 per bound.
+  reopened and an end owed) and an absent main resumed (F-183, `AbsentMains`), each capped at
+  10 per bound.
   """
   @spec default_remedies() :: %{String.t() => entry}
   def default_remedies do
     %{
       "lost_viewer" => %{remedy: "reopen", cap: 10},
-      "end_owed" => %{remedy: "end", cap: 10}
+      "end_owed" => %{remedy: "end", cap: 10},
+      "absent_main" => %{remedy: "resume", cap: 10}
     }
   end
 
@@ -144,8 +152,8 @@ defmodule CodingAgentFramework.Watch do
     do: call(watch, {:pass, source, kind, MapSet.new(targets), MapSet.new(states)}, opts)
 
   @doc """
-  The symptoms within `filter` (`kind:`, `target:`, `source:`, `status:`, each a value or a
-  list of them), oldest first. Answers `{:ok, rows}` or `{:refused, {:bad, :filter}}`.
+  The symptoms within `filter` (`kind:`, `target:`, `state:`, `source:`, `status:`, each a
+  value or a list of them), oldest first. Answers `{:ok, rows}` or `{:refused, {:bad, :filter}}`.
   """
   @spec read(GenServer.server(), keyword, keyword) ::
           {:ok, [map]} | {:refused, term} | {:unknown, term}
@@ -185,6 +193,28 @@ defmodule CodingAgentFramework.Watch do
       do: call(watch, {:answer, id, choice, by}, opts),
       else: {:refused, {:bad, :choice}}
   end
+
+  @doc """
+  A person's clear of symptom `id`, a state that waits on one, as `by`: its remedy prompt
+  answered `"leave"` (`answer/5`), so the healer acts on the target again from now. Answers as
+  `answer/5` does.
+
+      iex> dir = CodingAgentFramework.TestHost.test_dir()
+      iex> alias CodingAgentFramework.Watch
+      iex> {:ok, w} = Watch.start_link(db: Path.join(dir, "c.db"),
+      ...>   remedies: %{"end_owed" => %{remedy: "end", cap: 1}})
+      iex> s = %{kind: "end_owed", target: "alpha", state: "e1", source: "healer", since: 5}
+      iex> {:ok, %{id: id}} = Watch.record(w, s)
+      iex> {:ok, ^id} = Watch.ask(w, s, :unknown)
+      iex> Watch.clear(w, id, "sam")
+      {:ok, :answered}
+      iex> {:ok, [%{answer: "leave", answered_by: "sam"}]} = Watch.read(w, state: "e1")
+      iex> Watch.clear(w, id, "sam")
+      {:refused, :settled}
+  """
+  @spec clear(GenServer.server(), integer, String.t(), keyword) ::
+          {:ok, :answered} | {:refused, term} | {:unknown, term}
+  def clear(watch, id, by, opts \\ []), do: answer(watch, id, "leave", by, opts)
 
   defp call(watch, request, opts) do
     timeout = Keyword.get(opts, :timeout, @timeout)
