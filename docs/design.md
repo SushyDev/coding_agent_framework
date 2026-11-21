@@ -870,7 +870,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Watch` | the symptom record and the healer's allow-list (F-182, `Heal.tla`): each symptom state a fact (kind, target, state, since, evidence, source), recorded before anything acts on it and passed when no longer read; the list's acts (the healer's drop, the operator's revoke and approve), so a restart reads it as left; a state the healer leaves to a person is `asked`, the `remedy` prompt `Prompts` reads | `symptoms`, `remedy_acts` |
 | `Recoveries` | the healer (F-182): records each broken state in `Watch`, acts only by the allow-list's remedy for its kind and under its cap, takes its act in `Acts`, acts once per state, verifies, drops a remedy whose verify failed, and asks for the rest; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after its end within its stop's deadline, by `Holder.Process` (`Sessions` itself never kills). Two states wait for a person, whose clear (the `remedy` prompt's answer, F-183) makes the next one new: a viewer lost a third time within a window, and an end whose process outlived the KILL (`unknown`, F-118's new-5); the fault ledger shows both | no table of its own |
 | `AbsentMains` | the healer of `absent_main` (F-183, `Remedies.tla`): a main session whose process exited by itself, resumed once per absence through `Mains` under the `Scheduler`'s lease, on the same shape as `Recoveries`; a second absence of one main within the bound is asked | no table of its own |
-| `Limits` | the healer of a usage limit (F-186, `Limit.tla`): each agent's limit record read onto its row, and each phase's remedy (`press_stop`, `go_on`) on the same shape, written through `Sessions`, pressed through its checked press, the word stored through `Mailbox` ("Usage limits") | no table of its own: the phase is the agent row's `usage_limit` |
+| `Limits` | the healer of a usage limit (F-186, `Limit.tla`): each agent's limit record read onto its row, and each phase's remedy (`press_stop`, `go_on`, and F-191's `move` of a limit far from its reset through the `Mover`) on the same shape, written through `Sessions`, pressed through its checked press, the word stored through `Mailbox` or `Delegates` ("Usage limits") | no table of its own: the phase is the agent row's `usage_limit` |
 | `Grants` | decides whether a caller may act on a target, by the edges of `Sessions`' tree; a pure module, handed the tree's function | — |
 | `MCP` | the agent tools ("Agents working together"); each call is checked by `Grants` once, and each fix takes its act in `Acts` | `mcp_tokens`, `mcp_calls` |
 | `Ghostty` | opens or focuses a session's terminal window | — |
@@ -1433,7 +1433,10 @@ Each failure settles on one account:
 - the copy or the resume refused on the other account: the act `failed`, and the session is
   resumed on its own account, where its transcript is;
 - that resume refused too: no process of it runs; its row says why, and the fault ledger has an
-  act `move` `failed`, reason `stranded`, for a person.
+  act `move` `failed`, reason `stranded`, for a person;
+- an agent at a usage limit (F-191, "Usage limits"): its copy or resume refused leaves its
+  process gone, never resumed on its own account, which is at its limit; the act `failed` is
+  the limit's healer's `limit` prompt, and at the reset its word resumes it.
 
 A resume is asked again only while the row is free, and `Sessions` starts no name whose process
 may live, so a restart never runs two. Background commands (step 2) are read by the stop's idle
@@ -1520,7 +1523,12 @@ delegate's word to go on (`Mailbox.go_on/4`, first of its rows) under a uuid of 
 `limit:<agent>:<until>`, so once per limit, and makes the row's turn that word's; a gone process
 is resumed with it as the first line, under the start's lease, as the row's `going_on`, which
 `resumes` does not count. A refused one leaves the row `running`, still at its limit, and the
-healer asks a person. The word's turn's result is the report, the reply to the brief.
+healer asks a person. The word's turn's result is the report, the reply to the brief. An
+interactive delegate's turn whose transcript ends with the limit's line, no turn after it, is
+read the same way (F-187's new-2, built in F-191): neither a finish nor a kill, whether its
+process lives or not; `go_on/5` stores its word, a gone process is resumed with it by launch as
+its prompt, and its report is the reply of the word's turn. Before the limit's move the healer
+stores the word with no resume (`resume: false`), and the move's resume carries it.
 
 **No `partial` report** (F-184; F-182 had decided one). Claude Code writes a turn's `result`
 while a background command of it runs (measured on 2.1.322), so a delegate's report is never
@@ -1793,7 +1801,10 @@ reading for delegates:
   record, not a session file, gives a delegate's pid: nothing shows that `-p` writes one, and a
   headless session has no `--name` to match. `Sessions` reads it only after `Stream` has read
   the `system`/`init` naming the session id, and checks the socket again. That init, with the
-  pid alive, confirms the start. `Stream` sees an exit only of a
+  pid alive, confirms the start; with the pid gone after it, it confirms the start too, since
+  the hold removes an earlier hold's record and so the record is this start's (F-187's new-4,
+  built in F-191: a first turn at a usage limit exits at once), and the row is then a running
+  one that exited, settled as any exit. `Stream` sees an exit only of a
   process it knows was started: `Sessions` tells it once it held the process, and a read or a
   write's check that finds the socket live tells it too; without that, the socket a resume
   has not yet replaced would read as the new process's exit.
@@ -2620,6 +2631,15 @@ and `Break_Limit_MoveTwice`, in `Limit_Move`, `Limit_MoveMain`, `Limit_MoveHeadl
 space. F-187 adds `Delegates`' report of a headless delegate (`Report`): a result at a limit is
 never one (`LimitNotReport`, `Break_Limit_LimitReport`, in `Limit_Headless` and
 `Limit_MoveHeadless`); and `Read` keeps a `prompt` as it keeps an `unknown`, as the code does.
+F-191 models the move's own steps for a limited agent in `Move.tla` (`Limited`): a turn ended
+at the limit (`HitLimit`, its rows given the limit's result), held by `Mailbox` as a stopping
+row is and read as ended by the move's stop alone (`NoRowIntoLimit`,
+`Break_Move_LimitIdleForAll`); the word stored first (`WordStored`), and a resume at the limit
+carrying a row as its first (`LimitResumeCarriesRow`, `Break_Move_WordAfter`); a process gone
+at its limit moved with no drain and no stop (`LimitMove`); a copy or resume refused leaving it
+gone (`Back`), never resumed on the account at its limit (`NoResumeIntoLimit`,
+`Break_Move_BackIntoLimit`); in `Move_Limit` and `Move_LimitLiveness` (`LimitMoveSettles`).
+Every earlier `Move_*` configuration sets `Limited = FALSE` and keeps its state space.
 `Boxes.tla` composes its contracts (`MaxLimits` above 0 only in `Boxes_Limit`): the
 `Scheduler`'s gate and `Mailbox`'s mark against a `limited` turn, with a dialog, a stop and the
 restarts, as `NoStartOnLimited` and `NoRowIntoLimit`.
@@ -2794,6 +2814,25 @@ own: its `limit` prompt offers "move to <account>" beside "wait", and only a per
 moves it (`NeverMovesMain`). The move is a remedy on the healer's allow-list (`move`), as
 `press_stop` and `go_on` are.
 
+How a limited agent's move goes (F-187's new-1, decided; `Move.tla`'s `Limited`, built in
+F-191). The healer stores the word to go on first, under the limit's key, held while the agent
+is `limited` (a delegate's through `Delegates.go_on/5` with no resume of its own, a main's as
+the notice it gets at a reset); the word says only that the turn stopped at a usage limit and
+to go on, true whether the agent moved or waited (F-187's new-3), so a failed move's word at the
+reset is the same row. Then the `Mover`, which takes the healer's claim as its own act:
+
+- for `for: :move` alone, a `limited` turn is ended. An interactive session whose file does not
+  read idle is read from its screen in its place (Claude Code's own wait or its menu, through
+  the `Inlet`), and the SIGTERM ends the wait (F-181); a headless one's stream reads its turn
+  ended;
+- a row whose process is gone at its limit (a headless delegate exits at once) skips the drain
+  and the stop;
+- the resume carries the first row due, the word, as an interactive session's prompt by launch
+  or a headless one's first line by stream (as `Delegates`' does, F-152);
+- a copy or a resume refused on the other account leaves its process gone, never resumed on its
+  own account, which is at its limit: the act failed, a `limit` prompt, and at the reset the
+  word resumes it.
+
 **The code unit's list** (one unit after this one, against `Limit.tla` and `Boxes.tla`):
 
 1. **Settings per account**, written where the status line command is written today, in each
@@ -2857,9 +2896,8 @@ through `Sessions.answer_limit/6`, so one answer gets in. On the allow-list: `li
 only (state `limited:<agent>:<until>`), `limit_menu` by `press_stop` and `limit_reset` by
 `go_on`, each state `<kind>:<agent>:<until>`, 20 per bound. `Prompts` shows the `limit` prompt
 (answers `go_on` and `leave`, `Limit.tla`'s `AnswerLimit` and `Leave`) and the
-`usage_credits` prompt (the menu's stop or its credits, by label) from the row's step. Not
-built: the move (`limit_far`, `move_after`, the main's "move to <account>" answer) and a
-delegate's word by `launch` (F-186's new-1).
+`usage_credits` prompt (the menu's stop or its credits, by label) from the row's step. The
+move and a delegate's word by `launch` came after: F-187 and F-191 below.
 
 Built in F-187 (F-186's new-1, decided): a headless delegate's limited turn is not its report
 ("The delegate protocol"). At the reset `Limits` hands a headless delegate's word to
@@ -2868,6 +2906,24 @@ as the delegate's word to go on under a uuid of its key, the row's turn that wor
 process resumed with it under its start's lease as `going_on`, not counted as the resume after
 a kill. `Limit.tla`'s `Read` keeps a `prompt` as the code does (F-186's new-3), and "Metrics and
 healing" says a limit kind's ask is its `limit` prompt (new-4).
+
+Built in F-191 (F-187's new-1 to new-4, decided, and the operator's move): before the reset, a
+row at `idle` or `own` whose reset is more than `move_after` away (the config's `limits`
+option, 2 h by default) and for which `Mover.room/2` finds another usable account with room is
+moved once per limit (the row's `away`): a delegate by `Limits`' remedy `move` of kind
+`limit_far` (20 per bound), claimed, the step `move` with its act on the row, the word stored
+and held, then `Mover.move/4` with `act:` that claim; a main by its `limit` prompt, which
+offers `move` (to `move_to`) beside `go_on` (the wait) and `leave`, and only that answer
+moves it, a claim of its own naming the person. The move's row in `Acts`, read once the row no
+longer moves, makes the step `moved`; any other end is the `limit` prompt. The `Mover` moves a
+gone limited row (`Sessions.begin_move/4` takes one), resumes a headless delegate with its
+first due row by stream, and leaves a limited row gone when its copy or resume is refused.
+`Sessions.stop/3` `for: :move` reads a limited interactive session's screen. An interactive
+delegate's word is `Delegates.go_on/5`'s too, and its limited turn neither a finish nor a kill.
+One text for every word. And a delegate's start is confirmed by the init naming its session id
+whether its process still lives or not (F-187's new-4): the hold removes an earlier hold's
+record, so a record there is this start's, and a process gone after its init is a running row
+that exited.
 
 **Measured** (F-181, by hand on 2.1.322, against a local endpoint at `ANTHROPIC_BASE_URL` that
 answers 429 with the unified rate-limit headers the pinned binary reads, a dummy subscriber's

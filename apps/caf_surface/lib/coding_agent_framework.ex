@@ -834,12 +834,12 @@ defmodule CodingAgentFramework do
          end},
         # The healer of a usage limit (F-186): after `Sessions`, which writes its phases and
         # presses the menu, `Mailbox`, which stores its word, the `Watch`, `Mains`, which
-        # resumes a gone main with the word under its lease, and `Delegates`, whose headless
-        # delegate's word it is (F-187).
+        # resumes a gone main with the word under its lease, `Delegates`, whose delegate's word
+        # it is (F-187), and the `Mover`, which moves a limit far from its reset (F-191).
         {:limits,
          fn pid ->
            {inlet, mailbox, mains} = {pid.(:inlet), pid.(:mailbox), pid.(:mains)}
-           delegates = pid.(:delegates)
+           {delegates, mover} = {pid.(:delegates), pid.(:mover)}
            {transcripts, stream} = {pid.(:transcripts), pid.(:stream)}
 
            {Limits,
@@ -853,7 +853,9 @@ defmodule CodingAgentFramework do
             look: &Inlet.look(inlet, &1.name, &1.release),
             word: &Mailbox.notify(mailbox, &1, &2, key: &3, kind: :notice),
             resume: &resume_limited(mains, &1),
-            go_on: &Delegates.go_on(delegates, &1, &2, &3)}
+            go_on: &Delegates.go_on(delegates, &1, &2, &3, &4),
+            room: &Mover.room(mover, &1.name),
+            move: &Mover.move(mover, &1, &2, to: &3, act: &4)}
          end},
         # The healer of a background command that hangs after its delegate's report (F-184):
         # it reads `Stream`'s folds and ends a group by its record. A hung command writes
@@ -996,9 +998,8 @@ defmodule CodingAgentFramework do
   end
 
   # A limited agent whose process is gone, at its reset (F-186): a main is resumed through
-  # `Mains`, under its lease, its word the resume's first row. A headless delegate's word and
-  # resume are `Delegates.go_on/5`'s (`go_on:`); an interactive delegate's resumes are
-  # `Delegates`' own.
+  # `Mains`, under its lease, its word the resume's first row. A delegate's word and resume are
+  # `Delegates.go_on/5`'s (`go_on:`).
   defp resume_limited(mains, %{kind: "main", name: name}), do: Mains.resume_main(mains, name)
   defp resume_limited(_mains, _row), do: :none
 

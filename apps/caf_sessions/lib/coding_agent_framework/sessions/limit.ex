@@ -15,7 +15,9 @@ defmodule CodingAgentFramework.Sessions.Limit do
   - `label` (the menu's option to press) and `by` (the person whose answer it is; none for the
     framework's own press), `options` (the menu's labels as read), `deadline` (wall-clock ms,
     the `usage_credits` prompt's), `why` (what opened the `limit` prompt), `menu` (the person's
-    clears of a press, so a press after one is a new act);
+    clears of a press, or moves, so a press or a move after one is a new act);
+  - `away` (the limit whose move was claimed, or asked of a person: once per limit), `move_to`
+    (the account a `limit` prompt offers to move to) and `act` (the move's row in `Acts`);
   - `goes` (go-ons in a row that each hit a limit again) and `noted` (the limit whose word the
     count took last), kept when the limit clears, so the count runs across limits.
 
@@ -28,9 +30,10 @@ defmodule CodingAgentFramework.Sessions.Limit do
       {:refused, :settled}
   """
 
-  # Limit.tla's Steps: look, own, credits, press, unknown, idle, send, word, prompt; and left,
-  # the `limit` prompt answered "leave": nothing acts until a turn runs or a new record comes.
-  @steps ~w(look own credits press unknown idle send word prompt left)
+  # Limit.tla's Steps: look, own, credits, press, unknown, idle, send, word, prompt; left, the
+  # `limit` prompt answered "leave": nothing acts until a turn runs or a new record comes; and
+  # move and moved (F-191): a move to another account claimed (its act in `act`), and done.
+  @steps ~w(look own credits press unknown idle send word prompt left move moved)
 
   @doc "The remedy's phases (`Limit.tla`'s `Steps`, and `left`)."
   @spec steps() :: [String.t()]
@@ -71,15 +74,20 @@ defmodule CodingAgentFramework.Sessions.Limit do
   def prompt(_), do: nil
 
   @doc """
-  The choices a prompt offers: the `limit` prompt `go_on` and `leave`; the `usage_credits`
-  prompt the menu's stop and its usage credits' option, by their labels as read.
+  The choices a prompt offers: the `limit` prompt `go_on` (before the reset, the wait) and
+  `leave`, and `move` where it names an account to move to (`move_to`, F-191: a main's limit far
+  from its reset); the `usage_credits` prompt the menu's stop and its usage credits' option, by
+  their labels as read.
 
       iex> alias CodingAgentFramework.Sessions.Limit
+      iex> Limit.options(%{"step" => "prompt", "move_to" => "spare"})
+      ["go_on", "move", "leave"]
       iex> Limit.options(%{"step" => "credits", "options" => ["Stop and wait for limit to reset",
       ...>   "Wait here, then continue automatically at 9pm", "Use usage credits"]})
       ["Stop and wait for limit to reset", "Use usage credits"]
   """
   @spec options(map) :: [String.t()]
+  def options(%{"step" => "prompt", "move_to" => to}) when is_binary(to), do: ~w(go_on move leave)
   def options(%{"step" => "prompt"}), do: ~w(go_on leave)
 
   def options(%{"step" => "credits"} = l) do
@@ -108,6 +116,8 @@ defmodule CodingAgentFramework.Sessions.Limit do
   - `limit`, `"go_on"`: the go-ons in a row start again, the screen is read again, and a press
     whose outcome was unknown is cleared (`menu`), so the menu may be pressed once more;
   - `limit`, `"leave"`: nothing more acts on this limit (`left`);
+  - `limit`, `"move"`, offered where the prompt names `move_to`: the move is the person's
+    (`move`), a new act, and the go-ons in a row start again;
   - `usage_credits`, a label it offers: that option is pressed, a person's answer.
   """
   @spec answer(map | nil, String.t(), term, String.t()) :: {:ok, map} | {:refused, term}
@@ -123,6 +133,14 @@ defmodule CodingAgentFramework.Sessions.Limit do
     do: Map.merge(l, %{"step" => "look", "goes" => 0, "menu" => (l["menu"] || 0) + 1, "by" => by})
 
   defp answered(l, "limit", "leave", by), do: Map.merge(l, %{"step" => "left", "by" => by})
+
+  # Limit.tla's AnswerMove: the move is the person's, a new act, to the account the prompt
+  # named; the go-ons in a row start again.
+  defp answered(l, "limit", "move", by) do
+    l
+    |> Map.drop(["act"])
+    |> Map.merge(%{"step" => "move", "goes" => 0, "menu" => (l["menu"] || 0) + 1, "by" => by})
+  end
 
   defp answered(l, "usage_credits", label, by),
     do: Map.merge(l, %{"step" => "press", "label" => label, "by" => by})

@@ -65,7 +65,10 @@ defmodule CodingAgentFramework.Delegates do
   process's exit (Claude Code exits at once) is not a kill: the row stays `running`, with no
   report, and waits. At the reset the limit's healer calls `go_on/5`: the word to go on is
   stored first and the turn is its from then; a gone process is resumed with it as `going_on`,
-  which `resumes` does not count.
+  which `resumes` does not count. An interactive delegate's turn whose transcript ends with the
+  limit's line is read the same way (F-187's new-2): neither a finish nor a kill, its word
+  `go_on/5`'s, its report the reply of the word's turn. Before a move of the limit, the healer
+  stores the word with no resume (`resume: false`), and the move's resume carries it (F-191).
 
   **An interactive delegate** (`interactive: true`, F-137; `docs/design.md`, "Interactive
   delegates") runs Claude Code's terminal interface: role `:parent`, kind `:delegate`. Its brief
@@ -299,25 +302,30 @@ defmodule CodingAgentFramework.Delegates do
   def launch(delegates, name), do: call(delegates, {:launch, name}, [], @step)
 
   @doc """
-  Goes on with headless delegate `name`'s turn after a usage limit, for the limit's healer at
-  the reset (F-186's new-1; `Limit.tla`'s `Report` and `Deliver`): its result at the limit was
-  not its report (`Delegates.Turn.next/2`'s `:limited`), so the turn its brief began is still
-  open. `text` is stored as its word to go on (`Mailbox.go_on/4`, which goes before every
-  other row to it) under a uuid of `key` (`Delegates.Turn.word_uuid/1`), so it is stored once
-  per limit, and the row's turn is that word's from then. A live process takes it into its
-  ended turn by its stream: `{:ok, :live}`. A gone one is resumed with it as its first line,
-  under its start's lease, as `going_on`: not counted as the resume after a kill, and a refusal
-  leaves the row `running`, still limited. The answer is `Sessions`'.
+  Goes on with delegate `name`'s turn after a usage limit, for the limit's healer at the reset
+  (F-186's new-1; `Limit.tla`'s `Report` and `Deliver`): its turn at the limit was not its
+  report, so the turn its brief began is still open. A headless one's turn is read from its
+  stream (`Delegates.Turn.next/2`'s `:limited`), an interactive one's from its transcript,
+  whose last limit line no turn followed (F-187's new-2). `text` is stored as its word to go on
+  (`Mailbox.go_on/4`, which goes before every other row to it) under a uuid of `key`
+  (`Delegates.Turn.word_uuid/1`), so it is stored once per limit, and the row's turn is that
+  word's from then: its report is that turn's reply. A live process takes it into its ended
+  turn, by its stream or typed: `{:ok, :live}`. A gone one is resumed with it as its first line
+  (an interactive one's prompt, by launch), under its start's lease, as `going_on`: not counted
+  as the resume after a kill, and a refusal leaves the row `running`, still limited. The answer
+  is `Sessions`'. With `resume: false` (before a move, F-191) the word is stored and nothing
+  resumes: `{:ok, :stored}`, the move's resume carrying it.
 
   Refused with nothing written: `{:no_delegate, name}`, `{:status, status}` for a row not
-  `running`, `:interactive`, `{:not_limited, what}` for a turn not at a limit, and
-  `:session_running` for a process gone whose agent row is not yet free.
+  `running`, `{:not_limited, what}` for a turn not at a limit, and `:session_running` for a
+  process gone whose agent row is not yet free.
 
       Delegates.go_on(delegates, "app-unit-review", "Go on.", "limit:app-unit-review:1800000000")
       #=> {:ok, %{id: 1, name: "app-unit-review", session_id: "…", account: "work", …}}
   """
   def go_on(delegates, name, text, key, opts \\ []),
-    do: call(delegates, {:go_on, name, text, key}, opts, 300_000)
+    do:
+      call(delegates, {:go_on, name, text, key, Keyword.get(opts, :resume, true)}, opts, 300_000)
 
   @doc """
   What `Delegates` reads, for `Cues`: a stream's events and a transcript's lines (a turn's end
@@ -481,27 +489,26 @@ defmodule CodingAgentFramework.Delegates do
     {:reply, reply, s}
   end
 
-  def handle_call({:go_on, name, text, key}, from, s) do
+  def handle_call({:go_on, name, text, key, resume?}, from, s) do
     row = Enum.find(Table.latest(s.db, s.host), &(&1.name == name))
     agent = row && agent(s, row)
 
     with %{} <- agent || {:refused, {:no_delegate, name}},
          true <- row.status == "running" or {:refused, {:status, row.status}},
-         :headless <- how(agent),
-         {:ok, fold} <- followed(s, agent),
-         :limited <- limited(Turn.next(row, fold)),
+         {:ok, live?} <- limited_turn(s, row, agent),
          uuid = Turn.word_uuid(key),
          {:ok, _} <- Mailbox.go_on(s.mailbox, row.name, text, uuid) do
       if row.resume_uuid != uuid, do: write(s, row, resume_uuid: uuid)
       row = Table.get(s.db, row.id)
 
       cond do
-        not fold.gone and Agents.running?(agent) -> {:reply, {:ok, :live}, s}
+        # Before a move (F-191): the word is held, and the move's resume carries it.
+        not resume? -> {:reply, {:ok, :stored}, s}
+        live? and Agents.running?(agent) -> {:reply, {:ok, :live}, s}
         Agents.free?(agent) -> went_on(s, row, agent, from)
         true -> {:reply, {:refused, :session_running}, s}
       end
     else
-      :interactive -> {:reply, {:refused, :interactive}, s}
       other -> {:reply, other, s}
     end
   end
@@ -1088,7 +1095,11 @@ defmodule CodingAgentFramework.Delegates do
         else: {brief, s}
 
     with {:ok, brief} <- brief,
-         {:ok, turn} <- turn do
+         {:ok, turn} <- turn,
+         # A turn that ended at a usage limit (F-187's new-2): neither a finish nor a kill. Its
+         # reply is the limit's line, and its process may be gone at the limit; the healer's
+         # word goes on with the turn (`go_on/5`), whose reply is the report.
+         false <- acts?(agent, turn) and interactive_limit(s, agent) != :none do
       reply = with {:ok, %{reply: text}} when is_binary(text) <- turn, do: text, else: (_ -> nil)
 
       cond do
@@ -1111,6 +1122,10 @@ defmodule CodingAgentFramework.Delegates do
       _unread -> s
     end
   end
+
+  # Whether settle_interactive would act on the turn now: its process gone, or a reply.
+  defp acts?(agent, turn),
+    do: Agents.free?(agent) or match?({:ok, %{reply: text}} when is_binary(text), turn)
 
   # What the transcript holds of the turn the row `uuid` began (`Transcripts.Fold.reply_to/2`),
   # read from its marked line once that is found (F-137's new-4): the transcript is read from
@@ -1226,17 +1241,53 @@ defmodule CodingAgentFramework.Delegates do
     end
   end
 
-  defp limited(:limited), do: :limited
-  defp limited(other), do: {:refused, {:not_limited, other}}
+  # Whether the delegate's turn is at a usage limit, and its process lives: a headless one's by
+  # its stream (`Delegates.Turn.next/2`'s `:limited`), an interactive one's by its transcript,
+  # whose last limit line no turn followed (F-187's new-2).
+  defp limited_turn(s, row, agent) do
+    case how(agent) do
+      :headless ->
+        with {:ok, fold} <- followed(s, agent) do
+          case Turn.next(row, fold) do
+            :limited -> {:ok, not fold.gone}
+            other -> {:refused, {:not_limited, other}}
+          end
+        end
 
-  # The word to go on after a usage limit, as the resume's first line (F-152), under the
-  # start's lease (no claim of its own: the limit's healer claimed the act). It is not the
-  # resume after a kill, so `resumes` stays as it was. The caller waits for Sessions' answer.
+      :interactive ->
+        case interactive_limit(s, agent) do
+          :limited -> {:ok, Agents.running?(agent)}
+          other -> {:refused, {:not_limited, other}}
+        end
+    end
+  end
+
+  # An interactive delegate's transcript, read now: `:limited` while its last limit line is the
+  # last turn's end (no turn followed it), `:none` otherwise; a read that fails, `:unread`.
+  defp interactive_limit(s, %{session_id: sid} = agent) when is_binary(sid) do
+    t = s.transcripts
+
+    with {:ok, dir} <- Accounts.config_dir(s.accounts, agent.account),
+         {:ok, path} <- Transcripts.path(dir, agent.cwd, sid),
+         {:ok, %{failed: []}} <- Transcripts.read(t, [{agent.account, sid, path}], timeout: @step),
+         {:ok, tr} <- Transcripts.session(t, agent.account, sid, timeout: @step) do
+      if match?(%{followed: false}, tr[:limit]), do: :limited, else: :none
+    else
+      _ -> :unread
+    end
+  end
+
+  defp interactive_limit(_s, _agent), do: :unread
+
+  # The word to go on after a usage limit, as the resume's first line (F-152), or an
+  # interactive one's prompt by launch (F-191), under the start's lease (no claim of its own:
+  # the limit's healer claimed the act). It is not the resume after a kill, so `resumes` stays
+  # as it was. The caller waits for Sessions' answer.
   defp went_on(s, row, agent, from) do
     with {:ok, p} <- Map.fetch(s.projects, agent.project) |> known(agent.project),
          deadline = deadline(s, p),
          {:ok, account} <- Accounts.ready(s.accounts, agent.account),
-         {:ok, launched} <- launch_first(s, %{row | deadline: deadline}, :headless) do
+         {:ok, launched} <- launch_first(s, %{row | deadline: deadline}, how(agent)) do
       at = System.os_time(:millisecond)
       write(s, row, status: "going_on", called_at: at, deadline: deadline)
       start = {:resume, agent.session_id}

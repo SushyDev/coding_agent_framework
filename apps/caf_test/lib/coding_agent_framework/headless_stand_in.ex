@@ -15,9 +15,8 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     reset in Unix seconds), every message hits a usage limit as Claude Code 2.1.322 does
     headless (F-181's measure): a `rate_limit_event` `rejected` with that reset, the assistant
     line with `api_error: "usage_limit_reached"`, a `result` with `is_error` and the same
-    `api_error` naming the message, and an exit with status 1 at once. With a FIFO
-    `<dir>/limit.fifo`, it first waits for a line there, so a test can let the start be
-    confirmed before the exit. `half` ends its turn with half a
+    `api_error` naming the message, and an exit with status 1 at once. `half` ends its turn
+    with half a
     `rate_limit_event` line, and the next message finishes it; `self` ends its turn, then
     starts one of its own at once, whose `result` (`on its own`, uuid `r-self-<uuid>`) names no message; `quiet`
     ends its turn with an empty `result` that names no message, so no report is read from it;
@@ -115,7 +114,6 @@ defmodule CodingAgentFramework.HeadlessStandIn do
           if [ -n "$half" ]; then printf '"utilization":0.5}}\n'; half=''; fi
           ev '{"type":"user","isReplay":true,"session_id":"'"$sid"'","uuid":"'"$u"'","message":{"role":"user","content":""}}'
           if [ -e "DIR/limit" ]; then
-            [ -p "DIR/limit.fifo" ] && read -r _ < "DIR/limit.fifo"
             r=$(cat "DIR/limit") w="You've hit your 5-hour limit"
             ev '{"type":"rate_limit_event","session_id":"'"$sid"'","rate_limit_info":{"status":"rejected","resetsAt":'"$r"',"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":1,"resetsAt":'"$r"',"status":"rejected"}}}}'
             ev '{"type":"assistant","session_id":"'"$sid"'","uuid":"a-'"$u"'","error":"rate_limit","is_api_error_message":true,"api_error_status":429,"api_error":"usage_limit_reached","message":{"model":"<synthetic>","content":[{"type":"text","text":"'"$w"'"}]}}'

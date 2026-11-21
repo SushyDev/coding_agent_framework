@@ -348,6 +348,52 @@ defmodule CodingAgentFramework.MoverTest do
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{uuid}"]
   end
 
+  # Move.tla's LimitMove, Back and WordStored (F-191): a delegate whose process is gone at its
+  # usage limit moves with no drain and no stop, the claim its caller made taken as the move's
+  # own. Refused on the other account, it stays gone (NoResumeIntoLimit): never resumed on its
+  # own account. Moved, its resume carries the word stored before it as its first line
+  # (LimitResumeCarriesRow).
+  test "a delegate gone at its limit moves with no stop, its word first; refused, it stays gone",
+       ctx do
+    {:ok, account} = Accounts.ready(ctx.accounts, "work")
+
+    assert {:ok, %{session_id: sid}} =
+             Sessions.start(ctx.sessions, "d1", account, MoverSetup.headless(ctx.dir))
+
+    write_transcript(ctx, "work", sid)
+    reset = System.os_time(:second) + 3 * 3600
+    File.write!(Path.join(ctx.dir, "limit"), "#{reset}")
+    {:ok, _} = Mailbox.notify(ctx.mailbox, "d1", "work on")
+    assert {:ok, gone} = row_when(ctx, "d1", &Agents.free?/1)
+    File.rm!(Path.join(ctx.dir, "limit"))
+    limit = %{"until" => reset, "step" => "move", "line" => "stream:x"}
+    assert {:ok, _} = Sessions.put_limit(ctx.sessions, "d1", limit, from: nil)
+    word = "5e1f0c2a-7b3d-5a4e-9c1b-2d3e4f5a6b7c"
+    assert {:ok, {:queued, wid}} = Mailbox.go_on(ctx.mailbox, "d1", "go on", word)
+
+    # Refused there: the act failed, the process still gone, its row on its own account.
+    MoverSetup.set_launch(ctx, fn _row -> {:refused, :no_room} end)
+    {:ok, act} = Acts.claim(ctx.acts, "limits:test", "d1", %{limit: reset}, :move)
+    assert {:ok, %{act: ^act}} = Mover.move(mover(), "limits:test", "d1", to: "spare", act: act)
+    assert {:ok, left} = row_when(ctx, "d1", &(&1.move == nil))
+    assert %{status: "stopped", account: "work", pid: pid} = left
+    assert pid == gone.pid
+    assert {:ok, %{outcome: "failed", reason: why}} = Acts.get(ctx.acts, act)
+    assert why =~ "no_room"
+    assert %{status: "queued"} = mrow(ctx, wid)
+    assert length(HeadlessStandIn.taken(ctx.dir)) == 1
+
+    # A second move, a claim of its own: its resume's first line is the word.
+    MoverSetup.set_launch(ctx, &MoverSetup.launch(ctx.dir, &1))
+    {:ok, act} = Acts.claim(ctx.acts, "sam", "d1", %{limit: reset, by: "sam"}, :move)
+    assert {:ok, %{act: ^act}} = Mover.move(mover(), "sam", "d1", to: "spare", act: act)
+    assert {:ok, moved} = row_when(ctx, "d1", &moved?(&1, "spare"))
+    assert moved.session_id == sid
+    assert {:ok, %{outcome: "verified", actor: "sam"}} = Acts.get(ctx.acts, act)
+    assert {:ok, _} = mrow_when(ctx, wid, &(&1.status == "delivered"))
+    assert List.last(HeadlessStandIn.taken(ctx.dir)) == "message #{word}"
+  end
+
   defp move(ctx, name), do: Mover.move(mover(), "operator", name, to: other(ctx, name))
 
   defp other(ctx, name) do

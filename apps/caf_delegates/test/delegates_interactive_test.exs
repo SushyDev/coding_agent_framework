@@ -13,7 +13,7 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
   alias CodingAgentFramework.{Accounts, Delegates, Grants, Inlet, Intake, Mailbox}
   alias CodingAgentFramework.ScreenStandIn
   alias CodingAgentFramework.{Sessions, SessionsSetup, Transcripts, Usage}
-  alias CodingAgentFramework.Delegates.Table
+  alias CodingAgentFramework.Delegates.{Table, Turn}
   alias CodingAgentFramework.Sessions.Agents
   alias CodingAgentFramework.Sessions.Turn, as: SessionsTurn
 
@@ -361,6 +361,58 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
 
     assert [%{status: "refused"}] = Table.latest(ctx.dtable, "test")
     assert ScreenStandIn.prompts(ctx.dir) == []
+  end
+
+  # Limit.tla's Report and Deliver for an interactive delegate (F-187's new-2): a turn whose
+  # transcript ends with the limit's line is neither a finish nor a kill, its process gone or
+  # not; the healer's word is its word to go on (`go_on/5`), its resume by launch with the word
+  # as its prompt, not counted, and its report the reply of the word's turn.
+  test "an interactive delegate's limit is no kill; its word resumes it, and its reply reports",
+       ctx do
+    assert {:ok, %{id: id, name: name, brief_uuid: u, session_id: sid}} =
+             Delegates.start_delegate(ctx.delegates, "main", "app", "unit/one", "opus", "Go.",
+               interactive: true
+             )
+
+    text = "Go.\n\n[delivery #{u}]"
+    assert {:ok, [^text]} = await(fn -> nonempty(ScreenStandIn.prompts(ctx.dir)) end)
+    {:ok, dir} = Accounts.config_dir(ctx.accounts, "work")
+    {:ok, path} = Transcripts.path(dir, Agents.get(ctx.agents, name).cwd, sid)
+
+    hit = %{
+      "type" => "assistant",
+      "uuid" => "a-limit",
+      "isApiErrorMessage" => true,
+      "apiError" => "usage_limit_reached",
+      "quotaLimits" => %{"status" => "rejected", "resetsAt" => 1_800_000_000},
+      "message" => %{"id" => "m0", "stop_reason" => "stop_sequence", "content" => []}
+    }
+
+    lines(path, [user(text), hit])
+    # The process ends at its limit (a person's exit, say): no kill, no report.
+    assert {:ok, :stopped} = Sessions.stop(ctx.dopts[:sessions], name)
+
+    for _ <- 1..3, do: cue_until(ctx, id, fn _ -> true end)
+    assert %{status: "running", resumes: 0, report: "none"} = Table.get(ctx.dtable, id)
+    assert length(ScreenStandIn.prompts(ctx.dir)) == 1
+
+    key = "limit:#{name}:1800000000"
+    w = Turn.word_uuid(key)
+    assert {:ok, %{session_id: ^sid}} = Delegates.go_on(ctx.delegates, name, "Go on.", key)
+    word = "Go on.\n\n[delivery #{w}]"
+
+    assert {:ok, prompts} =
+             await(fn ->
+               if length(ScreenStandIn.prompts(ctx.dir)) == 2,
+                 do: {:ok, ScreenStandIn.prompts(ctx.dir)}
+             end)
+
+    assert word in prompts
+
+    lines(path, [user(word), reply("m1", "Done after the limit.")])
+
+    assert {:ok, %{text: "Done after the limit.", resumes: 0, resume_uuid: ^w}} =
+             cue_until(ctx, id, &(&1.status == "finished"))
   end
 
   defp brief(ctx, u) do

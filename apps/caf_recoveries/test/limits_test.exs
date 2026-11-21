@@ -85,9 +85,19 @@ defmodule CodingAgentFramework.LimitsTest do
         {:ok, %{rows: Agent.get(w, &Map.get(&1, :transcripts, []))}}
       end,
       folds: fn -> {:ok, %{rows: Agent.get(w, &Map.get(&1, :folds, []))}} end,
-      go_on: fn name, text, key ->
-        send(me, {:go_on, name, text, key})
+      go_on: fn name, text, key, opts ->
+        if opts[:resume] == false,
+          do: send(me, {:held, name, text, key}),
+          else: send(me, {:go_on, name, text, key})
+
         Agent.get(w, &Map.get(&1, {:go_on, name}, {:ok, :resumed}))
+      end,
+      # The Mover's pick and its move, told to the test; the move's end is the test's write of
+      # the claim it was handed, as the Mover settles it.
+      room: fn _row -> Agent.get(w, &Map.get(&1, :room, {:refused, :no_mover})) end,
+      move: fn actor, name, to, act ->
+        send(me, {:move, actor, name, to, act})
+        Agent.get(w, &Map.get(&1, {:move, name}, {:ok, %{act: act}}))
       end,
       look: fn row ->
         send(me, {:looked, row.name})
@@ -389,6 +399,95 @@ defmodule CodingAgentFramework.LimitsTest do
     assert_received {:pressed, "app-epic", @stop}
     refute_received {:pressed, _, _}
     assert limit(ctx, "app-epic")["why"] =~ "no_server"
+  end
+
+  # Limit.tla's Away and MoveAct, MoveOnce (F-191): a delegate whose reset is more than
+  # `move_after` away, with another account that has room, moves once per limit: the claim on
+  # its row first, the word stored and held, then the Mover's one move, which settles the claim.
+  # A move refused is a person's prompt, never a second move; the word then goes at the reset.
+  test "a delegate far from its reset moves once, its word first; a refused move is asked", ctx do
+    far = 1_000_000 + 3 * 3600
+    fields = [kind: "delegate"]
+    agent!(ctx, "app-unit-m", fields)
+    agent!(ctx, "app-unit-n", fields)
+    hit!(ctx, "app-unit-m", "m1", until: far)
+    hit!(ctx, "app-unit-n", "n1", until: far)
+    screen!(ctx, {:ok, %{state: :idle, box: :empty}})
+    refused = {:refused, {:none_usable, []}}
+
+    Agent.update(
+      ctx.world,
+      &Map.merge(&1, %{:room => {:ok, "spare"}, {:move, "app-unit-n"} => refused})
+    )
+
+    healer = healer!(ctx)
+
+    assert settle(healer, ctx, "app-unit-m") == "move"
+    key = "limit:app-unit-m:#{far}"
+    assert_received {:held, "app-unit-m", _text, ^key}
+    assert_received {:move, "framework", "app-unit-m", "spare", id}
+    assert %{"act" => ^id, "move_to" => "spare", "away" => ^far} = limit(ctx, "app-unit-m")
+
+    assert {:ok, %{act: "move", actor: "limits:test", status: "claimed", state: state}} =
+             Acts.get(ctx.acts, id)
+
+    assert state =~ "limit_far:app-unit-m:#{far}"
+
+    # The Mover takes the claim as its own and settles it once the agent runs there.
+    assert {:ok, _} = Acts.acted(ctx.acts, id)
+    assert {:ok, :verified} = Acts.answered(ctx.acts, id, {:ok, "spare"})
+    assert settle(healer, ctx, "app-unit-m") == "moved"
+    refute_received {:move, _, "app-unit-m", _, _}
+
+    # The other's move was refused: a person's, and no second move after their "go on".
+    assert step(ctx, "app-unit-n") == "prompt"
+    assert_received {:move, "framework", "app-unit-n", "spare", _}
+    assert limit(ctx, "app-unit-n")["why"] =~ "none_usable"
+    assert {:ok, _} = Sessions.answer_limit(ctx.sessions, "app-unit-n", "limit", "go_on", "sam")
+    assert settle(healer, ctx, "app-unit-n") == "idle"
+    refute_received {:move, _, "app-unit-n", _, _}
+
+    # At the reset its word is Delegates' under the same key, stored once.
+    :counters.put(ctx.time, 1, far * 1000 + @margin)
+    assert settle(healer, ctx, "app-unit-n") == "word"
+    key = "limit:app-unit-n:#{far}"
+    assert_received {:go_on, "app-unit-n", _, ^key}
+  end
+
+  # NeverMovesMain (F-191): a main far from its reset is never moved on the framework's own; its
+  # `limit` prompt offers the move beside the wait, once per limit, and a person's answer moves
+  # it, a claim of its own with the person named.
+  test "a main far from its reset is asked, and moved only by a person's answer", ctx do
+    far = 1_000_000 + 3 * 3600
+    agent!(ctx, "app-epic")
+    hit!(ctx, "app-epic", "a1", until: far)
+    screen!(ctx, {:ok, %{state: :idle, box: :empty}})
+    Agent.update(ctx.world, &Map.put(&1, :room, {:ok, "spare"}))
+    healer = healer!(ctx)
+
+    assert settle(healer, ctx, "app-epic") == "prompt"
+    assert Sessions.Limit.options(limit(ctx, "app-epic")) == ~w(go_on move leave)
+    refute_received {:move, _, _, _, _}
+
+    # "Go on" before the reset waits: no second prompt for this limit.
+    assert {:ok, _} = Sessions.answer_limit(ctx.sessions, "app-epic", "limit", "go_on", "sam")
+    assert settle(healer, ctx, "app-epic") == "idle"
+
+    # A later look at the same limit asks no more; a person's "move" from a prompt moves it.
+    Sessions.put_limit(
+      ctx.sessions,
+      "app-epic",
+      Map.put(limit(ctx, "app-epic"), "step", "prompt"),
+      from: "idle"
+    )
+
+    assert {:ok, _} = Sessions.answer_limit(ctx.sessions, "app-epic", "limit", "move", "sam")
+    assert settle(healer, ctx, "app-epic") == "move"
+    key = "limit:app-epic:#{far}"
+    assert_received {:word, "app-epic", _, ^key}
+    assert_received {:move, "sam", "app-epic", "spare", id}
+    assert {:ok, %{act: "move", detail: detail}} = Acts.get(ctx.acts, id)
+    assert detail =~ "sam"
   end
 
   # The one shape: a kind off the list is asked in the Watch, and nothing acts.
