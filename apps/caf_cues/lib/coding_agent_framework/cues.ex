@@ -299,10 +299,12 @@ defmodule CodingAgentFramework.Cues do
     for key <- routes(s.parts, topic), pid = s.pids[key], do: hand(s, key, pid, cue)
     words = String.split(topic, ":")
 
-    # A plain send: a subscriber that is slow, or gone, costs this nothing.
+    # A plain send: a subscriber that is slow, or gone, costs this nothing. The fold keeps `:ok`
+    # whatever `send` answers (the message), so the next subscriber is reached too.
     :ets.foldl(
       fn {_ref, pid, topics}, :ok ->
-        if reads?(topics, words), do: send(pid, {:caf_cue, cue}), else: :ok
+        if reads?(topics, words), do: send(pid, {:caf_cue, cue})
+        :ok
       end,
       :ok,
       s.subs

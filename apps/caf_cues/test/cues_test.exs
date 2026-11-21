@@ -168,6 +168,30 @@ defmodule CodingAgentFramework.CuesTest do
       assert Process.alive?(cues)
     end
 
+    test "every subscriber of a topic gets its cue, however many there are" do
+      parts = [a: part(["sessions", "last"])]
+      {:ok, cues} = start_supervised({Cues, parts: parts})
+      test = self()
+
+      others =
+        for n <- 1..3 do
+          spawn(fn ->
+            {:ok, _} = Cues.subscribe(cues, self(), ["sessions"])
+            send(test, {:subscribed, n})
+            receive do: ({:caf_cue, cue} -> send(test, {:got, n, cue.topic}))
+          end)
+        end
+
+      for n <- 1..3, do: assert_receive({:subscribed, ^n})
+      subscribed(cues, parts, ["sessions"])
+      Cues.cue(cues, %{topic: "sessions:ws", ids: [1]})
+      Cues.cue(cues, %{topic: "last"})
+
+      assert got_until_last([]) == ["sessions:ws"]
+      for n <- 1..3, do: assert_receive({:got, ^n, "sessions:ws"})
+      assert Process.alive?(cues) and length(others) == 3
+    end
+
     test "unsubscribe ends a subscription; a ref it does not hold is refused" do
       parts = [a: part(["sessions", "last"])]
       {:ok, cues} = start_supervised({Cues, parts: parts})
