@@ -32,21 +32,22 @@ defmodule CodingAgentFramework.SurfaceTest do
     # (F-169, F-175).
     home = Path.join([dir, "Application Support", "app", "framework"])
 
-    {:ok, config} =
-      Config.new(
-        home: home,
-        instance: "t",
-        programs: programs().paths,
-        accounts: ["work"],
-        projects: %{"app" => project},
-        mains: %{"app-main" => "app"},
-        ports: %{intake: free_port(), mcp: free_port()},
-        claude: HeadlessStandIn.write!(dir, :on_message),
-        env: %{home: dir, path: "/nonexistent", term: "xterm-256color", lang: "C.UTF-8"},
-        user: "tester",
-        interval: 200,
-        undeclared_cues: :raise
-      )
+    fields = [
+      home: home,
+      instance: "t",
+      programs: programs().paths,
+      accounts: ["work"],
+      projects: %{"app" => project},
+      mains: %{"app-main" => "app"},
+      ports: %{intake: free_port(), mcp: free_port()},
+      claude: HeadlessStandIn.write!(dir, :on_message),
+      env: %{home: dir, path: "/nonexistent", term: "xterm-256color", lang: "C.UTF-8"},
+      user: "tester",
+      interval: 200,
+      undeclared_cues: :raise
+    ]
+
+    {:ok, config} = Config.new(fields)
 
     # A new home: no account has a reading, and a start still picks one (F-147).
     File.mkdir_p!(home)
@@ -54,7 +55,7 @@ defmodule CodingAgentFramework.SurfaceTest do
     on_exit(fn -> Tmux.kill_server(server) end)
     on_exit(fn -> end_recorded(dir) end)
     {:ok, sessions} = Table.open(Path.join(home, "caf.db"))
-    %{config: config, sessions: sessions, dir: dir, home: home}
+    %{config: config, fields: fields, sessions: sessions, dir: dir, home: home}
   end
 
   defp free_port do
@@ -517,22 +518,51 @@ defmodule CodingAgentFramework.SurfaceTest do
              )
   end
 
-  test "the config's extensions are served on the agents' endpoint", ctx do
-    tool = %{
-      name: "board_cards",
-      description: "The board's cards.",
-      schema: %{"type" => "object"},
-      call: fn caller, _args -> {:ok, %{"caller" => caller}} end
-    }
+  # An app's extension, named in the config as a module and its options (F-188).
+  defmodule Board do
+    @behaviour CodingAgentFramework.Extension
 
-    config = %{
-      ctx.config
-      | extensions: [%{name: "board", scope: %{roles: [:main]}, tools: [tool]}]
-    }
+    @impl true
+    def bundle(opts, part) do
+      tool = %{
+        name: "board_cards",
+        description: "The board's cards.",
+        schema: %{"type" => "object"},
+        call: fn caller, _args ->
+          {:ok,
+           %{"caller" => caller, "board" => opts[:board], "mailbox" => is_pid(part.(:mailbox))}}
+        end
+      }
+
+      %{name: "board", scope: %{roles: [:main]}, tools: [tool]}
+    end
+  end
+
+  # F-188: the tree reads the config's keys, and nothing else.
+  test "the config's extensions, secret file and part options reach the tree", ctx do
+    secret = Path.join(ctx.dir, "hooks.secret")
+
+    {:ok, config} =
+      Config.new(
+        ctx.fields ++
+          [
+            extensions: [{Board, board: "web"}],
+            secret_file: secret,
+            restarts: %{max_restarts: 1, max_seconds: 10},
+            dialogs: %{trust: "Yes, I trust this folder"},
+            parts: %{sampler: %{interval: 100}, delegates: %{idle_bound: 600_000}}
+          ]
+      )
 
     parts = start(config)
     assert "board_cards" in Enum.map(MCP.tools(parts.mcp, "app-main"), & &1.name)
-    assert {:ok, %{"caller" => "app-main"}} = MCP.call(parts.mcp, "app-main", "board_cards", %{})
+
+    assert {:ok, %{"caller" => "app-main", "board" => "web", "mailbox" => true}} =
+             MCP.call(parts.mcp, "app-main", "board_cards", %{})
+
+    # The hooks post with the secret of the file the config names, and none is in the home.
+    assert hook_secret(ctx.home) == File.read!(secret)
+    refute File.exists?(Path.join(ctx.home, "intake.secret"))
   end
 
   # The checkout is the framework's own clone, and `start_main` goes through `MCP` to `Mains`:

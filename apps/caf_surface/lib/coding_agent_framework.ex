@@ -50,10 +50,16 @@ defmodule CodingAgentFramework do
   checkout and its pull, and starts a main session (`start_main`): the app calls
   `Mains.landed/2` when something landed in a project's trunk.
 
-  **Once per start.** `start_link/1` makes `Acts`' `start_id`, reads the hooks' secret, kept
-  per home (`Intake.secret/1` on `<home>/intake.secret`, made at the first start), and writes
-  each account's files with that secret, before any part starts. A session held across a
-  restart keeps its hooks: its settings name the same secret.
+  **Once per start.** `start_link/1` makes `Acts`' `start_id`, reads the hooks' secret from the
+  config's `secret_file` (`Intake.secret/1`, `<home>/intake.secret` by default, made at the
+  first start), and writes each account's files with that secret, before any part starts. A
+  session held across a restart keeps its hooks: its settings name the same secret.
+
+  **The config's keys** (F-188). The tree reads nothing but the config: each part's own
+  options in its `parts` go over the tree's wiring (`Config.options/3`), the holder's too; a
+  startup dialog is answered by its `dialogs` (`Config.dialog/3`); the extensions are made
+  from their modules when `MCP` starts (`Config.extensions/2`), and one that refuses then
+  fails the start with its refusal; and the tree's restart budget is its `restarts`.
 
   Nothing it starts acts outside the framework home but its own tmux server (whose socket is in
   the home) and its two ports.
@@ -133,7 +139,8 @@ defmodule CodingAgentFramework do
          {:ok, c} <- tools(c, programs),
          {:ok, tmux} <- server(c),
          {:ok, accounts} <- Accounts.new(c.home, c.accounts),
-         {:ok, holder} <- Holder.new(programs, Config.path(c, "d")),
+         {:ok, holder} <-
+           Holder.new(programs, Config.path(c, "d"), Config.options(c, :holder, [])),
          {:ok, agents} <- Sessions.Agents.open(Config.path(c, "caf.db"), c.workstation),
          {:ok, work} <-
            Delegates.Work.open(Config.path(c, "caf.db"), Config.path(c, "caf.db"), c.workstation),
@@ -142,7 +149,7 @@ defmodule CodingAgentFramework do
          {:ok, jobs_work} <- Jobs.Work.open(Config.path(c, "parts/jobs")),
          {:ok, mains_work} <-
            Mains.Work.open(Config.path(c, "caf.db"), Config.path(c, "caf.db"), c.workstation),
-         {:ok, secret} <- Intake.secret(Config.path(c, "intake.secret")),
+         {:ok, secret} <- Intake.secret(c.secret_file),
          :ok <- prepare(c, accounts, programs, secret),
          {:ok, runs} <- Runs.new(c.home, programs, c.heavy),
          :ok <- Runs.prepare(runs, programs, c.ports.intake, secret) do
@@ -445,21 +452,28 @@ defmodule CodingAgentFramework do
 
     children =
       for {key, build} <- children(w, notify),
-          do: %{id: key, start: {__MODULE__, :start_part, [tab, key, build]}}
+          do: %{id: key, start: {__MODULE__, :start_part, [tab, key, build, w.c]}}
 
-    Supervisor.init(children, strategy: :rest_for_one)
+    %{max_restarts: n, max_seconds: s} = w.c.restarts
+    Supervisor.init(children, strategy: :rest_for_one, max_restarts: n, max_seconds: s)
   end
 
   @doc false
-  # Runs in the supervisor: `build` gets the current process of each part started before it.
-  def start_part(tab, key, build) do
-    {module, opts} = build.(&lookup(tab, &1))
+  # Runs in the supervisor: `build` gets the current process of each part started before it,
+  # and the config's `parts` for this key go over its wiring. A build that cannot be made
+  # (an extension that refuses now) fails the start with its refusal.
+  def start_part(tab, key, build, c) do
+    case build.(&lookup(tab, &1)) do
+      {:refused, _} = refused ->
+        {:error, refused}
 
-    with {:ok, pid} <- module.start_link(opts) do
-      :ets.insert(tab, {key, pid})
-      Cues.started(lookup(tab, :cues), key, pid)
-      watch(tab, key, pid)
-      {:ok, pid}
+      {module, opts} ->
+        with {:ok, pid} <- module.start_link(Config.options(c, key, opts)) do
+          :ets.insert(tab, {key, pid})
+          Cues.started(lookup(tab, :cues), key, pid)
+          watch(tab, key, pid)
+          {:ok, pid}
+        end
     end
   end
 
@@ -607,8 +621,8 @@ defmodule CodingAgentFramework do
              Sessions,
              # Mailbox starts after Sessions: it is looked up at each read.
              # `Mains` declares the main sessions the config names, as agent rows.
-             # A startup dialog waits on a person (F-140): the app answers none on its own,
-             # and the operator answers through `Operator.answer_startup/4`.
+             # A startup dialog the config's `dialogs` does not answer waits on a person
+             # (F-140), who answers it through the inbox (`answer/4`).
              reaper: pid.(:reaper),
              programs: p,
              dir: Config.path(c, "d"),
@@ -619,7 +633,7 @@ defmodule CodingAgentFramework do
              db: db,
              notify: notify,
              inlet: pid.(:inlet),
-             dialog: &Sessions.Dialog.ask/2,
+             dialog: &Config.dialog(c, &1, &2),
              open_to: &Mailbox.open_to(pid.(:mailbox), &1, status: &2),
              waiter: %{port: c.ports.intake, secret: w.secret},
              acts: pid.(:acts)
@@ -873,27 +887,31 @@ defmodule CodingAgentFramework do
               acts: pid.(:acts)
             ] ++ notify_every}
          end},
+        # The app's extensions are made here, from the config's modules, each given the live
+        # lookup of the parts.
         {:mcp,
          fn pid ->
-           {MCP,
-            dir: Config.path(c, "parts/mcp"),
-            port: c.ports.mcp,
-            grants: grants,
-            mailbox: {Mailbox, pid.(:mailbox)},
-            delegates: {Delegates, pid.(:delegates)},
-            services: {Services, pid.(:services)},
-            workstation: host,
-            tracker: {Tracker, pid.(:tracker)},
-            stream: {Stream, pid.(:stream)},
-            transcripts: {Transcripts, pid.(:transcripts)},
-            place: &Sessions.Agents.place(w.agents, &1),
-            tool_timeout: c.tool_timeout,
-            margin: c.margin,
-            acts: pid.(:acts),
-            mover: {Mover, pid.(:mover)},
-            prompts: {Prompts, pid.(:prompts)},
-            mains: {Mains, pid.(:mains)},
-            extensions: c.extensions}
+           with {:ok, extensions} <- Config.extensions(c, pid) do
+             {MCP,
+              dir: Config.path(c, "parts/mcp"),
+              port: c.ports.mcp,
+              grants: grants,
+              mailbox: {Mailbox, pid.(:mailbox)},
+              delegates: {Delegates, pid.(:delegates)},
+              services: {Services, pid.(:services)},
+              workstation: host,
+              tracker: {Tracker, pid.(:tracker)},
+              stream: {Stream, pid.(:stream)},
+              transcripts: {Transcripts, pid.(:transcripts)},
+              place: &Sessions.Agents.place(w.agents, &1),
+              tool_timeout: c.tool_timeout,
+              margin: c.margin,
+              acts: pid.(:acts),
+              mover: {Mover, pid.(:mover)},
+              prompts: {Prompts, pid.(:prompts)},
+              mains: {Mains, pid.(:mains)},
+              extensions: extensions}
+           end
          end},
         {:mcp_http,
          fn pid ->

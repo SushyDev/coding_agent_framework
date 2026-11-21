@@ -81,10 +81,93 @@ defmodule CodingAgentFramework.Config do
     runs under the wrapper `<home>/bin/caf-run`, which takes a lease of that class (`heavy`,
     `builder` or `landing`, its units the `job_lease` of the class) before it runs. None by
     default;
-  - `extensions`: the app's bundles, each `%{name, scope, tools}` as
-    `CodingAgentFramework.Extension` takes them, served on the agents' MCP endpoint beside the
-    framework's tools; checked here with `MCP.extensions/3`, so a clash or a slow tool refuses
-    the config, `{:refused, {:bad, :extensions, reason}}`. None by default;
+  - `extensions`: the app's bundles as data, each `{module, opts}` (F-188): the tree calls the
+    module's `bundle(opts, part)` (`CodingAgentFramework.Extension`'s callback) and serves the
+    bundle, `%{name, scope, tools}`, on the agents' MCP endpoint beside the framework's tools.
+    `part` answers a part's process by its key (`CodingAgentFramework.parts/1`'s), looked up
+    when it is called, so a tool reaches the live part after a restart. `opts` is data: a
+    function, pid, port or reference in it is refused. Checked here, the bundles made with a
+    `part` that answers nil, with `MCP.extensions/3`, so a clash or a slow tool refuses the
+    config, `{:refused, {:bad, :extensions, reason}}`. None by default;
+
+        defmodule App.Board do
+          @behaviour CodingAgentFramework.Extension
+
+          @impl true
+          def bundle(opts, part) do
+            tool = %{name: "board_cards", description: "The board's cards.",
+              schema: %{type: "object"},
+              call: fn caller, _args -> App.cards(part.(:mailbox), opts[:board], caller) end}
+
+            %{name: "board", scope: %{roles: [:main]}, tools: [tool]}
+          end
+        end
+
+        Config.new(..., extensions: [{App.Board, board: "web"}])
+        #=> {:ok, %Config{extensions: [{App.Board, [board: "web"]}]}}
+        Config.new(..., extensions: [{App.Board, board: fn -> "web" end}])
+        #=> {:refused, {:bad, :extensions, {:not_data, App.Board}}}
+
+  - `dialogs`: how a startup dialog is answered (F-140, `Sessions`' `dialog:`), its kind
+    (`:trust`, `:imports`) to the label of the option to press; a kind not named, or a label
+    the dialog does not show, waits on a person (the `dialog` prompt). None by default: every
+    dialog waits. `dialog/3` is the answer the tree hands `Sessions`;
+
+        iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
+        ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
+        ...>   env: %{}, user: "me", dialogs: %{trust: "Yes, I trust this folder"})
+        iex> CodingAgentFramework.Config.dialog(c, :trust, ["No, exit", "Yes, I trust this folder"])
+        {:answer, "Yes, I trust this folder"}
+        iex> CodingAgentFramework.Config.dialog(c, :imports, ["Yes", "No"])
+        :ask
+
+  - `secret_file`: the absolute path of the file that keeps the hooks' secret, which every
+    hook, the waiter hook (`Sessions`' `waiter:`, on `ports.intake`) and the heavy commands'
+    wrapper post with (`Intake.secret/1`, made at the first start with no access for others).
+    The secret itself is never in the config. `<home>/intake.secret` by default;
+
+        iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
+        ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
+        ...>   env: %{}, user: "me")
+        iex> c.secret_file
+        "/srv/caf/intake.secret"
+
+  - `restarts`: the tree's restart budget, `%{max_restarts: n, max_seconds: s}` as OTP's
+    supervisor takes it: more than `n` restarts in `s` seconds end the tree, and the app's
+    supervisor decides. `%{max_restarts: 3, max_seconds: 5}`, OTP's own, by default;
+
+        iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
+        ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{},
+        ...>   user: "me", restarts: %{max_restarts: -1})
+        {:refused, {:bad, :restarts}}
+
+  - `parts`: each part's own options, as data, by the part's key in the tree (and `holder`,
+    the process holder every part that holds a session shares): the bounds and deadlines the
+    parts set by default, which the tree passes over its own wiring. Each is `parts/0`'s:
+    `acts` `claims` (the old claims file `Acts` takes once, `<home>/claims.db` by default);
+    `holder` `timeout`; `sampler` `interval` (the config's `interval` by default); `intake`
+    `deadline`, `tool_deadline`, `waiter_deadline` and `stop_deadline` (each under its hook's
+    timeout less the margin `Intake.Plug` waits past it), `beat` and `stop_cap`; `sessions`
+    `look` and `poll`; `recoveries` `max_age`, `window` and `end_grace`; `scheduler`
+    `queue_bound` and `max_wait` (a count, or a map with every class), and `age` (or nil);
+    `logins` `max_age`; `mailbox` `take_bound`; `mains` `clone_timeout`; `delegates`
+    `idle_bound` (none by default: an idle delegate is not told to its parent); `mover`
+    `timeout` and `stop`; `limits` `margin`, `credits` and `bound`; `stuck_backgrounds`
+    `quiet`; `hooks_silent` `bound` and `slack`; `registry`, `transcripts` and `stream`
+    `timeout`; `mcp` `cap`. Each is ms but for a count. An option not named is the part's own
+    default. A part or option it does not know, or a value out of shape, is refused naming
+    both, `{:refused, {:bad, :parts, {part, option}}}`.
+
+        iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
+        ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
+        ...>   env: %{}, user: "me", parts: %{delegates: %{idle_bound: 600_000}})
+        iex> CodingAgentFramework.Config.options(c, :delegates, host: "ws")
+        [host: "ws", idle_bound: 600_000]
+        iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
+        ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{},
+        ...>   user: "me", parts: %{intake: %{tool_deadline: 9_000}})
+        {:refused, {:bad, :parts, {:intake, :tool_deadline}}}
+
   - `remedies`: the healer's allow-list (F-182, `CodingAgentFramework.Watch`), symptom kind to
     `%{remedy: remedy | nil, cap: count}`: the one remedy the healer may take for that kind
     (nil for a symptom only shown), and how many of them in one `remedy_bound` (ms, an hour by
@@ -107,6 +190,8 @@ defmodule CodingAgentFramework.Config do
 
   alias CodingAgentFramework.{Mains, MCP, Runs, Watch}
   alias CodingAgentFramework.Mains.Checkout
+  alias CodingAgentFramework.Scheduler.Queue
+  alias CodingAgentFramework.Sessions.Dialog
 
   @enforce_keys [:home, :instance, :programs, :accounts, :ports, :claude, :env]
   defstruct [
@@ -135,6 +220,10 @@ defmodule CodingAgentFramework.Config do
     tool_hooks: %{},
     heavy: [],
     extensions: [],
+    dialogs: %{},
+    secret_file: nil,
+    restarts: %{max_restarts: 3, max_seconds: 5},
+    parts: %{},
     remedies: Watch.default_remedies(),
     remedy_bound: 3_600_000,
     undeclared_cues: :route
@@ -164,8 +253,8 @@ defmodule CodingAgentFramework.Config do
       {:refused, {:bad, :tool_hooks}}
       iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
       ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{}, user: "me",
-      ...>   extensions: [%{name: "message"}])
-      {:refused, {:bad, :extensions, {:extension, "message", :clashes}}}
+      ...>   extensions: [%{name: "board"}])
+      {:refused, {:bad, :extensions, {:not_an_extension, %{name: "board"}}}}
       iex> CodingAgentFramework.Config.new(home: "/" <> String.duplicate("a", 93))
       {:refused, {:bad, :home, {:longer_than, 93}}}
   """
@@ -215,11 +304,27 @@ defmodule CodingAgentFramework.Config do
       not match?(n when is_integer(n) and n > 0, Map.get(fields, :remedy_bound, 1)) ->
         {:refused, {:bad, :remedy_bound}}
 
+      not dialogs?(Map.get(fields, :dialogs, %{})) ->
+        {:refused, {:bad, :dialogs}}
+
+      not secret_file?(Map.get(fields, :secret_file)) ->
+        {:refused, {:bad, :secret_file}}
+
+      not restarts?(Map.get(fields, :restarts, %{max_restarts: 3, max_seconds: 5})) ->
+        {:refused, {:bad, :restarts}}
+
+      not is_map(Map.get(fields, :parts, %{})) ->
+        {:refused, {:bad, :parts}}
+
+      (bad = bad_part(Map.get(fields, :parts, %{}))) != nil ->
+        {:refused, {:bad, :parts, bad}}
+
       true ->
         c = struct!(__MODULE__, fields)
         c = if c.user && is_map(c.env), do: %{c | env: Map.put(c.env, :user, c.user)}, else: c
+        c = %{c | secret_file: c.secret_file || path(c, "intake.secret")}
 
-        with {:ok, _} <- extensions(c) do
+        with {:ok, _} <- extensions(c, fn _key -> nil end) do
           projects = Map.new(c.projects, fn {n, p} -> {n, Mains.project(c.home, n, p)} end)
 
           # Two projects in one checkout directory (F-156).
@@ -231,10 +336,178 @@ defmodule CodingAgentFramework.Config do
     end
   end
 
-  defp extensions(c) do
-    with {:refused, why} <- MCP.extensions(c.extensions, c.tool_timeout, c.margin),
-         do: {:refused, {:bad, :extensions, why}}
+  @doc """
+  The bundles the config's `extensions` make, in order: each module's `bundle(opts, part)`,
+  checked whole with `MCP.extensions/3`. `part` answers a part's process by its key, or nil.
+  The tree hands it the live lookup when `MCP` starts; `new/1` checks with one that answers
+  nil. Answers `{:ok, bundles}` or `{:refused, {:bad, :extensions, reason}}`: `{:not_an_extension,
+  entry}` (not a `{module, opts}` whose module has `bundle/2`), `{:not_data, module}` (a
+  function, pid, port or reference in its options), `{:raised, module, message}`, or the
+  bundles' own refusal.
+  """
+  @spec extensions(t, (atom -> pid | nil)) :: {:ok, [map]} | {:refused, {:bad, :extensions, term}}
+  def extensions(%__MODULE__{} = c, part) do
+    with {:ok, bundles} <- bundles(c.extensions, part),
+         {:ok, _tools} <- MCP.extensions(bundles, c.tool_timeout, c.margin) do
+      {:ok, bundles}
+    else
+      {:refused, why} -> {:refused, {:bad, :extensions, why}}
+    end
   end
+
+  defp bundles(entries, part) when is_list(entries) do
+    Enum.reduce_while(entries, {:ok, []}, fn entry, {:ok, acc} ->
+      case bundle(entry, part) do
+        {:ok, b} -> {:cont, {:ok, acc ++ [b]}}
+        refused -> {:halt, refused}
+      end
+    end)
+  end
+
+  defp bundles(entries, _part), do: {:refused, {:not_an_extension, entries}}
+
+  defp bundle({module, opts} = entry, part) when is_atom(module) do
+    cond do
+      not (Code.ensure_loaded?(module) and function_exported?(module, :bundle, 2)) ->
+        {:refused, {:not_an_extension, entry}}
+
+      not data?(opts) ->
+        {:refused, {:not_data, module}}
+
+      true ->
+        try do
+          {:ok, module.bundle(opts, part)}
+        rescue
+          e -> {:refused, {:raised, module, Exception.message(e)}}
+        end
+    end
+  end
+
+  defp bundle(entry, _part), do: {:refused, {:not_an_extension, entry}}
+
+  # Plain data: what a config file could hold.
+  defp data?(v) when is_function(v) or is_pid(v) or is_port(v) or is_reference(v), do: false
+  defp data?(v) when is_list(v), do: Enum.all?(v, &data?/1)
+  defp data?(v) when is_tuple(v), do: data?(Tuple.to_list(v))
+  defp data?(%{} = v), do: Enum.all?(v, fn {k, x} -> data?(k) and data?(x) end)
+  defp data?(_v), do: true
+
+  @doc """
+  The answer the config's `dialogs` gives startup dialog `kind` showing `options`, as
+  `Sessions`' `dialog:` callback answers: `{:answer, label}` for the label it names when the
+  dialog shows it, else `:ask` (a person answers).
+  """
+  @spec dialog(t, Dialog.kind(), [String.t()]) :: {:answer, String.t()} | :ask
+  def dialog(%__MODULE__{dialogs: dialogs}, kind, options) do
+    label = Map.get(dialogs, kind)
+    if label in options, do: {:answer, label}, else: :ask
+  end
+
+  defp dialogs?(d) do
+    is_map(d) and
+      Enum.all?(d, fn {kind, label} ->
+        kind in Dialog.kinds() and is_binary(label) and label != "" and
+          not (label =~ ~r/[[:cntrl:]]/)
+      end)
+  end
+
+  defp secret_file?(nil), do: true
+  defp secret_file?(path), do: path?(path)
+
+  defp path?(path), do: is_binary(path) and Path.type(path) == :absolute
+
+  defp restarts?(%{max_restarts: n, max_seconds: s} = r) when map_size(r) == 2,
+    do: is_integer(n) and n >= 0 and is_integer(s) and s > 0
+
+  defp restarts?(_r), do: false
+
+  # Each part's own options an app may set, by type: ms (a positive integer, `{:ms, below}`
+  # under a bound), a count, a path, or one by class. `Intake`'s deadlines stay under each
+  # hook's timeout (600 s and 10 s, `Intake.hooks/4`; `Intake.waiter_hook/5`'s 7,200 s) less
+  # the margin `Intake.Plug` waits past them (5 s, 1.5 s, 5 s, 5 s).
+  @parts %{
+    acts: [claims: :path],
+    holder: [timeout: :ms],
+    sampler: [interval: :ms],
+    intake: [
+      deadline: {:ms, 595_000},
+      tool_deadline: {:ms, 8_500},
+      waiter_deadline: {:ms, 7_195_000},
+      stop_deadline: {:ms, 595_000},
+      beat: :ms,
+      stop_cap: :count
+    ],
+    sessions: [look: :ms, poll: :ms],
+    recoveries: [max_age: :ms, window: :ms, end_grace: :ms],
+    scheduler: [queue_bound: :by_class, max_wait: :by_class, age: :ms_or_nil],
+    logins: [max_age: :ms],
+    mailbox: [take_bound: :ms],
+    mains: [clone_timeout: :ms],
+    delegates: [idle_bound: :ms],
+    mover: [timeout: :ms, stop: :ms],
+    limits: [margin: :ms, credits: :ms, bound: :count],
+    stuck_backgrounds: [quiet: :ms],
+    hooks_silent: [bound: :ms, slack: :ms],
+    registry: [timeout: :ms],
+    transcripts: [timeout: :ms],
+    stream: [timeout: :ms],
+    mcp: [cap: :ms]
+  }
+
+  @doc """
+  Each part's options the config's `parts` may set, by the part's key, each with its type.
+
+      iex> CodingAgentFramework.Config.parts()[:holder]
+      [timeout: :ms]
+  """
+  @spec parts() :: %{atom => keyword}
+  def parts, do: @parts
+
+  @doc """
+  The options the tree starts part `key` with: its own wiring `opts`, and over it the
+  config's `parts` for that key.
+
+      iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
+      ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
+      ...>   env: %{}, user: "me", parts: %{sampler: %{interval: 500}})
+      iex> CodingAgentFramework.Config.options(c, :sampler, db: "caf.db", interval: 2_000)
+      [db: "caf.db", interval: 500]
+  """
+  @spec options(t, atom, keyword) :: keyword
+  def options(%__MODULE__{parts: parts}, key, opts),
+    do: Keyword.merge(opts, Map.to_list(Map.get(parts, key, %{})))
+
+  # The first part or `{part, option}` out of shape, or nil.
+  defp bad_part(parts) do
+    Enum.find_value(parts, fn {part, opts} ->
+      allowed = Map.get(@parts, part)
+
+      cond do
+        allowed == nil or not is_map(opts) ->
+          part
+
+        bad = Enum.find(opts, fn {k, v} -> not typed?(Keyword.get(allowed, k), v) end) ->
+          {part, elem(bad, 0)}
+
+        true ->
+          nil
+      end
+    end)
+  end
+
+  defp typed?(:ms, v), do: is_integer(v) and v > 0
+  defp typed?({:ms, below}, v), do: typed?(:ms, v) and v < below
+  defp typed?(:count, v), do: is_integer(v) and v > 0
+  defp typed?(:path, v), do: path?(v)
+  defp typed?(:ms_or_nil, v), do: v == nil or typed?(:ms, v)
+
+  defp typed?(:by_class, %{} = v),
+    do:
+      Enum.sort(Map.keys(v)) == Enum.sort(Queue.classes()) and
+        Enum.all?(v, &typed?(:ms, elem(&1, 1)))
+
+  defp typed?(:by_class, v), do: typed?(:ms, v)
+  defp typed?(nil, _v), do: false
 
   defp tool_hooks?(hooks) do
     is_map(hooks) and
