@@ -70,6 +70,12 @@ defmodule CodingAgentFramework.Watch do
   process group under the delegate, and no event names a background task's pid, so a quiet stdio
   MCP server spawned the same way would read as stuck. It stays off by default until a run on
   Linux records the group's shape; an operator turns it on with `remedies:`.
+
+  The usage limit's three phases (F-186, `Limits`), one kind each, so each acts once per limit:
+  `limit_menu` (the menu shown, the account unable to spend) by `press_stop`, and `limit_reset`
+  (the reset passed, no own wait went on) by `go_on`, each 20 per bound, since one limit holds
+  every agent of an account at once; and `limited`, each agent's limit with its window, shown
+  only.
   """
   @spec default_remedies() :: %{String.t() => entry}
   def default_remedies do
@@ -78,7 +84,10 @@ defmodule CodingAgentFramework.Watch do
       "end_owed" => %{remedy: "end", cap: 10},
       "absent_main" => %{remedy: "resume", cap: 10},
       "stuck_background" => %{remedy: nil, cap: 0},
-      "hooks_silent" => %{remedy: nil, cap: 0}
+      "hooks_silent" => %{remedy: nil, cap: 0},
+      "limited" => %{remedy: nil, cap: 0},
+      "limit_menu" => %{remedy: "press_stop", cap: 20},
+      "limit_reset" => %{remedy: "go_on", cap: 20}
     }
   end
 

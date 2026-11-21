@@ -174,7 +174,7 @@ defmodule CodingAgentFramework.Sessions do
   alias CodingAgentFramework.{ClaudeCLI, Holder, Programs, Registry, Shell, Stream, Tmux}
   alias CodingAgentFramework.{Accounts, Acts, ClaudeCLI.Options, Inlet, Intake, Store}
   alias CodingAgentFramework.Transcripts
-  alias CodingAgentFramework.Sessions.{Agents, Dialog, Memory, Table, Turn, Worktree}
+  alias CodingAgentFramework.Sessions.{Agents, Dialog, Limit, Memory, Table, Turn, Worktree}
 
   @timeout 30_000
   # Each git command of a worktree, and the checks and the add before a setup: three lists or
@@ -463,9 +463,12 @@ defmodule CodingAgentFramework.Sessions do
   @doc """
   Writes the usage limit agent `name`'s last turn ended at, or its remedy's phase, on its row
   (`Sessions.Table`'s `usage_limit`, F-185): `limit` a map with `"until"` (the reset, Unix
-  seconds) and the remedy's own keys (`"step"`, `"window"`, `"line"`), or nil once a turn ran
-  after the limit. The limit's reader and its remedies are its callers (`model/tla/Limit.tla`'s
-  `Read`, `Continued` and each phase); the row is announced, so `Mailbox` reads its turn again.
+  seconds) and the remedy's own keys (`Sessions.Limit`), a map without `"until"` (the counts a
+  row keeps once its limit cleared), or nil. The limit's healer is its caller
+  (`CodingAgentFramework.Limits`; `model/tla/Limit.tla`'s `Read`, `Continued` and each phase);
+  the row is announced, so `Mailbox` reads its turn again. Option `from:` is the step the
+  caller read (nil for no limit): the write is refused `{:moved, step}` when the row's step is
+  another now, so a person's answer (`answer_limit/5`) taken meanwhile is never overwritten.
   Answers `{:ok, row}`, `{:refused, :no_session}` or `{:refused, {:bad, :limit}}`. Option:
   `:timeout` (ms, default 5 000).
 
@@ -473,8 +476,40 @@ defmodule CodingAgentFramework.Sessions do
       #=> {:ok, %{name: "app-fix", usage_limit: ~s({"step":"look","until":1795254036}), ...}}
   """
   @spec put_limit(GenServer.server(), String.t(), map | nil, keyword) :: outcome(map)
-  def put_limit(sessions, name, limit, opts \\ []),
-    do: call(sessions, {:put_limit, name, limit}, Keyword.get(opts, :timeout, @read))
+  def put_limit(sessions, name, limit, opts \\ []) do
+    from = if Keyword.has_key?(opts, :from), do: {:from, opts[:from]}, else: :any
+    call(sessions, {:put_limit, name, limit, from}, Keyword.get(opts, :timeout, @read))
+  end
+
+  @doc """
+  A person's answer, as `by`, of the usage limit prompt `kind` (`"limit"` or `"usage_credits"`)
+  agent `name`'s row shows (`Sessions.Limit.answer/4`; `Limit.tla`'s `AnswerLimit` and
+  `AnswerCredits`), checked and written in one step of this process, the row's one writer: one
+  answer gets in. `Prompts` hands it on. Answers `{:ok, row}`; refused `:no_session`,
+  `:settled` (the row shows no such prompt now), or `{:bad, :choice}`.
+
+      Sessions.answer_limit(sessions, "app-main", "limit", "go_on", "sam")
+      #=> {:ok, %{name: "app-main", ...}}
+  """
+  @spec answer_limit(GenServer.server(), String.t(), String.t(), term, String.t(), keyword) ::
+          outcome(map)
+  def answer_limit(sessions, name, kind, choice, by, opts \\ []),
+    do:
+      call(sessions, {:answer_limit, name, kind, choice, by}, Keyword.get(opts, :timeout, @read))
+
+  @doc """
+  Presses the option `label` of the usage limit menu agent `name`'s screen shows: the `Inlet`'s
+  checked press (`Inlet.choose/5`, kind `:usage_limit_menu`, as a startup dialog's), in a task,
+  so other calls go on meanwhile; its answer is this call's. The caller decided the press and
+  wrote its claim (`CodingAgentFramework.Limits`). Only for a `running` interactive row that is
+  `limited` with its step `press`. Answers the `Inlet`'s `{:ok, :sent}` (the menu left),
+  `{:refused, reason}` (no key went) or `{:unknown, reason}` (a key may have gone: never
+  pressed again); refused here `:no_session`, `{:not_running, status}`, `:headless`,
+  `{:step, step}`, `{:no_option, label}` (the row's options read no such label) or `:no_inlet`.
+  """
+  @spec press_limit(GenServer.server(), String.t(), String.t(), keyword) :: outcome(:sent)
+  def press_limit(sessions, name, label, opts \\ []),
+    do: call(sessions, {:press_limit, name, label}, Keyword.get(opts, :timeout, @press + @read))
 
   @doc """
   Delegate `name` is done for good: its report went in and no process of it may live. Its row
@@ -819,16 +854,60 @@ defmodule CodingAgentFramework.Sessions do
     {:reply, reply, state}
   end
 
-  def handle_call({:put_limit, name, limit}, _from, state) do
+  def handle_call({:put_limit, name, limit, from}, _from, state) do
     reply =
       with {:ok, text} <- limit_text(limit),
-           %{} = row <- Table.get(state.db, state.host.name, name) || {:refused, :no_session} do
+           %{} = row <- Table.get(state.db, state.host.name, name) || {:refused, :no_session},
+           :ok <- limit_from(row, from) do
         Table.update(state.db, row.id, usage_limit: text)
         announce(state, row)
         {:ok, Table.get(state.db, state.host.name, name)}
       end
 
     {:reply, reply, state}
+  end
+
+  def handle_call({:answer_limit, name, kind, choice, by}, _from, state) do
+    reply =
+      with true <- (is_binary(by) and by != "") or {:refused, {:bad, :by}},
+           %{} = row <- Table.get(state.db, state.host.name, name) || {:refused, :no_session},
+           {:ok, limit} <- Limit.answer(Agents.limit(row), kind, choice, by),
+           {:ok, text} <- limit_text(limit) do
+        Table.update(state.db, row.id, usage_limit: text)
+        announce(state, row)
+        {:ok, Table.get(state.db, state.host.name, name)}
+      end
+
+    {:reply, reply, state}
+  end
+
+  # The press goes in a task, as a dialog's: its answer replies to the caller once it is back.
+  def handle_call({:press_limit, name, label}, from, state) do
+    with %{} = row <- Table.get(state.db, state.host.name, name) || {:refused, :no_session},
+         true <- Agents.running?(row) or {:refused, {:not_running, row.status}},
+         false <- Agents.headless?(row) and {:refused, :headless},
+         limit = Agents.limit(row),
+         "press" <- Limit.step(limit) || {:refused, {:step, nil}},
+         true <- label in (limit["options"] || []) or {:refused, {:no_option, label}},
+         true <- state.inlet != nil or {:refused, :no_inlet} do
+      {inlet, release} = {state.inlet, row.release}
+
+      Task.async(fn ->
+        answer =
+          try do
+            Inlet.choose(inlet, name, :usage_limit_menu, label, release: release, timeout: @press)
+          catch
+            how, _ -> {:unknown, {how, :press}}
+          end
+
+        {:limit_pressed, from, answer}
+      end)
+
+      {:noreply, state}
+    else
+      step when is_binary(step) -> {:reply, {:refused, {:step, step}}, state}
+      refused -> {:reply, refused, state}
+    end
   end
 
   def handle_call({:ended, name}, _from, state) do
@@ -1238,6 +1317,13 @@ defmodule CodingAgentFramework.Sessions do
     {:noreply, pressed(state, press, answer)}
   end
 
+  # A usage limit menu's press answered, from its task: the caller's answer.
+  def handle_info({ref, {:limit_pressed, from, answer}}, state) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    GenServer.reply(from, answer)
+    {:noreply, state}
+  end
+
   # An unknown row's look asked by a settle (`peek/2`): one look per name at a time, in a task
   # linked to this process, so a pane read (up to `@read` ms) never holds the other calls.
   def handle_info({:peek, name}, state) do
@@ -1610,7 +1696,23 @@ defmodule CodingAgentFramework.Sessions do
   defp limit_text(%{"until" => until} = limit) when is_integer(until) and not is_struct(limit),
     do: {:ok, Store.text(limit)}
 
+  # Only the counts a row keeps once its limit cleared (`Sessions.Limit.cleared/1`).
+  defp limit_text(%{} = kept) when not is_struct(kept) and map_size(kept) > 0 do
+    if Enum.all?(kept, fn {k, v} -> k in ["goes", "noted"] and is_integer(v) end),
+      do: {:ok, Store.text(kept)},
+      else: {:refused, {:bad, :limit}}
+  end
+
   defp limit_text(_), do: {:refused, {:bad, :limit}}
+
+  defp limit_from(_row, :any), do: :ok
+
+  defp limit_from(row, {:from, step}) do
+    case Limit.step(Agents.limit(row)) do
+      ^step -> :ok
+      other -> {:refused, {:moved, other}}
+    end
+  end
 
   # Adopt: a starting row waits for its deadline before it is given up, and a failed read
   # decides nothing.

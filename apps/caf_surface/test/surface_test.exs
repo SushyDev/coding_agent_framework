@@ -71,7 +71,8 @@ defmodule CodingAgentFramework.SurfaceTest do
     keys = keys ++ ~w(services logins)a
 
     keys =
-      keys ++ ~w(prompts mains absent_mains stuck_backgrounds hooks_silent mcp mcp_http ends)a
+      keys ++
+        ~w(prompts mains absent_mains limits stuck_backgrounds hooks_silent mcp mcp_http ends)a
 
     assert Enum.sort(Map.keys(parts)) ==
              Enum.sort(keys ++ [:registry, :transcripts])
@@ -640,7 +641,7 @@ defmodule CodingAgentFramework.SurfaceTest do
   @needs %{
     "registry" => [:sessions, :mover],
     # A headless session's windows and limit are Usage's (F-181).
-    "stream" => [:sessions, :delegates, :mailbox, :mover, :usage, :stuck_backgrounds],
+    "stream" => [:sessions, :delegates, :mailbox, :mover, :usage, :stuck_backgrounds, :limits],
     "tmux" => [:sessions, :recoveries],
     "sessions" => [
       :delegates,
@@ -650,21 +651,23 @@ defmodule CodingAgentFramework.SurfaceTest do
       :scheduler,
       :mains,
       :prompts,
-      :absent_mains
+      :absent_mains,
+      :limits
     ],
     "mains" => [:scheduler],
     # A transcript's limit line is the account's record (F-185).
-    "transcripts" => [:delegates, :mailbox, :hooks_silent, :usage],
+    "transcripts" => [:delegates, :mailbox, :hooks_silent, :usage, :limits],
     "delegates" => [:mailbox, :scheduler],
     "usage" => [:scheduler],
     "jobs" => [:scheduler],
     "mailbox" => [:delegates, :mover, :prompts],
     # The inbox reads every hook row's cue: a held request opens a prompt (F-179).
-    "intake" => [:prompts, :hooks_silent],
-    "waiters" => [:mailbox, :prompts, :hooks_silent],
+    # A StopFailure or a quota_auto_resume_* is the limit's screen to read again (F-186).
+    "intake" => [:prompts, :hooks_silent, :limits],
+    "waiters" => [:mailbox, :prompts, :hooks_silent, :limits],
     # A symptom the healer asks about is a remedy prompt (F-182); its answer is the healers'
     # clear (F-183).
-    "watch" => [:prompts, :recoveries, :absent_mains, :stuck_backgrounds],
+    "watch" => [:prompts, :recoveries, :absent_mains, :stuck_backgrounds, :limits],
     # A login a check refused is a login prompt (F-181).
     "logins" => [:prompts]
   }

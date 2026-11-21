@@ -28,6 +28,7 @@ defmodule CafRecoveries.MixProject do
       {:caf_sessions, in_umbrella: true},
       {:caf_tmux, in_umbrella: true},
       {:caf_transcripts, in_umbrella: true},
+      {:caf_usage, in_umbrella: true},
       {:caf_watch, in_umbrella: true},
       {:caf_test, in_umbrella: true, only: :test}
     ]
