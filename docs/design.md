@@ -677,7 +677,11 @@ F-182 added the `remedy` kind: the `Watch`'s symptom row the healer asked, open 
 `asked`, answered by `Watch.answer/5`; it is not told to the agent's parent, since it is the
 `Watch`'s wait, not the agent's. F-181 added the `login` kind: `Logins`' row of an account a
 check found not logged in, id `login:<account>`, no agent, answered `check` (`Logins.recheck/3`).
-Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
+F-186 added the `limit` and `usage_credits` kinds from the agent row's usage limit, opened by
+its healer (`Limits`, not `Sessions` as the table says: `Sessions` is the row's writer), ids
+`limit:<agent>:<until>` and `usage_credits:<agent>:<until>`, answered through
+`Sessions.answer_limit/6`; the `Scheduler`'s `limit` prompt for a start refused at a limit is
+not built. Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
 `expired` prompts kept shown, and the kinds that need a reading first.
 
 `Prompt.tla` (B1) is its contract: it instances `Hold` (one response, its deadline, its holder's
@@ -816,6 +820,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Watch` | the symptom record and the healer's allow-list (F-182, `Heal.tla`): each symptom state a fact (kind, target, state, since, evidence, source), recorded before anything acts on it and passed when no longer read; the list's acts (the healer's drop, the operator's revoke and approve), so a restart reads it as left; a state the healer leaves to a person is `asked`, the `remedy` prompt `Prompts` reads | `symptoms`, `remedy_acts` |
 | `Recoveries` | the healer (F-182): records each broken state in `Watch`, acts only by the allow-list's remedy for its kind and under its cap, takes its act in `Acts`, acts once per state, verifies, drops a remedy whose verify failed, and asks for the rest; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after its end within its stop's deadline, by `Holder.Process` (`Sessions` itself never kills). Two states wait for a person, whose clear (the `remedy` prompt's answer, F-183) makes the next one new: a viewer lost a third time within a window, and an end whose process outlived the KILL (`unknown`, F-118's new-5); the fault ledger shows both | no table of its own |
 | `AbsentMains` | the healer of `absent_main` (F-183, `Remedies.tla`): a main session whose process exited by itself, resumed once per absence through `Mains` under the `Scheduler`'s lease, on the same shape as `Recoveries`; a second absence of one main within the bound is asked | no table of its own |
+| `Limits` | the healer of a usage limit (F-186, `Limit.tla`): each agent's limit record read onto its row, and each phase's remedy (`press_stop`, `go_on`) on the same shape, written through `Sessions`, pressed through its checked press, the word stored through `Mailbox` ("Usage limits") | no table of its own: the phase is the agent row's `usage_limit` |
 | `Grants` | decides whether a caller may act on a target, by the edges of `Sessions`' tree; a pure module, handed the tree's function | — |
 | `MCP` | the agent tools ("Agents working together"); each call is checked by `Grants` once, and each fix takes its act in `Acts` | `mcp_tokens`, `mcp_calls` |
 | `Ghostty` | opens or focuses a session's terminal window | — |
@@ -833,19 +838,20 @@ write fails its tests; an app's default routes it as any other. A cue of each to
 | Topic | Sent by | Reaches, beside the `Tracker` (which reads every topic) |
 |---|---|---|
 | `registry:<host>:<account>` | `Registry` | `Sessions`, `Mover` (a move's stop is asked again only on this cue and the stream's) |
-| `stream:<host>` | `Stream` | `Sessions`, `Delegates`, `Mailbox`, `Mover`, `Usage` (a headless session's windows and limit) |
+| `stream:<host>` | `Stream` | `Sessions`, `Delegates`, `Mailbox`, `Mover`, `Usage` (a headless session's windows and limit), `Limits` (a headless agent's limit) |
 | `logins:<host>` | `Logins` | `Prompts` (a `login` prompt opened or closed) |
 | `tmux:<host>:<server>` | `TmuxSampler` | `Sessions`, `Recoveries` |
-| `watch` | `Watch` | `Prompts` (a `remedy` prompt opened or closed) |
-| `sessions:<host>` | `Sessions` | `Delegates`, `Mailbox`, `Mover`, `Scheduler`, `Mains` (a start that runs or is refused), the app's end of an owner's services |
+| `watch` | `Watch` | `Prompts` (a `remedy` prompt opened or closed), the healers (`Recoveries`, `AbsentMains`, `StuckBackgrounds`, `Limits`: an answer is their clear) |
+| `sessions:<host>` | `Sessions` | `Delegates`, `Mailbox`, `Mover`, `Scheduler`, `Mains` (a start that runs or is refused), `Prompts`, `AbsentMains`, `Limits` (a limit's phase moved, or a person's answer), the app's end of an owner's services |
 | `mains:<host>` | `Mains` | `Scheduler` (a main session's start ended) |
-| `transcripts:<host>:<account>` | `Transcripts` | `Delegates`, `Mailbox` (a waiter row's lines are read only on this cue, the waiters' and the take bound), `Usage` (a transcript's limit line, F-185) |
+| `transcripts:<host>:<account>` | `Transcripts` | `Delegates`, `Mailbox` (a waiter row's lines are read only on this cue, the waiters' and the take bound), `Usage` (a transcript's limit line, F-185), `Limits` (an agent's limit line, and a turn after it) |
 | `delegates:<host>` | `Delegates` | `Mailbox`, `Scheduler` (a delegate's work ended) |
 | `mailbox` | `Mailbox` | `Delegates`, `Mover` |
-| `intake:<host>:<account>:waiters` | `Intake` | `Mailbox` |
+| `intake:<host>:<account>:waiters` | `Intake` | `Mailbox`, `Limits` (a turn ended: its screen read again) |
 | `usage:<host>:<account>` | `Usage` | `Scheduler` (a queued request's window ran out) |
 | `jobs` | `Jobs` | `Scheduler` (a job's work ended) |
-| `intake:<host>:<account>`, `acts:…`, `services`, `copies`, `scheduler:<host>` (a lease's row, or `pressure: level` at each change of the level) | their parts | none |
+| `intake:<host>:<account>` | `Intake` | `Prompts`, `HooksSilent`, `Limits` (a `StopFailure` or a `quota_auto_resume_*`: the screen read again, F-186) |
+| `acts:…`, `services`, `copies`, `scheduler:<host>` (a lease's row, or `pressure: level` at each change of the level) | their parts | none |
 
 No cue says that a host's job or service changed, so `Jobs` and `Services` settle their rows on
 their own interval, as a reader reads, and `Stream` reads its logs on one; each of the three
@@ -2704,7 +2710,8 @@ person's prompt (`NoAgentLeftLimited`).
 
 **What is a person's**: usage credits, only by the `usage_credits` prompt's answer and only
 where the account allows them; the `limit` prompt's answer (go on now, move to another account,
-or leave it), opened by `Sessions` with no deadline, so it waits for a person; and anything a
+or leave it), opened on the agent row by the healer (`Limits`) with no deadline, so it
+waits for a person; and anything a
 person does at the viewer first (an Esc, a menu's option, a prompt typed), which the next screen
 read takes as it finds it and which withdraws the prompt it answered. The `limit` prompt the
 `Scheduler` opens for a start refused at a limit keeps its deadline and its default, the wait.
@@ -2765,10 +2772,28 @@ each `transcripts:` cue; the stream's `result` keeps its `api_error`); item 3's 
 fixtures F-181's captures, scrubbed; item 4's turn state `limited` (`Sessions.Turn`, from the
 agent row's `usage_limit`, written by `Sessions.put_limit/4`); and item 5's held rows: `Mailbox`
 hands no row to a `limited` agent before its reset, and reads its turn as any row's after it
-(`Sessions.Agents.unheld/2`). Not built: the reading of each agent's limit onto its row, the
-remedies (`press_stop`, `go_on`, `move`, item 4's timer and prompts, item 5's word, item 7's
-symptom) and the main's prompt. F-185's new-1 and new-2 ask where they run and how the list
-names them, before they are built.
+(`Sessions.Agents.unheld/2`).
+
+Built in F-186 (F-185's new-1 and new-2, decided): one healer, `Limits`, in `caf_recoveries`
+after `Sessions`, `Mailbox`, the `Watch` and `Mains` in the tree, reading the `sessions`,
+`transcripts`, `stream`, `intake` and `watch` cues and a timer of its own to each row's reset
+plus a margin (2 min) or the `usage_credits` prompt's deadline (10 min). Per agent, against
+`Limit.tla`: the newest record read onto the row (`Read`; a transcript's line, or a headless
+stream's limited result with its `rate_limit_event`), the limit cleared once a turn ran after
+it (`Continued`, its count of go-ons kept until a turn ends by itself, `Ended`), and each
+phase: the screen read (`look`), Claude Code's own wait watched (`own`), the menu's stop
+pressed (`press`, through `Sessions.press_limit/4`, the `Inlet`'s checked press of kind
+`usage_limit_menu`), a `usage_credits` prompt where the account can spend, and at the reset
+the word (`send`, `Mailbox.notify/4` kind `notice` under `limit:<agent>:<until>`), a gone
+main resumed with it through `Mains`. The row's field is `Sessions.Limit`'s; `Sessions` writes
+each phase from the step the healer read (`put_limit/4`'s `from:`), and a person's answer
+through `Sessions.answer_limit/6`, so one answer gets in. On the allow-list: `limited` shown
+only (state `limited:<agent>:<until>`), `limit_menu` by `press_stop` and `limit_reset` by
+`go_on`, each state `<kind>:<agent>:<until>`, 20 per bound. `Prompts` shows the `limit` prompt
+(answers `go_on` and `leave`, `Limit.tla`'s `AnswerLimit` and `Leave`) and the
+`usage_credits` prompt (the menu's stop or its credits, by label) from the row's step. Not
+built: the move (`limit_far`, `move_after`, the main's "move to <account>" answer) and a
+delegate's word by `launch` (F-186's new-1).
 
 **Measured** (F-181, by hand on 2.1.322, against a local endpoint at `ANTHROPIC_BASE_URL` that
 answers 429 with the unified rate-limit headers the pinned binary reads, a dummy subscriber's

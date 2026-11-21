@@ -3,8 +3,9 @@
 (* An account's usage limit (F-178), taken as the account's state with     *)
 (* bounded remedies. Claude Code ends a turn at a limit with one record    *)
 (* (a transcript line `apiError: "usage_limit_reached"` whose              *)
-(* `quotaLimits` names the window and its reset, the same in a             *)
-(* `StopFailure` hook's input and, headless, in the stream's result).     *)
+(* `quotaLimits` names the window and its reset, and, headless, the       *)
+(* stream's `rate_limit_event` beside its result; never `StopFailure`,     *)
+(* whose input carries no reset: F-181's new-1).                           *)
 (* From any agent's record the framework marks the account limited until   *)
 (* that reset, refuses every start, resume and lease on it until then, and *)
 (* marks the agent `limited`, never idle. Then, by what the agent shows:   *)
@@ -33,7 +34,9 @@
 (* by `launch` as a resume's prompt when the process is gone, under a      *)
 (* lease the gate grants only once the account's limit passed. The agent   *)
 (* row counts the go-ons in a row that each hit a limit again; past        *)
-(* Bound of them the agent is a `limit` prompt, with no deadline.          *)
+(* Bound of them the agent is a `limit` prompt, with no deadline. Its      *)
+(* answers: go on, move (below), or leave it to the person (F-186), after  *)
+(* which nothing acts on that limit until a turn runs or a new record.     *)
 (*                                                                         *)
 (* The move (F-181, decided by the operator): before the reset, where it   *)
 (* is more than `move_after` away and another usable account has room, a   *)
@@ -51,7 +54,10 @@
 (* Notification hook's `quota_auto_resume_*`, read here as the turn and    *)
 (* the screen they report), and the screen reader (Screen's kinds          *)
 (* `usage_limit_menu` and `usage_limit_wait`). Prompts' two kinds are rows *)
-(* here (`cp`, `pp`); their answer's claim is Prompt.tla's.                *)
+(* here (`cp`, `pp`); their answer's claim is Prompt.tla's. The code       *)
+(* (F-186): Limits, the healer that reads each record onto the row and     *)
+(* takes each phase; Sessions.Limit, the row's field; Sessions'            *)
+(* put_limit, answer_limit and press_limit.                                *)
 (*                                                                         *)
 (* Left abstract: time but the reset's order (a reset is one step, and the *)
 (* framework's clock reads it as the record's `resetsAt` passed); the      *)
@@ -131,10 +137,11 @@ Labels == {"stop", "spend"}
 \*   send      the word to go on is owed, and counted
 \*   word      the word to go on is stored, its turn not yet seen
 \*   prompt    a person's `limit` prompt is open
+\*   left      a person answered it "leave": theirs until a turn runs or a new record
 \*   move      a move to another account is claimed, its act to run
 \*   moved     the move ran: the agent runs on the other account
 Steps == {"none", "look", "own", "credits", "press", "unknown", "idle", "send", "word",
-          "prompt", "move", "moved"}
+          "prompt", "left", "move", "moved"}
 
 VARIABLES
     \* the account's window, the environment
@@ -538,6 +545,16 @@ AnswerLimit(a) ==
     /\ UNCHANGED <<n, win, near, ccVars, rec, seen, lim, label, byPerson, cp, noted, due, wkey, req,
                    pend, restarts, stored, ownGone, grants, wrong, moveVars, moves>>
 
+\* A person answers the limit prompt "leave": the limit is theirs, and nothing acts on it until
+\* a turn runs (Continued) or a new record is read (Read).
+Leave(a) ==
+    /\ Outside
+    /\ pp[a] /\ step[a] = "prompt"
+    /\ pp' = [pp EXCEPT ![a] = FALSE]
+    /\ step' = [step EXCEPT ![a] = "left"]
+    /\ UNCHANGED <<n, win, near, ccVars, rec, seen, lim, label, byPerson, cp, goes, noted, due,
+                   wkey, req, pend, restarts, ghosts, moveVars>>
+
 \* Another usable account has room, or no longer has: another agent's use, its reset. Its
 \* room is its own, never its usage credits.
 Rooms ==
@@ -675,7 +692,7 @@ Framework(a) ==
     \/ Ended(a) \/ Away(a) \/ MoveAct(a)
 
 Person(a) ==
-    \/ GoesStale(a) \/ Esc(a) \/ Type(a) \/ Exit(a) \/ AnswerLimit(a) \/ AnswerMove(a)
+    \/ GoesStale(a) \/ Esc(a) \/ Type(a) \/ Exit(a) \/ AnswerLimit(a) \/ AnswerMove(a) \/ Leave(a)
     \/ \E l \in {"stop", "wait", "spend"} : Choose(a, l)
     \/ \E l \in Labels : AnswerCredits(a, l)
 
@@ -749,8 +766,8 @@ NeverMovesMain == "moved a main unasked" \notin wrong
 MoveOnce == \A a \in Agents : \A k \in Limits : moves[a][k] <= 1
 
 \* Liveness: every agent marked limited, once its limit's reset passed, goes on or is a
-\* person's prompt.
-NoAgentLeftLimited == \A a \in Agents : lim[a] > 0 ~> (lim[a] = 0 \/ pp[a])
+\* person's prompt, or a person took it ("leave").
+NoAgentLeftLimited == \A a \in Agents : lim[a] > 0 ~> (lim[a] = 0 \/ pp[a] \/ step[a] = "left")
 
 \* Liveness: every limit record is read: the agent's row says so.
 RecordRead == \A a \in Agents : hits[a] > seen[a] ~> hits[a] = seen[a]

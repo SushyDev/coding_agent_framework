@@ -62,7 +62,7 @@ defmodule CodingAgentFramework do
   use Supervisor
 
   alias CodingAgentFramework.{AbsentMains, Accounts, Acts, ClaudeCLI, Copies, Delegates, Grants}
-  alias CodingAgentFramework.{Holder, HooksSilent, Host, Inlet, Logins}
+  alias CodingAgentFramework.{Holder, HooksSilent, Host, Inlet, Limits, Logins}
 
   alias CodingAgentFramework.{
     Cues,
@@ -400,6 +400,7 @@ defmodule CodingAgentFramework do
       scheduler: Scheduler.reads(),
       mains: Mains.reads(),
       absent_mains: AbsentMains.reads(),
+      limits: Limits.reads(),
       stuck_backgrounds: StuckBackgrounds.reads(),
       hooks_silent: HooksSilent.reads(),
       prompts: Prompts.reads(),
@@ -796,6 +797,26 @@ defmodule CodingAgentFramework do
             host: host,
             resume: &Mains.resume_main(mains, &1)}
          end},
+        # The healer of a usage limit (F-186): after `Sessions`, which writes its phases and
+        # presses the menu, `Mailbox`, which stores its word, the `Watch`, and `Mains`, which
+        # resumes a gone main with the word under its lease.
+        {:limits,
+         fn pid ->
+           {inlet, mailbox, mains} = {pid.(:inlet), pid.(:mailbox), pid.(:mains)}
+           {transcripts, stream} = {pid.(:transcripts), pid.(:stream)}
+
+           {Limits,
+            agents: w.agents,
+            sessions: pid.(:sessions),
+            acts: pid.(:acts),
+            watch: pid.(:watch),
+            host: host,
+            transcripts: &Transcripts.rows(transcripts, &1),
+            folds: fn -> Stream.rows(stream) end,
+            look: &Inlet.look(inlet, &1.name, &1.release),
+            word: &Mailbox.notify(mailbox, &1, &2, key: &3, kind: :notice),
+            resume: &resume_limited(mains, &1)}
+         end},
         # The healer of a background command that hangs after its delegate's report (F-184):
         # it reads `Stream`'s folds and ends a group by its record.
         {:stuck_backgrounds,
@@ -929,6 +950,12 @@ defmodule CodingAgentFramework do
          {:ok, mcp} <- mcp,
          do: {:ok, Keyword.merge(launch, tool_timeout: c.tool_timeout, mcp: mcp)}
   end
+
+  # A limited agent whose process is gone, at its reset (F-186): a main is resumed through
+  # `Mains`, under its lease, its word the resume's first row. A delegate's resumes are
+  # `Delegates`', so none is made here (F-186's new-1).
+  defp resume_limited(mains, %{kind: "main", name: name}), do: Mains.resume_main(mains, name)
+  defp resume_limited(_mains, _row), do: :none
 
   @doc """
   What the `Scheduler` leases: the config's `resources` (an agent's seat, a heavy run's slot),

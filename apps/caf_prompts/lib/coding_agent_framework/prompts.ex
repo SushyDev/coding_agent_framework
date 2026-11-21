@@ -15,20 +15,25 @@ defmodule CodingAgentFramework.Prompts do
   | `ask` | `Mailbox`'s ask, from an agent to the operator | no answer row and no withdrawal |
   | `remedy` | `Watch`'s symptom state the healer left to a person (F-182) | the row is `asked` |
   | `login` | `Logins`' row of an account whose login a check refused (F-181) | no check found it logged in since |
+  | `limit` | `Sessions`' agent row at a usage limit the healer left to a person (F-186) | its step is `prompt` |
+  | `usage_credits` | `Sessions`' agent row on the usage limit menu, the account able to spend | its step is `credits` |
 
   A later kind is one more clause of `list/2` and of `answer/5`, and the same data.
 
   Each prompt is `%{id, kind, status, agent, parent, project, subagent, text, options,
   opened_at, deadline}`: `id` names its owner's key, so one state is one prompt
   (`"permission:<intake id>"`, `"stop_cap:<intake id>"`, `"dialog:<agent>:<start>:<dialog>"`,
-  `"ask:<mailbox id>"`, `"remedy:<symptom id>"`, `"login:<account>"`); `status` is `open`, `answering` (an answer is on its way to the owner),
+  `"ask:<mailbox id>"`, `"remedy:<symptom id>"`, `"login:<account>"`, `"limit:<agent>:<until>"`,
+  `"usage_credits:<agent>:<until>"`); `status` is `open`, `answering` (an answer is on its way to the owner),
   or for a dialog `cut` or `unknown` (a restart cut its press: a person clears it,
   `Sessions.clear_dialog/4`); `agent` is the agent whose session asks (nil for a session no
   agent row names; a remedy's is its symptom's target when an agent row has that name; a
   login's is nil, since an account waits, not an agent),
   `parent` and `project` its row's; `options` the labels a choice is one of,
   or for an ask its questions, each with its options; `opened_at` and `deadline` wall-clock ms,
-  `deadline` nil for a kind that waits for ever.
+  `deadline` nil for a kind that waits for ever. A `usage_credits` prompt has the deadline the
+  healer set, whose default is the stop, the healer's (`CodingAgentFramework.Limits`); a `limit`
+  prompt has none.
 
   **One answer.** `answer/5` checks the prompt read now (still open, the choice one it offers)
   and hands the choice to its owner, whose own guard is the claim that lets one answer in
@@ -50,7 +55,7 @@ defmodule CodingAgentFramework.Prompts do
   use GenServer
 
   alias CodingAgentFramework.{Intake, Logins, Mailbox, Sessions, Watch}
-  alias CodingAgentFramework.Sessions.Agents
+  alias CodingAgentFramework.Sessions.{Agents, Limit}
 
   @timeout 5_000
   # A dialog's press reads the pane, presses and reads it again (`Sessions.answer_dialog/5`).
@@ -58,7 +63,7 @@ defmodule CodingAgentFramework.Prompts do
   # The most characters of a tool call's input a permission prompt's text carries.
   @input 300
 
-  @kinds ~w(permission stop_cap dialog ask remedy login)
+  @kinds ~w(permission stop_cap dialog ask remedy login limit usage_credits)
 
   @typedoc "A prompt, as the module doc says."
   @type prompt :: %{
@@ -129,7 +134,10 @@ defmodule CodingAgentFramework.Prompts do
   - `remedy`: `"approve"` (its kind's remedy back on the allow-list, the operator's widening)
     or `"leave"` (`Watch.answer/5`);
   - `login`: `"check"`, once a person logged the account in (`bin/caf-login`): its login is
-    checked again now (`Logins.recheck/3`), and the prompt closes when it is logged in.
+    checked again now (`Logins.recheck/3`), and the prompt closes when it is logged in;
+  - `limit`: `"go_on"` (the healer reads the screen again and the go-ons in a row start again)
+    or `"leave"` (nothing more acts on that limit); `usage_credits`: one of its options' labels,
+    the menu's stop or its usage credits (`Sessions.answer_limit/6`).
 
   The prompt is read now and must be `open`, and the choice one it offers; the owner then takes
   it (`Intake.answer/4` with `by: who`, `Sessions.answer_dialog/5` with `by: who`,
@@ -306,7 +314,8 @@ defmodule CodingAgentFramework.Prompts do
     with {:ok, asks} <- asks(s.owners.mailbox) do
       prompts =
         holds(s, rows) ++
-          dialogs(rows) ++ Enum.map(asks, &ask(&1, rows)) ++ remedies(s, rows) ++ logins(s)
+          dialogs(rows) ++
+          Enum.map(asks, &ask(&1, rows)) ++ remedies(s, rows) ++ logins(s) ++ limits(rows)
 
       {:ok, Enum.sort_by(prompts, &{&1.opened_at || 0, &1.id})}
     end
@@ -445,6 +454,33 @@ defmodule CodingAgentFramework.Prompts do
     end
   end
 
+  # The usage limit's prompts, by the row's step (`Sessions.Limit.prompt/1`).
+  defp limits(rows) do
+    for row <- rows, l = Agents.limit(row), kind = Limit.prompt(l) do
+      fields = %{
+        id: "#{kind}:#{row.name}:#{l["until"]}",
+        kind: kind,
+        status: "open",
+        subagent: nil,
+        text: limit_text(kind, l),
+        options: Limit.options(l),
+        opened_at: row.updated_at,
+        deadline: if(kind == "usage_credits", do: l["deadline"])
+      }
+
+      Map.merge(of(row), fields)
+    end
+  end
+
+  defp limit_text("limit", l),
+    do:
+      "usage limit (#{l["window"] || "window"}) until #{l["until"]}: #{l["why"] || "left to you"}"
+
+  defp limit_text("usage_credits", l),
+    do:
+      "usage limit (#{l["window"] || "window"}) until #{l["until"]}: the account can spend " <>
+        "usage credits; stop and wait, or spend (the stop at the deadline)"
+
   defp of(nil), do: %{agent: nil, parent: nil, project: nil}
 
   defp of(row),
@@ -473,6 +509,9 @@ defmodule CodingAgentFramework.Prompts do
 
       ["remedy", n] ->
         settled_if(Watch.Table.select(s.wdb, "id = ?1", [int(n)]) != [])
+
+      [kind, agent, _until] when kind in ["limit", "usage_credits"] ->
+        settled_if(Agents.get(s.agents, agent) != nil)
 
       ["login", account] when s.ldb != nil ->
         settled_if(Map.has_key?(Logins.Table.rows(s.ldb), account))
@@ -513,6 +552,10 @@ defmodule CodingAgentFramework.Prompts do
     do: {:ok, choice}
 
   defp choose(%{kind: "login"}, "check", _who), do: {:ok, :check}
+
+  defp choose(%{kind: kind, options: options}, choice, _who)
+       when kind in ["limit", "usage_credits"],
+       do: if(choice in options, do: {:ok, choice}, else: {:refused, {:bad, :choice}})
 
   defp choose(_prompt, _choice, _who), do: {:refused, {:bad, :choice}}
 
@@ -557,6 +600,10 @@ defmodule CodingAgentFramework.Prompts do
       other -> other
     end
   end
+
+  defp hand(owners, %{kind: kind, agent: agent}, choice, who)
+       when kind in ["limit", "usage_credits"],
+       do: Sessions.answer_limit(owners.sessions, agent, kind, choice, who)
 
   defp check_filter(filter) when is_list(filter) do
     ok? =

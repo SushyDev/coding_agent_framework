@@ -344,4 +344,37 @@ defmodule CodingAgentFramework.PromptsTest do
     assert {:refused, :no_prompt} =
              Prompts.answer_startup(ctx.prompts, "nobody", "trust", @trust, "sam")
   end
+
+  # F-186: the usage limit's two prompts are the agent row's step, answered once through
+  # `Sessions`, its one writer.
+  test "a usage limit's limit and usage_credits prompts, each answered once", ctx do
+    {:ok, table} = Sessions.Table.open(Path.join(ctx.dir, "caf.db"))
+    row = %{host: "test", name: "alpha", socket: "alpha", account: "work", cwd: ctx.dir}
+    id = Sessions.Table.starting(table, Map.merge(row, %{role: "parent", resume: nil}))
+    Sessions.Table.update(table, id, status: "running")
+
+    stop = "Stop and wait for limit to reset"
+    credits = %{"until" => 9, "step" => "credits", "deadline" => 77, "window" => "seven_day"}
+    credits = Map.put(credits, "options", [stop, "Wait here", "Use usage credits"])
+    assert {:ok, _} = Sessions.put_limit(ctx.sessions, "alpha", credits)
+    Prompts.cue(ctx.prompts, %{topic: "sessions:test"})
+
+    assert {:ok, [%{id: "usage_credits:alpha:9" = cid, deadline: 77, options: options}]} =
+             Prompts.read(ctx.prompts, kind: "usage_credits")
+
+    assert options == [stop, "Use usage credits"]
+    assert {:refused, {:bad, :choice}} = Prompts.answer(ctx.prompts, cid, "Wait here", "sam")
+    assert {:ok, _} = Prompts.answer(ctx.prompts, cid, stop, "sam")
+    assert {:refused, :settled} = Prompts.answer(ctx.prompts, cid, stop, "sam")
+
+    asked = %{"until" => 9, "step" => "prompt", "why" => "a press whose outcome is unknown"}
+    assert {:ok, _} = Sessions.put_limit(ctx.sessions, "alpha", asked)
+
+    assert {:ok, [%{id: lid, kind: "limit", deadline: nil, options: ~w(go_on leave)}]} =
+             Prompts.read(ctx.prompts, agent: "alpha", kind: "limit")
+
+    assert {:ok, _} = Prompts.answer(ctx.prompts, lid, "leave", "sam")
+    assert {:refused, :settled} = Prompts.answer(ctx.prompts, lid, "go_on", "sam")
+    assert {:ok, []} = Prompts.read(ctx.prompts, kind: "limit")
+  end
 end
