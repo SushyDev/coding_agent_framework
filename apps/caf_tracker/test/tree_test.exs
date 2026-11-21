@@ -104,4 +104,26 @@ defmodule CodingAgentFramework.Tracker.TreeTest do
     assert %{agents: [%{state: "unread"}, %{state: "unread"}]} =
              Tree.agents(%{{"h", "agents"} => agents})
   end
+
+  # F-180: no session file exists while a startup dialog is shown, so a builder on one read as
+  # `unread`; its row says `dialog`, and the view says so, with the dialog it waits on.
+  test "a session on a startup dialog is `dialog`, never idle, and names the dialog" do
+    m = Map.merge(@main, %{status: "running", session_id: "s0"})
+    d = %{id: 2, host: "h", name: "a-x", kind: "delegate", role: "parent", parent: "m"}
+
+    shown =
+      ~s({"kind":"trust","options":["No, exit","Yes, I trust this folder"],"selected":"No, exit"})
+
+    d = Map.merge(d, %{project: "a", account: "w", status: "dialog", session_id: nil})
+    d = Map.merge(d, %{dialog: shown, answers: nil})
+    view = %{{"h", "agents"} => %{agents: [%{key: 1, row: m}, %{key: 2, row: d}]}}
+
+    assert %{agents: [_, %{name: "a-x", state: "dialog", waits_on: [waits]}]} = Tree.agents(view)
+    assert waits == %{dialog: :trust, options: ["No, exit", "Yes, I trust this folder"]}
+
+    # A row whose dialog cannot be read still says `dialog`.
+    rows = [%{key: 1, row: m}, %{key: 2, row: %{d | dialog: "x"}}]
+    view = put_in(view, [{"h", "agents"}, :agents], rows)
+    assert %{agents: [_, %{state: "dialog", waits_on: []}]} = Tree.agents(view)
+  end
 end

@@ -37,7 +37,9 @@ defmodule CodingAgentFramework.Intake do
     and a second post of the call's key answers the row's decision again, or an empty body.
     The callback corrects a call rather than refusing it where it can (F-169): `{:allow,
     updated_input: map, additional_context: text}` runs the call with the input it gives, and
-    `{:deny, reason, additional_context: text}` refuses it; each key is optional. The context is
+    `{:deny, reason, additional_context: text}` refuses it; each key is optional. `{:pass,
+    updated_input: map, additional_context: text}` corrects the call and leaves the decision to
+    Claude Code's own permission rules, as a pass does (measured on 2.1.322, F-180). The context is
     added to what the agent reads next, at most 10,000 characters, and is best written as facts
     ("`land` runs the gates"), not orders. A correction is a decision as any other: its row has
     the response it sent, the input included. An answer out of shape (a longer context, an
@@ -134,8 +136,8 @@ defmodule CodingAgentFramework.Intake do
   Starts an `Intake`. Options: `db:` (this instance's SQLite path), `host:` (the node's host
   name), and optionally `notify:` (a function of one cue), `deadline:` (ms a hold is kept),
   `pre_tool_use:` (`fun(tool_event) -> :allow | {:deny, reason} | :ask | :pass`, or a
-  correction: `{:allow, updated_input: map, additional_context: text}` or `{:deny, reason,
-  additional_context: text}`),
+  correction: `{:allow, updated_input: map, additional_context: text}`, `{:pass, updated_input:
+  map, additional_context: text}` or `{:deny, reason, additional_context: text}`),
   `post_tool_use:` (`fun(tool_event)`, its value ignored), `tool_deadline:` (ms the first is
   waited for, under 8 s), `waiter_deadline:` (ms a waiter is held, under the waiter hook's
   `timeout`; 7,080,000 by default, under `waiter_hook/5`'s 7,200 s), `beat:` (ms between a
@@ -1024,7 +1026,7 @@ defmodule CodingAgentFramework.Intake do
   end
 
   # The PreToolUse output in the shape Claude Code 2.1.322 reads. It keeps a reason only beside
-  # deny or ask, so an allow carries none; `updatedInput` only beside allow.
+  # deny or ask, so an allow carries none; `updatedInput` only beside allow or with no decision.
   defp tool_response(:allow), do: tool_response("allow", %{})
   defp tool_response(:ask), do: tool_response("ask", %{})
 
@@ -1036,6 +1038,15 @@ defmodule CodingAgentFramework.Intake do
   defp tool_response({:allow, opts}) when is_list(opts) and opts != [] do
     with {:ok, fields} <- corrections(opts, [:updated_input, :additional_context]),
          do: tool_response("allow", fields)
+  end
+
+  # A correction with no decision (F-180): Claude Code 2.1.322 runs the call with the input
+  # given and still asks its own permission rules, as for an empty body.
+  defp tool_response({:pass, opts}) when is_list(opts) and opts != [] do
+    with {:ok, fields} <- corrections(opts, [:updated_input, :additional_context]) do
+      output = Map.put(fields, "hookEventName", "PreToolUse")
+      {:decision, JSON.encode!(%{"hookSpecificOutput" => output})}
+    end
   end
 
   defp tool_response({:deny, reason, opts}) when is_binary(reason) and is_list(opts) do
