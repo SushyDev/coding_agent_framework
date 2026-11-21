@@ -41,9 +41,10 @@ defmodule CodingAgentFramework.MCP do
     stores the ask for the app; answers `%{ask: id}` at once. The person's answer comes later
     as a message (`Mailbox.answer/4`), or its withdrawal with the reason (`Mailbox.withdraw/4`);
   - `withdraw(ask, reason)`: the operator's alone (F-172); any other caller is refused
-    `:operator_only`. The mailbox's `withdraw/4`: a person dismissed the ask in the app, and
-    the agent reads the reason once, in the answer's place. Answers `Mailbox`'s answer, refused
-    `:settled` once the ask was answered or withdrawn;
+    `:operator_only`. The inbox's answer of the ask's prompt with `{:withdraw, reason}`
+    (`Prompts.answer/5`, F-179), which `Mailbox.withdraw/4` settles: a person dismissed the ask
+    in the app, and the agent reads the reason once, in the answer's place. Answers `Mailbox`'s
+    answer, refused `:settled` once the ask was answered or withdrawn;
   - `reload()`: `Grants.may_use?/2`, then the tools' names; the endpoint sends the client
     `notifications/tools/list_changed` first;
   - the service tools, each through the services' own function, which makes its own `Grants`
@@ -89,9 +90,11 @@ defmodule CodingAgentFramework.MCP do
   - `answer_startup(agent, kind, label)`: the operator's alone (F-140); any other caller is
     refused `:operator_only`. The startup dialog an interactive start waits on (`kind`
     `trust` or `imports`, as the agent row shows it, `Sessions.Agents.dialog/1`), answered by
-    its option's label through the sessions' `answer_dialog/5`, which writes it as an act in
-    `Acts`, actor the operator, marks it on the row before its checked press and never presses
-    it twice. Answers `Sessions`' answer.
+    its option's label as the inbox's prompt (`Prompts.answer_startup/5`, F-179), whose owner
+    `Sessions.answer_dialog/5` writes it as an act in `Acts`, actor the operator, marks it on
+    the row before its checked press and never presses it twice. Answers `Sessions`' answer,
+    or `{:refused, :settled}` for a dialog answered or gone, `{:refused, :no_prompt}` for one
+    the agent never showed.
   - `end_main(name)`: the operator's alone (F-143); any other caller is refused
     `:operator_only`. The mains' `end_main/3`: refused while a delegate of it has not ended
     (`{:delegates, names}`), else the session stopped once idle and its agent row `ended`, so
@@ -468,8 +471,9 @@ defmodule CodingAgentFramework.MCP do
   path}}` (the copy services run in) or `{:refused, reason}`. `:acts` is the
   instance's `CodingAgentFramework.Acts`, where each fix takes its claim. `:mover` (optional)
   is `{CodingAgentFramework.Mover, pid}`, which the `move` tool calls; without it `move` is
-  refused `:no_mover`. `:sessions` (optional) is `{CodingAgentFramework.Sessions, pid}`, which
-  `answer_startup` calls; without it that tool is refused `:no_sessions`. `:mains` (optional) is
+  refused `:no_mover`. `:prompts` (optional) is `{CodingAgentFramework.Prompts, pid}`, the
+  inbox `answer_startup` and `withdraw` answer through (F-179); without it those tools are
+  refused `:no_prompts`. `:mains` (optional) is
   `{CodingAgentFramework.Mains, pid}`, which `start_main` calls; without it that tool is refused
   `:no_mains`. `:cap` (ms, default a day) is the most a `run_delegate`'s, a `service_start`'s
   or a `service_wait`'s `timeout` may be.
@@ -699,13 +703,14 @@ defmodule CodingAgentFramework.MCP do
   end
 
   # A startup dialog is a person's to answer: the operator's tool alone, never an agent's.
+  # It is the inbox's one answer (F-179): the dialog's prompt, answered once.
   defp act(ctx, caller, _id, "answer_startup", %{"agent" => agent, "kind" => k, "label" => l})
        when is_binary(agent) and is_binary(k) and is_binary(l) do
     with true <- caller == Grants.operator(ctx.grants) or {:refused, :operator_only},
-         true <- ctx.sessions != nil or {:refused, :no_sessions} do
-      {mod, server} = ctx.sessions
+         true <- ctx.prompts != nil or {:refused, :no_prompts} do
+      {mod, server} = ctx.prompts
       # The answer's row in `Acts` names the operator as its actor (F-140's new-6).
-      mod.answer_dialog(server, agent, k, l, by: caller)
+      mod.answer_startup(server, agent, k, l, caller)
     end
   end
 
@@ -723,9 +728,10 @@ defmodule CodingAgentFramework.MCP do
   # the withdrawal race in `Mailbox` to one settle.
   defp act(ctx, caller, _id, "withdraw", %{"ask" => ask, "reason" => reason})
        when is_integer(ask) and is_binary(reason) do
-    with true <- caller == Grants.operator(ctx.grants) or {:refused, :operator_only} do
-      {mod, server} = ctx.mailbox
-      mod.withdraw(server, ask, reason, timeout: @step)
+    with true <- caller == Grants.operator(ctx.grants) or {:refused, :operator_only},
+         true <- ctx.prompts != nil or {:refused, :no_prompts} do
+      {mod, server} = ctx.prompts
+      mod.answer(server, "ask:#{ask}", {:withdraw, reason}, caller)
     end
   end
 
@@ -1179,7 +1185,7 @@ defmodule CodingAgentFramework.MCP do
       cap = Keyword.get(opts, :cap, @day)
       ctx = Map.merge(ctx, %{cap: cap, tool_timeout: tool_timeout, margin: margin})
       ctx = Map.put(ctx, :mover, Keyword.get(opts, :mover))
-      ctx = Map.put(ctx, :sessions, Keyword.get(opts, :sessions))
+      ctx = Map.put(ctx, :prompts, Keyword.get(opts, :prompts))
       ctx = Map.put(ctx, :mains, Keyword.get(opts, :mains))
       ctx = Map.merge(ctx, %{app_tools: app, app: Map.new(app, &{&1.name, &1})})
       {:ok, %{db: db, dir: dir, port: Keyword.fetch!(opts, :port), ctx: ctx}}

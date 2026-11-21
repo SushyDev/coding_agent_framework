@@ -116,12 +116,12 @@ defmodule CodingAgentFramework.SubscribeTest do
     assert "sessions" in topics and "intake:*:*:waiters" in topics
 
     # Every topic a part writes, the ones no part reads among them (F-174's new-1).
-    for topic <- ~w(acts:*:* intake:*:* scheduler:* services copies),
+    for topic <- ~w(acts:*:* intake:*:* scheduler:* services copies prompts),
         do: assert(topic in topics, topic)
 
     assert {:ok, %{ref: _}} = CodingAgentFramework.subscribe(i, ["acts", "scheduler:ws"])
 
-    assert CodingAgentFramework.subscribe(i, ["prompts"]) == {:refused, {:undeclared, "prompts"}}
+    assert CodingAgentFramework.subscribe(i, ["inbox"]) == {:refused, {:undeclared, "inbox"}}
 
     assert CodingAgentFramework.subscribe(i, []) == {:refused, {:bad, :topics}}
 

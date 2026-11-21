@@ -580,6 +580,22 @@ recorded as the framework's; any other is `expired` and stays shown, since Claud
 longer reads the hold. A restart keeps every `open` row and settles an `answering` one by its
 owner's evidence, as a dialog's press is settled today. Every write cues `prompts`.
 
+Built so far (F-179, B6's first part, `caf_prompts`): `Prompts` keeps no table. A prompt is
+its owner's row read by one function: `Intake`'s hold of a `PermissionRequest` (kind
+`permission`, a subagent's named) or of a `Stop` at the cap (`stop_cap`), `Sessions`' agent
+row on a startup dialog (`dialog`), and `Mailbox`'s ask (`ask`); each names its agent, the
+agent's parent and project, its text and options, when it opened and its deadline (`Intake`
+keeps a hold's on its row). `CodingAgentFramework.prompts/2` reads them (filters `agent`,
+`subtree`, `kind`), every read that opens, moves or closes one cues `prompts`, and
+`CodingAgentFramework.answer/4` (instance, id, choice, who) checks the prompt read now and hands
+the choice to its owner, whose own guard lets one answer in (a hold moves only from `held`, an
+ask's answer and withdrawal share a key, a dialog's press is marked first); a late or second
+answer is refused `{:refused, :settled}`, and `{:withdraw, reason}` withdraws an ask. When a
+delegate's prompt opens, its parent gets one notice through `Mailbox` (kind `prompt`, from the
+delegate, keyed by the prompt). The operator's `answer_startup` and `withdraw` go through it.
+Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
+`expired` prompts kept shown, and the kinds that need a reading first.
+
 `Prompt.tla` (B1) is its contract: it instances `Hold` (one response, its deadline, its holder's
 death) and `Claim` (once per state), and checks `OneAnswer`, `OnlyRightful`, `NotAfterDeadline`,
 `DefaultOnlyDeclared`, `KeptAcrossRestart` and `Escalated` (a budget run out is a prompt), with
@@ -620,7 +636,8 @@ cues: `subscribe/2`, `unsubscribe/2` and `topics/1`, the instance found by its n
 table the tree's supervisor owns, and a topic no part declares refused. F-176 made every
 written topic subscribable (`writes/0`, the cue table in `subscribe/2`'s doc), named the tree
 in `subscribe/2`'s answer, listed the operator's own tools to the operator alone, and removed
-`run`. The calls are B3's rest.
+`run`. F-179 built `prompts/2` and `answer/4`, whose fourth argument names who answers
+("Prompts"), and the `prompts` topic. The other calls are B3's rest.
 The config answers the room the home leaves for an agent's and a service's name (`Config.name_room/1`, F-172), and the tree hands it to `Delegates`, `Mains` and
 `Services`, which refuse a longer name `{:bad, :name, {:longer_than, n}}` before any row;
 sockets stay in the home.
@@ -2415,6 +2432,11 @@ the `stop_cap` hold at Claude Code's cap with the override as the environment's 
 `PromptsEnd` and `Escalated`; each with a `Break_Prompt_*` configuration. `Dialog.tla`'s answer
 and `Team.tla`'s ask are its instances: the dialog's mark is the prompt's row, and an ask opens
 one and is answered by `AnswerNow`. Its header says how it implies `Boxes.tla`'s `pr` and `rp`.
+F-179 added the parent's notice: when the asker is a delegate, one notice to its parent under
+the prompt's key (`Notice`; `ParentToldOnce`, liveness `ParentTold`, Break `NoticeUnkeyed`),
+also in `Boxes.tla` across both restarts on its dialog's prompt (`Boxes_Notice`, the constant
+`Delegated`), and its header says that the code's prompt is its owner's row read by one
+function, so the row's status here is that function's value.
 
 `Limit.tla` (F-178) models an account's usage limit ("Usage limits"): the window that closes
 and resets, agents interactive or headless whose turns end at it, Claude Code's own wait and its
@@ -3103,7 +3125,8 @@ model before the code it describes (B4, B6, B8, B9, B11); B2 and B3 change no be
   today's mechanisms; `end_main` and a main session's move and resume go to the app's surface;
   `reload` stays hidden until F-162's new-2 is measured; `run` is gone (F-176).
   About +600, −700, most of it tool schemas and their tests.
-- **B6. `Prompts`**, against `Prompt.tla`: the `prompts` table, `open/2`, `answer/3`, `read/2`
+- **B6. `Prompts`**, against `Prompt.tla` (its first part built in F-179: "Prompts" says what,
+  with no table of its own): the `prompts` table, `open/2`, `answer/3`, `read/2`
   and the `prompts` cue; an ask, a held permission request (a subagent's included) and a startup
   dialog opened as prompts and answered through it; `answer_startup`, `Mailbox.answer/4` and the
   operator's request answer become the app's one `answer/3`; the `restarts` kind from B4. Then,

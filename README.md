@@ -161,8 +161,8 @@ Built, each from a checked model in `model/tla/`:
   no session file, is read from its pane; its agent row says `dialog`, with the dialog's
   options and listed paths, and waits on a person through its deadline and a restart, its lease
   held. Nothing answers one on its own: the app may choose kinds through a callback, and a
-  person answers by label (`Sessions.answer_dialog/5`, the operator's `answer_startup`), marked
-  first, pressed once and checked on the screen;
+  person answers by label (`CodingAgentFramework.answer/4`, the operator's `answer_startup`),
+  marked first, pressed once and checked on the screen;
 - `Jobs` under the `Scheduler` (F-139): every job asks for a lease in the class its caller
   names (a heavy run, a builder's suite, a landing's gates), its row the holder, released once
   `Jobs` read the job's end; a refused job is a row that says why and when to ask again; a
@@ -252,7 +252,13 @@ Built, each from a checked model in `model/tla/`:
 - a resume on its row's account (F-177, against `Move.tla`): a stopped main session, an
   imported one's included, resumes where its conversation is, and on another account only
   when its own is refused, after a copy of the conversation as a move makes; and an import
-  refused while a Claude Code run by hand on the account or the source may run.
+  refused while a Claude Code run by hand on the account or the source may run;
+- one inbox of prompts (F-179, B6's first part, against `Prompt.tla` and `Boxes.tla`): a held
+  permission request, a `Stop` held at the cap, a startup dialog and an agent's ask read in one
+  place (`CodingAgentFramework.prompts/2`) as one function of their owners' rows, cued on
+  `prompts`, and answered once through `answer/4`, which hands the choice to the part that
+  owns it; a delegate's parent told once that it waits; the operator's `answer_startup` and
+  `withdraw` through the same inbox.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
@@ -380,8 +386,9 @@ flowchart LR
 
 The code is a Mix umbrella, one OTP app per part under `apps/`. An arrow means "uses"; each app
 declares every app it uses, directly, and `gate-deps` checks that. The chart shows the apps as
-built. Each belongs to one box (`Prompts` is new, B6, and fronts mechanisms that stay in
-`caf_mailbox`, `caf_intake` and `caf_sessions`): `Sessions` holds
+built. Each belongs to one box: `Prompts` holds `caf_prompts` (B6, F-179), the inbox that
+reads and answers the requests whose mechanisms stay in `caf_mailbox`, `caf_intake` and
+`caf_sessions`; `Sessions` holds
 `caf_sessions`, `caf_mover`, `caf_stream`, `caf_inlet`, `caf_screen`, `caf_intake`,
 `caf_registry`, `caf_transcripts`, `caf_sampler`, `caf_cli`, `caf_accounts` and `caf_tmux`;
 `Mailbox` holds `caf_mailbox`; `Team` holds `caf_delegates`, `caf_mains`, `caf_grants` and
@@ -426,6 +433,7 @@ flowchart BT
     mailbox[caf_mailbox]
     mcp[caf_mcp]
   end
+  prompts[caf_prompts]
   subgraph hosts["Hosts"]
     copies[caf_copies]
     jobs[caf_jobs]
@@ -506,6 +514,9 @@ flowchart BT
   mains --> acts
   mcp --> grants
   mcp --> acts
+  prompts --> intake
+  prompts --> sessions
+  prompts --> mailbox
   copies --> shell
   copies --> holder
   jobs --> shell
@@ -529,7 +540,7 @@ app; `caf_example` is an app built on it, as an embedding app would be. `caf_cue
 `caf_grants`, `caf_intake` and `caf_screen` use no other app: the embedding app hands `caf_cues`
 each part's declaration of what it reads and `caf_grants` the tree as a function, and
 `caf_screen` reads a screen's text it is given. `caf_mcp` reaches `Delegates`,
-`Mailbox`, the `Tracker`, the `Mover`, `Sessions` and `Mains` through modules the embedding app
+`Mailbox`, the `Tracker`, the `Mover`, `Prompts` and `Mains` through modules the embedding app
 names.
 
 ## Development

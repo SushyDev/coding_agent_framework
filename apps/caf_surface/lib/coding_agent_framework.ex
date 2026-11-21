@@ -36,12 +36,13 @@ defmodule CodingAgentFramework do
   `CodingAgentFramework.Operator` with `parts(sup).mcp`, under the config's `operator` name,
   which every part's `Grants` knows: the same checks, claims and call log as an agent's tools.
 
-  **Asks.** An agent asks a person through its `ask` tool, which answers at once. The app shows
-  the open asks (`Mailbox.open_asks(parts(sup).mailbox)`, one by id with `Mailbox.asked/3`) as
-  dialogs, and answers each once with `Mailbox.answer/4`; the answer goes to the agent that
-  asked as a message from the operator, one line per question. An ask a person dismisses in the
-  app is withdrawn (`Mailbox.withdraw/4`, or the operator's `Operator.withdraw/3`): the agent
-  reads the reason in the answer's place, and the first of the two settles the ask (F-172).
+  **The inbox** (F-179, `CodingAgentFramework.Prompts`). Everything that waits on a person is a
+  prompt: a held permission request, a startup dialog, an agent's ask, a `Stop` held at Claude
+  Code's cap. The app reads them with `prompts/2`, re-reads on the `prompts` cue, and answers
+  each once with `answer/4`, which hands the choice to the part that owns it. An ask a person
+  dismisses is withdrawn by `answer/4` with `{:withdraw, reason}`: the agent reads the reason in
+  the answer's place, and the first of the two settles the ask (F-172). A delegate's parent is
+  told once that its delegate waits.
 
   **The tree.** It opens no part's table: the tree `Grants` reads, an agent's worktree, the
   agent a hook names and whether an agent has ended are `Sessions.Agents`' functions over the
@@ -71,6 +72,7 @@ defmodule CodingAgentFramework do
     MCP,
     Mover,
     Programs,
+    Prompts,
     Recoveries,
     Registry,
     Services
@@ -202,6 +204,7 @@ defmodule CodingAgentFramework do
   | `tmux:<host>:<server>` | `ids`: the tmux sampler's row ids, `[]` for a failed sample |
   | `intake:<host>:<account>` | `ids`: the hooks' rows' ids (`Intake.Table`) |
   | `intake:<host>:<account>:waiters` | `ids`: the session id whose waiter came or went |
+  | `prompts` | `ids`: the prompts that opened, moved or closed (`prompts/2`, `Prompts`) |
 
   An app's process that subscribes again whenever its tree comes back:
 
@@ -271,11 +274,49 @@ defmodule CodingAgentFramework do
 
   defp registry(_instance), do: {:refused, :no_instance}
 
-  defp cues(instance) do
+  @doc """
+  The prompts open now in the instance the config named `instance`, oldest first: everything
+  that waits on a person (`CodingAgentFramework.Prompts`, its module doc says each kind and
+  field). `filter` narrows them: `agent:` (that agent's), `subtree:` (that agent's and its
+  delegates', at any depth), `kind:` (`"permission"`, `"stop_cap"`, `"dialog"`, `"ask"`). Each
+  write that opens, moves or closes one is cued on `prompts` (`subscribe/2`). Answers `{:ok,
+  prompts}`, `{:refused, :no_instance}`, `{:refused, {:bad, :filter}}`, or `{:unknown, reason}`.
+
+      {:ok, [%{id: id, kind: "permission", agent: "app-unit", options: ["allow", "deny"]}]} =
+        CodingAgentFramework.prompts("a", subtree: "app-main")
+  """
+  @spec prompts(String.t(), keyword) ::
+          {:ok, [Prompts.prompt()]} | {:refused, term} | {:unknown, term}
+  def prompts(instance, filter \\ []) do
+    with {:ok, prompts} <- part(instance, :prompts), do: Prompts.read(prompts, filter)
+  end
+
+  @doc """
+  Answers prompt `id` with `choice`, as `who` (a person's name), once, through the part that owns
+  it (`Prompts.answer/5` says each kind's choices): a held request's `Intake`, a dialog's
+  `Sessions`, an ask's `Mailbox`; `{:withdraw, reason}` withdraws an ask. A late or second
+  answer is refused `{:refused, :settled}`. Answers the owner's `{:ok, value}`, `{:refused,
+  :no_instance}`, or as `Prompts.answer/5` does.
+
+      CodingAgentFramework.answer("a", id, "allow", "sam")
+      #=> {:ok, :sent}
+      CodingAgentFramework.answer("a", id, "deny", "sam")
+      #=> {:refused, :settled}
+  """
+  @spec answer(String.t(), String.t(), term, String.t()) ::
+          {:ok, term} | {:refused, term} | {:unknown, term}
+  def answer(instance, id, choice, who) do
+    with {:ok, prompts} <- part(instance, :prompts), do: Prompts.answer(prompts, id, choice, who)
+  end
+
+  defp cues(instance), do: part(instance, :cues)
+
+  # A part the tree registered in the instance's own `Registry` (`Cues`, `Prompts`).
+  defp part(instance, key) do
     with {:ok, name} <- registry(instance) do
-      case Elixir.Registry.lookup(name, :cues) do
+      case Elixir.Registry.lookup(name, key) do
         [{pid, _}] -> {:ok, pid}
-        [] -> {:unknown, :no_cues}
+        [] -> {:unknown, {:no_part, key}}
       end
     end
   rescue
@@ -318,6 +359,7 @@ defmodule CodingAgentFramework do
       mover: Mover.reads(),
       scheduler: Scheduler.reads(),
       mains: Mains.reads(),
+      prompts: Prompts.reads(),
       ends: Ends.reads()
     ]
   end
@@ -343,7 +385,8 @@ defmodule CodingAgentFramework do
       mains: Mains.writes(),
       copies: Copies.writes(),
       jobs: Jobs.writes(),
-      services: Services.writes()
+      services: Services.writes(),
+      prompts: Prompts.writes()
     ]
   end
 
@@ -569,6 +612,19 @@ defmodule CodingAgentFramework do
             acts: pid.(:acts),
             notify: notify}
          end},
+        # After every owner of a prompt; the app finds it in the instance's `Registry`.
+        {:prompts,
+         fn pid ->
+           {Prompts,
+            host: host,
+            intake: pid.(:intake),
+            intake_db: db,
+            sessions: pid.(:sessions),
+            sessions_db: db,
+            mailbox: pid.(:mailbox),
+            notify: notify,
+            name: {:via, Elixir.Registry, {names(c.instance), :prompts}}}
+         end},
         {:delegates,
          fn pid ->
            {Delegates,
@@ -694,7 +750,7 @@ defmodule CodingAgentFramework do
             margin: c.margin,
             acts: pid.(:acts),
             mover: {Mover, pid.(:mover)},
-            sessions: {Sessions, pid.(:sessions)},
+            prompts: {Prompts, pid.(:prompts)},
             mains: {Mains, pid.(:mains)},
             extensions: c.extensions}
          end},

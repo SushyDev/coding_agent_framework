@@ -153,6 +153,7 @@ P == INSTANCE Prompt WITH
        hconn <- [p \in {} |-> FALSE], hrow <- [p \in {} |-> "none"], hmarking <- {},
        hout <- [p \in {} |-> <<>>], hwrong <- {},
        took <- [k \in Kinds |-> 0], orec <- [k \in Kinds |-> "none"], otold <- {},
+       told <- [k \in Kinds |-> 0],
        turn <- "working", blocks <- 0, tools <- 0, crashes <- 0, gaveUp <- FALSE
 
 OnDialog == at \in 1..N

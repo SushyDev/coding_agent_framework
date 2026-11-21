@@ -48,6 +48,18 @@
 (* a person answers or withdraws (F-172). One stop_cap per run:            *)
 (* a tool call resets the count only before the cap's hold.                *)
 (*                                                                         *)
+(* The code (F-179, `Prompts` in caf_prompts) keeps no row of its own: a   *)
+(* prompt is its owner's row read by one function (Intake's hold row of a  *)
+(* PermissionRequest, or of a Stop at the cap; Sessions' agent row on a    *)
+(* dialog, with its marks; Mailbox's ask and its answer row), and st here  *)
+(* is that function's value. Opened, SettleHeld and LostHeld are the       *)
+(* read, which in the code is the same moment as the owner's write; the    *)
+(* owner's own guard (a hold moves only from held, an answer row's unique  *)
+(* key, a dialog's mark) is the claim Answer and AnswerNow take, and       *)
+(* answer/4 hands it to the owner by the prompt's kind. When the asker is  *)
+(* a delegate, Prompts tells its parent once that it waits (Notice:        *)
+(* ParentToldOnce, ParentTold, broken by NoticeUnkeyed).                   *)
+(*                                                                         *)
 (* Left abstract: time (a deadline is a step); the text and the options    *)
 (* beyond the cap's two labels; the cue per write; the inbox's reads; the  *)
 (* kinds that need a reading first (plan and elicitation are held as a     *)
@@ -69,10 +81,13 @@
 (*                                                                         *)
 (* The Prompts box's contract: OneAnswer, AnsweredOnce, OnlyRightful,      *)
 (* NotAfterDeadline, DefaultOnlyDeclared, KeptAcrossRestart,               *)
-(* NeverOverridden, and the                                                *)
+(* NeverOverridden, ParentToldOnce, and the                                *)
 (* Ledger's OneClaimPerState and NoActOnCutOffClaim on the answers;        *)
 (* liveness PromptsEnd (answered, expired, withdrawn, or lost with its     *)
-(* owner's request) and Escalated. How they imply what Boxes.tla assumes   *)
+(* owner's request), Escalated and ParentTold. ParentToldOnce and          *)
+(* ParentTold are Boxes.tla's too, on its dialog's prompt, which a         *)
+(* delegate's parent is told of there across both restarts. How the        *)
+(* others imply what Boxes.tla assumes                                     *)
 (* of Prompts (`pr`, `rp`):                                                *)
 (*   pr's statuses are st's, Boxes' unknown being cut here (a restart cut  *)
 (*        it, a person clears it); Boxes' Answer is Answer then Hand, its  *)
@@ -122,7 +137,8 @@ Breaks == {
     "NoEvidence",    \* an answering row a restart cut waits for its owner's answer, lost with it
     "SilentGiveUp",  \* a restart budget run out opens no prompt
     "NoCap",         \* the app's callback decides every Stop hold, past Claude Code's cap
-    "WithdrawSettled" \* a withdrawal does not check its prompt is still open: an answered one is withdrawn
+    "WithdrawSettled", \* a withdrawal does not check its prompt is still open: an answered one is withdrawn
+    "NoticeUnkeyed"    \* the parent's notice is stored under a key of its own, not the prompt's
 }
 
 ASSUME Break \in Breaks
@@ -150,11 +166,12 @@ VARIABLES
     blocks,   \* Claude Code's count of Stop blocks in a row, no tool call between
     tools,    \* tool calls that reset it
     crashes,  \* the asker's supervisor's count of restarts
-    gaveUp    \* that supervisor gave up: no agent process runs for the asker
+    gaveUp,   \* that supervisor gave up: no agent process runs for the asker
+    told      \* p -> notices to the asker's parent stored in Mailbox for it (durable, F-179)
 
 rowVars == <<st, ep, claims, acting, cdone, acted, twice, cut, pwrong>>
 holdVars == <<hconn, hrow, hmarking, hout, hwrong>>
-ownVars == <<took, orec, otold>>
+ownVars == <<took, orec, otold, told>>
 askerVars == <<turn, blocks, tools, crashes, gaveUp>>
 vars == <<rowVars, kind, asker, up, restarts, holdVars, ownVars, askerVars>>
 
@@ -358,7 +375,7 @@ FrameworkDies ==
     /\ otold' = {}
     /\ turn' = IF "cap" \in HeldPs /\ hconn["cap"] THEN "ended" ELSE turn
     /\ crashes' = 0 /\ gaveUp' = FALSE
-    /\ UNCHANGED <<Rest, hrow, hout, hwrong, took, orec, blocks, tools>>
+    /\ UNCHANGED <<Rest, hrow, hout, hwrong, took, orec, told, blocks, tools>>
 
 FrameworkStarts ==
     /\ ~up /\ up' = TRUE
@@ -439,7 +456,8 @@ AtLimit ==
 Answers(p, who, l) ==
     /\ up /\ l \in Options(p)
     /\ IF p \in AskPs
-       THEN AnswerNow(p, who, l) /\ took' = [took EXCEPT ![p] = @ + 1] /\ UNCHANGED <<orec, otold>>
+       THEN /\ AnswerNow(p, who, l) /\ took' = [took EXCEPT ![p] = @ + 1]
+            /\ UNCHANGED <<orec, otold, told>>
        ELSE Answer(p, who, l) /\ UNCHANGED ownVars
     /\ UNCHANGED <<Rest, up, restarts, holdVars, askerVars>>
 
@@ -536,13 +554,13 @@ HandOwner(c) ==
                           /\ took' = [took EXCEPT ![p] = IF applied THEN @ + 1 ELSE @]
                           /\ orec' = [orec EXCEPT ![p] = IF sure THEN "applied" ELSE "unsure"]
                     /\ UNCHANGED <<crashes, gaveUp>>
-    /\ UNCHANGED <<Rest, up, restarts, holdVars, turn, blocks, tools>>
+    /\ UNCHANGED <<Rest, up, restarts, holdVars, told, turn, blocks, tools>>
 
 OwnerTold(p) ==
     /\ up /\ p \in otold
     /\ Settle(p, IF orec[p] = "applied" THEN "answered" ELSE "unknown")
     /\ otold' = otold \ {p}
-    /\ UNCHANGED <<Rest, up, restarts, holdVars, took, orec, askerVars>>
+    /\ UNCHANGED <<Rest, up, restarts, holdVars, took, orec, told, askerVars>>
 
 \* Once a restart cut the owner's answer, the owner's record is the evidence. Under
 \* NoEvidence the row waits for that answer.
@@ -564,13 +582,25 @@ Clears(p) ==
     /\ \/ Clear(p, IF Took(p) > 0 THEN "answered" ELSE "open")
        \/ Clear(p, IF Took(p) > 0 THEN "answered" ELSE "withdrawn")
     /\ orec' = IF st'[p] = "open" THEN [orec EXCEPT ![p] = "none"] ELSE orec
-    /\ UNCHANGED <<Rest, up, restarts, holdVars, took, otold, askerVars>>
+    /\ UNCHANGED <<Rest, up, restarts, holdVars, took, otold, told, askerVars>>
 
 \* The restarts prompt's owner: its agent process runs again (a whole restart started it).
 Passed ==
     /\ up /\ "restarts" \in Ps /\ ~gaveUp
     /\ Withdraw("restarts")
     /\ UNCHANGED <<Rest, up, restarts, holdVars, ownVars, askerVars>>
+
+\* Prompts tells the asker's parent, when the asker is a delegate, that the asker waits on p
+\* (F-179): one notice in Mailbox, stored under the prompt's key, so a second store of it after
+\* every read finds it (Mailbox's `stored_before`) and the parent reads it once. The code also
+\* keeps the prompts it told in memory, to ask Mailbox once per start; nothing here rests on
+\* that memory, so it is left out. Under NoticeUnkeyed the notice has a key of its own, and a
+\* later read (after a restart, or at the next cue) stores another.
+Notice(p) ==
+    /\ up /\ st[p] # "none" /\ Parent[asker[p]] \in Agents
+    /\ told[p] = 0 \/ (Break = "NoticeUnkeyed" /\ told[p] = 1)
+    /\ told' = [told EXCEPT ![p] = @ + 1]
+    /\ UNCHANGED <<rowVars, Rest, up, restarts, holdVars, took, orec, otold, askerVars>>
 
 ClaimEnds(c) ==
     /\ up /\ ClaimSettled(c)
@@ -585,6 +615,7 @@ Init ==
     /\ hconn = [p \in HeldPs |-> FALSE] /\ hrow = [p \in HeldPs |-> "none"]
     /\ hmarking = {} /\ hout = [p \in HeldPs |-> <<>>] /\ hwrong = {}
     /\ took = [p \in Ps |-> 0] /\ orec = [p \in Ps |-> "none"] /\ otold = {}
+    /\ told = [p \in Ps |-> 0]
     /\ turn = "working" /\ blocks = 0 /\ tools = 0
     /\ crashes = 0 /\ gaveUp = FALSE
 
@@ -593,7 +624,7 @@ Next ==
     \/ Requests \/ StopFires \/ ToolCall \/ AtLimit \/ Passed \/ Asks
     \/ \E p \in Ps : \/ Held(p) \/ Opened(p) \/ Deadline(p) \/ Decides(p) \/ Marked(p)
                      \/ Settles(p) \/ SettleHeld(p) \/ LostHeld(p) \/ OwnerTold(p)
-                     \/ SettleOwner(p) \/ Clears(p)
+                     \/ SettleOwner(p) \/ Clears(p) \/ Notice(p)
                      \/ \E who \in Answerers, l \in {"yes", "no"} : Answers(p, who, l)
                      \/ \E who \in Answerers : Withdraws(p, who)
     \/ \E c \in acting : HandHeld(c) \/ HandOwner(c)
@@ -608,7 +639,7 @@ Fairness ==
           /\ WF_vars(Held(p)) /\ WF_vars(Opened(p)) /\ WF_vars(Decides(p))
           /\ WF_vars(Marked(p)) /\ WF_vars(Settles(p)) /\ WF_vars(SettleHeld(p))
           /\ WF_vars(LostHeld(p)) /\ WF_vars(OwnerTold(p)) /\ WF_vars(SettleOwner(p))
-          /\ WF_vars(Clears(p))
+          /\ WF_vars(Clears(p)) /\ WF_vars(Notice(p))
           /\ \A who \in Persons : WF_vars(\E l \in {"yes", "no"} : Answers(p, who, l))
     /\ WF_vars(\E c \in acting : HandHeld(c) \/ HandOwner(c))
     /\ WF_vars(\E c \in claims : ClaimEnds(c))
@@ -623,6 +654,7 @@ TypeOK ==
     /\ acting \subseteq claims /\ cdone \subseteq claims
     /\ up \in BOOLEAN /\ restarts \in 0..MaxRestarts
     /\ took \in [Ps -> Nat] /\ orec \in [Ps -> {"none", "applied", "unsure"}] /\ otold \subseteq Ps
+    /\ told \in [Ps -> 0..2]
     /\ turn \in {"working", "stop", "ended"} /\ blocks \in 0..(Cap + 1)
     /\ crashes \in Nat /\ gaveUp \in BOOLEAN
 
@@ -663,6 +695,13 @@ PromptsEnd == \A p \in Ps : st[p] \in Waiting ~> st[p] \in Ends
 
 \* A budget run out is a prompt, and its answer starts the agent process again.
 Escalated == gaveUp ~> ~gaveUp
+
+\* A delegate's parent is told once of each prompt its delegate waits on (F-179): never twice,
+\* across every restart ...
+ParentToldOnce == \A p \in Ps : told[p] <= 1
+
+\* ... and always, once the prompt opened.
+ParentTold == \A p \in Ps : Parent[asker[p]] \in Agents => (st[p] # "none" ~> told[p] = 1)
 
 \* Every hold closes and settles; every claim ends.
 HoldsEnd == H!RequestsEnd
