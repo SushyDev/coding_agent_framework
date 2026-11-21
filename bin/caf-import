@@ -2,13 +2,14 @@
 # Moves an app's existing Claude Code conversations onto a framework home, once (F-156):
 #
 #   bin/caf-import <home> <account> <source config dir> [--map <old cwd>=<project>]...
-#     [--name <session id>=<name>]... [--meta <session id>=<json>]...
+#     [--name <session id>=<name>]... [--meta <session id>=<json>]... [--db <path>]
 #
 # It copies, never moves, the source config directory's conversations of each mapped working
 # directory into the home's account directory, <home>/accounts/<account>/claude, under the
 # encoded path of the mapped project's checkout, so `claude --resume <id>` there finds them;
 # that directory's memory into the home's one memory folder of the checkout; and the person's
-# settings (settings.json, CLAUDE.md, agents/, commands/, skills/) where the account has none.
+# settings (settings.json, CLAUDE.md, agents/, commands/, skills/) where the account has none;
+# a setting naming a path this host lacks is kept as it is and named in the report.
 # The login stays the account's own (bin/caf-login): no credential is copied.
 #
 # Each conversation given a --name becomes a main session of that name at the app's next
@@ -16,8 +17,10 @@
 # row stopped, with its session id, so the app's start-or-resume resumes it. --meta gives the
 # row the app's own metadata, a JSON object.
 #
-# Start the app once on this host first: the checkouts' paths are read from <home>/caf.db.
-# It is refused while any session of the account runs, and a second run for a session copies
+# Start the app once on this host first: the checkouts' paths are read from the app's tables,
+# --db, by default <home>/caf.db. It is refused while any session of the account runs, or any
+# Claude Code on the account's or the source's directory (by its sessions/<pid>.json, each pid
+# checked by its start time), and a second run for a session copies
 # nothing and says it was imported already. Exit status: 0 done, 2 usage, 3 refused (nothing
 # copied), 1 a copy failed part way (run it again; it goes on from what is there).
 #
@@ -27,7 +30,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: bin/caf-import <home> <account> <source config dir> [--map <old cwd>=<project>]..."
-  echo "         [--name <session id>=<name>]... [--meta <session id>=<json>]..."
+  echo "         [--name <session id>=<name>]... [--meta <session id>=<json>]... [--db <path>]"
 }
 
 case "${1:-}" in

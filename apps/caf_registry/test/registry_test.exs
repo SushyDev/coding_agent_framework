@@ -91,6 +91,35 @@ defmodule CodingAgentFramework.RegistryTest do
       assert rows["4.json"].alive == :unknown
     end
 
+    # F-177: for a caller with no Registry of those directories, such as `bin/caf-import`.
+    test "running/3 reads directories' session files once, each pid by its start time" do
+      dir = TestHost.test_dir()
+      [a, b, c] = for n <- ~w(a b c), do: Path.join(dir, n)
+      for d <- [a, b, c], do: File.mkdir_p!(Path.join(d, "sessions"))
+      me = String.to_integer(System.pid())
+
+      {:ok, %{status: 0, output: out}} =
+        Shell.run(TestHost.host(), TestHost.program!(:sh), ["-c", "echo $$"], timeout: 5_000)
+
+      gone = String.to_integer(String.trim(out))
+      put(a, "1.json", JSON.encode!(%{pid: me, sessionId: "live", procStart: lstart(me)}))
+      # Half written: its name still names the process, with no start time.
+      put(b, "#{me}.json", ~s({"pid": #{me}, "sess))
+      old = "Thu Jan  1 00:00:00 1970"
+      put(c, "2.json", JSON.encode!(%{pid: me, sessionId: "reused", procStart: old}))
+      put(c, "3.json", JSON.encode!(%{pid: gone, sessionId: "gone", procStart: old}))
+      programs = TestHost.programs()
+
+      assert {:ok, %{live: [^me], unknown: []}} = Registry.running(programs, [a, b])
+      assert {:ok, %{live: [], unknown: [^me]}} = Registry.running(programs, [b])
+
+      assert {:ok, %{live: [], unknown: []}} =
+               Registry.running(programs, [c, Path.join(dir, "none")])
+
+      assert {:refused, {:no_program, [:ps]}} =
+               Registry.running(%{programs | paths: Map.delete(programs.paths, :ps)}, [a])
+    end
+
     test "a ps that fails, or does not answer in time, answers unknown, not gone" do
       dir = TestHost.test_dir()
       failing = Path.join(dir, "ps-fails")

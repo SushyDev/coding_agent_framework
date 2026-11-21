@@ -57,13 +57,21 @@ defmodule CodingAgentFramework.Mains do
   stopped main session in its project's checkout (`Mains.Import.manifest/1`,
   `Sessions.import_main/4`), which `resume_main/3` takes up.
 
+  **A resume** (`resume_main/3`, F-177; `Move.tla`'s Resume) runs on the account its row
+  names, where its conversation is: a conversation lives only in the account it ran on or was
+  imported into. Only when that account is refused (not prepared, logged out, or its windows
+  spent by `allowance:`) does it go to the one with the most allowance left among the others
+  that are not, which first takes a copy of the conversation (`Transcripts.Copy`, the `Mover`'s
+  copy), an act `copy` in `Acts`, then resumes there under the same session id. A copy refused
+  leaves the row on its own account, the start refused `{:copy, reason}`.
+
   After each write `notify` gets `%{topic: "mains:<host>", ids: [id]}`.
   """
 
   use GenServer
 
   alias CodingAgentFramework.{Accounts, Acts, Intake, Mailbox, Programs, Scheduler}
-  alias CodingAgentFramework.{Sessions, Shell, Store, Stream, Usage}
+  alias CodingAgentFramework.{Sessions, Shell, Store, Stream, Transcripts, Usage}
   alias CodingAgentFramework.Intake.Table, as: IntakeTable
   alias CodingAgentFramework.Mains.{Checkout, Import, Rename, Starts, Table, Work}
   alias CodingAgentFramework.Sessions.{Agents, Worktree}
@@ -91,7 +99,10 @@ defmodule CodingAgentFramework.Mains do
   checkouts' reads, default 5 000), `clone_timeout:` (ms, default 600 000), `intake:` (the
   host's `Intake`) and `intake_db:` (its file), through which the operator answers a main
   session's held permission request (`answer/5`), `acts:` (the instance's `Acts`, where a
-  checkout's rename and an import's rows are recorded, F-156), `notify:`, `clock:` (wall-clock
+  checkout's rename, an import's rows and a resume's copy are recorded, F-156, F-177),
+  `allowance:` (a function of an account answering `:room` or `{:spent, retry_at}`, the
+  `Scheduler`'s own, `Usage.Allowance.check/3`; without it every account has room: a resume
+  leaves its row's account only when it is refused, F-177), `notify:`, `clock:` (wall-clock
   ms), and
   `name_room:` (bytes, the room the home leaves for an agent's socket, `Config.name_room/1`): a
   start of a longer name is refused `{:bad, :name, {:longer_than, n}}` before any row (F-172).
@@ -150,11 +161,16 @@ defmodule CodingAgentFramework.Mains do
   Resumes main session `name`, whose process ended (its agent row `stopped`), in its checkout
   with its session id (F-141's new-5): new work, so it writes a start's row and asks the
   `Scheduler` for a lease of its own, class main session, as `start_main/5` does, and then
-  `Sessions.resume/6` on the account with the most allowance left. Options: `model:` (else the
-  model its row keeps), `state:` (the operator's fix, F-144: the state its claim in `Acts`
-  holds, `fix_state/3`'s; the resume is refused `{:moved, state}` when the row's is another
-  now) and `timeout:`. Answers as `start_main/5` does; refused also `:no_session`, `{:not_main,
-  kind}`, `{:not_stopped, status}` and `{:running, name}` while a start of it is under way.
+  `Sessions.resume/6` on the account its row names, where its conversation is (F-177). When
+  that account is refused (`{:not_prepared, account}`, `{:login, :logged_out}`, `{:allowance,
+  retry_at}`), the conversation is first copied to the account with the most allowance left
+  among the others not refused, and resumed there; with none, the resume is refused
+  `{:account, account, reason}`, and a copy refused `{:copy, reason}`, the row left on its
+  account. Options: `model:` (else the model its row keeps), `state:` (the operator's fix,
+  F-144: the state its claim in `Acts` holds, `fix_state/3`'s; the resume is refused `{:moved,
+  state}` when the row's is another now) and `timeout:`. Answers as `start_main/5` does;
+  refused also `:no_session`, `{:not_main, kind}`, `{:not_stopped, status}` and `{:running,
+  name}` while a start of it is under way.
 
       Mains.resume_main(mains, "app-epic")
       #=> {:ok, %{name: "app-epic", account: "home", session_id: "…"}}
@@ -302,6 +318,7 @@ defmodule CodingAgentFramework.Mains do
           notify: Keyword.get(opts, :notify, fn _ -> :ok end),
           clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
           acts: Keyword.get(opts, :acts),
+          allowance: Keyword.get(opts, :allowance, fn _account -> :room end),
           # Per project: the task under way, whether a pull is owed, and the last reason a
           # rename of its old checkout was held back for (recorded once in `Acts`).
           checkouts:
@@ -462,10 +479,10 @@ defmodule CodingAgentFramework.Mains do
          {:ok, p} <- Map.fetch(s.projects, agent.project) |> known(agent.project),
          :ok <- made(s, agent.project),
          :ok <- model_ok(model),
-         {:ok, account} <- pick(s) do
+         {:ok, account, copy} <- resume_account(s, agent) do
       row = starting(s, agent.project, name, account, nil, agent.session_id)
       start = %{p: p, account: account, brief: nil, from: nil, model: model, kept: agent.model}
-      leased(s, row, Map.put(start, :resume, agent.session_id), from)
+      leased(s, row, Map.merge(start, %{resume: agent.session_id, copy: copy}), from)
     else
       refused -> {:reply, refused, s}
     end
@@ -979,9 +996,50 @@ defmodule CodingAgentFramework.Mains do
     end
   end
 
-  defp pick(s) do
+  # F-177: a conversation lives only in the account it ran on or was imported into, so a
+  # resume runs on its row's account (`Move.tla`'s ResumeHere); only one refused there goes to
+  # the picked account among those not refused, with a copy first (CopyAsked).
+  defp resume_account(s, %{account: own}) do
+    case usable(s, own) do
+      {:ok, account} ->
+        {:ok, account, nil}
+
+      {:refused, why} ->
+        case for(n <- s.accounts.names, n != own, match?({:ok, _}, usable(s, n)), do: n) do
+          [] ->
+            {:refused, {:account, own, why}}
+
+          others ->
+            with {:ok, account} <- pick(s, others), do: {:ok, account, %{from: own, why: why}}
+        end
+    end
+  end
+
+  # An account a launch may run on now: prepared, not logged out (read from which files exist,
+  # never a credential: one whose login is not readable may be logged in), and with room in
+  # both windows, as the Scheduler's gate reads them.
+  defp usable(s, name) do
+    with {:ok, account} <- Accounts.ready(s.accounts, name),
+         :ok <- logged_in(s, name),
+         :room <- s.allowance.(name) do
+      {:ok, account}
+    else
+      {:spent, retry_at} -> {:refused, {:allowance, retry_at}}
+      refused -> refused
+    end
+  end
+
+  defp logged_in(s, name) do
+    case Accounts.login(s.accounts, name) do
+      {:ok, :logged_out} -> {:refused, {:login, :logged_out}}
+      {:refused, why} -> {:refused, why}
+      _ -> :ok
+    end
+  end
+
+  defp pick(s, among \\ nil) do
     with {:ok, %{readings: readings}} <- Usage.readings(s.usage, timeout: @step),
-         {:ok, name} <- Usage.pick(readings, s.accounts.names) do
+         {:ok, name} <- Usage.pick(readings, among || s.accounts.names) do
       Accounts.ready(s.accounts, name)
     else
       :unread -> {:refused, {:usage, :unread}}
@@ -1019,12 +1077,15 @@ defmodule CodingAgentFramework.Mains do
       # A start that names no metadata, and a resume, keep the row's (`Sessions.start/5`).
       launch = if start[:meta], do: launch ++ [meta: start.meta], else: launch
       {sessions, mailbox, mcp} = {s.sessions, s.mailbox, s.mcp}
+      copy = copy(s, row, start)
 
       # The config is made in the task: the embedding app's `issue` may call a part that waits.
+      # A resume on another account than its row's copies the conversation there first.
       task =
         Task.async(fn ->
           answer =
-            with {:ok, config} <- mcp.(row.name) do
+            with :ok <- copy.(),
+                 {:ok, config} <- mcp.(row.name) do
               launch = if config, do: launch ++ [mcp: config], else: launch
               session(sessions, row, start, launch)
             end
@@ -1038,6 +1099,34 @@ defmodule CodingAgentFramework.Mains do
       not_started -> {:reply, refuse(s, row, not_started), s}
     end
   end
+
+  # The resume's conversation, from its row's account to the one it resumes on, as the Mover
+  # copies a move's (`Move.tla`'s ResumeCopy): the row's process is gone, so it is final. The
+  # copy is an act in `Acts`; refused, the row stays on its account (CopyRefused).
+  defp copy(s, row, %{copy: %{from: from, why: why}} = start) do
+    {accounts, rec, to} = {s.accounts, Map.take(s, [:acts, :host]), start.account.name}
+
+    fn ->
+      copied =
+        with {:ok, source} <- Accounts.config_dir(accounts, from),
+             {:ok, target} <- Accounts.config_dir(accounts, to),
+             do: Transcripts.Copy.copy(source, target, start.p.repo, start.resume)
+
+      detail = %{from: from, to: to, session_id: start.resume, because: why}
+
+      case copied do
+        :ok ->
+          record(rec, "agent:" <> row.name, :copy, :verified, detail: detail)
+          :ok
+
+        {:refused, reason} ->
+          record(rec, "agent:" <> row.name, :copy, :failed, detail: detail, reason: reason)
+          {:refused, {:copy, reason}}
+      end
+    end
+  end
+
+  defp copy(_s, _row, _start), do: fn -> :ok end
 
   defp brief(_s, %{brief_uuid: nil}, _start), do: :ok
 

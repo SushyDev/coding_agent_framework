@@ -31,7 +31,15 @@
 (*            launch (Delivery.tla, instanced as D). Any row may be long   *)
 (*            (a report): it is typed as a pointer to its file. A waiter   *)
 (*            connects only once a turn of the current process has ended   *)
-(*            (`turned`).                                                  *)
+(*            (`turned`);                                                  *)
+(*   Mains    with Resumes (F-177): the resume of the session once its     *)
+(*            process ended by itself (`resume_main`), on the account its  *)
+(*            row names, where its conversation is; only when that         *)
+(*            account is refused (its windows; a login refused is the same *)
+(*            refusal, left abstract) the conversation is first copied to  *)
+(*            the picked account, as the Mover's copy, and the resume runs *)
+(*            there under the same session id. A copy refused, or cut by a *)
+(*            restart, leaves the row stopped on its own account.          *)
 (*                                                                         *)
 (* A resumed process has no waiter until a turn of it ends, so the first   *)
 (* row due at the resume goes in as its prompt; a later one is typed.      *)
@@ -47,7 +55,9 @@
 (* ends with its report stored; run_delegate calls (Delivery.tla's call   *)
 (* transport; the drain also waits for none under way); the allowance's   *)
 (* weekly reset. The old process may crash once its stop is asked. One   *)
-(* move per behavior: the session starts on Home and may move once.       *)
+(* move per behavior: the session starts on Home and may move once. With  *)
+(* Resumes, the session's process may also end by itself while no move    *)
+(* runs, counted with the crashes, and be resumed.                        *)
 (*                                                                         *)
 (* Fairness: the Mover's and Sessions' steps happen while possible, and   *)
 (* it drains at 90 %; turns, background commands and a process asked to   *)
@@ -90,6 +100,7 @@ CONSTANTS
     MaxMsgs,       \* messages sent to the session
     MaxCrashes,    \* crashes of the old process once its stop is asked
     MaxRestarts,   \* restarts of the framework and of the session's agent process
+    Resumes,       \* the process may end by itself and Mains resume it (F-177)
     Break         \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -102,19 +113,23 @@ Breaks == {
     "CopyBeforeEnd",     \* the transcript is copied before the process is ended
     "MarkWhileEnding",   \* Mailbox marks and hands on rows while the session's row is stopping
     "StopWhileSending",  \* the idle read does not wait for rows to the session sending
-    "SettleOnTarget"     \* a row is settled against the target's transcript before the copy
+    "SettleOnTarget",    \* a row is settled against the target's transcript before the copy
+    "ResumeOnPicked"     \* a resume runs on the picked account, its conversation not copied
 }
 
 ASSUME Break \in Breaks
 ASSUME Home \in Accounts /\ Cardinality(Accounts) = 2
 ASSUME \A c \in {MaxPrompts, MaxBg, MaxDelegates, MaxMsgs, MaxCrashes, MaxRestarts} : c \in Nat
+ASSUME Resumes \in BOOLEAN
 
 \* Allowance levels.
 Ok == 0
 DrainLevel == 1   \* 90 % of the weekly allowance
 Limit == 2
 
-Phases == {"idle", "draining", "clear", "stopping", "ending", "moved"}
+\* "stopped", "copying" and "copied" are a resume's (Resumes): Mains' start row.
+Phases == {"idle", "draining", "clear", "stopping", "ending", "moved",
+           "stopped", "copying", "copied"}
 Ids == 1..(MaxDelegates + MaxMsgs)
 Delegates == 1..MaxDelegates
 PromptMark == 0   \* a prompt's turn in a transcript; a row is its id
@@ -177,6 +192,9 @@ D == INSTANCE Delivery WITH
 
 \* Starts are refused from the drain on until the session has moved.
 Draining == phase \in {"draining", "clear", "stopping", "ending"} /\ Break # "NoDrain"
+
+\* An account a start or a resume is refused on: its windows have no room.
+Refused(a) == level[a] = Limit
 
 DelegatesStarted == Cardinality({d \in Delegates : delegates[d] # "none"})
 
@@ -395,16 +413,18 @@ LaunchMarked(i) ==
     /\ up /\ phase \in {"stopping", "ending"} /\ copied /\ procs = {}
     /\ Mailbox(D!Mark(i, "launch"))
 
-\* Resume on the target, with --resume; the row names the new process, whose
-\* turn has not ended yet.
-NewProc ==
+\* Resume on account a, with --resume; the row names the new process, whose
+\* turn has not ended yet. The session starts from a's transcript.
+NewProcOn(a) ==
     /\ nextPid' = nextPid + 1
-    /\ procs' = procs \cup {[pid |-> nextPid + 1, account |-> target, ending |-> FALSE]}
-    /\ record' = [pid |-> nextPid + 1, account |-> target, status |-> "running"]
-    /\ resumedWith' = transcript[target]
+    /\ procs' = procs \cup {[pid |-> nextPid + 1, account |-> a, ending |-> FALSE]}
+    /\ record' = [pid |-> nextPid + 1, account |-> a, status |-> "running"]
+    /\ resumedWith' = transcript[a]
     /\ phase' = "moved" /\ turned' = FALSE
     /\ UNCHANGED <<up, restarts, level, turn, bg, bgCount, delegates, prompts, msgs, crashes,
                    transcript, target, copied, readAt, ends, lost>>
+
+NewProc == NewProcOn(target)
 
 \* The resume carries the row marked by launch as its prompt.
 ResumedWith(i) ==
@@ -422,6 +442,74 @@ ResumedBare ==
     /\ UNCHANGED dvars
 
 Resumed == ResumedBare \/ \E i \in Ids : ResumedWith(i)
+
+-----------------------------------------------------------------------------
+(* A resume of the session once its process ended by itself (Resumes) *)
+
+\* The row's process ends while no move runs: a person's /exit, or a crash.
+\* Its SessionEnd makes the row stopped. Counted with the crashes.
+EndsAlone(p) ==
+    /\ Resumes /\ phase \in {"idle", "moved"} /\ p.pid = Current /\ ~p.ending
+    /\ crashes < MaxCrashes /\ crashes' = crashes + 1
+    /\ procs' = procs \ {p}
+    /\ bg' = {b \in bg : b.pid # p.pid}
+    /\ turn' = IF turn = p.pid THEN 0 ELSE turn
+    /\ ends' = ends \cup {p.pid}
+    /\ phase' = "stopped"
+    /\ D!Exited(Main, FALSE)
+    /\ UNCHANGED <<up, restarts, level, nextPid, bgCount, delegates, prompts, msgs, transcript,
+                   target, copied, resumedWith, record, readAt, lost, turned>>
+
+\* Mains.resume_main takes up a stopped row, once a row still sending settled.
+Resuming ==
+    /\ up /\ phase = "stopped" /\ record.status = "ended" /\ procs = {}
+    /\ ~\E i \in Ids : row[i].st = "sending"
+
+\* On the account the row names, where the conversation is, while it has room.
+ResumeHere ==
+    /\ Resuming /\ ~Refused(Here) /\ Break # "ResumeOnPicked"
+    /\ NewProcOn(Here)
+    /\ UNCHANGED dvars
+
+\* Its account refused: the picked account first takes a copy, in the same act.
+CopyAsked ==
+    /\ Resuming /\ Refused(Here) /\ Break # "ResumeOnPicked"
+    /\ \E a \in Accounts \ {Here} : ~Refused(a) /\ target' = a
+    /\ phase' = "copying"
+    /\ UNCHANGED <<up, restarts, work, transcript, copied, resumedWith, record, readAt, ends,
+                   lost, turned, dvars>>
+
+\* The copy, as the Mover's: the whole transcript, the process being gone.
+ResumeCopy ==
+    /\ up /\ phase = "copying"
+    /\ transcript' = [transcript EXCEPT ![target] = transcript[Here]]
+    /\ copied' = TRUE /\ phase' = "copied"
+    /\ UNCHANGED <<up, restarts, work, target, resumedWith, record, readAt, ends, lost, turned,
+                   dvars>>
+
+\* Then the resume on the picked account, under the same session id.
+ResumeCopied ==
+    /\ up /\ phase = "copied" /\ procs = {}
+    /\ ~\E i \in Ids : row[i].st = "sending"
+    /\ NewProcOn(target)
+    /\ UNCHANGED dvars
+
+\* The copy refused, or the act cut by a restart (its start row refused at its
+\* deadline): the row stays stopped on its own account, refused with the reason.
+CopyRefused ==
+    /\ phase \in {"copying", "copied"}
+    /\ phase' = "stopped"
+    /\ UNCHANGED <<up, restarts, work, transcript, target, copied, resumedWith, record, readAt,
+                   ends, lost, turned, dvars>>
+
+\* Under ResumeOnPicked: the resume runs on the account picked by allowance,
+\* whether or not the conversation is there.
+ResumePicked ==
+    /\ Resuming /\ Break = "ResumeOnPicked"
+    /\ \E a \in Accounts : ~Refused(a) /\ NewProcOn(a)
+    /\ UNCHANGED dvars
+
+Resume == ResumeHere \/ CopyAsked \/ ResumeCopy \/ ResumeCopied \/ CopyRefused \/ ResumePicked
 
 \* Sessions ends the row only when the hook names the row's process.
 SessionEndArrives(pid) ==
@@ -442,6 +530,8 @@ Next ==
     \/ \E d \in Delegates : DelegateReports(d)
     \/ \E s \in Senders : MessageSent(s)
     \/ Drain \/ Cleared \/ StopAsked \/ IdleRead \/ Term \/ Copied \/ Resumed
+    \/ \E p \in procs : EndsAlone(p)
+    \/ Resume
     \/ \E pid \in ends : SessionEndArrives(pid)
     \/ Mailbox(D!Connects(Main)) \/ Mailbox(D!WaiterEnds(Main))
     \/ \E i \in Ids : \/ \E t \in {"waiter", "typed"} : Mailbox(D!Mark(i, t))
@@ -458,6 +548,7 @@ Fairness ==
     /\ WF_vars(level[Here] >= DrainLevel /\ Drain)
     /\ WF_vars(Cleared) /\ WF_vars(StopAsked) /\ WF_vars(IdleRead) /\ WF_vars(Term)
     /\ WF_vars(Copied) /\ WF_vars(Resumed) /\ WF_vars(\E i \in Ids : LaunchMarked(i))
+    /\ WF_vars(ResumeCopy) /\ WF_vars(ResumeCopied)
     /\ WF_vars(\E p \in procs : Exits(p, "term"))
     /\ WF_vars(\E p \in procs : TurnEnds(p))
     /\ WF_vars(\E b \in bg : BgEnds(b))
@@ -488,9 +579,10 @@ OneAccountAtATime == Cardinality(procs) <= 1
 \* No background command is cut off by a move.
 NothingLost == lost = {}
 
-\* The resumed session has the whole transcript of the old one, a turn the
-\* SIGTERM cut included.
-TranscriptKept == phase = "moved" => resumedWith = transcript[Home]
+\* Each new process of the session, a move's or a resume's, starts from the
+\* whole transcript of the account the row named, where the conversation is:
+\* a turn the SIGTERM cut included, and on another account only once copied.
+TranscriptKept == [][nextPid' # nextPid => resumedWith' = transcript[Here]]_vars
 
 \* A late SessionEnd never ends the moved session.
 LateEndNeverEndsMoved == record.status = "ended" => Live = {}
@@ -515,6 +607,10 @@ DeliveredIsKept == \A i \in Ids : row[i].st = "delivered" => Has(i)
 
 \* A drained session moves.
 DrainedParentMoves == phase = "draining" ~> phase = "moved"
+
+\* A resume's copy ends: the session runs on the picked account, or the row
+\* stays stopped on its own.
+CopySettles == phase = "copying" ~> phase \in {"stopped", "moved"}
 
 \* Every row to the session is delivered, held through the move: a row due
 \* at the resume goes in as its prompt, a later one by the waiter or, long as

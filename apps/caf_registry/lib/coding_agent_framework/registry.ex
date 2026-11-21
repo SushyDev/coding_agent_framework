@@ -92,6 +92,48 @@ defmodule CodingAgentFramework.Registry do
           :unread | {:ok, map} | {:refused, term} | {:unknown, term}
   def rows(registry, account, opts \\ []), do: call(registry, {:rows, account}, opts)
 
+  @doc """
+  The Claude Code processes that may run by the session files of config directories `dirs`, read
+  once as a read of a `Registry` reads them, with `programs`' sh, cat, env and ps, and nothing
+  written (F-177): for a caller that holds no `Registry` of those directories, such as
+  `bin/caf-import`. Each pid is checked by its start time (`Holder.Process.liveness/3`), never by
+  its name. Answers `{:ok, %{live: pids, unknown: pids}}`: `unknown` holds a pid `ps` lists
+  whose start time is not known, its file half written or naming none, or every pid when `ps`
+  failed, so a caller that must be sure counts it as running. Or `{:unknown, reason}` when the
+  read failed, and `{:refused, {:no_program, names}}`. Option `timeout:` (ms, default 10 s).
+  """
+  @spec running(Programs.t(), [Path.t()], keyword) ::
+          {:ok, %{live: [pos_integer], unknown: [pos_integer]}}
+          | {:refused, term}
+          | {:unknown, term}
+  def running(%Programs{host: host} = programs, dirs, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, @timeout)
+
+    with {:ok, paths} <- Programs.take(programs, [:sh, :env, :ps, :cat]),
+         {:ok, by_dir} <- read_files(host, paths, dirs, timeout) do
+      procs = for files <- by_dir, {file, bytes} <- files, uniq: true, do: proc(file, bytes)
+      procs = Enum.reject(procs, &is_nil(elem(&1, 0)))
+      alive = Holder.Process.liveness(host, procs, Map.to_list(paths) ++ [timeout: timeout])
+      pids = fn want -> for({{pid, _}, ^want} <- alive, uniq: true, do: pid) |> Enum.sort() end
+      {:ok, %{live: pids.(:live), unknown: pids.(:unknown) -- pids.(:live)}}
+    end
+  end
+
+  # A file that cannot be parsed still names its process: `<pid>.json`, with no start time.
+  defp proc(file, bytes) do
+    case parse(bytes, nil) do
+      {%{pid: pid, proc_start: start}, _problem} when is_integer(pid) -> {pid, start}
+      _ -> {file_pid(file), nil}
+    end
+  end
+
+  defp file_pid(file) do
+    case Integer.parse(Path.rootname(file)) do
+      {pid, ""} when pid > 0 -> pid
+      _ -> nil
+    end
+  end
+
   defp call(registry, request, opts),
     do: Reader.call(registry, request, Keyword.get(opts, :timeout, 2 * @timeout), :no_registry)
 
@@ -137,21 +179,30 @@ defmodule CodingAgentFramework.Registry do
 
   defp read_now(state) do
     {names, dirs} = Enum.unzip(state.accounts)
-    args = ["-c", @read, "sh", state.programs.cat | dirs]
 
-    case Shell.run(state.host, state.programs.sh, args, timeout: state.timeout) do
+    case read_files(state.host, state.programs, dirs, state.timeout) do
+      {:ok, by_dir} -> write(state, names |> Enum.zip(by_dir) |> Map.new())
+      other -> {other, state}
+    end
+  end
+
+  # Each directory's session files, by file name, in one shell command, in the order given.
+  defp read_files(host, programs, dirs, timeout) do
+    args = ["-c", @read, "sh", programs.cat | dirs]
+
+    case Shell.run(host, programs.sh, args, timeout: timeout) do
       {:ok, %{status: 0, output: out}} ->
         parts = out |> :binary.split(@account, [:global]) |> tl()
 
-        if length(parts) == length(names),
-          do: write(state, names |> Enum.zip(parts) |> Map.new(fn {a, p} -> {a, files(p)} end)),
-          else: {{:unknown, {:sh, 0, out}}, state}
+        if length(parts) == length(dirs),
+          do: {:ok, Enum.map(parts, &files/1)},
+          else: {:unknown, {:sh, 0, out}}
 
       {:ok, %{status: status, output: out}} ->
-        {{:unknown, {:sh, status, out}}, state}
+        {:unknown, {:sh, status, out}}
 
       other ->
-        {other, state}
+        other
     end
   end
 

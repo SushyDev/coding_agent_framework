@@ -31,6 +31,8 @@ defmodule CodingAgentFramework.MainsTest do
     commit!(ctx, origin, "init")
 
     {:ok, accounts} = Accounts.new(Path.join(ctx.dir, "home"), ["work"])
+    # Claude Code ran there: the account is not logged out (`Accounts.login/2`).
+    File.write!(Path.join(ctx.account.config_dir, ".claude.json"), "{}")
     {:ok, file} = Accounts.usage_file(accounts, "work")
     File.mkdir_p!(Path.dirname(file))
     week = %{"seven_day" => %{"used_percentage" => 25, "resets_at" => 4_000_000_000}}
@@ -466,7 +468,10 @@ defmodule CodingAgentFramework.MainsTest do
     write!(Path.join([app_dir, "s-app", "subagents", "a.jsonl"]), "{}\n")
     write!(Path.join([app_dir, "memory", "MEMORY.md"]), "kept from before")
     write!(Path.join(web_dir, "s-web.jsonl"), ~s({"type":"user"}\n))
-    write!(Path.join(source, "settings.json"), ~s({"model":"opus"}))
+    # A setting naming a path this host lacks is kept, and named (F-177).
+    dirs = %{"additionalDirectories" => [ctx.dir, "/old/docs"]}
+    settings = JSON.encode!(%{"model" => "opus", "permissions" => dirs})
+    write!(Path.join(source, "settings.json"), settings)
     write!(Path.join(source, ".credentials.json"), "secret")
 
     # The import's home is the framework's; its accounts are the Sessions' account's own.
@@ -478,19 +483,45 @@ defmodule CodingAgentFramework.MainsTest do
       source: source,
       maps: [{"/old/app", "app"}, {"/old/web", "web"}],
       names: %{"s-app" => "app-epic", "s-web" => "web-epic"},
-      metas: %{"s-app" => %{"epic" => 7}}
+      metas: %{"s-app" => %{"epic" => 7}},
+      programs: programs()
     }
+
+    # The app's tables named by `--db` (F-177): none there, so it never started on this host.
+    elsewhere = Path.join(ctx.dir, "elsewhere.db")
+    assert {:refused, {:no_app_start, ^elsewhere}} = Import.run(Map.put(run, :db, elsewhere))
+
+    # A Claude Code run by hand on the source or the account is no row, but its session file
+    # names a live process, by its pid and start time (F-177): nothing is copied.
+    me = String.to_integer(System.pid())
+    live = JSON.encode!(%{pid: me, sessionId: "by-hand", procStart: lstart(me)})
+    config = ctx.account.config_dir
+
+    for dir <- [source, config] do
+      file = Path.join([dir, "sessions", "#{me}.json"])
+      write!(file, live)
+      assert {:refused, {:running, [^me]}} = Import.run(run)
+      write!(file, ~s({"pid": #{me}, "sess))
+      assert {:refused, {:may_run, [^me]}} = Import.run(run)
+      File.rm!(file)
+    end
+
+    refute File.exists?(Path.join(config, "settings.json"))
 
     assert {:ok, lines} = Import.run(run)
     assert Enum.any?(lines, &(&1 =~ "s-app: imported (main session app-epic"))
-    config = ctx.account.config_dir
+
+    assert ("settings: settings.json keeps permissions.additionalDirectories[1], naming " <>
+              "/old/docs, not on this host") in lines
+
+    refute Enum.any?(lines, &(&1 =~ "naming #{ctx.dir}"))
     {:ok, transcript} = Transcripts.path(config, ctx.checkout, "s-app")
     assert File.read!(transcript) == ~s({"type":"user"}\n)
     assert File.exists?(Path.join([Path.rootname(transcript), "subagents", "a.jsonl"]))
     assert {:ok, _} = Transcripts.path(config, web_checkout, "s-web") |> then(&exists/1)
     {:ok, memory} = Memory.dir(ctx.dir, ctx.checkout)
     assert File.read!(Path.join(memory, "MEMORY.md")) == "kept from before"
-    assert File.read!(Path.join(config, "settings.json")) == ~s({"model":"opus"})
+    assert File.read!(Path.join(config, "settings.json")) == settings
     refute File.exists?(Path.join(config, ".credentials.json"))
 
     # A second run copies nothing, and says so.
@@ -522,6 +553,72 @@ defmodule CodingAgentFramework.MainsTest do
 
     # While a session of the account runs, nothing is imported.
     assert {:refused, {:running, ["app-epic"]}} = Import.run(run)
+  end
+
+  # F-177 (`Move.tla`'s Resume): a conversation is only in the account it ran on or was imported
+  # into, so a resume runs there, even with another account's allowance larger; only when that
+  # account is refused does it go to another, which first takes a copy (ResumeCopy); a copy
+  # refused leaves the row on its own account (CopyRefused). `TranscriptKept`.
+  test "a resume runs on its row's account, and on another only after a copy", ctx do
+    {:ok, accounts} = Accounts.new(Path.join(ctx.dir, "home"), ["work", "spare"])
+    {:ok, spare} = Accounts.prepare(accounts, "spare", %{})
+    {:ok, file} = Accounts.usage_file(accounts, "spare")
+    week = %{"seven_day" => %{"used_percentage" => 5, "resets_at" => 4_000_000_000}}
+    File.write!(file, JSON.encode!(%{"rate_limits" => week}))
+    usage_opts = [accounts: accounts, host: "test", db: Path.join(ctx.dir, "usage2.db")]
+    usage = start_supervised!(Supervisor.child_spec({Usage, usage_opts}, id: :usage2))
+    {:ok, _} = Usage.read(usage)
+    room = start_supervised!(Supervisor.child_spec({Agent, fn -> %{} end}, id: :room))
+    acts_db = Path.join(ctx.dir, "acts.db")
+    acts = start_supervised!({Acts, db: acts_db, start_id: "s1", host: "test", instance: "t"})
+    allowance = fn account -> Agent.get(room, &Map.get(&1, account, :room)) end
+    more = [accounts: accounts, usage: usage, allowance: allowance, acts: acts]
+    mains = mains(%{ctx | mains_opts: Keyword.merge(ctx.mains_opts, more)})
+    assert {:ok, _} = level(ctx, mains)
+
+    # A stopped main session of `work`, as an import leaves one: its conversation is there alone.
+    {:ok, transcript} = Transcripts.path(ctx.account.config_dir, ctx.checkout, "s-epic")
+    write!(transcript, ~s({"type":"user"}\n))
+    write!(Path.join([Path.rootname(transcript), "subagents", "a.jsonl"]), "{}\n")
+    entry = %{session_id: "s-epic", account: "work", project: "app", meta: nil}
+    entry = Map.merge(entry, %{name: "app-epic", cwd: ctx.checkout})
+    assert {:ok, _} = Sessions.import_main(ctx.sessions, "app-epic", entry)
+
+    # `spare` has more allowance left; the resume runs where the conversation is (ResumeHere).
+    assert {:unknown, {:dialog, :trust}} = Mains.resume_main(mains, "app-epic")
+    assert [%{account: "work", resume: "s-epic"}] = Starts.rows(ctx.starts, "test")
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :trust, @trust)
+    assert {:ok, %{account: "work"}} = await(fn -> running(ctx, "app-epic") end)
+    assert {:ok, _} = await(fn -> settled(ctx, mains) end)
+    assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "app-epic")
+    assert {:ok, :none} = await(fn -> held(ctx) end)
+
+    # `work`'s windows spent, and `spare` never logged in: no account may take it.
+    Agent.update(room, &Map.put(&1, "work", {:spent, 4_000_000_000_000}))
+
+    assert {:refused, {:account, "work", {:allowance, 4_000_000_000_000}}} =
+             Mains.resume_main(mains, "app-epic")
+
+    # `spare` logged in, but the copy refused: the row stays on `work`, stopped (CopyRefused).
+    File.write!(Path.join(spare.config_dir, ".claude.json"), "{}")
+    File.rename!(transcript, transcript <> ".away")
+    assert {:refused, {:copy, {:no_transcript, :enoent}}} = Mains.resume_main(mains, "app-epic")
+    assert %{account: "work", status: "stopped"} = Agents.get(ctx.agents, "app-epic")
+    assert %{status: "refused", account: "spare"} = List.last(Starts.rows(ctx.starts, "test"))
+    File.rename!(transcript <> ".away", transcript)
+    assert {:ok, :none} = await(fn -> held(ctx) end)
+
+    # The copy, then the resume on `spare` under the same session id (ResumeCopied).
+    assert {:unknown, {:dialog, :trust}} = Mains.resume_main(mains, "app-epic")
+    {:ok, copy} = Transcripts.path(spare.config_dir, ctx.checkout, "s-epic")
+    assert File.read!(copy) == File.read!(transcript)
+    assert File.exists?(Path.join([Path.rootname(copy), "subagents", "a.jsonl"]))
+
+    assert %{status: "starting", account: "spare", resume: "s-epic"} =
+             List.last(Starts.rows(ctx.starts, "test"))
+
+    assert [%{outcome: "failed"}, %{outcome: "verified"}] =
+             for(%{act: "copy"} = row <- elem(Acts.rows(acts), 1), do: row)
   end
 
   # F-156: a checkout an earlier build made under the project's name goes to its directory
@@ -625,6 +722,23 @@ defmodule CodingAgentFramework.MainsTest do
       [] -> {:ok, :settled}
       rows -> rows
     end
+  end
+
+  # No lease held: each start's went once its work ended.
+  defp held(ctx) do
+    case leases(ctx, &is_nil(&1.released_at)) do
+      :none -> {:ok, :none}
+      {:ok, found} -> {:held, found}
+    end
+  end
+
+  defp lstart(pid) do
+    {out, 0} =
+      System.cmd(program!(:ps), ["-o", "lstart=", "-p", "#{pid}"],
+        env: [{"LC_ALL", "C"}, {"TZ", "UTC"}]
+      )
+
+    String.trim(out)
   end
 
   # The Scheduler reads its holders again on a cue, as on the app's.

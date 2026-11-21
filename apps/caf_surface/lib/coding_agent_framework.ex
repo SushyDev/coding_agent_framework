@@ -133,6 +133,7 @@ defmodule CodingAgentFramework do
          {:ok, work} <-
            Delegates.Work.open(Config.path(c, "caf.db"), Config.path(c, "caf.db"), c.workstation),
          {:ok, allowance} <- Usage.Allowance.open(Config.path(c, "caf.db")),
+         {:ok, mains_allowance} <- Usage.Allowance.open(Config.path(c, "caf.db")),
          {:ok, jobs_work} <- Jobs.Work.open(Config.path(c, "parts/jobs")),
          {:ok, mains_work} <-
            Mains.Work.open(Config.path(c, "caf.db"), Config.path(c, "caf.db"), c.workstation),
@@ -143,7 +144,7 @@ defmodule CodingAgentFramework do
       w = %{c: c, programs: programs, tmux: tmux, accounts: accounts, holder: holder}
       w = Map.merge(w, %{agents: agents, secret: secret, start_id: token()})
       w = Map.merge(w, %{work: work, allowance: allowance, jobs_work: jobs_work})
-      w = Map.merge(w, %{mains_work: mains_work, runs: runs})
+      w = Map.merge(w, %{mains_work: mains_work, mains_allowance: mains_allowance, runs: runs})
       Supervisor.start_link(__MODULE__, Map.put(w, :db, Config.path(c, "caf.db")))
     end
   end
@@ -613,7 +614,8 @@ defmodule CodingAgentFramework do
            {
              Mains,
              # The operator answers a main session's held permission request through it.
-             # A checkout's rename and an import's rows are acts (F-156).
+             # A checkout's rename and an import's rows are acts (F-156). A resume reads its
+             # row's account's windows as the Scheduler does, through a connection of its own.
              host: host,
              home: c.home,
              name_room: Config.name_room(c).agent,
@@ -625,6 +627,7 @@ defmodule CodingAgentFramework do
              sessions: pid.(:sessions),
              mailbox: pid.(:mailbox),
              usage: pid.(:usage),
+             allowance: &Usage.Allowance.check(w.mains_allowance, &1),
              accounts: w.accounts,
              projects: c.projects,
              mains: c.mains,

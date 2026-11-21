@@ -455,62 +455,12 @@ defmodule CodingAgentFramework.Mover do
 
   defp wake(s, at), do: Process.send_after(self(), :deadline, max(at - s.clock.(), 0) + 1)
 
-  # The transcript and the directory beside it, from the account the move leaves to the one it
-  # goes to, each whole under a temporary name and renamed into place.
+  # The conversation, from the account the move leaves to the one it goes to
+  # (`Transcripts.Copy`, which `Mains` copies a resume's with too).
   defp copied(s, row) do
     with {:ok, from} <- Accounts.config_dir(s.accounts, row.move_from),
          {:ok, to} <- Accounts.config_dir(s.accounts, row.move_to),
          true <- is_binary(row.session_id) or {:refused, :no_session_id},
-         {:ok, source} <- Transcripts.path(from, row.cwd, row.session_id),
-         {:ok, copy} <- Transcripts.path(to, row.cwd, row.session_id),
-         :ok <- copy_file(source, copy),
-         :ok <- copy_dir(Path.rootname(source), Path.rootname(copy)) do
-      env = Path.join("session-env", row.session_id)
-      copy_any(Path.join(from, env), Path.join(to, env))
-    end
+         do: Transcripts.Copy.copy(from, to, row.cwd, row.session_id)
   end
-
-  # `session-env/<session id>`, the one other per-session file Claude Code 2.1.322 keeps
-  # (F-133's new-4), a directory or a file; a session with none has nothing to copy.
-  defp copy_any(source, copy) do
-    cond do
-      File.dir?(source) -> copy_dir(source, copy)
-      File.regular?(source) -> copy_file(source, copy)
-      true -> :ok
-    end
-  end
-
-  defp copy_file(source, copy) do
-    tmp = copy <> ".moving"
-
-    with {:ok, %{size: size}} <- File.stat(source) |> named(:no_transcript),
-         :ok <- File.mkdir_p(Path.dirname(copy)) |> named(:mkdir),
-         :ok <- File.cp(source, tmp) |> named(:copy),
-         :ok <- File.rename(tmp, copy) |> named(:rename),
-         {:ok, %{size: ^size}} <- File.stat(copy) |> named(:copied) do
-      :ok
-    else
-      {:ok, %{size: other}} -> {:refused, {:size, other}}
-      refused -> refused
-    end
-  end
-
-  defp copy_dir(source, copy) do
-    if File.dir?(source) do
-      tmp = copy <> ".moving"
-      File.rm_rf(tmp)
-
-      with :ok <- File.mkdir_p(Path.dirname(copy)) |> named(:mkdir),
-           {:ok, _} <- File.cp_r(source, tmp) |> named(:copy_dir),
-           {:ok, _} <- File.rm_rf(copy) |> named(:copy_dir),
-           :ok <- File.rename(tmp, copy) |> named(:copy_dir),
-           do: :ok
-    else
-      :ok
-    end
-  end
-
-  defp named({:error, reason}, what), do: {:refused, {what, reason}}
-  defp named({:error, reason, _file}, what), do: {:refused, {what, reason}}
-  defp named(ok, _what), do: ok
 end
