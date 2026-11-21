@@ -279,10 +279,11 @@ Built, each from a checked model in `model/tla/`:
   command's end begins is never a second report; a command whose group used no CPU time for a
   bound after the report is ended by its record, on Linux (`StuckBackgrounds`); and a tool call
   with no hook row of its session within a bound is shown as `hooks_silent` (`HooksSilent`);
-- usage limits and the config (F-185 to F-192, against `Limit.tla` and `Move.tla`): a limited
+- usage limits and the config (F-185 to F-193, against `Limit.tla` and `Move.tla`): a limited
   agent shown, its menu stopped, its word to go on sent once per limit, a delegate moved past
-  `move_after` and a main moved only by a person's answer; every setting an app passed by hand
-  a config key; and a person's claim closed by the healer's restart;
+  `move_after` and a main moved only by a person's answer, a headless move with nothing due
+  resumed with its own word, and the limited agents by account in the `Watch`; every setting an
+  app passed by hand a config key; and a person's claim closed by the healer's restart;
 - what an app's move onto the tree wired by hand (F-195): a tree with `agents: false` that runs
   only leases, `agent_rows/1` reading the rows by the config, `tool_hooks` as `{module, opts}`,
   and a start right after a kill waiting up to `restart_wait` for the old tree's exit.
