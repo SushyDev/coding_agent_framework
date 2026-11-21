@@ -1,0 +1,507 @@
+defmodule CodingAgentFramework.Prompts do
+  @moduledoc """
+  One inbox of prompts (`docs/design.md`, "Prompts", B6; `model/tla/Prompt.tla`): every request
+  that waits on a person, whatever asked it and however deep in the tree, read in one place and
+  answered in one place.
+
+  **No row of its own.** A prompt is its owner's row, read by one function (`list/2`), so the
+  inbox never lags or disagrees with the mechanism that applies the answer:
+
+  | kind | the owner's row | open while |
+  | --- | --- | --- |
+  | `permission` | `Intake`'s hold of a `PermissionRequest` (a subagent's included; `subagent` names it) | the hold is `held` |
+  | `stop_cap` | `Intake`'s hold of a `Stop` at Claude Code's cap of blocks in a row | the hold is `held` |
+  | `dialog` | `Sessions`' agent row on a startup dialog (`trust`, `imports`) | the row shows it, no press marked |
+  | `ask` | `Mailbox`'s ask, from an agent to the operator | no answer row and no withdrawal |
+
+  A later kind is one more clause of `list/2` and of `answer/5`, and the same data.
+
+  Each prompt is `%{id, kind, status, agent, parent, project, subagent, text, options,
+  opened_at, deadline}`: `id` names its owner's key, so one state is one prompt
+  (`"permission:<intake id>"`, `"stop_cap:<intake id>"`, `"dialog:<agent>:<start>:<dialog>"`,
+  `"ask:<mailbox id>"`); `status` is `open`, `answering` (an answer is on its way to the owner),
+  or for a dialog `cut` or `unknown` (a restart cut its press: a person clears it,
+  `Sessions.clear_dialog/4`); `agent` is the agent whose session asks (nil for a session no
+  agent row names), `parent` and `project` its row's; `options` the labels a choice is one of,
+  or for an ask its questions, each with its options; `opened_at` and `deadline` wall-clock ms,
+  `deadline` nil for a kind that waits for ever.
+
+  **One answer.** `answer/5` checks the prompt read now (still open, the choice one it offers)
+  and hands the choice to its owner, whose own guard is the claim that lets one answer in
+  (`Prompt.tla`'s `Answer` and `AnswerNow`): a hold moves only from `held`, an ask's answer row
+  and its withdrawal share one unique key, a dialog's press is marked before it goes. A late or
+  second answer is refused `{:refused, :settled}`, whichever of the two checks finds it.
+
+  **The parent told once.** When a delegate's prompt opens, its parent gets one notice through
+  `Mailbox` (`Mailbox.notify/4`, kind `prompt`, from the delegate): ``From <delegate> (prompt):
+  waiting on <kind>: <text> (prompt <id>)``, stored under the prompt's id, so a read after a
+  restart finds it stored and the parent reads it once (`Prompt.tla`'s `ParentToldOnce`). A
+  builder waiting on a dialog is so never read as idle with no word.
+
+  **Cues.** It reads again on each cue of its owners (`reads/0`), and after a read that opened,
+  moved or closed a prompt it calls `notify` with `%{topic: "prompts", ids: ids}`, the ids of
+  those prompts: the inbox's one topic. The embedding app's tree starts one per instance.
+  """
+
+  use GenServer
+
+  alias CodingAgentFramework.{Intake, Mailbox, Sessions}
+  alias CodingAgentFramework.Sessions.Agents
+
+  @timeout 5_000
+  # A dialog's press reads the pane, presses and reads it again (`Sessions.answer_dialog/5`).
+  @press 25_000
+  # The most characters of a tool call's input a permission prompt's text carries.
+  @input 300
+
+  @kinds ~w(permission stop_cap dialog ask)
+
+  @typedoc "A prompt, as the module doc says."
+  @type prompt :: %{
+          id: String.t(),
+          kind: String.t(),
+          status: String.t(),
+          agent: String.t() | nil,
+          parent: String.t() | nil,
+          project: String.t() | nil,
+          subagent: String.t() | nil,
+          text: String.t(),
+          options: list,
+          opened_at: integer | nil,
+          deadline: integer | nil
+        }
+
+  @doc """
+  Starts the inbox of one host. Options: `host:`, `intake:` (the host's `Intake`) and
+  `intake_db:` (its file), `sessions:` (the `Sessions`) and `sessions_db:` (its file), `mailbox:`,
+  and optionally `notify:` (a function of one cue) and `name:` (for the embedding app's tree;
+  the library looks up no name).
+  """
+  @spec start_link(keyword) :: GenServer.on_start()
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
+
+  @doc """
+  The topics of the cues it writes, each as its whole shape (`CodingAgentFramework.Cues`):
+  `prompts`.
+  """
+  @spec writes() :: [String.t()]
+  def writes, do: ~w(prompts)
+
+  @doc "What it reads, for `Cues`: its owners' topics, each cue a read of every prompt."
+  @spec reads() :: %{topics: [String.t()], cue: (pid, map -> :ok)}
+  def reads, do: %{topics: ~w(intake sessions mailbox), cue: &cue/2}
+
+  @doc "The kinds it reads."
+  @spec kinds() :: [String.t()]
+  def kinds, do: @kinds
+
+  @doc "Hands it an owner's cue: the prompts are read again. Answers `:ok` at once."
+  @spec cue(GenServer.server(), map) :: :ok
+  def cue(prompts, _cue), do: GenServer.cast(prompts, :read)
+
+  @doc """
+  The prompts open now, oldest first, within `filter`: `agent:` (that agent's), `subtree:` (that
+  agent's and every agent's under it), `kind:` (one of `kinds/0`). Answers `{:ok, prompts}`,
+  `{:refused, {:bad, :filter}}`, or `{:unknown, reason}` when an owner did not answer.
+
+      Prompts.read(prompts, subtree: "app-main", kind: "permission")
+      #=> {:ok, [%{id: "permission:41", kind: "permission", agent: "app-unit", …}]}
+  """
+  @spec read(GenServer.server(), keyword, keyword) ::
+          {:ok, [prompt]} | {:refused, term} | {:unknown, term}
+  def read(prompts, filter \\ [], opts \\ []) do
+    with :ok <- check_filter(filter), do: call(prompts, {:read, filter}, opts)
+  end
+
+  @doc """
+  Answers prompt `id` with `choice`, as `who` (a person's name, or the app's), once:
+
+  - `permission`: `"allow"`, `"deny"`, or `{"deny", message}` (the agent reads the message);
+  - `stop_cap`: `"go_on"` (the cap's last block Claude Code honors) or `"end"` (the turn ends);
+  - `dialog`: one of its options' labels;
+  - `ask`: one answer per question, as `Mailbox.answer/4` takes them, or `{:withdraw, reason}`
+    (a person dismissed it, `Mailbox.withdraw/4`: one more settle).
+
+  The prompt is read now and must be `open`, and the choice one it offers; the owner then takes
+  it (`Intake.answer/4` with `by: who`, `Sessions.answer_dialog/5` with `by: who`,
+  `Mailbox.answer/4` or `Mailbox.withdraw/4`), in the caller's process. Answers the owner's
+  `{:ok, value}`; `{:refused, :settled}` for a prompt answered, withdrawn, expired or gone since
+  it opened, or answered on the pane first; `{:refused, :no_prompt}` for an id no owner has;
+  `{:refused, {:bad, :choice}}` or `{:refused, {:bad, :who}}`; `{:refused, {:status, status}}`
+  for a dialog's press a restart cut; or the owner's other answers. Option `:timeout` (ms) for
+  the read; the owner's call has its own bound.
+
+      Prompts.answer(prompts, "permission:41", "allow", "person")
+      #=> {:ok, :sent}
+      Prompts.answer(prompts, "permission:41", "deny", "person")
+      #=> {:refused, :settled}
+  """
+  @spec answer(GenServer.server(), String.t(), term, String.t(), keyword) ::
+          {:ok, term} | {:refused, term} | {:unknown, term}
+  def answer(prompts, id, choice, who, opts \\ []) do
+    with true <- (is_binary(who) and String.trim(who) != "") or {:refused, {:bad, :who}},
+         {:ok, prompt, owners} <- call(prompts, {:get, id}, opts),
+         true <- prompt.status == "open" or refused_status(prompt.status),
+         {:ok, act} <- choose(prompt, choice, who) do
+      hand(owners, prompt, act, who)
+    end
+  end
+
+  @doc """
+  Answers the startup dialog `kind` (`"trust"`, `"imports"`) agent `agent` shows, by its option
+  `label`, as `who`: `answer/5` of that dialog's prompt, for a caller that names the agent and
+  the dialog rather than the prompt (the operator's `answer_startup`). Answers as `answer/5`;
+  `{:refused, :settled}` when the agent's row shows no such dialog but did once (its start went
+  on, or it was answered), `{:refused, :no_prompt}` for an agent with no row.
+
+      Prompts.answer_startup(prompts, "app-main", "trust", "Yes, I trust this folder", "operator")
+      #=> {:ok, :sent}
+  """
+  @spec answer_startup(
+          GenServer.server(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword
+        ) ::
+          {:ok, term} | {:refused, term} | {:unknown, term}
+  def answer_startup(prompts, agent, kind, label, who, opts \\ []) do
+    with {:ok, shown} <- read(prompts, [agent: agent, kind: "dialog"], opts) do
+      case Enum.find(shown, &String.ends_with?(&1.id, ":" <> to_string(kind))) do
+        %{id: id} -> answer(prompts, id, label, who, opts)
+        nil -> answer(prompts, "dialog:#{agent}::#{kind}", label, who, opts)
+      end
+    end
+  end
+
+  defp refused_status("answering"), do: {:refused, :settled}
+  defp refused_status(status), do: {:refused, {:status, status}}
+
+  defp call(prompts, request, opts) do
+    timeout = Keyword.get(opts, :timeout, @timeout)
+    GenServer.call(prompts, request, timeout)
+  catch
+    :exit, {:noproc, _} -> {:refused, :no_prompts}
+    :exit, {:timeout, _} -> {:unknown, {:timeout, Keyword.get(opts, :timeout, @timeout)}}
+    :exit, {reason, _} -> {:unknown, {:exit, reason}}
+  end
+
+  @impl true
+  def init(opts) do
+    host = Keyword.fetch!(opts, :host)
+
+    with {:ok, idb} <- Intake.Table.open(Keyword.fetch!(opts, :intake_db)),
+         {:ok, agents} <- Agents.open(Keyword.fetch!(opts, :sessions_db), host) do
+      s = %{
+        host: host,
+        idb: idb,
+        agents: agents,
+        owners: Map.new(~w(intake sessions mailbox)a, &{&1, Keyword.fetch!(opts, &1)}),
+        notify: Keyword.get(opts, :notify, fn _ -> :ok end),
+        # id -> status, as the last read found them: what the next cue says moved.
+        shown: %{},
+        # The prompts whose parent was told since this start; Mailbox's key keeps it once
+        # across starts, and this keeps it to one call per start.
+        told: MapSet.new()
+      }
+
+      {:ok, s, {:continue, :read}}
+    else
+      {:refused, reason} -> {:stop, reason}
+    end
+  end
+
+  @impl true
+  def handle_continue(:read, s), do: {:noreply, reread(s)}
+
+  @impl true
+  def handle_cast(:read, s), do: {:noreply, reread(s)}
+
+  @impl true
+  def handle_call({:read, filter}, _from, s) do
+    reply =
+      with {:ok, all} <- list(s), do: {:ok, filtered(all, filter, Agents.rows(s.agents))}
+
+    {:reply, reply, s}
+  end
+
+  def handle_call({:get, id}, _from, s) do
+    reply =
+      with {:ok, all} <- list(s) do
+        case Enum.find(all, &(&1.id == id)) do
+          nil -> gone(s, id)
+          prompt -> {:ok, prompt, s.owners}
+        end
+      end
+
+    {:reply, reply, s}
+  end
+
+  # A read of every prompt: what opened, moved or closed is cued, and a delegate's new prompt
+  # is told to its parent. A read an owner did not answer decides nothing; the next cue reads
+  # again.
+  defp reread(s) do
+    case list(s) do
+      {:ok, all} ->
+        now = Map.new(all, &{&1.id, &1.status})
+        moved = for {id, _} <- Map.merge(s.shown, now), s.shown[id] != now[id], do: id
+        if moved != [], do: s.notify.(%{topic: "prompts", ids: Enum.sort(moved)})
+        tell(%{s | shown: now}, all)
+
+      _unread ->
+        s
+    end
+  end
+
+  # Prompt.tla's Notice: one notice per prompt of a delegate, under the prompt's key.
+  defp tell(s, all) do
+    rows = Map.new(Agents.rows(s.agents), &{&1.name, &1})
+
+    for %{status: "open", agent: agent, parent: parent} = p <- all,
+        not MapSet.member?(s.told, p.id),
+        match?(%{kind: "delegate"}, rows[agent]) and is_binary(parent),
+        reduce: s do
+      s ->
+        text = "waiting on #{p.kind}: #{p.text} (prompt #{p.id})"
+        opts = [key: "prompt:" <> p.id, kind: :prompt, from: agent]
+
+        case Mailbox.notify(s.owners.mailbox, parent, text, opts) do
+          # Stored now or before, or refused for good (a parent no edge reaches): told.
+          {tag, _} when tag in [:ok, :refused] -> %{s | told: MapSet.put(s.told, p.id)}
+          {:unknown, _} -> s
+        end
+    end
+  end
+
+  @doc """
+  Every prompt open now, as one function of its owners' rows (the module doc's table): the
+  `Intake` holds, the agent rows of `Sessions` and the asks of `Mailbox`. `s` is the process's
+  state; answers `{:ok, prompts}` or `{:unknown, reason}` when `Mailbox` did not answer.
+  """
+  @spec list(map) :: {:ok, [prompt]} | {:unknown, term}
+  def list(s) do
+    rows = Agents.rows(s.agents)
+
+    with {:ok, asks} <- asks(s.owners.mailbox) do
+      prompts = holds(s, rows) ++ dialogs(rows) ++ Enum.map(asks, &ask(&1, rows))
+      {:ok, Enum.sort_by(prompts, &{&1.opened_at || 0, &1.id})}
+    end
+  end
+
+  defp asks(mailbox) do
+    case Mailbox.open_asks(mailbox) do
+      {:ok, asks} -> {:ok, asks}
+      {_, reason} -> {:unknown, {:mailbox, reason}}
+    end
+  end
+
+  defp holds(s, rows) do
+    by_session = Map.new(rows, &{{&1.account, &1.session_id}, &1})
+
+    for row <- Intake.Table.waiting(s.idb, s.host) do
+      agent = by_session[{row.account, row.session_id}]
+      data = decode(row.data)
+      kind = if row.prompt == "stop_cap", do: "stop_cap", else: "permission"
+
+      fields = %{
+        id: "#{kind}:#{row.id}",
+        kind: kind,
+        status: if(row.hold == "held", do: "open", else: "answering"),
+        subagent: if(is_binary(data["agent_id"]), do: data["agent_id"]),
+        # A held row is written once when it opens, and again only when it settles.
+        opened_at: row.written_at,
+        deadline: row.deadline
+      }
+
+      Map.merge(of(agent), Map.merge(fields, hold_text(kind, data)))
+    end
+  end
+
+  defp hold_text("permission", data) do
+    input =
+      case data["tool_input"] do
+        %{"command" => command} when is_binary(command) -> command
+        %{"file_path" => path} when is_binary(path) -> path
+        nil -> ""
+        other -> JSON.encode!(other)
+      end
+
+    text = String.trim("#{data["tool_name"]} #{String.slice(input, 0, @input)}")
+    %{text: text, options: ~w(allow deny)}
+  end
+
+  defp hold_text("stop_cap", _data) do
+    text =
+      "its turn would end at Claude Code's cap of Stop blocks in a row: go on once more, or end"
+
+    %{text: text, options: ~w(go_on end)}
+  end
+
+  defp dialogs(rows) do
+    for %{} = row <- rows, d = Agents.dialog(row), status = dialog_status(d.answers[d.kind]) do
+      fields = %{
+        id: "dialog:#{row.name}:#{row.started_at}:#{d.kind}",
+        kind: "dialog",
+        status: status,
+        subagent: nil,
+        text: Enum.join(["#{d.kind} dialog" | d.paths], ": "),
+        options: d.options,
+        opened_at: row.updated_at,
+        deadline: nil
+      }
+
+      Map.merge(of(row), fields)
+    end
+  end
+
+  # A dialog's prompt by its answer's mark: none or cleared, open; a press under way,
+  # answering; cut or unknown, for a person; sent, gone.
+  defp dialog_status(nil), do: "open"
+  defp dialog_status(%{mark: "cleared"}), do: "open"
+  defp dialog_status(%{mark: "pressing"}), do: "answering"
+  defp dialog_status(%{mark: mark}) when mark in ["cut", "unknown"], do: mark
+  defp dialog_status(_), do: nil
+
+  defp ask(a, rows) do
+    row = Enum.find(rows, &(&1.name == a.from)) || %{name: a.from}
+
+    fields = %{
+      id: "ask:#{a.id}",
+      kind: "ask",
+      status: "open",
+      subagent: nil,
+      text: Enum.map_join(a.questions, "\n", &"#{&1["header"]}: #{&1["question"]}"),
+      options: a.questions,
+      opened_at: a.asked_at,
+      deadline: nil
+    }
+
+    Map.merge(of(row), fields)
+  end
+
+  defp of(nil), do: %{agent: nil, parent: nil, project: nil}
+
+  defp of(row),
+    do: %{agent: row[:name], parent: Map.get(row, :parent), project: Map.get(row, :project)}
+
+  defp decode(text) when is_binary(text) do
+    case JSON.decode(text) do
+      {:ok, %{} = data} -> data
+      _ -> %{}
+    end
+  end
+
+  defp decode(_), do: %{}
+
+  # An id that is no prompt now: its owner's row is there but settled, or there is none.
+  defp gone(s, id) do
+    case String.split(id, ":") do
+      [kind, n] when kind in ["permission", "stop_cap"] ->
+        settled_if(Intake.Table.rows_by_id(s.idb, [int(n)]) != [])
+
+      ["dialog", agent, _start, _kind] ->
+        settled_if(Agents.get(s.agents, agent) != nil)
+
+      ["ask", n] ->
+        settled_if(match?({:ok, _}, Mailbox.asked(s.owners.mailbox, int(n))))
+
+      _ ->
+        {:refused, :no_prompt}
+    end
+  end
+
+  defp settled_if(true), do: {:refused, :settled}
+  defp settled_if(false), do: {:refused, :no_prompt}
+
+  defp int(n) do
+    case Integer.parse(n) do
+      {i, ""} -> i
+      _ -> -1
+    end
+  end
+
+  # The choice as its owner takes it, checked against what the prompt offers.
+  defp choose(%{kind: "permission"}, "allow", _who), do: {:ok, :allow}
+  defp choose(%{kind: "permission"}, "deny", who), do: {:ok, {:deny, "Denied by #{who}."}}
+
+  defp choose(%{kind: "permission"}, {"deny", message}, _who)
+       when is_binary(message) and message != "",
+       do: {:ok, {:deny, message}}
+
+  defp choose(%{kind: "stop_cap"}, "go_on", _who), do: {:ok, :go_on}
+  defp choose(%{kind: "stop_cap"}, "end", _who), do: {:ok, :end}
+
+  defp choose(%{kind: "dialog", options: options}, label, _who) when is_binary(label),
+    do: if(label in options, do: {:ok, label}, else: {:refused, {:bad, :choice}})
+
+  defp choose(%{kind: "ask"}, {:withdraw, reason}, _who), do: {:ok, {:withdraw, reason}}
+  defp choose(%{kind: "ask"}, answers, _who) when is_list(answers), do: {:ok, {:answer, answers}}
+  defp choose(_prompt, _choice, _who), do: {:refused, {:bad, :choice}}
+
+  # The owner takes the answer, in the caller's process; its refusal of a request no longer
+  # waiting is the same `settled` as the read's.
+  defp hand(owners, %{kind: kind, id: id}, decision, who)
+       when kind in ["permission", "stop_cap"] do
+    [_, n] = String.split(id, ":")
+
+    case Intake.answer(owners.intake, int(n), decision, by: who) do
+      {:refused, {:not_held, _}} -> {:refused, :settled}
+      other -> other
+    end
+  end
+
+  defp hand(owners, %{kind: "dialog", agent: agent, id: id}, label, who) do
+    [_, _, _, kind] = String.split(id, ":")
+
+    case Sessions.answer_dialog(owners.sessions, agent, kind, label, by: who, timeout: @press) do
+      {:refused, why}
+      when why == :no_session or elem(why, 0) in [:answered, :not_on_dialog, :shown] ->
+        {:refused, :settled}
+
+      other ->
+        other
+    end
+  end
+
+  defp hand(owners, %{kind: "ask", id: "ask:" <> n}, {:answer, answers}, _who),
+    do: Mailbox.answer(owners.mailbox, int(n), answers)
+
+  defp hand(owners, %{kind: "ask", id: "ask:" <> n}, {:withdraw, reason}, _who),
+    do: Mailbox.withdraw(owners.mailbox, int(n), reason)
+
+  defp check_filter(filter) when is_list(filter) do
+    ok? =
+      Enum.all?(filter, fn
+        {key, name} when key in [:agent, :subtree] -> is_binary(name)
+        {:kind, kind} -> kind in @kinds
+        _ -> false
+      end)
+
+    if ok?, do: :ok, else: {:refused, {:bad, :filter}}
+  end
+
+  defp check_filter(_), do: {:refused, {:bad, :filter}}
+
+  defp filtered(all, filter, rows) do
+    Enum.reduce(filter, all, fn
+      {:agent, name}, ps -> Enum.filter(ps, &(&1.agent == name))
+      {:kind, kind}, ps -> Enum.filter(ps, &(&1.kind == kind))
+      {:subtree, name}, ps -> Enum.filter(ps, &(&1.agent in subtree(rows, name)))
+    end)
+  end
+
+  # The agent and every agent under it, by the rows' parent edges.
+  defp subtree(rows, name) do
+    children = Enum.group_by(rows, & &1.parent, & &1.name)
+    walk([name], children, MapSet.new())
+  end
+
+  defp walk([], _children, seen), do: seen
+
+  defp walk([name | rest], children, seen) do
+    if MapSet.member?(seen, name),
+      do: walk(rest, children, seen),
+      else: walk(Map.get(children, name, []) ++ rest, children, MapSet.put(seen, name))
+  end
+end

@@ -377,11 +377,13 @@ defmodule CodingAgentFramework.Intake do
   Code's cap (`prompt` `stop_cap`): `:go_on`, the last block Claude Code honors, with the
   callback's reason, or `:end`, which lets the turn end. Returns `{:ok, :sent}` once the
   response is written. A row that is not `held` for that answer is refused with
-  `{:refused, {:not_held, hold}}`.
+  `{:refused, {:not_held, hold}}`. Option `by:`, who answered, is the row's `actor` (the inbox
+  names the person, F-179); without it a permission's row has none and a cap's says `person`.
   """
   @spec answer(GenServer.server(), integer, term, keyword) ::
           {:ok, :sent} | {:refused, term} | {:unknown, term}
-  def answer(intake, id, decision, opts \\ []), do: call(intake, {:answer, id, decision}, opts)
+  def answer(intake, id, decision, opts \\ []),
+    do: call(intake, {:answer, id, decision, Keyword.get(opts, :by)}, opts)
 
   @doc """
   Pauses an agent's or a project's turn ends: `scope` is `{:agent, name}` or `{:project,
@@ -523,15 +525,15 @@ defmodule CodingAgentFramework.Intake do
     end
   end
 
-  def handle_call({:answer, id, decision}, from, state) do
+  def handle_call({:answer, id, decision, by}, from, state) do
     case state.holds[id] do
       %{kind: :stop, cap: true} = hold
       when decision in [:go_on, :end] and not is_map_key(hold, :deciding) ->
-        cap_answer(state, id, hold, decision, from)
+        cap_answer(state, id, hold, {decision, by || "person"}, from)
 
       %{kind: :permission} ->
         with {:ok, body} <- permission_response(decision),
-             {:ok, state} <- decide(state, id, body, nil) do
+             {:ok, state} <- decide(state, id, body, by) do
           {:noreply, put_in(state.holds[id][:from], from)}
         else
           {:refused, _} = refused -> {:reply, refused, state}
@@ -666,6 +668,10 @@ defmodule CodingAgentFramework.Intake do
   defp store(row, account, {pid, _}, state) do
     # A tool call's row keeps `data` empty until a decision: `Transcripts` has the input.
     stored = if row.event == "PreToolUse", do: %{row | data: nil}, else: row
+    kind = Map.get(%{"PreToolUse" => :tool, "Stop" => :stop}, row.event, :permission)
+    # A hold's row keeps when it ends with no decision, for the inbox (F-179).
+    stored =
+      if row.hold, do: Map.put(stored, :deadline, now() + state.deadlines[kind]), else: stored
 
     case Table.insert(state.db, state.host, account, stored, now()) do
       # A second post of a PreToolUse answers the row's decision, or none.
@@ -678,8 +684,6 @@ defmodule CodingAgentFramework.Intake do
       {:new, id} when row.hold ->
         # Spec actions HoldStored and ToolHeld (Hold's Held): the row says held while the plug
         # keeps the request open, and the deadline starts.
-        kind = Map.get(%{"PreToolUse" => :tool, "Stop" => :stop}, row.event, :permission)
-
         hold = %{
           kind: kind,
           account: account,
@@ -834,18 +838,18 @@ defmodule CodingAgentFramework.Intake do
 
   # Spec action CapAnswered: a person's "go on" is the cap's last honored block; "end" lets
   # the turn end.
-  defp cap_answer(state, id, hold, :go_on, from) do
+  defp cap_answer(state, id, hold, {:go_on, by}, from) do
     blocks = Table.blocks(state.db, state.host, hold.account, hold.session)
     Table.put_blocks(state.db, state.host, hold.account, hold.session, blocks + 1, now())
 
-    case decide(state, id, stop_block(hold.reason), "person") do
+    case decide(state, id, stop_block(hold.reason), by) do
       {:ok, state} -> {:noreply, put_in(state.holds[id][:from], from)}
       :not_held -> {:reply, {:refused, {:not_held, hold_of(state, id)}}, state}
     end
   end
 
-  defp cap_answer(state, id, hold, :end, _from),
-    do: {:reply, {:ok, :sent}, release(state, id, hold, "passed", actor: "person")}
+  defp cap_answer(state, id, hold, {:end, by}, _from),
+    do: {:reply, {:ok, :sent}, release(state, id, hold, "passed", actor: by)}
 
   # The Stop output Claude Code 2.1.322 reads: a block sends the agent back with the reason.
   defp stop_block(reason), do: JSON.encode!(%{"decision" => "block", "reason" => reason})

@@ -381,6 +381,7 @@ Q == INSTANCE Prompt WITH
        hconn <- [p \in {} |-> FALSE], hrow <- [p \in {} |-> "none"], hmarking <- {},
        hout <- [p \in {} |-> <<>>], hwrong <- {},
        took <- [i \in Ids |-> 0], orec <- [i \in Ids |-> "none"], otold <- {},
+       told <- [i \in Ids |-> 0],
        turn <- "working", blocks <- 0, tools <- 0, crashes <- 0, gaveUp <- FALSE
 
 -----------------------------------------------------------------------------

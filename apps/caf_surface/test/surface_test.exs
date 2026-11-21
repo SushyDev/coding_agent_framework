@@ -68,7 +68,7 @@ defmodule CodingAgentFramework.SurfaceTest do
     parts = CodingAgentFramework.parts(start_supervised!({CodingAgentFramework, config}))
     keys = ~w(reaper names cues inlet usage stream intake intake_http sampler sessions acts)a
     keys = keys ++ ~w(recoveries tracker scheduler delegates mover mailbox copies jobs services)a
-    keys = keys ++ ~w(mains mcp mcp_http ends)a
+    keys = keys ++ ~w(prompts mains mcp mcp_http ends)a
 
     assert Enum.sort(Map.keys(parts)) ==
              Enum.sort(keys ++ [:registry, :transcripts])
@@ -629,14 +629,16 @@ defmodule CodingAgentFramework.SurfaceTest do
     "registry" => [:sessions, :mover],
     "stream" => [:sessions, :delegates, :mailbox, :mover],
     "tmux" => [:sessions, :recoveries],
-    "sessions" => [:delegates, :mailbox, :ends, :mover, :scheduler, :mains],
+    "sessions" => [:delegates, :mailbox, :ends, :mover, :scheduler, :mains, :prompts],
     "mains" => [:scheduler],
     "transcripts" => [:delegates, :mailbox],
     "delegates" => [:mailbox, :scheduler],
     "usage" => [:scheduler],
     "jobs" => [:scheduler],
-    "mailbox" => [:delegates, :mover],
-    "waiters" => [:mailbox]
+    "mailbox" => [:delegates, :mover, :prompts],
+    # The inbox reads every hook row's cue: a held request opens a prompt (F-179).
+    "intake" => [:prompts],
+    "waiters" => [:mailbox, :prompts]
   }
 
   test "an app that wires only the parts' declarations hands each part every cue it needs" do
@@ -711,6 +713,59 @@ defmodule CodingAgentFramework.SurfaceTest do
       end,
       20_000
     )
+  end
+
+  # The inbox on the whole tree (F-179): a delegate's held permission request is a prompt, cued
+  # on `prompts` to the app's subscriber, its parent told once through `Mailbox`, and answered
+  # once through `answer/4`; the operator's `answer_startup` goes through the same inbox.
+  test "a delegate's held request is in the inbox, cued, told to its parent, answered once",
+       ctx do
+    parts = start(ctx.config)
+    {:ok, %{ref: _}} = CodingAgentFramework.subscribe("t", ["prompts"])
+
+    assert {:ok, %{delegate: name}} =
+             MCP.call(parts.mcp, "app-main", "start_delegate", args("unit/one"))
+
+    {:ok, sid} = await(fn -> ok(Table.get(ctx.sessions, "ws", name).session_id) end, 20_000)
+    tool = %{"tool_use_id" => "t1", "tool_name" => "Bash", "tool_input" => %{"command" => "ls"}}
+    hook = %{"hook_event_name" => "PermissionRequest", "session_id" => sid}
+    body = JSON.encode!(Map.merge(hook, tool))
+
+    holder =
+      Task.async(fn ->
+        {:ok, {:held, id, ref, _wait}} =
+          CodingAgentFramework.Intake.post(parts.intake, "work", body)
+
+        receive do
+          {^ref, {:decision, decision}} ->
+            CodingAgentFramework.Intake.written(parts.intake, id, ref)
+            decision
+        after
+          20_000 -> :timeout
+        end
+      end)
+
+    assert_receive {:caf_cue, %{topic: "prompts", ids: [id]}}, 20_000
+    assert {:ok, [p]} = CodingAgentFramework.prompts("t", subtree: "app-main")
+    assert %{id: ^id, kind: "permission", agent: ^name, parent: "app-main", project: "app"} = p
+    assert {:ok, []} = CodingAgentFramework.prompts("t", kind: "dialog")
+
+    {:ok, mtable} = Mailbox.Table.open(Path.join(ctx.home, "caf.db"))
+
+    told =
+      for %{kind: "prompt", to_agent: "app-main"} = m <- Mailbox.Table.open_rows(mtable), do: m
+
+    assert [%{from_agent: ^name, text: "waiting on permission: Bash ls (prompt " <> _}] = told
+
+    assert {:ok, :sent} = CodingAgentFramework.answer("t", id, "allow", "sam")
+    assert Task.await(holder, 25_000) =~ ~s("behavior":"allow")
+    assert {:refused, :settled} = CodingAgentFramework.answer("t", id, "deny", "sam")
+    assert_receive {:caf_cue, %{topic: "prompts", ids: [^id]}}, 20_000
+    assert {:refused, :no_instance} = CodingAgentFramework.prompts("nope")
+
+    # The operator's answer of a dialog the agent never showed: the inbox has none.
+    assert {:refused, :settled} =
+             CodingAgentFramework.Operator.answer_startup(parts.mcp, name, "trust", "Yes")
   end
 
   defp ok(nil), do: nil

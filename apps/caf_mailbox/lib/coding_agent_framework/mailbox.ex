@@ -179,19 +179,21 @@ defmodule CodingAgentFramework.Mailbox do
   not stored again, so a repeat of one event (a late end handed twice) is dropped. Option
   `:kind`: `:msg` (the default) or `:notice`, a word no turn answers, so the addressee's next
   result is never read as a reply to it: a delegate's turn of its own told to its parent
-  (F-155). Answers `{:ok, {:queued, id}}`, `{:ok, :stored_before}`, or `{:refused, reason}` with
-  no row (`{:bad, :kind}` for another kind).
+  (F-155); or `:prompt`, a notice from agent `from:` (an agent of the tree), that it waits on a
+  person (F-179, `Prompts`): the addressee reads it as `From <from> (prompt): <text>`, and no
+  turn answers it either. Answers `{:ok, {:queued, id}}`, `{:ok, :stored_before}`, or
+  `{:refused, reason}` with no row (`{:bad, :kind}` for another kind).
 
       Mailbox.notify(mailbox, "app-main", "Job mcp-a-7 ended: exit 0.", key: "job:mcp-a-7")
       #=> {:ok, {:queued, 9}}
+      Mailbox.notify(mailbox, "app-main", "waiting on a permission: Bash", key: "prompt:p",
+        kind: :prompt, from: "app-unit")
+      #=> {:ok, {:queued, 10}}
   """
-  def notify(mailbox, to, text, opts \\ []),
-    do:
-      call(
-        mailbox,
-        {:notify, to, text, Keyword.get(opts, :key), Keyword.get(opts, :kind, :msg)},
-        opts
-      )
+  def notify(mailbox, to, text, opts \\ []) do
+    {key, kind} = {Keyword.get(opts, :key), Keyword.get(opts, :kind, :msg)}
+    call(mailbox, {:notify, to, text, key, kind, Keyword.get(opts, :from, @framework)}, opts)
+  end
 
   @doc """
   Stores delegate `to`'s brief from its parent `from` under `uuid`, the uuid `Delegates` chose
@@ -544,16 +546,19 @@ defmodule CodingAgentFramework.Mailbox do
 
   # The key goes in `reply_to`, whose unique index takes one row per key; a key is never a
   # row's uuid, since it carries its own prefix.
-  def handle_call({:notify, to, text, key, kind}, _from, s) do
-    with true <- kind in [:msg, :notice] or {:refused, {:bad, :kind}},
+  def handle_call({:notify, to, text, key, kind, from}, _from, s) do
+    with true <- kind in [:msg, :notice, :prompt] or {:refused, {:bad, :kind}},
          true <-
            (Enum.all?([to, text], &(is_binary(&1) and &1 != "")) and
               (is_nil(key) or is_binary(key))) or {:refused, {:bad, :message}},
          :ok <- Grants.may_use?(s.grants, to),
+         # A prompt's notice is its asker's: an agent of the tree, never the framework.
+         :ok <- if(kind == :prompt, do: Grants.may_use?(s.grants, from), else: :ok),
+         from = if(kind == :prompt, do: from, else: @framework),
          # The operator is no agent: nothing would deliver to it.
          true <- to != Grants.operator(s.grants) or {:refused, {:not_an_agent, to}} do
       row = %{
-        from: @framework,
+        from: from,
         to: to,
         text: text,
         uuid: Stream.uuid(),

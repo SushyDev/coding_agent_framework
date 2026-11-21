@@ -55,11 +55,19 @@ defmodule CodingAgentFramework.MCPTest do
       {:ok, if(written == :written, do: :delivered, else: :queued)}
     end
 
-    # A `Mailbox` that stores every well-formed ask as ask 12.
-    def withdraw(test, ask, reason, _opts) do
-      send(test, {:withdraw, ask, reason})
+    # A `Prompts` that takes every answer (F-179): the operator's withdrawal of an ask and its
+    # answer of a startup dialog go through it.
+    def answer(test, id, choice, who) do
+      send(test, {:prompt_answer, id, choice, who})
       {:ok, {:queued, 13}}
     end
+
+    def answer_startup(test, agent, kind, label, who) do
+      send(test, {:answer_startup, agent, kind, label, who})
+      {:ok, :sent}
+    end
+
+    # A `Mailbox` that stores every well-formed ask as ask 12.
 
     def ask(test, from, questions, _opts) do
       send(test, {:ask, from, questions})
@@ -416,7 +424,17 @@ defmodule CodingAgentFramework.MCPTest do
              %{"refused" => "operator_only"}
 
     assert {:ok, {:queued, 13}} = Operator.withdraw(operator, 12, "Dismissed.")
-    assert_received {:withdraw, 12, "Dismissed."}
+    assert_received {:prompt_answer, "ask:12", {:withdraw, "Dismissed."}, "op"}
+
+    # So is a startup dialog's answer, through the inbox, as the operator.
+    assert tool(ctx.mcp, t["app-main"], "answer_startup", %{
+             "agent" => "app-main",
+             "kind" => "trust",
+             "label" => "Yes"
+           }) == %{"refused" => "operator_only"}
+
+    assert {:ok, :sent} = Operator.answer_startup(operator, "app-main", "trust", "Yes")
+    assert_received {:answer_startup, "app-main", "trust", "Yes", "op"}
 
     # The operator's own tools are in its list alone (F-172's new-5).
     own = ~w(answer_startup end_main withdraw)
@@ -444,7 +462,7 @@ defmodule CodingAgentFramework.MCPTest do
 
     opts =
       [dir: dir, port: 4793, grants: Grants.new(tree, operator: "op"), acts: acts] ++
-        Enum.map(~w(mailbox delegates services tracker stream mains)a, &{&1, stand_in}) ++
+        Enum.map(~w(mailbox delegates services tracker stream mains prompts)a, &{&1, stand_in}) ++
         [workstation: "ws", transcripts: nil, place: fn _ -> {:refused, :no_worktree} end] ++
         [tool_timeout: 600_000, margin: 60_000]
 

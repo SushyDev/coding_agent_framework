@@ -34,6 +34,7 @@ defmodule CafSurface.MixProject do
       {:caf_mover, in_umbrella: true},
       {:caf_recoveries, in_umbrella: true},
       {:caf_runs, in_umbrella: true},
+      {:caf_prompts, in_umbrella: true},
       {:caf_registry, in_umbrella: true},
       {:caf_sampler, in_umbrella: true},
       {:caf_services, in_umbrella: true},

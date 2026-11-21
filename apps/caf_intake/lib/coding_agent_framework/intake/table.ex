@@ -10,8 +10,9 @@ defmodule CodingAgentFramework.Intake.Table do
   otherwise one of `held`, `deciding`, `answered`, `expired`, `passed`, `lost` and `unknown`
   (`model/tla/Hold.tla`'s rows). A decided row's `decision` is the response, and its `actor`
   who decided (`app` for the app's callback, `pause` for a pause's word, `person` for a
-  person's answer, `capped` for a `Stop` let pass at Claude Code's cap). A held `Stop` that
-  waits on a person has `prompt` `stop_cap`.
+  person's answer, or the name the answer gave, `capped` for a `Stop` let pass at Claude Code's
+  cap). A held `Stop` that waits on a person has `prompt` `stop_cap`. A held row's `deadline`
+  is the wall-clock ms at which its hold ends with no decision (F-179).
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "intake.db")
       iex> {:ok, db} = CodingAgentFramework.Intake.Table.open(path)
@@ -22,7 +23,7 @@ defmodule CodingAgentFramework.Intake.Table do
   alias CodingAgentFramework.Store
 
   @columns ~w(id host account key event session_id data problem hold decision written_at actor
-              prompt)a
+              prompt deadline)a
 
   @schema """
   CREATE TABLE IF NOT EXISTS intake_events (
@@ -39,7 +40,7 @@ defmodule CodingAgentFramework.Intake.Table do
     reason TEXT, set_by TEXT, set_at INTEGER NOT NULL, PRIMARY KEY (host, scope, name));
   """
 
-  @open [added: [intake_events: ["actor TEXT", "prompt TEXT"]]]
+  @open [added: [intake_events: ["actor TEXT", "prompt TEXT", "deadline INTEGER"]]]
 
   @type db :: Store.db()
 
@@ -112,11 +113,11 @@ defmodule CodingAgentFramework.Intake.Table do
   def insert(db, host, account, row, at) do
     values =
       [host, account, row.key, row.event, row.session_id, row.data] ++
-        [Store.text(row.problem), if(row.hold, do: "held"), at]
+        [Store.text(row.problem), if(row.hold, do: "held"), at, row[:deadline]]
 
     sql =
       "INSERT INTO intake_events (host, account, key, event, session_id, data, problem, hold, " <>
-        "written_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) " <>
+        "written_at, deadline) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) " <>
         "ON CONFLICT (host, account, key) DO NOTHING RETURNING id"
 
     case Store.query(db, sql, values) do
@@ -270,6 +271,25 @@ defmodule CodingAgentFramework.Intake.Table do
       held = for %{event: "PermissionRequest", hold: "held", id: id} <- own, do: id
       {:ok, %{last: own |> Enum.map(& &1.id) |> Enum.max(fn -> 0 end), held: held}}
     end
+  end
+
+  @doc """
+  The host's holds that wait on a person (F-179, `Prompts`), oldest first: each
+  `PermissionRequest` row and each `Stop` row at Claude Code's cap (`prompt` `stop_cap`) whose
+  hold is `held`, or `deciding` (an answer on its way out).
+
+      iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "intake.db")
+      iex> {:ok, db} = CodingAgentFramework.Intake.Table.open(path)
+      iex> CodingAgentFramework.Intake.Table.waiting(db, "laptop")
+      []
+  """
+  @spec waiting(db, String.t()) :: [map]
+  def waiting(db, host) do
+    where =
+      "host = ?1 AND hold IN ('held', 'deciding') AND " <>
+        "(event = 'PermissionRequest' OR prompt = 'stop_cap') ORDER BY id"
+
+    Store.select(db, "intake_events", @columns, where, [host])
   end
 
   @doc "The rows with these ids; an id with no row is absent."
