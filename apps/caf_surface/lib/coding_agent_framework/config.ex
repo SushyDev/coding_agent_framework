@@ -165,8 +165,9 @@ defmodule CodingAgentFramework.Config do
     `logins` `max_age`; `mailbox` `take_bound`; `mains` `clone_timeout`; `delegates`
     `idle_bound` (none by default: an idle delegate is not told to its parent); `mover`
     `timeout` and `stop`; `limits` `margin`, `credits` and `bound`; `stuck_backgrounds`
-    `quiet`; `hooks_silent` `bound` and `slack`; `registry`, `transcripts` and `stream`
-    `timeout`; `mcp` `cap`. Each is ms but for a count. An option not named is the part's own
+    `quiet`; `hooks_silent` `bound` and `slack`; `interventions` `person` (the actor of a
+    person's interventions, `"person"` by default), `settle` and `slack`; `registry`,
+    `transcripts` and `stream` `timeout`; `mcp` `cap`. Each is ms but for a count and a name. An option not named is the part's own
     default. A part or option it does not know, or a value out of shape, is refused naming
     both, `{:refused, {:bad, :parts, {part, option}}}`.
 
@@ -503,6 +504,7 @@ defmodule CodingAgentFramework.Config do
     limits: [margin: :ms, credits: :ms, bound: :count, move_after: :ms],
     stuck_backgrounds: [quiet: :ms],
     hooks_silent: [bound: :ms, slack: :ms],
+    interventions: [person: :name, settle: :ms, slack: :ms],
     registry: [timeout: :ms],
     transcripts: [timeout: :ms],
     stream: [timeout: :ms],
@@ -554,6 +556,7 @@ defmodule CodingAgentFramework.Config do
   defp typed?({:ms, below}, v), do: typed?(:ms, v) and v < below
   defp typed?(:count, v), do: is_integer(v) and v > 0
   defp typed?(:path, v), do: path?(v)
+  defp typed?(:name, v), do: is_binary(v) and String.trim(v) != ""
   defp typed?(:ms_or_nil, v), do: v == nil or typed?(:ms, v)
 
   defp typed?(:by_class, %{} = v),

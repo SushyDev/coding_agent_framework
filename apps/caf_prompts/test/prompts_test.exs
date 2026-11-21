@@ -10,7 +10,7 @@ defmodule CodingAgentFramework.PromptsTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, Grants, Inlet, Intake, Logins, Mailbox, Prompts}
+  alias CodingAgentFramework.{Accounts, Acts, Grants, Inlet, Intake, Logins, Mailbox, Prompts}
   alias CodingAgentFramework.{ScreenStandIn, Sessions}
   alias CodingAgentFramework.{SessionsSetup, Stream, Watch}
 
@@ -57,12 +57,14 @@ defmodule CodingAgentFramework.PromptsTest do
     sessions = start_supervised!(spec)
 
     watch = start_supervised!({Watch, db: db, remedies: Watch.default_remedies(), notify: cue})
+    acts = start_supervised!({Acts, db: db, start_id: "s1", host: "test", instance: "t"})
     popts = [host: "test", intake: intake, intake_db: db, sessions: sessions, sessions_db: db]
-    popts = popts ++ [mailbox: mailbox, watch: watch, watch_db: db]
+    popts = popts ++ [mailbox: mailbox, watch: watch, watch_db: db, acts: acts]
     popts = popts ++ [notify: &send(me, {:prompts, &1})]
 
     {:ok,
      intake: intake,
+     acts: acts,
      watch: watch,
      mailbox: mailbox,
      mtable: mtable,
@@ -192,6 +194,16 @@ defmodule CodingAgentFramework.PromptsTest do
     # A second answer, and a late one, are refused: the first settled it.
     assert {:refused, :settled} = Prompts.answer(prompts, id, "deny", "sam")
     assert {:ok, []} = Prompts.read(prompts)
+
+    # F-194: the one answer that went through is one row, settled by the owner's answer, with
+    # who answered, the prompt, its choice and when it opened; no refused one is a row.
+    assert {:ok, [row]} = Acts.rows(ctx.acts, act: "answer")
+    assert %{actor: "sam", target: "d1", status: "settled", outcome: "verified"} = row
+
+    assert %{"prompt" => ^id, "kind" => "permission", "choice" => "allow", "opened_at" => opened} =
+             JSON.decode!(row.detail)
+
+    assert opened == p.opened_at and row.claimed_at >= opened
   end
 
   defp int("permission:" <> n), do: String.to_integer(n)
@@ -364,6 +376,15 @@ defmodule CodingAgentFramework.PromptsTest do
     assert {:refused, :settled} = Prompts.answer(ctx.prompts, "ask:#{two}", answer, "sam")
     assert {:refused, :settled} = Prompts.answer(ctx.prompts, "ask:#{two}", withdraw, "sam")
     assert {:ok, []} = Prompts.read(ctx.prompts)
+
+    # F-179's new-4: who answered an ask, and who withdrew one, is its row in `Acts`.
+    assert {:ok, [answered, withdrawn]} = Acts.rows(ctx.acts, act: "answer")
+    assert %{actor: "sam", target: "d1", outcome: "verified"} = answered
+
+    assert %{"kind" => "ask", "choice" => [%{"labels" => ["Rebase"]}]} =
+             JSON.decode!(answered.detail)
+
+    assert %{"choice" => ["withdraw", "Dismissed."]} = JSON.decode!(withdrawn.detail)
   end
 
   # Dialog.tla's answer through the inbox: the dialog the pane shows is a prompt with its

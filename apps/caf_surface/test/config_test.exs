@@ -201,11 +201,13 @@ defmodule CodingAgentFramework.ConfigTest do
       :ms => 1_000,
       :count => 2,
       :path => "/srv/caf/old.db",
+      :name => "sam",
       :ms_or_nil => nil,
       :by_class => %{main: 1, landing: 2, builder: 3, heavy: 4}
     }
 
-    bad = %{:ms => 0, :count => -1, :path => "old.db", :ms_or_nil => "1", :by_class => %{main: 1}}
+    bad = %{:ms => 0, :count => -1, :path => "old.db", :ms_or_nil => "1", :name => " "}
+    bad = Map.put(bad, :by_class, %{main: 1})
 
     for {part, options} <- Config.parts(), {option, type} <- options do
       {kind, value} =

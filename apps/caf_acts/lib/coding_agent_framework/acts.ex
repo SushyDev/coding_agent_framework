@@ -166,8 +166,18 @@ defmodule CodingAgentFramework.Acts do
     do: settle(acts, id, :unknown, [reason: {:answer, other}, acted: true], opts)
 
   @doc """
-  Writes an act that takes no claim, already settled: a raised error. `fields` as
-  `settle/5`'s.
+  Writes an act that takes no claim, already settled: a raised error, or a fact a reader found
+  (a person's typed input, F-194). `fields` as `settle/5`'s. Option `state:` keys it, so a fact
+  read again after a restart is written once: a second record of `target` in that state is
+  refused as `claim/6`'s is, `{:already_claimed, by}`.
+
+      iex> dir = CodingAgentFramework.TestHost.test_dir()
+      iex> alias CodingAgentFramework.Acts
+      iex> {:ok, acts} = Acts.start_link(db: Path.join(dir, "fact.db"), start_id: "s1",
+      ...>   host: "laptop", instance: "a")
+      iex> {:ok, _} = Acts.record(acts, "person", "app-main", :typed, :verified, [], state: "t:7")
+      iex> Acts.record(acts, "person", "app-main", :typed, :verified, [], state: "t:7")
+      {:refused, {:already_claimed, "person"}}
   """
   @spec record(
           GenServer.server(),
@@ -181,7 +191,8 @@ defmodule CodingAgentFramework.Acts do
           answer(id)
   def record(acts, actor, target, act, outcome, fields \\ [], opts \\ [])
       when outcome in @outcomes,
-      do: call(acts, {:record, row(actor, target, nil, act), outcome, dump(fields)}, opts)
+      do:
+        call(acts, {:record, row(actor, target, opts[:state], act), outcome, dump(fields)}, opts)
 
   @doc """
   Closes the rows still `claimed` that `actor`'s calls held as `interrupted`: its own, and a
@@ -351,9 +362,23 @@ defmodule CodingAgentFramework.Acts do
       ended_at: at
     ]
 
-    [[id]] = Store.insert(s.db, "acts", Map.to_list(row) ++ base ++ fields, "RETURNING id")
-    cue(s, [id])
-    {:reply, {:ok, id}, s}
+    # A row with no state never conflicts; one with a state is written once (`record/7`).
+    case Store.insert(
+           s.db,
+           "acts",
+           Map.to_list(row) ++ base ++ fields,
+           "ON CONFLICT (target, state) DO NOTHING RETURNING id"
+         ) do
+      [[id]] ->
+        cue(s, [id])
+        {:reply, {:ok, id}, s}
+
+      [] ->
+        [%{status: held, actor: by}] =
+          Table.select(s.db, "target = ?1 AND state = ?2", [row.target, row.state])
+
+        {:reply, {:refused, {if(held in @open, do: :claimed, else: :already_claimed), by}}, s}
+    end
   end
 
   def handle_call({:interrupt, actor}, _from, s) do

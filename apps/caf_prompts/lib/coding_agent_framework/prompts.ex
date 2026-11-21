@@ -43,7 +43,10 @@ defmodule CodingAgentFramework.Prompts do
   (`Prompt.tla`'s `Answer` and `AnswerNow`): a hold moves only from `held` (an `Intake` row's,
   or a `Stream` request's, marked `answering` before its line is written), an ask's answer row
   and its withdrawal share one unique key, a dialog's press is marked before it goes. A late or
-  second answer is refused `{:refused, :settled}`, whichever of the two checks finds it.
+  second answer is refused `{:refused, :settled}`, whichever of the two checks finds it. Each
+  answer the checks let through is one row in `Acts` (`answering/4`), claimed before the owner
+  takes it and settled by the owner's answer, so who answered, and when, is read from the
+  ledger (F-194).
 
   **The parent told once.** When a delegate's prompt opens, its parent gets one notice through
   `Mailbox` (`Mailbox.notify/4`, kind `prompt`, from the delegate): ``From <delegate> (prompt):
@@ -58,7 +61,7 @@ defmodule CodingAgentFramework.Prompts do
 
   use GenServer
 
-  alias CodingAgentFramework.{Intake, Logins, Mailbox, Sessions, Stream, Watch}
+  alias CodingAgentFramework.{Acts, Intake, Logins, Mailbox, Sessions, Stream, Watch}
   alias CodingAgentFramework.Sessions.{Agents, Limit}
 
   @timeout 5_000
@@ -87,7 +90,8 @@ defmodule CodingAgentFramework.Prompts do
   @doc """
   Starts the inbox of one host. Options: `host:`, `intake:` (the host's `Intake`) and
   `intake_db:` (its file), `sessions:` (the `Sessions`) and `sessions_db:` (its file), `mailbox:`,
-  `watch:` (the `Watch`) and `watch_db:` (its file), and optionally `logins:` (the instance's
+  `watch:` (the `Watch`) and `watch_db:` (its file), `acts:` (where each answer is a row,
+  `answering/4`), and optionally `logins:` (the instance's
   `Logins`) with `logins_db:` (its file), `stream:` (the host's `Stream`) with `stream_db:` (its
   file), `notify:` (a function of one cue) and `name:` (for the embedding app's tree;
   the library looks up no name).
@@ -167,9 +171,38 @@ defmodule CodingAgentFramework.Prompts do
     with true <- (is_binary(who) and String.trim(who) != "") or {:refused, {:bad, :who}},
          {:ok, prompt, owners} <- call(prompts, {:get, id}, opts),
          true <- prompt.status == "open" or refused_status(prompt.status),
-         {:ok, act} <- choose(prompt, choice, who) do
-      hand(owners, prompt, act, who)
+         {:ok, act} <- choose(prompt, choice, who),
+         {:ok, row} <- answering(owners.acts, prompt, choice, who) do
+      answer = hand(owners, prompt, act, who)
+      Acts.answered(owners.acts, row, answer)
+      answer
     end
+  end
+
+  @doc """
+  The answer's row in `Acts` (F-194, from F-179's new-4), claimed before the owner takes the
+  answer and settled by the owner's answer (`Acts.answered/4`): actor `who`, target the prompt's
+  agent (its id when it has none, a login's), act `answer`, no state (each answer is an act of
+  its own: one the owner refused leaves the prompt open for the next), and in its `detail` the
+  prompt's `prompt` id, `kind`, `choice` as given, `opened_at` and `subagent`. Its `claimed_at`
+  is when it was answered, so the time to answer is read from the row, never guessed.
+
+      Prompts.answering(acts, %{id: "permission:41", kind: "permission", agent: "app-unit",
+        opened_at: 1_000, subagent: nil}, "allow", "sam")
+      #=> {:ok, 12}
+  """
+  @spec answering(GenServer.server(), prompt, term, String.t()) ::
+          {:ok, Acts.id()} | {:refused, term} | {:unknown, term}
+  def answering(acts, prompt, choice, who) do
+    detail = %{
+      prompt: prompt.id,
+      kind: prompt.kind,
+      choice: choice,
+      opened_at: prompt.opened_at,
+      subagent: prompt.subagent
+    }
+
+    Acts.claim(acts, who, prompt.agent || prompt.id, nil, :answer, detail: detail)
   end
 
   @doc """
@@ -221,7 +254,7 @@ defmodule CodingAgentFramework.Prompts do
          {:ok, wdb} <- Watch.Table.open(Keyword.fetch!(opts, :watch_db)),
          {:ok, ldb} <- logins_db(opts[:logins_db]),
          {:ok, sdb} <- stream_db(opts[:stream_db]) do
-      owners = Map.new(~w(intake sessions mailbox watch)a, &{&1, Keyword.fetch!(opts, &1)})
+      owners = Map.new(~w(intake sessions mailbox watch acts)a, &{&1, Keyword.fetch!(opts, &1)})
 
       s = %{
         host: host,

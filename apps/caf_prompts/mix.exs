@@ -17,6 +17,7 @@ defmodule CafPrompts.MixProject do
 
   defp deps do
     [
+      {:caf_acts, in_umbrella: true},
       {:caf_intake, in_umbrella: true},
       {:caf_mailbox, in_umbrella: true},
       {:caf_logins, in_umbrella: true},
