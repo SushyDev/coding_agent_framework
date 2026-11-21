@@ -296,6 +296,9 @@ defmodule CodingAgentFramework.Sessions do
   by pid and start time once `Stream`'s fold reads its turn ended (`Sessions.Turn.stream/1`) and
   no row to it is `sending`, since a move keeps what is still `queued` for the next process
   (an `end_session` would end those rows); a turn that runs is refused `{:not_idle, turn}`.
+  A move's stop of an interactive session at a usage limit (its row's `usage_limit`, F-191)
+  reads its screen through the `Inlet` when its file does not read idle: Claude Code's own wait
+  or its menu is a `limited` turn, ended for the move alone, and the SIGTERM ends the wait.
   `force: true` (F-170, `Delivery.tla`'s ForcedEnd; the operator's, through `Mains` or a fix)
   stops it as usual but for the rows to it: an interactive session gets SIGTERM once its file
   reads idle whatever row to it is `sending`, and a delegate gets `end_session` whatever row
@@ -976,10 +979,15 @@ defmodule CodingAgentFramework.Sessions do
           if Map.has_key?(state.pending, name) do
             {:refused, {:not_running, "calling"}}
           else
-            fields = [move: "draining", move_from: row.account, move_to: move.to]
-            write(state, row, fields ++ [move_act: move.act, move_deadline: move.deadline])
-            {:ok, Table.get(state.db, state.host.name, name)}
+            write_move(state, row, move)
           end
+
+        # A limited agent whose process is gone (F-191, `Move.tla`'s LimitMove): no drain and
+        # no stop, the move goes on from the copy.
+        row when not is_map_key(state.pending, name) ->
+          if Agents.free?(row) and Agents.limit(row) != nil,
+            do: write_move(state, row, move),
+            else: {:refused, {:not_running, row.status}}
 
         row ->
           {:refused, {:not_running, row.status}}
@@ -1142,6 +1150,13 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
+  # The move's phase written on the row, with its accounts, its act and its deadline.
+  defp write_move(state, row, move) do
+    fields = [move: "draining", move_from: row.account, move_to: move.to]
+    write(state, row, fields ++ [move_act: move.act, move_deadline: move.deadline])
+    {:ok, Table.get(state.db, state.host.name, row.name)}
+  end
+
   # The end asked, or waited for: a row `Mailbox` still has `sending` to an interactive session
   # holds the SIGTERM until it settles or the stop's deadline passes (F-122's new-1). A refusal
   # sends nothing and puts the row back to running.
@@ -1194,8 +1209,8 @@ defmodule CodingAgentFramework.Sessions do
   # StopAsked: SIGTERM by the row's pid and start time, once the session file of that process
   # reads idle and, in the same step, no `Mailbox` row to it is `sending`. A refusal sends
   # nothing; a process already gone is sent nothing and settles.
-  defp ask_end(state, row, _how, force) do
-    case end_reading(state, row) do
+  defp ask_end(state, row, how, force) do
+    case limited_reading(state, row, how, end_reading(state, row)) do
       {:idle, record} ->
         with :ok <- unless_forced(force, fn -> open(state, row.name, :sending) end),
              do: Holder.Process.signal(state.procs, record, "TERM")
@@ -1210,6 +1225,29 @@ defmodule CodingAgentFramework.Sessions do
         {:refused, unread}
     end
   end
+
+  # A move's end of an interactive session at a usage limit (F-191, `Move.tla`'s IdleRead of a
+  # limited turn): Claude Code's own wait and its menu are a `limited` turn, which only the move
+  # takes as ended. What the session file says during them was never measured, so the screen
+  # is read in its place, through the `Inlet`; the SIGTERM ends the wait (F-181). Any other
+  # screen, or one not read, leaves the file's reading as it was.
+  defp limited_reading(state, row, :move, {busy, _} = reading)
+       when busy in [:not_idle, :unread] do
+    with %{} <- Agents.limit(row),
+         true <- state.inlet != nil,
+         {:ok, screen} <- Inlet.look(state.inlet, row.name, row.release, timeout: @read),
+         true <- limit_screen?(screen) do
+      {:idle, %{pid: row.pid, start: row.proc_start}}
+    else
+      _ -> reading
+    end
+  end
+
+  defp limited_reading(_state, _row, _how, reading), do: reading
+
+  defp limit_screen?(%{state: :usage_limit_wait}), do: true
+  defp limit_screen?(%{state: :dialog, kind: :usage_limit_menu}), do: true
+  defp limit_screen?(_screen), do: false
 
   # A start's or a resume's row in `Acts`, written before the agent row, with no state to claim:
   # each call is an act of its own. A row that cannot be written starts nothing.
@@ -1876,16 +1914,25 @@ defmodule CodingAgentFramework.Sessions do
 
   # Confirms a delegate: its socket is live and its record names a process that runs with its
   # pid and start time, and Stream has read the init naming its session id. The record is
-  # written before claude starts, so it is this process's. A dead socket while that process
-  # runs on is `{:unheld, record}`: its dtach was killed hard.
+  # written before claude starts, and a hold removes an earlier hold's first, so it is this
+  # process's. A dead socket while that process runs on is `{:unheld, record}`: its dtach was
+  # killed hard. A process gone after its init (F-187's new-4: a first turn at a usage limit
+  # exits at once) is confirmed by that init all the same: a running row that exited, which
+  # the settle takes as any exit.
   defp confirm(state, %{role: "delegate"} = row, read?) do
     case held(state, row) do
       {:ok, %{socket: :live, process: :live, record: record}} ->
-        case followed(state, row, read?) do
-          {:ok, %{session_id: id}} when id == row.session_id -> {:ok, file_of(row, record)}
-          {:ok, _} -> {:live, :no_first_event}
-          :unread -> {:unknown, :unread}
-          {_, reason} -> {:unknown, reason}
+        case inited(state, row, read?) do
+          :ok -> {:ok, file_of(row, record)}
+          :no -> {:live, :no_first_event}
+          unknown -> unknown
+        end
+
+      {:ok, %{record: %{} = record, process: :gone} = reading} ->
+        case inited(state, row, read?) do
+          :ok -> {:ok, file_of(row, record)}
+          :no -> no_init(reading)
+          unknown -> unknown
         end
 
       {:ok, %{socket: :live}} ->
@@ -1930,6 +1977,24 @@ defmodule CodingAgentFramework.Sessions do
       {_, reason} -> {:unknown, reason}
     end
   end
+
+  # Whether Stream has read the init naming the row's session id: `:ok`, `:no`, or unknown.
+  defp inited(state, row, read?) do
+    case followed(state, row, read?) do
+      {:ok, %{session_id: id}} when id == row.session_id -> :ok
+      {:ok, _} -> :no
+      :unread -> {:unknown, :unread}
+      {_, reason} -> {:unknown, reason}
+    end
+  end
+
+  # A process gone with no init read: what its socket says, as before the init counted.
+  defp no_init(%{socket: :live}), do: {:live, :no_first_event}
+
+  defp no_init(%{socket: dead} = reading) when dead in [:absent, :stale],
+    do: if(Holder.Process.dead?(reading), do: {:dead, dead}, else: {:unknown, {:held, reading}})
+
+  defp no_init(reading), do: {:unknown, {:held, reading}}
 
   defp file_of(row, record),
     do: %{pid: record.pid, proc_start: record.start, session_id: row.session_id}

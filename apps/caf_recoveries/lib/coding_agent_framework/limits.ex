@@ -36,10 +36,19 @@ defmodule CodingAgentFramework.Limits do
   - `send` (`limit_reset`, remedy `go_on`): claimed, then the word stored through `Mailbox`
     under `limit:<agent>:<until>` (`word:`), so it is stored once per limit; a process that is
     gone is resumed then (`resume:`, a main's through `Mains`, under its lease), its first due
-    row the word. A headless delegate's word is `Delegates`' (`go_on:`, F-186's new-1): its
-    limited result was not its report, the word is its word to go on, whose turn's result is,
-    and a gone process is resumed with it under its start's lease, not counted as the resume
-    after a kill. Then `word`, until a turn shows.
+    row the word. A delegate's word is `Delegates`' (`go_on:`, F-186's new-1; an interactive
+    one's too, F-187's new-2): its limited turn was not its report, the word is its word to go
+    on, whose turn's reply is, and a gone process is resumed with it under its start's lease,
+    not counted as the resume after a kill. Then `word`, until a turn shows;
+  - before the reset, `idle` or `own` with the reset more than `move_after:` away and another
+    account with room (`room:`), once per limit (`Limit.tla`'s Away, F-191): a delegate's
+    move (`limit_far`, remedy `move`), claimed, the step `move` with its act on the row, the
+    word to go on stored first under the limit's key and held (`go_on:` with `resume: false`,
+    or `word:`), then `move:`, the `Mover`'s one move, which takes the claim as its own. A
+    main's is the `limit` prompt, offering the move (`move_to`) beside the wait and the leave;
+    only a person's answer moves it, a claim of its own. The move's row in `Acts`, read once
+    the row no longer moves, makes the step `moved`; refused, failed, unknown or cut by a
+    restart, it is the `limit` prompt, never a second move; the word then goes at the reset.
 
   **On the one shape** (F-182), as `CodingAgentFramework.AbsentMains` is: each limit is the
   symptom `limited`, shown only (state `limited:<agent>:<until>`), and each act's phase its own
@@ -67,9 +76,11 @@ defmodule CodingAgentFramework.Limits do
   @margin 120_000
   @credits 600_000
   @bound 3
+  @move_after 7_200_000
   @timeout 60_000
   @limit_api "usage_limit_reached"
-  @word "Your account's usage limit has reset. Go on with your task from where it stopped."
+  # One text for every agent (F-187's new-3): true whether it moved or waited for the reset.
+  @word "Your turn stopped at a usage limit. Go on with your task from where it stopped."
 
   @doc """
   Starts the healer. Options: `agents:` (a `Sessions.Agents` reader), `sessions:`, `acts:`,
@@ -80,13 +91,19 @@ defmodule CodingAgentFramework.Limits do
   - `look:`, agent row -> `Inlet.look/4`'s answer for its pane;
   - `word:`, `(name, text, key) ->` `Mailbox.notify/4`'s answer;
   - `resume:`, agent row -> an outcome, or `:none` where nothing resumes it (default);
-  - `go_on:`, `(name, text, key) ->` an outcome, a headless delegate's word in place of
-    `word:` and `resume:` (`Delegates.go_on/5`; refused `:no_delegates` by default);
-  - `press:`, `(name, label) ->` an outcome, by default `Sessions.press_limit/4`.
+  - `go_on:`, `(name, text, key, opts) ->` an outcome, a headless delegate's word in place of
+    `word:` and `resume:` (`Delegates.go_on/5`; `resume: false` stores it with no resume, before
+    a move; refused `:no_delegates` by default);
+  - `press:`, `(name, label) ->` an outcome, by default `Sessions.press_limit/4`;
+  - `room:`, agent row -> `{:ok, account}`, the account a move would go to now, or why none
+    (`Mover.room/2`; refused `:no_mover` by default, so nothing moves);
+  - `move:`, `(actor, name, to, act) ->` `Mover.move/4`'s answer, with the claim `act` made
+    here (refused `:no_mover` by default).
 
   Optionally `margin:` (ms past the reset, default 2 min: Claude Code's own wait went on 50 s
   after it, F-181), `credits:` (the `usage_credits` prompt's deadline, ms, default 10 min),
-  `bound:` (go-ons in a row, default 3) and `clock:` (ms).
+  `bound:` (go-ons in a row, default 3), `move_after:` (ms: a reset further away than this is
+  moved from, default 2 h) and `clock:` (ms).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -183,8 +200,11 @@ defmodule CodingAgentFramework.Limits do
       look: Keyword.fetch!(opts, :look),
       word: Keyword.fetch!(opts, :word),
       resume: Keyword.get(opts, :resume, fn _row -> :none end),
-      go_on: Keyword.get(opts, :go_on, fn _name, _text, _key -> {:refused, :no_delegates} end),
+      go_on: Keyword.get(opts, :go_on, fn _, _, _, _ -> {:refused, :no_delegates} end),
       press: Keyword.get(opts, :press, &Sessions.press_limit(sessions, &1, &2)),
+      room: Keyword.get(opts, :room, fn _row -> {:refused, :no_mover} end),
+      move: Keyword.get(opts, :move, fn _, _, _, _ -> {:refused, :no_mover} end),
+      move_after: Keyword.get(opts, :move_after, @move_after),
       actor: "limits:#{Keyword.fetch!(opts, :host)}",
       margin: Keyword.get(opts, :margin, @margin),
       credits: Keyword.get(opts, :credits, @credits),
@@ -215,6 +235,10 @@ defmodule CodingAgentFramework.Limits do
 
         "go_on" ->
           put(s, name, l, %{"step" => "prompt", "why" => "its word was cut by a restart"})
+
+        # A move claimed and never begun (`Limit.tla`'s Restart): a person's, never a second.
+        "move" ->
+          put(s, name, l, %{"step" => "prompt", "why" => "its move was cut by a restart"})
 
         _ ->
           nil
@@ -252,11 +276,15 @@ defmodule CodingAgentFramework.Limits do
     end
   end
 
-  # The agents a limit may hold: running, or gone by themselves, and not moving.
+  # The agents a limit may hold: running, or gone by themselves or by a move of their limit
+  # (F-191: one that failed leaves its process gone), and not moving.
   defp healed?(row) do
     row.kind in ["main", "delegate"] and row.move == nil and
-      (row.status == "running" or (row.status == "stopped" and row.reason == "exited"))
+      (row.status == "running" or
+         (row.status == "stopped" and (row.reason == "exited" or moved_from?(row))))
   end
+
+  defp moved_from?(row), do: is_integer((Agents.limit(row) || %{})["act"])
 
   # What was read of each agent: its transcript's row, or its stream's fold.
   defp reads(s, rows) do
@@ -374,10 +402,12 @@ defmodule CodingAgentFramework.Limits do
     end
   end
 
-  defp step(s, _list, row, %{"step" => "own"} = l) do
+  defp step(s, list, row, %{"step" => "own"} = l) do
     case screen(s, row) do
       %{state: :usage_limit_wait} ->
-        if due?(s, l), do: ask(s, row, l, "Claude Code's own wait still shown past the reset")
+        if due?(s, l),
+          do: ask(s, row, l, "Claude Code's own wait still shown past the reset"),
+          else: away(s, list, row, l)
 
       %{state: :running} ->
         nil
@@ -390,12 +420,12 @@ defmodule CodingAgentFramework.Limits do
     end
   end
 
-  defp step(s, _list, row, %{"step" => "idle"} = l) do
+  defp step(s, list, row, %{"step" => "idle"} = l) do
     goes = l["goes"] || 0
 
     cond do
       not due?(s, l) ->
-        nil
+        away(s, list, row, l)
 
       goes >= s.bound ->
         ask(s, row, l, "#{goes} go-ons in a row each hit a limit again")
@@ -407,7 +437,106 @@ defmodule CodingAgentFramework.Limits do
   end
 
   defp step(s, list, row, %{"step" => "send"} = l), do: send_word(s, list, row, l)
+  defp step(s, _list, row, %{"step" => "move"} = l), do: move(s, row, l)
   defp step(_s, _list, _row, _waits), do: nil
+
+  # Limit.tla's Away, before the reset: a reset more than `move_after:` away and another
+  # account with room (`room:`), once per limit (the row's `away`). A delegate moves on its
+  # own: the remedy `move` of kind `limit_far`, on the list and within its cap, claimed first.
+  # A main never does: its `limit` prompt opens, offering the move beside the wait.
+  defp away(s, list, row, l) do
+    with true <- l["away"] != l["until"],
+         true <- l["until"] * 1000 - now(s) > s.move_after,
+         {:ok, to} <- s.room.(row) do
+      if row.kind == "main",
+        do:
+          ask(s, row, l, "its limit resets in more than #{div(s.move_after, 60_000)} min", %{
+            "away" => l["until"],
+            "move_to" => to
+          }),
+        else: own_move(s, list, row, l, to)
+    else
+      _near_or_no_room -> nil
+    end
+  end
+
+  defp own_move(s, list, row, l, to) do
+    state = key("limit_far", row, l)
+
+    # The healer's own, or a person's `act` on a state asked for its bound (F-190), as in
+    # `send_word/4`.
+    with {:ok, sym, actor} <- symptom(s, "limit_far", row, state, l),
+         :go <- if(actor == s.actor, do: may_act(s, list, "limit_far", sym), else: :go),
+         {:ok, id} <- Acts.claim(s.acts, actor, row.name, state, :move, detail: %{to: to}) do
+      l = Map.merge(l, %{"away" => l["until"], "move_to" => to})
+      claimed_move(s, id, row, l, if(actor == s.actor, do: "framework", else: actor))
+    else
+      _shown_asked_or_claimed -> nil
+    end
+  end
+
+  # Limit.tla's MoveAct, once the claim is on the row: a person's answer is claimed here, as
+  # theirs, a new act each time (`menu`); the framework's was claimed by `own_move/5`. Then the
+  # move's end, read from its row in `Acts` once the row is no longer moving.
+  defp move(s, row, %{"act" => id} = l) when is_integer(id) do
+    case Acts.get(s.acts, id) do
+      {:ok, %{status: "settled", outcome: "verified"}} ->
+        put(s, row.name, l, %{"step" => "moved"})
+
+      {:ok, %{status: status} = act} when status in ["settled", "interrupted"] ->
+        ask(s, row, l, "its move did not go: #{act.outcome || status} #{act.reason || ""}")
+
+      _open_or_unread ->
+        nil
+    end
+  end
+
+  defp move(s, row, l) do
+    by = l["by"] || "framework"
+    claim = %{state: key("limit_far", row, l), by: by, menu: l["menu"] || 0}
+    detail = %{to: l["move_to"], by: by}
+
+    case Acts.claim(s.acts, s.actor, row.name, claim, :move, detail: detail) do
+      {:ok, id} -> claimed_move(s, id, row, l, by)
+      _claimed -> ask(s, row, l, "its move could not be claimed")
+    end
+  end
+
+  # The claim on the row first, then the word to go on stored, so the move's resume carries it
+  # as its first row (F-191, `Move.tla`'s WordStored), then the `Mover`. A refusal or an unknown
+  # answer is the `limit` prompt, never a second move.
+  defp claimed_move(s, id, row, l, by) do
+    l = Map.merge(l, %{"step" => "move", "act" => id})
+
+    with {:ok, _} <-
+           Sessions.put_limit(s.sessions, row.name, l, from: Limit.step(Agents.limit(row))),
+         {:ok, _} <- held_word(s, row, l) do
+      case s.move.(by, row.name, l["move_to"], id) do
+        {:ok, _} ->
+          id
+
+        {_refused_or_unknown, why} ->
+          ask(s, row, l, "its move was not begun: #{inspect(why)}")
+          id
+      end
+    else
+      not_stored ->
+        Acts.settle(s.acts, id, :failed, reason: {:word, not_stored})
+        ask(s, row, l, "its word to go on was not stored: #{inspect(not_stored)}")
+        id
+    end
+  end
+
+  # The word to go on, stored before the move under the limit's key, held while the agent is
+  # limited: a headless delegate's as `Delegates`' word (no resume of its own), any other as a
+  # notice through `Mailbox`.
+  defp held_word(s, row, l) do
+    key = "limit:#{row.name}:#{l["until"]}"
+
+    if delegate?(row),
+      do: s.go_on.(row.name, @word, key, resume: false),
+      else: s.word.(row.name, @word, key)
+  end
 
   # Limit.tla's Look: the screen as it is now decides the phase.
   defp look(s, _list, row, l) do
@@ -511,13 +640,13 @@ defmodule CodingAgentFramework.Limits do
     end
   end
 
-  # A headless delegate's word is `Delegates`' (F-186's new-1): it stores the word as the
-  # delegate's word to go on, which its turn's result answers, and resumes a gone process with it
-  # under its start's lease, not as the resume after a kill.
-  defp delegate?(row), do: row.kind == "delegate" and Agents.headless?(row)
+  # A delegate's word is `Delegates`' (F-186's new-1; an interactive one's too, F-187's new-2):
+  # it stores the word as the delegate's word to go on, whose turn's reply is its report, and
+  # resumes a gone process with it under its start's lease, not as the resume after a kill.
+  defp delegate?(row), do: row.kind == "delegate"
 
   defp delegate_word(s, id, row, l, key) do
-    case s.go_on.(row.name, @word, key) do
+    case s.go_on.(row.name, @word, key, []) do
       {:ok, answer} ->
         Acts.settle(s.acts, id, :recovered, answer: inspect(answer), acted: true)
         put(s, row.name, l, %{"step" => "word"})
@@ -611,7 +740,8 @@ defmodule CodingAgentFramework.Limits do
   end
 
   # The `limit` prompt on the row: a person's, with no deadline.
-  defp ask(s, row, l, why), do: put(s, row.name, l, %{"step" => "prompt", "why" => why})
+  defp ask(s, row, l, why, fields \\ %{}),
+    do: put(s, row.name, l, Map.merge(%{"step" => "prompt", "why" => why}, fields))
 
   # A phase written from the step this check read; a person's answer meanwhile wins.
   defp put(s, name, l, fields) do
@@ -629,7 +759,7 @@ defmodule CodingAgentFramework.Limits do
   defp pass(s, rows) do
     limited = for row <- rows, l = Agents.limit(row), do: {row, l}
 
-    for kind <- ~w(limited limit_menu limit_reset) do
+    for kind <- ~w(limited limit_menu limit_reset limit_far) do
       present = %{
         targets: Enum.map(limited, fn {row, _} -> row.name end),
         states: Enum.map(limited, fn {row, l} -> key(kind, row, l) end)

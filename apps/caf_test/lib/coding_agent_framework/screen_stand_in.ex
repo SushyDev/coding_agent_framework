@@ -10,6 +10,9 @@ defmodule CodingAgentFramework.ScreenStandIn do
     runs a turn that ends at once: its session file says `busy`, then `idle`;
   - started with `--screen running`, it draws `turn-running`'s screen until Escape, which ends
     the turn: it writes `<dir>/interrupted` and draws the idle screen;
+  - started with `--screen limit_wait`, it draws `usage-limit-wait`'s screen, Claude Code's own
+    wait at a usage limit, and takes no key; its session file says `busy`, since what 2.1.322's
+    says during the wait was never measured (F-191), so only the screen tells the wait;
   - `--version` prints the release as Claude Code does (`2.1.322 (Claude Code)`) and exits;
   - the argument after `--` is the start's prompt, run as its first turn: written to
     `<dir>/prompts/<pid>` (`prompts/1`), its session file `busy`, then `idle`;
@@ -55,6 +58,8 @@ defmodule CodingAgentFramework.ScreenStandIn do
     File.write!(Path.join(screens, "bottom"), bottom)
     running = File.read!(Path.join(fixtures(release), "turn-running.txt"))
     File.write!(Path.join(screens, "running"), String.trim_trailing(running, "\n"))
+    wait = File.read!(Path.join(fixtures(release), "usage-limit-wait.txt"))
+    File.write!(Path.join(screens, "limit_wait"), String.trim_trailing(wait, "\n"))
 
     dialog!(screens, release, "trust", " ", "No, exit", "Yes, I trust this folder")
 
@@ -181,8 +186,8 @@ defmodule CodingAgentFramework.ScreenStandIn do
     }
     draw() {
       printf '\\033[H\\033[2J'
-      if [ $screen = running ]; then
-        #{program!(:cat)} "#{screens}/running"
+      if [ $screen = running ] || [ $screen = limit_wait ]; then
+        #{program!(:cat)} "#{screens}/$screen"
       elif [ $screen = trust ] || [ $screen = imports ]; then
         #{program!(:cat)} "#{screens}/$screen-$choice"
       else
@@ -209,9 +214,12 @@ defmodule CodingAgentFramework.ScreenStandIn do
     box=''
     [ $screen = idle ] && first
     [ $screen = running ] && announce idle
+    [ $screen = limit_wait ] && announce busy
     draw
     while IFS= read -r -N1 -t #{idle} key; do
-      if [ $screen = trust ] || [ $screen = imports ]; then
+      if [ $screen = limit_wait ]; then
+        continue
+      elif [ $screen = trust ] || [ $screen = imports ]; then
         case $key in
           $'\\e') IFS= read -r -N2 -t 1 seq
                  case $seq in '[B') choice=yes ;; '[A') choice=no ;; esac ;;

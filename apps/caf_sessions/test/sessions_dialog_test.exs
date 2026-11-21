@@ -269,6 +269,27 @@ defmodule CodingAgentFramework.SessionsDialogTest do
              end)
   end
 
+  # Move.tla's IdleRead of a limited turn (F-191): Claude Code's own wait is a `limited` turn,
+  # which only a move's stop takes as ended, read from the screen through the Inlet; its session
+  # file says busy. A stop that is no move, or of a row with no limit, is refused.
+  test "a move's stop ends Claude Code's own wait, read from the screen", ctx do
+    sessions = sessions(ctx)
+    claude = ScreenStandIn.write!(ctx.dir)
+    wrapper = Path.join(ctx.dir, "claude-limit-wait")
+    File.write!(wrapper, "#!#{program!(:bash)}\nexec #{claude} --screen limit_wait \"$@\"\n")
+    File.chmod!(wrapper, 0o755)
+    launch = ctx.launch |> Keyword.put(:claude, wrapper) |> Keyword.delete(:prompt)
+
+    assert {:ok, %{pid: pid}} = Sessions.start(sessions, "alpha", ctx.account, launch)
+    assert {:refused, {:not_idle, "busy"}} = Sessions.stop(sessions, "alpha", for: :move)
+
+    limit = %{"until" => System.os_time(:second) + 3600, "step" => "own", "line" => "l1"}
+    assert {:ok, _} = Sessions.put_limit(sessions, "alpha", limit, from: nil)
+    assert {:refused, {:not_idle, "busy"}} = Sessions.stop(sessions, "alpha")
+    assert {:ok, :stopped} = Sessions.stop(sessions, "alpha", for: :move)
+    refute alive?(pid)
+  end
+
   defp marked(ctx, mark, kind \\ :trust) do
     case Agents.dialog(Agents.get(ctx.agents, "alpha")) do
       %{answers: %{^kind => %{mark: ^mark}}} = d -> {:ok, d}

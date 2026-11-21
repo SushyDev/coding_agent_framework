@@ -551,12 +551,9 @@ defmodule CodingAgentFramework.DelegatesTest do
   test "a turn at a usage limit is no report; its word resumes it, not counted as a kill", ctx do
     limit = Path.join(ctx.dir, "limit")
     File.write!(limit, "1800000000")
-    # The hit waits until the start is confirmed: a start is confirmed only while its process
-    # lives, and the process exits at once after the hit (the build note's new-4).
-    fifo = Path.join(ctx.dir, "limit.fifo")
-    {_, 0} = System.cmd(program!(:mkfifo), [fifo])
+    # The process exits at once after the hit, its init already written: the init confirms the
+    # start all the same (F-187's new-4, F-191).
     assert {:ok, %{id: id, name: name, brief_uuid: u}} = start(ctx, "app", "unit/one")
-    File.write!(fifo, "hit\n")
     stream_row(ctx, id, &(&1.gone and &1.last_result.api_error == "usage_limit_reached"))
 
     {:ok, _} =

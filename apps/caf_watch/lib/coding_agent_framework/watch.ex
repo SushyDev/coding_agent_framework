@@ -78,7 +78,8 @@ defmodule CodingAgentFramework.Watch do
   `limit_menu` (the menu shown, the account unable to spend) by `press_stop`, and `limit_reset`
   (the reset passed, no own wait went on) by `go_on`, each 20 per bound, since one limit holds
   every agent of an account at once; and `limited`, each agent's limit with its window, shown
-  only.
+  only. And `limit_far` (F-191: a delegate's reset more than `move_after` away, another account
+  with room) by `move`, 20 per bound, once per limit.
   """
   @spec default_remedies() :: %{String.t() => entry}
   def default_remedies do
@@ -90,7 +91,8 @@ defmodule CodingAgentFramework.Watch do
       "hooks_silent" => %{remedy: nil, cap: 0},
       "limited" => %{remedy: nil, cap: 0},
       "limit_menu" => %{remedy: "press_stop", cap: 20},
-      "limit_reset" => %{remedy: "go_on", cap: 20}
+      "limit_reset" => %{remedy: "go_on", cap: 20},
+      "limit_far" => %{remedy: "move", cap: 20}
     }
   end
 

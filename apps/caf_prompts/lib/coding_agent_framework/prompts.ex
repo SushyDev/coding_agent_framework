@@ -142,7 +142,9 @@ defmodule CodingAgentFramework.Prompts do
   - `login`: `"check"`, once a person logged the account in (`bin/caf-login`): its login is
     checked again now (`Logins.recheck/3`), and the prompt closes when it is logged in;
   - `limit`: `"go_on"` (the healer reads the screen again and the go-ons in a row start again)
-    or `"leave"` (nothing more acts on that limit); `usage_credits`: one of its options' labels,
+    or `"leave"` (nothing more acts on that limit), and `"move"` where it offers one (a main's
+    limit far from its reset, F-191: the healer moves it to the account the prompt names, the
+    person's act); `usage_credits`: one of its options' labels,
     the menu's stop or its usage credits (`Sessions.answer_limit/6`).
 
   The prompt is read now and must be `open`, and the choice one it offers; the owner then takes
@@ -512,9 +514,15 @@ defmodule CodingAgentFramework.Prompts do
     end
   end
 
-  defp limit_text("limit", l),
-    do:
+  defp limit_text("limit", l) do
+    text =
       "usage limit (#{l["window"] || "window"}) until #{l["until"]}: #{l["why"] || "left to you"}"
+
+    # F-191: a main's limit far from its reset offers the move beside the wait.
+    if is_binary(l["move_to"]),
+      do: text <> "; go_on waits for the reset, move moves it to #{l["move_to"]}",
+      else: text
+  end
 
   defp limit_text("usage_credits", l),
     do:

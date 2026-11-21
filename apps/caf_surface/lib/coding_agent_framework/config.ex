@@ -461,7 +461,7 @@ defmodule CodingAgentFramework.Config do
     mains: [clone_timeout: :ms],
     delegates: [idle_bound: :ms],
     mover: [timeout: :ms, stop: :ms],
-    limits: [margin: :ms, credits: :ms, bound: :count],
+    limits: [margin: :ms, credits: :ms, bound: :count, move_after: :ms],
     stuck_backgrounds: [quiet: :ms],
     hooks_silent: [bound: :ms, slack: :ms],
     registry: [timeout: :ms],

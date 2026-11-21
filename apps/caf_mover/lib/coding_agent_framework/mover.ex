@@ -18,7 +18,8 @@ defmodule CodingAgentFramework.Mover do
      starts no delegate under it (`Sessions.Agents.moving?/1`). The drain is clear once no
      `Mailbox` row to it is `sending` and no `run_delegate` call of it waits (`Mailbox.awaited/3`).
   2. `stopping`: `Sessions.stop/3` `for: :move`, the SIGTERM by the row's pid and start time
-     once the session reads idle and no row to it is sending, then the wait for the exit and
+     once the session reads idle (or, at a usage limit, shows Claude Code's own wait or its
+     menu: F-191) and no row to it is sending, then the wait for the exit and
      the dead socket. A stop refused (a turn runs) is asked again only on a reader's cue
      (`registry:`, `stream:`), when the evidence of the turn can have changed. An interactive
      session's file says `shell`, not `idle`, while a background command runs after its turn
@@ -46,6 +47,9 @@ defmodule CodingAgentFramework.Mover do
     resumed on its own account, where its transcript is;
   - that resume refused too: the session runs on no account. Its row says why and the fault
     ledger has an act `move` `failed` with reason `stranded`, for a person;
+  - an agent at a usage limit (F-191): its copy or resume refused leaves its process gone, the
+    act `failed`, never resumed on its own account, which is at its limit; the limit's healer
+    asks a person, and its word at the reset resumes it;
   - a restart at any step: the step the row names is taken again. A resume is asked again only
     while the row is free, so `Sessions`, which starts no name whose process may live, never
     runs two.
@@ -95,10 +99,26 @@ defmodule CodingAgentFramework.Mover do
   logged in, say: F-189's new-3), `Usage`'s or `Accounts`' refusal, or `Acts`' (`{:claimed, by}` for a
   move of that process already under way). Who may move whom is the caller's check
   (`Grants.may_fix?/3`).
+
+  An agent at a usage limit (its row's `usage_limit`, F-191; `Move.tla`'s LimitMove) moves
+  from a running process or from one gone at its limit, whose move skips the drain and the stop.
+  `act:` is a claim in `Acts` the caller made already (the limit's healer's, once per limit):
+  the move takes it in place of its own, marks it acted, and settles it as its own, a refusal
+  before the drain included. The caller reads the move's end from that row.
   """
   @spec move(GenServer.server(), String.t(), String.t(), keyword) :: outcome(map)
   def move(mover, actor, name, opts \\ []),
-    do: call(mover, {:move, actor, name, Keyword.get(opts, :to)})
+    do: call(mover, {:move, actor, name, Keyword.get(opts, :to), Keyword.get(opts, :act)})
+
+  @doc """
+  The account a move of agent `name` would go to now, by the same pick as `move/4`'s with no
+  `to:`, and with nothing begun: `{:ok, account}` or the refusal `move/4` would answer
+  (`{:none_usable, reasons}`, `{:allowance, retry_at}`, `{:usage, :unread}`, `:no_session`).
+  The limit's healer asks it before it claims a move, so a limit with no other account that has
+  room waits for its reset.
+  """
+  @spec room(GenServer.server(), String.t()) :: outcome(String.t())
+  def room(mover, name), do: call(mover, {:room, name})
 
   @doc """
   The framework's `PreToolUse` callback, for `Intake`'s `pre_tool_use:` (F-142's new-2). The
@@ -200,15 +220,15 @@ defmodule CodingAgentFramework.Mover do
     do: {:noreply, steps(s, if(evidence?, do: :evidence, else: :cue))}
 
   @impl true
-  def handle_call({:move, actor, name, to}, _from, s) do
+  def handle_call({:move, actor, name, to, given}, _from, s) do
     row = Agents.get(s.agents, name)
 
     with %{} <- row || {:refused, :no_session},
          false <- Agents.moving?(row) and {:refused, {:moving, row.move}},
-         true <- Agents.running?(row) or {:refused, {:not_running, row.status}},
+         true <- movable?(row) or {:refused, {:not_running, row.status}},
          {:ok, to} <- target(s, row, to),
          {:ok, _} <- Accounts.ready(s.accounts, to),
-         {:ok, act} <- claim(s, actor, row) do
+         {:ok, act} <- claim(s, actor, row, given) do
       deadline = s.clock.() + s.timeout
 
       case Sessions.begin_move(s.sessions, name, %{to: to, act: act, deadline: deadline}) do
@@ -221,8 +241,21 @@ defmodule CodingAgentFramework.Mover do
           {:reply, not_begun, s}
       end
     else
-      refused -> {:reply, refused, s}
+      refused ->
+        # The caller's claim is settled by this move's answer, a refusal as well.
+        if given, do: Acts.answered(s.acts, given, refused)
+        {:reply, refused, s}
     end
+  end
+
+  def handle_call({:room, name}, _from, s) do
+    reply =
+      case Agents.get(s.agents, name) do
+        nil -> {:refused, :no_session}
+        row -> target(s, row, nil)
+      end
+
+    {:reply, reply, s}
   end
 
   # A stop or a resume `Sessions` answered.
@@ -245,7 +278,12 @@ defmodule CodingAgentFramework.Mover do
   # The act, claimed on the session's current process and the moves of it already ended, so a
   # second press while one is under way is refused, and a press after one ended is new. It is
   # acted before the row's phase is written: a cut between the two is settled at the next start.
-  defp claim(s, actor, row) do
+  # A claim the caller made (the limit's healer's) is marked acted here, as this move's own.
+  defp claim(s, _actor, _row, given) when is_integer(given) do
+    with {:ok, _} <- Acts.acted(s.acts, given), do: {:ok, given}
+  end
+
+  defp claim(s, actor, row, nil) do
     with {:ok, ended} <-
            Acts.rows(s.acts, target: row.name, act: "move", status: ~w(settled interrupted)),
          state = %{
@@ -287,6 +325,11 @@ defmodule CodingAgentFramework.Mover do
       end
     end
   end
+
+  # A running agent, or one at a usage limit whose process is gone (F-191).
+  defp movable?(row), do: Agents.running?(row) or limited_gone?(row)
+
+  defp limited_gone?(row), do: Agents.free?(row) and Agents.limit(row) != nil
 
   defp moving(s), do: Agents.moving(s.agents)
 
@@ -359,7 +402,14 @@ defmodule CodingAgentFramework.Mover do
          {:ok, launch} <- s.launch.(row),
          {:ok, launched} <- launch_first(s, row) do
       launch = Keyword.delete(launch, :options)
-      launch = if launched, do: launch ++ [prompt: launched.text], else: launch
+
+      launch =
+        cond do
+          launched == nil -> launch
+          Agents.headless?(row) -> launch ++ [first: Map.take(launched, [:uuid, :text])]
+          true -> launch ++ [prompt: launched.text]
+        end
+
       mailbox = s.mailbox
 
       async(s, row, :resume, fn ->
@@ -383,19 +433,19 @@ defmodule CodingAgentFramework.Mover do
 
   # The first row due to an interactive session goes in as its resume's prompt (F-142, item 3):
   # the resumed process has no waiter until a turn of it ends, and the `Inlet` types no long
-  # row, so a report would otherwise wait for a person's prompt. A headless session's rows go
-  # by its stream. A row still `sending` (a launch a restart cut, say) settles first.
+  # row, so a report would otherwise wait for a person's prompt. A headless session's first row
+  # goes by its stream as the line the resume writes right after the hold, as `Delegates`' does
+  # (F-152: Claude Code headless writes its init only after it read a line; F-191, the word to go
+  # on of a limited delegate). A row still `sending` (a launch a restart cut, say) settles first.
   defp launch_first(s, row) do
-    if Agents.headless?(row) do
-      {:ok, nil}
-    else
-      case Mailbox.launch(s.mailbox, row.name, s.clock.() + @resume + @step) do
-        {:ok, %{id: _, text: _} = launched} -> {:ok, launched}
-        {:ok, :none} -> {:ok, nil}
-        {:refused, :no_transcripts} -> {:ok, nil}
-        {:refused, {:sending, ids}} -> {:unknown, {:sending, ids}}
-        {_, why} -> {:unknown, {:launch, why}}
-      end
+    via = if Agents.headless?(row), do: :stream, else: :launch
+
+    case Mailbox.launch(s.mailbox, row.name, s.clock.() + @resume + @step, via: via) do
+      {:ok, %{id: _, text: _} = launched} -> {:ok, launched}
+      {:ok, :none} -> {:ok, nil}
+      {:refused, :no_transcripts} -> {:ok, nil}
+      {:refused, {:sending, ids}} -> {:unknown, {:sending, ids}}
+      {_, why} -> {:unknown, {:launch, why}}
     end
   end
 
@@ -410,8 +460,9 @@ defmodule CodingAgentFramework.Mover do
 
   defp answered(s, row, :resume, {:ok, _}), do: done(s, row)
 
-  defp answered(s, %{move_to: to, move_from: to} = row, :resume, {:refused, why}),
-    do: stranded(s, row, why)
+  defp answered(s, %{move_to: to, move_from: to} = row, :resume, {:refused, why}) do
+    if Agents.limit(row), do: left_gone(s, row, {:resume, why}), else: stranded(s, row, why)
+  end
 
   defp answered(s, row, :resume, {:refused, why}), do: back(s, row, {:resume, why})
   defp answered(s, row, :resume, _unknown), do: step(s, row, :cue)
@@ -432,8 +483,21 @@ defmodule CodingAgentFramework.Mover do
   end
 
   # The other account refused the copy or the resume: the act failed, and the session goes back
-  # to its own account, where its transcript is.
+  # to its own account, where its transcript is. An agent at a usage limit does not (F-191,
+  # `Move.tla`'s Back): its own account is at the limit, so its process stays gone and its row
+  # free, and the limit's healer, which reads the act, asks a person.
   defp back(s, row, why) do
+    if Agents.limit(row), do: left_gone(s, row, why), else: go_back(s, row, why)
+  end
+
+  defp left_gone(s, row, why) do
+    Logger.warning("mover: #{row.name} stays gone at its usage limit: #{inspect(why)}")
+    if row.move_act, do: Acts.settle(s.acts, row.move_act, :failed, reason: why)
+    Sessions.move_phase(s.sessions, row.name, nil)
+    s
+  end
+
+  defp go_back(s, row, why) do
     Logger.warning("mover: #{row.name} goes back to #{row.move_from}: #{inspect(why)}")
     if row.move_act, do: Acts.settle(s.acts, row.move_act, :failed, reason: why)
 

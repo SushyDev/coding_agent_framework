@@ -12,7 +12,8 @@
 (* framework restarts at any step.                                        *)
 (*                                                                         *)
 (* Models these modules of CodingAgentFramework (Mover is built, F-133;   *)
-(* the idle read of background commands and the resume's launch, F-142):  *)
+(* the idle read of background commands and the resume's launch, F-142;   *)
+(* a limited agent's move, F-191, with Limits, the healer that asks it):  *)
 (*   Usage    each account's allowance: below 90 %, at 90 % (drain), at    *)
 (*            the limit;                                                   *)
 (*   Mover    drains the session, asks Sessions to stop it, waits for the  *)
@@ -79,6 +80,25 @@
 (* across it: TranscriptKept and DeliveredIsKept are what let it leave     *)
 (* the account and the copy out.                                          *)
 (*                                                                         *)
+(* A move of a limited agent (F-191; Limit.tla's Away and MoveAct are      *)
+(* this move, decided there once per limit). The session's turn may end   *)
+(* at a usage limit (Limited): its account is at the limit, and its turn   *)
+(* is `limited`, which is not an ended turn: Mailbox holds every row to    *)
+(* it (Boxes.tla's NoRowIntoLimit). Only the move's stop (`for: :move`)    *)
+(* takes the limited turn as ended: an interactive one's is read from its  *)
+(* screen (Claude Code's own wait or its menu, through the Inlet) in place *)
+(* of its session file, and the SIGTERM ends the wait (F-181), a headless  *)
+(* one's from its stream. The healer stores the word to go on first, under *)
+(* its key (Delegates.go_on with no resume of its own, or Mailbox.notify   *)
+(* for a main a person moves), and the resume carries it as its first row  *)
+(* (an interactive one's by launch; a headless one's first stream line is  *)
+(* the same step here). A process gone at its limit (a headless one exits  *)
+(* at once; a person may exit) is moved with no drain and no stop. A copy  *)
+(* or a resume refused on the other account leaves a limited session gone *)
+(* (Back), its row a person's `limit` prompt: never resumed on its own     *)
+(* account, which is at its limit. The reset is Limit.tla's: the move here *)
+(* comes before it.                                                        *)
+(*                                                                         *)
 (* Restarts (F-164): the whole framework's, and the session's own agent    *)
 (* process's (RestartAgent, B4's), at any step of the move, both bounded  *)
 (* by MaxRestarts. The agent process holds the stop's idle read and the    *)
@@ -101,6 +121,7 @@ CONSTANTS
     MaxCrashes,    \* crashes of the old process once its stop is asked
     MaxRestarts,   \* restarts of the framework and of the session's agent process
     Resumes,       \* the process may end by itself and Mains resume it (F-177)
+    Limited,       \* its turn may end at a usage limit, and the limit's move runs (F-191)
     Break         \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -114,23 +135,28 @@ Breaks == {
     "MarkWhileEnding",   \* Mailbox marks and hands on rows while the session's row is stopping
     "StopWhileSending",  \* the idle read does not wait for rows to the session sending
     "SettleOnTarget",    \* a row is settled against the target's transcript before the copy
-    "ResumeOnPicked"     \* a resume runs on the picked account, its conversation not copied
+    "ResumeOnPicked",    \* a resume runs on the picked account, its conversation not copied
+    "LimitIdleForAll",   \* a limited turn is ended for Mailbox too, not only for the move's stop
+    "BackIntoLimit",     \* a failed move of a limited session resumes it on its own account
+    "WordAfter"          \* the limit's move begins before the healer stored the word to go on
 }
 
 ASSUME Break \in Breaks
 ASSUME Home \in Accounts /\ Cardinality(Accounts) = 2
 ASSUME \A c \in {MaxPrompts, MaxBg, MaxDelegates, MaxMsgs, MaxCrashes, MaxRestarts} : c \in Nat
-ASSUME Resumes \in BOOLEAN
+ASSUME Resumes \in BOOLEAN /\ Limited \in BOOLEAN
 
 \* Allowance levels.
 Ok == 0
 DrainLevel == 1   \* 90 % of the weekly allowance
 Limit == 2
 
-\* "stopped", "copying" and "copied" are a resume's (Resumes): Mains' start row.
+\* "stopped", "copying" and "copied" are a resume's (Resumes): Mains' start row. "failed" is a
+\* limited session's move refused on the other account: its process gone, a person's prompt.
 Phases == {"idle", "draining", "clear", "stopping", "ending", "moved",
-           "stopped", "copying", "copied"}
-Ids == 1..(MaxDelegates + MaxMsgs)
+           "stopped", "copying", "copied", "failed"}
+\* The rows: delegates' reports, messages, and the limit's word to go on.
+Ids == 1..(MaxDelegates + MaxMsgs + (IF Limited THEN 1 ELSE 0))
 Delegates == 1..MaxDelegates
 PromptMark == 0   \* a prompt's turn in a transcript; a row is its id
 
@@ -157,13 +183,21 @@ VARIABLES
     lost,          \* ghost: work a move cut off: [kind, id]
     turned,        \* a turn of the current process has ended
     \* Delivery's, for the rows to the session
-    row, hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, dlost, wrong
+    row, hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, dlost, wrong,
+    \* the limit (Limited)
+    hitPid,        \* the process whose turn ended at the usage limit, or 0
+    word           \* the healer stored the word to go on
 
 dvars == <<row, hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, dlost, wrong>>
 work == <<level, procs, nextPid, turn, bg, bgCount, delegates, prompts, msgs, crashes>>
 mover == <<transcript, phase, target, copied, resumedWith, record, readAt, ends, lost, turned>>
 
-vars == <<up, restarts, work, mover, dvars>>
+lvars == <<hitPid, word>>
+
+vars == <<up, restarts, work, mover, dvars, lvars>>
+
+\* Every action but the limit's leaves the limit as it is.
+Kept(A) == A /\ UNCHANGED lvars
 
 Live == {p \in procs : ~p.ending}
 Pids == {p.pid : p \in procs}
@@ -172,6 +206,13 @@ Here == record.account
 \* The process Mailbox sees: the row's, while it runs.
 Current == IF record.pid \in Pids THEN record.pid ELSE 0
 AccountOf(pid) == (CHOOSE p \in procs : p.pid = pid).account
+
+\* The conversation is at its limit: the row still names the process whose turn ended there,
+\* live or gone. A resume's process is a new one.
+AtLimit == hitPid # 0 /\ record.pid = hitPid
+
+\* Mailbox holds every row to a limited process, as to one stopping: no mark, no hand-on.
+Held == AtLimit /\ Current # 0 /\ Break # "LimitIdleForAll"
 
 D == INSTANCE Delivery WITH
        Ids <- Ids, Addrs <- {Main}, Headless <- {}, Senders <- Senders, MaxSent <- 0,
@@ -183,7 +224,7 @@ D == INSTANCE Delivery WITH
        up <- up,
        pr <- [a \in {Main} |-> Current],
        idle <- [a \in {Main} |-> turn = 0],
-       stopping <- [a \in {Main} |-> record.status = "stopping" /\ Current # 0],
+       stopping <- [a \in {Main} |-> (record.status = "stopping" /\ Current # 0) \/ Held],
        over <- [a \in {Main} |-> FALSE],
        turned <- [a \in {Main} |-> turned], Long <- Ids, Launched <- {},
        lost <- dlost,
@@ -217,6 +258,7 @@ Init ==
     /\ tx = [a \in {Main} |-> <<>>] /\ fold = [i \in Ids |-> "none"]
     /\ rmem = {} /\ last = [a \in {Main} |-> D!NoResult]
     /\ unsure = {} /\ dlost = {} /\ wrong = {}
+    /\ hitPid = 0 /\ word = FALSE
 
 -----------------------------------------------------------------------------
 (* The framework: its tables survive a restart; its memory does not *)
@@ -329,7 +371,7 @@ Has(i) == \E k \in DOMAIN Read : Read[k] = i
 
 \* Drain: a press, or the session's account at 90 % (Fairness).
 Drain ==
-    /\ up /\ phase = "idle"
+    /\ up /\ phase = "idle" /\ ~AtLimit
     /\ \E a \in Accounts \ {Here} : level[a] = Ok /\ target' = a
     /\ phase' = "draining"
     /\ UNCHANGED <<up, restarts, work, transcript, copied, resumedWith, record, readAt, ends,
@@ -444,6 +486,68 @@ ResumedBare ==
 Resumed == ResumedBare \/ \E i \in Ids : ResumedWith(i)
 
 -----------------------------------------------------------------------------
+(* A limited session's move (Limited, F-191) *)
+
+\* The turn ends at the usage limit: the account is at its limit, the turn's rows have its
+\* result (the limit's line, or a headless stream's result at the limit), and no Stop hook
+\* connects a waiter (the turn is `limited`, not ended). So the move's SIGTERM cuts no row's
+\* turn: the word to go on is that turn's from then. Once per behavior.
+HitLimit(p) ==
+    /\ Limited /\ hitPid = 0 /\ phase = "idle" /\ turn = p.pid /\ p.pid = Current
+    /\ turn' = 0 /\ hitPid' = p.pid
+    /\ level' = [level EXCEPT ![p.account] = Limit]
+    /\ D!Result(Main)
+    /\ UNCHANGED <<up, restarts, procs, nextPid, bg, bgCount, delegates, prompts, msgs, crashes,
+                   mover, word>>
+
+\* The process ends at its limit before any move: a headless one exits at once, or a person
+\* exits. Its SessionEnd makes the row ended.
+ExitsAtLimit(p) ==
+    /\ AtLimit /\ phase = "idle" /\ p.pid = Current /\ ~p.ending
+    /\ procs' = procs \ {p}
+    /\ bg' = {b \in bg : b.pid # p.pid}
+    /\ turn' = IF turn = p.pid THEN 0 ELSE turn
+    /\ ends' = ends \cup {p.pid}
+    /\ D!Exited(Main, FALSE)
+    /\ UNCHANGED <<up, restarts, level, nextPid, bgCount, delegates, prompts, msgs, crashes,
+                   transcript, phase, target, copied, resumedWith, record, readAt, lost, turned,
+                   lvars>>
+
+\* The healer stores the word to go on first, under its key, once per limit: held while the
+\* process is limited, the first row of the move's resume.
+WordStored ==
+    /\ up /\ AtLimit /\ ~word
+    /\ word' = TRUE
+    /\ \E s \in Senders : D!Store(D!NextId, s, Main, "msg")
+    /\ UNCHANGED <<up, restarts, work, mover, hitPid>>
+
+\* Limit.tla's Away and MoveAct: the limit's move, once the word is stored (under WordAfter,
+\* before). A live process is drained and stopped; one already gone skips both, its row free.
+LimitMove ==
+    /\ up /\ Limited /\ AtLimit /\ phase = "idle"
+    /\ word \/ Break = "WordAfter"
+    /\ \E a \in Accounts \ {Here} : level[a] = Ok /\ target' = a
+    /\ phase' = IF Current = 0 THEN "ending" ELSE "draining"
+    /\ UNCHANGED <<up, restarts, work, transcript, copied, resumedWith, record, readAt, ends,
+                   lost, turned, dvars, lvars>>
+
+\* The copy or the resume refused on the other account, the old process gone: a limited
+\* session stays gone, a person's limit prompt, never resumed into its limit (under
+\* BackIntoLimit it is, on its own account, as a move of a session not at a limit goes back).
+Back ==
+    /\ up /\ Limited /\ AtLimit /\ phase \in {"stopping", "ending"} /\ procs = {}
+    /\ ~\E i \in Ids : row[i].st = "sending"
+    /\ IF Break = "BackIntoLimit"
+       THEN NewProcOn(Here) /\ UNCHANGED <<dvars, lvars>>
+       ELSE /\ phase' = "failed"
+            /\ UNCHANGED <<up, restarts, work, transcript, target, copied, resumedWith, record,
+                           readAt, ends, lost, turned, dvars, lvars>>
+
+LimitNext ==
+    \/ \E p \in procs : HitLimit(p) \/ ExitsAtLimit(p)
+    \/ WordStored \/ LimitMove \/ Back
+
+-----------------------------------------------------------------------------
 (* A resume of the session once its process ended by itself (Resumes) *)
 
 \* The row's process ends while no move runs: a person's /exit, or a crash.
@@ -521,7 +625,7 @@ SessionEndArrives(pid) ==
                    lost, turned, dvars>>
 
 -----------------------------------------------------------------------------
-Next ==
+OldNext ==
     \/ FrameworkDies \/ FrameworkStarts \/ RestartAgent \/ UsageRises
     \/ \E p \in procs : \/ PromptSent(p) \/ TurnEnds(p) \/ BgStarted(p)
                         \/ Exits(p, "term") \/ Exits(p, "crash")
@@ -541,22 +645,27 @@ Next ==
                       \/ Takes(i)
                       \/ Mailbox(D!SettleSeen(i, Has(i)))
 
+Next == Kept(OldNext) \/ LimitNext
+
 \* A resume is not refused here: Mover.ex goes back to the old account then,
 \* and a refused launch makes its row due again for the next one.
 Fairness ==
-    /\ WF_vars(FrameworkStarts)
-    /\ WF_vars(level[Here] >= DrainLevel /\ Drain)
-    /\ WF_vars(Cleared) /\ WF_vars(StopAsked) /\ WF_vars(IdleRead) /\ WF_vars(Term)
-    /\ WF_vars(Copied) /\ WF_vars(Resumed) /\ WF_vars(\E i \in Ids : LaunchMarked(i))
-    /\ WF_vars(ResumeCopy) /\ WF_vars(ResumeCopied)
-    /\ WF_vars(\E p \in procs : Exits(p, "term"))
-    /\ WF_vars(\E p \in procs : TurnEnds(p))
-    /\ WF_vars(\E b \in bg : BgEnds(b))
-    /\ WF_vars(Mailbox(D!Connects(Main)))
+    /\ WF_vars(Kept(FrameworkStarts))
+    /\ WF_vars(Kept(level[Here] >= DrainLevel /\ Drain))
+    /\ WF_vars(Kept(Cleared)) /\ WF_vars(Kept(StopAsked)) /\ WF_vars(Kept(IdleRead))
+    /\ WF_vars(Kept(Term))
+    /\ WF_vars(Kept(Copied)) /\ WF_vars(Kept(Resumed))
+    /\ WF_vars(Kept(\E i \in Ids : LaunchMarked(i)))
+    /\ WF_vars(Kept(ResumeCopy)) /\ WF_vars(Kept(ResumeCopied))
+    /\ WF_vars(Kept(\E p \in procs : Exits(p, "term")))
+    /\ WF_vars(Kept(\E p \in procs : TurnEnds(p)))
+    /\ WF_vars(Kept(\E b \in bg : BgEnds(b)))
+    /\ WF_vars(Kept(Mailbox(D!Connects(Main))))
+    /\ WF_vars(WordStored) /\ WF_vars(LimitMove)
     /\ \A i \in Ids :
-         /\ SF_vars(\E t \in {"waiter", "typed"} : Mailbox(D!Mark(i, t)))
-         /\ SF_vars(Mailbox(D!Handed(i))) /\ WF_vars(Mailbox(D!Refused(i)))
-         /\ SF_vars(Takes(i)) /\ WF_vars(Mailbox(D!SettleSeen(i, Has(i))))
+         /\ SF_vars(Kept(\E t \in {"waiter", "typed"} : Mailbox(D!Mark(i, t))))
+         /\ SF_vars(Kept(Mailbox(D!Handed(i)))) /\ WF_vars(Kept(Mailbox(D!Refused(i))))
+         /\ SF_vars(Kept(Takes(i))) /\ WF_vars(Kept(Mailbox(D!SettleSeen(i, Has(i)))))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -571,6 +680,7 @@ TypeOK ==
     /\ phase \in Phases /\ target \in Accounts /\ copied \in BOOLEAN
     /\ turned \in BOOLEAN
     /\ record.status \in {"running", "stopping", "ended"}
+    /\ hitPid \in 0..nextPid /\ word \in BOOLEAN
     /\ D!TypeOK
 
 \* A session runs on one account at a time: never two processes of it.
@@ -611,6 +721,27 @@ DrainedParentMoves == phase = "draining" ~> phase = "moved"
 \* A resume's copy ends: the session runs on the picked account, or the row
 \* stays stopped on its own.
 CopySettles == phase = "copying" ~> phase \in {"stopped", "moved"}
+
+\* Mailbox marks no row into a limited process: it holds them, and only the move's stop reads
+\* its turn as ended (F-191). A row handed into the turn before its limit Claude Code may still
+\* take; that is the turn's own, as a prompt typed before it is.
+NoRowIntoLimit ==
+    [][(AtLimit /\ Current # 0) =>
+         ~\E i \in Ids : row[i].st = "due" /\ row'[i].st = "sending"
+                         /\ row'[i].via \in {"waiter", "typed"}]_vars
+
+\* A limited session is never resumed on the account at its limit: a move refused or failed
+\* leaves its process gone, for a person.
+NoResumeIntoLimit == [][(AtLimit /\ nextPid' # nextPid) => record'.account # Here]_vars
+
+\* A limited session's resume carries a row as its first: the word to go on, stored first (or
+\* a row due before it), so its turn goes on and a headless process has its first line.
+LimitResumeCarriesRow ==
+    [][(AtLimit /\ nextPid' # nextPid) =>
+         \E i \in Ids : row[i].st = "sending" /\ row[i].via = "launch"]_vars
+
+\* A limited session's move settles: it runs on the other account, or a person has it.
+LimitMoveSettles == (AtLimit /\ phase # "idle") ~> phase \in {"moved", "failed"}
 
 \* Every row to the session is delivered, held through the move: a row due
 \* at the resume goes in as its prompt, a later one by the waiter or, long as
