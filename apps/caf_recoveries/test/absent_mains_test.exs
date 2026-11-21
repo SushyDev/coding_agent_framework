@@ -135,6 +135,54 @@ defmodule CodingAgentFramework.AbsentMainsTest do
     assert {:refused, :settled} = Watch.answer(ctx.watch, sym, "leave", "sam")
   end
 
+  # F-190's new-2: a person's claim names its healer, so the healer's restart closes the claim
+  # it cut (Heal.tla's SettleCut, Break_Heal_CutOwnOnly), and the state is never acted on.
+  test "a healer killed between a person's claim and its act closes that claim when it starts",
+       ctx do
+    first = healer!(ctx, {:ok, %{name: "app-epic"}})
+    exit!(ctx, 1)
+    assert {:ok, %{resumed: [_]}} = AbsentMains.check(first)
+    exit!(ctx, 2)
+    assert {:ok, %{resumed: []}} = AbsentMains.check(first)
+    assert_received {:resumed, "app-epic"}
+    assert [%{id: sym}] = asked(ctx)
+    assert {:ok, :answered} = Watch.answer(ctx.watch, sym, "act", "sam")
+    GenServer.stop(first)
+
+    # This healer's check claims for sam and holds the resume until it is killed.
+    me = self()
+
+    held = fn name ->
+      send(me, {:holding, name})
+
+      receive do
+        :go -> {:ok, %{name: name}}
+      after
+        30_000 -> {:unknown, :test_waited}
+      end
+    end
+
+    opts = [agents: ctx.agents, acts: ctx.acts, watch: ctx.watch, host: "test", clock: ctx.clock]
+    {:ok, cut} = AbsentMains.start_link([resume: held] ++ opts)
+    assert_receive {:holding, "app-epic"}, 5_000
+
+    assert {:ok, [%{id: id, status: "claimed", detail: detail}]} =
+             Acts.rows(ctx.acts, actor: "sam", act: "resume")
+
+    assert detail == ~s({"healer":"absent_mains:test"})
+
+    Process.unlink(cut)
+    ref = Process.monitor(cut)
+    Process.exit(cut, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^cut, :killed}
+
+    # Its restart closes sam's claim; the answer was one act, and no act runs on the state.
+    again = healer!(ctx, {:ok, %{name: "app-epic"}})
+    assert {:ok, %{status: "interrupted", actor: "sam"}} = Acts.get(ctx.acts, id)
+    assert {:ok, %{resumed: []}} = AbsentMains.check(again)
+    refute_received {:resumed, _}
+  end
+
   test "a resume refused or unknown is asked and never tried again in its state", ctx do
     healer = healer!(ctx, {:unknown, {:timeout, 300_000}})
     exit!(ctx, 1)

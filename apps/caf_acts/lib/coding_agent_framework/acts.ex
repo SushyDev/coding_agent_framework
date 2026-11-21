@@ -20,7 +20,8 @@ defmodule CodingAgentFramework.Acts do
 
   **A restart** opens the table with a new `start_id` (made once per framework start by the
   embedding app): every row still `claimed` that another start wrote is closed `interrupted`.
-  A caller that restarts within one start closes its own with `interrupt/2`.
+  A caller that restarts within one start closes its own with `interrupt/2`, and the claims it
+  held for a person (a healer taking a person's act, F-192).
 
   **Cues.** After each write it calls `notify` with `%{topic: "acts:<host>:<instance>", ids:
   ids}`, the topic of the `Tracker`'s source made from `Acts.Table.meta/0`.
@@ -75,13 +76,27 @@ defmodule CodingAgentFramework.Acts do
   Refused `{:claimed, by}` while another claim of that state is open, and `{:already_claimed,
   by}` once one has ended, whatever its end. A `skipped` row of the state is taken over.
   Option `detail:` is written on the row with the claim, so a reader knows the act's kind
-  before it runs: the operator's forced end, `%{force: true}` (F-172).
+  before it runs: the operator's forced end, `%{force: true}` (F-172). Option `healer:` names
+  the process that takes a person's act for them (F-192): it is written in the detail as
+  `healer`, beside a map `detail:`, so that process's restart closes the claim it cut
+  (`interrupt/2`).
+
+      Acts.claim(acts, "sam", "app-main", "absent_main:app-main:7", :resume,
+        healer: "absent_mains:laptop")
+      #=> {:ok, 12}
   """
   @spec claim(GenServer.server(), String.t(), String.t(), term, atom | String.t(), keyword) ::
           answer(id)
   def claim(acts, actor, target, state, act, opts \\ []) do
     row = row(actor, target, state, act)
-    row = if d = opts[:detail], do: Map.put(row, :detail, Store.text(d)), else: row
+
+    detail =
+      case {opts[:detail], opts[:healer]} do
+        {d, nil} -> d
+        {d, healer} when is_map(d) or is_nil(d) -> Map.put(d || %{}, :healer, healer)
+      end
+
+    row = if detail, do: Map.put(row, :detail, Store.text(detail)), else: row
     call(acts, {:claim, row}, opts)
   end
 
@@ -153,8 +168,19 @@ defmodule CodingAgentFramework.Acts do
       do: call(acts, {:record, row(actor, target, nil, act), outcome, dump(fields)}, opts)
 
   @doc """
-  Closes `actor`'s rows still `claimed` as `interrupted`: the actor restarted, and the calls
-  that held them are gone. Answers their ids.
+  Closes the rows still `claimed` that `actor`'s calls held as `interrupted`: its own, and a
+  person's that names it as the healer taking the act (`claim/6`'s `healer:`). The actor
+  restarted, and the calls that held them are gone. Answers their ids.
+
+      iex> dir = CodingAgentFramework.TestHost.test_dir()
+      iex> alias CodingAgentFramework.Acts
+      iex> {:ok, acts} = Acts.start_link(db: Path.join(dir, "cut.db"), start_id: "s1",
+      ...>   host: "laptop", instance: "a")
+      iex> {:ok, own} = Acts.claim(acts, "healer:ws", "alpha", 1, :resume)
+      iex> {:ok, sams} = Acts.claim(acts, "sam", "beta", 1, :resume, healer: "healer:ws")
+      iex> {:ok, _other} = Acts.claim(acts, "sam", "gamma", 1, :resume, healer: "other:ws")
+      iex> Acts.interrupt(acts, "healer:ws") == {:ok, [own, sams]}
+      true
   """
   @spec interrupt(GenServer.server(), String.t(), keyword) :: answer([id])
   def interrupt(acts, actor, opts \\ []), do: call(acts, {:interrupt, actor}, opts)
@@ -319,13 +345,15 @@ defmodule CodingAgentFramework.Acts do
             Store.query(
               s.db,
               "UPDATE acts SET status = 'interrupted', ended_at = ?2 " <>
-                "WHERE actor = ?1 AND status = 'claimed' RETURNING id",
+                "WHERE status = 'claimed' AND (actor = ?1 OR " <>
+                "CASE WHEN json_valid(detail) THEN json_extract(detail, '$.healer') END = ?1) " <>
+                "RETURNING id",
               [actor, now(s)]
             ),
           do: id
 
     if ids != [], do: cue(s, ids)
-    {:reply, {:ok, ids}, s}
+    {:reply, {:ok, Enum.sort(ids)}, s}
   end
 
   def handle_call({:clear, [], _at}, _from, s), do: {:reply, {:ok, []}, s}

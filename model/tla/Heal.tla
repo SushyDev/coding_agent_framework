@@ -43,7 +43,10 @@
 (* state), and it is never the healer's (ActOnlyForBound, CapToPrompt).    *)
 (* In the code the answer and the claim are two steps (Watch.answer/5,     *)
 (* then the healer's next check); a cut between them leaves no act, a     *)
-(* behavior this spec's one step already covers.                           *)
+(* behavior this spec's one step already covers. A cut between the       *)
+(* person's claim and its act is the healer's restart: the claim names    *)
+(* its healer (F-192, the row's detail in Acts), so the restart settles   *)
+(* it as it settles its own (SettleCut, any claim).                        *)
 (*                                                                         *)
 (* Left abstract: what a remedy does (Effect, in the instancing spec: a    *)
 (* fix that may not help); evidence; which remedy (one per kind).          *)
@@ -89,7 +92,8 @@ Breaks == {
     "Unlisted",        \* the healer acts on a kind the list does not allow
     "StaleSymptom",    \* it claims on a fact it recorded before, not the symptom now
     "ActAnyPrompt",    \* "act" is offered on any prompt, one asked off the list among them
-    "ActAsHealer"      \* a person's "act" is claimed as the healer's, and counted in its cap
+    "ActAsHealer",     \* a person's "act" is claimed as the healer's, and counted in its cap
+    "CutOwnOnly"       \* a restart settles only the healer's own cut claims, not a person's
 }
 
 ASSUME Break \in Breaks
@@ -219,9 +223,13 @@ Ask(s) ==
                    THEN forBound \cup {k} ELSE forBound
     /\ UNCHANGED <<facts, res, count, mem, allow, dropped, closed, claimVars, wrong>>
 
-\* A claim whose state passed is let go; a row a restart cut settles interrupted.
+\* A claim whose state passed is let go; a row a restart cut settles interrupted, the healer's
+\* own or a person's that names it (the healer's init, Acts.interrupt/2). Under CutOwnOnly a
+\* person's stays open.
 LetGo(c) == ~C!Current(c) /\ C!LetGo(c) /\ UNCHANGED <<healVars, wrong>>
-SettleCut(c) == C!Settle(c) /\ UNCHANGED <<healVars, wrong>>
+SettleCut(c) ==
+    /\ c.by = "healer" \/ Break # "CutOwnOnly"
+    /\ C!Settle(c) /\ UNCHANGED <<healVars, wrong>>
 
 \* The healer restarts: its calls go, its rows stay (the count and the list's acts among
 \* them). Under CountInMemory the count starts again; under WidenOnRestart the list is read

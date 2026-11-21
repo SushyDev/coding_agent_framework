@@ -132,7 +132,8 @@ defmodule CodingAgentFramework.StuckBackgrounds do
         seen: %{}
       }
 
-      # A claim this actor wrote and did not act on: never acted on; its state is a person's.
+      # A claim this actor wrote, or a person's it took (F-192), and did not act on: never
+      # acted on; its state is a person's.
       case Acts.interrupt(s.acts, s.actor) do
         {:ok, cut} ->
           for id <- cut, {:ok, row} <- [Acts.get(s.acts, id)], do: ask(s, row, :interrupted)
@@ -275,7 +276,8 @@ defmodule CodingAgentFramework.StuckBackgrounds do
   end
 
   defp end_group(s, sym, g, actor \\ nil) do
-    with {:ok, id} <- Acts.claim(s.acts, actor || s.actor, sym.target, sym.state, :end) do
+    with {:ok, id} <-
+           Acts.claim(s.acts, actor || s.actor, sym.target, sym.state, :end, healer(s, actor)) do
       case s.signal.(g.group) do
         {:ok, :sent} ->
           detail = %{tasks: g.tasks, changes: g.changes, group: g.group}
@@ -336,6 +338,10 @@ defmodule CodingAgentFramework.StuckBackgrounds do
     Watch.ask(s.watch, %{kind: @kind, target: target, state: key}, why)
     true
   end
+
+  # A person's claim names this healer, whose restart closes it if cut (F-192).
+  defp healer(_s, nil), do: []
+  defp healer(s, person), do: if(person == s.actor, do: [], else: [healer: s.actor])
 
   defp now(s), do: s.clock.()
 end
