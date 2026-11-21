@@ -10,6 +10,7 @@ defmodule CodingAgentFramework.Prompts do
   | kind | the owner's row | open while |
   | --- | --- | --- |
   | `permission` | `Intake`'s hold of a `PermissionRequest` (a subagent's included; `subagent` names it) | the hold is `held` |
+  | `permission` | a headless delegate's `can_use_tool` request, held in its `Stream` fold (F-189's new-2) | the request is `held` |
   | `stop_cap` | `Intake`'s hold of a `Stop` at Claude Code's cap of blocks in a row | the hold is `held` |
   | `dialog` | `Sessions`' agent row on a startup dialog (`trust`, `imports`) | the row shows it, no press marked |
   | `ask` | `Mailbox`'s ask, from an agent to the operator | no answer row and no withdrawal |
@@ -22,7 +23,8 @@ defmodule CodingAgentFramework.Prompts do
 
   Each prompt is `%{id, kind, status, agent, parent, project, subagent, text, options,
   opened_at, deadline}`: `id` names its owner's key, so one state is one prompt
-  (`"permission:<intake id>"`, `"stop_cap:<intake id>"`, `"dialog:<agent>:<start>:<dialog>"`,
+  (`"permission:<intake id>"`, `"permission:stream:<session>:<request id>"`,
+  `"stop_cap:<intake id>"`, `"dialog:<agent>:<start>:<dialog>"`,
   `"ask:<mailbox id>"`, `"remedy:<symptom id>"`, `"login:<account>"`, `"limit:<agent>:<until>"`,
   `"usage_credits:<agent>:<until>"`); `status` is `open`, `answering` (an answer is on its way to the owner),
   or for a dialog `cut` or `unknown` (a restart cut its press: a person clears it,
@@ -31,13 +33,15 @@ defmodule CodingAgentFramework.Prompts do
   login's is nil, since an account waits, not an agent),
   `parent` and `project` its row's; `options` the labels a choice is one of,
   or for an ask its questions, each with its options; `opened_at` and `deadline` wall-clock ms,
-  `deadline` nil for a kind that waits for ever. A `usage_credits` prompt has the deadline the
+  `deadline` nil for a kind that waits for ever (a stream's request among them: Claude Code
+  waits on the stream for its answer). A `usage_credits` prompt has the deadline the
   healer set, whose default is the stop, the healer's (`CodingAgentFramework.Limits`); a `limit`
   prompt has none.
 
   **One answer.** `answer/5` checks the prompt read now (still open, the choice one it offers)
   and hands the choice to its owner, whose own guard is the claim that lets one answer in
-  (`Prompt.tla`'s `Answer` and `AnswerNow`): a hold moves only from `held`, an ask's answer row
+  (`Prompt.tla`'s `Answer` and `AnswerNow`): a hold moves only from `held` (an `Intake` row's,
+  or a `Stream` request's, marked `answering` before its line is written), an ask's answer row
   and its withdrawal share one unique key, a dialog's press is marked before it goes. A late or
   second answer is refused `{:refused, :settled}`, whichever of the two checks finds it.
 
@@ -54,7 +58,7 @@ defmodule CodingAgentFramework.Prompts do
 
   use GenServer
 
-  alias CodingAgentFramework.{Intake, Logins, Mailbox, Sessions, Watch}
+  alias CodingAgentFramework.{Intake, Logins, Mailbox, Sessions, Stream, Watch}
   alias CodingAgentFramework.Sessions.{Agents, Limit}
 
   @timeout 5_000
@@ -84,7 +88,8 @@ defmodule CodingAgentFramework.Prompts do
   Starts the inbox of one host. Options: `host:`, `intake:` (the host's `Intake`) and
   `intake_db:` (its file), `sessions:` (the `Sessions`) and `sessions_db:` (its file), `mailbox:`,
   `watch:` (the `Watch`) and `watch_db:` (its file), and optionally `logins:` (the instance's
-  `Logins`) with `logins_db:` (its file), `notify:` (a function of one cue) and `name:` (for the embedding app's tree;
+  `Logins`) with `logins_db:` (its file), `stream:` (the host's `Stream`) with `stream_db:` (its
+  file), `notify:` (a function of one cue) and `name:` (for the embedding app's tree;
   the library looks up no name).
   """
   @spec start_link(keyword) :: GenServer.on_start()
@@ -99,7 +104,7 @@ defmodule CodingAgentFramework.Prompts do
 
   @doc "What it reads, for `Cues`: its owners' topics, each cue a read of every prompt."
   @spec reads() :: %{topics: [String.t()], cue: (pid, map -> :ok)}
-  def reads, do: %{topics: ~w(intake sessions mailbox watch logins), cue: &cue/2}
+  def reads, do: %{topics: ~w(intake sessions mailbox watch logins stream), cue: &cue/2}
 
   @doc "The kinds it reads."
   @spec kinds() :: [String.t()]
@@ -132,7 +137,8 @@ defmodule CodingAgentFramework.Prompts do
   - `ask`: one answer per question, as `Mailbox.answer/4` takes them, or `{:withdraw, reason}`
     (a person dismissed it, `Mailbox.withdraw/4`: one more settle);
   - `remedy`: `"approve"` (its kind's remedy back on the allow-list, the operator's widening)
-    or `"leave"` (`Watch.answer/5`);
+    or `"leave"` (`Watch.answer/5`); for a state asked for its bound, `"act"` (the remedy once,
+    which its healer takes at its next check under `who`'s claim, F-189's new-7) or `"leave"`;
   - `login`: `"check"`, once a person logged the account in (`bin/caf-login`): its login is
     checked again now (`Logins.recheck/3`), and the prompt closes when it is logged in;
   - `limit`: `"go_on"` (the healer reads the screen again and the go-ons in a row start again)
@@ -211,7 +217,8 @@ defmodule CodingAgentFramework.Prompts do
     with {:ok, idb} <- Intake.Table.open(Keyword.fetch!(opts, :intake_db)),
          {:ok, agents} <- Agents.open(Keyword.fetch!(opts, :sessions_db), host),
          {:ok, wdb} <- Watch.Table.open(Keyword.fetch!(opts, :watch_db)),
-         {:ok, ldb} <- logins_db(opts[:logins_db]) do
+         {:ok, ldb} <- logins_db(opts[:logins_db]),
+         {:ok, sdb} <- stream_db(opts[:stream_db]) do
       owners = Map.new(~w(intake sessions mailbox watch)a, &{&1, Keyword.fetch!(opts, &1)})
 
       s = %{
@@ -220,7 +227,8 @@ defmodule CodingAgentFramework.Prompts do
         agents: agents,
         wdb: wdb,
         ldb: ldb,
-        owners: Map.put(owners, :logins, opts[:logins]),
+        sdb: sdb,
+        owners: Map.merge(owners, %{logins: opts[:logins], stream: opts[:stream]}),
         notify: Keyword.get(opts, :notify, fn _ -> :ok end),
         # id -> status, as the last read found them: what the next cue says moved.
         shown: %{},
@@ -237,6 +245,9 @@ defmodule CodingAgentFramework.Prompts do
 
   defp logins_db(nil), do: {:ok, nil}
   defp logins_db(path), do: Logins.Table.open(path)
+
+  defp stream_db(nil), do: {:ok, nil}
+  defp stream_db(path), do: Stream.Table.open(path)
 
   @impl true
   def handle_continue(:read, s), do: {:noreply, reread(s)}
@@ -314,6 +325,7 @@ defmodule CodingAgentFramework.Prompts do
     with {:ok, asks} <- asks(s.owners.mailbox) do
       prompts =
         holds(s, rows) ++
+          requests(s, rows) ++
           dialogs(rows) ++
           Enum.map(asks, &ask(&1, rows)) ++ remedies(s, rows) ++ logins(s) ++ limits(rows)
 
@@ -370,6 +382,34 @@ defmodule CodingAgentFramework.Prompts do
     %{text: text, options: ~w(go_on end)}
   end
 
+  # A headless delegate's `can_use_tool` requests, held in its fold (F-189's new-2): answered
+  # through `Stream`, whose fold moves a request only from `held`.
+  defp requests(%{sdb: nil}, _rows), do: []
+
+  defp requests(s, rows) do
+    by_session = Map.new(rows, &{&1.session_id, &1})
+
+    with {:ok, %{rows: folds}} <- Stream.Table.rows(s.sdb, s.host) do
+      for %{gone: false, session: session, requests: requests} <- folds,
+          {id, %{state: state} = r} <- Enum.sort(requests),
+          state in [:held, :answering] do
+        fields = %{
+          id: "permission:stream:#{session}:#{id}",
+          kind: "permission",
+          status: if(state == :held, do: "open", else: "answering"),
+          subagent: nil,
+          opened_at: r[:held_at],
+          deadline: nil
+        }
+
+        data = %{"tool_name" => r[:tool_name], "tool_input" => r[:input]}
+        Map.merge(of(by_session[session]), Map.merge(fields, hold_text("permission", data)))
+      end
+    else
+      :unread -> []
+    end
+  end
+
   defp dialogs(rows) do
     for %{} = row <- rows, d = Agents.dialog(row), status = dialog_status(d.answers[d.kind]) do
       fields = %{
@@ -422,7 +462,7 @@ defmodule CodingAgentFramework.Prompts do
         status: "open",
         subagent: nil,
         text: "#{sym.kind} of #{sym.target}: #{sym.reason}; its remedy: #{sym.remedy}",
-        options: ~w(approve leave),
+        options: Watch.choices(sym),
         opened_at: sym.asked_at,
         deadline: nil
       }
@@ -498,6 +538,9 @@ defmodule CodingAgentFramework.Prompts do
   # An id that is no prompt now: its owner's row is there but settled, or there is none.
   defp gone(s, id) do
     case String.split(id, ":") do
+      ["permission", "stream", session | request] when s.sdb != nil ->
+        settled_if(stream_request?(s, session, Enum.join(request, ":")))
+
       [kind, n] when kind in ["permission", "stop_cap"] ->
         settled_if(Intake.Table.rows_by_id(s.idb, [int(n)]) != [])
 
@@ -518,6 +561,16 @@ defmodule CodingAgentFramework.Prompts do
 
       _ ->
         {:refused, :no_prompt}
+    end
+  end
+
+  defp stream_request?(s, session, request) do
+    case Stream.Table.rows(s.sdb, s.host) do
+      {:ok, %{rows: folds}} ->
+        Enum.any?(folds, &(&1.session == session and Map.has_key?(&1.requests, request)))
+
+      :unread ->
+        false
     end
   end
 
@@ -548,8 +601,8 @@ defmodule CodingAgentFramework.Prompts do
   defp choose(%{kind: "ask"}, {:withdraw, reason}, _who), do: {:ok, {:withdraw, reason}}
   defp choose(%{kind: "ask"}, answers, _who) when is_list(answers), do: {:ok, {:answer, answers}}
 
-  defp choose(%{kind: "remedy"}, choice, _who) when choice in ["approve", "leave"],
-    do: {:ok, choice}
+  defp choose(%{kind: "remedy", options: options}, choice, _who) when is_binary(choice),
+    do: if(choice in options, do: {:ok, choice}, else: {:refused, {:bad, :choice}})
 
   defp choose(%{kind: "login"}, "check", _who), do: {:ok, :check}
 
@@ -560,7 +613,19 @@ defmodule CodingAgentFramework.Prompts do
   defp choose(_prompt, _choice, _who), do: {:refused, {:bad, :choice}}
 
   # The owner takes the answer, in the caller's process; its refusal of a request no longer
-  # waiting is the same `settled` as the read's.
+  # waiting is the same `settled` as the read's. A stream's request: its fold refuses an
+  # answer to a request no longer held.
+  defp hand(owners, %{kind: "permission", id: "permission:stream:" <> key}, decision, _who) do
+    [session, request] = String.split(key, ":", parts: 2)
+    label = if decision == :allow, do: "allow", else: {"deny", elem(decision, 1)}
+
+    case Stream.answer(owners.stream, session, request, label) do
+      {:refused, why} when why in [:no_request, :gone, :not_followed] -> {:refused, :settled}
+      {:refused, {:request, _state}} -> {:refused, :settled}
+      other -> other
+    end
+  end
+
   defp hand(owners, %{kind: kind, id: id}, decision, who)
        when kind in ["permission", "stop_cap"] do
     [_, n] = String.split(id, ":")

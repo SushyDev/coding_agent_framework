@@ -28,7 +28,10 @@
 (*                     Its remedy is one resume; once per absence (H's     *)
 (*                     OncePerState), and a second absence of m within a   *)
 (*                     bound is asked, not resumed (ResumeOncePerBound,    *)
-(*                     then H's ActedOrAsked).                             *)
+(*                     then H's ActedOrAsked): asked for its bound, so a   *)
+(*                     person may answer "act", one resume of their own    *)
+(*                     (H's AnswerAct, F-190), which the healer's bound    *)
+(*                     does not count.                                     *)
 (*                                                                         *)
 (* Every property of Heal.tla is checked through H. Left abstract: how the *)
 (* CPU time is read, the Scheduler's lease of the resume, and Mailbox's    *)
@@ -58,14 +61,14 @@ Kind(s) == IF s \in Delegates THEN "stuck_background" ELSE "absent_main"
 
 VARIABLES
     on, st, facts, claims, acting, cdone, acted, twice, cut, res, count, mem, allow,
-    dropped, asked, closed, wrong, restarts, bounds,  \* Heal.tla's
+    dropped, asked, forBound, closed, wrong, restarts, bounds,  \* Heal.tla's
     turn,      \* d -> "brief" (its brief's turn runs), "idle", "own" (a turn of its own), "ended"
     bg,        \* d -> a background command of d runs
     reports,   \* d -> the reports taken as the brief's reply
     resumes    \* m -> the resumes of m claimed in the bound: a fold of the rows (durable)
 
 healVars == <<facts, claims, acting, cdone, acted, twice, cut, res, count, mem, allow,
-              dropped, asked, closed, wrong>>
+              dropped, asked, forBound, closed, wrong>>
 dvars == <<turn, bg, reports>>
 mine == <<turn, bg, reports, resumes>>
 vars == <<on, st, healVars, restarts, bounds, mine>>
@@ -73,7 +76,7 @@ vars == <<on, st, healVars, restarts, bounds, mine>>
 H == INSTANCE Heal WITH Symptoms <- Delegates \cup Mains,
                         Kinds <- {"stuck_background", "absent_main"}, Kind <- Kind,
                         Approved <- {"stuck_background", "absent_main"},
-                        Actors <- {"healer"}, Break <- "none"
+                        Actors <- {"healer", "person"}, Break <- "none"
 
 -----------------------------------------------------------------------------
 (* The healer: Heal.tla's steps, with these kinds' effects *)
@@ -85,11 +88,13 @@ Claim(s) ==
     /\ resumes' = IF s \in Mains THEN [resumes EXCEPT ![s] = @ + 1] ELSE resumes
     /\ UNCHANGED dvars
 
-\* A second absence of a main within the bound, with no claim on it: a person's.
+\* A second absence of a main within the bound, with no claim on it: a person's, asked for its
+\* bound.
 AskAgain(m) ==
     /\ m \in Mains /\ on[m] /\ H!Key(m) \in facts /\ H!Key(m) \notin asked
     /\ ~H!Held(H!Key(m)) /\ resumes[m] >= 1
     /\ asked' = asked \cup {H!Key(m)}
+    /\ forBound' = forBound \cup {H!Key(m)}
     /\ UNCHANGED <<on, st, facts, claims, acting, cdone, acted, twice, cut, res, count, mem,
                    allow, dropped, closed, wrong, mine>>
 
@@ -182,6 +187,8 @@ Next ==
     \/ Bound
     \/ \E k \in asked, widen \in BOOLEAN :
           H!Answer(k, widen) /\ UNCHANGED <<on, st, restarts, bounds, mine>>
+    \* A person's "act" on a prompt asked for its bound: their claim, never the healer's resume.
+    \/ \E k \in asked : H!AnswerAct(k) /\ UNCHANGED <<on, st, restarts, bounds, mine>>
 
 Fairness ==
     /\ \A s \in Delegates \cup Mains :
@@ -233,6 +240,7 @@ NarrowsAlone == H!NarrowsAlone
 OnlyApproved == H!OnlyApproved
 OnlyOnSymptom == H!OnlyOnSymptom
 ActedOrAsked == H!ActedOrAsked
+ActOnlyForBound == H!ActOnlyForBound
 ClaimsEnd == H!ClaimsEnd
 
 =============================================================================

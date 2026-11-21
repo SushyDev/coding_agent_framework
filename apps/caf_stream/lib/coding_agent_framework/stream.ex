@@ -121,7 +121,8 @@ defmodule CodingAgentFramework.Stream do
 
   @doc """
   Answers held request `request_id` by the label an agent's `answer` names: `"allow"`, or
-  `"deny"` with a message that says its parent denied it. Any other label is refused as
+  `"deny"` with a message that says its parent denied it, or `{"deny", message}` with a
+  message of the answerer's own (a person's, through `Prompts`). Any other label is refused as
   `{:bad, :label}` before anything is marked; otherwise it answers as `write/4`.
 
       Stream.answer(stream, "6f1c…", "req-1", "allow")
@@ -134,6 +135,10 @@ defmodule CodingAgentFramework.Stream do
 
   def answer(stream, session, id, "deny", opts),
     do: write(stream, session, {:answer, id, {:deny, "Your parent denied this."}}, opts)
+
+  def answer(stream, session, id, {"deny", message}, opts)
+      when is_binary(message) and message != "",
+      do: write(stream, session, {:answer, id, {:deny, message}}, opts)
 
   def answer(_stream, _session, _id, _label, _opts), do: {:refused, {:bad, :label}}
 
@@ -288,6 +293,7 @@ defmodule CodingAgentFramework.Stream do
          {:ok, bytes} <- tail(s, Path.join(dir(s.home, session), "events.jsonl"), d.fold.offset) do
       # Read: the whole lines, handled; the offset is saved with them in one transaction.
       fold = %{Fold.take(d.fold, bytes) | live_seen: d.fold.live_seen or state == :live}
+      fold = Fold.stamp(fold, System.os_time(:millisecond))
 
       if state != :live and fold.live_seen,
         do: exit_seen(s, %{d | fold: fold}),

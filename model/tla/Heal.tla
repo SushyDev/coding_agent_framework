@@ -34,10 +34,19 @@
 (* the Ledger's rows in the bound, so a restart keeps it; Bound is time    *)
 (* passing the bound.                                                      *)
 (*                                                                         *)
+(* A prompt asked for its bound (the cap reached; Remedies.tla's main      *)
+(* absent again within it) offers "act" in place of "approve" (F-189's     *)
+(* new-7, F-190): AnswerAct, the remedy once, claimed in the Ledger under  *)
+(* the person's own name on the state still read, never counted in the     *)
+(* healer's cap. `forBound` is the reason the Watch keeps on the row. One  *)
+(* answer is one act (the prompt closes, and the Ledger's one claim per    *)
+(* state), and it is never the healer's (ActOnlyForBound, CapToPrompt).    *)
+(* In the code the answer and the claim are two steps (Watch.answer/5,     *)
+(* then the healer's next check); a cut between them leaves no act, a     *)
+(* behavior this spec's one step already covers.                           *)
+(*                                                                         *)
 (* Left abstract: what a remedy does (Effect, in the instancing spec: a    *)
-(* fix that may not help); evidence; which remedy (one per kind); the      *)
-(* person's "act once", which is the operator's own act through            *)
-(* Team.operate/4, not the healer's.                                       *)
+(* fix that may not help); evidence; which remedy (one per kind).          *)
 (*                                                                         *)
 (* Boxes.tla instances this module with the stuck turn as its one kind     *)
 (* (the first instance): on <- stuck, st <- ep, the Ledger's variables     *)
@@ -78,7 +87,9 @@ Breaks == {
     "WidenOnRestart",  \* a restart reads the allow-list from the config, undoing a narrowing
     "NoNarrow",        \* a remedy whose verify failed stays on the list
     "Unlisted",        \* the healer acts on a kind the list does not allow
-    "StaleSymptom"     \* it claims on a fact it recorded before, not the symptom now
+    "StaleSymptom",    \* it claims on a fact it recorded before, not the symptom now
+    "ActAnyPrompt",    \* "act" is offered on any prompt, one asked off the list among them
+    "ActAsHealer"      \* a person's "act" is claimed as the healer's, and counted in its cap
 }
 
 ASSUME Break \in Breaks
@@ -98,11 +109,12 @@ VARIABLES
     allow,     \* k -> its remedy is on the allow-list (durable: the config, then the acts on it)
     dropped,   \* ghost: k -> its remedy failed a verify, with no operator's approval since
     asked,     \* the remedy prompts opened, by state <<s, n>> (durable)
+    forBound,  \* the ones asked for their bound: the cap reached (durable: the row's reason)
     closed,    \* the prompts a person answered
     wrong,     \* ghost: the faults a guard failed to stop, by name
     restarts, bounds
 
-healVars == <<facts, res, count, mem, allow, dropped, asked, closed>>
+healVars == <<facts, res, count, mem, allow, dropped, asked, forBound, closed>>
 claimVars == <<claims, acting, cdone, acted, twice, cut>>
 vars == <<on, st, healVars, claimVars, wrong, restarts, bounds>>
 
@@ -141,7 +153,7 @@ Needs(k) ==
 Detect(s) ==
     /\ on[s] /\ Key(s) \notin facts
     /\ facts' = facts \cup {Key(s)}
-    /\ UNCHANGED <<res, count, mem, allow, dropped, asked, closed, claimVars, wrong>>
+    /\ UNCHANGED <<res, count, mem, allow, dropped, asked, forBound, closed, claimVars, wrong>>
 
 \* A remedy claimed: on a symptom recorded in its state now, of a kind the list allows, under
 \* the cap; the Ledger's row first, counted in the bound. Under StaleSymptom any fact recorded
@@ -157,20 +169,21 @@ Claim(s) ==
     /\ count' = [count EXCEPT ![kd] = @ + 1]
     /\ mem' = [mem EXCEPT ![kd] = @ + 1]
     /\ wrong' = IF allow[kd] THEN wrong ELSE wrong \cup {"not approved"}
-    /\ UNCHANGED <<facts, res, allow, dropped, asked, closed>>
+    /\ UNCHANGED <<facts, res, allow, dropped, asked, forBound, closed>>
 
 \* The remedy acts under its current claim, and its answer is read: `out`. What it does to the
 \* target is the instancing spec's (Effect). Acting on a state with no symptom, or again on a
-\* state whose remedy answered unknown, is a fault.
+\* state whose remedy answered unknown, is a fault. The claim is the healer's, or a person's
+\* answer "act" (AnswerAct), which the healer takes on that person's claim.
 Act(c, out) ==
     LET k == <<c.t, c.s>> IN
-    /\ c.by = "healer" /\ out \in Outcomes
+    /\ c.by \in {"healer", "person"} /\ out \in Outcomes
     /\ C!Act(c)
     /\ res' = res \cup {[k |-> k, out |-> out]}
     /\ wrong' = wrong \cup (IF on[c.t] THEN {} ELSE {"acted on no symptom"})
                       \cup (IF \E r \in res : r.k = k /\ r.out = "unknown"
                             THEN {"retried unknown"} ELSE {})
-    /\ UNCHANGED <<facts, count, mem, allow, dropped, asked, closed>>
+    /\ UNCHANGED <<facts, count, mem, allow, dropped, asked, forBound, closed>>
 
 \* Under RetryUnknown an unknown answer is taken as no act: the state's rows go, so it is
 \* claimed again.
@@ -193,13 +206,17 @@ Verify(r) ==
         /\ res' = (res \ {r}) \cup {[k |-> r.k, out |-> IF still THEN "failed" ELSE "recovered"]}
         /\ allow' = IF still /\ Break # "NoNarrow" THEN [allow EXCEPT ![kd] = FALSE] ELSE allow
         /\ dropped' = IF still THEN [dropped EXCEPT ![kd] = TRUE] ELSE dropped
-        /\ UNCHANGED <<facts, count, mem, asked, closed, claimVars, wrong>>
+        /\ UNCHANGED <<facts, count, mem, asked, forBound, closed, claimVars, wrong>>
 
-\* A remedy prompt, once per symptom state, for a recorded symptom that needs a person.
+\* A remedy prompt, once per symptom state, for a recorded symptom that needs a person; one
+\* asked because the cap is reached is asked for its bound.
 Ask(s) ==
-    /\ on[s] /\ Key(s) \in facts /\ Key(s) \notin asked
-    /\ Needs(Key(s))
-    /\ asked' = asked \cup {Key(s)}
+    LET k == Key(s) IN
+    /\ on[s] /\ k \in facts /\ k \notin asked
+    /\ Needs(k)
+    /\ asked' = asked \cup {k}
+    /\ forBound' = IF ~Held(k) /\ allow[Kind(s)] /\ Count(Kind(s)) >= MaxActs
+                   THEN forBound \cup {k} ELSE forBound
     /\ UNCHANGED <<facts, res, count, mem, allow, dropped, closed, claimVars, wrong>>
 
 \* A claim whose state passed is let go; a row a restart cut settles interrupted.
@@ -215,7 +232,7 @@ Restart ==
     /\ allow' = IF Break = "WidenOnRestart" THEN [k \in Kinds |-> k \in Approved] ELSE allow
     /\ wrong' = IF Break = "WidenOnRestart" /\ \E k \in Approved : ~allow[k]
                 THEN wrong \cup {"widened"} ELSE wrong
-    /\ UNCHANGED <<facts, res, count, dropped, asked, closed>>
+    /\ UNCHANGED <<facts, res, count, dropped, asked, forBound, closed>>
 
 \* A person answers a remedy prompt: leave it, or approve the remedy, which puts the kind back
 \* on the allow-list (the operator's widening, the only one).
@@ -225,7 +242,24 @@ Answer(k, widen) ==
     /\ closed' = closed \cup {k}
     /\ allow' = IF widen THEN [allow EXCEPT ![kd] = TRUE] ELSE allow
     /\ dropped' = IF widen THEN [dropped EXCEPT ![kd] = FALSE] ELSE dropped
-    /\ UNCHANGED <<facts, res, count, mem, asked, claimVars, wrong>>
+    /\ UNCHANGED <<facts, res, count, mem, asked, forBound, claimVars, wrong>>
+
+\* A person answers a prompt asked for its bound with "act": the prompt closes, and the remedy
+\* is claimed once under the person's own name, on the state still read, outside the healer's
+\* cap. Its act, outcome and verify are Act's and Verify's. Under ActAnyPrompt any prompt offers
+\* it; under ActAsHealer the claim is the healer's, counted in its cap.
+AnswerAct(k) ==
+    LET s == k[1]
+        kd == Kind(s)
+        by == IF Break = "ActAsHealer" THEN "healer" ELSE "person"
+    IN  /\ k \in asked \ closed
+        /\ k \in forBound \/ Break = "ActAnyPrompt"
+        /\ on[s] /\ Key(s) = k
+        /\ closed' = closed \cup {k}
+        /\ C!Take(by, s, "remedy")
+        /\ count' = IF by = "healer" THEN [count EXCEPT ![kd] = @ + 1] ELSE count
+        /\ mem' = IF by = "healer" THEN [mem EXCEPT ![kd] = @ + 1] ELSE mem
+        /\ UNCHANGED <<facts, res, allow, dropped, asked, forBound, wrong>>
 
 -----------------------------------------------------------------------------
 (* Alone *)
@@ -255,14 +289,15 @@ Bound ==
     /\ bounds < MaxBounds
     /\ bounds' = bounds + 1
     /\ count' = [k \in Kinds |-> 0] /\ mem' = [k \in Kinds |-> 0]
-    /\ UNCHANGED <<on, st, facts, res, allow, dropped, asked, closed, claimVars, wrong, restarts>>
+    /\ UNCHANGED <<on, st, facts, res, allow, dropped, asked, forBound, closed, claimVars, wrong,
+                   restarts>>
 
 Init ==
     /\ on = [s \in Symptoms |-> FALSE] /\ st = [s \in Symptoms |-> 0]
     /\ facts = {} /\ res = {}
     /\ count = [k \in Kinds |-> 0] /\ mem = [k \in Kinds |-> 0]
     /\ allow = [k \in Kinds |-> k \in Approved] /\ dropped = [k \in Kinds |-> FALSE]
-    /\ asked = {} /\ closed = {}
+    /\ asked = {} /\ forBound = {} /\ closed = {}
     /\ claims = {} /\ acting = {} /\ cdone = {} /\ acted = {} /\ twice = FALSE /\ cut = {}
     /\ wrong = {} /\ restarts = 0 /\ bounds = 0
 
@@ -280,6 +315,7 @@ Next ==
        /\ UNCHANGED <<on, st, bounds>>
     \/ Bound
     \/ \E k \in asked, widen \in BOOLEAN : Answer(k, widen) /\ UNCHANGED <<on, st, restarts, bounds>>
+    \/ \E k \in asked : AnswerAct(k) /\ UNCHANGED <<on, st, restarts, bounds>>
 
 Fairness ==
     /\ \A s \in Symptoms :
@@ -303,7 +339,7 @@ TypeOK ==
                      /\ r.out \in Outcomes \cup {"recovered", "failed"}
     /\ count \in [Kinds -> Nat] /\ mem \in [Kinds -> Nat]
     /\ allow \in [Kinds -> BOOLEAN] /\ dropped \in [Kinds -> BOOLEAN]
-    /\ asked \subseteq facts /\ closed \subseteq asked
+    /\ asked \subseteq facts /\ forBound \subseteq asked /\ closed \subseteq asked
 
 \* A remedy acts once per symptom state, whoever else claims in the Ledger.
 OncePerState == C!OneActPerState /\ C!OneClaimPerState
@@ -332,6 +368,10 @@ OnlyOnSymptom == "acted on no symptom" \notin wrong
 ActedOrAsked ==
     \A s \in Symptoms, n \in 0..MaxState :
         (on[s] /\ st[s] = n) ~> (st[s] # n \/ <<s, n>> \in asked)
+
+\* A person's act is one per answer of a prompt asked for its bound: never on another prompt,
+\* never without the answer (one claim per state, OncePerState, keeps it to one).
+ActOnlyForBound == \A c \in claims : c.by = "person" => <<c.t, c.s>> \in forBound \cap closed
 
 \* Every claim ends.
 ClaimsEnd == C!ClaimsEnd

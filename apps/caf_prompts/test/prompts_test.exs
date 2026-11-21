@@ -111,8 +111,8 @@ defmodule CodingAgentFramework.PromptsTest do
 
   # A headless delegate of `main` started as `Delegates` starts one (F-152): its row names its
   # account's session, which the hooks name.
-  defp started(ctx, name) do
-    {:ok, {:queued, _}} = Mailbox.brief(ctx.mailbox, "main", name, "Review it.", Stream.uuid())
+  defp started(ctx, name, brief \\ "Review it.") do
+    {:ok, {:queued, _}} = Mailbox.brief(ctx.mailbox, "main", name, brief, Stream.uuid())
 
     {:ok, first} =
       Mailbox.launch(ctx.mailbox, name, System.os_time(:millisecond) + 60_000, via: :stream)
@@ -196,6 +196,42 @@ defmodule CodingAgentFramework.PromptsTest do
 
   defp int("permission:" <> n), do: String.to_integer(n)
 
+  # F-189's new-2: a headless delegate's `can_use_tool` request, held in its `Stream` fold, is
+  # a permission prompt as an interactive one's hook is: listed, its parent told once, answered
+  # once through `Stream`, whose fold lets one answer in.
+  test "a headless delegate's stream request is a permission prompt, answered once", ctx do
+    popts = ctx.popts ++ [stream: ctx.stream, stream_db: Path.join(ctx.dir, "caf.db")]
+    :ok = stop_supervised(Prompts)
+    prompts = start_supervised!({Prompts, popts})
+    ctx = %{ctx | prompts: prompts}
+
+    sid = started(ctx, "d1", "ask to run it")
+
+    SessionsSetup.stream_until(
+      ctx,
+      sid,
+      &Enum.any?(&1.requests, fn {_, r} -> r.state == :held end)
+    )
+
+    Prompts.cue(prompts, %{topic: "stream:test"})
+    [id] = cued(ctx)
+    assert "permission:stream:" <> ^sid <> ":" <> request = id
+
+    assert {:ok, [p]} = Prompts.read(prompts, kind: "permission")
+    assert %{id: ^id, status: "open", agent: "d1", parent: "main", deadline: nil} = p
+    assert %{text: "Bash true", options: ["allow", "deny"]} = p
+    assert is_integer(p.opened_at)
+
+    assert [%{from_agent: "d1", text: "waiting on permission: Bash true" <> _}] =
+             notices(ctx, "main")
+
+    assert {:ok, %{uuid: ^request}} = Prompts.answer(prompts, id, {"deny", "Not now."}, "sam")
+    assert {:refused, :settled} = Prompts.answer(prompts, id, "allow", "sam")
+    SessionsSetup.stream_until(ctx, sid, &(&1.requests[request].state == :answered))
+    assert {:ok, []} = Prompts.read(prompts, kind: "permission")
+    assert {:refused, :settled} = Prompts.answer(prompts, id, "allow", "sam")
+  end
+
   # Prompt.tla's cap prompt: the Stop hold at Claude Code's cap waits on a person, whose "go on"
   # is the last block it honors; the second answer is refused.
   test "a Stop held at the cap is a stop_cap prompt, answered once", ctx do
@@ -235,6 +271,21 @@ defmodule CodingAgentFramework.PromptsTest do
     assert {:refused, :settled} = Prompts.answer(ctx.prompts, id, "leave", "sam")
     assert {:ok, %{"lost_viewer" => %{allowed: true}}} = Watch.remedies(ctx.watch, :list)
     assert {:refused, :no_prompt} = Prompts.answer(ctx.prompts, "remedy:999", "leave", "sam")
+
+    # Asked for its bound (F-189's new-7): the act once, or leave; approve widens nothing there.
+    capped = %{sym | state: "k2"}
+    {:ok, %{id: cid}} = Watch.record(ctx.watch, capped)
+    {:ok, ^cid} = Watch.ask(ctx.watch, capped, {:cap, 10, 3_600_000})
+    id = "remedy:#{cid}"
+    # The read that opens it may also be the first's close.
+    assert id in cued(ctx)
+
+    assert {:ok, [%{id: ^id, options: ["act", "leave"]}]} =
+             Prompts.read(ctx.prompts, kind: "remedy")
+
+    assert {:refused, {:bad, :choice}} = Prompts.answer(ctx.prompts, id, "approve", "sam")
+    assert {:ok, :answered} = Prompts.answer(ctx.prompts, id, "act", "sam")
+    assert {:ok, [%{answer: "act", answered_by: "sam"}]} = Watch.read(ctx.watch, state: "k2")
   end
 
   # F-181: an account whose login a check refused is a login prompt, with no agent, until a

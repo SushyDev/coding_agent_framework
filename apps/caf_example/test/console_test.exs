@@ -286,6 +286,21 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
 
     see.(fn -> Console.leases(caf, true) end, ~r/lease \d+: builder for app on one, seat 1: /)
     see.(fn -> Console.faults(caf) end, "no faults")
+
+    # F-189's new-1 and new-6: the inbox, the symptoms, the acts, usage and a delegate's groups.
+    see.(fn -> Console.prompts(caf, kind: "ask") end, "no prompt waits")
+    see.(fn -> Console.answer(caf, "permission:999", "allow") end, "refused: :no_prompt")
+    see.(fn -> Console.symptoms(caf, kind: "absent_main") end, "no symptoms")
+    see.(fn -> Console.acts(caf, actor: "nobody") end, "no acts")
+    see.(fn -> Console.acts(caf) end, ~r/act \d+: \S+ \S+ /)
+    see.(fn -> Console.usage(caf) end, ~r/no account has a reading|usage not read yet|one: /)
+
+    see.(
+      fn -> Console.groups(caf, "app-unit-one") end,
+      ~r/unknown: :no_proc|leads no group of its own|group \d+, started/
+    )
+
+    see.(fn -> Console.groups(caf, "nobody") end, "refused: :no_agent")
   end
 
   # Only its refusals: a login runs the real Claude Code, which no test starts.

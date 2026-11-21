@@ -470,8 +470,13 @@ answer is read: ok is verified after, and a failed verify drops the kind from th
 refused, unknown or cut by a restart is asked. A kind whose remedy is nil is shown, never asked.
 The cap's count is a fold of the healer's rows in `Acts` within the bound, so a restart keeps
 it. A `remedy` prompt's answers are "approve" (the kind back on the list, the operator's
-widening) and "leave"; "act once" is the operator's own act through `Team.operate/4`. A
-prompt stays while its target shows the kind at all, and passes with it.
+widening) and "leave". A prompt asked for its bound (the cap reached, or a main absent again
+within it) offers "act" and "leave" instead (F-190, from F-189's new-7), since its kind is on
+the list and "approve" would widen nothing: "act" is the person's act, the remedy once, which
+the healer takes at its next check while the state is still read, under a claim in `Acts` whose
+actor is the person, never counted in the healer's cap (`Heal.tla`'s `AnswerAct` and
+`ActOnlyForBound`, `Break_Heal_ActAnyPrompt`, `Break_Heal_ActAsHealer`). A prompt stays while
+its target shows the kind at all, and passes with it.
 
 Built so far (F-182): `Heal.tla`; `Watch` (`caf_watch`) with the record, the list from the
 config's `remedies` and `remedy_bound`, and the cue `watch`; `Recoveries` as the healer of its
@@ -515,7 +520,9 @@ record, once per state; its outcome is read from the next `background_tasks_chan
 gone from it is recovered, all still listed fails the verify. No partial report goes
 (`StuckAfterReport`). And `hooks_silent` (`HooksSilent`): the newest tool call in an agent's
 transcript older than a bound with no `Intake` row of its session written since, shown only.
-Not built: `mcp_dropped` (F-183's new-2).
+Both read at the tree's `interval` as well as at their cues (F-190): a hung command writes
+nothing to the stream, so no cue would read its group again. Not built: `mcp_dropped` (F-183's
+new-2).
 
 The first remedies on this shape, decided (F-180's new-6), each a small unit:
 
@@ -641,7 +648,7 @@ by label, a default, a deadline, its owner and its status (`open`, `answering`, 
 
 | Kind | Opened by | Its answer goes to |
 |---|---|---|
-| `permission` | `Sessions`, from a held `PermissionRequest`, a subagent's included (the hook names it) | `Intake`'s hold |
+| `permission` | `Sessions`, from a held `PermissionRequest`, a subagent's included (the hook names it); a headless delegate's `can_use_tool` request held in its `Stream` fold (F-190) | `Intake`'s hold; `Stream.answer/5` |
 | `question` | `ask`, and Claude Code's question tool intercepted | `Mailbox`, a row to the agent |
 | `startup` | `Sessions`, from a dialog read on the pane: trust, imports, onboarding | `Sessions`' checked press |
 | `plan` | `Sessions`, from a held call of Claude Code's plan exit | `Intake`'s hold |
@@ -650,7 +657,7 @@ by label, a default, a deadline, its owner and its status (`open`, `answering`, 
 | `usage_credits` | `Sessions`, at Claude Code's limit menu, only where the account's record allows credits | `Sessions`' checked press of the label answered: "stop and wait" (its default at the deadline) or the credits |
 | `login` | `Logins`, from an account whose `claude auth status`, read before a start or a resume, says it is not logged in (F-181) | a person, at `bin/caf-login`, then `check`: the login is checked again, and the prompt closes once a check finds it logged in |
 | `exit` | `Sessions`, from Claude Code's own exit prompt read on the pane | `Sessions`' checked press |
-| `remedy` | the `Watch`, for a symptom state its healer leaves to a person (F-182) | the `Watch`: "approve" puts the kind's remedy back on the allow-list; "leave" |
+| `remedy` | the `Watch`, for a symptom state its healer leaves to a person (F-182) | the `Watch`: "approve" puts the kind's remedy back on the allow-list; "leave"; for a state asked for its bound, "act" (the remedy once, under the person's claim, F-190) in place of "approve" |
 | `restarts` | a supervisor whose budget ran out | its process started again |
 | `stop_cap` | the `Stop` hold, at Claude Code's cap of 8 blocks in a row, in place of being overridden (decided) | `Intake`'s hold: go on, or let the turn end |
 | `policy` | the app (confirm a landing, say) | the app's callback |
@@ -687,7 +694,12 @@ F-186 added the `limit` and `usage_credits` kinds from the agent row's usage lim
 its healer (`Limits`, not `Sessions` as the table says: `Sessions` is the row's writer), ids
 `limit:<agent>:<until>` and `usage_credits:<agent>:<until>`, answered through
 `Sessions.answer_limit/6`; the `Scheduler`'s `limit` prompt for a start refused at a limit is
-not built. Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
+not built. F-190 added a headless delegate's permission request: `Prompts` reads each `Stream`
+fold's held `can_use_tool` request as kind `permission`, id
+`permission:stream:<session>:<request id>`, no deadline (Claude Code waits on the stream),
+answered once through `Stream.answer/5` (the fold marks it answering before its line goes, so
+a second answer, the parent's through `answer` among them, is refused `settled`), and told to
+the parent once as any delegate's prompt. `Prompt.tla`'s header says why no property changes. Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
 `expired` prompts kept shown, and the kinds that need a reading first.
 
 `Prompt.tla` (B1) is its contract: it instances `Hold` (one response, its deadline, its holder's
@@ -767,6 +779,7 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 | `restarts` | the tree's `%{max_restarts, max_seconds}` | 3 in 5 s |
 | `parts` | each part's own bounds and deadlines, by its key (`Config.parts/0`) | each part's |
 | `remedies`, `remedy_bound` | the healer's allow-list and its caps' window | the healer's acts, 1 h |
+| `viewer` | every viewer's `{columns, rows}`, handed to `Sessions` and `Recoveries` alike (F-190) | `{200, 50}` |
 | `undeclared_cues` | `:route` or `:raise` a cue on a topic no part declares | `:route` |
 
 An app like a development loop's (views, builders, gates, landings) needs nothing more: a
@@ -829,7 +842,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Cues` | one per instance: each part declares the topics it reads and the ones it writes, and `Cues` hands each cue to the `Tracker`, to every part that declared its topic, and to each of the app's processes that subscribed to it (`subscribe/2`, by a plain send, monitored); the order in which the system settles is the library's, not the app's | no table |
 | `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` | — |
 | `Usage` | each account's allowance, its weekly and five-hour windows, from what Claude Code hands its status line and a headless session's `rate_limit_event`, the newer of the two, never stale (a window past its reset is whole again); the account limited until its reset, from any agent's limit record ("Usage limits"); `Usage.Room`, the one rule of an account's room (the tighter window, none while limited), which `Usage.pick/4` (the usable account with the most room, F-181) and `Usage.Allowance` (the `Scheduler`'s gate) share; a `Reader` | its readings, with the limit's `limited_until`, window, `can_spend` and evidence |
-| `Logins` | each account's login, read with `claude auth status` under the launch's own environment and kept 10 minutes (F-181): `Logins.usable/3` (prepared and logged in) is what `Mains`, `Delegates` and the `Mover` give `Usage.pick/4`; a refused login is a `login` prompt until a check finds it logged in | `logins` |
+| `Logins` | each account's login, read with `claude auth status` under the launch's own environment and kept 10 minutes (F-181): `Logins.usable/3` (prepared and logged in) is what `Mains`, `Delegates` and the `Mover` give `Usage.pick/4`, and what the `Mover` reads of a named `to:` before its claim, refusing `{:account, to, reason}` with nothing begun (F-190); a refused login is a `login` prompt until a check finds it logged in | `logins` |
 | `Tmux` | sessions, panes, tags, keys and viewers on one server, and the one-command check of every write to a pane; a contract with a CLI (its fake is a test aid) | — |
 | `TmuxSampler` | samples each server's panes and each host's held sockets, reports a held agent with no viewer, and cues when a held socket goes away; a `Reader` | `tmux_samples` |
 | `Holder` | dtach: hold a process in a clean environment, open a viewer, list sockets and whether each lives | — |
@@ -2230,7 +2243,9 @@ both read as the delegate's own task) goes with a first line in one fixed form, 
 (<kind>):`, then the text: on the same line when the text has one line, after a blank line
 when it has several. The kind is `message`, `report` (a reply or notice to a brief, whoever
 sent it), `notice` (the framework's, naming the agent it is about), or the row's own kind
-(`ask`, `answer`, `reply`). The frame is put on at the hand-on, not in the stored text, so a
+(`ask`, `answer`, `reply`). When the sender has an agent row, the frame names its account too,
+`From <name> on <account> (<kind>):` (F-190, from F-188's new-3), so an app whose agents run on
+several accounts needs no frame of its own. The frame is put on at the hand-on, not in the stored text, so a
 row due again goes with the same frame, and the uuid mark still comes last: the settle finds
 each row by its own uuid line, as before. An app may give `Mailbox` a `frame:` function of the
 row's sender, kind and text that answers the text to hand on; one that answers no text hands

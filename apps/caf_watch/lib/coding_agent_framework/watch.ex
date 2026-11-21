@@ -24,8 +24,11 @@ defmodule CodingAgentFramework.Watch do
   does not act on: its kind off the list, the cap reached, or a remedy refused, unknown, cut by a
   restart, or failed its verify. The state's row then waits on a person, once per state: it is
   the `remedy` prompt `Prompts` reads, whose answer (`answer/5`) is `"approve"` (put the kind's
-  remedy back on the list, the operator's widening) or `"leave"`. A kind with no remedy is never
-  asked.
+  remedy back on the list, the operator's widening) or `"leave"`. A state asked for its bound
+  (`for_bound?/1`: the cap reached, or a main absent again within it) is answered `"act"` or
+  `"leave"` instead (F-189's new-7): `"act"` is the person's own act, the remedy once, which the
+  healer takes at its next check under a claim in `Acts` whose actor is the person, outside its
+  own cap (`Heal.tla`'s `AnswerAct`). A kind with no remedy is never asked.
 
   **One clear** (F-182's new-2). The answer is also a person's clear of the state (`clear/3` is
   the answer `"leave"`): its `answered_at` is the time the healer reads as the state cleared, so
@@ -128,7 +131,8 @@ defmodule CodingAgentFramework.Watch do
 
   @doc """
   Records a symptom state, `%{kind, target, state, source, since}` and optionally `evidence`.
-  Answers `{:ok, %{id, status}}`, the row's, new or recorded before;
+  Answers `{:ok, %{id, status}}`, the row's, new or recorded before, with its `answer` and
+  `answered_by` once a person answered it (the healer reads an `"act"` there);
   `{:refused, {:unknown_kind, kind}}` for a kind the list does not name, or `{:refused, {:bad,
   :symptom}}`.
   """
@@ -196,15 +200,60 @@ defmodule CodingAgentFramework.Watch do
   def remedies(watch, request, opts \\ []), do: call(watch, {:remedies, request}, opts)
 
   @doc """
+  Whether a symptom row was asked for its bound: its reason is the cap reached (`{:cap, cap,
+  bound}`) or a second absence within it (`{:again_within, bound}`), as the healers ask. Such a
+  prompt offers `"act"` and `"leave"`; any other, `"approve"` and `"leave"`.
+
+      iex> CodingAgentFramework.Watch.for_bound?(%{reason: ~s(["cap",10,3600000])})
+      true
+      iex> CodingAgentFramework.Watch.for_bound?(%{reason: "not_on_list"})
+      false
+  """
+  @spec for_bound?(map) :: boolean
+  def for_bound?(%{reason: reason}) when is_binary(reason),
+    do: String.starts_with?(reason, [~s(["cap",), ~s(["again_within",)])
+
+  def for_bound?(_), do: false
+
+  @doc """
+  Who takes a symptom state's remedy now, from `record/3`'s answer: the healer (`actor`) for an
+  open state, the person who answered `"act"` for a state asked for its bound, or nil for any
+  other (asked, left, approved, passed, or unread). The healer claims in `Acts` as that actor
+  and counts only its own claims against its cap; `Acts`' one claim per state keeps a person's
+  answer to one act (`Heal.tla`'s `AnswerAct`).
+
+      iex> CodingAgentFramework.Watch.acting({:ok, %{id: 1, status: "open"}}, "healer:ws")
+      "healer:ws"
+      iex> CodingAgentFramework.Watch.acting(
+      ...>   {:ok, %{id: 1, status: "answered", answer: "act", answered_by: "sam"}}, "healer:ws")
+      "sam"
+      iex> CodingAgentFramework.Watch.acting({:ok, %{id: 1, status: "asked"}}, "healer:ws")
+      nil
+  """
+  @spec acting(term, String.t()) :: String.t() | nil
+  def acting({:ok, %{status: "open"}}, actor), do: actor
+  def acting({:ok, %{status: "answered", answer: "act", answered_by: by}}, _actor), do: by
+  def acting(_recorded, _actor), do: nil
+
+  @doc """
+  The choices symptom row `sym`'s remedy prompt offers: `["act", "leave"]` when it was asked
+  for its bound (`for_bound?/1`), else `["approve", "leave"]`.
+  """
+  @spec choices(map) :: [String.t()]
+  def choices(sym), do: if(for_bound?(sym), do: ~w(act leave), else: ~w(approve leave))
+
+  @doc """
   Answers symptom `id`'s remedy prompt with `choice`, as `by`, once: `"approve"` puts its
-  kind's remedy back on the list (`remedies/3`'s `approve`), and `"leave"` leaves it as it is.
-  Answers `{:ok, :answered}`; `{:refused, :settled}` for a symptom whose prompt is not open;
-  `{:refused, :no_symptom}`; `{:refused, {:bad, :choice}}`.
+  kind's remedy back on the list (`remedies/3`'s `approve`), `"act"` is the person's act once
+  (for a state asked for its bound: its healer takes it, under `by`'s claim), and `"leave"`
+  leaves it as it is. Answers `{:ok, :answered}`; `{:refused, :settled}` for a symptom whose
+  prompt is not open; `{:refused, :no_symptom}`; `{:refused, {:bad, :choice}}`, a choice the
+  prompt does not offer (`choices/1`) among them.
   """
   @spec answer(GenServer.server(), integer, String.t(), String.t(), keyword) ::
           {:ok, :answered} | {:refused, term} | {:unknown, term}
   def answer(watch, id, choice, by, opts \\ []) do
-    if choice in ["approve", "leave"] and is_binary(by),
+    if choice in ["approve", "act", "leave"] and is_binary(by),
       do: call(watch, {:answer, id, choice, by}, opts),
       else: {:refused, {:bad, :choice}}
   end
@@ -280,8 +329,13 @@ defmodule CodingAgentFramework.Watch do
             {:ok, %{id: id, status: "open"}}
 
           [] ->
-            %{id: id, status: status} = find(s, sym)
-            {:ok, %{id: id, status: status}}
+            row = find(s, sym)
+
+            {:ok,
+             Map.take(
+               row,
+               if(row.answer, do: [:id, :status, :answer, :answered_by], else: [:id, :status])
+             )}
         end
       else
         {:refused, {:unknown_kind, sym.kind}}
@@ -357,7 +411,10 @@ defmodule CodingAgentFramework.Watch do
           {:refused, :no_symptom}
 
         [%{status: "asked"} = sym] ->
-          with {:ok, _} <-
+          # The act is a person's, under a name of its own: never the healer's.
+          with true <- choice in choices(sym) or {:refused, {:bad, :choice}},
+               true <- choice != "act" or by not in ["", "healer"] or {:refused, {:bad, :by}},
+               {:ok, _} <-
                  if(choice == "approve",
                    do: act_on_list(s, :approve, sym.kind, by),
                    else: {:ok, nil}

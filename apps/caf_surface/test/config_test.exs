@@ -98,6 +98,14 @@ defmodule CodingAgentFramework.ConfigTest do
         do: assert(new(secret_file: bad) == {:refused, {:bad, :secret_file}})
   end
 
+  test "viewer: one size for every viewer, {200, 50} by default" do
+    assert {:ok, %Config{viewer: {120, 40}}} = new(viewer: {120, 40})
+    assert {:ok, %Config{viewer: {200, 50}}} = new([])
+
+    for bad <- [{0, 50}, {200, -1}, [200, 50], {200.0, 50}, nil],
+        do: assert(new(viewer: bad) == {:refused, {:bad, :viewer}})
+  end
+
   test "restarts: the tree's budget, OTP's by default" do
     assert {:ok, %Config{restarts: %{max_restarts: 0, max_seconds: 60}}} =
              new(restarts: %{max_restarts: 0, max_seconds: 60})

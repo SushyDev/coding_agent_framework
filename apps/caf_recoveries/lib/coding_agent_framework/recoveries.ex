@@ -277,7 +277,7 @@ defmodule CodingAgentFramework.Recoveries do
     with :ok <- release(state),
          {:ok, list} <- Watch.remedies(state.watch, :list),
          state = Map.put(state, :list, list),
-         {:ok, open} <- Acts.rows(state.acts, actor: state.actor, status: "acted"),
+         {:ok, open} <- acted(state.acts, state.watch, state.actor, "reopen"),
          {:ok, waiting} <-
            Acts.rows(state.acts,
              actor: state.actor,
@@ -310,7 +310,7 @@ defmodule CodingAgentFramework.Recoveries do
               key = end_key(state, o, rows) do
             evidence = %{name: o.name, pid: o.record.pid, start: o.record.start}
             sym = %{kind: "end_owed", target: o.socket, state: key, evidence: evidence}
-            {key, heal(state, sym, "end", fn -> end_one(state, o, key, sym) end)}
+            {key, heal(state, sym, "end", &end_one(state, o, key, sym, &1))}
           end
 
         present = %{targets: Enum.map(owed, & &1.socket), states: Enum.map(ends, &elem(&1, 0))}
@@ -322,8 +322,8 @@ defmodule CodingAgentFramework.Recoveries do
     end
   end
 
-  defp end_one(state, o, key, sym) do
-    with {:ok, id} <- claim(state, o.socket, key, :end) do
+  defp end_one(state, o, key, sym, actor) do
+    with {:ok, id} <- claim(state, actor, o.socket, key, :end) do
       case Holder.Process.end_held(state.procs, o.socket, o.record, state.end_grace) do
         {:ok, :ended} ->
           Acts.settle(state.acts, id, :recovered, answer: "ended", acted: true)
@@ -339,19 +339,27 @@ defmodule CodingAgentFramework.Recoveries do
 
   # Heal.tla's Detect, then its Claim or its Ask: the symptom recorded first, whatever happens
   # next; a state with a row in `Acts` already is decided by that row's outcome; a remedy only
-  # on the list and under its cap, else the state waits on a person. `act` claims and acts, and
-  # answers the row's id.
+  # on the list and under its cap, else the state waits on a person. `act` claims as the actor
+  # it is given and acts, and answers the row's id: the healer's, or for a state a person
+  # answered `act` (F-189's new-7), that person's, once.
   defp heal(state, sym, remedy, act) do
     sym = Map.merge(sym, %{source: state.actor, since: Map.get(sym, :since, now(state))})
 
-    with {:ok, %{status: "open"}} <- Watch.record(state.watch, sym),
-         {:ok, rows} <-
+    case Watch.acting(Watch.record(state.watch, sym), state.actor) do
+      nil -> nil
+      by when by != state.actor -> act.(by)
+      _healer -> heal_open(state, sym, remedy, act)
+    end
+  end
+
+  defp heal_open(state, sym, remedy, act) do
+    with {:ok, rows} <-
            Acts.rows(state.acts, actor: state.actor, target: sym.target, state: sym.state) do
       # A skipped row (a sample too old) is no claim: one taken now takes it over.
       case Enum.reject(rows, &(&1.status == "skipped")) do
         [] ->
           case may_act(state, remedy) do
-            :ok -> act.()
+            :ok -> act.(state.actor)
             :shown -> nil
             {:ask, why} -> ask(state.watch, sym, why) && nil
           end
@@ -365,7 +373,7 @@ defmodule CodingAgentFramework.Recoveries do
           nil
       end
     else
-      _recorded_asked_or_unread -> nil
+      _unread -> nil
     end
   end
 
@@ -495,7 +503,7 @@ defmodule CodingAgentFramework.Recoveries do
             since: l.since,
             evidence: %{generation: l.generation, read_at: read.read_at}
           },
-          id = heal(state, sym, "reopen", fn -> reopen(state, l, sym, rows) end),
+          id = heal(state, sym, "reopen", &reopen(state, l, sym, rows, &1)),
           is_integer(id),
           do: id
 
@@ -503,10 +511,11 @@ defmodule CodingAgentFramework.Recoveries do
     {{:ok, %{claimed: claimed, ended: ended}}, state}
   end
 
-  defp reopen(state, l, sym, rows) do
-    prior = losses(state, rows, l.socket)
+  # A person's act (F-189's new-7) is theirs once, whatever the losses counted before it.
+  defp reopen(state, l, sym, rows, actor) do
+    prior = if actor == state.actor, do: losses(state, rows, l.socket), else: 0
 
-    with {:ok, id} <- claim(state, l.socket, sym.state, :reopen),
+    with {:ok, id} <- claim(state, actor, l.socket, sym.state, :reopen),
          do: act(state, id, sym, prior)
   end
 
@@ -542,7 +551,28 @@ defmodule CodingAgentFramework.Recoveries do
     )
   end
 
-  defp claim(state, target, key, act), do: Acts.claim(state.acts, state.actor, target, key, act)
+  defp claim(state, actor, target, key, act), do: Acts.claim(state.acts, actor, target, key, act)
+
+  @doc """
+  The rows of `act` that are `acted` and wait for `actor`'s verify: the healer's own, and those
+  a person's answer `act` took on a symptom of `actor`'s (F-189's new-7), found by their
+  symptom's row in the `Watch`. `StuckBackgrounds` reads its own the same way. Answers
+  `{:ok, rows}` or `Acts`' refusal or unknown.
+  """
+  @spec acted(GenServer.server(), GenServer.server(), String.t(), String.t()) ::
+          {:ok, [map]} | {:refused, term} | {:unknown, term}
+  def acted(acts, watch, actor, act) do
+    with {:ok, rows} <- Acts.rows(acts, status: "acted", act: act) do
+      {:ok, Enum.filter(rows, &(&1.actor == actor or answered_act?(watch, actor, &1)))}
+    end
+  end
+
+  defp answered_act?(watch, actor, %{actor: by} = row) do
+    match?(
+      {:ok, [%{answer: "act", answered_by: ^by}]},
+      Watch.read(watch, source: actor, target: row.target, state: row.state)
+    )
+  end
 
   # The third loss in the window: the row says so, nothing is opened, and a person is asked.
   defp act(state, id, sym, prior) when prior >= 2 do

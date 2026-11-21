@@ -461,8 +461,9 @@ defmodule CodingAgentFramework.Limits do
     # Each record's menu, and each person's clear of a press, is a new state to claim.
     claim = %{state: state, line: l["line"], menu: l["menu"] || 0}
 
-    with :go <- if(is_binary(l["by"]), do: :go, else: own_press(s, list, row, state, l)),
-         {:ok, id} <- Acts.claim(s.acts, s.actor, row.name, claim, :press_stop, detail: by(l)) do
+    with {:go, actor} <-
+           if(is_binary(l["by"]), do: {:go, s.actor}, else: own_press(s, list, row, state, l)),
+         {:ok, id} <- Acts.claim(s.acts, actor, row.name, claim, :press_stop, detail: by(l)) do
       case s.press.(row.name, l["label"]) do
         {:ok, _} ->
           Acts.settle(s.acts, id, :recovered, answer: "sent", acted: true)
@@ -490,17 +491,18 @@ defmodule CodingAgentFramework.Limits do
   end
 
   defp own_press(s, list, row, state, l) do
-    with {:ok, sym} <- symptom(s, "limit_menu", row, state, l),
-         do: may_act(s, list, "limit_menu", sym)
+    with {:ok, sym, actor} <- symptom(s, "limit_menu", row, state, l),
+         :go <- if(actor == s.actor, do: may_act(s, list, "limit_menu", sym), else: :go),
+         do: {:go, actor}
   end
 
   # Limit.tla's Send: the word stored once under its key, a gone process resumed with it.
   defp send_word(s, list, row, l) do
     state = key("limit_reset", row, l)
 
-    with {:ok, sym} <- symptom(s, "limit_reset", row, state, l),
-         :go <- may_act(s, list, "limit_reset", sym),
-         {:ok, id} <- Acts.claim(s.acts, s.actor, row.name, state, :go_on) do
+    with {:ok, sym, actor} <- symptom(s, "limit_reset", row, state, l),
+         :go <- if(actor == s.actor, do: may_act(s, list, "limit_reset", sym), else: :go),
+         {:ok, id} <- Acts.claim(s.acts, actor, row.name, state, :go_on) do
       key = "limit:#{row.name}:#{l["until"]}"
       if delegate?(row), do: delegate_word(s, id, row, l, key), else: own_word(s, id, row, l, key)
       id
@@ -569,9 +571,13 @@ defmodule CodingAgentFramework.Limits do
       evidence: %{until: l["until"], window: l["window"], step: l["step"]}
     }
 
-    case Watch.record(s.watch, sym) do
-      {:ok, %{status: "open"}} -> {:ok, sym}
-      other -> {:shown, other}
+    # The healer's own, or for a state asked for its bound that a person answered `act`
+    # (F-189's new-7), that person's, once: `Acts`' claim on the state lets one in.
+    recorded = Watch.record(s.watch, sym)
+
+    case Watch.acting(recorded, s.actor) do
+      nil -> {:shown, recorded}
+      actor -> {:ok, sym, actor}
     end
   end
 

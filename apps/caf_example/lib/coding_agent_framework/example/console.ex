@@ -21,6 +21,13 @@ defmodule CodingAgentFramework.Example.Console do
       requests(caf, "demo-main")                     # a main session's held requests
       answer_request(caf, "demo-main", "41", "allow")             # and the answer to one
       stop_delegate(caf, "demo-unit-readme")         # once its report is delivered
+      prompts(caf)                                   # everything that waits on a person
+      prompts(caf, subtree: "demo-main", kind: "permission")
+      answer(caf, "permission:41", "allow")          # as the config's operator, once
+      symptoms(caf, status: ["open", "asked"])       # what the healer read
+      acts(caf, actor: "absent_mains:ws")            # the ledger's acts
+      usage(caf)                                     # each account's reading
+      groups(caf, "demo-unit-readme")                # its process groups, as the healer reads them
       asks(caf)                                      # then answer_ask(caf, id, ["Rebase"])
       move(caf, "demo-main", "two")
       end_main(caf, "demo-main")
@@ -34,6 +41,7 @@ defmodule CodingAgentFramework.Example.Console do
   """
 
   alias CodingAgentFramework.{Acts, Mailbox, Mains, MCP, Operator, Scheduler, Sessions, Shell}
+  alias CodingAgentFramework.{StuckBackgrounds, Usage}
   alias CodingAgentFramework.Config
   alias CodingAgentFramework.Example.{ConfigFile, Run}
   alias CodingAgentFramework.Intake.Table, as: IntakeTable
@@ -306,6 +314,144 @@ defmodule CodingAgentFramework.Example.Console do
     end
   end
 
+  @doc """
+  The prompts open now, oldest first (`CodingAgentFramework.prompts/2`): each one's id, kind,
+  agent, status and text, and how to answer it. `filter`: `agent:`, `subtree:`, `kind:`.
+
+      prompts(caf, subtree: "demo-main")
+  """
+  @spec prompts(pid, keyword) :: :ok
+  def prompts(caf, filter \\ []) do
+    case CodingAgentFramework.prompts(info(caf).config.instance, filter) do
+      {:ok, prompts} ->
+        if prompts == [], do: say("no prompt waits")
+
+        for p <- prompts do
+          say("#{p.id}: #{p.kind} of #{p.agent || "no agent"}, #{p.status}")
+          for line <- lines(p.text), do: say("  | " <> line)
+          say(~s|  answer(caf, "#{p.id}", #{choices(p)})|)
+        end
+
+        :ok
+
+      other ->
+        show(other)
+    end
+  end
+
+  @doc """
+  Answers prompt `id` with `choice` as the config's operator, once
+  (`CodingAgentFramework.answer/4`; `Prompts.answer/5` says each kind's choices). A second
+  answer is refused `settled`.
+  """
+  @spec answer(pid, String.t(), term) :: :ok
+  def answer(caf, id, choice) do
+    c = info(caf).config
+    show(CodingAgentFramework.answer(c.instance, id, choice, c.operator))
+  end
+
+  @doc """
+  The symptoms the `Watch` keeps, oldest first (`CodingAgentFramework.symptoms/2`): each one's
+  id, kind, target, status, and why it waits on a person or how it was answered. `filter`:
+  `kind:`, `target:`, `state:`, `source:`, `status:`.
+  """
+  @spec symptoms(pid, keyword) :: :ok
+  def symptoms(caf, filter \\ []) do
+    case CodingAgentFramework.symptoms(info(caf).config.instance, filter) do
+      {:ok, rows} ->
+        if rows == [], do: say("no symptoms")
+
+        for s <- rows do
+          asked = if s.reason, do: ", asked: #{s.reason} (its remedy #{s.remedy})", else: ""
+          answer = if s.answer, do: ", answered #{s.answer} by #{s.answered_by}", else: ""
+          say("symptom #{s.id}: #{s.kind} of #{s.target}, #{s.status}#{asked}#{answer}")
+          say("  state #{s.state}, from #{s.source}")
+        end
+
+        :ok
+
+      other ->
+        show(other)
+    end
+  end
+
+  @doc """
+  The ledger's acts within `filter` (`Acts.rows/3`'s: `actor:`, `target:`, `act:`, `status:`,
+  …), the last 30: each one's actor, act, target, state and end.
+  """
+  @spec acts(pid, keyword) :: :ok
+  def acts(caf, filter \\ []) do
+    case Acts.rows(part(caf, :acts), filter) do
+      {:ok, rows} ->
+        if rows == [], do: say("no acts")
+        if length(rows) > 30, do: say("#{length(rows) - 30} earlier acts not shown")
+
+        for r <- Enum.take(rows, -30) do
+          end_ = if r.outcome, do: "#{r.status} #{r.outcome}", else: r.status
+          why = if r[:reason], do: ": #{r.reason}", else: ""
+          say("act #{r.id}: #{r.actor} #{r.act} #{r.target}, #{end_}#{why}")
+          if r.state, do: say("  state #{r.state}")
+        end
+
+        :ok
+
+      other ->
+        show(other)
+    end
+  end
+
+  @doc """
+  Each account's usage reading (`Usage.readings/2`): how much of its windows is used and when
+  they reset, where the reading came from, and its limit when it has one.
+  """
+  @spec usage(pid) :: :ok
+  def usage(caf) do
+    case Usage.readings(part(caf, :usage)) do
+      {:ok, %{readings: readings}} when readings == %{} ->
+        say("no account has a reading")
+
+      {:ok, %{readings: readings}} ->
+        for {name, r} <- Enum.sort(readings) do
+          five = if r[:five_used], do: ", five hours #{r.five_used} %", else: ""
+          say("#{name}: #{r[:used]} % used, resets #{r[:resets_at]}#{five}, from #{r[:source]}")
+
+          if r[:limited_until],
+            do: say("  limited (#{r[:limit_window]}) until #{r.limited_until}")
+        end
+
+        :ok
+
+      :unread ->
+        say("usage not read yet")
+
+      other ->
+        show(other)
+    end
+  end
+
+  @doc """
+  The process groups `agent`'s process started, with each one's CPU time, read as
+  `stuck_background`'s healer reads them (`StuckBackgrounds.Groups.read/3`), by the agent row's
+  record and the tree's own holder (`CodingAgentFramework.processes/1`). On macOS it answers
+  `unknown: :no_proc`.
+  """
+  @spec groups(pid, String.t()) :: :ok
+  def groups(caf, agent) do
+    %{config: c, agents: agents} = info(caf)
+
+    with %{pid: pid, proc_start: start} when is_integer(pid) <-
+           Agents.get(agents, agent) || {:refused, :no_agent},
+         {:ok, procs} <- CodingAgentFramework.processes(c),
+         {:ok, groups} <- StuckBackgrounds.Groups.read(procs, %{pid: pid, start: start}) do
+      if groups == [], do: say("#{agent} (pid #{pid}) leads no group of its own")
+      for g <- groups, do: say("group #{g.pid}, started #{g.start}: #{g.cpu} ticks of CPU time")
+      :ok
+    else
+      %{} -> say("#{agent} has no process recorded")
+      other -> show(other)
+    end
+  end
+
   @doc "Moves `agent` to account `to`, or with nil to the usable one with the most room."
   @spec move(pid, String.t(), String.t() | nil) :: :ok
   def move(caf, agent, to \\ nil), do: show(Operator.move(mcp(caf), agent, to))
@@ -409,6 +555,10 @@ defmodule CodingAgentFramework.Example.Console do
     subs = if a[:subagents] in [nil, []], do: "", else: ", #{length(a.subagents)} subagents"
     Enum.join([a.state, status, dialog || "", move || "" | waits] ++ [subs])
   end
+
+  # How a prompt is answered: one of its labels, or for an ask one answer per question.
+  defp choices(%{kind: "ask"}), do: "[<one label per question>]"
+  defp choices(%{options: options}), do: Enum.map_join(options, " | ", &inspect/1)
 
   defp delegate(parent, project, branch, brief, opts) do
     %{

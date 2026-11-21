@@ -16,7 +16,9 @@ defmodule CodingAgentFramework.AbsentMains do
   recorded in the `Watch` first; a state with a row in `Acts` is decided by that row; a kind off
   the list, past its cap, or a main already resumed within the bound (a second absence in it,
   `Remedies.tla`'s `ResumeOncePerBound`) is asked; else the resume is claimed in `Acts` under
-  this healer's actor and its state, and made once. An answer of ok is verified at once from
+  this healer's actor and its state, and made once. A state asked for its bound that a person
+  answered `act` (F-189's new-7) is resumed once at the next check, under a claim whose actor is
+  that person, which no cap of this healer counts. An answer of ok is verified at once from
   the agent row (running or starting is recovered; anything else drops the remedy from the list
   and asks); refused and unknown are asked, never tried again in that state. A claim a restart
   cut is asked at `init`. Each check passes the absences it no longer reads.
@@ -141,8 +143,16 @@ defmodule CodingAgentFramework.AbsentMains do
       evidence: a.evidence
     }
 
-    with {:ok, %{status: "open"}} <- Watch.record(s.watch, sym),
-         {:ok, rows} <- Acts.rows(s.acts, actor: s.actor, target: a.name, state: a.key) do
+    case Watch.acting(Watch.record(s.watch, sym), s.actor) do
+      nil -> nil
+      # A person's answer "act" (F-189's new-7): the resume once, under their claim.
+      by when by != s.actor -> resume(s, sym, by)
+      _healer -> heal_open(s, list, a, sym)
+    end
+  end
+
+  defp heal_open(s, list, a, sym) do
+    with {:ok, rows} <- Acts.rows(s.acts, actor: s.actor, target: a.name, state: a.key) do
       case rows do
         [] ->
           case may_act(s, list[@kind], a.name) do
@@ -158,7 +168,7 @@ defmodule CodingAgentFramework.AbsentMains do
           nil
       end
     else
-      _recorded_asked_or_unread -> nil
+      _unread -> nil
     end
   end
 
@@ -191,8 +201,8 @@ defmodule CodingAgentFramework.AbsentMains do
     end
   end
 
-  defp resume(s, sym) do
-    with {:ok, id} <- Acts.claim(s.acts, s.actor, sym.target, sym.state, :resume) do
+  defp resume(s, sym, actor \\ nil) do
+    with {:ok, id} <- Acts.claim(s.acts, actor || s.actor, sym.target, sym.state, :resume) do
       case s.resume.(sym.target) do
         {:ok, _} -> verify(s, id, sym)
         {:refused, why} -> settle(s, id, sym, :failed, {:refused, why}, acted: false)

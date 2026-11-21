@@ -91,7 +91,8 @@ defmodule CodingAgentFramework.Mover do
   among the others that are usable: by `usable:`, the most room). Answers once the drain began: `{:ok, %{act,
   from, to}}`, the rest following on the row; or `{:refused, reason}`, with nothing begun:
   `:no_session`, `{:not_running, status}`, `{:moving, phase}`, `{:same_account, to}`,
-  `{:unknown_account, to}`, `Usage`'s or `Accounts`' refusal, or `Acts`' (`{:claimed, by}` for a
+  `{:unknown_account, to}`, `{:account, to, reason}` for a named account `usable:` refuses (not
+  logged in, say: F-189's new-3), `Usage`'s or `Accounts`' refusal, or `Acts`' (`{:claimed, by}` for a
   move of that process already under way). Who may move whom is the caller's check
   (`Grants.may_fix?/3`).
   """
@@ -277,8 +278,14 @@ defmodule CodingAgentFramework.Mover do
 
   defp target(_s, %{account: to}, to), do: {:refused, {:same_account, to}}
 
+  # F-189's new-3: a named account is read by `usable:` before the claim, as the pick reads each.
   defp target(s, _row, to) do
-    if to in s.accounts.names, do: {:ok, to}, else: {:refused, {:unknown_account, to}}
+    with true <- to in s.accounts.names or {:refused, {:unknown_account, to}} do
+      case s.usable.(to) do
+        {:ok, _} -> {:ok, to}
+        {_, reason} -> {:refused, {:account, to, reason}}
+      end
+    end
   end
 
   defp moving(s), do: Agents.moving(s.agents)

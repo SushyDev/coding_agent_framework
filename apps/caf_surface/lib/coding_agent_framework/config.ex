@@ -174,6 +174,15 @@ defmodule CodingAgentFramework.Config do
     default). By default `Watch.default_remedies/0`, the healer's two acts. The list narrows
     alone (a remedy whose verify failed is dropped) and widens only by the operator, each act a
     row, so a restart never reads this again over them;
+  - `viewer`: the size every viewer opens at, `{columns, rows}`: the one the tree hands both
+    `Sessions` (a viewer's first open) and `Recoveries` (a lost one reopened), so the two never
+    draw at different sizes (F-188's new-2). `{200, 50}` by default;
+
+        iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
+        ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{},
+        ...>   user: "me", viewer: {0, 50})
+        {:refused, {:bad, :viewer}}
+
   - `undeclared_cues`: what becomes of a cue whose topic no part declares it writes
     (`CodingAgentFramework.Cues.notify/3`): `:route` by default, handed on as any other, or
     `:raise`, which the framework's own tests set, so a part that writes such a topic fails
@@ -226,6 +235,7 @@ defmodule CodingAgentFramework.Config do
     parts: %{},
     remedies: Watch.default_remedies(),
     remedy_bound: 3_600_000,
+    viewer: {200, 50},
     undeclared_cues: :route
   ]
 
@@ -303,6 +313,12 @@ defmodule CodingAgentFramework.Config do
 
       not match?(n when is_integer(n) and n > 0, Map.get(fields, :remedy_bound, 1)) ->
         {:refused, {:bad, :remedy_bound}}
+
+      not match?(
+        {c, r} when is_integer(c) and c > 0 and is_integer(r) and r > 0,
+        Map.get(fields, :viewer, {200, 50})
+      ) ->
+        {:refused, {:bad, :viewer}}
 
       not dialogs?(Map.get(fields, :dialogs, %{})) ->
         {:refused, {:bad, :dialogs}}

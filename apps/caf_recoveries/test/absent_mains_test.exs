@@ -107,6 +107,34 @@ defmodule CodingAgentFramework.AbsentMainsTest do
     assert_received {:resumed, "app-epic"}
   end
 
+  # Heal.tla's AnswerAct (F-189's new-7): a prompt asked for its bound offers the act once, which
+  # the next check takes under the person's claim, never the healer's; a second answer, or a
+  # later check, acts no more.
+  test "a second absence answered act is resumed once, under the person's claim", ctx do
+    healer = healer!(ctx, {:ok, %{name: "app-epic"}})
+    exit!(ctx, 1)
+    assert {:ok, %{resumed: [_]}} = AbsentMains.check(healer)
+    exit!(ctx, 2)
+    assert {:ok, %{resumed: []}} = AbsentMains.check(healer)
+    assert [%{id: sym} = row] = asked(ctx)
+    assert Watch.choices(row) == ["act", "leave"]
+    assert {:refused, {:bad, :choice}} = Watch.answer(ctx.watch, sym, "approve", "sam")
+    assert {:refused, {:bad, :by}} = Watch.answer(ctx.watch, sym, "act", "healer")
+    assert {:ok, :answered} = Watch.answer(ctx.watch, sym, "act", "sam")
+
+    assert {:ok, %{resumed: [id]}} = AbsentMains.check(healer)
+    assert_received {:resumed, "app-epic"}
+    assert_received {:resumed, "app-epic"}
+
+    assert {:ok, %{actor: "sam", act: "resume", state: "absent_main:app-epic:2"} = acted} =
+             Acts.get(ctx.acts, id)
+
+    assert acted.outcome == "recovered"
+    assert {:ok, %{resumed: []}} = AbsentMains.check(healer)
+    refute_received {:resumed, _}
+    assert {:refused, :settled} = Watch.answer(ctx.watch, sym, "leave", "sam")
+  end
+
   test "a resume refused or unknown is asked and never tried again in its state", ctx do
     healer = healer!(ctx, {:unknown, {:timeout, 300_000}})
     exit!(ctx, 1)
