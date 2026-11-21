@@ -248,7 +248,11 @@ Built, each from a checked model in `model/tla/`:
 - every topic a part writes subscribable (F-176), each part declaring its writes beside its reads;
   a subscription that answers its tree's pid, so an app subscribes again after a restart of the
   whole tree; the operator's tools listed to no agent; the `run` tool gone, an agent's heavy
-  command its own `Bash`; and every subscriber of a topic reached, however many there are.
+  command its own `Bash`; and every subscriber of a topic reached, however many there are;
+- a resume on its row's account (F-177, against `Move.tla`): a stopped main session, an
+  imported one's included, resumes where its conversation is, and on another account only
+  when its own is refused, after a copy of the conversation as a move makes; and an import
+  refused while a Claude Code run by hand on the account or the source may run.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
@@ -601,9 +605,12 @@ Code:
    Quitting the shell stops the framework; the agents run on under dtach, and the next start
    adopts them, with the hooks' secret the first start wrote to `<home>/intake.secret`.
 4. To bring existing conversations along (F-156), once the app has started on the host and
-   made its checkouts: stop the account's sessions, then run `bin/caf-import <home> <account>
-   <your old config dir> --map <old cwd>=<project> --name <session id>=<name>`. Each named
-   conversation is a stopped main session at the next start, and `resume_main` takes it up.
+   made its checkouts: stop the account's sessions, and any Claude Code you run on either
+   config directory, then run `bin/caf-import <home> <account> <your old config dir> --map
+   <old cwd>=<project> --name <session id>=<name>` (`--db <path>` for tables not at
+   `<home>/caf.db`). Each named conversation is a stopped main session at the next start, and
+   `resume_main` takes it up on that account. A setting naming a path this host lacks is copied
+   as it is and named in the import's report.
 
 [docs/e2e.md](docs/e2e.md) is the end-to-end run, step by step, that a person and a main
 session follow together with it.

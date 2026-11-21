@@ -8,6 +8,7 @@ defmodule CodingAgentFramework.TranscriptsTest do
   doctest CodingAgentFramework.Transcripts
   doctest CodingAgentFramework.Transcripts.Fold
   doctest CodingAgentFramework.Transcripts.Table
+  doctest CodingAgentFramework.Transcripts.Copy
 
   # Synthetic lines of each shape Claude Code 2.1.322 writes, and some it does not.
   defp line(map), do: JSON.encode!(map)

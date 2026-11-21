@@ -4,7 +4,7 @@ defmodule CodingAgentFramework.Mains.Import do
   `bin/caf-import`'s work, and the manifest `Mains` reads at its start.
 
       bin/caf-import <home> <account> <source config dir> [--map <old cwd>=<project>]...
-        [--name <session id>=<name>]... [--meta <session id>=<json>]...
+        [--name <session id>=<name>]... [--meta <session id>=<json>]... [--db <path>]
 
   **What it copies** (`run/1`), never moving, from the source config directory into the home's
   account directory `<home>/accounts/<account>/claude`, once:
@@ -17,18 +17,26 @@ defmodule CodingAgentFramework.Mains.Import do
   - that directory's memory, `projects/<encoded old cwd>/memory/`, into the home's one memory
     folder of the checkout (`Sessions.Memory.dir/2`, F-155), file by file;
   - the person's settings: `settings.json`, `CLAUDE.md`, `agents/`, `commands/` and `skills/`,
-    each only when the account has none of its own.
+    each only when the account has none of its own. A setting of a copied `settings.json` that
+    names an absolute path this host lacks (a hook's command, an additional directory) is kept
+    as it is, never rewritten, and named in the report with its key (`missing_paths/2`, F-177).
 
   The login stays with the account's own (`bin/caf-login`): `.credentials.json` and
   `.claude.json` are never copied.
 
   **Where the checkout is**: the `checkouts` row of the mapped project (`Mains.Table`), which
-  `Mains` writes from its first start on, in the home's `caf.db`. So the app starts once on the
-  new host, which makes the checkouts, before an import. The file is read and never written:
+  `Mains` writes from its first start on, in the app's tables: `--db`, by default the home's
+  `caf.db`, the name the app's surface gives them (F-177). So the app starts once on the new
+  host, which makes the checkouts, before an import. The file is read and never written:
   `Sessions` and `Mains` are its writers.
 
   **Refused** with nothing copied: while any agent row of the account may hold a process
-  (`Sessions.Agents.free?/1`), since Claude Code rewrites what it keeps from memory; for a
+  (`Sessions.Agents.free?/1`, `{:running, names}`), and while a Claude Code the person runs by
+  hand on the account's or the source's config directory may (F-177): their session files,
+  `sessions/<pid>.json`, are read as the `Registry` reads them (`Registry.running/3`), each pid
+  checked by its start time, never by its name, `{:running, pids}`, or `{:may_run, pids}` for
+  one `ps` lists whose start time is not known; since Claude Code rewrites what it keeps from
+  memory; for a
   conversation whose files are already in the account and differ, or memory files that differ
   (`{:conflicts, paths}`); for a name given twice, or to a session not found under a mapped
   cwd. Each file is copied whole under a temporary name and renamed.
@@ -47,22 +55,31 @@ defmodule CodingAgentFramework.Mains.Import do
       iex> CodingAgentFramework.Mains.Import.parse(["/caf", "work", "/old/.claude",
       ...>   "--map", "/src/app=app", "--name", "s1=app-epic", "--meta", ~s(s1={"epic":7})])
       {:ok, %{home: "/caf", account: "work", source: "/old/.claude", maps: [{"/src/app", "app"}],
-        names: %{"s1" => "app-epic"}, metas: %{"s1" => %{"epic" => 7}}}}
+        names: %{"s1" => "app-epic"}, metas: %{"s1" => %{"epic" => 7}}, db: "/caf/caf.db"}}
+      iex> {:ok, %{db: db}} = CodingAgentFramework.Mains.Import.parse(["/caf", "work", "/old",
+      ...>   "--map", "/src/app=app", "--db", "/var/app/tables.db"])
+      iex> db
+      "/var/app/tables.db"
   """
 
-  alias CodingAgentFramework.{Accounts, Transcripts}
+  alias CodingAgentFramework.{Accounts, Host, Programs, Registry, Transcripts}
   alias CodingAgentFramework.Mains.Table
   alias CodingAgentFramework.Sessions.{Agents, Memory, Worktree}
 
   @settings ~w(settings.json CLAUDE.md agents commands skills)
   @session ~r/\A[A-Za-z0-9_-]{1,64}\z/
 
-  @doc "The script's entry: parses `argv`, runs the import, prints what it did, and halts."
-  @spec main([String.t()]) :: no_return
-  def main(argv) do
+  @doc """
+  The script's entry: parses `argv`, runs the import, prints what it did, and halts. The
+  programs it reads session files with (sh, cat, env, ps and kill) are devenv's, from `env`'s
+  `CAF_<NAME>` variables, the environment `bin/caf-import` runs in.
+  """
+  @spec main([String.t()], %{String.t() => String.t()}) :: no_return
+  def main(argv, env \\ System.get_env()) do
     code =
       with {:ok, opts} <- parse(argv),
-           {:ok, lines} <- run(opts) do
+           {:ok, programs} <- programs(env),
+           {:ok, lines} <- run(Map.put(opts, :programs, programs)) do
         Enum.each(lines, &IO.puts("caf-import: " <> &1))
         0
       else
@@ -82,11 +99,16 @@ defmodule CodingAgentFramework.Mains.Import do
     System.halt(code)
   end
 
-  @doc "The script's arguments as `run/1` takes them, or `{:usage, why}`."
+  @doc """
+  The script's arguments as `run/1` takes them, or `{:usage, why}`. `db` is `--db`'s path, by
+  default `<home>/caf.db`.
+  """
   @spec parse([String.t()]) :: {:ok, map} | {:usage, String.t()}
   def parse([home, account, source | flags]) do
     acc = %{home: home, account: account, source: source, maps: [], names: %{}, metas: %{}}
-    flags(flags, acc)
+
+    with {:ok, acc} <- flags(flags, Map.put(acc, :db, nil)),
+         do: {:ok, %{acc | db: acc.db || Path.join(home, "caf.db")}}
   end
 
   def parse(_), do: {:usage, "usage: bin/caf-import <home> <account> <source config dir> ..."}
@@ -121,23 +143,45 @@ defmodule CodingAgentFramework.Mains.Import do
     end
   end
 
+  defp flags(["--db", path | rest], acc), do: flags(rest, %{acc | db: path})
+
   defp flags([flag | _], _acc), do: {:usage, "unknown or incomplete option #{flag}"}
+
+  defp programs(env) do
+    paths =
+      for name <- [:sh, :cat, :env, :ps, :kill],
+          path = env["CAF_" <> String.upcase(Atom.to_string(name))],
+          is_binary(path),
+          into: %{},
+          do: {name, path}
+
+    case paths do
+      %{kill: kill} -> Programs.new(Host.local("local", kill), paths)
+      _ -> {:refused, {:no_program, :kill}}
+    end
+  end
 
   @doc """
   Imports as the module doc says. `opts`: `home`, `account`, `source`, `maps` (`[{old cwd,
-  project}]`), `names` and `metas` (by session id). Answers `{:ok, lines}`, what it did and
-  what was imported already; `{:refused, reason}` with nothing copied; or `{:unknown, reason}`
-  when a copy failed part way (a second run goes on from what is there).
+  project}]`), `names` and `metas` (by session id), `programs` (this host's, naming sh, cat,
+  env and ps), and optionally `db` (the app's tables, by default `<home>/caf.db`). Answers
+  `{:ok, lines}`, what it did and what was imported already; `{:refused, reason}` with nothing
+  copied; or `{:unknown, reason}` when a copy failed part way (a second run goes on from what
+  is there).
   """
   @spec run(map) :: {:ok, [String.t()]} | {:refused, term} | {:unknown, term}
   def run(%{home: home, account: account, source: source} = o) do
+    path = Map.get(o, :db) || Path.join(home, "caf.db")
+
     with {:ok, accounts} <- Accounts.new(home, [account]),
          {:ok, config} <- Accounts.config_dir(accounts, account),
          :ok <- source_ok(source, config),
          :ok <- args_ok(o),
-         {:ok, db} <- db(home),
+         {:ok, programs} <- Map.fetch(o, :programs) |> or_refused({:missing, :programs}),
+         {:ok, db} <- db(path),
          {:ok, host, paths} <- checkouts(db, o.maps),
-         :ok <- idle(Path.join(home, "caf.db"), host, account),
+         :ok <- idle(path, host, account),
+         :ok <- by_hand(programs, [config, source]),
          {:ok, plan} <- plan(o, config, paths),
          :ok <- conflicts(plan) do
       act(plan)
@@ -208,10 +252,11 @@ defmodule CodingAgentFramework.Mains.Import do
     end
   end
 
-  # Mains writes the file from the app's first start; read here, never written.
-  defp db(home) do
-    path = Path.join(home, "caf.db")
+  defp or_refused({:ok, _} = ok, _why), do: ok
+  defp or_refused(:error, why), do: {:refused, why}
 
+  # Mains writes the file from the app's first start; read here, never written.
+  defp db(path) do
     if File.regular?(path),
       do: Table.open(path),
       else: {:refused, {:no_app_start, path}}
@@ -241,6 +286,19 @@ defmodule CodingAgentFramework.Mains.Import do
         [] -> :ok
         names -> {:refused, {:running, names}}
       end
+    end
+  end
+
+  # A Claude Code run by hand on the account's or the source's directory is no agent row
+  # (F-156's new-4): its session files say so, each pid checked by its start time. One whose
+  # start time is not known may run, so it refuses too.
+  defp by_hand(programs, dirs) do
+    case Registry.running(programs, dirs) do
+      {:ok, %{live: [], unknown: []}} -> :ok
+      {:ok, %{live: [], unknown: pids}} -> {:refused, {:may_run, pids}}
+      {:ok, %{live: pids}} -> {:refused, {:running, pids}}
+      {:unknown, why} -> {:refused, {:sessions_unread, why}}
+      refused -> refused
     end
   end
 
@@ -352,6 +410,45 @@ defmodule CodingAgentFramework.Mains.Import do
 
   # -- The copies ---------------------------------------------------------------------------
 
+  @doc """
+  Each setting of `settings` (a decoded `settings.json`) that names an absolute path for which
+  `exists?` is false, as `{key, path}`: the key as its place in the JSON, the path as the
+  setting writes it, a command's other words left out. A URL is no path.
+
+      iex> settings = %{
+      ...>   "$schema" => "https://json.schemastore.org/claude-code-settings.json",
+      ...>   "hooks" => %{"Stop" => [%{"hooks" => [%{"command" => "/old/bin/stop.sh --quiet"}]}]},
+      ...>   "permissions" => %{"additionalDirectories" => ["/srv/app", "/old/docs"]}}
+      iex> CodingAgentFramework.Mains.Import.missing_paths(settings, &(&1 == "/srv/app"))
+      [{"hooks.Stop[0].hooks[0].command", "/old/bin/stop.sh"},
+       {"permissions.additionalDirectories[1]", "/old/docs"}]
+  """
+  @spec missing_paths(term, (String.t() -> boolean)) :: [{String.t(), String.t()}]
+  def missing_paths(settings, exists?), do: settings |> leaves("") |> missing(exists?)
+
+  # A path starts a word: after the start, a space, a quote, `=`, `:` or `(`, never `//`.
+  @path ~r{(?<![^\s"'=:(])/(?!/)[^\s"'`;|&()<>,]*}
+
+  defp missing(leaves, exists?) do
+    for {key, text} <- leaves,
+        [path] <- Regex.scan(@path, text),
+        not exists?.(path),
+        do: {key, path}
+  end
+
+  defp leaves(%{} = map, at) do
+    map
+    |> Enum.sort()
+    |> Enum.flat_map(fn {k, v} -> leaves(v, if(at == "", do: k, else: "#{at}.#{k}")) end)
+  end
+
+  defp leaves(list, at) when is_list(list) do
+    list |> Enum.with_index() |> Enum.flat_map(fn {v, i} -> leaves(v, "#{at}[#{i}]") end)
+  end
+
+  defp leaves(text, at) when is_binary(text), do: [{at, text}]
+  defp leaves(_other, _at), do: []
+
   defp act(plan) do
     with {:ok, settings} <- each(plan.settings, &setting/1),
          {:ok, memory} <- each(plan.memory, &memory_file/1),
@@ -359,7 +456,7 @@ defmodule CodingAgentFramework.Mains.Import do
       copied = Enum.count(memory, &(&1 == :copied))
 
       {:ok,
-       settings ++
+       List.flatten(settings) ++
          ["memory: #{copied} file(s) copied, #{length(memory) - copied} there already"] ++
          sessions}
     end
@@ -378,7 +475,20 @@ defmodule CodingAgentFramework.Mains.Import do
     if exists?(to) do
       {:ok, "settings: #{name} kept: the account has its own"}
     else
-      with :ok <- copy_whole(from, to), do: {:ok, "settings: #{name} copied"}
+      with :ok <- copy_whole(from, to), do: {:ok, ["settings: #{name} copied" | named_paths(to)]}
+    end
+  end
+
+  # The copied settings' paths this host lacks, kept as they are, for a person to see to
+  # (F-156's new-5).
+  defp named_paths(path) do
+    with "settings.json" <- Path.basename(path),
+         {:ok, text} <- File.read(path),
+         {:ok, %{} = settings} <- JSON.decode(text) do
+      for {key, missing} <- missing_paths(settings, &exists?/1),
+          do: "settings: settings.json keeps #{key}, naming #{missing}, not on this host"
+    else
+      _ -> []
     end
   end
 

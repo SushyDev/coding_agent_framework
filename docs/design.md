@@ -1116,15 +1116,24 @@ every read runs `git worktree repair` while one does. The rename is an act in `A
 (`rename`, verified with its paths, or failed with each new reason it waited for).
 
 **An import** (F-156): `bin/caf-import <home> <account> <source config dir> [--map <old
-cwd>=<project>]... [--name <session id>=<name>]... [--meta <session id>=<json>]...` moves an
+cwd>=<project>]... [--name <session id>=<name>]... [--meta <session id>=<json>]... [--db
+<path>]` moves an
 app's existing Claude Code conversations onto a new host's framework at once
 (`Mains.Import`). It copies, never moves, each conversation of a mapped cwd into the
 account's `projects/<encoded checkout>/`, with the directory and `session-env` entry beside it,
 so `--resume <id>` in the checkout finds it; that cwd's memory into the home's memory folder
 of the checkout; and `settings.json`, `CLAUDE.md`, `agents/`, `commands/` and `skills/` where the
-account has none. The login stays the account's own. The checkouts' paths are read from
-`Mains`' rows, so the app starts once on the host first; it is refused while any agent row of
-the account may hold a process, and with nothing copied for a file that is there and differs.
+account has none. A setting of a copied `settings.json` that names an absolute path this host
+lacks (a hook's command, an additional directory) is kept as it is, never rewritten, and the
+report names each, its key and the path (F-177). The login stays the account's own. The
+checkouts' paths are read from `Mains`' rows in the app's tables (`--db`, by default
+`<home>/caf.db`, F-177), so the app starts once on the host first. It is refused while any
+agent row of the account may hold a process (`{:running, names}`), and while a Claude Code a
+person runs by hand on the account's or the source's config directory may (F-177): their
+`sessions/<pid>.json` are read as the `Registry` reads them (`Registry.running/3`), each pid
+checked by its start time, never by its name, `{:running, pids}`, and one `ps` lists whose
+start time is not known (a file half written) `{:may_run, pids}`. And it is refused with
+nothing copied for a file that is there and differs.
 Each conversation copied is a manifest file, `<home>/imports/<account>/<session id>.json`,
 written last, so a second run says it was imported already. At each start `Mains` has
 `Sessions` write each named one as a main session's row, `stopped`, reason `imported`, with
@@ -1139,7 +1148,17 @@ node, and an import on a new host comes before its sessions ever run.
 writes a start's row and asks the `Scheduler` for a lease of its own, class main session
 (always admitted), as a start does, then resumes it in the checkout with its session id and the
 model its row keeps (F-141's new-5); its row in `main_starts` names the session id it resumed
-(`resume`, F-143's new-5). The operator's `resume` tool of a main session claims its state in
+(`resume`, F-143's new-5). It runs on the account its agent row names (F-177, `Move.tla`'s
+`ResumeHere`, with `Resumes`): a conversation lives only in the account it ran on or was
+imported into, and `--resume <id>` on another finds none (`Break_Move_ResumeOnPicked` fails
+`TranscriptKept`). Only when that account is refused, not prepared, logged out
+(`Accounts.login/2`: Claude Code never ran there) or with a window spent (`allowance:`, the
+`Scheduler`'s own gate), does the resume go to the account with the most allowance left among
+the others not refused, in one act: the conversation copied there as the `Mover` copies a
+move's (`Transcripts.Copy`: the transcript, the directory beside it and `session-env`, each
+whole), an act `copy` in `Acts`, then the resume under the same session id. A copy refused
+leaves the agent row stopped on its own account, the start refused `{:copy, reason}`; with no
+other account, the resume is refused `{:account, account, reason}`. The operator's `resume` tool of a main session claims its state in
 `Acts` (`Mains.fix_state/3`: its status, session id and last process) and calls `resume_main`
 with it, which acts only while that state is still the row's (F-144). A state not `stopped` is
 refused `{:not_stopped, status}` before the claim (F-149), and leaves it unclaimed. A move's resume needs
@@ -2242,6 +2261,11 @@ worktree on its branch whose setup finished).
      end with the process; the transcript is copied after the old process exited; running
      delegates do not hold a move, and their reports wait for a live process of the main session; a
      `SessionEnd` ends the session only when it names the session's current process.
+   - The spec settles (F-177, `Resumes`, `Move_Resume`): a resume of the session once its
+     process ended by itself runs on the account its row names, and on another only after a
+     copy there, in one act; a copy refused or cut leaves the row stopped on its own account.
+     `TranscriptKept` is an action property: each new process, a move's or a resume's, starts
+     from the whole transcript of the account the row named.
 3. **`Delegate.tla`**: a main session, its delegates and restarts of the framework.
    - Invariants: each report is delivered once, and only to a running process of the main
      session whose turn has ended; a delegate ends only after its report is delivered; a report
