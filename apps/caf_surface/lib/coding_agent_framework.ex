@@ -395,6 +395,21 @@ defmodule CodingAgentFramework do
   end
 
   @doc """
+  The accounts at a usage limit now in the instance the config named `instance`, from the
+  `Watch`'s symptom `limited` (F-193, `Watch.limited/2`): one reading per account, its window,
+  its reset (Unix seconds) and its agents, each with how long it has waited (ms). Each write is
+  cued on `watch`. Answers `{:ok, readings}`, `{:refused, :no_instance}`, or `{:unknown, reason}`.
+
+      {:ok, [%{account: "work", window: "five_hour", until: 1_800_000_000,
+               agents: [%{agent: "app-unit", waited: 540_000}]}]} =
+        CodingAgentFramework.limited("a")
+  """
+  @spec limited(String.t()) :: {:ok, [map]} | {:refused, term} | {:unknown, term}
+  def limited(instance) do
+    with {:ok, watch} <- part(instance, :watch), do: Watch.limited(watch)
+  end
+
+  @doc """
   The healer's allow-list in the instance the config named `instance`, and the operator's acts
   on it (`Watch.remedies/3`): `:list`, `{:approve, kind, who}` (the only widening) or
   `{:revoke, kind, who}`.

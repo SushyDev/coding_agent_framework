@@ -26,7 +26,9 @@ defmodule CodingAgentFramework.ActsSourceTest do
     assert_received {:cue, %{topic: "acts:test:a", ids: [^id]}}
     # The same reading again claims nothing: it was read before the open.
     assert {:ok, %{claimed: [], ended: []}} = Recoveries.check(ctx.recoveries)
-    assert [%{status: "acted", answer: "ok", detail: pane}] = rows(ctx)
+    assert [%{status: "acted", answer: "ok", detail: detail}] = rows(ctx)
+    # The reopened pane beside the claim's symptom (F-193).
+    assert %{"pane" => pane, "symptom" => _} = JSON.decode!(detail)
     assert pane != viewer
 
     assert held(ctx, "alpha").status == :viewed

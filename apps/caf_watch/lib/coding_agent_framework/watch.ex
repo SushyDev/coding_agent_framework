@@ -56,7 +56,7 @@ defmodule CodingAgentFramework.Watch do
   use GenServer
 
   alias CodingAgentFramework.Store
-  alias CodingAgentFramework.Watch.Table
+  alias CodingAgentFramework.Watch.{Limited, Table}
 
   @timeout 5_000
   @bound 3_600_000
@@ -183,6 +183,19 @@ defmodule CodingAgentFramework.Watch do
       do: call(watch, {:read, filter}, opts),
       else: {:refused, {:bad, :filter}}
   end
+
+  @doc """
+  The digest of `limited` by account (F-193, `Watch.Limited.digest/2`): one reading per account
+  limited now, its window and reset, and its agents, each with how long it has waited by this
+  `Watch`'s clock. Answers `{:ok, readings}`.
+
+      Watch.limited(watch)
+      #=> {:ok, [%{account: "work", window: "five_hour", until: 1_800_000_000,
+      #=>   agents: [%{agent: "app-unit", until: 1_800_000_000, since: …, waited: 540_000}]}]}
+  """
+  @spec limited(GenServer.server(), keyword) ::
+          {:ok, [Limited.reading()]} | {:refused, term} | {:unknown, term}
+  def limited(watch, opts \\ []), do: call(watch, :limited, opts)
 
   @doc """
   The allow-list (`model/tla/Heal.tla`'s `allow`):
@@ -395,6 +408,11 @@ defmodule CodingAgentFramework.Watch do
       end)
 
     {:reply, {:ok, Table.select(s.db, Enum.join(where, " AND "), args)}, s}
+  end
+
+  def handle_call(:limited, _from, s) do
+    rows = Table.select(s.db, "kind = 'limited' AND status = 'open'", [])
+    {:reply, {:ok, Limited.digest(rows, now(s))}, s}
   end
 
   def handle_call({:remedies, :list}, _from, s), do: {:reply, {:ok, list(s)}, s}

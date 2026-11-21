@@ -12,6 +12,7 @@ defmodule CodingAgentFramework.WatchTest do
 
   doctest Watch
   doctest Table
+  doctest Watch.Limited
 
   @remedies %{
     "lost_viewer" => %{remedy: "reopen", cap: 2},

@@ -203,8 +203,17 @@ defmodule CodingAgentFramework.AbsentMains do
   end
 
   defp resume(s, sym, actor \\ nil) do
+    detail = [detail: %{symptom: sym.state}]
+
     with {:ok, id} <-
-           Acts.claim(s.acts, actor || s.actor, sym.target, sym.state, :resume, healer(s, actor)) do
+           Acts.claim(
+             s.acts,
+             actor || s.actor,
+             sym.target,
+             sym.state,
+             :resume,
+             detail ++ healer(s, actor)
+           ) do
       case s.resume.(sym.target) do
         {:ok, _} -> verify(s, id, sym)
         {:refused, why} -> settle(s, id, sym, :failed, {:refused, why}, acted: false)

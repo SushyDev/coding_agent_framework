@@ -318,9 +318,7 @@ defmodule CodingAgentFramework.MoverTest do
   test "a delegate moves by SIGTERM once its turn ended, and takes what waited, once", ctx do
     {:ok, account} = Accounts.ready(ctx.accounts, "work")
 
-    assert {:ok, %{session_id: sid}} =
-             Sessions.start(ctx.sessions, "d1", account, MoverSetup.headless(ctx.dir))
-
+    assert {:ok, %{session_id: sid}} = headless(ctx, "d1", account)
     write_transcript(ctx, "work", sid)
     me = self()
 
@@ -338,14 +336,37 @@ defmodule CodingAgentFramework.MoverTest do
     assert_receive :launch, 15_000
     {:ok, {:queued, id}} = Mailbox.notify(ctx.mailbox, "d1", "go on")
     assert %{status: "queued", uuid: uuid} = mrow(ctx, id)
-    assert HeadlessStandIn.taken(ctx.dir) == []
+    assert HeadlessStandIn.taken(ctx.dir) == [first_taken()]
 
     send(mover(), :go)
     assert {:ok, moved} = row_when(ctx, "d1", &moved?(&1, "spare"))
     assert moved.session_id == sid
     assert "--resume" in HeadlessStandIn.argv(ctx.dir, sid)
     assert {:ok, _} = mrow_when(ctx, id, &(&1.status == "delivered"))
-    assert HeadlessStandIn.taken(ctx.dir) == ["message #{uuid}"]
+    assert HeadlessStandIn.taken(ctx.dir) == [first_taken(), "message #{uuid}"]
+  end
+
+  # Move.tla's OwnWord and HeadlessResumeHasLine (F-193): a headless delegate moved with nothing
+  # due gets a word of the move's own, a notice from `framework` stored first, as its resume's
+  # first line, so Claude Code writes its init and the resume is confirmed. Under BareHeadless
+  # the stand-in, in the real release's shape, would never write one.
+  test "a headless delegate moved with nothing due resumes with the move's own word", ctx do
+    {:ok, account} = Accounts.ready(ctx.accounts, "work")
+    assert {:ok, %{session_id: sid}} = headless(ctx, "d1", account)
+    write_transcript(ctx, "work", sid)
+    assert {:ok, _} = row_when(ctx, "d1", &Agents.running?/1)
+
+    assert {:ok, %{act: act}} = move(ctx, "d1")
+    assert {:ok, moved} = row_when(ctx, "d1", &moved?(&1, "spare"))
+    assert moved.session_id == sid
+    assert {:ok, %{outcome: "verified"}} = Acts.get(ctx.acts, act)
+
+    assert [_, "message " <> word] = HeadlessStandIn.taken(ctx.dir)
+
+    assert %{kind: "notice", from_agent: "framework", text: text} =
+             Mailbox.Table.by_uuid(ctx.mtable, word)
+
+    assert text =~ "moved between Claude accounts"
   end
 
   # Move.tla's LimitMove, Back and WordStored (F-191): a delegate whose process is gone at its
@@ -356,10 +377,7 @@ defmodule CodingAgentFramework.MoverTest do
   test "a delegate gone at its limit moves with no stop, its word first; refused, it stays gone",
        ctx do
     {:ok, account} = Accounts.ready(ctx.accounts, "work")
-
-    assert {:ok, %{session_id: sid}} =
-             Sessions.start(ctx.sessions, "d1", account, MoverSetup.headless(ctx.dir))
-
+    assert {:ok, %{session_id: sid}} = headless(ctx, "d1", account)
     write_transcript(ctx, "work", sid)
     reset = System.os_time(:second) + 3 * 3600
     File.write!(Path.join(ctx.dir, "limit"), "#{reset}")
@@ -381,7 +399,7 @@ defmodule CodingAgentFramework.MoverTest do
     assert {:ok, %{outcome: "failed", reason: why}} = Acts.get(ctx.acts, act)
     assert why =~ "no_room"
     assert %{status: "queued"} = mrow(ctx, wid)
-    assert length(HeadlessStandIn.taken(ctx.dir)) == 1
+    assert length(HeadlessStandIn.taken(ctx.dir)) == 2
 
     # A second move, a claim of its own: its resume's first line is the word.
     MoverSetup.set_launch(ctx, &MoverSetup.launch(ctx.dir, &1))
@@ -395,6 +413,18 @@ defmodule CodingAgentFramework.MoverTest do
   end
 
   defp move(ctx, name), do: Mover.move(mover(), "operator", name, to: other(ctx, name))
+
+  # A headless delegate's start, its first line written after the hold, as `Delegates`' is.
+  defp headless(ctx, name, account),
+    do:
+      Sessions.start(
+        ctx.sessions,
+        name,
+        account,
+        MoverSetup.headless(ctx.dir) ++ MoverSetup.first()
+      )
+
+  defp first_taken, do: "message " <> MoverSetup.first()[:first].uuid
 
   defp other(ctx, name) do
     if row(ctx, name).account == "work", do: "spare", else: "work"

@@ -276,8 +276,17 @@ defmodule CodingAgentFramework.StuckBackgrounds do
   end
 
   defp end_group(s, sym, g, actor \\ nil) do
+    detail = [detail: %{symptom: sym.state}]
+
     with {:ok, id} <-
-           Acts.claim(s.acts, actor || s.actor, sym.target, sym.state, :end, healer(s, actor)) do
+           Acts.claim(
+             s.acts,
+             actor || s.actor,
+             sym.target,
+             sym.state,
+             :end,
+             detail ++ healer(s, actor)
+           ) do
       case s.signal.(g.group) do
         {:ok, :sent} ->
           detail = %{tasks: g.tasks, changes: g.changes, group: g.group}
