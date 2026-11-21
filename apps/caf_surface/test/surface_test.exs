@@ -653,7 +653,8 @@ defmodule CodingAgentFramework.SurfaceTest do
       :absent_mains
     ],
     "mains" => [:scheduler],
-    "transcripts" => [:delegates, :mailbox, :hooks_silent],
+    # A transcript's limit line is the account's record (F-185).
+    "transcripts" => [:delegates, :mailbox, :hooks_silent, :usage],
     "delegates" => [:mailbox, :scheduler],
     "usage" => [:scheduler],
     "jobs" => [:scheduler],

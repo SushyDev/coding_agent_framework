@@ -15,7 +15,10 @@ defmodule CodingAgentFramework.Usage do
     latest `rate_limit_event`, whose `unifiedWindows` holds both windows after an answer, and
     which names the limit at a rejection. A headless session draws no status line.
   - **A limit record**, an exact fact (`CodingAgentFramework.Usage.Limit`): from the stream's
-    event, and from any reader that hands one to `take/3` (a transcript's line). It sets the
+    event, from a transcript's line (`Transcripts`' fold's `limit`, read from its table on each
+    `transcripts:` cue when given `transcripts_db:`, every mode), and from any reader that hands
+    one to `take/4`. The `StopFailure` hook's input is not one: it carries no reset (F-181's
+    new-1), so it is evidence of the agent's turn only, `Sessions`'. It sets the
     account's `limited_until` (the reset), `limit_window`, `can_spend` and `evidence` (where it
     came from); a later reset replaces it, and one read late never shortens it.
 
@@ -44,7 +47,7 @@ defmodule CodingAgentFramework.Usage do
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, Reader, Store}
+  alias CodingAgentFramework.{Accounts, Reader, Store, Transcripts}
   alias CodingAgentFramework.Usage.{Limit, Reading, Room, Table}
 
   @windows ~w(used resets_at five_used five_resets_at)a
@@ -115,7 +118,8 @@ defmodule CodingAgentFramework.Usage do
   Starts `Usage`. Options: `accounts:` (an `Accounts`), `host:` (this host's name, for the
   topics), `db:` (this instance's SQLite path), and optionally `stream:` (`{module, server}`: the
   host's `CodingAgentFramework.Stream` and its process, whose `rows/2` it reads at each of its
-  cues), `notify:` (a function of one cue) and `interval:` (ms between reads
+  cues), `transcripts_db:` (the SQLite path of the host's `Transcripts`, whose rows of an
+  account it reads at each of that account's cues), `notify:` (a function of one cue) and `interval:` (ms between reads
   of the files; without it, reads happen only on `read/2`).
   """
   @spec start_link(keyword) :: GenServer.on_start()
@@ -128,13 +132,27 @@ defmodule CodingAgentFramework.Usage do
   @spec writes() :: [String.t()]
   def writes, do: ~w(usage:*:*)
 
-  @doc "What `Usage` reads, for `Cues`: the host's stream (a headless session's readings)."
+  @doc """
+  What `Usage` reads, for `Cues`: the host's stream (a headless session's readings and limit)
+  and its transcripts (any session's limit).
+  """
   @spec reads() :: %{topics: [String.t()], cue: (pid, map -> :ok)}
-  def reads, do: %{topics: ~w(stream), cue: &cue/2}
+  def reads, do: %{topics: ~w(stream transcripts), cue: &cue/2}
 
-  @doc "A cue of what `Usage` reads: it reads the `Stream`'s rows again. Never waits."
+  @doc """
+  A cue of what `Usage` reads: it reads the `Stream`'s rows, or the account's `Transcripts`
+  rows, again. Never waits.
+  """
   @spec cue(GenServer.server(), map) :: :ok
   def cue(usage, %{topic: "stream:" <> _}), do: GenServer.cast(usage, :stream)
+
+  def cue(usage, %{topic: "transcripts:" <> rest}) do
+    case String.split(rest, ":") do
+      [_host, account] -> GenServer.cast(usage, {:transcripts, account})
+      _ -> :ok
+    end
+  end
+
   def cue(_usage, _cue), do: :ok
 
   @doc """
@@ -176,7 +194,8 @@ defmodule CodingAgentFramework.Usage do
 
   @impl true
   def init(opts) do
-    with {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)) do
+    with {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)),
+         {:ok, transcripts} <- transcripts_db(opts[:transcripts_db]) do
       cache =
         case Table.rows(db) do
           :unread -> %{}
@@ -187,11 +206,14 @@ defmodule CodingAgentFramework.Usage do
         accounts: Keyword.fetch!(opts, :accounts),
         host: Keyword.fetch!(opts, :host),
         stream: Keyword.get(opts, :stream),
+        transcripts: transcripts,
         clock: Keyword.get(opts, :clock, fn -> System.os_time(:second) end),
         db: db,
         cache: cache,
-        # The stream's last event taken per session, so an unchanged one is not taken again.
-        streamed: %{}
+        # The stream's last event taken per session, so an unchanged one is not taken again;
+        # and each transcript's last limit line taken, by its uuid.
+        streamed: %{},
+        lines: %{}
       }
 
       {:ok, Map.merge(state, Reader.loop(opts))}
@@ -224,7 +246,21 @@ defmodule CodingAgentFramework.Usage do
     {:reply, reply, state}
   end
 
+  defp transcripts_db(nil), do: {:ok, nil}
+  defp transcripts_db(path), do: Transcripts.Table.open(path)
+
   @impl true
+  def handle_cast({:transcripts, _account}, %{transcripts: nil} = state), do: {:noreply, state}
+
+  def handle_cast({:transcripts, account}, state) do
+    with true <- account in state.accounts.names,
+         {:ok, %{rows: rows}} <- Transcripts.Table.rows(state.transcripts, state.host, account) do
+      {:noreply, take_lines(state, account, rows)}
+    else
+      _ -> {:noreply, state}
+    end
+  end
+
   def handle_cast(:stream, %{stream: nil} = state), do: {:noreply, state}
 
   def handle_cast(:stream, state) do
@@ -377,6 +413,37 @@ defmodule CodingAgentFramework.Usage do
       end
     end)
   end
+
+  # Each transcript's last limit line, once, on the account it is under; its own time is the
+  # fact's, or the row's write time where it has none.
+  defp take_lines(state, account, rows) do
+    Enum.reduce(rows, state, fn row, state ->
+      key = {account, row.session_id}
+
+      with %{record: %{} = record, uuid: uuid} = line <- Map.get(row, :limit),
+           true <- state.lines[key] != uuid do
+        evidence = %{"source" => "transcript", "session" => row.session_id, "line" => uuid}
+        fact = %{at: line_time(line.at, row.written_at), evidence: evidence, limit: record}
+        state = %{state | lines: Map.put(state.lines, key, uuid)}
+
+        case taken(state.cache[account], fact, state.clock.()) do
+          {:ok, new} -> state |> write(%{account => new}, false) |> elem(1)
+          _ -> state
+        end
+      else
+        _ -> state
+      end
+    end)
+  end
+
+  defp line_time(at, written_at) when is_binary(at) do
+    case DateTime.from_iso8601(at) do
+      {:ok, time, _} -> DateTime.to_unix(time, :millisecond)
+      _ -> written_at
+    end
+  end
+
+  defp line_time(_at, written_at), do: written_at
 
   defp account_of(accounts, path) when is_binary(path) do
     Enum.find_value(accounts.names, {:refused, :no_account}, fn name ->

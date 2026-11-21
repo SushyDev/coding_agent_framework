@@ -17,7 +17,10 @@ defmodule CodingAgentFramework.Accounts do
   - `parent.settings.json` and `delegate.settings.json`: the account's settings and hooks,
     loaded with `--settings`. They differ only in `remoteControlAtStartup`: true for a main session
     and false for a delegate, since 2.1.322 has a flag to turn Remote Control on but none to
-    turn it off;
+    turn it off. Both set `autoContinueAtUsageLimit` true, whatever the caller's settings say:
+    at a usage limit under 24 hours away an interactive session waits and goes on by itself, as
+    `Limit.tla`'s own wait does (`docs/design.md`, "Usage limits"). The hooks need no matcher
+    of their own for a limit: Intake's post every `StopFailure` and `Notification`;
   - `mcp.json`: the MCP servers, loaded with `--mcp-config` and `--strict-mcp-config`, so no
     server from `.claude.json` joins them;
   - `agents/<agent>.settings.json`: an agent's own settings over the account's (`overlay/4`);
@@ -201,6 +204,8 @@ defmodule CodingAgentFramework.Accounts do
   end
 
   defp encode(account, settings, mcp_servers) do
+    settings = Map.put(settings, "autoContinueAtUsageLimit", true)
+
     files = [
       {account.settings.parent, Map.put(settings, "remoteControlAtStartup", true)},
       {account.settings.delegate, Map.put(settings, "remoteControlAtStartup", false)},

@@ -72,6 +72,11 @@ defmodule CodingAgentFramework.Mailbox do
   names, after the resume the copy. A waiting call still takes its answer, since the drain waits
   for it.
 
+  While the addressee is `limited` and its usage limit's reset has not passed (F-185,
+  `Sessions.Agents.unheld/2`, `Boxes.tla`'s `NoRowIntoLimit`), no row is marked either: a row
+  handed in would start a turn into the limit. Once the reset passed, its turn is read as any
+  row's, and its rows go into its ended turn.
+
   **Answers.** A delivered message's turn ends with a `result` that names its uuid; that
   result's text is stored as a reply from the delegate to the message's sender (to its parent,
   the sender of its brief, for a message from `framework`), `reply_to` the message's uuid, with
@@ -1149,7 +1154,7 @@ defmodule CodingAgentFramework.Mailbox do
   # delegate's stream, with the fold of its session; an interactive session's waiter or typed
   # write, when this Mailbox was given an `Intake` or an `Inlet`. Anything else has none.
   defp target(s, to, folds) do
-    srow = Agents.get(s.agents, to)
+    srow = s.agents |> Agents.get(to) |> Agents.unheld(div(now(), 1000))
 
     cond do
       Agents.ended?(srow) ->
@@ -1159,6 +1164,11 @@ defmodule CodingAgentFramework.Mailbox do
       # until the session runs on the other account; a waiting call's answer still may.
       Agents.moving?(srow) ->
         :moving
+
+      # A usage limit's reset not yet passed (Boxes.tla's NoRowIntoLimit): a row handed in
+      # would start a turn into the limit. After it, the turn is read as any row's.
+      Agents.limit(srow) != nil ->
+        :limited
 
       Agents.headless?(srow) and is_binary(srow.session_id) ->
         {:stream, srow, folds[srow.session_id]}
@@ -1184,6 +1194,7 @@ defmodule CodingAgentFramework.Mailbox do
 
   defp deliver(s, _rows, :not_started), do: s
   defp deliver(s, _rows, :moving), do: s
+  defp deliver(s, _rows, :limited), do: s
 
   # An agent that ended takes nothing: no process of it runs again (EndedNotDelivered). A brief
   # stored since its end is a later start's, stored before `Sessions` writes that start, and
@@ -1461,7 +1472,7 @@ defmodule CodingAgentFramework.Mailbox do
 
   # The turn of `name`'s process `pid` read now: its row, its session file and its waiter.
   defp turn_now(s, name, pid) do
-    with %{} = row <- Agents.get(s.agents, name),
+    with %{} = row <- s.agents |> Agents.get(name) |> Agents.unheld(div(now(), 1000)),
          {:ok, files} <- files(s, row),
          {:ok, held} <- waiter?(s, row) do
       Transport.Typed.turn(Turn.interactive(row, files, held), row.pid == pid)
@@ -1479,7 +1490,7 @@ defmodule CodingAgentFramework.Mailbox do
 
   # A typed row's evidence: the waiter's, and whether the turn reads ended now.
   defp typed_seen(s, m) do
-    srow = Agents.get(s.agents, m.to_agent)
+    srow = s.agents |> Agents.get(m.to_agent) |> Agents.unheld(div(now(), 1000))
 
     ended =
       with %{} <- srow,

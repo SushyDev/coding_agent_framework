@@ -14,12 +14,15 @@ defmodule CodingAgentFramework.Screen.Reading do
     * `named_rule`: the rule above the box of a session that has a name, with the name in it;
     * `placeholder`: the hint an empty box shows, which is not typed text;
     * `running`: the words in the footer under the box while a turn runs;
+    * `wait`: a line of the footer under the box while Claude Code waits at a usage limit by
+      itself, its one capture the time it names;
     * `exited`: the line Claude Code leaves on the screen when it exits;
     * `resume`: what starts the line under `exited`;
     * `dialogs`: each dialog `Screen` knows, by its kind: its `title` (a line inside it), its
       `footer` (what starts its last line), whether its options are `numbered`, their `indent`
       (the spaces before the selection mark), and, for a dialog that lists paths, the heading
-      above them (`paths`). Two kinds that share a footer differ by their title.
+      above them (`paths`), and the character of its rule (`rule`) when it is not `─`. Two
+      kinds that share a footer differ by their title or their rule.
   """
 
   @type dialog :: %{
@@ -28,7 +31,8 @@ defmodule CodingAgentFramework.Screen.Reading do
           required(:footer) => String.t(),
           required(:numbered) => boolean,
           required(:indent) => pos_integer,
-          optional(:paths) => String.t()
+          optional(:paths) => String.t(),
+          optional(:rule) => String.t()
         }
 
   @type t :: %{
@@ -37,6 +41,7 @@ defmodule CodingAgentFramework.Screen.Reading do
           named_rule: Regex.t(),
           placeholder: Regex.t(),
           running: String.t(),
+          wait: Regex.t(),
           exited: String.t(),
           resume: String.t(),
           dialogs: [dialog]

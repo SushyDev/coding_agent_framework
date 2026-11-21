@@ -839,7 +839,7 @@ write fails its tests; an app's default routes it as any other. A cue of each to
 | `watch` | `Watch` | `Prompts` (a `remedy` prompt opened or closed) |
 | `sessions:<host>` | `Sessions` | `Delegates`, `Mailbox`, `Mover`, `Scheduler`, `Mains` (a start that runs or is refused), the app's end of an owner's services |
 | `mains:<host>` | `Mains` | `Scheduler` (a main session's start ended) |
-| `transcripts:<host>:<account>` | `Transcripts` | `Delegates`, `Mailbox` (a waiter row's lines are read only on this cue, the waiters' and the take bound) |
+| `transcripts:<host>:<account>` | `Transcripts` | `Delegates`, `Mailbox` (a waiter row's lines are read only on this cue, the waiters' and the take bound), `Usage` (a transcript's limit line, F-185) |
 | `delegates:<host>` | `Delegates` | `Mailbox`, `Scheduler` (a delegate's work ended) |
 | `mailbox` | `Mailbox` | `Delegates`, `Mover` |
 | `intake:<host>:<account>:waiters` | `Intake` | `Mailbox` |
@@ -2658,9 +2658,11 @@ pinned binary):
   account may spend.
 
 **The evidence and its one reader.** `Usage` is the one reader of an account's limit. It takes
-the record from any agent on the account: the transcript line (`Transcripts`), the
-`StopFailure` hook's input (`Intake`), a headless stream's result (`Stream`), and the status
-line's numbers, a window at 100 % with its `resets_at`. Its reading per account gains
+the record from any agent on the account: the transcript line (`Transcripts`, every mode), a
+headless stream's `rate_limit_event` (`Stream`), and the status line's numbers, a window at
+100 % with its `resets_at`. The `StopFailure` hook's input carries no reset and fires at most
+sometimes headless (F-181's new-1, decided): it is evidence of the agent's turn only, as the
+stream's `result` with `api_error: "usage_limit_reached"` is, never of the account's reset. Its reading per account gains
 `limited_until` (the reset), the window, `can_spend` (from `overageStatus`: true only for a
 value that says credits are on) and the evidence it came from (the agent, the line or the
 event). A later reset or a newer record replaces it; each record is a fact in the `Ledger`.
@@ -2722,22 +2724,27 @@ moves it (`NeverMovesMain`). The move is a remedy on the healer's allow-list (`m
 **The code unit's list** (one unit after this one, against `Limit.tla` and `Boxes.tla`):
 
 1. **Settings per account**, written where the status line command is written today, in each
-   account's `settings.json`: `autoContinueAtUsageLimit: true`; the `StopFailure` hook with
-   matcher `rate_limit`; the `Notification` hook with matchers `quota_auto_resume_fired`,
-   `quota_auto_resume_stale` and `quota_auto_resume_disabled`. A headless launch sets
-   `CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS` explicitly, to the value the
-   measurement below shows makes a request fail at once, since a request that blocks for hours
-   reads as a turn still running.
+   account's framework settings: `autoContinueAtUsageLimit: true`, whatever the app's settings
+   say. The hooks need no matcher of their own: `Intake`'s post every `StopFailure` and
+   `Notification`, `quota_auto_resume_*` among them. A launch sets no
+   `CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS` (F-181's new-2, decided): unset, a
+   request at a limit already fails at once, and the bound acts only under
+   `CLAUDE_CODE_RETRY_WATCHDOG`, with which a request retries for hours and reads as a turn
+   still running. `ClaudeCLI`'s `env -i` keeps both out, as every `CLAUDE_CODE_*` a launch does
+   not name.
 2. **What each reader parses.** `Transcripts`: the assistant line with `isApiErrorMessage:
    true` and `apiError: "usage_limit_reached"`, its `quotaLimits` (`resetsAt`,
    `rateLimitType`, `overageStatus`), and whether a turn followed it. `Intake`: the
-   `StopFailure` event (`error`, `error_details`) and the three Notification matchers, each a
-   fact. `Stream`: the result that ends a turn at a limit and the `rate_limit_event`, by the
-   shape measured. `Usage`: the fields above on its reading, from any of these and from the
-   status line.
-3. **`Screen`'s kinds** `usage_limit_menu` (its three options by label, the selected one) and
-   `usage_limit_wait` (its reset time), from fixtures captured on 2.1.322 with
-   `bin/capture-screen`, and `Inlet`'s checked press of the menu's option by label.
+   `StopFailure` event and the three Notification matchers, each a fact of the agent's turn.
+   `Stream`: the result that ends a turn at a limit and the `rate_limit_event`, by the shape
+   measured. `Usage`: the fields above on its reading, from the transcript's line, the stream's
+   event and the status line.
+3. **`Screen`'s kinds** `usage_limit_menu` (its options by label, the selected one; the third
+   is what the account allows, F-181's new-4) and `usage_limit_wait` (the time its notice
+   names, "Continuing automatically at … · Esc to cancel"; a screen with it is never an ended
+   turn, so no text is typed into the wait, F-181's new-3), from fixtures captured on 2.1.322,
+   and `Inlet`'s checked press of the menu's option by label ("Stop and wait for limit to
+   reset", checked after).
 4. **`Sessions`**: the turn state `limited`, the phase on the agent row, the timer to the
    record's reset plus the margin, after which it reads the turn and the screen and acts only on
    what it reads; the `limit` and `usage_credits` prompts opened through `Prompts`.
@@ -2751,8 +2758,17 @@ moves it (`NeverMovesMain`). The move is a remedy on the healer's allow-list (`m
 
 Built in F-181: the model of the move; `Usage`'s part of item 2 (the stream's `rate_limit_event`
 read, a limit record taken by `Usage.take/4`, `limited_until` on the reading) and item 6 (the
-gate reads `limited_until` through `Usage.Room`); picking and `Logins`. The rest of items 1 to 7,
-and the move's and the main's prompt's code, are the next unit's.
+gate reads `limited_until` through `Usage.Room`); picking and `Logins`.
+
+Built in F-185: item 1; item 2's readers (the transcript fold's `limit`, which `Usage` takes on
+each `transcripts:` cue; the stream's `result` keeps its `api_error`); item 3's two kinds, their
+fixtures F-181's captures, scrubbed; item 4's turn state `limited` (`Sessions.Turn`, from the
+agent row's `usage_limit`, written by `Sessions.put_limit/4`); and item 5's held rows: `Mailbox`
+hands no row to a `limited` agent before its reset, and reads its turn as any row's after it
+(`Sessions.Agents.unheld/2`). Not built: the reading of each agent's limit onto its row, the
+remedies (`press_stop`, `go_on`, `move`, item 4's timer and prompts, item 5's word, item 7's
+symptom) and the main's prompt. F-185's new-1 and new-2 ask where they run and how the list
+names them, before they are built.
 
 **Measured** (F-181, by hand on 2.1.322, against a local endpoint at `ANTHROPIC_BASE_URL` that
 answers 429 with the unified rate-limit headers the pinned binary reads, a dummy subscriber's

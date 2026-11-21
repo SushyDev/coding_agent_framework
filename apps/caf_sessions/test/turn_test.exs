@@ -39,6 +39,18 @@ defmodule CodingAgentFramework.Sessions.TurnTest do
     assert Turn.headless(%{row | status: "stopping"}, fold) == :not_running
   end
 
+  test "a row limited is never idle nor an ended turn, whatever its evidence says" do
+    limit = ~s({"until":1800000000,"step":"idle"})
+    main = Map.put(@main, :usage_limit, limit)
+    assert Turn.interactive(main, [@session_file], true) == :limited
+    assert Turn.interactive(%{main | usage_limit: nil}, [@session_file], true) == :ended
+    assert Turn.interactive(%{main | status: "stopped"}, [@session_file], true) == :not_running
+
+    delegate = %{status: "running", role: "delegate", usage_limit: limit}
+    assert Turn.headless(delegate, %{idle: true, gone: false, ending: false}) == :limited
+    assert Turn.of(delegate, %{fold: %{idle: true}}) == :limited
+  end
+
   test "a headless delegate is not idle while a background command of its own runs" do
     alias CodingAgentFramework.Stream.Fold
     row = %{status: "running", role: "delegate"}

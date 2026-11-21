@@ -4,7 +4,8 @@ defmodule CodingAgentFramework.Transcripts.Fold do
   line of JSON per entry (Claude Code 2.1.322; sources in `docs/build-notes/F-28.md`).
 
   It answers the session's last assistant reply, its user prompts with their ids, its
-  subagents with their token counts, and its own token usage. It is total: a line that is not
+  subagents with their token counts, its own token usage, and the last usage limit a turn of it
+  hit (`limit`, below). It is total: a line that is not
   JSON, not an object, of an unknown type or of an odd shape is kept as a problem, and the fold
   goes on.
 
@@ -13,6 +14,27 @@ defmodule CodingAgentFramework.Transcripts.Fold do
       iex> {:ok, fold} = Fold.take(Fold.new(), line <> "\\n" <> ~s({"type":"user"))
       iex> {fold.offset, Enum.map(fold.prompts, & &1.prompt_id)}
       {71, ["p1"]}
+
+  **A usage limit** (`docs/design.md`, "Usage limits"; measured on 2.1.322 in F-178 and
+  F-181): a turn that hits one writes one assistant line with `isApiErrorMessage: true`,
+  `apiError: "usage_limit_reached"` and the account's record in `quotaLimits` (or
+  `apiErrorParams.rate_limit_info`). `limit` is the last such line: `record` (that map, as
+  `CodingAgentFramework.Usage.Limit.parse/1` reads it), `uuid`, `at` (its `timestamp`),
+  `offset`, and `followed`, true once a later line shows a turn ran after it (a prompt, or a
+  reply that is not an API error). The line's text is never a reply.
+
+      iex> alias CodingAgentFramework.Transcripts.Fold
+      iex> hit = ~s({"type":"assistant","uuid":"a1","timestamp":"2026-11-21T06:48:44.124Z",) <>
+      ...>   ~s("isApiErrorMessage":true,"apiError":"usage_limit_reached",) <>
+      ...>   ~s("quotaLimits":{"status":"rejected","resetsAt":1795254036},) <>
+      ...>   ~s("message":{"id":"m1","stop_reason":"stop_sequence","content":[]}}\\n)
+      iex> {:ok, fold} = Fold.take(Fold.new(), hit)
+      iex> {fold.limit.record["resetsAt"], fold.limit.followed}
+      {1795254036, false}
+      iex> again = ~s({"type":"user","message":{"content":"again"}}\\n)
+      iex> {:ok, fold} = Fold.take(Fold.new(), hit <> again)
+      iex> fold.limit.followed
+      true
 
   The offset counts only whole lines: a partial last line waits for the next read. The fold
   keeps the last bytes before its offset (`seam`); a read resumes `byte_size(seam)` bytes before
@@ -46,6 +68,7 @@ defmodule CodingAgentFramework.Transcripts.Fold do
           message: map | nil,
           subagents: %{String.t() => map},
           usage: %{String.t() => non_neg_integer},
+          limit: map | nil,
           problems: [map],
           problem_count: non_neg_integer
         }
@@ -63,6 +86,7 @@ defmodule CodingAgentFramework.Transcripts.Fold do
       message: nil,
       subagents: %{},
       usage: zero(),
+      limit: nil,
       problems: [],
       problem_count: 0
     }
@@ -327,7 +351,21 @@ defmodule CodingAgentFramework.Transcripts.Fold do
   # subagent's, not the session's: it is skipped by name, as is any line not of this session.
   defp read(fold, _type, %{"isSidechain" => true}, _at), do: fold
 
+  # The usage limit's line: the account's record, and no reply (F-181).
+  defp read(fold, "assistant", %{"apiError" => "usage_limit_reached"} = e, at) do
+    record =
+      Enum.find([e["quotaLimits"], get_in(e, ["apiErrorParams", "rate_limit_info"])], &is_map/1)
+
+    if record do
+      limit = %{record: record, uuid: e["uuid"], at: e["timestamp"], offset: at, followed: false}
+      %{fold | limit: limit, ends_with_reply: false}
+    else
+      problem(fold, at, {:shape, "usage limit"})
+    end
+  end
+
   defp read(fold, "assistant", %{"message" => %{"id" => id} = m} = e, at) when is_binary(id) do
+    fold = if e["isApiErrorMessage"] == true, do: fold, else: followed(fold)
     content = if is_list(m["content"]), do: m["content"], else: []
 
     texts =
@@ -407,8 +445,14 @@ defmodule CodingAgentFramework.Transcripts.Fold do
       images: images
     }
 
-    %{fold | prompts: fold.prompts ++ [prompt], ends_with_reply: false}
+    %{followed(fold) | prompts: fold.prompts ++ [prompt], ends_with_reply: false}
   end
+
+  # A turn ran after the last limit's line.
+  defp followed(%{limit: %{followed: false} = limit} = fold),
+    do: %{fold | limit: %{limit | followed: true}}
+
+  defp followed(fold), do: fold
 
   defp started(fold, content, e) do
     agents =

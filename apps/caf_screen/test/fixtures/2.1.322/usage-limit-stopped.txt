@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.322
+▝▜██████▀  Sonnet 5.5 · Claude API
+ ▝▝   ▝▝   /work/repo
+
+
+❯ say hi
+  ⎿  You've hit your weekly limit · resets Nov 22 at 11:58pm (Etc/UTC)
+
+✻ Sautéed for 0s · done 7:58 AM
+
+❯ again
+  ⎿  You've hit your weekly limit · resets Nov 22 at 11:58pm (Etc/UTC)
+     /upgrade to increase your usage limit.
+
+✻ Worked for 0s · done 7:59 AM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  ⏵⏵ auto mode on (shift+tab to cycle)

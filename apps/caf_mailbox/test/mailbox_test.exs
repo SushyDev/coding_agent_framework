@@ -98,6 +98,29 @@ defmodule CodingAgentFramework.MailboxTest do
     assert %{status: "queued"} = Table.get(ctx.mtable, next)
   end
 
+  # Boxes.tla's NoRowIntoLimit (F-185): an agent `limited` takes no row before its limit's
+  # reset, since a row would start a turn into the limit; once the reset passed its ended turn
+  # takes the rows held, while the row still says limited.
+  test "a limited agent's rows wait for its reset, then go into its ended turn", ctx do
+    {sid, brief} = started(ctx, "d1")
+    until_taken(ctx, ["message #{brief}"])
+    now = System.os_time(:second)
+    limit = %{"until" => now + 3600, "window" => "five_hour", "step" => "idle"}
+    {:ok, _} = Sessions.put_limit(ctx.sessions, "d1", limit)
+
+    assert {:ok, {:queued, id}} = Mailbox.message(ctx.mailbox, "main", "d1", "go on")
+    cue(ctx)
+    cue(ctx)
+    assert %{status: "queued"} = Table.get(ctx.mtable, id)
+    assert HeadlessStandIn.taken(ctx.dir) == ["message #{brief}"]
+
+    {:ok, _} = Sessions.put_limit(ctx.sessions, "d1", %{limit | "until" => now - 1})
+    assert {:ok, %{uuid: u, via: "stream"}} = until(ctx, id, &(&1.status == "delivered"))
+    until_taken(ctx, ["message #{brief}", "message #{u}"])
+    assert {:refused, {:bad, :limit}} = Sessions.put_limit(ctx.sessions, "d1", %{"step" => "x"})
+    _ = sid
+  end
+
   # F-165: "since the end" is read from the agent row's end time, never its last write. A brief
   # stored in the end's own millisecond, and a write to the row after both (as the migration's
   # hand-over writes a parent to a row that ended), leave a later start's brief queued.
