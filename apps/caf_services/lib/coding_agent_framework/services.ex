@@ -129,6 +129,13 @@ defmodule CodingAgentFramework.Services do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc """
+  The topics of the cues it writes, each as its whole shape, `*` for a word it fills in
+  (`CodingAgentFramework.Cues`): `services`.
+  """
+  @spec writes() :: [String.t()]
+  def writes, do: ~w(services)
+
+  @doc """
   Starts service `name` (a socket name: letters, digits, `-`, `_`) for `owner`, holding `argv`
   in the copy the options name. Options: `:host`, `:project`, `:copy` (the worktree's name) and
   `:worktree` (its path), all required; `:keep` (false); `:env`, the program's whole

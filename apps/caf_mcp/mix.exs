@@ -20,7 +20,6 @@ defmodule CafMcp.MixProject do
       {:caf_acts, in_umbrella: true},
       {:caf_grants, in_umbrella: true},
       {:caf_store, in_umbrella: true},
-      {:exqlite, "~> 0.43.0"},
       {:plug, "~> 1.20"},
       {:caf_accounts, in_umbrella: true, only: :test},
       {:caf_copies, in_umbrella: true, only: :test},
@@ -31,7 +30,6 @@ defmodule CafMcp.MixProject do
       {:caf_tracker, in_umbrella: true, only: :test},
       {:caf_transcripts, in_umbrella: true, only: :test},
       {:caf_usage, in_umbrella: true, only: :test},
-      {:caf_jobs, in_umbrella: true, only: :test},
       {:caf_services, in_umbrella: true, only: :test},
       {:caf_test, in_umbrella: true, only: :test},
       {:bandit, "~> 1.14", only: :test}

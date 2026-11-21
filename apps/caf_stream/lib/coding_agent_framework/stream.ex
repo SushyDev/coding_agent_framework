@@ -56,6 +56,13 @@ defmodule CodingAgentFramework.Stream do
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
+  @doc """
+  The topics of the cues it writes, each as its whole shape, `*` for a word it fills in
+  (`CodingAgentFramework.Cues`): `stream:<host>`.
+  """
+  @spec writes() :: [String.t()]
+  def writes, do: ~w(stream:*)
+
   @doc ~S"""
   A delegate's directory under `home`.
 

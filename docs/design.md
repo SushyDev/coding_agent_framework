@@ -359,8 +359,9 @@ framework's hooks deciding:
   code are the command's and the lease's holder is that process (`{"run", "<pid> <start>"}`),
   released once on any end, a kill included, read by `ps` (`Schedule.tla`'s shape `Native`);
   a refusal prints one line with its reason and retry time and exits 75; with no answer it
-  runs without a lease and says so, as a hook fails open. `run` is listed to no agent, and
-  stays served until a later unit takes it and its late end out (F-171's new-3);
+  runs without a lease and says so, as a hook fails open. The `run` tool, its late end and
+  `MCP.caller/3` were removed in F-176 (F-171's new-3); the operator keeps no `run`, since a
+  landing is the app's own `Jobs.run/6`;
 - `run_in_background` and `Monitor` stay native; during a move's drain they are denied with a
   reason (as today);
 - Claude Code's own question tool (`AskUserQuestion`), in a session no person attends, opens a
@@ -384,7 +385,8 @@ hold regardless is a deny rule in the launch settings, never a hook alone, and a
 on unanswered is a fact the `Watch` counts (F-162's new-9).
 
 **Off the agents' list**, to the app's surface: `answer_startup` (a prompt the app answers),
-`end_main`, a main session's
+`end_main`, `withdraw` (built: since F-176 `MCP.tools/2` lists these operator-only tools to the
+operator alone, and `MCP.operate/3` serves them; F-172's new-5), a main session's
 move and resume (the operator's alone, as decided), the leases (asked by `Team` for every
 start, `Hosts` for every job), and `reload` (the framework reconnects an agent's tools when its
 list changes; F-162's new-2 says what must be measured first). From 25 tools to 7, and at most
@@ -590,14 +592,20 @@ One config and one supervisor in; a few calls and one stream of cues out.
   refusal naming its key (the home, hosts, accounts, projects, ports, capacities, the
   callbacks for dialogs, `PreToolUse` and `Stop`, the idle bound, the restart budgets, the
   remedies' allow-list and the extensions). One supervisor starts every box in its order; the
-  app wires nothing else.
+  app wires nothing else. The config's `instance` names the tree: it is unique per app (a
+  second start of a running name is refused `{:instance_running, name}`) and 1 to 100 bytes
+  with no control character, as `Config.new/1` checks it (F-174's new-3).
 - **Calls.** `operate(caf, actor, verb, args)`: the seven verbs as the operator, and the
   operator's own: `end_main`, a main session's `move` and `resume`, a remedy's `approve` and
   `revoke`, a symptom's `clear`. `answer(caf, prompt, choice)` answers any prompt, in place of
   `answer_startup`, an ask's answer and a request's answer. `prompts(caf, filter)`,
   `view(caf, scope)`, `metrics(caf, query)`, `digest(caf, window)` and `query(caf, filter)` read.
 - **Cues.** `subscribe(caf, topics)`: one stream of `{topic, ids}` for every write, from the
-  `Ledger`. The app re-reads by id, as every view does; `prompts` is the inbox's topic.
+  `Ledger`. The app re-reads by id, as every view does; `prompts` is the inbox's topic. Every
+  topic a part writes is subscribable (each part's `writes/0`). A subscription lives and dies
+  with the tree: `subscribe/2` answers `{:ok, %{ref: ref, tree: pid}}`, the tree's supervisor,
+  which the app monitors, and on its exit it subscribes again once the tree is back and
+  re-reads; nothing claims to keep a subscription across a restart of the whole tree (F-176).
 
 Built so far (F-169, B3's start): `CodingAgentFramework.child_spec/1` and `start_link/1` in
 `caf_surface`, from one `CodingAgentFramework.Config` checked whole by `Config.new/1` (a key
@@ -607,7 +615,10 @@ to wire, `Ends` included, since an app that left it out would keep an ended owne
 (F-169's new-1). `caf_example` keeps its config file, its console and `Run`. F-174 built the
 cues: `subscribe/2`, `unsubscribe/2` and `topics/1`, the instance found by its name in its own
 `Registry` (the tree's `:names` child, after the reaper), the subscriptions held by `Cues` in a
-table the tree's supervisor owns, and a topic no part declares refused. The calls are B3's rest.
+table the tree's supervisor owns, and a topic no part declares refused. F-176 made every
+written topic subscribable (`writes/0`, the cue table in `subscribe/2`'s doc), named the tree
+in `subscribe/2`'s answer, listed the operator's own tools to the operator alone, and removed
+`run`. The calls are B3's rest.
 The config answers the room the home leaves for an agent's and a service's name (`Config.name_room/1`, F-172), and the tree hands it to `Delegates`, `Mains` and
 `Services`, which refuse a longer name `{:bad, :name, {:longer_than, n}}` before any row;
 sockets stay in the home.
@@ -669,7 +680,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `ToolHome` | where every tool the framework runs keeps its state, in the home (F-155): the environment every launch, job and service sets (`GH_CONFIG_DIR`, `GIT_CONFIG_GLOBAL` with `GIT_CONFIG_NOSYSTEM`, the four `XDG_*_HOME`, `GIT_SSH_COMMAND`), the options every ssh to a host takes (`-F <home>/ssh/config -o UserKnownHostsFile=<home>/ssh/known_hosts`), and the git config it writes at the app's start: the author it is given, SSH signing with the home's own key, `gh` as GitHub's credential helper, and each project's override for every repository under its checkout. A pure module | — |
 | `Store` | a pure module over SQLite: open with WAL and a busy timeout, the schema and its added columns, `query`, `rows_by_id`, `update`, upsert, a reads row, and a load that fills a newer build's fields with their defaults; every table of the framework is opened through it. A term in a column is stored by one rule (`Store.text/1`): an atom as its name, any other term as canonical JSON, never `inspect` text; a writer converts what an earlier build stored when it opens its file (`Store.convert/3`) | no table |
 | `Reader` | a pure module beside `Store`: the loop every reader runs (read on an interval or a call, diff against what it wrote, write with a reads row, cue), and a `Tracker` source made from the reader's table metadata | no table; each reader its own |
-| `Cues` | one per instance: each part declares the topics it reads, and `Cues` hands each cue to the `Tracker`, to every part that declared its topic, and to each of the app's processes that subscribed to it (`subscribe/2`, by a plain send, monitored); the order in which the system settles is the library's, not the app's | no table |
+| `Cues` | one per instance: each part declares the topics it reads and the ones it writes, and `Cues` hands each cue to the `Tracker`, to every part that declared its topic, and to each of the app's processes that subscribed to it (`subscribe/2`, by a plain send, monitored); the order in which the system settles is the library's, not the app's | no table |
 | `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` | — |
 | `Usage` | each account's allowance, its weekly and five-hour windows, from what Claude Code hands its status line; picks the account with the most left ("Allowance"); `Usage.Allowance` answers whether both windows have room, for the `Scheduler`; a `Reader` | its readings |
 | `Tmux` | sessions, panes, tags, keys and viewers on one server, and the one-command check of every write to a pane; a contract with a CLI (its fake is a test aid) | — |
@@ -703,9 +714,13 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 
 **The order in which the system settles** (R11, F-131) is what each part reads. Each part that
 settles on another's rows declares it as data, its `reads/0`: the topics (a cue's first word,
-or a pattern of words with `*` for any one) and its own `cue/2`. The embedding app hands the
-declarations to `Cues`, and names each part's process to it as it starts; no part uses
-`caf_cues`. A cue of each topic reaches:
+or a pattern of words with `*` for any one) and its own `cue/2`. Each part that cues declares
+what it writes the same way, its `writes/0`: each topic's whole shape, `*` for each word it
+fills in (`acts:*:*`), F-176. The embedding app hands the declarations to `Cues`, and names
+each part's process to it as it starts; no part uses `caf_cues`. What an app may subscribe to
+is the union of the two. In the framework's own tests (`undeclared_cues: :raise`) a cue on a
+topic no part declares it writes raises in the part that wrote it, so a part's undeclared
+write fails its tests; an app's default routes it as any other. A cue of each topic reaches:
 
 | Topic | Sent by | Reaches, beside the `Tracker` (which reads every topic) |
 |---|---|---|
@@ -744,10 +759,10 @@ wires that the parts do not offer (F-102's findings): it hands `Mains` its proje
 naming its repository (`origin`), and the main sessions it declares, which `Mains` writes as
 agent rows of kind `main` with no parent, so a main session can start its first delegate, and
 the projects' `repo` is their checkout (F-141); `Delegates` launches each delegate with its own MCP config, from a
-function of the agent's name the app gives it (`MCP.issue/2`); a job's late end goes to its
-caller through `Mailbox` as a message from `framework`, once per job, the caller read from
-`MCP`'s call log by the job's id (from the file: `Jobs` hands the ends it owes as it starts,
-before `MCP`); and when a delegate's end is seen, `Services.owner_ended/3` runs on the cue of
+function of the agent's name the app gives it (`MCP.issue/2`); a job's late end is kept in its
+job's row, which `Jobs` marks told and cues on `jobs`, for the app that ran the job to read (no
+agent's tool runs a job since F-176: an agent's heavy command is its own `Bash` under a lease,
+and a landing is the app's `Jobs.run/6`); and when a delegate's end is seen, `Services.owner_ended/3` runs on the cue of
 the agent row's end. `Stream` and `Transcripts` are read on an interval, as `Registry` is, so a
 delegate's `result` is read without waiting for another cue; that interval is the `Reader`'s
 (R2). A delegate ended after its report (by `stop`) is `ended` on its agent row, so the cue
@@ -867,8 +882,10 @@ any reply does (new-4).
     gates, a builder's suite, or a heavy run (the default); its row, written `asked` first, is
     the holder. A landing's job asks for every resource the landing needs in one request, the
     app's declaration: in the example a heavy slot and its project's landing lock
-    (`land:<project>`, capacity one), so it is one gang lease. An agent names the class in the
-    `run` tool. A refused job's row says why and when to retry, under a new job id.
+    (`land:<project>`, capacity one), so it is one gang lease. The app names the class in its
+    `Jobs.run/6` (`CodingAgentFramework.job_units/3`); an agent's heavy command takes its class
+    from the app's list of heavy commands (F-171). A refused job's row says why and when to
+    retry, under a new job id.
   - **Accounts.** Holding several Claude accounts and moving work between them is allowed
     (decided), so the account is a resource with several entries; a start's account is
     chosen when it is admitted, and `Mover` moves a session later.
@@ -925,22 +942,22 @@ its host, as it has since the first part built, so the workstation is one host a
   in the copy; the fetch begins only once the job's socket reads dead, after that end. A kill of
   the group from outside ends the wrapper and the job together, and no group outlives a wrapper
   that was killed (F-76);
-- a job can bring files back: `run`'s `fetch: [paths]` names paths that rsync copies from the
+- a job can bring files back: `Jobs.run/6`'s `fetch: [paths]` names paths that rsync copies from the
   host's copy into the worktree after the job ends. Nothing comes back unless named, and nothing
   is written over blind: the sync records each named path's size, time and hash, and the fetch
   writes a path only while the worktree's file is still what the sync sent; it answers the
   others as a conflict and leaves the copy's version on the host. Each path comes in under a
   temporary name, is compared after that write and before its rename into place, so the only
   window left for an edit to be lost is between that compare and the rename;
-- `run` answers `{:ok, %{exit: code, log: tail, fetch: :done | :none | {:conflict, paths} |
+- `Jobs.run/6` answers `{:ok, %{exit: code, log: tail, fetch: :done | :none | {:conflict, paths} |
   {:unknown, reason}}}`; `{:unknown, {:timeout, %{fetch: f}}}` once the host ended the job at
   its timeout, with the fetch's outcome; `{:unknown, :dropped}` at the call's deadline with the connection
   down; `{:unknown, :no_exit}` for a dead socket with no exit file; `{:refused, {:sync,
-  reason}}` for a cut sync, when nothing ran. An unknown answer names the job, and once the
-  job's end is read it arrives to the caller as a message, as a delegate's report does after
-  `run_delegate`'s timeout, saying that nothing was fetched; a later `run` fetches nothing for
-  an earlier job. A late end is handed to the embedding app at least once, never lost: a
-  repeat after a crash carries the same job id, so the receiver drops it. A job a restart left
+  reason}}` for a cut sync, when nothing ran. Once an unknown job's end is read it is handed to
+  the embedding app (`on_late_end`), saying that nothing was fetched; a later run fetches
+  nothing for an earlier job. The tree keeps it in the job's row, marked told and cued on
+  `jobs`, for the app that ran the job to read (F-176). A late end is handed on at least once,
+  never lost: a repeat after a crash carries the same job id, so the receiver drops it. A job a restart left
   before anything was sent to the host is handed on once as interrupted, never retried. A
   job's row keeps its worktree's path, so a fetch a restart cut leaves no temporary folder past
   the next start (F-78);
@@ -2922,7 +2939,7 @@ model before the code it describes (B4, B6, B8, B9, B11); B2 and B3 change no be
 - **B5. The seven verbs**: `Team.operate/4` and the MCP endpoint serve `delegate`, `message`,
   `ask`, `look`, `steer`, `wait_for` (answering `refused{not_built}` until B9) and `serve` over
   today's mechanisms; `end_main` and a main session's move and resume go to the app's surface;
-  `reload` stays hidden until F-162's new-2 is measured; `run` stays until F-157's wrapper.
+  `reload` stays hidden until F-162's new-2 is measured; `run` is gone (F-176).
   About +600, −700, most of it tool schemas and their tests.
 - **B6. `Prompts`**, against `Prompt.tla`: the `prompts` table, `open/2`, `answer/3`, `read/2`
   and the `prompts` cue; an ask, a held permission request (a subagent's included) and a startup
@@ -2941,8 +2958,8 @@ model before the code it describes (B4, B6, B8, B9, B11); B2 and B3 change no be
   by facts; a job's end, a service's line, port and exit, a delegate's idle and report, an
   answer. `service_wait`'s poll becomes a fact `Hosts` records. About +400, −150.
 - **F-157**, as decided: the heavy `Bash` command rewritten into a wrapper under a lease; then
-  `run` leaves the agents' list (about −200). Built in F-171 ("Intercepted, not added"); `run`
-  is listed to no agent and stays served until its late end goes with it (F-171's new-3).
+  `run` leaves the agents' list (about −200). Built in F-171 ("Intercepted, not added"); `run`,
+  its late end and `MCP.caller/3` removed in F-176 (F-171's new-3).
 - **B10. The intercepts**: `AskUserQuestion` opened as a prompt where no person attends; the
   `Agent` tool's named types answered with the `delegate` call to make; the `unenforced` fact
   and the `stuck` event raised from the hooks' rows and told to the parent. About +300.

@@ -22,16 +22,22 @@ defmodule CodingAgentFramework.Cues do
       Cues.cue(cues, %{topic: "registry:laptop:work", ids: [3]})
       #=> :ok
 
-  A part's `notify:` is then `&Cues.cue(cues, &1)`. Nothing here keeps a cue: a cue is a hint
-  to read rows again, never the data.
+  A part's `notify:` is then `&Cues.cue(cues, &1)`, or `notify/3`'s. Nothing here keeps a cue:
+  a cue is a hint to read rows again, never the data.
+
+  **What a part writes** is data too (its `writes/0`): the topics of the cues it sends, each
+  as its whole shape, `*` for each word the part fills in (`"acts:*:*"` for
+  `"acts:<host>:<instance>"`). `writes:` names them by part. They are what an app may subscribe
+  to beside what the parts read (`topics/2`), and what `notify/3` checks a cue against.
 
   **The app's subscribers.** A process outside the parts, the app's own (a view, a sync of its
   own rows), gets the cues of the topics it names with `subscribe/3`: each as a message
   `{:caf_cue, cue}`, by a plain `send`, after the parts got theirs. A subscriber may name only
-  topics the parts declare (`topics/1`), as patterns of the same shape. It is monitored and
+  topics the parts declare (`topics/2`), as patterns of the same shape. It is monitored and
   removed when it exits. The subscriptions are rows in an ETS table its starter may own
   (`subscriptions:`), so a `Cues` a restart replaced re-adopts them, and a subscriber that
-  exited meanwhile is removed then.
+  exited meanwhile is removed then. They are never kept anywhere else: when the table's owner
+  ends, they end with it, and `Cues` claims none of them after.
 
       {:ok, ref} = Cues.subscribe(cues, self(), ["sessions"])
       Cues.cue(cues, %{topic: "sessions:ws", ids: [4]})
@@ -48,7 +54,7 @@ defmodule CodingAgentFramework.Cues do
 
   @doc """
   Starts it. Options: `parts:`, a keyword list (or map) of each part's key to its declaration;
-  `subscriptions:`, a public ETS set its starter owns, which keeps the subscriptions across a
+  `writes:`, each part's key to the topics it writes (none by default); `subscriptions:`, a public ETS set its starter owns, which keeps the subscriptions across a
   restart of `Cues` (without it, one of its own); and `registry: {name, key}`, a `Registry` it
   registers itself in under `key`, so the app finds it by its instance's name.
   """
@@ -73,7 +79,7 @@ defmodule CodingAgentFramework.Cues do
   `pid` exits or `unsubscribe/2`. Each topic is a pattern as a declaration's are, so
   `"sessions"` matches `"sessions:ws"`; a trailing `:` is the same as none. Answers `{:ok,
   ref}`, `{:refused, {:bad, :topics}}` when `topics` is not a list of such patterns, or
-  `{:refused, {:undeclared, topic}}` for the first topic no part declares (`topics/1`), or
+  `{:refused, {:undeclared, topic}}` for the first topic no part declares (`topics/2`), or
   `{:unknown, reason}` when `Cues` did not answer.
   """
   @spec subscribe(GenServer.server(), pid, [String.t()]) ::
@@ -98,42 +104,101 @@ defmodule CodingAgentFramework.Cues do
   end
 
   @doc ~S"""
-  The topics the parts declare, each once and in order: the patterns an app may subscribe to.
-  A part that reads every topic (`:all`) adds none.
+  A part's `notify:`: each cue goes to the `Cues` that `find` answers at that moment (nil when
+  none runs, and the cue goes nowhere). `undeclared` says what becomes of a cue whose topic
+  no part declares it writes (`written?/2`): `:route` (the default) hands it on as any other;
+  `:raise`, which the framework's own tests set, refuses it by raising in the process that
+  wrote it, so a part that writes a topic it never declared fails its tests.
+
+      iex> notify = CodingAgentFramework.Cues.notify(fn -> nil end, [a: ["acts:*:*"]], :raise)
+      iex> notify.(%{topic: "acts:ws:a", ids: [1]})
+      :ok
+      iex> notify.(%{topic: "acts:ws", ids: [1]})
+      ** (ArgumentError) a cue on "acts:ws", a topic no part declares it writes
+  """
+  @spec notify((-> GenServer.server() | nil), Enumerable.t(), :route | :raise) :: (term -> :ok)
+  def notify(find, writes, undeclared \\ :route) when undeclared in [:route, :raise] do
+    shapes = shapes(writes)
+
+    fn
+      %{topic: topic} = cue when undeclared == :raise and is_binary(topic) ->
+        if written?(shapes, topic),
+          do: cue(find.(), cue),
+          else:
+            raise(ArgumentError, "a cue on #{inspect(topic)}, a topic no part declares it writes")
+
+      cue ->
+        cue(find.(), cue)
+    end
+  end
+
+  @doc ~S"""
+  Whether a part declares it writes `topic`: one of `writes`' shapes has its number of words,
+  each the same word or `*`. `writes` is each part's key to its shapes, or the shapes alone.
+
+      iex> CodingAgentFramework.Cues.written?([a: ["acts:*:*"], b: ["jobs"]], "acts:ws:a")
+      true
+      iex> CodingAgentFramework.Cues.written?(["acts:*:*", "jobs"], "acts:ws")
+      false
+  """
+  @spec written?(Enumerable.t(), String.t()) :: boolean
+  def written?(writes, topic) when is_binary(topic) do
+    words = String.split(topic, ":")
+
+    Enum.any?(shapes(writes), fn shape ->
+      shape = String.split(shape, ":")
+      length(shape) == length(words) and words?(shape, words)
+    end)
+  end
+
+  defp shapes(writes),
+    do:
+      Enum.flat_map(writes, fn
+        {_key, s} -> s
+        s -> [s]
+      end)
+
+  @doc ~S"""
+  The topics the parts declare, each once and in order: the patterns an app may subscribe to,
+  what the parts read and what they write. A part that reads every topic (`:all`) adds none.
 
       iex> parts = [a: %{topics: ["stream", "intake:*:*:waiters"], cue: nil},
       ...>          b: %{topics: :all, cue: nil}, c: %{topics: ["stream", "registry"], cue: nil}]
-      iex> CodingAgentFramework.Cues.topics(parts)
-      ["intake:*:*:waiters", "registry", "stream"]
+      iex> CodingAgentFramework.Cues.topics(parts, d: ["acts:*:*"], e: ["stream:*"])
+      ["acts:*:*", "intake:*:*:waiters", "registry", "stream", "stream:*"]
   """
-  @spec topics(Enumerable.t()) :: [String.t()]
-  def topics(parts) do
+  @spec topics(Enumerable.t(), Enumerable.t()) :: [String.t()]
+  def topics(parts, writes \\ []) do
     parts
     |> Enum.flat_map(fn {_key, %{topics: t}} -> if t == :all, do: [], else: t end)
+    |> Enum.concat(shapes(writes))
     |> Enum.uniq()
     |> Enum.sort()
   end
 
   @doc ~S"""
-  `topics` checked against the parts' declarations, each with its trailing `:` cut: a topic is
-  declared when a declared pattern matches it.
+  `topics` checked against the `declared` ones (`topics/2`), each with its trailing `:` cut. A
+  topic is declared when a declared pattern matches it (as a part's read does), or when it
+  begins a declared pattern (as a shape a part writes is begun), `*` in the pattern standing
+  for any word. So `"acts"`, `"acts:ws"` and `"acts:ws:a"` are declared by `"acts:*:*"`, and
+  `"*"` by no pattern but `"*"`.
 
-      iex> parts = [a: %{topics: ["sessions", "intake:*:*:waiters"], cue: nil}]
-      iex> CodingAgentFramework.Cues.check(parts, ["sessions:", "intake:ws:work:waiters"])
+      iex> declared = ["acts:*:*", "intake:*:*:waiters", "sessions"]
+      iex> CodingAgentFramework.Cues.check(declared, ["sessions:", "intake:ws:work:waiters"])
       {:ok, ["sessions", "intake:ws:work:waiters"]}
-      iex> CodingAgentFramework.Cues.check(parts, ["acts"])
-      {:refused, {:undeclared, "acts"}}
-      iex> CodingAgentFramework.Cues.check(parts, [])
+      iex> CodingAgentFramework.Cues.check(declared, ["acts", "acts:ws:a"])
+      {:ok, ["acts", "acts:ws:a"]}
+      iex> CodingAgentFramework.Cues.check(declared, ["jobs"])
+      {:refused, {:undeclared, "jobs"}}
+      iex> CodingAgentFramework.Cues.check(declared, [])
       {:refused, {:bad, :topics}}
   """
-  @spec check(Enumerable.t(), term) :: {:ok, [String.t()]} | {:refused, term}
-  def check(parts, [_ | _] = topics) do
-    declared = topics(parts)
-
+  @spec check([String.t()], term) :: {:ok, [String.t()]} | {:refused, term}
+  def check(declared, [_ | _] = topics) do
     Enum.reduce_while(topics, {:ok, []}, fn topic, {:ok, acc} ->
       cond do
         not topic?(topic) -> {:halt, {:refused, {:bad, :topics}}}
-        reads?(declared, words(topic)) -> {:cont, {:ok, [cut(topic) | acc]}}
+        declared?(declared, words(topic)) -> {:cont, {:ok, [cut(topic) | acc]}}
         true -> {:halt, {:refused, {:undeclared, topic}}}
       end
     end)
@@ -143,7 +208,13 @@ defmodule CodingAgentFramework.Cues do
     end)
   end
 
-  def check(_parts, _topics), do: {:refused, {:bad, :topics}}
+  def check(_declared, _topics), do: {:refused, {:bad, :topics}}
+
+  # A pattern no longer than the topic is read as a prefix; a longer one, a shape a part writes,
+  # by as many of its words as the topic has.
+  defp declared?(declared, words) do
+    Enum.any?(declared, &words?(Enum.take(String.split(&1, ":"), length(words)), words))
+  end
 
   defp topic?(topic), do: is_binary(topic) and Enum.all?(words(topic), &(&1 != ""))
   defp words(topic), do: String.split(cut(topic), ":")
@@ -178,6 +249,7 @@ defmodule CodingAgentFramework.Cues do
   @impl true
   def init(opts) do
     parts = Keyword.fetch!(opts, :parts) |> Enum.to_list()
+    declared = topics(parts, Keyword.get(opts, :writes, []))
     subs = Keyword.get_lazy(opts, :subscriptions, fn -> :ets.new(__MODULE__, [:set]) end)
 
     with {name, key} <- Keyword.get(opts, :registry),
@@ -190,12 +262,12 @@ defmodule CodingAgentFramework.Cues do
           into: %{},
           do: {Process.monitor(pid), ref}
 
-    {:ok, %{parts: parts, pids: %{}, subs: subs, watched: watched}}
+    {:ok, %{parts: parts, declared: declared, pids: %{}, subs: subs, watched: watched}}
   end
 
   @impl true
   def handle_call({:subscribe, pid, topics}, _from, s) do
-    case check(s.parts, topics) do
+    case check(s.declared, topics) do
       {:ok, topics} ->
         ref = make_ref()
         true = :ets.insert(s.subs, {ref, pid, topics})
@@ -227,10 +299,12 @@ defmodule CodingAgentFramework.Cues do
     for key <- routes(s.parts, topic), pid = s.pids[key], do: hand(s, key, pid, cue)
     words = String.split(topic, ":")
 
-    # A plain send: a subscriber that is slow, or gone, costs this nothing.
+    # A plain send: a subscriber that is slow, or gone, costs this nothing. The fold keeps `:ok`
+    # whatever `send` answers (the message), so the next subscriber is reached too.
     :ets.foldl(
       fn {_ref, pid, topics}, :ok ->
-        if reads?(topics, words), do: send(pid, {:caf_cue, cue}), else: :ok
+        if reads?(topics, words), do: send(pid, {:caf_cue, cue})
+        :ok
       end,
       :ok,
       s.subs

@@ -103,6 +103,13 @@ defmodule CodingAgentFramework.Mains do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc """
+  The topics of the cues it writes, each as its whole shape, `*` for a word it fills in
+  (`CodingAgentFramework.Cues`): `mains:<host>`.
+  """
+  @spec writes() :: [String.t()]
+  def writes, do: ~w(mains:*)
+
+  @doc """
   Project `name` as `Sessions` and `Delegates` read it: `data` with its `name`, its `dir` (the
   checkout's directory: `data`'s `dir:`, by default the repository's name,
   `Checkout.dir_name/1`, F-156) and its `repo`, the checkout under `home`.

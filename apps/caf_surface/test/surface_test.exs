@@ -44,7 +44,8 @@ defmodule CodingAgentFramework.SurfaceTest do
         claude: HeadlessStandIn.write!(dir, :on_message),
         env: %{home: dir, path: "/nonexistent", term: "xterm-256color", lang: "C.UTF-8"},
         user: "tester",
-        interval: 200
+        interval: 200,
+        undeclared_cues: :raise
       )
 
     # A new home: no account has a reading, and a start still picks one (F-147).
@@ -152,47 +153,33 @@ defmodule CodingAgentFramework.SurfaceTest do
              MCP.call(parts.mcp, "app-main", "start_delegate", args("unit/three"))
   end
 
-  test "a job's late end goes to its caller as a message from framework, once", ctx do
-    # A stand-in job: its call answered `{:unknown, :dropped}`, as `MCP`'s log keeps it, and
-    # `Jobs` owes its end, read since. A start hands it on before `MCP` has started.
-    for d <- ~w(mcp jobs), do: File.mkdir_p!(Path.join(ctx.home, "parts/#{d}"))
-    {:ok, log} = MCP.Table.open(Path.join(ctx.home, "parts/mcp/mcp.db"))
-    id = MCP.Table.called(log, "app-main", "run", "{}")
-    dropped = MCP.json({:unknown, %{job: "mcp-t-#{id}", reason: :dropped}})
-    :ok = MCP.Table.answered(log, id, JSON.encode!(dropped))
+  # An app's landing runs through `Jobs` itself (F-171's new-3): no agent's tool runs a job.
+  test "a job's late end is kept in its row, told, and cued on jobs", ctx do
+    start(ctx.config)
+    {:ok, %{ref: _}} = CodingAgentFramework.subscribe("t", ["jobs"])
     {:ok, jobs} = Jobs.Table.open(Path.join(ctx.home, "parts/jobs/jobs.db"))
-    row = %{id: "mcp-t-#{id}", host: "ws", project: "app", name: "app-main", state: "exited"}
+
+    # A job whose call answered `{:unknown, :dropped}`, its end read since: `Jobs` owes it, and
+    # on its interval hands it on, which the tree takes as stored in the row.
+    row = %{id: "land-1", host: "ws", project: "app", name: "app-land", state: "exited"}
     :ok = Jobs.Table.put(jobs, Map.merge(row, %{code: 3, late: "owed"}))
 
-    parts = start(ctx.config)
-    {:ok, messages} = Mailbox.Table.open(Path.join(ctx.home, "caf.db"))
+    assert_receive {:caf_cue, %{topic: "jobs", ids: ["land-1"]}}, 20_000
 
-    {:ok, m} =
-      await(fn ->
-        ok(Enum.find(Mailbox.Table.open_rows(messages), &(&1.from_agent == "framework")))
-      end)
-
-    assert %{to_agent: "app-main", reply_to: "key:job:mcp-t-" <> _, text: text} = m
-    assert text =~ "mcp-t-#{id}" and text =~ "{:exit, 3}" and text =~ "Nothing was fetched"
-    assert %{late: "told"} = Jobs.Table.get(jobs, "mcp-t-#{id}")
-
-    # A repeat of the same end, as a crash before `Jobs` marked it told would hand it on.
-    assert {:ok, :stored_before} =
-             Mailbox.notify(parts.mailbox, "app-main", text, key: "job:mcp-t-#{id}")
-
-    assert {:refused, {:unknown_agent, "nobody"}} = Mailbox.notify(parts.mailbox, "nobody", "x")
+    {:ok, _} =
+      await(fn -> ok(match?(%{code: 3, late: "told"}, Jobs.Table.get(jobs, "land-1")) || nil) end)
   end
 
-  test "a delegate's landing job takes its slot and its project's lock in one lease", ctx do
-    File.write!(Path.join(ctx.dir, "hold"), "")
+  test "an app's landing job takes its slot and its project's lock in one lease", ctx do
     parts = start(ctx.config)
-    {:ok, _} = MCP.call(parts.mcp, "app-main", "start_delegate", args("unit/one"))
-    {:ok, ddb} = Delegates.Table.open(Path.join(ctx.home, "caf.db"))
-    {:ok, _} = row(ddb, &(&1.status == "running"))
+    {:ok, units} = CodingAgentFramework.job_units(ctx.config, :landing, "app")
+    {:ok, %{path: checkout}} = Mains.checkout(parts.mains, "app")
+    where = %{host: "ws", project: "app", name: "app-land"}
+    lease = %{class: :landing, module: "app", units: units}
+    argv = [program!(:sh), "-c", "exit 0"]
 
-    run = %{"host" => "ws", "argv" => [program!(:sh), "-c", "exit 0"], "timeout" => 10_000}
-    landing = Map.put(run, "opts", %{"class" => "landing"})
-    assert {:ok, %{exit: 0}} = MCP.call(parts.mcp, "app-unit-one", "run", landing)
+    assert {:ok, %{exit: 0}} =
+             Jobs.run(parts.jobs, "land-2", where, checkout, argv, timeout: 10_000, lease: lease)
 
     # Schedule.tla: one lease of both, whose holder is the job's row, released by the monitor
     # once `Jobs` wrote the job's end.
@@ -204,7 +191,7 @@ defmodule CodingAgentFramework.SurfaceTest do
         end
       end)
 
-    assert %{units: %{"slot" => 1, "land:app" => 1}, holder: {"job", "mcp-t-" <> _}} = lease
+    assert %{units: %{"slot" => 1, "land:app" => 1}, holder: {"job", "land-2"}} = lease
   end
 
   test "a delegate's end ends its services, and hands a kept one to its parent", ctx do
@@ -445,49 +432,6 @@ defmodule CodingAgentFramework.SurfaceTest do
     {:ok, _} = await(fn -> ok("message #{u}" in HeadlessStandIn.taken(ctx.dir) || nil) end)
   end
 
-  test "a late end `Mailbox` did not answer is kept owed, then stored once", ctx do
-    parts = start(ctx.config)
-    {:ok, messages} = Mailbox.Table.open(Path.join(ctx.home, "caf.db"))
-    {:ok, log} = MCP.Table.open(Path.join(ctx.home, "parts/mcp/mcp.db"))
-    id = MCP.Table.called(log, "app-main", "run", "{}")
-    dropped = MCP.json({:unknown, %{job: "mcp-t-#{id}", reason: :dropped}})
-    :ok = MCP.Table.answered(log, id, JSON.encode!(dropped))
-    {:ok, jobs} = Jobs.Table.open(Path.join(ctx.home, "parts/jobs/jobs.db"))
-
-    # `Mailbox` does not answer: the first hand-on is unknown, and nothing raises or is stored.
-    :ok = :sys.suspend(parts.mailbox)
-    row = %{id: "mcp-t-#{id}", host: "ws", project: "app", name: "app-main", state: "exited"}
-    :ok = Jobs.Table.put(jobs, Map.merge(row, %{code: 3, late: "owed"}))
-
-    # On its own interval `Jobs` hands the end on: the call waits in the suspended `Mailbox`'s
-    # queue. Once `Jobs` is read again, it has had no answer.
-    {:ok, _} = await(fn -> ok(late_end_waiting(parts.mailbox)) end, 20_000)
-    :sys.get_state(parts.jobs, 60_000)
-    assert %{state: "exited", late: "owed"} = Jobs.Table.get(jobs, "mcp-t-#{id}")
-    assert Enum.filter(Mailbox.Table.open_rows(messages), &(&1.from_agent == "framework")) == []
-
-    :ok = :sys.resume(parts.mailbox)
-
-    {:ok, _} =
-      await(
-        fn ->
-          ok(Enum.find(Mailbox.Table.open_rows(messages), &(&1.from_agent == "framework")))
-        end,
-        20_000
-      )
-
-    {:ok, _} =
-      await(
-        fn -> if match?(%{late: "told"}, Jobs.Table.get(jobs, "mcp-t-#{id}")), do: {:ok, 1} end,
-        20_000
-      )
-
-    assert Process.alive?(parts.jobs)
-
-    assert [_one] =
-             Enum.filter(Mailbox.Table.open_rows(messages), &(&1.from_agent == "framework"))
-  end
-
   test "the app's PreToolUse callback denies or corrects a call through the account's hook",
        ctx do
     deny = fn
@@ -672,10 +616,12 @@ defmodule CodingAgentFramework.SurfaceTest do
              Operator.start_main(parts.mcp, "app", "app-main", "Go.")
   end
 
-  # The parts the app wires and the topics each one cues on, as the parts write them.
-  @topics ~w(registry:ws:work stream:ws tmux:ws:caf sessions:ws transcripts:ws:work
-             delegates:ws mailbox intake:ws:work intake:ws:work:waiters acts:ws:t usage:ws:work
-             jobs services scheduler:ws mains:ws)
+  # The topics the parts write, as they declare them, each word they fill in as `x`.
+  defp written do
+    for {_key, shapes} <- CodingAgentFramework.writes(),
+        shape <- shapes,
+        do: String.replace(shape, "*", "x")
+  end
 
   # What each part must be handed to settle (`docs/design.md`, "The parts"): beside the
   # `Tracker`, which reads every topic.
@@ -702,7 +648,15 @@ defmodule CodingAgentFramework.SurfaceTest do
 
     for {key, pid} <- stand_ins, do: Cues.started(cues, key, pid)
 
-    for topic <- @topics do
+    # Each topic a part reads, some part writes.
+    for {key, %{topics: patterns}} <- CodingAgentFramework.reads(),
+        patterns != :all,
+        pattern <- patterns do
+      reader = [{key, %{topics: [pattern], cue: nil}}]
+      assert Enum.any?(written(), &(Cues.routes(reader, &1) == [key])), pattern
+    end
+
+    for topic <- written() do
       Cues.cue(cues, %{topic: topic, ids: []})
       # Once Cues has handled the cue, each stand-in has it in its queue, before the ask.
       :sys.get_state(cues)
@@ -730,13 +684,6 @@ defmodule CodingAgentFramework.SurfaceTest do
     send(pid, {:kept, self()})
     assert_receive {:kept, ^pid, kept}
     kept
-  end
-
-  # A late end's `notify` call, waiting in the suspended mailbox's queue.
-  defp late_end_waiting(mailbox) do
-    {:messages, messages} = Process.info(mailbox, :messages)
-
-    Enum.find(messages, &match?({:"$gen_call", _, {:notify, _, _, "job:" <> _, _}}, &1))
   end
 
   # Kills the delegate's current process, once the stand-in has taken `n` messages.

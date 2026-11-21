@@ -64,6 +64,13 @@ defmodule CodingAgentFramework.Acts do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc """
+  The topics of the cues it writes, each as its whole shape, `*` for a word it fills in
+  (`CodingAgentFramework.Cues`): `acts:<host>:<instance>`.
+  """
+  @spec writes() :: [String.t()]
+  def writes, do: ~w(acts:*:*)
+
+  @doc """
   Claims `target` in `state` for `act` by `actor`: writes its row `claimed` before the act.
   Refused `{:claimed, by}` while another claim of that state is open, and `{:already_claimed,
   by}` once one has ended, whatever its end. A `skipped` row of the state is taken over.

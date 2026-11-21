@@ -1,16 +1,16 @@
 defmodule CodingAgentFramework.MCPTest do
   # No Claude Code: the test is the MCP client, speaking JSON-RPC to the endpoint with a token,
   # as an agent's `http` server entry would. The mailbox is a stand-in that tells the test what
-  # reached it. `run` reaches a real `Jobs` whose one host is this workstation.
+  # reached it.
   use ExUnit.Case, async: true
 
   doctest CodingAgentFramework.MCP.Table
   doctest CodingAgentFramework.MCP.Plug
   doctest CodingAgentFramework.MCP, only: [extensions: 3]
 
-  import CodingAgentFramework.TestHost, only: [test_dir: 0, program!: 1, programs: 0]
+  import CodingAgentFramework.TestHost, only: [test_dir: 0]
 
-  alias CodingAgentFramework.{Acts, Copies, Grants, Jobs, MCP, Operator}
+  alias CodingAgentFramework.{Acts, Grants, MCP, Operator}
 
   defmodule StandIn do
     @moduledoc false
@@ -81,16 +81,6 @@ defmodule CodingAgentFramework.MCPTest do
     def send_resp(_payload, _status, _headers, _body), do: raise(ArgumentError, "closed")
   end
 
-  defmodule UnknownJobs do
-    @moduledoc false
-    # A `Jobs` whose `run` is unknown, as it is when its owner drops or the exit is not read.
-    def run(test, job, _where, _worktree, _argv, opts) do
-      send(test, {:run, job, opts[:timeout]})
-      send(test, {:lease, job, opts[:lease]})
-      {:unknown, :dropped}
-    end
-  end
-
   setup do
     tree = fn ->
       [
@@ -101,19 +91,7 @@ defmodule CodingAgentFramework.MCPTest do
     end
 
     dir = test_dir()
-    wt = Path.join(dir, "wt")
-    File.mkdir_p!(wt)
-    git = [{"GIT_CONFIG_GLOBAL", "/dev/null"}, {"GIT_CONFIG_NOSYSTEM", "1"}]
-    {_, 0} = System.cmd(program!(:git), ["-C", wt, "init", "-q"], env: git)
-    copies = start_supervised!({Copies, dir: Path.join(dir, "copies"), programs: programs()})
-    hosts = %{"ws" => %{programs: programs(), dir: Path.join(dir, "ws")}}
-
-    jobs =
-      start_supervised!(
-        {Jobs, dir: Path.join(dir, "jobs"), copies: copies, hosts: hosts, on_late_end: & &1}
-      )
-
-    place = fn agent -> {:ok, %{project: "app", name: agent, worktree: wt}} end
+    place = fn agent -> {:ok, %{project: "app", name: agent, worktree: dir}} end
 
     mcp =
       start_supervised!(
@@ -126,22 +104,17 @@ defmodule CodingAgentFramework.MCPTest do
          delegates: {StandIn, self()},
          services: {StandIn, self()},
          workstation: "ws",
-         jobs: {Jobs, jobs},
          tracker: {StandIn, self()},
          stream: {StandIn, self()},
          transcripts: nil,
          place: place,
-         instance: "one",
          tool_timeout: 600_000,
          margin: 60_000}
       )
 
     tokens = for a <- ~w(app-main app-fix stray), into: %{}, do: {a, token(mcp, a)}
-    %{mcp: mcp, tokens: tokens, jobs: jobs, wt: wt}
+    %{mcp: mcp, tokens: tokens}
   end
-
-  # The stand-in job: it writes a file in the copy, prints a line and exits 3.
-  defp job, do: [program!(:bash), "-c", "echo made > out.txt; echo ran; exit 3"]
 
   defp token(mcp, agent) do
     {:ok, path} = MCP.issue(mcp, agent)
@@ -198,7 +171,7 @@ defmodule CodingAgentFramework.MCPTest do
              ~w(message start_delegate run_delegate start_main) ++
                ~w(service_start services service_logs service_send service_wait) ++
                ~w(service_restart service_stop service_hand agents look transcript) ++
-               ~w(interrupt answer resume stop move answer_startup end_main ask withdraw reload)
+               ~w(interrupt answer resume stop move ask reload)
   end
 
   test "a call is the agent's whose token it carries, whatever its arguments say",
@@ -260,51 +233,6 @@ defmodule CodingAgentFramework.MCPTest do
     end
   end
 
-  test "run is the caller's job, named for the call, and answers as Jobs does",
-       %{mcp: mcp, tokens: t, jobs: jobs, wt: wt} do
-    args = %{
-      "host" => "ws",
-      "argv" => job(),
-      "timeout" => 20_000,
-      "opts" => %{"fetch" => ["out.txt"]}
-    }
-
-    answer = tool(mcp, t["app-fix"], "run", Map.put(args, "from", "app-main"))
-    assert answer == %{"ok" => %{"exit" => 3, "log" => "ran\n", "fetch" => "done"}}
-    assert File.read!(Path.join(wt, "out.txt")) == "made\n"
-
-    assert [%{id: id, agent: "app-fix", tool: "run", state: "answered"}] = MCP.calls(mcp)
-    assert [%{id: job, name: "app-fix", host: "ws"}] = Jobs.rows(jobs)
-    assert job == "mcp-one-#{id}"
-
-    where = %{host: "ws", project: "app", name: "app-fix"}
-    direct = Jobs.run(jobs, "direct", where, wt, job(), timeout: 20_000, fetch: ["out.txt"])
-    assert MCP.json(direct) == answer
-  end
-
-  test "run is refused off the tree, and its timeout is capped at a day",
-       %{mcp: mcp, tokens: t, jobs: jobs} do
-    args = %{"host" => "ws", "argv" => job(), "timeout" => 20_000}
-    assert tool(mcp, t["stray"], "run", args) == %{"refused" => ["unknown_agent", "stray"]}
-
-    for timeout <- [86_400_001, 0, "1000", nil] do
-      bad = Map.put(args, "timeout", timeout)
-      assert tool(mcp, t["app-fix"], "run", bad) == %{"refused" => ["bad", "args"]}
-    end
-
-    bad = Map.put(args, "opts", %{"fetch" => "out.txt"})
-    assert tool(mcp, t["app-fix"], "run", bad) == %{"refused" => ["bad", "args"]}
-    assert Jobs.rows(jobs) == []
-    assert length(MCP.calls(mcp)) == 6
-  end
-
-  # An MCP over a `Jobs` stand-in whose `run` is always unknown.
-  defp unknown_mcp(name, extra) do
-    mcp = start_supervised!({MCP, mcp_opts(name) ++ extra}, id: name)
-    {:ok, _} = MCP.issue(mcp, "app-fix")
-    mcp
-  end
-
   defp mcp_opts(name) do
     tree = fn ->
       [
@@ -324,72 +252,13 @@ defmodule CodingAgentFramework.MCPTest do
       delegates: {StandIn, self()},
       services: {StandIn, self()},
       workstation: "ws",
-      jobs: {UnknownJobs, self()},
       tracker: {StandIn, self()},
       stream: {StandIn, self()},
       transcripts: nil,
       place: place,
-      instance: name,
       tool_timeout: 600_000,
       margin: 60_000
     ]
-  end
-
-  defp run_call(mcp, timeout) do
-    MCP.call(mcp, "app-fix", "run", %{"host" => "ws", "argv" => ["x"], "timeout" => timeout})
-  end
-
-  test "an unknown run answer names its job, in the JSON too" do
-    mcp = unknown_mcp("u", [])
-    assert run_call(mcp, 1000) == {:unknown, %{job: "mcp-u-1", reason: :dropped}}
-    assert_received {:run, "mcp-u-1", 1000}
-
-    assert MCP.json(run_call(mcp, 1000)) ==
-             %{"unknown" => %{"job" => "mcp-u-2", "reason" => "dropped"}}
-
-    assert [%{outcome: ~s({"unknown":{"job":"mcp-u-1","reason":"dropped"}})} | _] =
-             MCP.calls(mcp)
-  end
-
-  test "a run's class names its lease, with the units the app's function gives, in one request" do
-    units = fn
-      :landing, project -> {:ok, %{"slot" => 1, ("land:" <> project) => 1}}
-      _class, _project -> {:ok, %{"slot" => 1}}
-    end
-
-    mcp = unknown_mcp("lease", lease: units)
-    args = %{"host" => "ws", "argv" => ["x"], "timeout" => 1000}
-    {:unknown, _} = MCP.call(mcp, "app-fix", "run", args)
-
-    assert_received {:lease, "mcp-lease-1",
-                     %{class: :heavy, module: "app", units: %{"slot" => 1}}}
-
-    {:unknown, _} =
-      MCP.call(mcp, "app-fix", "run", Map.put(args, "opts", %{"class" => "landing"}))
-
-    landing = %{"slot" => 1, "land:app" => 1}
-    assert_received {:lease, "mcp-lease-2", %{class: :landing, module: "app", units: ^landing}}
-
-    assert {:refused, {:bad, :class}} =
-             MCP.call(mcp, "app-fix", "run", Map.put(args, "opts", %{"class" => "main"}))
-
-    # With no `lease` function a run names no lease.
-    {:unknown, _} = run_call(unknown_mcp("plain", []), 1000)
-    assert_received {:lease, "mcp-plain-1", nil}
-  end
-
-  test "the cap is an option, a day by default, and the job id names the instance" do
-    short = unknown_mcp("short", cap: 5_000)
-    long = unknown_mcp("long", [])
-
-    assert run_call(short, 5_001) == {:refused, {:bad, :args}}
-    assert {:unknown, _} = run_call(short, 5_000)
-    assert {:unknown, _} = run_call(long, 86_400_000)
-    assert run_call(long, 86_400_001) == {:refused, {:bad, :args}}
-
-    # A refused call has an id too, so the short one's run is its second call.
-    assert_received {:run, "mcp-short-2", 5_000}
-    assert_received {:run, "mcp-long-1", 86_400_000}
   end
 
   defp run_delegate(timeout) do
@@ -422,6 +291,16 @@ defmodule CodingAgentFramework.MCPTest do
       assert {:error, {{:bad, :tool_timeout}, _}} =
                start_supervised({MCP, Keyword.merge(mcp_opts(name), opts)}, id: name)
     end
+  end
+
+  test "a call's timeout is at most the cap, an option" do
+    short = start_supervised!({MCP, mcp_opts("short") ++ [cap: 5_000]}, id: "short")
+
+    assert MCP.call(short, "app-main", "run_delegate", run_delegate(5_001)) ==
+             {:refused, {:bad, :args}}
+
+    assert {:ok, %{report: "done"}} =
+             MCP.call(short, "app-main", "run_delegate", run_delegate(5_000))
   end
 
   test "a report written to the agent is delivered; one whose write fails is due again",
@@ -539,6 +418,11 @@ defmodule CodingAgentFramework.MCPTest do
     assert {:ok, {:queued, 13}} = Operator.withdraw(operator, 12, "Dismissed.")
     assert_received {:withdraw, 12, "Dismissed."}
 
+    # The operator's own tools are in its list alone (F-172's new-5).
+    own = ~w(answer_startup end_main withdraw)
+    assert own -- Enum.map(MCP.tools(operator, "op"), & &1.name) == []
+    assert own -- Enum.map(MCP.tools(operator, "app-main"), & &1.name) == own
+
     # An agent's stop is never forced.
     assert tool(ctx.mcp, t["app-main"], "stop", %{"agent" => "app-fix", "force" => true}) ==
              %{"refused" => ["operator_only", "force"]}
@@ -560,9 +444,9 @@ defmodule CodingAgentFramework.MCPTest do
 
     opts =
       [dir: dir, port: 4793, grants: Grants.new(tree, operator: "op"), acts: acts] ++
-        Enum.map(~w(mailbox jobs delegates services tracker stream mains)a, &{&1, stand_in}) ++
+        Enum.map(~w(mailbox delegates services tracker stream mains)a, &{&1, stand_in}) ++
         [workstation: "ws", transcripts: nil, place: fn _ -> {:refused, :no_worktree} end] ++
-        [instance: "three", tool_timeout: 600_000, margin: 60_000]
+        [tool_timeout: 600_000, margin: 60_000]
 
     start_supervised!(Supervisor.child_spec({MCP, opts}, id: :operating))
   end
@@ -577,9 +461,9 @@ defmodule CodingAgentFramework.MCPTest do
 
     opts =
       [dir: test_dir(), port: 4792, grants: Grants.new(fn -> tree end), acts: :unused] ++
-        Enum.map(~w(mailbox jobs delegates services tracker stream mover)a, &{&1, stand_in}) ++
+        Enum.map(~w(mailbox delegates services tracker stream mover)a, &{&1, stand_in}) ++
         [workstation: "ws", transcripts: nil, place: fn _ -> {:refused, :no_worktree} end] ++
-        [instance: "two", tool_timeout: 600_000, margin: 60_000]
+        [tool_timeout: 600_000, margin: 60_000]
 
     moving = start_supervised!(Supervisor.child_spec({MCP, opts}, id: :moving))
     [main, fix] = for a <- ~w(app-main app-fix), do: token(elem(MCP.issue(moving, a), 1))
@@ -638,7 +522,7 @@ defmodule CodingAgentFramework.MCPTest do
                  ~w(message start_delegate run_delegate start_main) ++
                    ~w(service_start services service_logs service_send service_wait) ++
                    ~w(service_restart service_stop service_hand agents look transcript) ++
-                   ~w(interrupt answer resume stop move answer_startup end_main ask withdraw reload)
+                   ~w(interrupt answer resume stop move ask reload)
              }
            }
 

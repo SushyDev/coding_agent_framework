@@ -82,6 +82,7 @@ defmodule CodingAgentFramework.TestHost do
     :head,
     :mkdir,
     :mkfifo,
+    :id,
     :sysctl,
     :stty,
     :echo,

@@ -27,7 +27,8 @@ defmodule CodingAgentFramework.SubscribeTest do
         claude: HeadlessStandIn.write!(dir, :on_message),
         env: %{home: dir, path: "/nonexistent", term: "xterm-256color", lang: "C.UTF-8"},
         user: "tester",
-        interval: 200
+        interval: 200,
+        undeclared_cues: :raise
       )
 
     File.mkdir_p!(home)
@@ -56,7 +57,7 @@ defmodule CodingAgentFramework.SubscribeTest do
         relay(test, tag)
       end)
 
-    assert_receive {^tag, :subscribed, {:ok, ref}}
+    assert_receive {^tag, :subscribed, {:ok, %{ref: ref}}}
     {pid, ref}
   end
 
@@ -113,9 +114,15 @@ defmodule CodingAgentFramework.SubscribeTest do
     i = ctx.a.instance
     assert {:ok, topics} = CodingAgentFramework.topics(i)
     assert "sessions" in topics and "intake:*:*:waiters" in topics
-    refute "acts" in topics
 
-    assert CodingAgentFramework.subscribe(i, ["acts"]) == {:refused, {:undeclared, "acts"}}
+    # Every topic a part writes, the ones no part reads among them (F-174's new-1).
+    for topic <- ~w(acts:*:* intake:*:* scheduler:* services copies),
+        do: assert(topic in topics, topic)
+
+    assert {:ok, %{ref: _}} = CodingAgentFramework.subscribe(i, ["acts", "scheduler:ws"])
+
+    assert CodingAgentFramework.subscribe(i, ["prompts"]) == {:refused, {:undeclared, "prompts"}}
+
     assert CodingAgentFramework.subscribe(i, []) == {:refused, {:bad, :topics}}
 
     assert CodingAgentFramework.subscribe("no-such-instance", ["sessions"]) ==
@@ -123,11 +130,35 @@ defmodule CodingAgentFramework.SubscribeTest do
 
     assert CodingAgentFramework.topics("no-such-instance") == {:refused, :no_instance}
 
-    {:ok, ref} = CodingAgentFramework.subscribe(i, ["sessions:"])
+    {:ok, %{ref: ref}} = CodingAgentFramework.subscribe(i, ["sessions:"])
     assert CodingAgentFramework.unsubscribe(i, ref) == :ok
     assert CodingAgentFramework.unsubscribe(i, ref) == {:refused, :no_subscription}
 
     # A second instance of the name is refused before it makes anything.
     assert CodingAgentFramework.start_link(ctx.a) == {:refused, {:instance_running, i}}
+  end
+
+  # F-174's new-2: the subscriptions live and die with the tree, whose supervisor `subscribe/2`
+  # names, and the app subscribes again once the tree is back.
+  test "a subscription ends with its tree, which the app watches and subscribes to again", ctx do
+    sup = start_supervised!({CodingAgentFramework, ctx.a})
+    i = ctx.a.instance
+    assert {:ok, %{tree: ^sup}} = CodingAgentFramework.subscribe(i, ["sessions"])
+    tree = Process.monitor(sup)
+
+    :ok = Supervisor.stop(sup)
+    assert_receive {:DOWN, ^tree, :process, ^sup, _}
+
+    # The test's supervisor starts the tree again: it holds no subscription of the old one's.
+    {:ok, %{tree: again, ref: ref}} =
+      await(fn -> CodingAgentFramework.subscribe(i, ["sessions"]) end, 20_000)
+
+    assert again != sup
+    me = self()
+    parts = CodingAgentFramework.parts(again)
+    assert {:ok, [{^ref, ^me, ["sessions"]}]} = Cues.subscriptions(parts.cues)
+
+    Cues.cue(parts.cues, %{topic: "sessions:back", ids: [1]})
+    assert_receive {:caf_cue, %{topic: "sessions:back"}}
   end
 end

@@ -74,6 +74,13 @@ defmodule CodingAgentFramework.Registry do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc """
+  The topics of the cues it writes, each as its whole shape, `*` for a word it fills in
+  (`CodingAgentFramework.Cues`): `registry:<host>:<account>`.
+  """
+  @spec writes() :: [String.t()]
+  def writes, do: ~w(registry:*:*)
+
+  @doc """
   Reads every account's session files now. Returns `{:ok, %{files: n, problems: n, ids: ids}}`,
   where `ids` are the rows written, or `{:unknown, reason}` when the shell failed.
   """

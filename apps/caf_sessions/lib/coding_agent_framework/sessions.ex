@@ -231,6 +231,13 @@ defmodule CodingAgentFramework.Sessions do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc """
+  The topics of the cues it writes, each as its whole shape, `*` for a word it fills in
+  (`CodingAgentFramework.Cues`): `sessions:<host>`.
+  """
+  @spec writes() :: [String.t()]
+  def writes, do: ~w(sessions:*)
+
+  @doc """
   Starts session `name` on `account` (from `Accounts.ready/2`). `launch` holds `role:` and
   `cwd:` (an absolute path) or `worktree:` (`%{project: project, branch: branch}`, with the
   project as `Sessions.Worktree.project/1` reads it; `cwd:` is then not read); the agent row's
