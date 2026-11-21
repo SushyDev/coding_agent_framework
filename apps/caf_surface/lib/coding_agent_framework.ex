@@ -62,7 +62,7 @@ defmodule CodingAgentFramework do
   use Supervisor
 
   alias CodingAgentFramework.{AbsentMains, Accounts, Acts, ClaudeCLI, Copies, Delegates, Grants}
-  alias CodingAgentFramework.{Holder, Host, Inlet, Logins}
+  alias CodingAgentFramework.{Holder, HooksSilent, Host, Inlet, Logins}
 
   alias CodingAgentFramework.{
     Cues,
@@ -80,7 +80,8 @@ defmodule CodingAgentFramework do
     Watch
   }
 
-  alias CodingAgentFramework.{Runs, Scheduler, Sessions, Shell, Stream, Tmux, TmuxSampler}
+  alias CodingAgentFramework.{Runs, Scheduler, Sessions, Shell, Stream, StuckBackgrounds}
+  alias CodingAgentFramework.{Tmux, TmuxSampler}
   alias CodingAgentFramework.Tracker
   alias CodingAgentFramework.{ToolHome, Transcripts, Usage}
   alias CodingAgentFramework.{Config, Endpoint, Ends}
@@ -399,6 +400,8 @@ defmodule CodingAgentFramework do
       scheduler: Scheduler.reads(),
       mains: Mains.reads(),
       absent_mains: AbsentMains.reads(),
+      stuck_backgrounds: StuckBackgrounds.reads(),
+      hooks_silent: HooksSilent.reads(),
       prompts: Prompts.reads(),
       ends: Ends.reads()
     ]
@@ -790,6 +793,33 @@ defmodule CodingAgentFramework do
             watch: pid.(:watch),
             host: host,
             resume: &Mains.resume_main(mains, &1)}
+         end},
+        # The healer of a background command that hangs after its delegate's report (F-184):
+        # it reads `Stream`'s folds and ends a group by its record.
+        {:stuck_backgrounds,
+         fn pid ->
+           stream = pid.(:stream)
+
+           {StuckBackgrounds,
+            agents: w.agents,
+            folds: fn -> with {:ok, %{rows: rows}} <- Stream.rows(stream), do: {:ok, rows} end,
+            acts: pid.(:acts),
+            watch: pid.(:watch),
+            host: host,
+            holder: w.holder,
+            programs: w.programs}
+         end},
+        # The detector of an agent's hooks gone quiet (F-184): shown only, with no remedy. A
+        # silence sends no cue, so it reads at the interval too.
+        {:hooks_silent,
+         fn pid ->
+           {HooksSilent,
+            agents: w.agents,
+            transcripts: pid.(:transcripts),
+            intake_db: db,
+            watch: pid.(:watch),
+            host: host,
+            interval: every}
          end},
         {:copies,
          fn _ -> {Copies, dir: Config.path(c, "parts/copies"), programs: p, notify: notify} end},

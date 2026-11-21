@@ -69,7 +69,9 @@ defmodule CodingAgentFramework.SurfaceTest do
     keys = ~w(reaper names cues inlet usage stream intake intake_http sampler sessions acts)a
     keys = keys ++ ~w(watch recoveries tracker scheduler delegates mover mailbox copies jobs)a
     keys = keys ++ ~w(services logins)a
-    keys = keys ++ ~w(prompts mains absent_mains mcp mcp_http ends)a
+
+    keys =
+      keys ++ ~w(prompts mains absent_mains stuck_backgrounds hooks_silent mcp mcp_http ends)a
 
     assert Enum.sort(Map.keys(parts)) ==
              Enum.sort(keys ++ [:registry, :transcripts])
@@ -638,7 +640,7 @@ defmodule CodingAgentFramework.SurfaceTest do
   @needs %{
     "registry" => [:sessions, :mover],
     # A headless session's windows and limit are Usage's (F-181).
-    "stream" => [:sessions, :delegates, :mailbox, :mover, :usage],
+    "stream" => [:sessions, :delegates, :mailbox, :mover, :usage, :stuck_backgrounds],
     "tmux" => [:sessions, :recoveries],
     "sessions" => [
       :delegates,
@@ -651,17 +653,17 @@ defmodule CodingAgentFramework.SurfaceTest do
       :absent_mains
     ],
     "mains" => [:scheduler],
-    "transcripts" => [:delegates, :mailbox],
+    "transcripts" => [:delegates, :mailbox, :hooks_silent],
     "delegates" => [:mailbox, :scheduler],
     "usage" => [:scheduler],
     "jobs" => [:scheduler],
     "mailbox" => [:delegates, :mover, :prompts],
     # The inbox reads every hook row's cue: a held request opens a prompt (F-179).
-    "intake" => [:prompts],
-    "waiters" => [:mailbox, :prompts],
+    "intake" => [:prompts, :hooks_silent],
+    "waiters" => [:mailbox, :prompts, :hooks_silent],
     # A symptom the healer asks about is a remedy prompt (F-182); its answer is the healers'
     # clear (F-183).
-    "watch" => [:prompts, :recoveries, :absent_mains],
+    "watch" => [:prompts, :recoveries, :absent_mains, :stuck_backgrounds],
     # A login a check refused is a login prompt (F-181).
     "logins" => [:prompts]
   }

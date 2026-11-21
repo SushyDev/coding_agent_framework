@@ -15,9 +15,13 @@ defmodule CodingAgentFramework.Stream.Fold do
   `own`, in order, with its uuid, for `Delegates` to tell the parent once per turn; one with no
   uuid is counted as a problem. It keeps the delegate's own background commands (`tasks`, by
   task id): a `system` event `task_started` adds one and `task_notification` (its end, however
-  it ended) removes it, so the turn is not idle while one runs (F-171; the shapes are Claude
-  Code's stream messages as its own types name them, not yet checked against a recorded log:
-  F-171's new-4). It is total: a line that is not a JSON object is counted as a problem.
+  it ended) removes it, so the turn is not idle while one runs (F-171). It keeps Claude Code's
+  own list of them too, the last `background_tasks_changed` (`background`: its task ids and how
+  many such events came), which `StuckBackgrounds` reads. A turn's `result` comes while its
+  background command runs; the command's end then starts a turn of Claude Code's own, which
+  begins with a new `system`/`init` (measured on 2.1.322, F-184): an init while the turn reads
+  ended clears `idle` until that turn's result, so nothing is written into it. It is total: a
+  line that is not a JSON object is counted as a problem.
 
       iex> alias CodingAgentFramework.Stream.Fold
       iex> fold = Fold.mark(Fold.new(), {:message, "u1", "hi"}, ~s({"x":1}\\n), 0)
@@ -40,6 +44,7 @@ defmodule CodingAgentFramework.Stream.Fold do
           last_result: map | nil,
           own: [map],
           tasks: %{String.t() => map},
+          background: %{tasks: [String.t()], changes: non_neg_integer},
           rate_limit: map | nil,
           events: non_neg_integer,
           problems: non_neg_integer
@@ -62,6 +67,7 @@ defmodule CodingAgentFramework.Stream.Fold do
       last_result: nil,
       own: [],
       tasks: %{},
+      background: %{tasks: [], changes: 0},
       rate_limit: nil,
       events: 0,
       problems: 0
@@ -97,9 +103,22 @@ defmodule CodingAgentFramework.Stream.Fold do
 
   @doc "`Handle`: what one event writes."
   @spec event(t, map) :: t
+  # A later init while the turn reads ended begins a turn of Claude Code's own: a background
+  # command's end woke it (measured on 2.1.322, F-184). Its result ends it, as any turn's.
   def event(fold, %{"type" => "system", "subtype" => "init", "session_id" => id})
-      when is_binary(id),
-      do: %{fold | session_id: id}
+      when is_binary(id) do
+    if fold.session_id != nil and fold.idle and not fold.gone,
+      do: %{fold | session_id: id, idle: false},
+      else: %{fold | session_id: id}
+  end
+
+  # Claude Code's own list of its background tasks, as it last said it, and how many times.
+  def event(fold, %{"type" => "system", "subtype" => "background_tasks_changed", "tasks" => t})
+      when is_list(t) do
+    ids = for %{"task_id" => id} <- t, is_binary(id), do: id
+    changes = get_in(fold, [:background, :changes]) || 0
+    Map.put(fold, :background, %{tasks: ids, changes: changes + 1})
+  end
 
   # A background command of the delegate's own starts, and ends whatever its status.
   def event(fold, %{"type" => "system", "subtype" => "task_started", "task_id" => id})
@@ -298,7 +317,11 @@ defmodule CodingAgentFramework.Stream.Fold do
 
     # A background command is a child of the process, and ended with it.
     %{fold | gone: true, messages: messages, requests: requests, lines: %{}, tasks: %{}}
+    |> no_background()
   end
+
+  defp no_background(fold),
+    do: Map.update(fold, :background, %{tasks: [], changes: 0}, &%{&1 | tasks: []})
 
   defp cut(%{state: :delivered, result: nil} = m), do: %{m | exited: true}
   defp cut(m), do: m
@@ -326,6 +349,7 @@ defmodule CodingAgentFramework.Stream.Fold do
         ending: false,
         tasks: %{}
     }
+    |> no_background()
   end
 
   @doc """
@@ -399,7 +423,9 @@ defmodule CodingAgentFramework.Stream.Fold do
           other
       end)
 
-    Map.put_new(%{fold | messages: messages}, :tasks, %{})
+    %{fold | messages: messages}
+    |> Map.put_new(:tasks, %{})
+    |> Map.put_new(:background, %{tasks: [], changes: 0})
   end
 
   def upgrade(fold), do: fold

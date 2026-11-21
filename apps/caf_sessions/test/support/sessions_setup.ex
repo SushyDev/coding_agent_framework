@@ -18,12 +18,13 @@ defmodule CodingAgentFramework.SessionsSetup do
 
   alias CodingAgentFramework.{Accounts, ClaudeStandIn, HeadlessStandIn, Holder, Registry}
   alias CodingAgentFramework.{Sessions, Shell, Stream, Tmux}
-  alias CodingAgentFramework.Sessions.Table
+  alias CodingAgentFramework.Sessions.{Table, Turn}
+  alias CodingAgentFramework.Stream.Fold
   alias CodingAgentFramework.Tmux.CLI
 
   @doc """
-  An ExUnit setup. Its `opts` start another `Sessions` on the same table; its cues come to the
-  test as `{:cue, cue}`. The test's `clock` is an `Agent` holding ms, `open` an `Agent` holding
+  An ExUnit setup. Its `opts` start another `Sessions` on the same table; its cues, and
+  `Stream`'s, which reads every 100 ms, come to the test as `{:cue, cue}`. The test's `clock` is an `Agent` holding ms, `open` an `Agent` holding
   the `Mailbox` rows `open_to:` answers (`%{{name, :open | :sending} => ids}`), and `server` its
   tmux server.
   """
@@ -47,7 +48,16 @@ defmodule CodingAgentFramework.SessionsSetup do
     {:ok, holder} = Holder.new(programs(), dtach)
     me = self()
     clock = start_supervised!({Agent, fn -> System.os_time(:millisecond) end})
-    stream_opts = [programs: programs(), holder: holder, home: dir, db: db]
+    # Stream reads on its own and cues the test, so a test waits on its announced read.
+    stream_opts = [
+      programs: programs(),
+      holder: holder,
+      home: dir,
+      db: db,
+      interval: 100,
+      notify: &send(me, {:cue, &1})
+    ]
+
     stream = start_supervised!(Supervisor.child_spec({Stream, stream_opts}, id: Stream))
     reaper = start_supervised!({Shell.Reaper, programs: programs()})
     # Mailbox's open rows as the test sets them: `{name, :open | :sending}` to ids.
@@ -84,6 +94,44 @@ defmodule CodingAgentFramework.SessionsSetup do
      registry: registry,
      stream: stream,
      sessions: start_supervised!(Supervisor.child_spec({Sessions, opts}, restart: :temporary))}
+  end
+
+  @doc """
+  Waits on `Stream`'s cue until session `id`'s fold satisfies `ok?`, and answers it (F-183's
+  new-6). `Stream` reads on its own interval here and announces each read that wrote; the fold
+  is checked first and again at each cue, so one that came before the wait is not missed.
+  Raises when no cue makes it true within `timeout` ms.
+  """
+  def stream_until(ctx, id, ok?, timeout \\ 10_000),
+    do: wait_stream(ctx, id, ok?, System.monotonic_time(:millisecond) + timeout)
+
+  @doc """
+  Waits on `Stream`'s cue until session `id`'s turn reads ended (`Sessions.Turn.stream/1`) with
+  no line of it still waiting for its replay: what a stop of it needs.
+  """
+  def turn_ended(ctx, id, timeout \\ 10_000),
+    do: stream_until(ctx, id, &(Turn.stream(&1) == :ended and Fold.writing(&1) == []), timeout)
+
+  defp wait_stream(ctx, id, ok?, deadline) do
+    {:ok, %{rows: rows}} = Stream.rows(ctx.stream)
+    row = Enum.find(rows, &(&1.session == id))
+
+    if row && holds?(ok?, row) do
+      row
+    else
+      receive do
+        {:cue, %{topic: "stream:" <> _}} -> wait_stream(ctx, id, ok?, deadline)
+      after
+        max(deadline - System.monotonic_time(:millisecond), 0) ->
+          raise ExUnit.AssertionError, message: "no Stream cue made it so: #{inspect(row)}"
+      end
+    end
+  end
+
+  defp holds?(ok?, row) do
+    ok?.(row) == true
+  rescue
+    _ -> false
   end
 
   @doc """

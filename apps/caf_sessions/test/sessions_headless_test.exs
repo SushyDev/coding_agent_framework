@@ -336,23 +336,8 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
     if Enum.any?(messages, &match?({:"$gen_call", {^caller, _}, _}, &1)), do: {:ok, caller}
   end
 
-  defp stream_row(ctx, id, ok? \\ fn _ -> true end) do
-    {:ok, row} =
-      await(fn ->
-        {:ok, _} = Stream.read(ctx.stream)
-        {:ok, %{rows: rows}} = Stream.rows(ctx.stream)
-        row = Enum.find(rows, &(&1.session == id))
-        if row && safe(ok?, row), do: {:ok, row}, else: row
-      end)
-
-    row
-  end
-
-  defp safe(ok?, row) do
-    ok?.(row) == true
-  rescue
-    _ -> false
-  end
+  # Waits on Stream's own announced read (F-183's new-6), never on a timer.
+  defp stream_row(ctx, id, ok? \\ fn _ -> true end), do: stream_until(ctx, id, ok?)
 
   # What the viewer pane of `session` shows, from this test's own tmux server.
   defp viewer(ctx, session) do

@@ -62,6 +62,45 @@ defmodule CodingAgentFramework.StreamFoldTest do
     assert fold.last_result.subtype == "error_during_execution"
   end
 
+  # Remedies.tla's BriefResult, TaskEnds and OwnResult, in the order measured on Claude Code
+  # 2.1.322 (F-184): the result comes while the background command runs; its end starts a turn
+  # of Claude Code's own with a new init, whose result is never the brief's.
+  test "a background command's end starts a turn of its own, which is never the brief's" do
+    task = %{"task_id" => "t1", "run_id" => "r1", "task_type" => "local_bash"}
+    changed = &%{"type" => "system", "subtype" => "background_tasks_changed", "tasks" => &1}
+    init = %{"type" => "system", "subtype" => "init", "session_id" => "s1"}
+
+    fold =
+      Fold.mark(Fold.new(), {:message, "b1", "brief"}, "", 0)
+      |> Fold.event(init)
+      |> Fold.event(%{"type" => "user", "isReplay" => true, "uuid" => "b1"})
+      |> Fold.event(Map.merge(%{"type" => "system", "subtype" => "task_started"}, task))
+      |> Fold.event(changed.([task]))
+      |> named(["b1"], %{"result" => "report", "uuid" => "r-b1"})
+
+    assert {fold.idle, Map.keys(fold.tasks), fold.background} ==
+             {true, ["t1"], %{tasks: ["t1"], changes: 1}}
+
+    ended =
+      fold
+      |> Fold.event(%{"type" => "system", "subtype" => "task_updated", "task_id" => "t1"})
+      |> Fold.event(%{"type" => "system", "subtype" => "task_notification", "task_id" => "t1"})
+      |> Fold.event(changed.([]))
+
+    assert {ended.idle, ended.tasks, ended.background} == {true, %{}, %{tasks: [], changes: 2}}
+
+    # Its init: a turn runs, so nothing is written into it until its result.
+    own = Fold.event(ended, init)
+
+    assert {own.idle, Fold.check(own, {:message, "m1", "hi"})} ==
+             {false, {:refused, :turn_running}}
+
+    own = named(own, [], %{"result" => "the command ended", "uuid" => "r-own"})
+    assert own.idle
+    assert Fold.outcome(own, "b1") == {:result, %{text: "report", subtype: nil, is_error: nil}}
+    assert [%{uuid: "r-own", text: "the command ended"}] = own.own
+  end
+
   # Team.tla's fold[i] = "exited": delivered, its turn begun, the process gone with no result.
   test "a delivered message no result named is exited at the exit; one answered is not" do
     fold =
