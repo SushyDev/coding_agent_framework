@@ -98,6 +98,54 @@ defmodule CodingAgentFramework.ConfigTest do
         do: assert(new(secret_file: bad) == {:refused, {:bad, :secret_file}})
   end
 
+  # F-195: the tool hooks as data, a module and its options, as an extension is.
+  defmodule Hooks do
+    @behaviour CodingAgentFramework.ToolHooks
+
+    @impl true
+    def pre_tool_use(_event, opts, part), do: {:deny, "#{opts[:why]} #{inspect(part.(:mcp))}"}
+
+    @impl true
+    def stop(_event, _opts, _part), do: :pass
+  end
+
+  test "tool_hooks: a module's hooks with plain options; the old functions refused" do
+    assert {:ok, %Config{tool_hooks: {Hooks, [why: "no"]}} = c} =
+             new(tool_hooks: {Hooks, why: "no"})
+
+    # The settings name the hooks the module has; each gets its options and the lookup.
+    assert Config.hooks(c) == [:pre_tool_use, :stop]
+    hooks = CodingAgentFramework.ToolHooks.callbacks(c.tool_hooks, fn :mcp -> :live end)
+    assert Enum.sort(Map.keys(hooks)) == [:pre_tool_use, :stop]
+    assert hooks.pre_tool_use.(%{tool_name: "Read"}) == {:deny, "no :live"}
+
+    assert {:ok, %Config{tool_hooks: nil} = none} = new([])
+    assert Config.hooks(none) == []
+
+    old = %{pre_tool_use: fn _ -> :pass end}
+
+    for {bad, why} <- [
+          {old, {:not_tool_hooks, old}},
+          {{Enum, []}, {:not_tool_hooks, {Enum, []}}},
+          {{NoSuchModule, []}, {:not_tool_hooks, {NoSuchModule, []}}},
+          {{Hooks, to: self()}, {:not_data, Hooks}},
+          {Hooks, {:not_tool_hooks, Hooks}}
+        ],
+        do: assert(new(tool_hooks: bad) == {:refused, {:bad, :tool_hooks, why}})
+  end
+
+  test "agents and restart_wait: an agentless tree on request; a bounded wait" do
+    assert {:ok, %Config{agents: true, restart_wait: 5_000}} = new([])
+
+    assert {:ok, %Config{agents: false, restart_wait: 200}} =
+             new(agents: false, restart_wait: 200)
+
+    for bad <- [nil, "false", 0], do: assert(new(agents: bad) == {:refused, {:bad, :agents}})
+
+    for bad <- [:infinity, 0, -1, 1.5, nil],
+        do: assert(new(restart_wait: bad) == {:refused, {:bad, :restart_wait}})
+  end
+
   test "viewer: one size for every viewer, {200, 50} by default" do
     assert {:ok, %Config{viewer: {120, 40}}} = new(viewer: {120, 40})
     assert {:ok, %Config{viewer: {200, 50}}} = new([])

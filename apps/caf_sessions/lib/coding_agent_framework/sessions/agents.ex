@@ -45,6 +45,16 @@ defmodule CodingAgentFramework.Sessions.Agents do
     with {:ok, db} <- Table.open_read(path), do: {:ok, %__MODULE__{db: db, host: host}}
   end
 
+  @doc """
+  The host's rows in `Sessions`' file at `path`, oldest first, read once through a read-only
+  connection that is closed after (F-195): for a reader outside the tree, which opens no
+  writer's file. `{:ok, []}` before `Sessions` made its table; `{:refused, {:sqlite, reason}}`
+  for a file it cannot open.
+  """
+  @spec read_only(String.t(), String.t()) :: {:ok, [row]} | {:refused, term}
+  def read_only(path, host),
+    do: CodingAgentFramework.Store.read_only(path, "agents", [], &Table.rows(&1, host))
+
   @doc "The host's rows, oldest first."
   @spec rows(t) :: [row]
   def rows(%__MODULE__{db: db, host: host}), do: Table.rows(db, host)

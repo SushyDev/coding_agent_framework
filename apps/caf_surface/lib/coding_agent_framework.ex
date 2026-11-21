@@ -89,7 +89,7 @@ defmodule CodingAgentFramework do
   alias CodingAgentFramework.{Runs, Scheduler, Sessions, Shell, Stream, StuckBackgrounds}
   alias CodingAgentFramework.{Tmux, TmuxSampler}
   alias CodingAgentFramework.Tracker
-  alias CodingAgentFramework.{ToolHome, Transcripts, Usage}
+  alias CodingAgentFramework.{ToolHome, ToolHooks, Transcripts, Usage}
   alias CodingAgentFramework.{Config, Endpoint, Ends}
 
   require Logger
@@ -130,6 +130,17 @@ defmodule CodingAgentFramework do
   reason}` when the config's programs, accounts or home cannot be used or an instance of its
   name already runs in this app (`{:instance_running, name}`), or `{:unknown,
   reason}` when a write under the home fails.
+
+  **A restart at once.** An instance of the same name that is still exiting (a tree its
+  parent just killed, whose named `Registry` still ends) is waited for: the start monitors
+  that `Registry` and goes on at its `:DOWN`, up to the config's `restart_wait` (5 s by
+  default), so the parent's restart is not refused and its restart budget is not spent on it.
+  Past the bound the start is refused `{:instance_running, name}`, as it is for an instance
+  that runs on; so a second start of a running name answers only after `restart_wait`.
+
+  **No agents.** With the config's `agents: false` the tree starts only the parts a lease
+  needs, `Config.agentless/0`'s: no tmux server, no account's settings, no hooks' secret and
+  no endpoint. `parts/1` then names only those.
   """
   @spec start_link(Config.t()) :: Supervisor.on_start() | {:refused, term} | {:unknown, term}
   def start_link(%Config{} = c) do
@@ -137,27 +148,36 @@ defmodule CodingAgentFramework do
          :ok <- mkdirs(c),
          {:ok, programs} <- programs(c),
          {:ok, c} <- tools(c, programs),
-         {:ok, tmux} <- server(c),
+         {:ok, jobs_work} <- Jobs.Work.open(Config.path(c, "parts/jobs")),
+         {:ok, w} <- agents_wiring(c, programs) do
+      w = Map.merge(w, %{c: c, programs: programs, jobs_work: jobs_work, start_id: token()})
+      Supervisor.start_link(__MODULE__, Map.put(w, :db, Config.path(c, "caf.db")))
+    end
+  end
+
+  # What only the parts that run or read an agent take; a tree with `agents: false` makes none
+  # of it, so it writes no account's settings and opens no agent's table (F-195).
+  defp agents_wiring(%Config{agents: false}, _programs), do: {:ok, %{}}
+
+  defp agents_wiring(c, programs) do
+    db = Config.path(c, "caf.db")
+
+    with {:ok, tmux} <- server(c),
          {:ok, accounts} <- Accounts.new(c.home, c.accounts),
          {:ok, holder} <-
            Holder.new(programs, Config.path(c, "d"), Config.options(c, :holder, [])),
-         {:ok, agents} <- Sessions.Agents.open(Config.path(c, "caf.db"), c.workstation),
-         {:ok, work} <-
-           Delegates.Work.open(Config.path(c, "caf.db"), Config.path(c, "caf.db"), c.workstation),
-         {:ok, allowance} <- Usage.Allowance.open(Config.path(c, "caf.db")),
-         {:ok, mains_allowance} <- Usage.Allowance.open(Config.path(c, "caf.db")),
-         {:ok, jobs_work} <- Jobs.Work.open(Config.path(c, "parts/jobs")),
-         {:ok, mains_work} <-
-           Mains.Work.open(Config.path(c, "caf.db"), Config.path(c, "caf.db"), c.workstation),
+         {:ok, agents} <- Sessions.Agents.open(db, c.workstation),
+         {:ok, work} <- Delegates.Work.open(db, db, c.workstation),
+         {:ok, allowance} <- Usage.Allowance.open(db),
+         {:ok, mains_allowance} <- Usage.Allowance.open(db),
+         {:ok, mains_work} <- Mains.Work.open(db, db, c.workstation),
          {:ok, secret} <- Intake.secret(c.secret_file),
          :ok <- prepare(c, accounts, programs, secret),
          {:ok, runs} <- Runs.new(c.home, programs, c.heavy),
          :ok <- Runs.prepare(runs, programs, c.ports.intake, secret) do
-      w = %{c: c, programs: programs, tmux: tmux, accounts: accounts, holder: holder}
-      w = Map.merge(w, %{agents: agents, secret: secret, start_id: token()})
-      w = Map.merge(w, %{work: work, allowance: allowance, jobs_work: jobs_work})
-      w = Map.merge(w, %{mains_work: mains_work, mains_allowance: mains_allowance, runs: runs})
-      Supervisor.start_link(__MODULE__, Map.put(w, :db, Config.path(c, "caf.db")))
+      w = %{tmux: tmux, accounts: accounts, holder: holder, agents: agents, secret: secret}
+      w = Map.merge(w, %{work: work, allowance: allowance, mains_allowance: mains_allowance})
+      {:ok, Map.merge(w, %{mains_work: mains_work, runs: runs})}
     end
   end
 
@@ -179,6 +199,30 @@ defmodule CodingAgentFramework do
          {:ok, holder} <-
            Holder.new(programs, Config.path(c, "d"), Config.options(c, :holder, [])),
          do: Holder.Process.new(programs, holder)
+  end
+
+  @doc """
+  The agent rows and the delegate rows of the instance `config` names, on its workstation, read
+  now (F-195), as `processes/1` is the holder's reader: one call that opens the instance's
+  store read-only by its config, reads, and closes it, so an app never names the framework's
+  file and never takes a writer's lock. Whether the tree runs does not matter. `agents` are
+  `Sessions`' rows (`Sessions.Agents` says what a status means), `delegates` each start of a
+  delegate (`Delegates.Table`), each oldest first; both are empty before the tree made its
+  tables, or for a tree with `agents: false`. Answers `{:ok, %{agents: rows, delegates:
+  rows}}`, or `{:refused, {:sqlite, reason}}` when the store cannot be opened (no tree ever
+  started on the home, say).
+
+      {:ok, %{agents: [%{name: "app-main", kind: "main", status: "running"} | _],
+              delegates: delegates}} = CodingAgentFramework.agent_rows(config)
+  """
+  @spec agent_rows(Config.t()) ::
+          {:ok, %{agents: [map], delegates: [map]}} | {:refused, term}
+  def agent_rows(%Config{} = c) do
+    path = Config.path(c, "caf.db")
+
+    with {:ok, agents} <- Sessions.Agents.read_only(path, c.workstation),
+         {:ok, delegates} <- Delegates.Table.read_only(path, c.workstation),
+         do: {:ok, %{agents: agents, delegates: delegates}}
   end
 
   @doc "Each part's process, by its key (`:sessions`, `:registry`, …)."
@@ -395,11 +439,25 @@ defmodule CodingAgentFramework do
     ArgumentError -> {:refused, :no_instance}
   end
 
-  # Two instances of one name in one app would share a name to find them by.
+  # Two instances of one name in one app would share a name to find them by. A tree just killed
+  # still holds its name while its `Registry` exits, so a parent's restart at once would be
+  # refused and spend its budget (F-195): the start waits for that `Registry` to end, up to the
+  # config's `restart_wait`.
   defp unique(c) do
-    case registry(c.instance) do
-      {:ok, _} -> {:refused, {:instance_running, c.instance}}
+    with {:ok, name} <- registry(c.instance),
+         pid when is_pid(pid) <- Process.whereis(name) do
+      ref = Process.monitor(pid)
+
+      receive do
+        {:DOWN, ^ref, :process, _, _} -> :ok
+      after
+        c.restart_wait ->
+          Process.demonitor(ref, [:flush])
+          {:refused, {:instance_running, c.instance}}
+      end
+    else
       {:refused, :no_instance} -> :ok
+      nil -> :ok
     end
   end
 
@@ -463,8 +521,12 @@ defmodule CodingAgentFramework do
     # The app's subscriptions, owned by this supervisor so a restarted `Cues` keeps them.
     w = Map.put(w, :subscriptions, :ets.new(Cues, [:public]))
 
+    # A tree that runs no agent starts only what a lease needs (`Config.agentless/0`).
+    started = fn key -> w.c.agents or key in Config.agentless() end
+
     children =
       for {key, build} <- children(w, notify),
+          started.(key),
           do: %{id: key, start: {__MODULE__, :start_part, [tab, key, build, w.c]}}
 
     %{max_restarts: n, max_seconds: s} = w.c.restarts
@@ -531,18 +593,19 @@ defmodule CodingAgentFramework do
     held_env = c.env.tools ++ [{"PATH", c.env.path}]
     hosts = Map.put(c.hosts, host, %{programs: p, dir: Config.path(c, "ws"), env: held_env})
 
+    notify_every = [notify: notify, interval: every]
+    read = [programs: p, db: db] ++ notify_every
+
     # One Registry and one Transcripts on the host, over every account: a move hides no agent.
-    dirs =
+    dirs = fn ->
       for a <- c.accounts,
           {:ok, dir} = Accounts.config_dir(w.accounts, a),
           into: %{},
           do: {a, dir}
-
-    notify_every = [notify: notify, interval: every]
-    read = [programs: p, db: db] ++ notify_every
+    end
 
     readers = [
-      {:registry, fn _ -> {Registry, [accounts: dirs] ++ read} end},
+      {:registry, fn _ -> {Registry, [accounts: dirs.()] ++ read} end},
       {:transcripts, fn _ -> {Transcripts, [accounts: c.accounts] ++ read} end}
     ]
 
@@ -598,15 +661,16 @@ defmodule CodingAgentFramework do
           accounts: w.accounts, host: host, db: db, run: &auth_status(c, w, &1), notify: notify}
        end},
       {:intake,
-       fn _ ->
+       fn pid ->
          # The framework's PreToolUse callback first (a move's drain), then the app's, whose
          # answer a heavy command's wrapper corrects, and a background command's stdin closed
-         # in what that answer runs.
-         heavy = Runs.pre_tool_use(w.runs, c.tool_hooks[:pre_tool_use])
+         # in what that answer runs. The app's hooks get the live lookup of the parts, as an
+         # extension's tools do (F-195).
+         hooks = ToolHooks.callbacks(c.tool_hooks, pid)
+         heavy = Runs.pre_tool_use(w.runs, hooks[:pre_tool_use])
          pre = Mover.pre_tool_use(w.agents, Intake.Background.pre_tool_use(heavy))
 
-         tools =
-           [pre_tool_use: pre] ++ Map.to_list(Map.take(c.tool_hooks, [:post_tool_use, :stop]))
+         tools = [pre_tool_use: pre] ++ Map.to_list(Map.take(hooks, [:post_tool_use, :stop]))
 
          agent = &Sessions.Agents.by_session(w.agents, &1, &2)
          # A pause per project reads the agent row's project.
@@ -683,19 +747,15 @@ defmodule CodingAgentFramework do
         {:scheduler,
          fn _ ->
            {Scheduler,
-            db: db,
-            host: host,
-            resources: resources(c),
-            holders: %{
-              "delegate" => &Delegates.Work.state(w.work, &1),
-              "job" => &Jobs.Work.state(w.jobs_work, &1),
-              "main" => &Mains.Work.state(w.mains_work, &1),
-              "run" => &Runs.state(w.runs, &1)
-            },
-            allowance: &Usage.Allowance.check(w.allowance, &1),
-            pressure: pressure(c, p),
-            interval: every,
-            notify: notify}
+            [
+              db: db,
+              host: host,
+              resources: resources(c),
+              holders: holders(w),
+              pressure: pressure(c, p),
+              interval: every,
+              notify: notify
+            ] ++ allowance(w)}
          end},
         # Before `Delegates`, which stores each brief and report in it.
         {:mailbox,
@@ -954,9 +1014,22 @@ defmodule CodingAgentFramework do
       ]
   end
 
-  defp sources(%{c: c, db: db, tmux: tmux}) do
-    {_, server} = Tmux.key(tmux)
+  # The tables the `Tracker` reads: the lease parts' always, the agents' parts' when they run.
+  defp sources(%{c: c, db: db} = w) do
     on = [db: db, host: c.workstation]
+
+    [
+      {Tracker.TableSource, [table: Scheduler.Table] ++ on},
+      {Tracker.TableSource, [table: Acts.Table] ++ on ++ [instance: c.instance]},
+      {Tracker.TableSource,
+       table: Jobs.Table, db: Config.path(c, "parts/jobs/jobs.db"), host: c.workstation},
+      {Tracker.TableSource,
+       table: Copies.Table, db: Config.path(c, "parts/copies/copies.db"), host: c.workstation}
+    ] ++ if(c.agents, do: agent_sources(w, on), else: [])
+  end
+
+  defp agent_sources(%{c: c, tmux: tmux}, on) do
+    {_, server} = Tmux.key(tmux)
 
     kinds = [
       {Tracker.TableSource, table: Registry.Table},
@@ -970,16 +1043,29 @@ defmodule CodingAgentFramework do
         {Tracker.TableSource, [table: Stream.Table] ++ on},
         {Tracker.TableSource, [table: Sessions.Table] ++ on},
         {Tracker.TableSource, [table: Delegates.Table] ++ on},
-        {Tracker.TableSource, [table: Scheduler.Table] ++ on},
         {Tracker.TableSource, [table: Mains.Table] ++ on},
-        {Tracker.TableSource, [table: TmuxSampler.Table] ++ on ++ [server: server]},
-        {Tracker.TableSource, [table: Acts.Table] ++ on ++ [instance: c.instance]},
-        {Tracker.TableSource,
-         table: Jobs.Table, db: Config.path(c, "parts/jobs/jobs.db"), host: c.workstation},
-        {Tracker.TableSource,
-         table: Copies.Table, db: Config.path(c, "parts/copies/copies.db"), host: c.workstation}
+        {Tracker.TableSource, [table: TmuxSampler.Table] ++ on ++ [server: server]}
       ]
   end
+
+  # Who the `Scheduler` asks whether a lease's work ended, by the holder's kind. A tree that
+  # runs no agent has only jobs: a delegate's, a main's or a run's lease a home kept from an
+  # earlier tree is asked of no one, so its answer stays unknown and nothing is reclaimed.
+  defp holders(%{c: %Config{agents: false}} = w),
+    do: %{"job" => &Jobs.Work.state(w.jobs_work, &1)}
+
+  defp holders(w) do
+    %{
+      "delegate" => &Delegates.Work.state(w.work, &1),
+      "job" => &Jobs.Work.state(w.jobs_work, &1),
+      "main" => &Mains.Work.state(w.mains_work, &1),
+      "run" => &Runs.state(w.runs, &1)
+    }
+  end
+
+  # An account's usage, read before a start on it; a tree with no agent starts on none.
+  defp allowance(%{c: %Config{agents: false}}), do: []
+  defp allowance(w), do: [allowance: &Usage.Allowance.check(w.allowance, &1)]
 
   # A moved agent's launch on its new account: a delegate's as `Delegates` keeps it, a main
   # session's from the config, each with a new MCP config. The row's own options are its own.
@@ -1109,7 +1195,7 @@ defmodule CodingAgentFramework do
   end
 
   defp prepare(c, accounts, programs, secret) do
-    tools = [:pre_tool_use | Map.keys(Map.take(c.tool_hooks, [:post_tool_use, :stop]))]
+    tools = [:pre_tool_use | Config.hooks(c) -- [:pre_tool_use]]
     data = %{programs: programs, intake: %{port: c.ports.intake, secret: secret, tools: tools}}
 
     Enum.reduce_while(c.accounts, :ok, fn a, :ok ->

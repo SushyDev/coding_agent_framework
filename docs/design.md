@@ -733,7 +733,9 @@ One config and one supervisor in; a few calls and one stream of cues out.
   budget, the remedies' allow-list and the extensions; the table below). One supervisor starts every box in its order; the
   app wires nothing else. The config's `instance` names the tree: it is unique per app (a
   second start of a running name is refused `{:instance_running, name}`) and 1 to 100 bytes
-  with no control character, as `Config.new/1` checks it (F-174's new-3).
+  with no control character, as `Config.new/1` checks it (F-174's new-3). A start while a tree
+  of that name still exits (its parent's restart of a tree just killed) waits for its named
+  `Registry` to end, up to `restart_wait`, so the restart is not refused (F-195).
 - **Calls.** `operate(caf, actor, verb, args)`: the seven verbs as the operator, and the
   operator's own: `end_main`, a main session's `move` and `resume`, a remedy's `approve` and
   `revoke`, a symptom's `clear`. `answer(caf, prompt, choice)` answers any prompt, in place of
@@ -760,7 +762,13 @@ in `subscribe/2`'s answer, listed the operator's own tools to the operator alone
 `run`. F-179 built `prompts/2` and `answer/4`, whose fourth argument names who answers
 ("Prompts"), and the `prompts` topic. F-182 added `symptoms/2` (the `Watch`'s record), `remedies/2`
 (the allow-list, and the operator's `approve` and `revoke`), the config's `remedies` and
-`remedy_bound`, and the topic `watch`. The other calls are B3's rest.
+`remedy_bound`, and the topic `watch`. F-195 added a tree with no agents (`agents: false`:
+the reaper, the instance's `Registry`, `Cues`, `Acts`, the `Tracker`, the `Scheduler`,
+`Copies` and `Jobs`, the `Scheduler` asking only `Jobs` about a lease), `agent_rows/1` (the
+agent and delegate rows read once through a read-only connection to the store the config
+names, as `processes/1` reads the holder's records), the tool hooks as `{module, opts}`
+(`CodingAgentFramework.ToolHooks`, each callback given the live `part` lookup), and the
+restart that waits for the old tree's `Registry`. The other calls are B3's rest.
 The config answers the room the home leaves for an agent's and a service's name (`Config.name_room/1`, F-172), and the tree hands it to `Delegates`, `Mains` and
 `Services`, which refuse a longer name `{:bad, :name, {:longer_than, n}}` before any row;
 sockets stay in the home.
@@ -786,7 +794,7 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 | `interval` | ms between the timed readers' reads | 2 s |
 | `resources`, `lease`, `job_lease` | the `Scheduler`'s capacities and the units each start asks for | seat 4, slot 2 |
 | `pressure` | how the host's pressure is read | the host's own |
-| `tool_hooks` | the app's `pre_tool_use`, `post_tool_use` and `stop` callbacks | none |
+| `tool_hooks` | the app's `pre_tool_use`, `post_tool_use` and `stop` callbacks, as `{module, opts}` (`ToolHooks`, F-195) | none |
 | `heavy` | the app's heavy commands, run under a lease | none |
 | `extensions` | the app's bundles, each `{module, opts}`, made by the module's `bundle/2` | none |
 | `dialogs` | a startup dialog's kind to the label pressed; any other waits on a person | none |
@@ -796,6 +804,8 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 | `remedies`, `remedy_bound` | the healer's allow-list and its caps' window | the healer's acts, 1 h |
 | `viewer` | every viewer's `{columns, rows}`, handed to `Sessions` and `Recoveries` alike (F-190) | `{200, 50}` |
 | `undeclared_cues` | `:route` or `:raise` a cue on a topic no part declares | `:route` |
+| `agents` | `false` starts only the parts a lease needs (`Config.agentless/0`), none that runs or reads an agent (F-195) | `true` |
+| `restart_wait` | ms a start waits for an instance of its name still exiting, before it is refused `{:instance_running, name}` (F-195) | 5 s |
 
 An app like a development loop's (views, builders, gates, landings) needs nothing more: a
 builder is a `delegate` with `review`, a gate is a heavy command or a job, a landing a job of

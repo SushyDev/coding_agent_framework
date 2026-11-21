@@ -58,6 +58,45 @@ defmodule CodingAgentFramework.Store do
     end
   end
 
+  @doc """
+  Reads the existing file at `path` read-only (F-195): opens it so it can write nothing and
+  makes no file, answers `{:ok, fun.(db)}`, or `{:ok, empty}` when the file has no table
+  `table` yet, and closes it. A reader outside the tree uses it, so it never takes a writer's
+  lock or adds a writer's schema. Answers `{:refused, {:sqlite, reason}}` for a file it cannot
+  open, a missing one included.
+
+      iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "ro.db")
+      iex> alias CodingAgentFramework.Store
+      iex> Store.read_only(path, "t", [], &Store.query(&1, "SELECT a FROM t", []))
+      {:refused, {:sqlite, :database_open_failed}}
+      iex> {:ok, db} = Store.open(path, "CREATE TABLE IF NOT EXISTS t (a TEXT);")
+      iex> Store.insert(db, "t", [a: "x"], "")
+      iex> Store.read_only(path, "t", [], &Store.query(&1, "SELECT a FROM t", []))
+      {:ok, [["x"]]}
+      iex> Store.read_only(path, "u", [], &Store.query(&1, "SELECT a FROM u", []))
+      {:ok, []}
+  """
+  @spec read_only(String.t(), String.t(), term, (db -> term)) ::
+          {:ok, term} | {:refused, {:sqlite, term}}
+  def read_only(path, table, empty, fun) do
+    case Sqlite3.open(path, mode: :readonly) do
+      {:ok, db} ->
+        try do
+          :ok = Sqlite3.set_busy_timeout(db, @busy_timeout)
+
+          tables =
+            query(db, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1", [table])
+
+          if tables == [], do: {:ok, empty}, else: {:ok, fun.(db)}
+        after
+          Sqlite3.close(db)
+        end
+
+      {:error, reason} ->
+        {:refused, {:sqlite, reason}}
+    end
+  end
+
   defp add_columns(db, added) do
     added
     |> Enum.flat_map(fn {table, columns} ->

@@ -199,6 +199,78 @@ defmodule CodingAgentFramework.SurfaceTest do
     assert %{units: %{"slot" => 1, "land:app" => 1}, holder: {"job", "land-2"}} = lease
   end
 
+  # F-195: an app that only leases its jobs runs the tree with no agent part.
+  test "a tree with agents: false starts the lease parts alone, and a job takes its lease",
+       ctx do
+    {:ok, config} = Config.new(ctx.fields ++ [agents: false])
+    parts = CodingAgentFramework.parts(start_supervised!({CodingAgentFramework, config}))
+    assert Enum.sort(Map.keys(parts)) == Enum.sort(Config.agentless())
+
+    {:ok, units} = CodingAgentFramework.job_units(config, :heavy, "app")
+    where = %{host: "ws", project: "app", name: "app-heavy"}
+    lease = %{class: :heavy, module: "app", units: units}
+    argv = [program!(:sh), "-c", "exit 0"]
+    # The project's own repository: no checkout is cloned, since `Mains` does not run.
+    repo = Path.join(ctx.dir, "repo")
+
+    assert {:ok, %{exit: 0}} =
+             Jobs.run(parts.jobs, "heavy-1", where, repo, argv, timeout: 10_000, lease: lease)
+
+    {:ok, lease} =
+      await(fn ->
+        case Enum.find(Scheduler.leases(parts.scheduler), &(&1.holder == {"job", "heavy-1"})) do
+          %{released_by: "monitor"} = lease -> {:ok, lease}
+          _ -> nil
+        end
+      end)
+
+    assert %{units: %{"slot" => 1}, holder: {"job", "heavy-1"}} = lease
+
+    # Nothing an agent needs was made: no hooks' secret, no heavy commands' wrapper, no
+    # account's settings, and the agent rows' reader answers none.
+    for path <- ["intake.secret", "bin/caf-run", "accounts"],
+        do: refute(File.exists?(Path.join(ctx.home, path)), path)
+
+    assert CodingAgentFramework.agent_rows(config) == {:ok, %{agents: [], delegates: []}}
+  end
+
+  # F-195's finding: the parent's restart of a tree just killed came while the old tree's named
+  # `Registry` still ended, and was refused, so the parent's budget ran out.
+  test "a parent's restart of a killed tree waits for the old one and starts", ctx do
+    child = %{
+      id: :parent,
+      start:
+        {Supervisor, :start_link,
+         [[{CodingAgentFramework, ctx.config}], [strategy: :one_for_one, max_restarts: 1]]},
+      type: :supervisor
+    }
+
+    parent = start_supervised!(child)
+    watch = Process.monitor(parent)
+    [{_, tree, _, _}] = Supervisor.which_children(parent)
+    {:ok, %{tree: ^tree}} = CodingAgentFramework.subscribe("t", ["sessions"])
+
+    Process.exit(tree, :kill)
+
+    {:ok, again} =
+      await(
+        fn ->
+          case Supervisor.which_children(parent) do
+            [{_, pid, _, _}] when is_pid(pid) and pid != tree -> {:ok, pid}
+            other -> {:not_yet, other}
+          end
+        end,
+        20_000
+      )
+
+    refute_received {:DOWN, ^watch, _, _, _}
+    assert {:ok, %{tree: ^again}} = CodingAgentFramework.subscribe("t", ["sessions"])
+
+    # An instance that runs on is still refused, once the bound has passed.
+    assert CodingAgentFramework.start_link(%{ctx.config | restart_wait: 100}) ==
+             {:refused, {:instance_running, "t"}}
+  end
+
   test "a delegate's end ends its services, and hands a kept one to its parent", ctx do
     # The brief's turn waits on a permission, so the delegate runs until it is killed twice.
     File.write!(Path.join(ctx.dir, "hold"), "")
@@ -437,22 +509,31 @@ defmodule CodingAgentFramework.SurfaceTest do
     {:ok, _} = await(fn -> ok("message #{u}" in HeadlessStandIn.taken(ctx.dir) || nil) end)
   end
 
-  test "the app's PreToolUse callback denies or corrects a call through the account's hook",
-       ctx do
-    deny = fn
-      %{tool_name: "WebFetch"} ->
-        {:deny, "No fetches in this app."}
+  # The app's tool hooks, named in the config as a module and its options (F-195).
+  defmodule Hooks do
+    @behaviour CodingAgentFramework.ToolHooks
 
-      %{tool_name: "Grep"} ->
-        {:allow, updated_input: %{"path" => "src"}, additional_context: "Code is in src."}
+    @impl true
+    def pre_tool_use(%{tool_name: "WebFetch"}, opts, _part), do: {:deny, opts[:deny]}
 
-      _ ->
-        :pass
+    def pre_tool_use(%{tool_name: "Grep"}, _opts, part) do
+      context = "Code is in src; mailbox #{is_pid(part.(:mailbox))}."
+      {:allow, updated_input: %{"path" => "src"}, additional_context: context}
     end
 
-    me = self()
-    tools = %{pre_tool_use: deny, post_tool_use: &send(me, {:after, &1})}
-    start(%{ctx.config | tool_hooks: tools})
+    def pre_tool_use(_event, _opts, _part), do: :pass
+
+    @impl true
+    def post_tool_use(event, opts, part), do: send(opts[:to], {:after, event, part.(:mailbox)})
+  end
+
+  test "the app's PreToolUse callback denies or corrects a call through the account's hook",
+       ctx do
+    # Options are data: the test is found by a name of its own, not by its pid.
+    me = :"surface_hooks_#{System.unique_integer([:positive])}"
+    Process.register(self(), me)
+    {:ok, config} = Config.new(ctx.fields ++ [tool_hooks: {Hooks, deny: "No fetches.", to: me}])
+    parts = start(config)
 
     # The hooks Claude Code would post, as the account's settings name them.
     {:ok, accounts} = Accounts.new(ctx.home, ["work"])
@@ -481,7 +562,7 @@ defmodule CodingAgentFramework.SurfaceTest do
     assert %{"permissionDecision" => "allow", "updatedInput" => %{"path" => "src"}} =
              correction = JSON.decode!(post.("PreToolUse", "Grep"))["hookSpecificOutput"]
 
-    assert correction["additionalContext"] == "Code is in src."
+    assert correction["additionalContext"] == "Code is in src; mailbox true."
     assert post.("PreToolUse", "Read") == ""
     assert post.("PostToolUse", "Read") == ""
 
@@ -491,7 +572,9 @@ defmodule CodingAgentFramework.SurfaceTest do
     answer = JSON.decode!(post_input.("PreToolUse", "Bash", background))["hookSpecificOutput"]
     assert answer["updatedInput"] == %{background | "command" => "exec </dev/null; ls"}
     refute Map.has_key?(answer, "permissionDecision")
-    assert_receive {:after, %{tool_name: "Read", agent: nil}}, 5_000
+    # The hook reached the live `Mailbox` through its lookup.
+    mailbox = parts.mailbox
+    assert_receive {:after, %{tool_name: "Read", agent: nil}, ^mailbox}, 5_000
   end
 
   test "a heavy command's wrapper takes its lease from the tree's Scheduler on the intake's port",

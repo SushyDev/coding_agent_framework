@@ -134,8 +134,10 @@ defmodule CodingAgentFramework.SubscribeTest do
     assert CodingAgentFramework.unsubscribe(i, ref) == :ok
     assert CodingAgentFramework.unsubscribe(i, ref) == {:refused, :no_subscription}
 
-    # A second instance of the name is refused before it makes anything.
-    assert CodingAgentFramework.start_link(ctx.a) == {:refused, {:instance_running, i}}
+    # A second instance of the name is refused before it makes anything, once it has waited
+    # its `restart_wait` for the first to end (F-195).
+    assert CodingAgentFramework.start_link(%{ctx.a | restart_wait: 100}) ==
+             {:refused, {:instance_running, i}}
   end
 
   # F-174's new-2: the subscriptions live and die with the tree, whose supervisor `subscribe/2`

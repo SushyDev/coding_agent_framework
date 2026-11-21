@@ -199,6 +199,14 @@ defmodule CodingAgentFramework.Delegates.Table do
   @spec rows(db, String.t()) :: [map]
   def rows(db, host), do: select(db, "host = ?1", [host])
 
+  @doc """
+  The host's rows in the file at `path`, read once through a read-only connection that is
+  closed after (F-195), for a reader outside the tree; `{:ok, []}` before `Delegates` made its
+  table.
+  """
+  @spec read_only(String.t(), String.t()) :: {:ok, [map]} | {:refused, term}
+  def read_only(path, host), do: Store.read_only(path, "delegates", [], &rows(&1, host))
+
   defp select(db, where, args),
     do: Store.select(db, "delegates", @columns, where <> " ORDER BY id", args)
 end
