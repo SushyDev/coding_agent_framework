@@ -112,6 +112,22 @@ defmodule CodingAgentFramework.Acts do
   @doc """
   The act ran and its outcome waits for a later reading: a `claimed` row becomes `acted`, with
   `fields` (`reason`, `answer`, `detail`). Refused `{:not_claimed, status}` otherwise.
+
+  A `detail` merges into the claim's and never writes over it (F-192's new-1), so what the
+  claim recorded (its symptom's key, the healer taking a person's act) stays on the row beside
+  what the act answered: both are read as maps, the claim's keys kept, and a detail that is no
+  map is the map's `text`.
+
+      iex> dir = CodingAgentFramework.TestHost.test_dir()
+      iex> alias CodingAgentFramework.Acts
+      iex> {:ok, acts} = Acts.start_link(db: Path.join(dir, "acted.db"), start_id: "s1",
+      ...>   host: "laptop", instance: "a")
+      iex> {:ok, id} = Acts.claim(acts, "healer:ws", "alpha", "k1", :end, detail: %{symptom: "k1"})
+      iex> Acts.acted(acts, id, answer: "sent", detail: %{group: 7, symptom: "other"})
+      {:ok, :acted}
+      iex> {:ok, %{detail: detail}} = Acts.get(acts, id)
+      iex> detail
+      ~s({"group":7,"symptom":"k1"})
   """
   @spec acted(GenServer.server(), id, keyword, keyword) :: answer(:acted)
   def acted(acts, id, fields \\ [], opts \\ []), do: call(acts, {:acted, id, dump(fields)}, opts)
@@ -291,7 +307,8 @@ defmodule CodingAgentFramework.Acts do
         nil ->
           {:refused, :unknown_act}
 
-        %{status: "claimed"} ->
+        %{status: "claimed"} = row ->
+          fields = Keyword.replace_lazy(fields, :detail, &merged(row.detail, &1))
           write(s, id, [status: "acted", acted_at: now(s)] ++ fields)
           {:ok, :acted}
 
@@ -418,6 +435,20 @@ defmodule CodingAgentFramework.Acts do
         {:refused, {if(held in @open, do: :claimed, else: :already_claimed), by}}
     end
   end
+
+  # The act's detail into the claim's, the claim's keys kept (`acted/4`).
+  defp merged(nil, detail), do: detail
+  defp merged(claimed, nil), do: claimed
+  defp merged(claimed, detail), do: Store.text(Map.merge(object(detail), object(claimed)))
+
+  defp object(text) when is_binary(text) do
+    case JSON.decode(text) do
+      {:ok, %{} = map} -> map
+      _not_a_map -> %{"text" => text}
+    end
+  end
+
+  defp object(other), do: %{"text" => other}
 
   defp write(s, id, fields) do
     Store.update(s.db, "acts", id, fields)

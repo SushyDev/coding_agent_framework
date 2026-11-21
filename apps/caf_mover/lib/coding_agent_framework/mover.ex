@@ -33,7 +33,10 @@ defmodule CodingAgentFramework.Mover do
      the launch the app gives (`launch:`, without options, so the row's own are taken again),
      and so Remote Control and the waiter's hook of that account. An interactive session's
      first due row goes in as the resume's prompt (`Mailbox.launch/4`, then `launched/3`), since
-     the resumed process has no waiter until a turn of it ends. Once the row runs there the
+     the resumed process has no waiter until a turn of it ends. A headless session's goes as
+     the first line by its stream, which Claude Code headless needs before it writes its init
+     (F-152); with nothing due, the move first stores a word of its own (F-193), a notice under
+     `move:<agent>:<deadline>` that says it was moved and to go on. Once the row runs there the
      move is done: its fields are cleared and its act `verified`.
 
   **How each failure settles**, the session running on one account, never two and never none:
@@ -71,6 +74,8 @@ defmodule CodingAgentFramework.Mover do
   @stop 30_000
   # A resume's deadline in `Sessions`, which bounds the launch that carries its first row.
   @resume 30_000
+  # The word a headless session moved with nothing due goes on with (F-193).
+  @moved "This session was moved between Claude accounts. Go on with your task from where it stopped."
 
   @type outcome(ok) :: {:ok, ok} | {:refused, term} | {:unknown, term}
 
@@ -437,15 +442,46 @@ defmodule CodingAgentFramework.Mover do
   # goes by its stream as the line the resume writes right after the hold, as `Delegates`' does
   # (F-152: Claude Code headless writes its init only after it read a line; F-191, the word to go
   # on of a limited delegate). A row still `sending` (a launch a restart cut, say) settles first.
+  # A headless session with nothing due gets the move's own word first (F-193, `Move.tla`'s
+  # OwnWord), so its resume always has a first line.
   defp launch_first(s, row) do
     via = if Agents.headless?(row), do: :stream, else: :launch
 
+    case marked(s, row, via) do
+      {:ok, :none} when via == :stream ->
+        with :ok <- own_word(s, row) do
+          case marked(s, row, via) do
+            {:ok, :none} -> {:unknown, :no_first_line}
+            marked -> marked
+          end
+        end
+
+      {:ok, :none} ->
+        {:ok, nil}
+
+      marked ->
+        marked
+    end
+  end
+
+  defp marked(s, row, via) do
     case Mailbox.launch(s.mailbox, row.name, s.clock.() + @resume + @step, via: via) do
       {:ok, %{id: _, text: _} = launched} -> {:ok, launched}
-      {:ok, :none} -> {:ok, nil}
+      {:ok, :none} -> {:ok, :none}
       {:refused, :no_transcripts} -> {:ok, nil}
       {:refused, {:sending, ids}} -> {:unknown, {:sending, ids}}
       {_, why} -> {:unknown, {:launch, why}}
+    end
+  end
+
+  # A notice no turn answers, under the move's key: one per move, whatever account its resume
+  # goes to (the move's deadline stays on the row through a way back, which clears its act).
+  defp own_word(s, row) do
+    key = "move:#{row.name}:#{row.move_deadline}"
+
+    case Mailbox.notify(s.mailbox, row.name, @moved, key: key, kind: :notice) do
+      {:ok, _} -> :ok
+      {_, why} -> {:unknown, {:word, why}}
     end
   end
 

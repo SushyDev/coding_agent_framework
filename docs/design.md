@@ -709,7 +709,7 @@ F-186 added the `limit` and `usage_credits` kinds from the agent row's usage lim
 its healer (`Limits`, not `Sessions` as the table says: `Sessions` is the row's writer), ids
 `limit:<agent>:<until>` and `usage_credits:<agent>:<until>`, answered through
 `Sessions.answer_limit/6`; the `Scheduler`'s `limit` prompt for a start refused at a limit is
-not built. F-190 added a headless delegate's permission request: `Prompts` reads each `Stream`
+not built (F-193's new-1 says why). F-190 added a headless delegate's permission request: `Prompts` reads each `Stream`
 fold's held `can_use_tool` request as kind `permission`, id
 `permission:stream:<session>:<request id>`, no deadline (Claude Code waits on the stream),
 answered once through `Stream.answer/5` (the fold marks it answering before its line goes, so
@@ -1439,7 +1439,13 @@ gone by pid and start time and its socket dead); `resuming` is `Sessions.resume`
 account with the same session id and the app's launch for the agent (a delegate's from
 `Delegates.launch/2`), the row's own options and model taken again. An interactive session's
 first due row goes in as the resume's prompt (`launch`, "Delivery"; F-137's new-1), since the
-resumed process has no waiter until a turn of it ends; a row still `sending` settles first.
+resumed process has no waiter until a turn of it ends; a row still `sending` settles first. A
+headless one's goes as its first line by stream, which Claude Code headless needs before it
+writes its init (F-152); with no row due, the move first stores a word of its own, a notice
+from `framework` under `move:<agent>:<deadline>` ("This session was moved between Claude
+accounts. Go on with your task from where it stopped."), so every headless resume has a first
+line (F-193, `Move.tla`'s `Headless`). The key is the move's deadline, which the row keeps on a
+way back, so one move stores one word whichever account its resume goes to.
 The copy leaves the memory: Claude Code keeps a working directory's agent memory once per
 account, in `<config>/projects/<cwd>/memory/`, and a move would leave it behind. So the memory
 lives once per checkout or worktree in the home, `<home>/memory/<cwd as Claude Code names
@@ -2665,6 +2671,11 @@ at its limit moved with no drain and no stop (`LimitMove`); a copy or resume ref
 gone (`Back`), never resumed on the account at its limit (`NoResumeIntoLimit`,
 `Break_Move_BackIntoLimit`); in `Move_Limit` and `Move_LimitLiveness` (`LimitMoveSettles`).
 Every earlier `Move_*` configuration sets `Limited = FALSE` and keeps its state space.
+F-193 models a headless session's move (`Headless`): with no row due or in flight at the
+resume, the `Mover` stores a word of its own first (`OwnWord`), so every headless resume
+carries a first line (`HeadlessResumeHasLine`, `Break_Move_BareHeadless`, in `Move_Headless`
+and `Move_HeadlessLiveness`, with `DrainedParentMoves` and `RowsArrive`); every other `Move_*`
+configuration sets `Headless = FALSE` and keeps its state space.
 `Boxes.tla` composes its contracts (`MaxLimits` above 0 only in `Boxes_Limit`): the
 `Scheduler`'s gate and `Mailbox`'s mark against a `limited` turn, with a dialog, a stop and the
 restarts, as `NoStartOnLimited` and `NoRowIntoLimit`.
@@ -2949,6 +2960,18 @@ One text for every word. And a delegate's start is confirmed by the init naming 
 whether its process still lives or not (F-187's new-4): the hold removes an earlier hold's
 record, so a record there is this start's, and a process gone after its init is a running row
 that exited.
+
+Built in F-193 (F-191's new-2 and new-4, F-186's leftover, F-192's new-1 and new-2, decided): a
+headless move with nothing due carries the `Mover`'s own word ("How `Mover` does it");
+`Watch.limited/2` (`Watch.Limited`, the app's `limited/1`, the console's `limited(caf)`), the
+digest of `limited` by account: one reading per account limited now, its newest reset and its
+window, and its agents, each with its own reset and how long it has waited since its limit was
+read; each healer's claim keeps its symptom's state in its `detail` as `symptom`, and
+`Acts.acted/4` merges an act's `detail` into the claim's, never over it (a `Recoveries` reopen's
+pane is its `pane`), so a person's answered prompt can be read with its act's row; and a press
+a person's `act` took is `by` that person. The runbook's `usage-limit` record takes the session
+file during Claude Code's own wait. Not built: the `Scheduler`'s `limit` prompt for a start
+refused at a limit, and the inbox's reading of a person's act (F-193's new-1 and new-2).
 
 **Measured** (F-181, by hand on 2.1.322, against a local endpoint at `ANTHROPIC_BASE_URL` that
 answers 429 with the unified rate-limit headers the pinned binary reads, a dummy subscriber's

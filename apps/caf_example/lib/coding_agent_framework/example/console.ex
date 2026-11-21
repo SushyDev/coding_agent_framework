@@ -25,6 +25,7 @@ defmodule CodingAgentFramework.Example.Console do
       prompts(caf, subtree: "demo-main", kind: "permission")
       answer(caf, "permission:41", "allow")          # as the config's operator, once
       symptoms(caf, status: ["open", "asked"])       # what the healer read
+      limited(caf)                                   # the accounts at a usage limit
       acts(caf, actor: "absent_mains:ws")            # the ledger's acts
       usage(caf)                                     # each account's reading
       groups(caf, "demo-unit-readme")                # its process groups, as the healer reads them
@@ -366,6 +367,31 @@ defmodule CodingAgentFramework.Example.Console do
           answer = if s.answer, do: ", answered #{s.answer} by #{s.answered_by}", else: ""
           say("symptom #{s.id}: #{s.kind} of #{s.target}, #{s.status}#{asked}#{answer}")
           say("  state #{s.state}, from #{s.source}")
+        end
+
+        :ok
+
+      other ->
+        show(other)
+    end
+  end
+
+  @doc """
+  The accounts at a usage limit now (`CodingAgentFramework.limited/1`): each one's window and
+  reset, and its agents with how long each has waited.
+  """
+  @spec limited(pid) :: :ok
+  def limited(caf) do
+    case CodingAgentFramework.limited(info(caf).config.instance) do
+      {:ok, []} ->
+        say("no account is at a usage limit")
+
+      {:ok, readings} ->
+        for r <- readings do
+          say("#{r.account}: limited (#{r.window}) until #{r.until}")
+
+          for a <- r.agents,
+              do: say("  #{a.agent}, waiting #{div(a.waited, 60_000)} min, until #{a.until}")
         end
 
         :ok

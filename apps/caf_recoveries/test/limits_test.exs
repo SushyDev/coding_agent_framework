@@ -180,6 +180,15 @@ defmodule CodingAgentFramework.LimitsTest do
     assert settle(healer, ctx, "app-epic") == "idle"
     refute_received {:word, _, _, _}
     past_reset!(ctx)
+
+    # The Watch's digest by account (F-193): the account's window and reset, and the agent with
+    # how long it has waited since the limit was read.
+    waited = @until * 1000 + @margin - 1_000_000_000
+
+    assert {:ok, [%{account: "work", window: "five_hour", until: @until, agents: [agent]}]} =
+             Watch.limited(ctx.watch)
+
+    assert %{agent: "app-epic", until: @until, waited: ^waited} = agent
     assert settle(healer, ctx, "app-epic") == "word"
     key = "limit:app-epic:#{@until}"
     assert_received {:word, "app-epic", _text, ^key}
@@ -199,6 +208,7 @@ defmodule CodingAgentFramework.LimitsTest do
            }
 
     assert {:ok, [%{status: "passed"}]} = Watch.read(ctx.watch, kind: "limited")
+    assert {:ok, []} = Watch.limited(ctx.watch)
 
     # It ended by itself: the go-ons in a row end.
     hit!(ctx, "app-epic", "a1", followed: true, ended: true)
@@ -502,5 +512,28 @@ defmodule CodingAgentFramework.LimitsTest do
 
     assert {:ok, [%{kind: "limit_menu", reason: "not_on_list"}]} =
              Watch.read(ctx.watch, status: "asked")
+  end
+
+  # Heal.tla's AnswerAct (F-192's new-2): a press asked for its cap that a person answered `act`
+  # is pressed under their claim, its `by` theirs, not the framework's; and the claim keeps its
+  # symptom's key (F-193), so the answered prompt is read with the act's row.
+  test "a person's act on a press asked for its cap is theirs, its claim keyed by the symptom",
+       ctx do
+    agent!(ctx, "app-epic")
+    hit!(ctx, "app-epic", "a1")
+    state = "limit_menu:app-epic:#{@until}"
+    sym = %{kind: "limit_menu", target: "app-epic", state: state, source: "limits:test", since: 0}
+    {:ok, %{id: id}} = Watch.record(ctx.watch, sym)
+    {:ok, ^id} = Watch.ask(ctx.watch, sym, {:cap, 20, 3_600_000})
+    {:ok, :answered} = Watch.answer(ctx.watch, id, "act", "sam")
+    healer = healer!(ctx)
+
+    assert settle(healer, ctx, "app-epic") == "idle"
+    assert_received {:pressed, "app-epic", @stop}
+
+    assert {:ok, [%{actor: "sam", outcome: "recovered", detail: detail}]} =
+             Acts.rows(ctx.acts, act: "press_stop")
+
+    assert %{"by" => "sam", "symptom" => ^state} = JSON.decode!(detail)
   end
 end

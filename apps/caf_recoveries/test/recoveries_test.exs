@@ -111,7 +111,9 @@ defmodule CodingAgentFramework.RecoveriesTest do
     assert {:ok, %{claimed: []}} = Recoveries.check(ctx.recoveries)
     assert held(ctx, "alpha").status == :no_server
     assert {:ok, %{claimed: [id]}} = Recoveries.check(ctx.recoveries)
-    assert [%{status: "acted", detail: "%0"}] = rows(ctx)
+    assert [%{status: "acted"} = acted] = rows(ctx)
+    assert pane(acted) == "%0"
+    assert JSON.decode!(acted.detail)["symptom"] =~ "lost_viewer:alpha:"
 
     assert %{status: :viewed} = held(ctx, "alpha")
     assert {:ok, %{generation: 1}} = TmuxSampler.rows(ctx.sampler)
@@ -315,7 +317,8 @@ defmodule CodingAgentFramework.RecoveriesTest do
     hold!(ctx, "alpha")
     {:ok, _} = Tmux.new_session(ctx.server, "keeper", [program!(:cat)])
     assert {:ok, id} = agree(ctx, "alpha")
-    assert [%{status: "acted", detail: pane}] = rows(ctx)
+    assert [%{status: "acted"} = acted] = rows(ctx)
+    pane = pane(acted)
 
     # The viewer is gone again before the sample that verifies it.
     assert {:ok, :killed} = Tmux.kill_pane(ctx.server, pane, "alpha")
@@ -450,7 +453,10 @@ defmodule CodingAgentFramework.RecoveriesTest do
     assert {:ok, id} = agree(ctx, "alpha")
     assert held(ctx, "alpha").status == :viewed
     assert {:ok, %{ended: [^id]}} = Recoveries.check(ctx.recoveries)
-    assert %{id: ^id, outcome: "recovered", detail: new} = List.last(rows(ctx))
-    new
+    assert %{id: ^id, outcome: "recovered"} = recovered = List.last(rows(ctx))
+    pane(recovered)
   end
+
+  # The reopened viewer's pane, in the act's detail beside its claim's symptom (F-193).
+  defp pane(%{detail: detail}), do: JSON.decode!(detail)["pane"]
 end

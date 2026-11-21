@@ -474,7 +474,7 @@ defmodule CodingAgentFramework.Limits do
              row.name,
              state,
              :move,
-             [detail: %{to: to}] ++ healer(s, actor)
+             [detail: %{to: to, symptom: state}] ++ healer(s, actor)
            ) do
       l = Map.merge(l, %{"away" => l["until"], "move_to" => to})
       claimed_move(s, id, row, l, if(actor == s.actor, do: "framework", else: actor))
@@ -501,8 +501,9 @@ defmodule CodingAgentFramework.Limits do
 
   defp move(s, row, l) do
     by = l["by"] || "framework"
-    claim = %{state: key("limit_far", row, l), by: by, menu: l["menu"] || 0}
-    detail = %{to: l["move_to"], by: by}
+    state = key("limit_far", row, l)
+    claim = %{state: state, by: by, menu: l["menu"] || 0}
+    detail = %{to: l["move_to"], by: by, symptom: state}
 
     case Acts.claim(s.acts, s.actor, row.name, claim, :move, detail: detail) do
       {:ok, id} -> claimed_move(s, id, row, l, by)
@@ -600,6 +601,7 @@ defmodule CodingAgentFramework.Limits do
 
     with {:go, actor} <-
            if(is_binary(l["by"]), do: {:go, s.actor}, else: own_press(s, list, row, state, l)),
+         detail = Map.put(by(s, l, actor), :symptom, state),
          {:ok, id} <-
            Acts.claim(
              s.acts,
@@ -607,7 +609,7 @@ defmodule CodingAgentFramework.Limits do
              row.name,
              claim,
              :press_stop,
-             [detail: by(l)] ++ healer(s, actor)
+             [detail: detail] ++ healer(s, actor)
            ) do
       case s.press.(row.name, l["label"]) do
         {:ok, _} ->
@@ -647,7 +649,15 @@ defmodule CodingAgentFramework.Limits do
 
     with {:ok, sym, actor} <- symptom(s, "limit_reset", row, state, l),
          :go <- if(actor == s.actor, do: may_act(s, list, "limit_reset", sym), else: :go),
-         {:ok, id} <- Acts.claim(s.acts, actor, row.name, state, :go_on, healer(s, actor)) do
+         {:ok, id} <-
+           Acts.claim(
+             s.acts,
+             actor,
+             row.name,
+             state,
+             :go_on,
+             [detail: %{symptom: state}] ++ healer(s, actor)
+           ) do
       key = "limit:#{row.name}:#{l["until"]}"
       if delegate?(row), do: delegate_word(s, id, row, l, key), else: own_word(s, id, row, l, key)
       id
@@ -817,8 +827,11 @@ defmodule CodingAgentFramework.Limits do
   defp menu?(%{state: :dialog, kind: :usage_limit_menu}), do: true
   defp menu?(_), do: false
 
-  defp by(%{"by" => by}) when is_binary(by), do: %{by: by}
-  defp by(_), do: %{by: "framework"}
+  # Who a press is for: the `limit` prompt's answerer, else the claim's actor, a person's `act`
+  # (F-192's new-2) or the framework's own.
+  defp by(_s, %{"by" => by}, _actor) when is_binary(by), do: %{by: by}
+  defp by(%{actor: actor}, _l, actor), do: %{by: "framework"}
+  defp by(_s, _l, person), do: %{by: person}
 
   # A person's claim names this healer, whose restart closes it if cut (F-192).
   defp healer(%{actor: actor}, actor), do: []

@@ -179,14 +179,17 @@ defmodule CodingAgentFramework.MoverSetup do
   end
 
   @doc """
-  A headless stand-in's launch in `dir`, as a delegate of `main`. It writes its init at its
-  start (`:at_start`) on purpose: `Mover`'s resume of a headless delegate carries no first line,
-  so a stand-in in the real release's shape would never be confirmed (F-152's build note, new-1).
+  A headless stand-in's launch in `dir`, as a delegate of `main`, in the real release's shape:
+  it writes its init only after it read a first line (F-152), so a start carries one (`first/0`)
+  and every `Mover` resume of it does (F-193).
   """
   def headless(dir) do
-    [role: :delegate, parent: "main", cwd: dir, claude: HeadlessStandIn.write!(dir, :at_start)] ++
+    [role: :delegate, parent: "main", cwd: dir, claude: HeadlessStandIn.write!(dir)] ++
       shared(dir)
   end
+
+  @doc "A headless start's first line, as `Delegates` writes its brief: `first:` for `Sessions`."
+  def first, do: [first: %{uuid: "b0000000-0000-4000-8000-000000000001", text: "begin"}]
 
   defp shared(dir) do
     env = %{home: dir, path: "/nonexistent", term: "xterm-256color", lang: "C.UTF-8"}

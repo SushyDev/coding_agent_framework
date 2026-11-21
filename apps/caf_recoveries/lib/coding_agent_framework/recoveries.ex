@@ -551,12 +551,17 @@ defmodule CodingAgentFramework.Recoveries do
     )
   end
 
-  # A person's claim names this healer, whose restart closes it if cut (F-192).
+  # The claim keeps its symptom's key (F-193), so a person's answered prompt is read with it;
+  # a person's claim names this healer, whose restart closes it if cut (F-192).
   defp claim(%{actor: actor} = state, actor, target, key, act),
-    do: Acts.claim(state.acts, actor, target, key, act)
+    do: Acts.claim(state.acts, actor, target, key, act, detail: %{symptom: key})
 
   defp claim(state, person, target, key, act),
-    do: Acts.claim(state.acts, person, target, key, act, healer: state.actor)
+    do:
+      Acts.claim(state.acts, person, target, key, act,
+        detail: %{symptom: key},
+        healer: state.actor
+      )
 
   @doc """
   The rows of `act` that are `acted` and wait for `actor`'s verify: the healer's own, and those
@@ -597,7 +602,7 @@ defmodule CodingAgentFramework.Recoveries do
 
     case answer do
       {:ok, pane} ->
-        Acts.acted(state.acts, id, answer: "ok", detail: pane)
+        Acts.acted(state.acts, id, answer: "ok", detail: %{pane: pane})
 
       # A viewer opened since the samples: it counts as an open, so a later loss is new.
       {:refused, {:session_exists, _}} ->

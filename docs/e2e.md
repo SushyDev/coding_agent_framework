@@ -24,9 +24,9 @@ or an interactive delegate's screen; never into a headless delegate's.
 `prompts(caf, filter)` and answered once with `answer(caf, id, choice)`, as the config's
 operator (`operator`): the app's `prompts/2` and `answer/4` (F-179; the console's calls,
 F-190). Each prompt below is answered so wherever the inbox lists it, a headless delegate's
-permission request among them (F-190). `symptoms(caf, filter)`, `acts(caf, filter)`,
-`usage(caf)` and `groups(caf, agent)` read the `Watch`, the ledger, the usage readings and a
-delegate's process groups the same way.
+permission request among them (F-190). `symptoms(caf, filter)`, `limited(caf)`, `acts(caf,
+filter)`, `usage(caf)` and `groups(caf, agent)` read the `Watch`, its digest of the accounts
+at a limit, the ledger, the usage readings and a delegate's process groups the same way.
 
 Never interrupt the console's shell (Ctrl+C, or Ctrl+G and a new shell) to get past a slow
 call: wait for it, or run a long one as a task (`Task.async(fn -> checkout(caf) end)`). A new
@@ -36,9 +36,14 @@ a shell that started the app a second time, failed on its ports and stopped the 
 **If a usage limit comes** in any step (an agent `limited` in `agents(caf)`, or Claude Code's
 limit text on a screen), press nothing on the screen. Record `usage-limit`: the screen
 (`attach`), `prompts(caf)` (a `limit` or `usage_credits` prompt), `symptoms(caf,
-kind: ["limited", "limit_menu", "limit_reset"])`, `usage(caf)` and
-the time. The healer (`Limits`) presses the menu's stop and goes on at the reset by itself; a
-real limit is a reading no test has.
+kind: ["limited", "limit_menu", "limit_reset", "limit_far"])`, `limited(caf)` (each account's
+limit, its agents and how long each has waited, F-193), `usage(caf)` and the time. While a main
+session shows Claude Code's own wait ("Continuing automatically at … · Esc to cancel"), also
+record what its session file says, whole: `ls -t
+/Users/me/caf-e2e/accounts/<account>/claude/sessions/`, then `cat` the newest, its `status`
+read at the time the screen shows the wait (F-191's new-4: the move's stop reads the screen
+only when the file does not say `idle`). The healer (`Limits`) presses the menu's stop and goes
+on at the reset by itself; a real limit is a reading no test has.
 
 ## 0. Before the run
 
@@ -663,7 +668,7 @@ write `/Users/me` (or `/home/me`) for your home and `me` for your name. The reco
 | `absent-main` | 13 | one resume per absence, a prompt past it, and its act once |
 | `symptoms` | 14 | what the `Watch` recorded in a whole run |
 | `exit-dialog` | 15 | what the session file says while the exit dialog shows |
-| `usage-limit` | any | a real limit, if one came |
+| `usage-limit` | any | a real limit, if one came, and what the session file says during Claude Code's own wait |
 | `linux-paths` | On Linux | the login's file, the session's `PATH`, writes outside the home |
 | `linux-process-tree` | L1 | whether `stuck_background`'s remedy goes on by default |
 | `linux-cpu` | L2 | the healer's CPU time against `ps`, and its symptom of a quiet group |
