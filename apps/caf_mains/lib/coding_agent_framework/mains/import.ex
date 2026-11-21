@@ -338,9 +338,9 @@ defmodule CodingAgentFramework.Mains.Import do
     memory =
       plan.memory
       |> Enum.group_by(&elem(&1, 1), &elem(&1, 0))
-      |> Enum.filter(fn {to, froms} ->
-        (exists?(to) and Enum.any?(froms, &(not same?(&1, to)))) or
-          length(Enum.uniq_by(froms, &File.read/1)) > 1
+      |> Enum.filter(fn {to, sources} ->
+        (exists?(to) and Enum.any?(sources, &(not same?(&1, to)))) or
+          length(Enum.uniq_by(sources, &File.read/1)) > 1
       end)
       |> Enum.map(&elem(&1, 0))
 
