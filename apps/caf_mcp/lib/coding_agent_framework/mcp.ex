@@ -85,7 +85,7 @@ defmodule CodingAgentFramework.MCP do
     `{:already_claimed, by}`. Answers `%{done: value, claim: id, settled: settle's answer}`,
     or the fix's refusal or unknown.
   - `move(agent, to)`: `Grants.may_fix?/3`, then the mover's `move/4` (`to` optional: by default
-    the account with the most allowance left), which claims the act `move` in `Acts` and settles
+    the usable account with the most room), which claims the act `move` in `Acts` and settles
     it when the move ends. Answers `%{act: id, from: account, to: account}` once the drain began.
   - `answer_startup(agent, kind, label)`: the operator's alone (F-140); any other caller is
     refused `:operator_only`. The startup dialog an interactive start waits on (`kind`
@@ -371,7 +371,7 @@ defmodule CodingAgentFramework.MCP do
     %{
       name: "move",
       description:
-        "Moves your delegate to another account (to: its name, or the one with the most allowance left): drained, ended once idle, resumed there.",
+        "Moves your delegate to another account (to: its name, or the usable one with the most room): drained, ended once idle, resumed there.",
       inputSchema: %{
         type: "object",
         properties: %{agent: @str, to: @str},

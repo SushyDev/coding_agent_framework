@@ -1,15 +1,21 @@
 defmodule CodingAgentFramework.Usage.Reading do
   @moduledoc """
-  One account's allowance, its weekly window and its five-hour one, read from the JSON Claude
-  Code hands its `statusLine` command. Pure and total: any bytes give a reading or a named
-  problem, never a raise.
+  One account's allowance, its weekly window and its five-hour one. Pure and total: any input
+  gives a reading or a named problem, never a raise.
 
-  In Claude Code 2.1.322 that JSON has `rate_limits.seven_day` and `rate_limits.five_hour`,
-  each with `used_percentage` (0 to 100) and `resets_at` (Unix seconds), for a subscriber,
-  after the session's first answer from the API, and each only while that window's reset has
-  not passed. A reading keeps each window's share used, as a float, and its reset: the weekly
-  one as `used` and `resets_at`, which it must have, and the five-hour one as `five_used` and
-  `five_resets_at`, nil when the JSON has none.
+  Two sources give it, both Claude Code's (2.1.322):
+
+  - `parse/1`: the JSON Claude Code hands its `statusLine` command, with
+    `rate_limits.seven_day` and `rate_limits.five_hour`, each with `used_percentage` (0 to 100)
+    and `resets_at` (Unix seconds), for a subscriber, after the session's first answer from the
+    API, and each only while that window's reset has not passed. It must have the weekly window.
+  - `windows/1`: a headless session's `rate_limit_event`, whose `unifiedWindows` has
+    `five_hour` and `seven_day`, each with `utilization` (0 to 1) and `resetsAt`, measured in
+    F-181 (an event of a limit names only the window it closed). Either window may be absent.
+
+  A reading keeps each window's share used, as a float percentage, and its reset: the weekly
+  one as `used` and `resets_at`, and the five-hour one as `five_used` and `five_resets_at`, nil
+  where the source has none.
 
       iex> alias CodingAgentFramework.Usage.Reading
       iex> Reading.parse(~s({"rate_limits": {"seven_day": {"used_percentage": 41, "resets_at": 1800000000}}}))
@@ -19,16 +25,18 @@ defmodule CodingAgentFramework.Usage.Reading do
       {:ok, %{used: 41.0, resets_at: 1800000000, five_used: 97.5, five_resets_at: 1700003600}}
       iex> Reading.parse(~s({"rate_limits": {"five_hour": {}}}))
       {:malformed, :no_seven_day}
+      iex> Reading.windows(%{"five_hour" => %{"utilization" => 0.02, "resetsAt" => 1700003600}})
+      {:ok, %{five_used: 2.0, five_resets_at: 1700003600}}
   """
 
   @type t :: %{
-          used: float,
-          resets_at: integer,
+          used: float | nil,
+          resets_at: integer | nil,
           five_used: float | nil,
           five_resets_at: integer | nil
         }
 
-  @doc "The reading in `bytes`, or `{:malformed, reason}`."
+  @doc "The status line's reading in `bytes`, or `{:malformed, reason}`."
   @spec parse(binary) :: {:ok, t} | {:malformed, term}
   def parse(bytes) when is_binary(bytes) do
     with {:ok, json} <- decode(bytes),
@@ -45,24 +53,42 @@ defmodule CodingAgentFramework.Usage.Reading do
 
   def parse(_), do: {:malformed, :not_text}
 
-  @max_age 6 * 60 * 60
+  @doc """
+  The windows a stream's `rate_limit_event` names in its `unifiedWindows`: a partial reading
+  with only the windows it has, `{:ok, %{}}` for none, or `{:malformed, reason}`.
+  """
+  @spec windows(term) :: {:ok, map} | {:malformed, term}
+  def windows(unified) when is_map(unified) do
+    Enum.reduce_while(
+      [{"seven_day", :used, :resets_at}, {"five_hour", :five_used, :five_resets_at}],
+      {:ok, %{}},
+      fn {key, used_key, resets_key}, {:ok, acc} ->
+        case unified[key] do
+          nil ->
+            {:cont, {:ok, acc}}
 
-  @doc "How long a reading is current, in seconds: 6 hours."
-  @spec max_age() :: pos_integer
-  def max_age, do: @max_age
+          %{} = w ->
+            with {:ok, u} <- number(w, "utilization"),
+                 {:ok, r} <- number(w, "resetsAt") do
+              {:cont, {:ok, Map.merge(acc, %{used_key => u * 100.0, resets_key => trunc(r)})}}
+            else
+              bad -> {:halt, bad}
+            end
+
+          _ ->
+            {:halt, {:malformed, {:wrong_type, key}}}
+        end
+      end
+    )
+  end
+
+  def windows(_), do: {:malformed, :no_windows}
 
   @doc """
-  What `reading` says at `now` (Unix seconds), for a reading kept `max_age` seconds (default 6
-  hours) from its `seen_at` (ms):
-
-  - `{:assumed, 0.0}`: its window has reset, so the week started anew and nothing used since is
-    known. The reset wins over the age: an idle account's reading is always old, and it is the
-    account this rule exists for;
-  - `{:current, used}`: its window has not reset and it was written within `max_age`;
-  - `:unknown`: its window has not reset but it is older than `max_age`, or it is not a
-    reading.
-
-  Pure and total. A reading from the future counts as just written.
+  What `reading`'s weekly window says at `now` (Unix seconds): `{:assumed, 0.0}` once its reset
+  has passed, since the week started anew and nothing used since is known; `{:current, used}`
+  before it, however old the reading, since an idle account's share does not grow; `:unknown`
+  for what is not a reading. A view shows a reading's age beside it. Pure and total.
 
       iex> alias CodingAgentFramework.Usage.Reading
       iex> reading = %{used: 41.0, resets_at: 2000, seen_at: 1_000_000}
@@ -73,22 +99,15 @@ defmodule CodingAgentFramework.Usage.Reading do
       iex> Reading.status(reading, 1000 + 6 * 3600)
       {:assumed, 0.0}
       iex> Reading.status(%{reading | resets_at: 99_999}, 1000 + 6 * 3600)
-      :unknown
+      {:current, 41.0}
   """
-  @spec status(term, integer, integer) :: {:current | :assumed, float} | :unknown
-  def status(reading, now, max_age \\ @max_age)
-
-  def status(%{used: used, resets_at: resets_at, seen_at: seen_at}, now, max_age)
-      when is_number(used) and is_integer(resets_at) and is_integer(seen_at) and is_integer(now) and
-             is_integer(max_age) do
-    cond do
-      resets_at <= now -> {:assumed, 0.0}
-      seen_at + max_age * 1000 <= now * 1000 -> :unknown
-      true -> {:current, used / 1}
-    end
+  @spec status(term, integer) :: {:current | :assumed, float} | :unknown
+  def status(%{used: used, resets_at: resets_at}, now)
+      when is_number(used) and is_integer(resets_at) and is_integer(now) do
+    if resets_at <= now, do: {:assumed, 0.0}, else: {:current, used / 1}
   end
 
-  def status(_, _, _), do: :unknown
+  def status(_, _), do: :unknown
 
   # The five-hour window is absent once its reset passed; one that is there must be whole.
   defp five_hour(nil), do: {:ok, %{five_used: nil, five_resets_at: nil}}

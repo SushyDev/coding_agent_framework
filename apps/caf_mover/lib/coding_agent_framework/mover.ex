@@ -77,7 +77,10 @@ defmodule CodingAgentFramework.Mover do
   resume on another account (`Sessions.resume/6`'s: its role and its `cwd:` or `worktree:`,
   `claude:`, `env:`, `tool_timeout:`, `mcp:`; with no `model:` the row's is taken), a refusal (the move then goes back, as
   for a refused resume), or `{:unknown, reason}` (asked again at the next cue). Optionally `timeout:`
-  (ms, 30 min by default), `stop:` (ms, each stop's own deadline, 30 s by default) and `clock:`
+  (ms, 30 min by default), `stop:` (ms, each stop's own deadline, 30 s by default), `usable:` (a
+  function of an account answering `{:ok, account}` for one a launch may run on now, else why
+  not: `CodingAgentFramework.Logins.usable/3`, prepared and logged in; by default
+  `Accounts.ready/2`) and `clock:`
   (wall-clock ms).
   """
   @spec start_link(keyword) :: GenServer.on_start()
@@ -85,7 +88,7 @@ defmodule CodingAgentFramework.Mover do
 
   @doc """
   Moves agent `name`, for `actor`, to account `to:` (by default the one `Usage.pick/4` finds
-  with the most allowance left among the others). Answers once the drain began: `{:ok, %{act,
+  among the others that are usable: by `usable:`, the most room). Answers once the drain began: `{:ok, %{act,
   from, to}}`, the rest following on the row; or `{:refused, reason}`, with nothing begun:
   `:no_session`, `{:not_running, status}`, `{:moving, phase}`, `{:same_account, to}`,
   `{:unknown_account, to}`, `Usage`'s or `Accounts`' refusal, or `Acts`' (`{:claimed, by}` for a
@@ -165,6 +168,7 @@ defmodule CodingAgentFramework.Mover do
           agents: agents,
           timeout: Keyword.get(opts, :timeout, @timeout),
           stop: Keyword.get(opts, :stop, @stop),
+          usable: Keyword.get(opts, :usable, &Accounts.ready(s.accounts, &1)),
           clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
           calls: %{}
         })
@@ -257,9 +261,17 @@ defmodule CodingAgentFramework.Mover do
 
   defp target(s, row, nil) do
     case Usage.readings(s.usage, timeout: @step) do
-      {:ok, %{readings: readings}} -> Usage.pick(readings, s.accounts.names -- [row.account])
-      :unread -> {:refused, {:usage, :unread}}
-      other -> other
+      {:ok, %{readings: readings}} ->
+        # F-181: among the usable others, the one with the most room.
+        Usage.pick(readings, s.accounts.names -- [row.account], System.os_time(:second),
+          usable: s.usable
+        )
+
+      :unread ->
+        {:refused, {:usage, :unread}}
+
+      other ->
+        other
     end
   end
 

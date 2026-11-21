@@ -36,7 +36,8 @@ defmodule CodingAgentFramework.Mains do
   **A start** (`start_main/5`; the design's `start_main(project, name, brief)`) checks the
   project and its checkout, and that the name is free: no agent row, or a declared main session
   of that project; any other name, and the reserved names `framework` and the operator's, is
-  refused `{:running, name}`. It picks the account with the most allowance left, declares the
+  refused `{:running, name}`. It picks the usable account with the most room (`Usage.pick/4`:
+  by `usable:`, and the most room in the tighter window), declares the
   agent row, and writes its own row `starting`, the lease's holder; with a `scheduler:` it asks
   for a lease, class `:main` (a person's main session, always admitted), module the project,
   holder `{"main", key}` (`Mains.Work`). Granted, the brief is stored in `Mailbox` from the
@@ -60,8 +61,8 @@ defmodule CodingAgentFramework.Mains do
   **A resume** (`resume_main/3`, F-177; `Move.tla`'s Resume) runs on the account its row
   names, where its conversation is: a conversation lives only in the account it ran on or was
   imported into. Only when that account is refused (not prepared, logged out, or its windows
-  spent by `allowance:`) does it go to the one with the most allowance left among the others
-  that are not, which first takes a copy of the conversation (`Transcripts.Copy`, the `Mover`'s
+  spent by `allowance:`) does it go to the one with the most room among the others that are
+  not (`Usage.pick/4`), which first takes a copy of the conversation (`Transcripts.Copy`, the `Mover`'s
   copy), an act `copy` in `Acts`, then resumes there under the same session id. A copy refused
   leaves the row on its own account, the start refused `{:copy, reason}`.
 
@@ -102,8 +103,10 @@ defmodule CodingAgentFramework.Mains do
   checkout's rename, an import's rows and a resume's copy are recorded, F-156, F-177),
   `allowance:` (a function of an account answering `:room` or `{:spent, retry_at}`, the
   `Scheduler`'s own, `Usage.Allowance.check/3`; without it every account has room: a resume
-  leaves its row's account only when it is refused, F-177), `notify:`, `clock:` (wall-clock
-  ms), and
+  leaves its row's account only when it is refused, F-177), `usable:` (a function of an account
+  answering `{:ok, account}` for one a launch may run on now, else why not:
+  `CodingAgentFramework.Logins.usable/3`, prepared and logged in, F-181; by default
+  `Accounts.ready/2`), `notify:`, `clock:` (wall-clock ms), and
   `name_room:` (bytes, the room the home leaves for an agent's socket, `Config.name_room/1`): a
   start of a longer name is refused `{:bad, :name, {:longer_than, n}}` before any row (F-172).
   A start's call of `Sessions` carries the caller's deadline, the row's less its slack, so a
@@ -163,8 +166,8 @@ defmodule CodingAgentFramework.Mains do
   `Scheduler` for a lease of its own, class main session, as `start_main/5` does, and then
   `Sessions.resume/6` on the account its row names, where its conversation is (F-177). When
   that account is refused (`{:not_prepared, account}`, `{:login, :logged_out}`, `{:allowance,
-  retry_at}`), the conversation is first copied to the account with the most allowance left
-  among the others not refused, and resumed there; with none, the resume is refused
+  retry_at}`), the conversation is first copied to the account `Usage.pick/4` finds among the
+  others not refused (the most room), and resumed there; with none, the resume is refused
   `{:account, account, reason}`, and a copy refused `{:copy, reason}`, the row left on its
   account. Options: `model:` (else the model its row keeps), `state:` (the operator's fix,
   F-144: the state its claim in `Acts` holds, `fix_state/3`'s; the resume is refused `{:moved,
@@ -319,6 +322,7 @@ defmodule CodingAgentFramework.Mains do
           clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
           acts: Keyword.get(opts, :acts),
           allowance: Keyword.get(opts, :allowance, fn _account -> :room end),
+          usable: Keyword.get(opts, :usable, &Accounts.ready(s.accounts, &1)),
           # Per project: the task under way, whether a pull is owed, and the last reason a
           # rename of its old checkout was held back for (recorded once in `Acts`).
           checkouts:
@@ -1012,15 +1016,18 @@ defmodule CodingAgentFramework.Mains do
           others ->
             with {:ok, account} <- pick(s, others), do: {:ok, account, %{from: own, why: why}}
         end
+
+      # A login check that could not tell is no refusal: the conversation stays where it is,
+      # and the resume says why it did not go (F-181).
+      {:unknown, why} ->
+        {:unknown, {:account, own, why}}
     end
   end
 
-  # An account a launch may run on now: prepared, not logged out (read from which files exist,
-  # never a credential: one whose login is not readable may be logged in), and with room in
-  # both windows, as the Scheduler's gate reads them.
+  # An account a launch may run on now: prepared, logged in (`claude auth status`, by
+  # `usable:`), and with room in both windows and no limit, as the Scheduler's gate reads them.
   defp usable(s, name) do
-    with {:ok, account} <- Accounts.ready(s.accounts, name),
-         :ok <- logged_in(s, name),
+    with {:ok, account} <- launchable(s, name),
          :room <- s.allowance.(name) do
       {:ok, account}
     else
@@ -1029,17 +1036,15 @@ defmodule CodingAgentFramework.Mains do
     end
   end
 
-  defp logged_in(s, name) do
-    case Accounts.login(s.accounts, name) do
-      {:ok, :logged_out} -> {:refused, {:login, :logged_out}}
-      {:refused, why} -> {:refused, why}
-      _ -> :ok
-    end
-  end
+  defp launchable(s, name), do: s.usable.(name)
 
+  # F-181: new work picks among the usable accounts, the one with the most room.
   defp pick(s, among \\ nil) do
     with {:ok, %{readings: readings}} <- Usage.readings(s.usage, timeout: @step),
-         {:ok, name} <- Usage.pick(readings, among || s.accounts.names) do
+         {:ok, name} <-
+           Usage.pick(readings, among || s.accounts.names, System.os_time(:second),
+             usable: &launchable(s, &1)
+           ) do
       Accounts.ready(s.accounts, name)
     else
       :unread -> {:refused, {:usage, :unread}}

@@ -20,6 +20,7 @@ defmodule CafSurface.MixProject do
     [
       {:caf_accounts, in_umbrella: true},
       {:caf_acts, in_umbrella: true},
+      {:caf_cli, in_umbrella: true},
       {:caf_copies, in_umbrella: true},
       {:caf_cues, in_umbrella: true},
       {:caf_delegates, in_umbrella: true},
@@ -28,6 +29,7 @@ defmodule CafSurface.MixProject do
       {:caf_inlet, in_umbrella: true},
       {:caf_intake, in_umbrella: true},
       {:caf_jobs, in_umbrella: true},
+      {:caf_logins, in_umbrella: true},
       {:caf_mailbox, in_umbrella: true},
       {:caf_mains, in_umbrella: true},
       {:caf_mcp, in_umbrella: true},

@@ -10,7 +10,8 @@ defmodule CodingAgentFramework.PromptsTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Grants, Inlet, Intake, Mailbox, Prompts, ScreenStandIn, Sessions}
+  alias CodingAgentFramework.{Accounts, Grants, Inlet, Intake, Logins, Mailbox, Prompts}
+  alias CodingAgentFramework.{ScreenStandIn, Sessions}
   alias CodingAgentFramework.{SessionsSetup, Stream, Watch}
 
   @trust "Yes, I trust this folder"
@@ -234,6 +235,53 @@ defmodule CodingAgentFramework.PromptsTest do
     assert {:refused, :settled} = Prompts.answer(ctx.prompts, id, "leave", "sam")
     assert {:ok, %{"lost_viewer" => %{allowed: true}}} = Watch.remedies(ctx.watch, :list)
     assert {:refused, :no_prompt} = Prompts.answer(ctx.prompts, "remedy:999", "leave", "sam")
+  end
+
+  # F-181: an account whose login a check refused is a login prompt, with no agent, until a
+  # check finds it logged in; its answer `check` is that check.
+  test "a refused login is a login prompt until a check finds it logged in", ctx do
+    me = self()
+    db = Path.join(ctx.dir, "caf.db")
+    {:ok, accounts} = Accounts.new(Path.join(ctx.dir, "home"), ["work"])
+    out = ~s({"loggedIn": false, "authMethod": "none"})
+
+    said =
+      start_supervised!(
+        Supervisor.child_spec({Agent, fn -> {:ok, %{status: 1, output: out}} end}, id: :said)
+      )
+
+    logins =
+      start_supervised!(
+        {Logins,
+         accounts: accounts,
+         host: "test",
+         db: db,
+         run: fn _ -> Agent.get(said, & &1) end,
+         notify: &send(me, {:cue, &1})}
+      )
+
+    :ok = stop_supervised(Prompts)
+    prompts = start_supervised!({Prompts, ctx.popts ++ [logins: logins, logins_db: db]})
+    ctx = %{ctx | prompts: prompts}
+    assert Logins.check(logins, "work") == {:refused, {:login, :logged_out}}
+    assert cued(ctx) == ["login:work"]
+
+    assert {:ok, [%{id: "login:work", kind: "login", agent: nil, options: ["check"]} = p]} =
+             Prompts.read(prompts, kind: "login")
+
+    assert p.text =~ "account work is not logged in (logged_out)"
+    assert is_integer(p.opened_at)
+
+    # Still logged out: the check answers so, and the prompt stays.
+    assert {:refused, {:login, :logged_out}} =
+             Prompts.answer(prompts, "login:work", "check", "sam")
+
+    assert {:refused, {:bad, :choice}} = Prompts.answer(prompts, "login:work", "go", "sam")
+    Agent.update(said, fn _ -> {:ok, %{status: 0, output: ~s({"loggedIn": true})}} end)
+    assert {:ok, :logged_in} = Prompts.answer(prompts, "login:work", "check", "sam")
+    assert cued(ctx) == ["login:work"]
+    assert {:ok, []} = Prompts.read(prompts, kind: "login")
+    assert {:refused, :settled} = Prompts.answer(prompts, "login:work", "check", "sam")
   end
 
   # Prompt.tla's AnswerNow and WithdrawNow: an ask is answered or withdrawn, once.

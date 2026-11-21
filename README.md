@@ -25,8 +25,8 @@ It follows eight rules ([docs/design.md](docs/design.md#principles)):
 - **Main sessions** are the chats you work in, one per project, on its trunk. Each moves to
   another account with one press, keeping its name and Remote Control, and main sessions of
   different projects talk to each other.
-- **Delegates** are real Claude Code sessions a main session starts, on the account with the
-  most allowance left, each in its own git worktree. To the main session a delegate acts like a
+- **Delegates** are real Claude Code sessions a main session starts, on the usable account
+  with the most room, each in its own git worktree. To the main session a delegate acts like a
   subagent: a brief goes in, a report comes back. Inside it, Claude Code's own **subagents**
   delegate further, on the delegate's account.
 - **Hosts** run jobs (a test run, a build) and services (a dev server, a database) for agents,

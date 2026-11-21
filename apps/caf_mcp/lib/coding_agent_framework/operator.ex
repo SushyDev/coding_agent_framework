@@ -160,7 +160,7 @@ defmodule CodingAgentFramework.Operator do
 
   @doc """
   Moves `agent`, a main session or a delegate, to account `to`, or with `nil` to the one with
-  the most allowance left: drained, ended once idle, its transcript copied, resumed there under
+  the most room among the usable ones: drained, ended once idle, its transcript copied, resumed there under
   the same name and session (`CodingAgentFramework.Mover`). Answers once the drain began.
   """
   @spec move(GenServer.server(), String.t(), String.t() | nil) :: answer

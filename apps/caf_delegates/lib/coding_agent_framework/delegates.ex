@@ -26,8 +26,8 @@ defmodule CodingAgentFramework.Delegates do
   (`Delegates.Turn`): the parent's delegates the tree holds (`Sessions.Agents.children/3`) and
   its starts under way here; a parent a move drains is refused `{:moving, parent}`. While a
   move of a delegate is under way (`Sessions.Agents.moving?/1`), its end is the move's, not a
-  kill, and its row waits for the move. It picks the account with the most allowance left
-  (`Usage.pick/2`), and writes its row first, as `starting`, with the uuid its brief will go in
+  kill, and its row waits for the move. It picks the usable account with the most room
+  (`Usage.pick/4`: by `usable:`, the most room in the tighter window), and writes its row first, as `starting`, with the uuid its brief will go in
   under. With a `scheduler:`, it then asks for a lease, class `:builder`, its module the
   project, on that account, naming the row as the lease's holder (`Delegates.Work` answers
   whether its work ended): granted, the start goes on; queued, it waits in this process for the
@@ -134,7 +134,9 @@ defmodule CodingAgentFramework.Delegates do
   `mailbox:` (the host's `Mailbox`), `projects:` (name to a project as
   `Sessions.Worktree.project/1` reads it, with `branches:` and `cap:`), `launch:` (`claude:`,
   `env:` and `tool_timeout:` for `ClaudeCLI`), and optionally `notify:`, `clock:` (wall-clock
-  ms) and `mcp:`, a function of the delegate's name that answers `{:ok, path}`, its own MCP
+  ms), `usable:` (a function of an account answering `{:ok, account}` for one a launch may
+  run on now, else why not: `CodingAgentFramework.Logins.usable/3`; by default
+  `Accounts.ready/2`) and `mcp:`, a function of the delegate's name that answers `{:ok, path}`, its own MCP
   config (the embedding app gives `MCP.issue/2`), or a refusal. Each start and resume calls it
   just before its launch and adds the path as `ClaudeCLI`'s `mcp:`; its refusal refuses the
   start, and with no `mcp:` a delegate runs without the framework's tools. With `acts:` (the
@@ -322,6 +324,7 @@ defmodule CodingAgentFramework.Delegates do
           notify: Keyword.get(opts, :notify, fn _ -> :ok end),
           clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
           mcp: Keyword.get(opts, :mcp, fn _ -> {:ok, nil} end),
+          usable: Keyword.get(opts, :usable, &Accounts.ready(s.accounts, &1)),
           acts: Keyword.get(opts, :acts),
           scheduler: Keyword.get(opts, :scheduler),
           lease: Keyword.get(opts, :lease, %{"seat" => 1}),
@@ -1399,7 +1402,9 @@ defmodule CodingAgentFramework.Delegates do
 
   defp pick(s) do
     with {:ok, %{readings: readings}} <- Usage.readings(s.usage, timeout: @step),
-         {:ok, name} <- Usage.pick(readings, s.accounts.names) do
+         # F-181: among the usable accounts (prepared, logged in), the one with the most room.
+         {:ok, name} <-
+           Usage.pick(readings, s.accounts.names, System.os_time(:second), usable: s.usable) do
       Accounts.ready(s.accounts, name)
     else
       :unread -> {:refused, {:usage, :unread}}

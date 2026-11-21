@@ -132,6 +132,27 @@ defmodule CodingAgentFramework.ClaudeCLI do
 
   def session(_role, _account, _opts), do: {:refused, :no_account_dir}
 
+  @doc """
+  The argv and environment of `claude auth status --json` on `account`: the same environment a
+  session's launch has (options `:claude`, `:env` and `:tool_timeout`, as `session/3`'s), so it
+  reads the very login the launch would (`CodingAgentFramework.Logins`). Pure.
+
+      iex> account = CodingAgentFramework.Accounts.Account.at("work", "/caf/accounts/work/claude")
+      iex> env = %{home: "/h", path: "/bin", term: "xterm-256color", lang: "C.UTF-8"}
+      iex> {:ok, %{argv: argv, env: [first | _]}} = CodingAgentFramework.ClaudeCLI.auth_status(account,
+      ...>   claude: "/run/bin/claude", env: env, tool_timeout: 3_600_000)
+      iex> {argv, first}
+      {["/run/bin/claude", "auth", "status", "--json"], {"CLAUDE_CONFIG_DIR", "/caf/accounts/work/claude"}}
+  """
+  @spec auth_status(Account.t(), keyword) :: {:ok, launch} | {:refused, term}
+  def auth_status(%Account{config_dir: "/" <> _} = account, opts) do
+    with {:ok, claude} <- path(opts, :claude),
+         {:ok, env} <- env(account, opts, %{}),
+         do: {:ok, %{argv: [claude, "auth", "status", "--json"], env: env}}
+  end
+
+  def auth_status(_account, _opts), do: {:refused, :no_account_dir}
+
   # The wrapper of "Headless delegates": stdin is the FIFO opened read-write, so the delegate
   # holds a writer itself and never reads end of file; `exec` makes claude the held process.
   # The pid is `Holder.Process`'s record, with its start time, written by the hold around this

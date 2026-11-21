@@ -68,7 +68,7 @@ defmodule CodingAgentFramework.SurfaceTest do
     parts = CodingAgentFramework.parts(start_supervised!({CodingAgentFramework, config}))
     keys = ~w(reaper names cues inlet usage stream intake intake_http sampler sessions acts)a
     keys = keys ++ ~w(watch recoveries tracker scheduler delegates mover mailbox copies jobs)a
-    keys = keys ++ ~w(services)a
+    keys = keys ++ ~w(services logins)a
     keys = keys ++ ~w(prompts mains absent_mains mcp mcp_http ends)a
 
     assert Enum.sort(Map.keys(parts)) ==
@@ -637,7 +637,8 @@ defmodule CodingAgentFramework.SurfaceTest do
   # `Tracker`, which reads every topic.
   @needs %{
     "registry" => [:sessions, :mover],
-    "stream" => [:sessions, :delegates, :mailbox, :mover],
+    # A headless session's windows and limit are Usage's (F-181).
+    "stream" => [:sessions, :delegates, :mailbox, :mover, :usage],
     "tmux" => [:sessions, :recoveries],
     "sessions" => [
       :delegates,
@@ -660,7 +661,9 @@ defmodule CodingAgentFramework.SurfaceTest do
     "waiters" => [:mailbox, :prompts],
     # A symptom the healer asks about is a remedy prompt (F-182); its answer is the healers'
     # clear (F-183).
-    "watch" => [:prompts, :recoveries, :absent_mains]
+    "watch" => [:prompts, :recoveries, :absent_mains],
+    # A login a check refused is a login prompt (F-181).
+    "logins" => [:prompts]
   }
 
   test "an app that wires only the parts' declarations hands each part every cue it needs" do
