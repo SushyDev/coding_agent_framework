@@ -5,9 +5,14 @@ defmodule CodingAgentFramework.Mains.Checkout do
   pull, and what a reading says. `Mains` runs the commands through `Shell`, each under `env -i`
   with the project's environment, and decides with these.
 
-  The checkout of `project` is `<home>/checkouts/<project>`; its clone is made at
-  `<home>/checkouts/.<project>.clone` and renamed into place once whole, so a checkout at its
-  path is always a whole one (`Checkout.tla`'s `WholeCheckout`).
+  The checkout of a project is `<home>/checkouts/<dir>` (F-156): `dir` is the project's own
+  `dir:`, by default its repository's name (`dir_name/1`), so a `CLAUDE.md` that imports a
+  sibling repository's file by relative path (`@../other_repo/CLAUDE.md`) finds it among the
+  checkouts as it did among the person's own clones. Its clone is made at
+  `<home>/checkouts/.<dir>.clone` and renamed into place once whole, so a checkout at its path
+  is always a whole one (`Checkout.tla`'s `WholeCheckout`). A checkout an earlier build made
+  under the project's name is renamed to its directory once (`Mains`, `Checkout.tla`'s
+  `RenameOld`).
 
   **A reading** is its branch, whether it is clean (`git status --porcelain
   --untracked-files=all` lists nothing), and how far its trunk is ahead of and behind
@@ -20,6 +25,8 @@ defmodule CodingAgentFramework.Mains.Checkout do
       iex> alias CodingAgentFramework.Mains.Checkout
       iex> Checkout.path("/srv/caf", "app")
       "/srv/caf/checkouts/app"
+      iex> Checkout.dir_name("git@github.com:me/other_repo.git")
+      "other_repo"
       iex> Checkout.reading("main", "main\\n", "", "0\\t2\\n").state
       "behind"
       iex> Checkout.reading("main", "main\\n", " M lib/a.ex\\n", "0\\t2\\n").state
@@ -36,9 +43,57 @@ defmodule CodingAgentFramework.Mains.Checkout do
           behind: non_neg_integer
         }
 
-  @doc "The checkout's path under the framework home."
+  @doc "The checkout's path under the framework home, by its directory's name."
   @spec path(String.t(), String.t()) :: String.t()
-  def path(home, project), do: Path.join([home, "checkouts", project])
+  def path(home, dir), do: Path.join([home, "checkouts", dir])
+
+  @doc """
+  A repository's name, the default directory of its checkout: the origin's last path part,
+  without `.git`. nil for an origin that is not a string.
+
+      iex> CodingAgentFramework.Mains.Checkout.dir_name("/src/app/")
+      "app"
+      iex> CodingAgentFramework.Mains.Checkout.dir_name("https://github.com/me/app.git")
+      "app"
+  """
+  @spec dir_name(term) :: String.t() | nil
+  def dir_name(origin) when is_binary(origin) do
+    origin
+    |> String.trim_trailing("/")
+    |> String.split(["/", ":"])
+    |> List.last()
+    |> String.replace_suffix(".git", "")
+  end
+
+  def dir_name(_origin), do: nil
+
+  @doc """
+  Whether `dir` can be a checkout's directory: one path component that is not hidden, so it
+  never meets a clone's temporary name.
+
+      iex> CodingAgentFramework.Mains.Checkout.dir?("other_repo")
+      true
+      iex> CodingAgentFramework.Mains.Checkout.dir?("../x")
+      false
+  """
+  @spec dir?(term) :: boolean
+  def dir?(dir), do: is_binary(dir) and dir =~ ~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/
+
+  @doc """
+  The first directory two projects name, with the projects' names, or nil (F-156): two
+  checkouts in one directory are refused at config. `projects` is name to a project with its
+  `dir`.
+
+      iex> CodingAgentFramework.Mains.Checkout.same_dir(%{"a" => %{dir: "x"}, "b" => %{dir: "x"}})
+      {"x", ["a", "b"]}
+  """
+  @spec same_dir(%{String.t() => map}) :: {String.t(), [String.t()]} | nil
+  def same_dir(projects) do
+    projects
+    |> Enum.group_by(fn {_, p} -> p[:dir] end, &elem(&1, 0))
+    |> Enum.sort()
+    |> Enum.find_value(fn {dir, names} -> if length(names) > 1, do: {dir, Enum.sort(names)} end)
+  end
 
   @doc "git's index lock in the checkout at `path`, which a cut git command may leave."
   @spec lock_path(String.t()) :: String.t()
@@ -46,7 +101,7 @@ defmodule CodingAgentFramework.Mains.Checkout do
 
   @doc "Where its clone is made before it is renamed into place."
   @spec clone_path(String.t(), String.t()) :: String.t()
-  def clone_path(home, project), do: Path.join([home, "checkouts", "." <> project <> ".clone"])
+  def clone_path(home, dir), do: Path.join([home, "checkouts", "." <> dir <> ".clone"])
 
   @doc """
   git's arguments for each step: `{:clone, origin, trunk, to}`, `{:head, path, trunk}`,
@@ -89,6 +144,9 @@ defmodule CodingAgentFramework.Mains.Checkout do
 
   def git({:merge, path, trunk}),
     do: ["-C", path, "merge", "--ff-only", "--quiet", remote(trunk)]
+
+  # F-156: the worktrees made before a rename name the checkout's git directory at its old path.
+  def git({:repair, path, worktrees}), do: ["-C", path, "worktree", "repair", "--" | worktrees]
 
   defp local(trunk), do: "refs/heads/" <> trunk
   defp remote(trunk), do: "refs/remotes/origin/" <> trunk

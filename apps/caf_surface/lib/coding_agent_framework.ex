@@ -534,11 +534,13 @@ defmodule CodingAgentFramework do
            {
              Mains,
              # The operator answers a main session's held permission request through it.
+             # A checkout's rename and an import's rows are acts (F-156).
              host: host,
              home: c.home,
              name_room: Config.name_room(c).agent,
              db: db,
              sessions_db: db,
+             acts: pid.(:acts),
              programs: p,
              reaper: pid.(:reaper),
              sessions: pid.(:sessions),

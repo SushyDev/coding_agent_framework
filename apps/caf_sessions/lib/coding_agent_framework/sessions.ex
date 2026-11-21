@@ -423,6 +423,24 @@ defmodule CodingAgentFramework.Sessions do
     do: call(sessions, {:declare, name, project}, Keyword.get(opts, :timeout, @read))
 
   @doc """
+  Writes main session `name`, a conversation `bin/caf-import` copied in (F-156; `Mains`' call
+  at its start, from the import's manifest): a row of kind `main` with no parent, `stopped`
+  with reason `imported`, on `entry`'s `account`, `project` and `session_id`, in `cwd` (its
+  project's checkout), with `meta` (a map, or nil), so a resume (`Mains.resume_main/3`) takes
+  the conversation up. Taken only by a name with no row, or a main session declared for that
+  project and never started. Answers `{:ok, row}`; `{:ok, :already}` when the row already
+  holds that session; refused `{:bad, field}`, `{:bad, :meta}`, or `{:exists, status}` for a
+  name another agent holds. Option: `:timeout` (ms, default 5 000).
+
+      Sessions.import_main(sessions, "app-epic", %{project: "app", account: "work",
+        session_id: "6f1c…", cwd: "/srv/caf/checkouts/app", meta: %{"epic" => 7}})
+      #=> {:ok, %{name: "app-epic", status: "stopped", reason: "imported", ...}}
+  """
+  @spec import_main(GenServer.server(), String.t(), map, keyword) :: outcome(map | :already)
+  def import_main(sessions, name, entry, opts \\ []),
+    do: call(sessions, {:import_main, name, entry}, Keyword.get(opts, :timeout, @read))
+
+  @doc """
   Sets the embedding app's own metadata on agent `name`'s row (F-154), in place of what it
   had: the app's call, never an agent's (no tool reaches it). Answers `{:ok, row}`, `{:refused,
   :no_session}` for a name with no row, or `{:refused, {:bad, :meta}}` (`Table.meta_text/1`).
@@ -737,6 +755,30 @@ defmodule CodingAgentFramework.Sessions do
         id = Table.declare(state.db, state.host.name, name, project)
         state.notify.(%{topic: topic(state), ids: [id]})
         {:ok, Table.get(state.db, state.host.name, name)}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:import_main, name, entry}, _from, state) do
+    reply =
+      with :ok <- imported_entry(name, entry),
+           {:ok, meta} <- if(entry[:meta], do: Table.meta_text(entry.meta), else: {:ok, nil}) do
+        row = Table.get(state.db, state.host.name, name)
+
+        cond do
+          row != nil and row.kind == "main" and row.session_id == entry.session_id ->
+            {:ok, :already}
+
+          row == nil or (Agents.declared?(row) and row.project in [nil, entry.project]) ->
+            fields = Map.take(entry, [:project, :account, :session_id, :cwd])
+            id = Table.imported(state.db, state.host.name, name, Map.put(fields, :meta, meta))
+            state.notify.(%{topic: topic(state), ids: [id]})
+            {:ok, Table.get(state.db, state.host.name, name)}
+
+          true ->
+            {:refused, {:exists, row.status}}
+        end
       end
 
     {:reply, reply, state}
@@ -1841,6 +1883,31 @@ defmodule CodingAgentFramework.Sessions do
         {:refused, {:bad, :kind}}
     end
   end
+
+  # An imported conversation's entry: each field a session's, as a start would check it.
+  defp imported_entry(name, %{} = e) do
+    cond do
+      not Worktree.name?(name) ->
+        {:refused, {:bad, :name}}
+
+      not (is_binary(e[:project]) and e.project != "") ->
+        {:refused, {:bad, :project}}
+
+      not (is_binary(e[:account]) and e.account != "") ->
+        {:refused, {:bad, :account}}
+
+      not (is_binary(e[:session_id]) and e.session_id =~ ~r/\A[A-Za-z0-9_-]{1,64}\z/) ->
+        {:refused, {:bad, :session_id}}
+
+      not match?("/" <> _, e[:cwd]) ->
+        {:refused, {:bad, :cwd}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp imported_entry(_name, _entry), do: {:refused, {:bad, :entry}}
 
   defp kind_of(%{kind: "main"}), do: :main
   defp kind_of(%{kind: "delegate"}), do: :delegate

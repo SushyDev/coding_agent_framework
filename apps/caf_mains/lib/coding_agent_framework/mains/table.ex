@@ -92,4 +92,9 @@ defmodule CodingAgentFramework.Mains.Table do
   @spec rows(db, String.t()) :: [map]
   def rows(db, host),
     do: Store.select(db, "checkouts", @columns, "host = ?1 ORDER BY project", [host])
+
+  @doc "`project`'s checkout on every host that has one, by host: what an import reads (F-156)."
+  @spec project_rows(db, String.t()) :: [map]
+  def project_rows(db, project),
+    do: Store.select(db, "checkouts", @columns, "project = ?1 ORDER BY host", [project])
 end

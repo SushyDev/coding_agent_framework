@@ -18,6 +18,7 @@ defmodule CafMains.MixProject do
   defp deps do
     [
       {:caf_accounts, in_umbrella: true},
+      {:caf_acts, in_umbrella: true},
       {:caf_intake, in_umbrella: true},
       {:caf_mailbox, in_umbrella: true},
       {:caf_scheduler, in_umbrella: true},
@@ -25,11 +26,11 @@ defmodule CafMains.MixProject do
       {:caf_shell, in_umbrella: true},
       {:caf_store, in_umbrella: true},
       {:caf_stream, in_umbrella: true},
+      {:caf_transcripts, in_umbrella: true},
       {:caf_usage, in_umbrella: true},
       {:caf_grants, in_umbrella: true, only: :test},
       {:caf_inlet, in_umbrella: true, only: :test},
       {:caf_registry, in_umbrella: true, only: :test},
-      {:caf_transcripts, in_umbrella: true, only: :test},
       {:caf_test, in_umbrella: true, only: :test}
     ]
   end

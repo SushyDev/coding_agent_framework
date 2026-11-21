@@ -90,7 +90,8 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
     assert c.mains == %{"app-main" => "app"}
     assert c.main_model == "opus" and c.interval == 200
     assert %{"app" => %{name: "app", repo: repo, trunk: "main", cap: 2, setup: []}} = c.projects
-    assert repo == Path.join(home, "checkouts/app")
+    # The checkout is named by its repository (F-156).
+    assert repo == Path.join(home, "checkouts/repo")
     assert Regex.match?(c.projects["app"].branches, "unit/one")
     assert c.resources == %{"seat" => 4, "slot" => 2} and c.lease == %{"seat" => 1}
     assert c.job_lease.landing == %{"slot" => 1}
@@ -202,7 +203,7 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
       {"asks(caf)", "no open asks"},
       {"leases(caf)", "no lease held, none refused"},
       {"faults(caf)", "no faults"},
-      {"checkout(caf)", "  #{config.home}/checkouts/app"},
+      {"checkout(caf)", "  #{config.home}/checkouts/repo"},
       {~s|start_main(caf, "app", "framework", "Go.")|, ~s|refused: {:running, "framework"}|},
       {~s|message(caf, "nobody", "Hi.")|, "refused: "},
       {~s|end_main(caf, "app-main")|, "ok: :ended"},

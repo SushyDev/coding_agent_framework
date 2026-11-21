@@ -46,15 +46,26 @@ defmodule CodingAgentFramework.Mains do
   the row stays `starting` until the agent row runs or is free. A restart that cut the call
   settles the row by the agent row of its call, or refuses it `interrupted` at its deadline.
 
+  **A checkout under the project's name** (F-156), which an earlier build made, is renamed to
+  its directory once no agent row of the project may hold a process, with each account's
+  conversations and the home's memory of it (`Mains.Rename`); before that its state is `old`,
+  its reason the sessions that hold it, and no clone is made beside it. Each read links again
+  a worktree whose checkout moved (`git worktree repair`).
+
+  **Imported conversations** (F-156): at its start, before it declares the app's main
+  sessions, `Mains` has `Sessions` write each one `bin/caf-import` copied with a name as a
+  stopped main session in its project's checkout (`Mains.Import.manifest/1`,
+  `Sessions.import_main/4`), which `resume_main/3` takes up.
+
   After each write `notify` gets `%{topic: "mains:<host>", ids: [id]}`.
   """
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, Intake, Mailbox, Programs, Scheduler}
+  alias CodingAgentFramework.{Accounts, Acts, Intake, Mailbox, Programs, Scheduler}
   alias CodingAgentFramework.{Sessions, Shell, Store, Stream, Usage}
   alias CodingAgentFramework.Intake.Table, as: IntakeTable
-  alias CodingAgentFramework.Mains.{Checkout, Starts, Table, Work}
+  alias CodingAgentFramework.Mains.{Checkout, Import, Rename, Starts, Table, Work}
   alias CodingAgentFramework.Sessions.{Agents, Worktree}
 
   # Sessions' own timeout for a start; its hold's and its viewer's bounds come on top.
@@ -79,7 +90,9 @@ defmodule CodingAgentFramework.Mains do
   `%{"seat" => 1}`), `operator:` (a name no main session may take), `interval:` (ms between the
   checkouts' reads, default 5 000), `clone_timeout:` (ms, default 600 000), `intake:` (the
   host's `Intake`) and `intake_db:` (its file), through which the operator answers a main
-  session's held permission request (`answer/5`), `notify:`, `clock:` (wall-clock ms), and
+  session's held permission request (`answer/5`), `acts:` (the instance's `Acts`, where a
+  checkout's rename and an import's rows are recorded, F-156), `notify:`, `clock:` (wall-clock
+  ms), and
   `name_room:` (bytes, the room the home leaves for an agent's socket, `Config.name_room/1`): a
   start of a longer name is refused `{:bad, :name, {:longer_than, n}}` before any row (F-172).
   A start's call of `Sessions` carries the caller's deadline, the row's less its slack, so a
@@ -90,15 +103,19 @@ defmodule CodingAgentFramework.Mains do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc """
-  Project `name` as `Sessions` and `Delegates` read it: `data` with its `name` and its `repo`,
-  the checkout under `home`.
+  Project `name` as `Sessions` and `Delegates` read it: `data` with its `name`, its `dir` (the
+  checkout's directory: `data`'s `dir:`, by default the repository's name,
+  `Checkout.dir_name/1`, F-156) and its `repo`, the checkout under `home`.
 
-      iex> CodingAgentFramework.Mains.project("/srv/caf", "app", %{origin: "/src/app", trunk: "main"})
-      %{name: "app", origin: "/src/app", repo: "/srv/caf/checkouts/app", trunk: "main"}
+      iex> CodingAgentFramework.Mains.project("/srv/caf", "app", %{origin: "/src/app_repo", trunk: "main"})
+      %{name: "app", dir: "app_repo", origin: "/src/app_repo", repo: "/srv/caf/checkouts/app_repo", trunk: "main"}
   """
   @spec project(String.t(), String.t(), map) :: map
-  def project(home, name, data),
-    do: data |> Map.put(:name, name) |> Map.put(:repo, Checkout.path(home, name))
+  def project(home, name, data) do
+    dir = data[:dir] || Checkout.dir_name(data[:origin])
+    repo = if Checkout.dir?(dir), do: Checkout.path(home, dir)
+    data |> Map.put(:name, name) |> Map.put(:dir, dir) |> Map.put(:repo, repo)
+  end
 
   @doc """
   Starts main session `name` of `project`, with `brief` (a string, or nil for none) as its
@@ -277,10 +294,12 @@ defmodule CodingAgentFramework.Mains do
           clone_timeout: Keyword.get(opts, :clone_timeout, 600_000),
           notify: Keyword.get(opts, :notify, fn _ -> :ok end),
           clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
-          # Per project: the task under way, and whether a pull is owed.
+          acts: Keyword.get(opts, :acts),
+          # Per project: the task under way, whether a pull is owed, and the last reason a
+          # rename of its old checkout was held back for (recorded once in `Acts`).
           checkouts:
             Map.new(projects, fn {name, _} ->
-              {name, %{task: nil, owed: false, pulling: false}}
+              {name, %{task: nil, owed: false, pulling: false, held: nil}}
             end),
           calls: %{},
           ends: %{},
@@ -292,6 +311,10 @@ defmodule CodingAgentFramework.Mains do
 
       # The declared main sessions are rows before `start_link` returns: a tool call the app
       # sends right after its start may name one, and `Grants` reads the tree from the rows.
+      # An imported conversation's row first (F-156), so a declared name it takes is stopped,
+      # with its session to resume, not declared.
+      imported(s)
+
       case declare(s, Keyword.get(opts, :mains, %{})) do
         :ok -> {:ok, s, {:continue, :start}}
         {_, reason} -> {:stop, reason}
@@ -302,16 +325,26 @@ defmodule CodingAgentFramework.Mains do
   end
 
   defp projects(home, projects) do
-    Enum.reduce_while(projects, {:ok, %{}}, fn {name, data}, {:ok, acc} ->
-      p = project(home, name, data)
+    checked =
+      Enum.reduce_while(projects, {:ok, %{}}, fn {name, data}, {:ok, acc} ->
+        p = project(home, name, data)
 
-      with true <- (is_binary(p[:origin]) and p.origin != "") or {:refused, {:bad, :origin}},
-           {:ok, checked} <- Worktree.project(p) do
-        {:cont, {:ok, Map.put(acc, name, Map.merge(p, checked))}}
-      else
-        {:refused, why} -> {:halt, {:refused, {:project, name, why}}}
+        with true <- (is_binary(p[:origin]) and p.origin != "") or {:refused, {:bad, :origin}},
+             true <- Checkout.dir?(p.dir) or {:refused, {:bad, :dir}},
+             {:ok, checked} <- Worktree.project(p) do
+          {:cont, {:ok, Map.put(acc, name, Map.merge(p, checked))}}
+        else
+          {:refused, why} -> {:halt, {:refused, {:project, name, why}}}
+        end
+      end)
+
+    # Two projects in one directory would share a checkout (F-156).
+    with {:ok, projects} <- checked do
+      case Checkout.same_dir(projects) do
+        nil -> {:ok, projects}
+        {dir, names} -> {:refused, {:same_dir, dir, names}}
       end
-    end)
+    end
   end
 
   defp declare(s, mains) do
@@ -327,12 +360,39 @@ defmodule CodingAgentFramework.Mains do
   defp declared({:ok, _}), do: {:cont, :ok}
   defp declared(other), do: {:halt, other}
 
+  # Each conversation `bin/caf-import` copied with a name becomes a main session's row,
+  # stopped, with its session to resume, written by `Sessions` (F-156). Every start reads the
+  # manifests again: a row written before answers `:already`, and a refusal (a name another
+  # agent holds, a project the config lost) is an act in `Acts` for a person, each start.
+  defp imported(s) do
+    for %{name: name} = entry <- Import.manifest(s.home), is_binary(name) do
+      answer =
+        case Map.fetch(s.projects, entry.project) do
+          {:ok, p} -> Sessions.import_main(s.sessions, name, %{entry | cwd: p.repo})
+          :error -> {:refused, {:unknown_project, entry.project}}
+        end
+
+      case answer do
+        {:ok, :already} -> :ok
+        {:ok, _} -> record(s, "agent:" <> name, :import, :verified, detail: entry.session_id)
+        other -> record(s, "agent:" <> name, :import, :failed, reason: other)
+      end
+    end
+
+    :ok
+  end
+
+  defp record(%{acts: nil}, _target, _act, _outcome, _fields), do: :ok
+
+  defp record(s, target, act, outcome, fields),
+    do: Acts.record(s.acts, "mains:#{s.host}", target, act, outcome, fields)
+
   @impl true
   def handle_continue(:start, s) do
     # Checkout.tla's Recover: a clone a restart cut is removed; every checkout owes a pull.
     s =
       Enum.reduce(Map.keys(s.projects), s, fn name, s ->
-        File.rm_rf(Checkout.clone_path(s.home, name))
+        File.rm_rf(Checkout.clone_path(s.home, s.projects[name].dir))
         s = put_in(s.checkouts[name].owed, true)
         step(s, name)
       end)
@@ -397,7 +457,7 @@ defmodule CodingAgentFramework.Mains do
          :ok <- model_ok(model),
          {:ok, account} <- pick(s) do
       row = starting(s, agent.project, name, account, nil, agent.session_id)
-      start = %{p: p, account: account, brief: nil, from: nil, model: model}
+      start = %{p: p, account: account, brief: nil, from: nil, model: model, kept: agent.model}
       leased(s, row, Map.put(start, :resume, agent.session_id), from)
     else
       refused -> {:reply, refused, s}
@@ -575,6 +635,19 @@ defmodule CodingAgentFramework.Mains do
       c.task != nil ->
         s
 
+      # Checkout.tla's RenameOld: a checkout an earlier build made under the project's name
+      # goes to its directory before anything clones one there (OneCheckout).
+      old = old_checkout(s, p) ->
+        case running_in(s, p, old) do
+          [] ->
+            s
+            |> put(name, state: "renaming", reason: nil)
+            |> run_task(name, false, fn -> rename(s, p, old) end)
+
+          names ->
+            held_rename(s, name, {:running, names})
+        end
+
       not File.dir?(p.repo) and not c.owed ->
         s
 
@@ -592,7 +665,13 @@ defmodule CodingAgentFramework.Mains do
   # reaper, so Mains' death ends them, and a restart finds only what is on disk.
   defp run_task(s, name, pulling?, fun) do
     task = Task.async(fun)
-    put_in(s.checkouts[name], %{task: task.ref, owed: false, pulling: pulling?})
+
+    put_in(s.checkouts[name], %{
+      s.checkouts[name]
+      | task: task.ref,
+        owed: false,
+        pulling: pulling?
+    })
   end
 
   # A task's answer: the reading written, and the pull owed again when a reading held it back,
@@ -607,6 +686,15 @@ defmodule CodingAgentFramework.Mains do
         # The read that follows at once says what the new checkout is.
         {:cloned, :ok} ->
           put_in(s.checkouts[name].owed, true)
+
+        {:renamed, old} ->
+          detail = %{from: old, to: s.projects[name].repo}
+          record(s, "checkout:" <> name, :rename, :verified, detail: detail)
+          put_in(s.checkouts[name], %{s.checkouts[name] | owed: true, held: nil})
+
+        # The old checkout stays where it was, and the next read tries again.
+        {:failed, {:rename, _} = reason} ->
+          held_rename(s, name, reason)
 
         {:read, reading, pulled} ->
           held? = pulled not in [:none, :pulled]
@@ -631,7 +719,74 @@ defmodule CodingAgentFramework.Mains do
       end
 
     # A new checkout is read, and pulled, at once.
-    if landed? or match?({:cloned, _}, answer), do: step(s, name), else: s
+    if landed? or match?({tag, _} when tag in [:cloned, :renamed], answer),
+      do: step(s, name),
+      else: s
+  end
+
+  # -- A checkout an earlier build named by its project (F-156) ---------------------------------
+
+  # Its path, when the project's checkout is not made yet and a checkout under the project's
+  # name is, which is no other project's directory.
+  defp old_checkout(s, p) do
+    old = Checkout.path(s.home, p.name)
+    others = for {_, q} <- s.projects, do: q.repo
+
+    if p.name != p.dir and old not in others and File.dir?(old) and not File.exists?(p.repo),
+      do: old
+  end
+
+  # The agents whose process may live in the project's checkout or its worktrees: a rename
+  # under them would move their files away (Checkout.tla's RenameOld guard).
+  defp running_in(s, p, old) do
+    for row <- Agents.rows(s.agents),
+        row.project == p.name or row.cwd == old,
+        not Agents.free?(row),
+        do: row.name
+  end
+
+  defp held_rename(s, name, reason) do
+    s = put(s, name, state: "old", reason: Store.text(reason))
+
+    if s.checkouts[name].held == reason do
+      s
+    else
+      record(s, "checkout:" <> name, :rename, :failed, reason: reason)
+      put_in(s.checkouts[name].held, reason)
+    end
+  end
+
+  # Each account's conversations and the home's memory of the old path go to the new one's,
+  # entry by entry and never over one, then the checkout itself, last, so a restart part way
+  # finds it still at its old path and does the rest; then its worktrees' links.
+  defp rename(s, p, old) do
+    with {:ok, moves} <- Rename.moves(s.home, account_dirs(s), old, p.repo),
+         :ok <- Rename.move_all(moves),
+         :ok <- File.rename(old, p.repo) |> io(:rename),
+         :ok <- repair(s, p) do
+      {:renamed, old}
+    else
+      {_, reason} -> {:failed, {:rename, reason}}
+    end
+  end
+
+  defp account_dirs(s) do
+    for name <- s.accounts.names, {:ok, dir} <- [Accounts.config_dir(s.accounts, name)], do: dir
+  end
+
+  # A worktree whose `.git` names the checkout's git directory at a path gone (a rename, or one
+  # a restart cut before its repair) is linked again (`Checkout.tla`'s Repair).
+  defp repair(s, p) do
+    case Rename.stale_worktrees(p.repo) do
+      [] ->
+        :ok
+
+      paths ->
+        case git(s, p, {:repair, p.repo, paths}, @git) do
+          {:ok, _} -> :ok
+          other -> other
+        end
+    end
   end
 
   defp put(s, name, fields) do
@@ -665,7 +820,8 @@ defmodule CodingAgentFramework.Mains do
   # that is not ahead, read before the fetch and again after it; git's `--ff-only` refuses a
   # local commit, and an edit made since that it would overwrite, and carries any other.
   defp read(s, p, owed?) do
-    with {:ok, first} <- reading(s, p) do
+    with :ok <- repair(s, p) |> failed(:repair),
+         {:ok, first} <- reading(s, p) do
       cond do
         not owed? ->
           {:read, first, :none}
@@ -684,6 +840,9 @@ defmodule CodingAgentFramework.Mains do
       end
     end
   end
+
+  defp failed(:ok, _what), do: :ok
+  defp failed({_, reason}, what), do: {:failed, {what, reason}}
 
   defp merge(_s, _p, %{state: "ready"} = r), do: {:ok, {:read, r, :pulled}}
 
@@ -898,12 +1057,14 @@ defmodule CodingAgentFramework.Mains do
   end
 
   # The model the caller names (F-141's new-8), else the app's; a resume that names none runs
-  # the one its row keeps, as a move's resume does.
+  # the one its row keeps, as a move's resume does; a row that keeps none (an imported
+  # conversation's, F-156) runs the app's.
   defp launch_model(launch, %{model: model}) when is_binary(model),
     do: Keyword.put(launch, :model, model)
 
-  defp launch_model(launch, %{resume: resume}) when is_binary(resume),
-    do: Keyword.delete(launch, :model)
+  defp launch_model(launch, %{resume: resume, kept: kept})
+       when is_binary(resume) and is_binary(kept),
+       do: Keyword.delete(launch, :model)
 
   defp launch_model(launch, _start), do: launch
 

@@ -311,6 +311,33 @@ defmodule CodingAgentFramework.Sessions.Table do
   end
 
   @doc """
+  Writes main session `name`, a conversation an import copied in (F-156), `stopped` with reason
+  `imported`, role `parent`, from `fields` (`project`, `account`, `session_id`, `cwd`, `meta`
+  as JSON or nil), over a declared row of that name. The caller checked that the row, if any,
+  is a declared main session. Answers the row's id.
+  """
+  @spec imported(db, String.t(), String.t(), map) :: integer
+  def imported(db, host, name, fields) do
+    now = System.os_time(:millisecond)
+    keys = [:project, :account, :session_id, :cwd, :meta]
+    given = Enum.map(keys, &{&1, fields[&1]})
+
+    row =
+      [host: host, name: name, kind: "main", socket: name, role: "parent"] ++
+        given ++ [status: "stopped", reason: "imported", started_at: now, updated_at: now]
+
+    sets =
+      Enum.map_join(
+        keys ++ [:role, :status, :reason, :updated_at],
+        ", ",
+        &"#{&1} = excluded.#{&1}"
+      )
+
+    tail = "ON CONFLICT (host, name) DO UPDATE SET #{sets} RETURNING id"
+    Store.insert(db, "agents", row, tail) |> hd() |> hd()
+  end
+
+  @doc """
   Sets `fields` (status, reason, viewer, pid, session_id, proc_start, deadline, worktree,
   parent, project, dialog, answers, end_asked, meta, and a move's `move`, `move_from`, `move_to`,
   `move_act`, `move_deadline`) on row `id`, with `updated_at`, and `ended_at` as the module
