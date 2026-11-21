@@ -15,6 +15,12 @@ defmodule CodingAgentFramework.Recoveries do
   fails also drops the kind's remedy from the list at once; only the operator puts it back.
   Each check passes the states it no longer reads.
 
+  **One clear** (F-182's new-2, built in F-183). A state that waits on a person (a loss that
+  repeated, an end whose outcome is unknown) is cleared by its `remedy` prompt's answer
+  (`Watch.answer/5`, or `Watch.clear/3`), or by the prompt passing with its target, since no
+  answer can come then. Each check copies that time onto the state's own row in `Acts`
+  (`cleared_at`), where the keys and counts below read it.
+
   The caller's supervision tree starts one per host, with no name, given the host's
   `TmuxSampler`, `Holder`, `Sessions`, tmux server (for its key and its viewers) and the instance's
   `Acts` and `Watch`. It reads the sampler's rows, never a pane's screen: by `check/2`, or after `cue/1`,
@@ -53,7 +59,7 @@ defmodule CodingAgentFramework.Recoveries do
 
   **Repeating losses**: the third loss of one socket within `window` (default 60 s) since a
   person last cleared it settles `failed{repeating}` with no act, and that socket's losses are
-  not claimed again until `clear/2`.
+  not claimed again until a person clears it.
 
   **The second recovery is an end owed** (F-118, `model/tla/Start.tla`'s `Kill`; act `end`): the
   process of an `orphan` row of `Sessions`, or of a stop whose deadline passed with it alive,
@@ -62,7 +68,7 @@ defmodule CodingAgentFramework.Recoveries do
   first, then the process is ended by that record alone (`Holder.Process.end_held/5`: TERM, then
   KILL at `end_grace`, default 5 s), and the row settles `recovered` once the program reads
   dead, or `unknown` with what was read. An end that settled `unknown` waits for a person, as a
-  repeating loss does (F-118's new-5): its state stays claimed until `clear/2` names a new one.
+  repeating loss does (F-118's new-5): its state stays claimed until a person's clear names a new one.
   `Sessions` settles its own row at the next cue, once the process is gone and its socket dead.
   `Sessions` itself never kills.
 
@@ -111,16 +117,6 @@ defmodule CodingAgentFramework.Recoveries do
           {:ok, map} | :unread | {:refused, term} | {:unknown, term}
   def check(recoveries, opts \\ []), do: call(recoveries, :check, opts)
 
-  @doc """
-  A person clears socket `socket`'s states that wait for one: losses that repeated, and an end
-  that settled `unknown`. Its losses are acted on again, a loss read after the clear is a new
-  one, and its end owed is a new state. Answers `{:ok, ids}` (the rows marked cleared) or
-  `{:refused, :not_waiting}`. Option: `:timeout`.
-  """
-  @spec clear(GenServer.server(), String.t(), keyword) ::
-          {:ok, [integer]} | {:refused, term} | {:unknown, term}
-  def clear(recoveries, socket, opts \\ []), do: call(recoveries, {:clear, socket}, opts)
-
   @doc "Asks for a check without waiting for it: the sampler's cue. Answers `:ok` at once."
   @spec cue(pid, map) :: :ok
   def cue(recoveries, _cue \\ %{}) do
@@ -128,9 +124,12 @@ defmodule CodingAgentFramework.Recoveries do
     :ok
   end
 
-  @doc "What `Recoveries` reads, for `Cues`: the samplers' cues, which show a lost viewer."
+  @doc """
+  What `Recoveries` reads, for `Cues`: the samplers' cues, which show a lost viewer, and the
+  `Watch`'s, which show a person's clear.
+  """
   @spec reads() :: %{topics: [String.t()], cue: (pid, map -> :ok)}
-  def reads, do: %{topics: ~w(tmux), cue: &cue/2}
+  def reads, do: %{topics: ~w(tmux watch), cue: &cue/2}
 
   defp call(recoveries, message, opts) do
     timeout = Keyword.get(opts, :timeout, @timeout)
@@ -235,35 +234,48 @@ defmodule CodingAgentFramework.Recoveries do
     {:reply, reply, state}
   end
 
-  def handle_call({:clear, socket}, _from, state) do
-    reply =
-      with {:ok, rows} <- Acts.rows(state.acts, actor: state.actor, target: socket) do
-        case for(r <- rows, waits?(r), do: r.id) do
-          [] -> {:refused, :not_waiting}
-          ids -> Acts.clear(state.acts, ids)
-        end
-      end
-
-    {:reply, reply, state}
-  end
-
   @impl true
   def handle_info(:check, state) do
     {_, state} = check_now(state)
     {:noreply, state}
   end
 
-  # A row that waits for a person: a loss that repeated, or an end that settled unknown.
-  defp waits?(%{cleared_at: nil, act: "reopen"} = r), do: repeating?(r)
-  defp waits?(%{cleared_at: nil, act: "end", outcome: "unknown"}), do: true
-  defp waits?(_), do: false
+  # The rows that wait for a person, never cleared: a loss that repeated, or an end that settled
+  # unknown. Each whose symptom state a person answered, or whose prompt passed with its target,
+  # takes that time as its clear (F-182's new-2): one clear, the `Watch`'s.
+  defp release(state) do
+    with {:ok, loops} <-
+           Acts.rows(state.acts,
+             actor: state.actor,
+             act: "reopen",
+             reason: "repeating",
+             cleared_at: nil
+           ),
+         {:ok, ends} <-
+           Acts.rows(state.acts,
+             actor: state.actor,
+             act: "end",
+             outcome: "unknown",
+             cleared_at: nil
+           ) do
+      for r <- loops ++ ends,
+          r.status == "settled",
+          key = [kind: @kinds[r.act], target: r.target, state: r.state],
+          {:ok, [sym]} <- [Watch.read(state.watch, key)],
+          at = sym.answered_at || sym.passed_at,
+          do: Acts.clear(state.acts, [r.id], at: at)
+
+      :ok
+    end
+  end
 
   # The ledger keeps every row (F-126's new-5), so a check reads by index only what can decide
   # it: the acts that wait for a sample, the losses that wait for a person, and the rows of the
   # sockets lost now since the earliest time that changes a state's key or count; and per end
   # owed, that socket's ends.
   defp check_now(state) do
-    with {:ok, list} <- Watch.remedies(state.watch, :list),
+    with :ok <- release(state),
+         {:ok, list} <- Watch.remedies(state.watch, :list),
          state = Map.put(state, :list, list),
          {:ok, open} <- Acts.rows(state.acts, actor: state.actor, status: "acted"),
          {:ok, waiting} <-
@@ -334,16 +346,26 @@ defmodule CodingAgentFramework.Recoveries do
 
     with {:ok, %{status: "open"}} <- Watch.record(state.watch, sym),
          {:ok, rows} <-
-           Acts.rows(state.acts, actor: state.actor, target: sym.target, state: sym.state),
-         # A skipped row (a sample too old) is no claim: one taken now takes it over.
-         true <- Enum.all?(rows, &(&1.status == "skipped")) do
-      case may_act(state, remedy) do
-        :ok -> act.()
-        :shown -> nil
-        {:ask, why} -> ask(state.watch, sym, why) && nil
+           Acts.rows(state.acts, actor: state.actor, target: sym.target, state: sym.state) do
+      # A skipped row (a sample too old) is no claim: one taken now takes it over.
+      case Enum.reject(rows, &(&1.status == "skipped")) do
+        [] ->
+          case may_act(state, remedy) do
+            :ok -> act.()
+            :shown -> nil
+            {:ask, why} -> ask(state.watch, sym, why) && nil
+          end
+
+        # Heal.tla's Ended: a claim that ended with no good outcome is a person's, however it
+        # ended (the healer's own ask may have been cut).
+        claimed ->
+          if fault = Enum.find(claimed, &Acts.fault?/1),
+            do: ask(state.watch, sym, {:ended, fault.outcome || fault.status})
+
+          nil
       end
     else
-      _recorded_asked_or_claimed -> nil
+      _recorded_asked_or_unread -> nil
     end
   end
 

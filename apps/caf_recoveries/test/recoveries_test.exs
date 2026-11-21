@@ -72,10 +72,14 @@ defmodule CodingAgentFramework.RecoveriesTest do
     assert {:ok, %{claimed: [], ended: []}} = Recoveries.check(ctx.recoveries)
     assert length(rows(ctx)) == 5
 
-    assert {:refused, :not_waiting} = Recoveries.clear(ctx.recoveries, "beta")
-    assert {:ok, [^id]} = Recoveries.clear(ctx.recoveries, "alpha")
+    # F-183: one clear, the remedy prompt's, which the healer copies onto its row.
+    state = List.last(rows(ctx)).state
+    assert {:ok, [%{id: sid, state: ^state}]} = Watch.read(ctx.watch, status: "asked")
+    assert {:ok, :answered} = Watch.clear(ctx.watch, sid, "sam")
     assert {:ok, sixth} = agree(ctx, "alpha")
     assert %{id: ^sixth, status: "acted", answer: "ok"} = List.last(rows(ctx))
+    {:ok, %{cleared_at: at}} = Acts.get(ctx.acts, id)
+    assert {:ok, [%{answered_at: ^at}]} = Watch.read(ctx.watch, state: state)
   end
 
   test "a sample older than the maximum age is not acted on, and the row says why", ctx do
@@ -350,7 +354,7 @@ defmodule CodingAgentFramework.RecoveriesTest do
     assert {:ok, [%{id: ^sid, reason: "interrupted"}]} = Watch.read(ctx.watch, status: "asked")
   end
 
-  test "F-118 new-5: an end that settled unknown waits for a person, whose clear tries it again",
+  test "F-118 new-5: an end that settled unknown is asked, and its prompt's answer tries it again",
        ctx do
     {:ok, procs} = Holder.Process.new(programs(), ctx.holder)
     on_exit(fn -> end_recorded(ctx.dir) end)
@@ -368,14 +372,19 @@ defmodule CodingAgentFramework.RecoveriesTest do
     assert {:ok, %{ends: []}} = Recoveries.check(ctx.recoveries)
     assert alive?(pid)
     assert {:ok, [%{id: ^first, cleared_at: nil}]} = Acts.faults(ctx.acts, target: "lost")
+    # Its claim ended unknown, so its state is a person's (Heal.tla's Ended), once.
+    assert {:ok, [%{id: sid, reason: ~s(["ended","unknown"])}]} =
+             Watch.read(ctx.watch, status: "asked", state: state)
 
-    assert {:refused, :not_waiting} = Recoveries.clear(ctx.recoveries, "beta")
-    assert {:ok, [^first]} = Recoveries.clear(ctx.recoveries, "lost")
+    assert {:ok, %{ends: []}} = Recoveries.check(ctx.recoveries)
+    assert alive?(pid)
+    assert {:ok, :answered} = Watch.answer(ctx.watch, sid, "leave", "sam")
     assert {:ok, %{ends: [second]}} = Recoveries.check(ctx.recoveries)
     refute alive?(pid)
     assert [%{cleared_at: at}, %{id: ^second, outcome: "recovered", state: again}] = rows(ctx)
     assert again == "#{state}:cleared:#{at}"
-    assert {:refused, :not_waiting} = Recoveries.clear(ctx.recoveries, "lost")
+    assert {:ok, [%{answered_at: ^at}]} = Watch.read(ctx.watch, state: state)
+    assert {:refused, :settled} = Watch.clear(ctx.watch, sid, "sam")
   end
 
   defp record(procs, name) do

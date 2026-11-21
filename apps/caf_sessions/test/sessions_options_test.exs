@@ -5,7 +5,7 @@ defmodule CodingAgentFramework.SessionsOptionsTest do
   import CodingAgentFramework.SessionsSetup
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{HeadlessStandIn, Holder, Sessions, SessionsSetup}
+  alias CodingAgentFramework.{HeadlessStandIn, Holder, Sessions, SessionsSetup, Stream}
   alias CodingAgentFramework.Sessions.Table
 
   setup {SessionsSetup, :sessions}
@@ -17,7 +17,8 @@ defmodule CodingAgentFramework.SessionsOptionsTest do
     bad = headless(ctx, :on_message) ++ [options: %{env: %{"HOME" => "/x"}}]
     assert {{:refused, _}, nil} = {start(ctx, bad), Table.get(ctx.table, "test", "o1")}
 
-    assert {:ok, %{session_id: id}} = start(ctx, headless(ctx, :on_message) ++ [options: options])
+    launch = headless(ctx, :on_message)
+    assert {:ok, %{session_id: id}} = start(ctx, launch ++ [options: options])
     own = Path.join(ctx.account.config_dir, "framework/agents/o1.settings.json")
     assert JSON.decode!(File.read!(own))["permissions"] == deny["permissions"]
     flags = ["--settings", own, "--add-dir", "/srv/docs", "--append-system-prompt=Be brief."]
@@ -25,6 +26,9 @@ defmodule CodingAgentFramework.SessionsOptionsTest do
     kept = Table.get(ctx.table, "test", "o1").options
     assert CodingAgentFramework.ClaudeCLI.Options.decode(kept) == {:ok, options}
 
+    # The start's first line opens a turn, and a stop refuses a running turn: the stop waits
+    # until `Stream` reads that line delivered and the turn ended (F-155's new-12).
+    turn_ended!(ctx, id, launch[:first].uuid)
     assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "o1")
     {:ok, _} = await(fn -> if Holder.state(ctx.holder, "o1") == {:ok, :absent}, do: {:ok, 1} end)
     File.rm!(Path.join([ctx.dir, "argv", id]))
@@ -43,4 +47,18 @@ defmodule CodingAgentFramework.SessionsOptionsTest do
   end
 
   defp start(ctx, launch), do: Sessions.start(ctx.sessions, "o1", ctx.account, launch)
+
+  # Session `id`'s fold in `Stream`, read until line `uuid` is delivered and its turn is idle.
+  defp turn_ended!(ctx, id, uuid) do
+    {:ok, _} =
+      await(fn ->
+        {:ok, _} = Stream.read(ctx.stream)
+        {:ok, %{rows: rows}} = Stream.rows(ctx.stream)
+
+        case Enum.find(rows, &(&1.session == id)) do
+          %{idle: true, messages: %{^uuid => %{state: :delivered}}} = row -> {:ok, row}
+          other -> other
+        end
+      end)
+  end
 end

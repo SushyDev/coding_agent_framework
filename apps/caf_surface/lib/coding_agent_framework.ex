@@ -61,7 +61,8 @@ defmodule CodingAgentFramework do
 
   use Supervisor
 
-  alias CodingAgentFramework.{Accounts, Acts, Copies, Delegates, Grants, Holder, Host, Inlet}
+  alias CodingAgentFramework.{AbsentMains, Accounts, Acts, Copies, Delegates, Grants, Holder}
+  alias CodingAgentFramework.{Host, Inlet}
 
   alias CodingAgentFramework.{
     Cues,
@@ -395,6 +396,7 @@ defmodule CodingAgentFramework do
       mover: Mover.reads(),
       scheduler: Scheduler.reads(),
       mains: Mains.reads(),
+      absent_mains: AbsentMains.reads(),
       prompts: Prompts.reads(),
       ends: Ends.reads()
     ]
@@ -754,6 +756,19 @@ defmodule CodingAgentFramework do
              interval: every,
              notify: notify
            }
+         end},
+        # After `Mains`, whose resume it makes: the healer of an absent main (F-183). A restart
+        # of `Mains` restarts it, so the pid it holds is the live one.
+        {:absent_mains,
+         fn pid ->
+           mains = pid.(:mains)
+
+           {AbsentMains,
+            agents: w.agents,
+            acts: pid.(:acts),
+            watch: pid.(:watch),
+            host: host,
+            resume: &Mains.resume_main(mains, &1)}
          end},
         {:copies,
          fn _ -> {Copies, dir: Config.path(c, "parts/copies"), programs: p, notify: notify} end},

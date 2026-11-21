@@ -476,9 +476,25 @@ prompt stays while its target shows the kind at all, and passes with it.
 Built so far (F-182): `Heal.tla`; `Watch` (`caf_watch`) with the record, the list from the
 config's `remedies` and `remedy_bound`, and the cue `watch`; `Recoveries` as the healer of its
 two acts (`lost_viewer` by `reopen`, `end_owed` by `end`, the default list, 10 per hour); the
-`remedy` kind in `Prompts`; the app's `symptoms/2` and `remedies/2`. A viewer lost a third time
-within its window, and an end whose outcome is unknown, still wait for a person's
-`Recoveries.clear/2` as well as their prompt (F-182's new-2).
+`remedy` kind in `Prompts`; the app's `symptoms/2` and `remedies/2`.
+
+**One clear** (F-182's new-2, built in F-183). A `remedy` prompt's answer is the person's clear
+of its state (`Watch.clear/3` is the answer "leave"), and `Recoveries.clear/2` is gone: a viewer
+lost a third time within its window, or an end whose outcome is unknown, is acted on again from
+the answer's time, which the healer copies onto its own row in `Acts` (`cleared_at`), where its
+keys and counts read it. A prompt that passed with its target clears its state the same way,
+since no answer can come to it (F-183's new-3). A claim of the healer's that ended badly with
+its state still open is asked (`Heal.tla`'s `Ended`), so a cut ask is not lost.
+
+Built in F-183: `absent_main` (`AbsentMains`, in `caf_recoveries`, after `Mains` in the tree),
+modeled with `stuck_background` in `Remedies.tla`, which instances `Heal.tla` beside
+`Boxes.tla`'s stuck turn: `PartialOnce`, `ResumeOncePerBound` and, as liveness, `ReportTaken`
+(a partial never stands in for the brief's reply), each with a `Break_Remedies_*`, and every
+property of `Heal.tla` through it. An absence is a main's agent row `stopped` with reason
+`exited`, one state per process that went (its `started_at`); its resume is
+`Mains.resume_main/3`, which takes the `Scheduler`'s lease; an ok is verified from the row at
+once. Not built: `stuck_background`'s detector and remedy, and `mcp_dropped` and
+`hooks_silent` (F-183's new-1 and new-2).
 
 The first remedies on this shape, decided (F-180's new-6), each a small unit:
 
@@ -774,7 +790,8 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Services` | programs agents start and keep on a host, in a copy: held, owned, read, written to, restarted, with ports forwarded to the workstation; the forward is a second `Holder.Process` record of the service | `services` |
 | `Tracker` | the state views read: the fold of every reader | — |
 | `Watch` | the symptom record and the healer's allow-list (F-182, `Heal.tla`): each symptom state a fact (kind, target, state, since, evidence, source), recorded before anything acts on it and passed when no longer read; the list's acts (the healer's drop, the operator's revoke and approve), so a restart reads it as left; a state the healer leaves to a person is `asked`, the `remedy` prompt `Prompts` reads | `symptoms`, `remedy_acts` |
-| `Recoveries` | the healer (F-182): records each broken state in `Watch`, acts only by the allow-list's remedy for its kind and under its cap, takes its act in `Acts`, acts once per state, verifies, drops a remedy whose verify failed, and asks for the rest; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after its end within its stop's deadline, by `Holder.Process` (`Sessions` itself never kills). Two states wait for a person, whose clear makes the next one new: a viewer lost a third time within a window, and an end whose process outlived the KILL (`unknown`, F-118's new-5); the fault ledger shows both | no table of its own |
+| `Recoveries` | the healer (F-182): records each broken state in `Watch`, acts only by the allow-list's remedy for its kind and under its cap, takes its act in `Acts`, acts once per state, verifies, drops a remedy whose verify failed, and asks for the rest; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after its end within its stop's deadline, by `Holder.Process` (`Sessions` itself never kills). Two states wait for a person, whose clear (the `remedy` prompt's answer, F-183) makes the next one new: a viewer lost a third time within a window, and an end whose process outlived the KILL (`unknown`, F-118's new-5); the fault ledger shows both | no table of its own |
+| `AbsentMains` | the healer of `absent_main` (F-183, `Remedies.tla`): a main session whose process exited by itself, resumed once per absence through `Mains` under the `Scheduler`'s lease, on the same shape as `Recoveries`; a second absence of one main within the bound is asked | no table of its own |
 | `Grants` | decides whether a caller may act on a target, by the edges of `Sessions`' tree; a pure module, handed the tree's function | — |
 | `MCP` | the agent tools ("Agents working together"); each call is checked by `Grants` once, and each fix takes its act in `Acts` | `mcp_tokens`, `mcp_calls` |
 | `Ghostty` | opens or focuses a session's terminal window | — |
@@ -1418,7 +1435,8 @@ healing"). When the healer hands the parent a delegate's last reply because a ba
 of its turn hangs, the report is marked `partial`: its row in `Mailbox` and the parent's text say
 so, and the delegate's row stays as it was, its report still owed. A later report of the same
 brief is still taken and delivered, as the brief's reply; the `partial` one never stands in for
-it.
+it, and one state's partial goes once (`Remedies.tla`'s `ReportTaken` and `PartialOnce`,
+F-183). Not built yet: when such a report is owed is not read today (F-183's new-1).
 
 **A second start of a branch** (F-150, `Delegate.tla`'s `StartAgain`) looks up the name's
 latest row and its agent row before anything is written. While the parent's delegate of that
@@ -3199,7 +3217,8 @@ model before the code it describes (B4, B6, B8, B9, B11); B2 and B3 change no be
 - **B8. Healing on an allow-list**, against `Heal.tla`: `Recoveries` becomes the `Watch`'s
   healer acting through `Team.operate/4`, its acts the default allow-list, the cap, and the
   `remedy` prompt. About +400, −250. Built in F-182 but the acts through `Team.operate/4`,
-  which B5 makes; then each remedy of "One shape for every remedy" as its own small unit.
+  which B5 makes; then each remedy of "One shape for every remedy" as its own small unit
+  (`absent_main` and one clear built in F-183).
 - **B9. `wait_for`**, against `Delivery.tla`'s subscription: `Mailbox`'s `subscriptions`, fired
   by facts; a job's end, a service's line, port and exit, a delegate's idle and report, an
   answer. `service_wait`'s poll becomes a fact `Hosts` records. About +400, −150.

@@ -269,7 +269,11 @@ Built, each from a checked model in `model/tla/`:
   acts on it; `Recoveries` acts only by the remedy the config's list names for its kind, under
   a cap per bound, once per state, and asks a person (a `remedy` prompt) for the rest; a remedy
   whose verify failed leaves the list, which only the operator widens (`remedies/2`); and an
-  asked background command corrected too, its prompt showing the corrected call.
+  asked background command corrected too, its prompt showing the corrected call;
+- the first remedy on that shape and one clear (F-183, against `Remedies.tla`): a main session
+  whose process exited by itself is resumed once per absence through `Mains`, and a second
+  absence within the bound is asked (`AbsentMains`); a `remedy` prompt's answer is the person's
+  clear of its state (`Watch.clear/3`), and `Recoveries.clear/2` is gone.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
