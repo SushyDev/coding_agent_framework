@@ -521,7 +521,7 @@ The first remedies on this shape, decided (F-180's new-6), each a small unit:
 
 | Symptom | Read from | Remedy | Its bound |
 |---|---|---|---|
-| `stuck_background` | a delegate whose report was taken while Claude Code still lists a background task of it, and a process group of its process used no CPU time for a bound, read from `/proc` on Linux; on macOS it reads `unknown`, never stuck (F-184) | end that group by its record (its leader's pid and start time); its outcome read from the next `background_tasks_changed`; no partial report | once per state |
+| `stuck_background` | a delegate whose report was taken while Claude Code still lists a background task of it, and a process group of its process used no CPU time for a bound, read from `/proc` on Linux; on macOS it reads `unknown`, never stuck (F-184) | end that group by its record (its leader's pid and start time); its outcome read from the next `background_tasks_changed`; no partial report; off by default (shown only) until a run on Linux records the group's shape, since a quiet stdio MCP server spawned the same way would read as stuck; an operator turns it on with `remedies:` | once per state |
 | `absent_main` | a declared main session whose process is gone while the tree runs | one resume through `Mains` under the `Scheduler` | once per absence; a second absence within a bound is a `remedy` prompt |
 | `hooks_silent` | a tool call the transcript shows with no `Intake` row of its session within a bound (F-184) | none: shown only | — |
 | `mcp_dropped` | an agent's MCP connection gone | none yet: shown only | — |

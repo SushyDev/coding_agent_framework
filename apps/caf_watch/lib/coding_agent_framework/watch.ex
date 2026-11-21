@@ -64,9 +64,12 @@ defmodule CodingAgentFramework.Watch do
 
   @doc """
   The default allow-list: the healer's two acts (F-182: today's `Recoveries`, a lost viewer
-  reopened and an end owed), an absent main resumed (F-183, `AbsentMains`) and a stuck
-  background command's group ended (F-184, `StuckBackgrounds`), each capped at 10 per bound;
-  and `hooks_silent` (F-184, `HooksSilent`), a symptom only shown, with no remedy.
+  reopened and an end owed) and an absent main resumed (F-183, `AbsentMains`), each capped at 10
+  per bound; and two symptoms only shown, with no remedy: `hooks_silent` (F-184, `HooksSilent`)
+  and `stuck_background` (F-184, `StuckBackgrounds`). The second's remedy, `"end"`, ends a quiet
+  process group under the delegate, and no event names a background task's pid, so a quiet stdio
+  MCP server spawned the same way would read as stuck. It stays off by default until a run on
+  Linux records the group's shape; an operator turns it on with `remedies:`.
   """
   @spec default_remedies() :: %{String.t() => entry}
   def default_remedies do
@@ -74,7 +77,7 @@ defmodule CodingAgentFramework.Watch do
       "lost_viewer" => %{remedy: "reopen", cap: 10},
       "end_owed" => %{remedy: "end", cap: 10},
       "absent_main" => %{remedy: "resume", cap: 10},
-      "stuck_background" => %{remedy: "end", cap: 10},
+      "stuck_background" => %{remedy: nil, cap: 0},
       "hooks_silent" => %{remedy: nil, cap: 0}
     }
   end
