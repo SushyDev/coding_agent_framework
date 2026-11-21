@@ -244,7 +244,11 @@ Built, each from a checked model in `model/tla/`:
   checkout named by its repository (or the project's `dir:`), so `@../other_repo/` imports
   resolve, an older checkout renamed once no session runs in it; and `bin/caf-import`, which
   copies an existing config directory's conversations, memory and settings into an account and
-  makes each named conversation a stopped main session the app resumes.
+  makes each named conversation a stopped main session the app resumes;
+- every topic a part writes subscribable (F-176), each part declaring its writes beside its reads;
+  a subscription that answers its tree's pid, so an app subscribes again after a restart of the
+  whole tree; the operator's tools listed to no agent; the `run` tool gone, an agent's heavy
+  command its own `Bash`; and every subscriber of a topic reached, however many there are.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
