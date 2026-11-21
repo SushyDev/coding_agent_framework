@@ -278,7 +278,14 @@ Built, each from a checked model in `model/tla/`:
   report is taken at the result Claude Code writes while the command runs, and the turn the
   command's end begins is never a second report; a command whose group used no CPU time for a
   bound after the report is ended by its record, on Linux (`StuckBackgrounds`); and a tool call
-  with no hook row of its session within a bound is shown as `hooks_silent` (`HooksSilent`).
+  with no hook row of its session within a bound is shown as `hooks_silent` (`HooksSilent`);
+- usage limits and the config (F-185 to F-192, against `Limit.tla` and `Move.tla`): a limited
+  agent shown, its menu stopped, its word to go on sent once per limit, a delegate moved past
+  `move_after` and a main moved only by a person's answer; every setting an app passed by hand
+  a config key; and a person's claim closed by the healer's restart;
+- what an app's move onto the tree wired by hand (F-195): a tree with `agents: false` that runs
+  only leases, `agent_rows/1` reading the rows by the config, `tool_hooks` as `{module, opts}`,
+  and a start right after a kill waiting up to `restart_wait` for the old tree's exit.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

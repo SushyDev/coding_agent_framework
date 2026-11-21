@@ -67,15 +67,26 @@ defmodule CodingAgentFramework.Config do
   - `pressure`: how the `Scheduler` reads the host's pressure (`Scheduler.Pressure`), as its
     `pressure:` option; nil by default, which reads stall times where the host has them
     (`/proc/pressure`) and nothing elsewhere;
-  - `tool_hooks`: the app's hook callbacks, `%{pre_tool_use: fun, post_tool_use: fun, stop:
-    fun}`, each optional, as `CodingAgentFramework.Intake` takes them. Every account's settings
-    name the `PreToolUse` hook, since the framework's own callback (`Mover.pre_tool_use/2`, a
-    move's drain) decides first and hands any other call to the app's; `post_tool_use` adds its
-    hook when given; `stop` holds each turn's end for the app (the `Stop` hold, with its cap
-    and pauses). None by default. A callback may correct a call rather than refuse it
-    (`Intake`'s `{:allow, updated_input: map, additional_context: text}`). Whatever it answers,
-    a background `Bash` command it lets run runs with its stdin at end of file
-    (`Intake.Background`, always on);
+  - `tool_hooks`: the app's hook callbacks as data, `{module, opts}` (F-195): the module
+    implements `CodingAgentFramework.ToolHooks`' callback for each hook it takes,
+    `pre_tool_use/3`, `post_tool_use/3` and `stop/3`, each given the event, `opts` and the
+    same live `part` lookup an extension's tool has. `opts` is data, as an extension's is. Every
+    account's settings name the `PreToolUse` hook, since the framework's own callback
+    (`Mover.pre_tool_use/2`, a move's drain) decides first and hands any other call to the
+    app's; `post_tool_use` adds its hook when the module has it; `stop` holds each turn's end
+    for the app (the `Stop` hold, with its cap and pauses). None by default. A callback may
+    correct a call rather than refuse it (`Intake`'s `{:allow, updated_input: map,
+    additional_context: text}`). Whatever it answers, a background `Bash` command it lets run
+    runs with its stdin at end of file (`Intake.Background`, always on). The old form, a map of
+    functions, is refused, `{:refused, {:bad, :tool_hooks, {:not_tool_hooks, value}}}`, as a
+    module with none of the callbacks is; options that hold a function, pid, port or reference
+    `{:not_data, module}`;
+
+        Config.new(..., tool_hooks: {App.Hooks, proxy: "the board"})
+        #=> {:ok, %Config{tool_hooks: {App.Hooks, [proxy: "the board"]}}}
+        Config.new(..., tool_hooks: %{pre_tool_use: fn _ -> :pass end})
+        #=> {:refused, {:bad, :tool_hooks, {:not_tool_hooks, %{pre_tool_use: #Function<…>}}}}
+
   - `heavy`: the app's heavy commands (F-171), each `%{match: regex_or_string, class: class}`
     as `CodingAgentFramework.Runs` takes them: an agent's `Bash` call whose command matches
     runs under the wrapper `<home>/bin/caf-run`, which takes a lease of that class (`heavy`,
@@ -183,6 +194,20 @@ defmodule CodingAgentFramework.Config do
         ...>   user: "me", viewer: {0, 50})
         {:refused, {:bad, :viewer}}
 
+  - `agents`: `false` for a tree that runs no agent (F-195): it starts only the parts a lease
+    needs, `agentless/0`'s, the reaper, the instance's `Registry`, `Cues`, `Acts`, the
+    `Scheduler`, the `Tracker`, `Copies` and `Jobs`, and none that runs or reads an agent: no
+    tmux server, no account's settings, no hooks, no endpoints. Its `Scheduler` asks only a
+    job's owner, `Jobs`, about a lease. `true` by default;
+  - `restart_wait`: ms a start waits for an instance of its name that is still exiting
+    (`CodingAgentFramework.start_link/1`), so a parent's restart of a tree just killed is not
+    refused while the old one ends; 5,000 by default, and never `:infinity`;
+
+        iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
+        ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{},
+        ...>   user: "me", restart_wait: :infinity)
+        {:refused, {:bad, :restart_wait}}
+
   - `undeclared_cues`: what becomes of a cue whose topic no part declares it writes
     (`CodingAgentFramework.Cues.notify/3`): `:route` by default, handed on as any other, or
     `:raise`, which the framework's own tests set, so a part that writes such a topic fails
@@ -197,7 +222,7 @@ defmodule CodingAgentFramework.Config do
       {:refused, {:bad, :home}}
   """
 
-  alias CodingAgentFramework.{Mains, MCP, Runs, Watch}
+  alias CodingAgentFramework.{Mains, MCP, Runs, ToolHooks, Watch}
   alias CodingAgentFramework.Mains.Checkout
   alias CodingAgentFramework.Scheduler.Queue
   alias CodingAgentFramework.Sessions.Dialog
@@ -226,7 +251,7 @@ defmodule CodingAgentFramework.Config do
     lease: %{"seat" => 1},
     job_lease: %{heavy: %{"slot" => 1}, builder: %{"slot" => 1}, landing: %{"slot" => 1}},
     pressure: nil,
-    tool_hooks: %{},
+    tool_hooks: nil,
     heavy: [],
     extensions: [],
     dialogs: %{},
@@ -236,10 +261,17 @@ defmodule CodingAgentFramework.Config do
     remedies: Watch.default_remedies(),
     remedy_bound: 3_600_000,
     viewer: {200, 50},
+    agents: true,
+    restart_wait: 5_000,
     undeclared_cues: :route
   ]
 
   @type t :: %__MODULE__{}
+
+  # The parts a lease needs (F-195): the reaper every command runs under, the instance's
+  # `Registry` and `Cues`, `Acts` (where a part's crash is recorded), the `Tracker`, the
+  # `Scheduler`, and `Copies` and `Jobs`, whose jobs take its leases.
+  @agentless [:reaper, :names, :cues, :acts, :tracker, :scheduler, :copies, :jobs]
 
   # macOS cuts a unix socket path at 103 bytes (`Holder`). The tmux server's socket,
   # `<home>/tmux.sock`, is the one whose name is fixed, and tmux would fail on it only at its
@@ -259,8 +291,8 @@ defmodule CodingAgentFramework.Config do
 
       iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
       ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{}, user: "me",
-      ...>   tool_hooks: %{pre_tool_use: fn _, _ -> :allow end})
-      {:refused, {:bad, :tool_hooks}}
+      ...>   tool_hooks: {Enum, []})
+      {:refused, {:bad, :tool_hooks, {:not_tool_hooks, {Enum, []}}}}
       iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
       ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{}, user: "me",
       ...>   extensions: [%{name: "board"}])
@@ -296,8 +328,14 @@ defmodule CodingAgentFramework.Config do
       not operator?(fields) ->
         {:refused, {:bad, :operator}}
 
-      not tool_hooks?(Map.get(fields, :tool_hooks, %{})) ->
-        {:refused, {:bad, :tool_hooks}}
+      (bad = bad_tool_hooks(Map.get(fields, :tool_hooks))) != nil ->
+        {:refused, {:bad, :tool_hooks, bad}}
+
+      not is_boolean(Map.get(fields, :agents, true)) ->
+        {:refused, {:bad, :agents}}
+
+      not match?(n when is_integer(n) and n > 0, Map.get(fields, :restart_wait, 5_000)) ->
+        {:refused, {:bad, :restart_wait}}
 
       not user?(fields) ->
         {:refused, {:bad, :user}}
@@ -525,12 +563,43 @@ defmodule CodingAgentFramework.Config do
   defp typed?(:by_class, v), do: typed?(:ms, v)
   defp typed?(nil, _v), do: false
 
-  defp tool_hooks?(hooks) do
-    is_map(hooks) and
-      Enum.all?(hooks, fn {k, f} ->
-        k in [:pre_tool_use, :post_tool_use, :stop] and is_function(f, 1)
-      end)
+  # Why `tool_hooks` is out of shape, or nil: a `{module, opts}` whose module has a hook's
+  # callback and whose options are data, as an extension's are.
+  defp bad_tool_hooks(nil), do: nil
+
+  defp bad_tool_hooks({module, opts} = entry) when is_atom(module) do
+    cond do
+      ToolHooks.implemented(module) == [] -> {:not_tool_hooks, entry}
+      not data?(opts) -> {:not_data, module}
+      true -> nil
+    end
   end
+
+  defp bad_tool_hooks(other), do: {:not_tool_hooks, other}
+
+  @doc """
+  The hooks the config's `tool_hooks` take, the ones the accounts' settings name beside the
+  framework's `PreToolUse`.
+
+      iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
+      ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
+      ...>   env: %{}, user: "me")
+      iex> CodingAgentFramework.Config.hooks(c)
+      []
+  """
+  @spec hooks(t) :: [:pre_tool_use | :post_tool_use | :stop]
+  def hooks(%__MODULE__{tool_hooks: nil}), do: []
+  def hooks(%__MODULE__{tool_hooks: {module, _opts}}), do: ToolHooks.implemented(module)
+
+  @doc """
+  The parts a tree with `agents: false` starts, by their keys, in the tree's order: what a
+  lease needs, and nothing that runs or reads an agent.
+
+      iex> CodingAgentFramework.Config.agentless()
+      [:reaper, :names, :cues, :acts, :tracker, :scheduler, :copies, :jobs]
+  """
+  @spec agentless() :: [atom]
+  def agentless, do: @agentless
 
   # A name with no control character; on macOS it must be there (see `user` above).
   defp user?(fields) do
