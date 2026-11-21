@@ -169,7 +169,7 @@ defmodule CodingAgentFramework.AbsentMainsTest do
     assert {:ok, [%{id: id, status: "claimed", detail: detail}]} =
              Acts.rows(ctx.acts, actor: "sam", act: "resume")
 
-    assert detail == ~s({"healer":"absent_mains:test"})
+    assert detail == ~s({"healer":"absent_mains:test","symptom":"absent_main:app-epic:2"})
 
     Process.unlink(cut)
     ref = Process.monitor(cut)
