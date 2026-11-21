@@ -36,7 +36,10 @@ defmodule CodingAgentFramework.Limits do
   - `send` (`limit_reset`, remedy `go_on`): claimed, then the word stored through `Mailbox`
     under `limit:<agent>:<until>` (`word:`), so it is stored once per limit; a process that is
     gone is resumed then (`resume:`, a main's through `Mains`, under its lease), its first due
-    row the word. Then `word`, until a turn shows.
+    row the word. A headless delegate's word is `Delegates`' (`go_on:`, F-186's new-1): its
+    limited result was not its report, the word is its word to go on, whose turn's result is,
+    and a gone process is resumed with it under its start's lease, not counted as the resume
+    after a kill. Then `word`, until a turn shows.
 
   **On the one shape** (F-182), as `CodingAgentFramework.AbsentMains` is: each limit is the
   symptom `limited`, shown only (state `limited:<agent>:<until>`), and each act's phase its own
@@ -77,6 +80,8 @@ defmodule CodingAgentFramework.Limits do
   - `look:`, agent row -> `Inlet.look/4`'s answer for its pane;
   - `word:`, `(name, text, key) ->` `Mailbox.notify/4`'s answer;
   - `resume:`, agent row -> an outcome, or `:none` where nothing resumes it (default);
+  - `go_on:`, `(name, text, key) ->` an outcome, a headless delegate's word in place of
+    `word:` and `resume:` (`Delegates.go_on/5`; refused `:no_delegates` by default);
   - `press:`, `(name, label) ->` an outcome, by default `Sessions.press_limit/4`.
 
   Optionally `margin:` (ms past the reset, default 2 min: Claude Code's own wait went on 50 s
@@ -178,6 +183,7 @@ defmodule CodingAgentFramework.Limits do
       look: Keyword.fetch!(opts, :look),
       word: Keyword.fetch!(opts, :word),
       resume: Keyword.get(opts, :resume, fn _row -> :none end),
+      go_on: Keyword.get(opts, :go_on, fn _name, _text, _key -> {:refused, :no_delegates} end),
       press: Keyword.get(opts, :press, &Sessions.press_limit(sessions, &1, &2)),
       actor: "limits:#{Keyword.fetch!(opts, :host)}",
       margin: Keyword.get(opts, :margin, @margin),
@@ -495,36 +501,61 @@ defmodule CodingAgentFramework.Limits do
     with {:ok, sym} <- symptom(s, "limit_reset", row, state, l),
          :go <- may_act(s, list, "limit_reset", sym),
          {:ok, id} <- Acts.claim(s.acts, s.actor, row.name, state, :go_on) do
-      case s.word.(row.name, @word, "limit:#{row.name}:#{l["until"]}") do
-        {:ok, stored} ->
-          resumed = if Agents.running?(row), do: :none, else: s.resume.(row)
-
-          case resumed do
-            {:unknown, why} ->
-              Acts.settle(s.acts, id, :unknown, reason: {:resume, why}, acted: true)
-              ask(s, row, l, "its resume's outcome is unknown")
-
-            {:refused, why} ->
-              Acts.settle(s.acts, id, :failed, reason: {:resume, why}, acted: true)
-              ask(s, row, l, "its resume was refused: #{inspect(why)}")
-
-            _ok_or_none ->
-              Acts.settle(s.acts, id, :recovered, answer: inspect(stored), acted: true)
-              put(s, row.name, l, %{"step" => "word"})
-          end
-
-        {:refused, why} ->
-          Acts.settle(s.acts, id, :failed, reason: {:refused, why})
-          ask(s, row, l, "its word was refused: #{inspect(why)}")
-
-        {_unknown, why} ->
-          Acts.settle(s.acts, id, :unknown, reason: {:unknown, why}, acted: true)
-          ask(s, row, l, "its word's outcome is unknown")
-      end
-
+      key = "limit:#{row.name}:#{l["until"]}"
+      if delegate?(row), do: delegate_word(s, id, row, l, key), else: own_word(s, id, row, l, key)
       id
     else
       _shown_asked_or_claimed -> nil
+    end
+  end
+
+  # A headless delegate's word is `Delegates`' (F-186's new-1): it stores the word as the
+  # delegate's word to go on, which its turn's result answers, and resumes a gone process with it
+  # under its start's lease, not as the resume after a kill.
+  defp delegate?(row), do: row.kind == "delegate" and Agents.headless?(row)
+
+  defp delegate_word(s, id, row, l, key) do
+    case s.go_on.(row.name, @word, key) do
+      {:ok, answer} ->
+        Acts.settle(s.acts, id, :recovered, answer: inspect(answer), acted: true)
+        put(s, row.name, l, %{"step" => "word"})
+
+      {:refused, why} ->
+        Acts.settle(s.acts, id, :failed, reason: {:refused, why}, acted: true)
+        ask(s, row, l, "its word to go on was refused: #{inspect(why)}")
+
+      {_unknown, why} ->
+        Acts.settle(s.acts, id, :unknown, reason: {:unknown, why}, acted: true)
+        ask(s, row, l, "its word's outcome is unknown")
+    end
+  end
+
+  defp own_word(s, id, row, l, key) do
+    case s.word.(row.name, @word, key) do
+      {:ok, stored} ->
+        resumed = if Agents.running?(row), do: :none, else: s.resume.(row)
+
+        case resumed do
+          {:unknown, why} ->
+            Acts.settle(s.acts, id, :unknown, reason: {:resume, why}, acted: true)
+            ask(s, row, l, "its resume's outcome is unknown")
+
+          {:refused, why} ->
+            Acts.settle(s.acts, id, :failed, reason: {:resume, why}, acted: true)
+            ask(s, row, l, "its resume was refused: #{inspect(why)}")
+
+          _ok_or_none ->
+            Acts.settle(s.acts, id, :recovered, answer: inspect(stored), acted: true)
+            put(s, row.name, l, %{"step" => "word"})
+        end
+
+      {:refused, why} ->
+        Acts.settle(s.acts, id, :failed, reason: {:refused, why})
+        ask(s, row, l, "its word was refused: #{inspect(why)}")
+
+      {_unknown, why} ->
+        Acts.settle(s.acts, id, :unknown, reason: {:unknown, why}, acted: true)
+        ask(s, row, l, "its word's outcome is unknown")
     end
   end
 

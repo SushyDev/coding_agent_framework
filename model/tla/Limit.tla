@@ -26,7 +26,12 @@
 (*        whose default at its deadline is the stop: credits only by a     *)
 (*        person's answer. A press whose outcome is unknown is never sent  *)
 (*        again; the menu still shown after it is a person's prompt.       *)
-(*   headless   no wait: the turn ends with the limit.                     *)
+(*   headless   no wait: the turn ends with the limit. A delegate's        *)
+(*        limited result is never its report (F-186's new-1): the turn its *)
+(*        brief began is still open, and the word at the reset goes on     *)
+(*        with it; Delegates resumes a gone process with that word, under  *)
+(*        its lease, and does not count it as the resume after a kill      *)
+(*        (Delegate.tla's).                                                *)
 (*                                                                         *)
 (* At the reset each limited agent whose own wait did not go on gets one   *)
 (* word to go on through Mailbox, under a key of the agent and the limit,  *)
@@ -57,7 +62,9 @@
 (* here (`cp`, `pp`); their answer's claim is Prompt.tla's. The code       *)
 (* (F-186): Limits, the healer that reads each record onto the row and     *)
 (* takes each phase; Sessions.Limit, the row's field; Sessions'            *)
-(* put_limit, answer_limit and press_limit.                                *)
+(* put_limit, answer_limit and press_limit. And (F-187) Delegates.Turn's   *)
+(* reading of a headless delegate's turn, and Delegates.go_on, the word's  *)
+(* resume of a delegate.                                                   *)
 (*                                                                         *)
 (* Left abstract: time but the reset's order (a reset is one step, and the *)
 (* framework's clock reads it as the record's `resetsAt` passed); the      *)
@@ -114,7 +121,8 @@ Breaks == {
     "Unchecked",       \* the press goes without the screen read to show the menu
     "NoBound",         \* go-ons that hit the limit again are not counted
     "MoveMain",        \* a main session is moved as a delegate is, on the framework's own
-    "MoveTwice"        \* the move's claim is not checked, so a limit may be moved from twice
+    "MoveTwice",       \* the move's claim is not checked, so a limit may be moved from twice
+    "LimitReport"      \* a headless delegate's result at a limit is taken as its report
 }
 
 ASSUME Break \in Breaks
@@ -178,6 +186,7 @@ VARIABLES
     where,      \* Sessions: a -> "here", or "there" once moved to the other account
     mv,         \* Acts: a -> the limit whose move was claimed (or asked of a person; 0: none)
     mvBy,       \* Sessions: a -> the claimed move is a person's answer
+    reported,   \* Delegates: a -> its report was taken (a headless delegate's)
     \* the framework, in memory
     pend,       \* a -> the limit of a word stored whose agent row does not yet say so (0: none)
     restarts,
@@ -195,7 +204,10 @@ rowVars == <<seen, lim, step, label, byPerson, cp, pp, goes, noted>>
 moveVars == <<far, room, where, mv, mvBy>>
 ghosts == <<stored, ownGone, pressedOn, streak, grants, moves, wrong>>
 vars == <<n, win, near, ccVars, outside, rec, rowVars, due, wkey, req, pend, restarts, ghosts,
-          moveVars>>
+          moveVars, reported>>
+
+\* Every action but Report leaves the report as it is.
+Kept(A) == A /\ UNCHANGED reported
 
 -----------------------------------------------------------------------------
 (* Reading the state *)
@@ -340,12 +352,14 @@ Ask ==
 \* Sessions reads a's new limit record: Usage takes it as the account's, limited until its
 \* reset, and a's row is `limited`, its screen to be read. An open limit prompt stays, and so
 \* does a press whose outcome is unknown: a record read late never makes it pressable again.
+\* The prompt is the row's step, so its step stays too (F-186's new-3): nothing acts on the
+\* row until the person answers or a turn runs.
 Read(a) ==
     /\ hits[a] > seen[a]
     /\ seen' = [seen EXCEPT ![a] = hits[a]]
     /\ rec' = Max(rec, hitLim[a])
     /\ lim' = [lim EXCEPT ![a] = hitLim[a]]
-    /\ step' = [step EXCEPT ![a] = IF @ = "unknown" THEN @ ELSE "look"]
+    /\ step' = [step EXCEPT ![a] = IF @ \in {"unknown", "prompt"} THEN @ ELSE "look"]
     /\ cp' = [cp EXCEPT ![a] = FALSE]
     /\ UNCHANGED <<n, win, near, ccVars, outside, label, byPerson, pp, goes, noted, due, wkey, req,
                    pend, restarts, ghosts, moveVars>>
@@ -625,6 +639,18 @@ MoveAct(a) ==
                    byPerson, cp, goes, noted, due, wkey, req, pend, restarts, stored, ownGone,
                    pressedOn, streak, grants, far, room, mv, mvBy>>
 
+\* Delegates reads a headless delegate's turn from its stream: the `result` that ends the turn
+\* its brief (or its word to go on) began is its report, and its work ends there. A result at a
+\* limit (`api_error: "usage_limit_reached"`) is not one (F-186's new-1): the turn is still
+\* open, and the word at the reset goes on with it. Under LimitReport it is taken as the report.
+Report(a) ==
+    /\ a \in Headless \ Mains /\ ~reported[a]
+    /\ cc[a] = "done" \/ (Break = "LimitReport" /\ cc[a] = "hit")
+    /\ reported' = [reported EXCEPT ![a] = TRUE]
+    /\ wrong' = IF cc[a] = "hit" THEN wrong \cup {"reported a limit"} ELSE wrong
+    /\ UNCHANGED <<n, win, near, ccVars, outside, rec, rowVars, due, wkey, req, pend, restarts,
+                   stored, ownGone, pressedOn, streak, grants, moves, moveVars>>
+
 \* The Scheduler answers the other request at once: granted only where the gate admits.
 Answer ==
     /\ req = "asked"
@@ -654,7 +680,8 @@ Init ==
     /\ where = [a \in Agents |-> "here"]
     /\ mv = [a \in Agents |-> 0]
     /\ mvBy = [a \in Agents |-> FALSE]
-    /\ moves = [a \in Agents |-> [k \in Limits |-> 0]]
+    /\ reported = [a \in Agents |-> FALSE]
+    /\ moves =[a \in Agents |-> [k \in Limits |-> 0]]
     /\ cc = [a \in Agents |-> "working"]
     /\ screen = [a \in Agents |-> "input"]
     /\ live = [a \in Agents |-> TRUE]
@@ -697,18 +724,21 @@ Person(a) ==
     \/ \E l \in Labels : AnswerCredits(a, l)
 
 Next ==
-    \/ Close \/ Reset \/ Ask \/ Answer \/ Restart \/ Rooms
-    \/ \E a \in Agents : Hit(a) \/ TurnEnds(a) \/ AutoGo(a) \/ Framework(a) \/ Person(a)
+    \/ Kept(Close \/ Reset \/ Ask \/ Answer \/ Restart \/ Rooms)
+    \/ \E a \in Agents :
+          \/ Kept(Hit(a) \/ TurnEnds(a) \/ AutoGo(a) \/ Framework(a) \/ Person(a))
+          \/ Report(a)
 
 Fairness ==
-    /\ WF_vars(Reset) /\ WF_vars(Answer)
+    /\ WF_vars(Kept(Reset)) /\ WF_vars(Kept(Answer))
     /\ \A a \in Agents :
-          /\ WF_vars(Hit(a)) /\ WF_vars(AutoGo(a))
-          /\ WF_vars(Read(a)) /\ WF_vars(Look(a)) /\ WF_vars(CreditsDefault(a))
-          /\ WF_vars(CreditsGone(a)) /\ WF_vars(Press(a)) /\ WF_vars(Unsure(a))
-          /\ WF_vars(Abandoned(a)) /\ WF_vars(Overdue(a)) /\ WF_vars(GoOn(a))
-          /\ WF_vars(Send(a)) /\ WF_vars(Sent(a)) /\ WF_vars(Deliver(a)) /\ WF_vars(Continued(a))
-          /\ WF_vars(Ended(a)) /\ WF_vars(Away(a)) /\ WF_vars(MoveAct(a))
+          /\ WF_vars(Kept(Hit(a))) /\ WF_vars(Kept(AutoGo(a)))
+          /\ WF_vars(Kept(Read(a))) /\ WF_vars(Kept(Look(a))) /\ WF_vars(Kept(CreditsDefault(a)))
+          /\ WF_vars(Kept(CreditsGone(a))) /\ WF_vars(Kept(Press(a))) /\ WF_vars(Kept(Unsure(a)))
+          /\ WF_vars(Kept(Abandoned(a))) /\ WF_vars(Kept(Overdue(a))) /\ WF_vars(Kept(GoOn(a)))
+          /\ WF_vars(Kept(Send(a))) /\ WF_vars(Kept(Sent(a))) /\ WF_vars(Kept(Deliver(a)))
+          /\ WF_vars(Kept(Continued(a))) /\ WF_vars(Kept(Ended(a))) /\ WF_vars(Kept(Away(a)))
+          /\ WF_vars(Kept(MoveAct(a)))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -732,6 +762,10 @@ TypeOK ==
     /\ pend \in [Agents -> Limits] /\ restarts \in 0..MaxRestarts
     /\ far \in BOOLEAN /\ room \in BOOLEAN /\ where \in [Agents -> {"here", "there"}]
     /\ mv \in [Agents -> Limits] /\ mvBy \in [Agents -> BOOLEAN]
+    /\ reported \in [Agents -> BOOLEAN]
+
+\* A headless delegate's result at a limit is never its report.
+LimitNotReport == "reported a limit" \notin wrong
 
 \* No usage credits but by a person's answer: the framework presses the credits only as a
 \* person answered its usage_credits prompt.

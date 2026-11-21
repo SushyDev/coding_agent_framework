@@ -60,6 +60,13 @@ defmodule CodingAgentFramework.Delegates do
   yet, the resume waits for the next cue. A second such kill, or a refused resume, is `failed`,
   and that is the report, a notice from `framework`. A row leaves `running` once.
 
+  **A turn at a usage limit** (F-186's new-1, `Limit.tla`'s `Report`): a headless turn that
+  ends with a `result` whose `api_error` is `usage_limit_reached` is not finished, and its
+  process's exit (Claude Code exits at once) is not a kill: the row stays `running`, with no
+  report, and waits. At the reset the limit's healer calls `go_on/5`: the word to go on is
+  stored first and the turn is its from then; a gone process is resumed with it as `going_on`,
+  which `resumes` does not count.
+
   **An interactive delegate** (`interactive: true`, F-137; `docs/design.md`, "Interactive
   delegates") runs Claude Code's terminal interface: role `:parent`, kind `:delegate`. Its brief
   is marked by `Mailbox.launch/4` and carried by its start as the prompt; its report is the
@@ -292,6 +299,27 @@ defmodule CodingAgentFramework.Delegates do
   def launch(delegates, name), do: call(delegates, {:launch, name}, [], @step)
 
   @doc """
+  Goes on with headless delegate `name`'s turn after a usage limit, for the limit's healer at
+  the reset (F-186's new-1; `Limit.tla`'s `Report` and `Deliver`): its result at the limit was
+  not its report (`Delegates.Turn.next/2`'s `:limited`), so the turn its brief began is still
+  open. `text` is stored as its word to go on (`Mailbox.go_on/4`, which goes before every
+  other row to it) under a uuid of `key` (`Delegates.Turn.word_uuid/1`), so it is stored once
+  per limit, and the row's turn is that word's from then. A live process takes it into its
+  ended turn by its stream: `{:ok, :live}`. A gone one is resumed with it as its first line,
+  under its start's lease, as `going_on`: not counted as the resume after a kill, and a refusal
+  leaves the row `running`, still limited. The answer is `Sessions`'.
+
+  Refused with nothing written: `{:no_delegate, name}`, `{:status, status}` for a row not
+  `running`, `:interactive`, `{:not_limited, what}` for a turn not at a limit, and
+  `:session_running` for a process gone whose agent row is not yet free.
+
+      Delegates.go_on(delegates, "app-unit-review", "Go on.", "limit:app-unit-review:1800000000")
+      #=> {:ok, %{id: 1, name: "app-unit-review", session_id: "…", account: "work", …}}
+  """
+  def go_on(delegates, name, text, key, opts \\ []),
+    do: call(delegates, {:go_on, name, text, key}, opts, 300_000)
+
+  @doc """
   What `Delegates` reads, for `Cues`: a stream's events and a transcript's lines (a turn's end
   and its report), the agent rows (a start or an end) and `Mailbox`'s rows (a report taken).
   """
@@ -451,6 +479,31 @@ defmodule CodingAgentFramework.Delegates do
       end
 
     {:reply, reply, s}
+  end
+
+  def handle_call({:go_on, name, text, key}, from, s) do
+    row = Enum.find(Table.latest(s.db, s.host), &(&1.name == name))
+    agent = row && agent(s, row)
+
+    with %{} <- agent || {:refused, {:no_delegate, name}},
+         true <- row.status == "running" or {:refused, {:status, row.status}},
+         :headless <- how(agent),
+         {:ok, fold} <- followed(s, agent),
+         :limited <- limited(Turn.next(row, fold)),
+         uuid = Turn.word_uuid(key),
+         {:ok, _} <- Mailbox.go_on(s.mailbox, row.name, text, uuid) do
+      if row.resume_uuid != uuid, do: write(s, row, resume_uuid: uuid)
+      row = Table.get(s.db, row.id)
+
+      cond do
+        not fold.gone and Agents.running?(agent) -> {:reply, {:ok, :live}, s}
+        Agents.free?(agent) -> went_on(s, row, agent, from)
+        true -> {:reply, {:refused, :session_running}, s}
+      end
+    else
+      :interactive -> {:reply, {:refused, :interactive}, s}
+      other -> {:reply, other, s}
+    end
   end
 
   def handle_call({:fix_state, parent, name}, _from, s) do
@@ -731,6 +784,13 @@ defmodule CodingAgentFramework.Delegates do
     {refused, settle_row(s, Table.get(s.db, row.id), agent(s, row))}
   end
 
+  # The word's resume after a usage limit, refused: no report, and the row runs on, still at
+  # its limit (`Delegates.Turn.next/2`), for the limit's healer to ask a person.
+  defp answered(s, %{status: "going_on"} = row, {:refused, why} = refused) do
+    write(s, row, status: "running", reason: why)
+    {refused, s}
+  end
+
   defp answered(s, row, {:refused, why} = refused) do
     text = "The delegate was killed before its last reply, and its resume was refused: "
     {refused, finish(s, row, "failed", {:notice, text <> inspect(why)})}
@@ -885,7 +945,8 @@ defmodule CodingAgentFramework.Delegates do
 
   # Settled: by the agent row of this call (written at or after the call) once that row is
   # settled; with none past the deadline, the call never reached Sessions and is not made again.
-  defp settle_row(s, %{status: status} = row, agent) when status in ~w(starting resuming) do
+  defp settle_row(s, %{status: status} = row, agent)
+       when status in ~w(starting resuming going_on) do
     cond do
       Agents.since?(agent, row.called_at) and Agents.running?(agent) ->
         elem(answered(s, row, {:ok, agent}), 1)
@@ -941,6 +1002,8 @@ defmodule CodingAgentFramework.Delegates do
       case Turn.next(row, fold) do
         {:finished, r} -> finish(s, row, "finished", {:reply, r.text, r})
         :exited -> exited(s, row, agent, fold)
+        # Its turn is at a usage limit: no report and no resume here; the healer goes on.
+        :limited -> s
         :waiting -> s
       end
     else
@@ -1160,6 +1223,27 @@ defmodule CodingAgentFramework.Delegates do
     else
       {:refused, _} = refused -> elem(answered(s, row, refused), 1)
       _not_taken -> s
+    end
+  end
+
+  defp limited(:limited), do: :limited
+  defp limited(other), do: {:refused, {:not_limited, other}}
+
+  # The word to go on after a usage limit, as the resume's first line (F-152), under the
+  # start's lease (no claim of its own: the limit's healer claimed the act). It is not the
+  # resume after a kill, so `resumes` stays as it was. The caller waits for Sessions' answer.
+  defp went_on(s, row, agent, from) do
+    with {:ok, p} <- Map.fetch(s.projects, agent.project) |> known(agent.project),
+         deadline = deadline(s, p),
+         {:ok, account} <- Accounts.ready(s.accounts, agent.account),
+         {:ok, launched} <- launch_first(s, %{row | deadline: deadline}, :headless) do
+      at = System.os_time(:millisecond)
+      write(s, row, status: "going_on", called_at: at, deadline: deadline)
+      start = {:resume, agent.session_id}
+      {:noreply, call_sessions(s, Table.get(s.db, row.id), p, account, start, from, launched)}
+    else
+      {:refused, _} = refused -> {:reply, refused, s}
+      not_launched -> {:reply, {:refused, not_launched}, s}
     end
   end
 

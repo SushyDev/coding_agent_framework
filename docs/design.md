@@ -529,7 +529,11 @@ The first remedies on this shape, decided (F-180's new-6), each a small unit:
 
 A usage-limit remedy is an instance of this healer: its symptom `limited`, its remedies
 `press_stop`, `go_on` and `move`, each an entry on the list with its cap, recorded, claimed,
-verified and asked as every other; `Limit.tla` says when each is legal.
+verified and asked as every other; `Limit.tla` says when each is legal. A limit kind's ask is
+its `limit` prompt on the agent row where `Limit.tla` names one (a press whose outcome is
+unknown, a word or a move refused or unknown, a claim a restart cut), never a `remedy` prompt
+beside it, so a person is asked about one wait once (F-186's new-4); only a kind off the list
+or past its cap is asked in the `Watch`.
 
 ### Extensions
 
@@ -840,7 +844,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Sessions` | the agent row: one row per agent, main session or delegate, with its kind, parent, project, account, launch options and model, held process and status; start, resume, and stop by SIGTERM once idle; the tree as one function of its rows; each session's turn state as one function per kind of session, from its evidence. Other parts read its rows only through `Sessions.Agents`, a pure module over a reader's own connection, which answers what each status means | `agents` |
 | `Mover` | drains a session, a main session or a delegate, and moves it between accounts; its phase is a field of the agent row (`move`, with the accounts, its act and its deadline), which `Sessions` writes for it | — |
 | `Mains` | each project's main sessions, as agent rows of kind `main` it declares in `Sessions`; the project's checkout, made once, and the pull after a landing; the start of one (`start_main`), through the `Scheduler` and the startup dialogs (F-141, `Checkout.tla`); its resume under a lease of its own, and its end, the operator's (`end_main`, F-143, `Team.tla`) | `checkouts`: each checkout's reading, for a view; `main_starts`: each start, the holder of its lease |
-| `Delegates` | the delegate protocol only: its checks, the cap, the account pick, resume once, report a second kill; it hands the report to `Mailbox` as the reply to the brief | `delegates`: branch, brief uuid, resumes, whether the report was taken |
+| `Delegates` | the delegate protocol only: its checks, the cap, the account pick, resume once, report a second kill, a turn at a usage limit no report and its word's resume (F-187); it hands the report to `Mailbox` as the reply to the brief | `delegates`: branch, brief uuid, resumes, whether the report was taken |
 | `Mailbox` | every delivery: messages, replies, notices, reports, briefs, the words to go on and the app's word, stored, delivered once, in order per sender and addressee; one mark and settle, with the transport the target's kind chooses | `messages` |
 | `Acts` | one ledger of acts: an actor's act on a target's state, written before it acts, once per state, settled after, closed as interrupted when a restart cut it, with a cue. Fixes, the operator's acts, recoveries, kills, resumes, starts and raised errors are its rows, and the fault ledger is a query of it | `acts` |
 | `Scheduler` | one per instance, against `Schedule.tla`: every agent start, heavy run and landing asks it for a lease first ("A lease" below). A grant is one write transaction that checks each resource's capacity and inserts the row, with all of a landing's resources in one lease; a release is a compare-and-set on the lease id, so it happens once; a lease names the row of the work it admits, and is released only when that row's owner says the work ended (by its `Holder.Process` record; a row still starting is live), never because time passed. It reads pressure and each account's budget, never the load average | `leases`: id (the fencing token), request id, outcome (granted or refused), class, module, account, the units of each resource, the holder (the work's row), asked, decided and released times, and a refusal's reason and retry time |
@@ -1494,6 +1498,17 @@ A main session calls `start_delegate(project, branch, model, brief)`. The framew
    instead of retrying. That report is held and delivered like a finish. A kill after the last
    reply is a finish, read from the transcript.
 
+**A turn at a usage limit is not the report** (F-186's new-1, built in F-187; `Limit.tla`'s
+`Report`). Claude Code headless ends a turn at a limit with a `result` whose `api_error` is
+`usage_limit_reached`, and exits 1 at once (F-181). `Delegates.Turn.next/2` reads it as
+`:limited`: no report, the brief's turn still open, and the exit no kill. At the reset the
+limit's healer (`Limits`) hands the word to go on to `Delegates.go_on/5`, which stores it as the
+delegate's word to go on (`Mailbox.go_on/4`, first of its rows) under a uuid of the word's key
+`limit:<agent>:<until>`, so once per limit, and makes the row's turn that word's; a gone process
+is resumed with it as the first line, under the start's lease, as the row's `going_on`, which
+`resumes` does not count. A refused one leaves the row `running`, still at its limit, and the
+healer asks a person. The word's turn's result is the report, the reply to the brief.
+
 **No `partial` report** (F-184; F-182 had decided one). Claude Code writes a turn's `result`
 while a background command of it runs (measured on 2.1.322), so a delegate's report is never
 owed behind a hung command, and the healer hands no partial one: `stuck_background` only ends
@@ -1528,7 +1543,7 @@ is told at most once per idle state across restarts.
   reads it ("The worktree") with two more fields: `branches`, the pattern a delegate's branch
   must match, and `cap`, how many of one parent's delegates may hold it at once. There is no
   table of projects and no default cap. A delegate holds its parent's cap from its row's
-  start until it ends: starting, running, resuming, finished or failed, since a finished one
+  start until it ends: starting, running, resuming, going_on, finished or failed, since a finished one
   still holds its worktree and its report.
 - A delegate's life is its agent row in `Sessions`: whether its process may live, and whether
   it has `ended`, which `Sessions` writes when `Delegates` asks (`Sessions.ended/3`) once no
@@ -1541,7 +1556,7 @@ is told at most once per idle state across restarts.
   an agent, and so the cap, is one function there (`Sessions.Agents.holds?/1`, R9): a
   delegate holds its parent's cap from its start (its call under way in `Delegates`, then its
   agent row) until it has ended or its start was refused. `Delegates`' own row keeps the marks
-  of its own calls (starting, resuming), the protocol's outcome (running, finished with a
+  of its own calls (starting, resuming, going_on), the protocol's outcome (running, finished with a
   reply, failed with a notice, refused) and its own facts: branch, model, brief uuid, resume
   uuid, resumes, and whether the report was taken. It reads `Sessions`' state only through
   `Sessions.Agents`.
@@ -1559,10 +1574,11 @@ is told at most once per idle state across restarts.
   second time (unless found undelivered), so a restart never writes a turn's message twice. The resume is asked only once `Sessions`' row of the killed
   process has ended (`stopped`, by its settle of a running row whose process is gone), since
   `Sessions` starts a name only then; until it has, the delegate stays running.
-- A row a restart left starting or resuming is settled by `Sessions`' row of its call (one
+- A row a restart left starting, resuming or going_on is settled by `Sessions`' row of its call (one
   written at or after the call), once that row is settled: running, or refused. With no such
   row by the row's deadline, the call never reached `Sessions`, and the row is refused (a
-  start) or failed (a resume) as interrupted. A call is never made again. That reading is true
+  start), failed (a resume) or running again (a word's `going_on`) as interrupted. A call is never
+  made again. That reading is true
   because the call carries a caller's deadline, the row's less its slack (F-166, F-164's
   new-1): a call may wait in `Sessions`' mailbox after its task gave up or `Delegates`
   restarted, and `Sessions` takes one past that deadline only to answer it
@@ -2586,7 +2602,9 @@ person's answer of its `limit` prompt, and a move refused, failed, unknown or cu
 left to that prompt; invariants `NeverMovesMain` and `MoveOnce`, with `Break_Limit_MoveMain`
 and `Break_Limit_MoveTwice`, in `Limit_Move`, `Limit_MoveMain`, `Limit_MoveHeadless` and
 `slow/Limit_MoveLarge`. Every earlier configuration sets `Others = FALSE` and keeps its state
-space.
+space. F-187 adds `Delegates`' report of a headless delegate (`Report`): a result at a limit is
+never one (`LimitNotReport`, `Break_Limit_LimitReport`, in `Limit_Headless` and
+`Limit_MoveHeadless`); and `Read` keeps a `prompt` as it keeps an `unknown`, as the code does.
 `Boxes.tla` composes its contracts (`MaxLimits` above 0 only in `Boxes_Limit`): the
 `Scheduler`'s gate and `Mailbox`'s mark against a `limited` turn, with a dialog, a stop and the
 restarts, as `NoStartOnLimited` and `NoRowIntoLimit`.
@@ -2732,7 +2750,7 @@ Every action below is decided on the newest record and the screen read before it
 | Claude Code's own wait | watches: a turn after the reset clears `limited`; the wait ended with no turn (Esc, an exit, `_disabled`) is taken as the menu's stop; the wait still shown at the reset plus a margin (`_stale`, or nothing) is a `limit` prompt | sends nothing into the wait |
 | the menu, the account unable to spend | presses "Stop and wait for limit to reset" at once, found by its label, checked on the screen in the same step (`Inlet`'s checked press, as a startup dialog's) | once per menu shown; a press whose outcome is unknown is never sent again, and the menu still shown after it is a `limit` prompt, whose answer clears that press once (`MenuPressedOnce`) |
 | the menu, the account able to spend | opens a `usage_credits` prompt: "stop and wait" or "use credits"; its default at its deadline is the stop; the answer is pressed as above | credits only by a person's answer (`NeverSpends`) |
-| a headless turn ended | nothing until the reset | — |
+| a headless turn ended | nothing until the reset; a delegate's limited result is not its report, and its exit is not a kill (F-187) | — |
 | a delegate's turn ended at a limit whose reset is more than `move_after` away (default 2 hours, the config's), another usable account with room | one move through the `Mover` ("The move" below) | once per limit, its claim in `Acts` first (`MoveOnce`); refused, failed or unknown, a `limit` prompt |
 | at the reset, for each `limited` agent whose own wait did not go on | writes on its row that a word is owed, then stores one word to go on in `Mailbox` under the key `limit:<agent>:<resets_at>`; `Mailbox` hands it into an ended turn, or by `launch` as the prompt of a resume when the process is gone, under a lease the gate grants | at most one word per agent per limit, none to an agent whose own wait went on (`GoOnOnce`); past three go-ons in a row that each hit a limit again, a `limit` prompt in place of the fourth (`BoundedRetries`) |
 
@@ -2827,6 +2845,14 @@ only (state `limited:<agent>:<until>`), `limit_menu` by `press_stop` and `limit_
 `usage_credits` prompt (the menu's stop or its credits, by label) from the row's step. Not
 built: the move (`limit_far`, `move_after`, the main's "move to <account>" answer) and a
 delegate's word by `launch` (F-186's new-1).
+
+Built in F-187 (F-186's new-1, decided): a headless delegate's limited turn is not its report
+("The delegate protocol"). At the reset `Limits` hands a headless delegate's word to
+`Delegates.go_on/5` (`go_on:`) in place of `Mailbox.notify/4` and a resume of its own: stored
+as the delegate's word to go on under a uuid of its key, the row's turn that word's, a gone
+process resumed with it under its start's lease as `going_on`, not counted as the resume after
+a kill. `Limit.tla`'s `Read` keeps a `prompt` as the code does (F-186's new-3), and "Metrics and
+healing" says a limit kind's ask is its `limit` prompt (new-4).
 
 **Measured** (F-181, by hand on 2.1.322, against a local endpoint at `ANTHROPIC_BASE_URL` that
 answers 429 with the unified rate-limit headers the pinned binary reads, a dummy subscriber's

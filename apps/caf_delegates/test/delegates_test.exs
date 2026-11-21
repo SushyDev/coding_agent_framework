@@ -12,7 +12,7 @@ defmodule CodingAgentFramework.DelegatesTest do
   alias CodingAgentFramework.{Accounts, Delegates, Grants, HeadlessStandIn, Holder, Mailbox}
   alias CodingAgentFramework.{Scheduler, Sessions, SessionsSetup, Stream, Transcripts, Usage}
   alias CodingAgentFramework.ClaudeCLI.Options
-  alias CodingAgentFramework.Delegates.{Table, Work}
+  alias CodingAgentFramework.Delegates.{Table, Turn, Work}
   alias CodingAgentFramework.Sessions.Agents
   alias CodingAgentFramework.Sessions.Turn, as: SessionsTurn
 
@@ -542,6 +542,51 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert text == "done #{r}"
     assert {:ok, %{kind: "reply"}} = Mailbox.answer_to(ctx.mailbox, u)
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "message #{r}"]
+  end
+
+  # Limit.tla's Report and Deliver (F-186's new-1): the stand-in plays F-181's measured headless
+  # hit, so the turn ends with a result at the limit and the process exits 1. That is no report
+  # and no kill; at the reset the healer's word goes on with the brief's turn, by a resume
+  # `resumes` does not count, and that turn's result is the report.
+  test "a turn at a usage limit is no report; its word resumes it, not counted as a kill", ctx do
+    limit = Path.join(ctx.dir, "limit")
+    File.write!(limit, "1800000000")
+    # The hit waits until the start is confirmed: a start is confirmed only while its process
+    # lives, and the process exits at once after the hit (the build note's new-4).
+    fifo = Path.join(ctx.dir, "limit.fifo")
+    {_, 0} = System.cmd(program!(:mkfifo), [fifo])
+    assert {:ok, %{id: id, name: name, brief_uuid: u}} = start(ctx, "app", "unit/one")
+    File.write!(fifo, "hit\n")
+    stream_row(ctx, id, &(&1.gone and &1.last_result.api_error == "usage_limit_reached"))
+
+    {:ok, _} =
+      await(fn ->
+        Sessions.cue(ctx.sessions, %{topic: "stream:test", ids: []})
+        cue(ctx, current(ctx))
+        if session_row(ctx, name).status == "stopped", do: {:ok, :exited}
+      end)
+
+    cue(ctx, current(ctx))
+    assert %{status: "running", resumes: 0, report: "none"} = Table.get(ctx.dtable, id)
+    assert {:refused, :no_answer} = Mailbox.answer_to(ctx.mailbox, u)
+
+    assert {:refused, {:no_delegate, "app-x"}} =
+             Delegates.go_on(current(ctx), "app-x", "Go.", "k")
+
+    # The reset passed: the word is stored once, under its key's uuid, and is the first line.
+    File.rm!(limit)
+    key = "limit:#{name}:1800000000"
+    w = Turn.word_uuid(key)
+    assert {:ok, %{session_id: _}} = Delegates.go_on(current(ctx), name, "Go on.", key)
+
+    assert {:ok, %{report: "taken", text: text, resumes: 0, resume_uuid: ^w}} =
+             cue_until(ctx, id, &(&1.status == "finished"))
+
+    assert text == "done #{w}"
+    assert {:ok, %{kind: "reply"}} = Mailbox.answer_to(ctx.mailbox, u)
+    assert [%{kind: "resume", from_agent: "framework"}] = Enum.filter(rows(ctx), &(&1.uuid == w))
+    assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "message #{w}"]
+    assert {:refused, {:status, "finished"}} = Delegates.go_on(current(ctx), name, "Go on.", key)
   end
 
   test "a delegate's own options are checked, kept on its row, and given again on its resume",
