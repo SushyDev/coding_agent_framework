@@ -80,7 +80,7 @@ defmodule CodingAgentFramework.Sessions.Table do
   @columns ~w(id host name kind parent project socket account role cwd resume status reason
               viewer pid session_id proc_start started_at updated_at deadline repo branch
               worktree options model release move move_from move_to move_act move_deadline
-              dialog answers end_asked ended_at meta usage_limit)a
+              dialog answers end_asked ended_at meta usage_limit menu)a
 
   @schema """
   CREATE TABLE IF NOT EXISTS agents (
@@ -91,7 +91,7 @@ defmodule CodingAgentFramework.Sessions.Table do
     repo TEXT, branch TEXT, worktree TEXT, options TEXT, model TEXT, release TEXT, move TEXT,
     move_from TEXT, move_to TEXT, move_act INTEGER, move_deadline INTEGER, dialog TEXT,
     answers TEXT, end_asked INTEGER, ended_at INTEGER, meta TEXT, usage_limit TEXT,
-    UNIQUE (host, name));
+    menu TEXT, UNIQUE (host, name));
   CREATE INDEX IF NOT EXISTS agents_status ON agents (host, status);
   CREATE INDEX IF NOT EXISTS agents_cwd ON agents (host, cwd);
   CREATE INDEX IF NOT EXISTS agents_parent ON agents (host, parent);
@@ -101,7 +101,7 @@ defmodule CodingAgentFramework.Sessions.Table do
   # The columns a later build added to `agents`, so added if missing: the release a session
   # runs (R8), a move's phase on the row (F-133), the model (F-136), and a startup dialog and
   # its answers (F-140), an end asked (F-144), the end's own time (F-165), and the app's own
-  # metadata (F-154), and a usage limit (F-185).
+  # metadata (F-154), a usage limit (F-185), and a menu on a running screen (F-198).
   @added [
     agents: [
       "release TEXT",
@@ -116,7 +116,8 @@ defmodule CodingAgentFramework.Sessions.Table do
       "end_asked INTEGER",
       "ended_at INTEGER",
       "meta TEXT",
-      "usage_limit TEXT"
+      "usage_limit TEXT",
+      "menu TEXT"
     ]
   ]
 
@@ -223,7 +224,8 @@ defmodule CodingAgentFramework.Sessions.Table do
                :end_asked,
                :ended_at,
                :meta,
-               :usage_limit
+               :usage_limit,
+               :menu
              ])
 
       Store.transaction(db, fn ->
@@ -349,7 +351,7 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   @doc """
   Sets `fields` (status, reason, viewer, pid, session_id, proc_start, deadline, worktree,
-  parent, project, dialog, answers, end_asked, meta, usage_limit, and a move's `move`,
+  parent, project, dialog, answers, end_asked, meta, usage_limit, menu, and a move's `move`,
   `move_from`, `move_to`, `move_act`, `move_deadline`) on row `id`, with `updated_at`, and
   `ended_at` as the module doc says: a first done status stamps it, any other status clears it.
   """

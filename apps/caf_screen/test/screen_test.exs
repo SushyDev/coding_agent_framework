@@ -24,6 +24,13 @@ defmodule CodingAgentFramework.ScreenTest do
     "Wait here, then continue automatically at Nov 22 at 11:58pm",
     "Upgrade your plan"
   ]
+  @teach %{
+    state: :dialog,
+    kind: :menu,
+    title: "Teach auto mode about your environment?",
+    detail: ["Auto mode works better when it knows your environment. Takes about a minute."],
+    options: ["Yes", "Not now", "Don't show again"]
+  }
 
   # What each state the capture script records reads as. A state the manifest names and this
   # map does not fails the test below, so a new capture is read before it is trusted.
@@ -70,8 +77,16 @@ defmodule CodingAgentFramework.ScreenTest do
     },
     "usage-limit-wait" => %{state: :usage_limit_wait, at: "7:57am"},
     "usage-limit-stopped" => %{state: :idle, box: :empty},
-    "usage-limit-went-on" => %{state: :idle, box: :empty}
+    "usage-limit-went-on" => %{state: :idle, box: :empty},
+    # A menu no rule names, above the box (F-198), with the marker on 1 and, after Down, on 2.
+    "menu" => Map.put(@teach, :selected, "Yes"),
+    "menu-down" => Map.put(@teach, :selected, "Not now"),
+    # A dim prompt suggestion is no typed text; without its colors nothing says it is one.
+    "suggestion" => %{state: :idle, box: :empty},
+    "suggestion-plain" => %{state: :idle, box: {:text, "yes, run the end-to-end rerun"}}
   }
+
+  @suggested "yes, run the end-to-end rerun"
 
   defp fixture(name), do: File.read!(Path.join(@fixtures, name))
 
@@ -278,11 +293,77 @@ defmodule CodingAgentFramework.ScreenTest do
                Screen.read(screen, @release)
     end
 
-    test "the menu's options under a rule of ─ are not the menu" do
+    test "the usage limit menu's options under a rule of ─ are a menu no rule names" do
       screen =
         edit("usage-limit-menu.txt", String.duplicate("▔", 120), String.duplicate("─", 120))
 
-      assert Screen.read(screen, @release) == {:unknown, {:unrecognized, @release}}
+      assert {:ok, %{kind: :menu, title: "What do you want to do?", options: @menu}} =
+               Screen.read(screen, @release)
+    end
+
+    test "a menu with blank lines around its parts reads the same" do
+      screen =
+        "menu.ansi"
+        |> edit("  Auto mode works", "\n  Auto mode works")
+        |> String.replace("    3. Don't show again\n", "    3. Don't show again\n\n")
+        |> String.replace("Esc to cancel\n", "Esc to cancel\n\n")
+
+      assert Screen.read(screen, @release) == {:ok, Map.put(@teach, :selected, "Yes")}
+    end
+
+    test "a numbered list with no menu footer is the agent's output, not a menu" do
+      screen = edit("menu.txt", "  Enter to confirm · Esc to cancel\n", "")
+      assert Screen.read(screen, @release) == {:ok, %{state: :idle, box: {:text, @suggested}}}
+
+      assert {:ok, %{state: :idle, box: :empty}} =
+               Screen.read(fixture("suggestion.ansi"), @release)
+    end
+
+    test "a menu needs two numbered options in a row, from 1, one marked, one indent" do
+      for {from, to} <- [
+            {"    2. Not now\n    3. Don't show again\n", ""},
+            {"    3. Don't show again", "    4. Don't show again"},
+            {"    2. Not now", "      an option's second line\n    2. Not now"},
+            {"  ❯ 1. Yes", "    1. Yes"},
+            {"    2. Not now", "  ❯ 2. Not now"},
+            {"    3. Don't show again", "     3. Don't show again"},
+            {"    3. Don't show again\n", "    3. Don't show again\n  More words\n"}
+          ] do
+        screen = edit("menu.txt", from, to)
+
+        assert Screen.read(screen, @release) == {:unknown, {:unrecognized, @release}},
+               "#{inspect(from)} -> #{inspect(to)}"
+      end
+    end
+
+    test "a menu the agent's output prints, rules and all, above the box is not a menu" do
+      printed = "menu.txt" |> fixture() |> String.split("\n") |> Enum.take(8) |> Enum.join("\n")
+      screen = printed <> "\n  and the agent goes on\n" <> fixture("idle-empty.txt")
+      assert Screen.read(screen, @release) == {:ok, %{state: :idle, box: :empty}}
+    end
+
+    test "a menu footer with more under it than the box is not a menu's" do
+      screen =
+        edit(
+          "menu.txt",
+          "  Enter to confirm · Esc to cancel\n",
+          "  Enter to confirm · Esc to cancel\n  and more\n"
+        )
+
+      assert Screen.read(screen, @release) == {:ok, %{state: :idle, box: {:text, @suggested}}}
+    end
+
+    test "a dim run only on the box's line is dropped, up to its reset" do
+      dim = "\e[39m❯ \e[2myes, run the end-to-end rerun\e[0m"
+      typed = "\e[39m❯ ye\e[2ms, run the end-to-end rerun\e[22m"
+      truecolor = "\e[39m❯ \e[38;2;1;2;3mhello\e[0m"
+
+      for {line, box} <- [{dim, :empty}, {typed, {:text, "ye"}}, {truecolor, {:text, "hello"}}] do
+        screen = edit("suggestion.ansi", dim, line)
+        assert Screen.read(screen, @release) == {:ok, %{state: :idle, box: box}}
+      end
+
+      assert Screen.read(fixture("exited.ansi"), @release) == {:ok, %{state: :exited}}
     end
 
     test "a resume line with more under it is not an exit" do
@@ -338,6 +419,12 @@ defmodule CodingAgentFramework.ScreenTest do
       {:ok, screen} = Screen.read(fixture("usage-limit-menu.ansi"), @release)
       assert Screen.option_keys(screen, "Stop and wait for limit to reset") == {:ok, []}
       assert Screen.option_keys(screen, "Upgrade your plan") == {:ok, ["Down", "Down"]}
+    end
+
+    test "moves from a menu's marker to each option" do
+      {:ok, screen} = Screen.read(fixture("menu-down.ansi"), @release)
+      assert Screen.option_keys(screen, "Yes") == {:ok, ["Up"]}
+      assert Screen.option_keys(screen, "Don't show again") == {:ok, ["Down"]}
     end
 
     test "refuses a label the dialog does not show, and a screen with no dialog" do

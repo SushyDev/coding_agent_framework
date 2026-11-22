@@ -13,6 +13,10 @@ defmodule CodingAgentFramework.ScreenStandIn do
   - started with `--screen limit_wait`, it draws `usage-limit-wait`'s screen, Claude Code's own
     wait at a usage limit, and takes no key; its session file says `busy`, since what 2.1.322's
     says during the wait was never measured (F-191), so only the screen tells the wait;
+  - started with `--screen menu`, or written with `menu: true`, it draws the `menu` fixture's screen (F-198), a menu no rule
+    names above the box, its marker on its first option, its session file `idle`. Down and Up
+    move the marker; Enter answers its option and a lone Escape `esc`, each written to
+    `<dir>/menu` (`menu_answer/1`), and the idle screen is drawn after;
   - `--version` prints the release as Claude Code does (`2.1.322 (Claude Code)`) and exits;
   - the argument after `--` is the start's prompt, run as its first turn: written to
     `<dir>/prompts/<pid>` (`prompts/1`), its session file `busy`, then `idle`;
@@ -40,6 +44,21 @@ defmodule CodingAgentFramework.ScreenStandIn do
 
   import CodingAgentFramework.TestHost, only: [program!: 1, stand_in_idle: 0]
 
+  # The options of the menu fixture (`menu.ansi`), in order.
+  @menu ["Yes", "Not now", "Don't show again"]
+
+  @doc "The options of the menu `--screen menu` draws, in order."
+  def menu, do: @menu
+
+  @doc "What a person or the framework answered the menu with in `dir`: a label, `esc`, or nil."
+  def menu_answer(dir) do
+    case File.read(Path.join(dir, "menu")) do
+      {:ok, n} when n in ["1", "2", "3"] -> Enum.at(@menu, String.to_integer(n) - 1)
+      {:ok, other} -> other
+      {:error, :enoent} -> nil
+    end
+  end
+
   @doc "The fixtures directory of `release`, in `caf_screen`'s tests."
   def fixtures(release),
     do: Path.expand("../../../caf_screen/test/fixtures/#{release}", __DIR__)
@@ -65,6 +84,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
     wait = File.read!(Path.join(fixtures(release), "usage-limit-wait.txt"))
     File.write!(Path.join(screens, "limit_wait"), String.trim_trailing(wait, "\n"))
 
+    menu!(screens, release)
     dialog!(screens, release, "trust", " ", "No, exit", "Yes, I trust this folder")
 
     dialog!(
@@ -78,10 +98,17 @@ defmodule CodingAgentFramework.ScreenStandIn do
 
     dialogs = Keyword.get(opts, :dialogs, if(opts[:trust], do: [:trust], else: []))
     transcript = if opts[:transcript], do: "1", else: ""
+    first = if opts[:menu], do: "menu", else: "idle"
     suffix = Enum.map_join(dialogs, &"-#{&1}") <> if(opts[:transcript], do: "-tx", else: "")
+    suffix = suffix <> if(opts[:menu], do: "-menu", else: "")
     path = Path.join(dir, "claude-screen#{suffix}-#{release}")
     tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
-    File.write!(tmp, script(dir, screens, release, idle, Enum.join(dialogs, " "), transcript))
+
+    File.write!(
+      tmp,
+      script(dir, screens, release, idle, Enum.join(dialogs, " "), transcript, first)
+    )
+
     File.chmod!(tmp, 0o755)
     # Renamed into place, as `ClaudeStandIn.write!/3` does: a start may be running the path.
     File.rename!(tmp, path)
@@ -133,6 +160,24 @@ defmodule CodingAgentFramework.ScreenStandIn do
     File.write!(Path.join(screens, "#{kind}-yes"), selected)
   end
 
+  # The menu no rule names (F-198) with the marker on each option: `menu-1` to `menu-3`.
+  defp menu!(screens, release) do
+    shown = String.trim_trailing(File.read!(Path.join(fixtures(release), "menu.ansi")), "\n")
+    options = Enum.with_index(@menu, 1)
+
+    plain =
+      Enum.reduce(options, shown, fn {o, n}, s ->
+        String.replace(s, "❯ #{n}. #{o}", "  #{n}. #{o}")
+      end)
+
+    for {o, n} <- options,
+        do:
+          File.write!(
+            Path.join(screens, "menu-#{n}"),
+            String.replace(plain, "  #{n}. #{o}", "❯ #{n}. #{o}")
+          )
+  end
+
   # The lines above the box's line, and those below it, the last with no newline: a newline
   # after the last row would scroll the screen by one.
   defp split_at_box(text) do
@@ -146,10 +191,10 @@ defmodule CodingAgentFramework.ScreenStandIn do
   defp width(screens),
     do: screens |> Path.join("rule") |> File.read!() |> String.trim() |> String.length()
 
-  defp script(dir, screens, release, idle, dialogs, transcript) do
+  defp script(dir, screens, release, idle, dialogs, transcript, first) do
     ~s"""
     #!#{program!(:bash)}
-    name='' resume='' screen=idle prompt='' dialogs='#{dialogs}' choice=no transcript='#{transcript}'
+    name='' resume='' screen=#{first} sel=1 prompt='' dialogs='#{dialogs}' choice=no transcript='#{transcript}'
     given=$(printf '%s\\n' "$@")
     while [ $# -gt 0 ]; do
       case $1 in
@@ -211,6 +256,8 @@ defmodule CodingAgentFramework.ScreenStandIn do
         #{program!(:cat)} "#{screens}/$screen"
       elif [ $screen = trust ] || [ $screen = imports ]; then
         #{program!(:cat)} "#{screens}/$screen-$choice"
+      elif [ $screen = menu ]; then
+        #{program!(:cat)} "#{screens}/menu-$sel"
       else
         #{program!(:cat)} "#{screens}/top"
         rule
@@ -236,10 +283,22 @@ defmodule CodingAgentFramework.ScreenStandIn do
     [ $screen = idle ] && first
     [ $screen = running ] && announce idle
     [ $screen = limit_wait ] && announce busy
+    [ $screen = menu ] && announce idle
     draw
     while IFS= read -r -N1 -t #{idle} key; do
       if [ $screen = limit_wait ]; then
         continue
+      elif [ $screen = menu ]; then
+        # The marker moves; Enter answers its option, a lone Escape esc: the idle screen after.
+        case $key in
+          $'\\e') seq=''; IFS= read -r -N2 -t 0.2 seq
+                 case $seq in
+                   '[B') [ $sel -lt 3 ] && sel=$((sel + 1)) ;;
+                   '[A') [ $sel -gt 1 ] && sel=$((sel - 1)) ;;
+                   '') printf esc > "#{dir}/menu"; screen=idle ;;
+                 esac ;;
+          $'\\n'|$'\\r') printf '%s' $sel > "#{dir}/menu"; screen=idle ;;
+        esac
       elif [ $screen = trust ] || [ $screen = imports ]; then
         case $key in
           $'\\e') IFS= read -r -N2 -t 1 seq

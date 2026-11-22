@@ -123,7 +123,7 @@ defmodule CodingAgentFramework.Tmux.CLI do
   @impl true
   def capture(%__MODULE__{} = s, pane, session) do
     command =
-      "display-message -p -t #{pane} 'captured\t\#{pane_width}' ; capture-pane -p -t #{pane}"
+      "display-message -p -t #{pane} 'captured\t\#{pane_width}' ; capture-pane -p -e -t #{pane}"
 
     guarded(s, pane, session, command, fn
       "captured\t" <> rest ->

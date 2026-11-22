@@ -67,6 +67,16 @@ defmodule CodingAgentFramework.Sessions do
   file names the process the row is `running`, as a start's confirm makes it. A start whose
   process exits on a dialog ("No, exit") is `stopped`.
 
+  **A menu on a running screen** (F-198, `model/tla/Menu.tla`). Claude Code may draw a numbered
+  menu no rule names over a running session (`Screen`'s kind `:menu`), with no hook event. With
+  `inlet:`, each `running` interactive row's pane is read every `look:` ms, in a task, one read
+  per name at a time: a menu read becomes the row's `menu` (`Sessions.Menu`), with a cue, and a
+  screen with no menu takes it away, so `Prompts` shows it as a `dialog` prompt while the
+  screen shows it. Nothing answers it but a person (`answer_menu/5`): no default, no deadline.
+  The answer is an act in `Acts`, marked `pressing` before its press goes, and the `Inlet`'s
+  press is checked and read back: the marker on the label before Enter, or Escape for `esc`. A
+  press sent or unknown is never made again; a restart makes a `pressing` one `unknown`.
+
   **A delegate** (role `:delegate`) runs headless ("Headless delegates"): after its row, which
   keeps the session id the framework chose, `Stream.follow/5` makes its directory and FIFO under
   `<home>/streams/<session id>/`, then `ClaudeCLI.headless/2`'s argv is held inside
@@ -174,7 +184,7 @@ defmodule CodingAgentFramework.Sessions do
   alias CodingAgentFramework.{ClaudeCLI, Holder, Programs, Registry, Shell, Stream, Tmux}
   alias CodingAgentFramework.{Accounts, Acts, ClaudeCLI.Options, Inlet, Intake, Store}
   alias CodingAgentFramework.Transcripts
-  alias CodingAgentFramework.Sessions.{Agents, Dialog, Limit, Memory, Table, Turn, Worktree}
+  alias CodingAgentFramework.Sessions.{Agents, Dialog, Limit, Memory, Menu, Table, Turn, Worktree}
 
   @timeout 30_000
   # Each git command of a worktree, and the checks and the add before a setup: three lists or
@@ -212,7 +222,7 @@ defmodule CodingAgentFramework.Sessions do
   to its startup dialog; `programs:` names cat for an interactive start's prompt), `dialog:`
   (the app's callback for a startup dialog, `fn kind, options -> {:answer, label} | :ask end`,
   by default `Sessions.Dialog.ask/2`: ask a person), `look:` (ms between reads of a pane that
-  waits on a person, default 5 000),
+  waits on a person, and of each running interactive row's for a menu, default 5 000),
   `notify:`, `size:`
   (the viewer's `{columns, rows}`, default `{200, 50}`), `poll:` (ms between reads while a call
   waits, default 200), `clock:` (a function answering wall-clock ms, for the deadlines), and,
@@ -374,6 +384,39 @@ defmodule CodingAgentFramework.Sessions do
       nil -> {:refused, {:bad, :kind}}
       kind -> call(sessions, {:answer_dialog, name, kind, label, by}, timeout)
     end
+  end
+
+  @doc """
+  Answers the numbered menu agent `name`'s running screen shows (F-198, `Sessions.Menu`,
+  `model/tla/Menu.tla`), the one its pane's read at `at` found (the row's `menu`, `at` its
+  key), by `choice`: one of its options' labels, or `"esc"`. Only a person answers it: the menu
+  has no default and no deadline. The answer is an act in `Acts` (with `acts:`), actor `by:`
+  (default `"person"`), state the row's start and `at`, so it is answered once; it is marked
+  `pressing` on the row, then the `Inlet`'s checked press goes in a task (`Inlet.choose/5` with
+  `{:menu, title, options}`): the pane must show that menu, the keys move the marker, and only
+  with the marker read back on the label does Enter go; `"esc"` is Escape. Sent or unknown
+  stays marked, so it is never pressed twice; a refusal takes the mark back.
+
+  Answers `{:ok, :sent}` once the menu has left the pane. Refused, with nothing pressed:
+  `:no_session`, `{:not_running, status}`, `:settled` (the row shows no menu now, or another
+  one), `{:answered, mark}`, `{:no_option, choice}`, `:no_inlet`, `{:acts, answer}`, or the
+  `Inlet`'s refusal. Unknown: the `Inlet`'s, once a key may have gone. Options: `by:`,
+  `:timeout` (ms, default 25 000).
+
+      Sessions.answer_menu(sessions, "app-main", 1_795_254_036_000, "Not now", by: "sam")
+      #=> {:ok, :sent}
+      #=> {:refused, {:answered, "sent"}}
+  """
+  @spec answer_menu(GenServer.server(), String.t(), integer, String.t(), keyword) ::
+          outcome(:sent)
+  def answer_menu(sessions, name, at, choice, opts \\ []) do
+    by = Keyword.get(opts, :by, "person")
+
+    call(
+      sessions,
+      {:answer_menu, name, at, choice, by},
+      Keyword.get(opts, :timeout, @press + @read)
+    )
   end
 
   @doc """
@@ -646,6 +689,8 @@ defmodule CodingAgentFramework.Sessions do
         look: Keyword.get(opts, :look, 5_000),
         looking: false,
         peeking: %{},
+        # name -> the ref of the read of a running row's pane for a menu under way (F-198).
+        menus: %{},
         worktrees: root(host, holder.sh, programs, Keyword.get(opts, :home)),
         pending: %{}
       }
@@ -672,6 +717,16 @@ defmodule CodingAgentFramework.Sessions do
       write(state, row, answers: answers)
     end
 
+    # A menu's press marked before then may have gone too: unknown, never pressed again
+    # (Menu.tla's Recover), for a person at the viewer.
+    for row <- Table.with_status(state.db, state.host.name, "running"),
+        field = Menu.after_restart(Agents.menu(row)) do
+      if state.acts && field["act"],
+        do: Acts.settle(state.acts, field["act"], :unknown, reason: :cut, acted: true)
+
+      write(state, row, menu: Store.text(field))
+    end
+
     settle(state, :all, true)
 
     # One wake at each starting row's deadline, when Adopt may decide; not a poll.
@@ -689,7 +744,8 @@ defmodule CodingAgentFramework.Sessions do
       _ -> :ok
     end
 
-    {:noreply, state}
+    # A row the settle made running has its pane read for a menu on the interval.
+    {:noreply, look_later(state)}
   end
 
   def handle_cast({:cue, "stream:" <> host}, state) do
@@ -767,6 +823,39 @@ defmodule CodingAgentFramework.Sessions do
       {:noreply, state}
     else
       status when is_binary(status) -> {:reply, {:refused, {:not_on_dialog, status}}, state}
+      refused -> {:reply, refused, state}
+    end
+  end
+
+  # Menu.tla's Take: checked against the row's menu, its act claimed, marked pressing, then the
+  # press in a task, whose answer replies to the caller once it comes back.
+  def handle_call({:answer_menu, name, at, choice, by}, from, state) do
+    with %{} = row <- Table.get(state.db, state.host.name, name) || {:refused, :no_session},
+         true <- Agents.running?(row) or {:refused, {:not_running, row.status}},
+         field = Agents.menu(row),
+         :ok <- Menu.check(field, at, choice),
+         true <- state.inlet != nil or {:refused, :no_inlet},
+         {:ok, act} <- menu_act(state, by, row, at) do
+      fields = %{"label" => choice, "by" => by, "act" => act}
+      write(state, row, menu: Store.text(Menu.mark(field, "pressing", fields)))
+      {inlet, release} = {state.inlet, row.release}
+      menu = {:menu, field["title"], field["options"]}
+      key = if choice == "esc", do: :esc, else: choice
+
+      Task.async(fn ->
+        answer =
+          try do
+            Inlet.choose(inlet, name, menu, key, release: release, timeout: @press)
+          catch
+            how, _ -> {:unknown, {how, :press}}
+          end
+
+        {:menu_pressed, %{name: name, at: at, act: act, from: from}, answer}
+      end)
+
+      # A read of the pane under way began before the mark: its answer is not taken.
+      {:noreply, %{state | menus: Map.delete(state.menus, name)}}
+    else
       refused -> {:reply, refused, state}
     end
   end
@@ -1351,7 +1440,48 @@ defmodule CodingAgentFramework.Sessions do
         row.role == "parent",
         do: settle_row(state, row, false)
 
-    {:noreply, look_later(state)}
+    {:noreply, state |> read_menus() |> look_later()}
+  end
+
+  # A running row's pane, read for a menu (F-198): it is the row's only while the row is still
+  # that start, running, with no call under way for its name, and this read is the one asked
+  # last (an answer's press drops the one before it).
+  def handle_info({ref, {:menu_looked, name, started, answer}}, state) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    latest? = state.menus[name] == ref
+    state = if latest?, do: %{state | menus: Map.delete(state.menus, name)}, else: state
+
+    with true <- latest? and not Map.has_key?(state.pending, name),
+         {:ok, screen} <- answer,
+         %{status: "running", started_at: ^started} = row <-
+           Table.get(state.db, state.host.name, name),
+         {:write, field} <- Menu.seen(Agents.menu(row), screen, started, state.clock.()) do
+      write(state, row, menu: field && Store.text(field))
+    end
+
+    {:noreply, state}
+  end
+
+  # A menu's press answered, from its task (Menu.tla's Pressed): sent or unknown stays marked,
+  # a refusal, which pressed nothing, takes the mark back; then the pane is read again.
+  def handle_info({ref, {:menu_pressed, press, answer}}, state) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+
+    mark =
+      case answer do
+        {:ok, :sent} -> "sent"
+        {:refused, _} -> nil
+        _unknown -> "unknown"
+      end
+
+    with %{} = row <- Table.get(state.db, state.host.name, press.name),
+         %{"mark" => "pressing", "at" => at} = field when at == press.at <- Agents.menu(row) do
+      write(state, row, menu: Store.text(Menu.mark(field, mark, %{})))
+    end
+
+    if press.act, do: Acts.answered(state.acts, press.act, answer)
+    GenServer.reply(press.from, answer)
+    {:noreply, read_menus(state)}
   end
 
   # A dialog's press answered, from its task.
@@ -1496,7 +1626,7 @@ defmodule CodingAgentFramework.Sessions do
       {:ok, file} ->
         running(state, row, file)
         answer = %{name: name, pid: file.pid, session_id: file.session_id}
-        done(state, name, pending, {:ok, answer})
+        state |> done(name, pending, {:ok, answer}) |> look_later()
 
       _ ->
         case look_at(state, row) do
@@ -1642,6 +1772,17 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
+  # A menu's answer is an act in `Acts`, as a dialog's: actor the person, state the row's start
+  # and the read that found the menu, so it is answered once.
+  defp menu_act(%{acts: nil}, _by, _row, _at), do: {:ok, nil}
+
+  defp menu_act(state, by, row, at) do
+    case Acts.claim(state.acts, by, row.name, %{start: row.started_at, menu: at}, :answer_menu) do
+      {:ok, id} -> {:ok, id}
+      other -> {:refused, {:acts, other}}
+    end
+  end
+
   defp answer_act(%{acts: nil}, _by, _name, _taken), do: {:ok, nil}
 
   defp answer_act(state, by, name, taken) do
@@ -1682,14 +1823,54 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
-  # One read of the waiting rows' panes `look` ms from now, while any row waits on a person.
+  # Each running interactive row's pane, read for a menu in a task (Menu.tla's Read), one read
+  # per name at a time, none while a call or a menu's press is under way for it.
+  defp read_menus(%{inlet: nil} = state), do: state
+
+  defp read_menus(state) do
+    for row <- settling(state, :all, "running"),
+        menu_row?(row),
+        not Map.has_key?(state.menus, row.name),
+        not match?(%{"mark" => "pressing"}, Agents.menu(row)),
+        reduce: state do
+      state ->
+        {inlet, name, release, started} = {state.inlet, row.name, row.release, row.started_at}
+
+        task =
+          Task.async(fn ->
+            answer =
+              try do
+                Inlet.look(inlet, name, release, timeout: @read)
+              catch
+                how, _ -> {:unknown, {how, :look}}
+              end
+
+            {:menu_looked, name, started, answer}
+          end)
+
+        %{state | menus: Map.put(state.menus, name, task.ref)}
+    end
+  end
+
+  # A row whose screen may show a menu: an interactive one, with a release to read it by.
+  defp menu_row?(%{role: "parent", release: release}) when is_binary(release), do: true
+  defp menu_row?(_row), do: false
+
+  # One read of the waiting rows' panes `look` ms from now, while any row waits on a person or
+  # runs interactive, its pane read for a menu.
   defp look_later(%{looking: true} = state), do: state
 
   defp look_later(state) do
     unknown =
       Enum.filter(Table.with_status(state.db, state.host.name, "unknown"), &(&1.role == "parent"))
 
-    if Table.with_status(state.db, state.host.name, "dialog") == [] and unknown == [] do
+    menus =
+      if state.inlet,
+        do: Enum.filter(Table.with_status(state.db, state.host.name, "running"), &menu_row?/1),
+        else: []
+
+    if Table.with_status(state.db, state.host.name, "dialog") == [] and unknown == [] and
+         menus == [] do
       state
     else
       Process.send_after(self(), :look, state.look)

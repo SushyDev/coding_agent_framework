@@ -29,7 +29,7 @@ defmodule CodingAgentFramework.Sessions.Agents do
       ["app-main", "app-fix"]
   """
 
-  alias CodingAgentFramework.Sessions.{Dialog, Table}
+  alias CodingAgentFramework.Sessions.{Dialog, Menu, Table}
 
   @enforce_keys [:db, :host]
   defstruct [:db, :host]
@@ -148,6 +148,29 @@ defmodule CodingAgentFramework.Sessions.Agents do
   end
 
   def dialog(_), do: nil
+
+  @doc """
+  The numbered menu a running interactive session's screen shows (F-198, `Sessions.Menu`), as
+  its pane was last read: `%{"at", "title", "detail", "options", "selected"}` and, once
+  answered, `"label"`, `"by"` and `"mark"`; nil when the row is not running, or its field is
+  from an earlier start. A person answers it through `Sessions.answer_menu/5`.
+
+      iex> row = %{status: "running", started_at: 5,
+      ...>   menu: ~s({"start":5,"at":9,"title":"Pick","detail":[],"options":["A","B"],"selected":"A"})}
+      iex> CodingAgentFramework.Sessions.Agents.menu(row)["options"]
+      ["A", "B"]
+      iex> CodingAgentFramework.Sessions.Agents.menu(%{row | started_at: 6})
+      nil
+  """
+  @spec menu(row | nil) :: map | nil
+  def menu(%{status: "running", started_at: start} = row) do
+    case Menu.of(row) do
+      %{"start" => ^start} = field -> field
+      _ -> nil
+    end
+  end
+
+  def menu(_), do: nil
 
   @doc "Whether a start or a resume of the row is under way."
   @spec starting?(row | nil) :: boolean
