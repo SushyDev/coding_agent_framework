@@ -230,6 +230,58 @@ defmodule CodingAgentFramework.MainsTest do
     assert {:refused, {:running, "app-epic"}} = Mains.start_main(mains, "app", "app-epic", "Go.")
   end
 
+  # Limit.tla's StartRefusedAtLimit, AnswerWait, a restart that keeps the row, and StartAtReset
+  # (F-196): a main's start at a limit is its own row, waiting, and its sender is told once.
+  test "a main's start refused at a usage limit waits as its row, and starts at its reset", ctx do
+    clock = [clock: fn -> Agent.get(ctx.clock, & &1) end]
+    ctx = %{ctx | mains_opts: ctx.mains_opts ++ clock}
+    mains = mains(ctx)
+    assert {:ok, _} = level(ctx, mains)
+    until = limit(ctx, 3_600)
+
+    assert {:ok, %{id: id, name: "app-epic", account: nil, session_id: nil, waiting: ^until}} =
+             Mains.start_main(mains, "app", "app-epic", "Plan it.", from: "app-main")
+
+    assert %{status: "waiting", account: "", until: ^until, tell: "app-main"} =
+             row = Starts.get(ctx.starts, id)
+
+    assert row.deadline == until + 120_000
+    assert Agents.get(ctx.agents, "app-epic") == nil
+    assert {:refused, {:waiting, "app-epic"}} = Mains.start_main(mains, "app", "app-epic", "Go.")
+    assert {:refused, {:waiting, "app-epic"}} = Mains.end_main(mains, "app-epic")
+    assert {:ok, :waiting} = Mains.answer_wait(mains, id, "wait", "sam")
+    assert {:refused, :settled} = Mains.answer_wait(mains, id, "leave", "sam")
+
+    # A restart keeps the row; at its deadline the pick finds room, and the start goes on under
+    # its own row, the lease's holder.
+    Process.exit(mains, :kill)
+    mains = mains(ctx)
+    Agent.update(ctx.clock, fn _ -> until + 120_000 end)
+    Mains.cue(mains, %{topic: "sessions:test", ids: []})
+    assert {:ok, %{account: "work"}} = await(fn -> start_row(ctx, id, "starting") end)
+    assert [%{holder: {"main", _}}] = Scheduler.leases(ctx.scheduler)
+    assert {:ok, _} = await(fn -> dialog(ctx, "app-epic") end)
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :trust, @trust)
+    assert {:ok, _} = await(fn -> running(ctx, "app-epic") end)
+
+    told = fn ->
+      Mains.cue(mains, %{topic: "sessions:test", ids: []})
+
+      case Starts.get(ctx.starts, id) do
+        %{status: "running", tell: nil} = row -> {:ok, row}
+        row -> row
+      end
+    end
+
+    assert {:ok, %{account: "work"}} = await(told)
+
+    {:ok, mtable} = Mailbox.Table.open(ctx.mailbox_db)
+    notices = for n <- 1..20, %{kind: "notice"} = m <- [Mailbox.Table.get(mtable, n)], do: m
+    assert [%{to_agent: "app-main", from_agent: "framework", text: text}] = notices
+    assert text =~ "start of main session app-epic, which waited for a usage limit's reset"
+    assert text =~ "has started on work"
+  end
+
   # `Delegate.tla`'s CallerLate and Called past the deadline, for `Mains`' start (F-166's new-1,
   # F-172): a request that waited in `Sessions`' queue past its caller's deadline is refused
   # there and makes nothing, so no session runs under a row `Mains` refuses at its own deadline.
@@ -601,11 +653,17 @@ defmodule CodingAgentFramework.MainsTest do
     assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "app-epic")
     assert {:ok, :none} = await(fn -> held(ctx) end)
 
-    # `work`'s windows spent, and `spare` never logged in: no account may take it.
+    # `work`'s windows spent, and `spare` never logged in: no usable account has room, so the
+    # resume waits for the reset (F-196), until a person leaves it.
     Agent.update(room, &Map.put(&1, "work", {:spent, 4_000_000_000_000}))
 
-    assert {:refused, {:account, "work", {:allowance, 4_000_000_000_000}}} =
+    assert {:ok, %{id: waiting, waiting: 4_000_000_000_000}} =
              Mains.resume_main(mains, "app-epic")
+
+    assert %{status: "waiting", resume: "s-epic", tell: nil} = Starts.get(ctx.starts, waiting)
+    assert {:refused, {:waiting, "app-epic"}} = Mains.resume_main(mains, "app-epic")
+    assert {:ok, :left} = Mains.answer_wait(mains, waiting, "leave", "sam")
+    assert %{status: "refused", reason: "left"} = Starts.get(ctx.starts, waiting)
 
     # `spare` logged in, but the copy refused: the row stays on `work`, stopped (CopyRefused).
     Agent.update(login, &Map.delete(&1, "spare"))
@@ -780,6 +838,23 @@ defmodule CodingAgentFramework.MainsTest do
       ok
     else
       other -> {:not_yet, other}
+    end
+  end
+
+  # The account's record of a usage limit `s` seconds from the test's clock, read by `Usage`:
+  # its reset in ms.
+  defp limit(ctx, s) do
+    resets = div(Agent.get(ctx.clock, & &1), 1000) + s
+    limit = %{"status" => "rejected", "resetsAt" => resets, "rateLimitType" => "five_hour"}
+    fact = %{at: System.os_time(:millisecond), evidence: %{"source" => "test"}, limit: limit}
+    {:ok, _} = Usage.take(ctx.mains_opts[:usage], "work", fact)
+    resets * 1000
+  end
+
+  defp dialog(ctx, name) do
+    case Agents.get(ctx.agents, name) do
+      %{status: "dialog"} = row -> {:ok, row}
+      row -> row
     end
   end
 

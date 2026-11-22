@@ -928,7 +928,9 @@ defmodule CodingAgentFramework.Delegates do
 
     with {:ok, p} <- Map.fetch(s.projects, start.project) |> known(start.project),
          {:ok, account} <- pick(s) do
-      write(s, row, status: "starting", called_at: s.clock.(), deadline: deadline(s, p))
+      # The call's time as `Table.starting/2` stamps it, which the agent row's start is read by.
+      now = System.os_time(:millisecond)
+      write(s, row, status: "starting", called_at: now, deadline: deadline(s, p))
       start = Map.merge(start, %{p: p, account: account})
       {:noreply, s} = began(leased(s, Table.get(s.db, row.id), start, nil, false), nil)
       s
