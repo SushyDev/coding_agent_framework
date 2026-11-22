@@ -98,8 +98,8 @@ defmodule CodingAgentFramework.Config do
         Config.new(..., tool_hooks: %{pre_tool_use: fn _ -> :pass end})
         #=> {:refused, {:bad, :tool_hooks, {:not_tool_hooks, %{pre_tool_use: #Function<…>}}}}
 
-  - `usable`: which accounts the app lets a start use, as data, `{module, opts}` (F-207,
-    `CodingAgentFramework.Usable`): the module's `usable?(account, opts, part)` answers `true`
+  - `usable`: which accounts the app lets a start or a resume use, as data, `{module, opts}`
+    (F-207, `CodingAgentFramework.Usable`): the module's `usable?(account, opts, part)` answers `true`
     or `{false, reason}`, and the tree hands it to every part that picks an account (`Delegates`,
     `Mains` and the `Mover`) beside the framework's own check (prepared, logged in): an account
     is usable only if both say so. A refused account reads in the pick's refusal as
@@ -234,12 +234,18 @@ defmodule CodingAgentFramework.Config do
     `Scheduler` asks only a job's owner, `Jobs`, about a lease. `true` by default. Such a config
     needs only what that tree reads (F-201): `home`, `instance`, `programs` and `env` with its
     `path`, which `Jobs` reads (`{:bad, :env}` without it). `accounts`, `ports`, `claude` and
-    `user`, which only the agents' parts read, may be left out there, on macOS too;
+    `user`, which only the agents' parts read, may be left out there, on macOS too. A key only
+    an agent's part reads, `usable`, `tool_hooks`, `extensions` or `dialogs`, is refused there
+    if it is given at all, empty or not, `{:bad, key}` (F-209): no part would read it, and an app
+    that sets `usable` would believe a start is guarded;
 
         iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
         ...>   programs: %{}, env: %{path: "/bin"}, agents: false)
         iex> {c.accounts, c.ports, c.claude}
         {[], nil, nil}
+        iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
+        ...>   env: %{path: "/bin"}, agents: false, usable: {App.Accounts, []})
+        {:refused, {:bad, :usable}}
         iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
         ...>   env: %{}, agents: false)
         {:refused, {:bad, :env}}
@@ -277,6 +283,9 @@ defmodule CodingAgentFramework.Config do
   # What only a tree that runs agents reads, so a config with `agents: false` may leave it out
   # (F-201).
   @agent_keys [:accounts, :ports, :claude]
+  # What only an agent's part reads, so a config with `agents: false` that sets it is refused
+  # (F-209): an app that sets `usable` there would believe a start is guarded.
+  @agent_only [:usable, :tool_hooks, :extensions, :dialogs]
   defstruct [
     :home,
     :instance,
@@ -368,6 +377,7 @@ defmodule CodingAgentFramework.Config do
     required = if agents?, do: @enforce_keys ++ @agent_keys, else: @enforce_keys
     missing = Enum.find(required, &(not Map.has_key?(fields, &1)))
     unknown = Enum.find(Map.keys(fields), &(not Map.has_key?(__MODULE__.__struct__(), &1)))
+    unread = if agents?, do: nil, else: Enum.find(@agent_only, &Map.has_key?(fields, &1))
 
     cond do
       not (is_binary(fields[:home]) and Path.type(fields[:home]) == :absolute) ->
@@ -383,6 +393,9 @@ defmodule CodingAgentFramework.Config do
 
       unknown ->
         {:refused, {:bad, unknown}}
+
+      unread ->
+        {:refused, {:bad, unread}}
 
       agents? and
           not match?(%{intake: i, mcp: m} when is_integer(i) and is_integer(m), fields.ports) ->

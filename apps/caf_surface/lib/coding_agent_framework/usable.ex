@@ -1,8 +1,8 @@
 defmodule CodingAgentFramework.Usable do
   @moduledoc ~S"""
-  Which accounts the app lets a start use, named in the config as data (F-207): `usable:
-  {module, opts}`, where `module` implements `usable?/3` and `opts` is plain data, what a config
-  file could hold, as `tool_hooks`' and `extensions`' are. A function, pid, port or reference in
+  Which accounts the app lets a start or a resume use, named in the config as data (F-207,
+  F-209): `usable: {module, opts}`, where `module` implements `usable?/3` and `opts` is plain
+  data, what a config file could hold, as `tool_hooks`' and `extensions`' are. A function, pid, port or reference in
   it is refused `{:not_data, module}`, and a struct `{:not_data, module, {:struct, struct}}`.
   A function in place of the pair is refused `{:not_usable, value}`.
 

@@ -53,7 +53,12 @@ defmodule CodingAgentFramework.Delegates do
   When its process is gone first, the transcript says whether it had given its last reply: if
   so it finished with that reply. Otherwise it is resumed once, after its agent row is free (no
   process of it may live): the row counts the resume first, as `resuming`, then
-  `Sessions.resume/6` follows it again, with the agent row's own options. When the brief had
+  `Sessions.resume/6` follows it again, with the agent row's own options. It resumes on its
+  agent row's account, where its conversation is, while `usable:` takes that account; refused
+  there (the app flags it, F-209), on the account `Usage.pick/4` finds among the others, the
+  conversation copied there first (`Transcripts.Copy`, the `Mover`'s, an act `copy`), as a main
+  session's resume does; with none usable the resume is refused with its own account's reason,
+  `{:app, reason}` for the app's, and never runs on a refused account. When the brief had
   gone in, `Mailbox` is first given the word to go on (`go_on/4`, under the row's
   `resume_uuid`), which goes before any other row to it; when it had not, `Mailbox` has the
   brief due again itself. That first row is marked and carried as the start's is; with none due
@@ -340,7 +345,9 @@ defmodule CodingAgentFramework.Delegates do
   word's from then: its report is that turn's reply. A live process takes it into its ended
   turn, by its stream or typed: `{:ok, :live}`. A gone one is resumed with it as its first line
   (an interactive one's prompt, by launch), under its start's lease, as `going_on`: not counted
-  as the resume after a kill, and a refusal leaves the row `running`, still limited. The answer
+  as the resume after a kill, and a refusal leaves the row `running`, still limited. Its account
+  is chosen as a resume after a kill chooses it (F-209): its own while `usable:` takes it, else
+  the one the pick finds, its conversation copied there first, else refused. The answer
   is `Sessions`'. With `resume: false` (before a move, F-191) the word is stored and nothing
   resumes: `{:ok, :stored}`, the move's resume carrying it.
 
@@ -820,8 +827,10 @@ defmodule CodingAgentFramework.Delegates do
             launch = if mcp, do: launch ++ [mcp: mcp], else: launch
 
             case start do
-              {:resume, session_id} ->
-                Sessions.resume(s.sessions, row.name, account, session_id, launch, opts)
+              # A resume on another account than its agent row's copies the conversation first.
+              {:resume, session_id, copy} ->
+                with :ok <- copy.(),
+                     do: Sessions.resume(s.sessions, row.name, account, session_id, launch, opts)
 
               # A start that names no metadata keeps the row's (`Sessions.start/5`).
               {parent, options, meta} ->
@@ -1396,7 +1405,7 @@ defmodule CodingAgentFramework.Delegates do
     deadline = with {:ok, p} <- Map.fetch(s.projects, agent.project), do: deadline(s, p)
 
     with {:ok, p} <- Map.fetch(s.projects, agent.project) |> known(agent.project),
-         {:ok, account} <- Accounts.ready(s.accounts, agent.account),
+         {:ok, account, moved} <- resume_account(s, agent.account),
          {:ok, _} <-
            if(uuid,
              do: Mailbox.go_on(s.mailbox, row.name, Turn.resumed(), uuid),
@@ -1408,7 +1417,7 @@ defmodule CodingAgentFramework.Delegates do
       at = System.os_time(:millisecond)
       fields = [status: "resuming", resumes: 1, called_at: at, deadline: deadline]
       write(s, row, fields ++ [resume_uuid: uuid])
-      start = {:resume, agent.session_id}
+      start = {:resume, agent.session_id, copy(s, agent, account.name, moved)}
       s = call_sessions(s, Table.get(s.db, row.id), p, account, start, nil, launched)
       if act, do: put_in(s.pending, Map.new(s.pending, &with_act(&1, row.id, act))), else: s
     else
@@ -1462,15 +1471,74 @@ defmodule CodingAgentFramework.Delegates do
   defp went_on(s, row, agent, from) do
     with {:ok, p} <- Map.fetch(s.projects, agent.project) |> known(agent.project),
          deadline = deadline(s, p),
-         {:ok, account} <- Accounts.ready(s.accounts, agent.account),
+         {:ok, account, moved} <- resume_account(s, agent.account),
          {:ok, launched} <- launch_first(s, %{row | deadline: deadline}, how(agent)) do
       at = System.os_time(:millisecond)
       write(s, row, status: "going_on", called_at: at, deadline: deadline)
-      start = {:resume, agent.session_id}
+      start = {:resume, agent.session_id, copy(s, agent, account.name, moved)}
       {:noreply, call_sessions(s, Table.get(s.db, row.id), p, account, start, from, launched)}
     else
       {:refused, _} = refused -> {:reply, refused, s}
+      {:unknown, _} = unknown -> {:reply, unknown, s}
       not_launched -> {:reply, {:refused, not_launched}, s}
+    end
+  end
+
+  # F-209 (F-207's new-2; `Move.tla`'s ResumeHere, CopyAsked and NoResumeOnRefused): a resume
+  # runs on its agent row's account, where its conversation is, while `usable:` takes that
+  # account. Refused there (the app flags it, or its login is gone), it runs on the account the
+  # pick finds among the others, its conversation copied there first, as a main session's resume
+  # does (F-177); with none usable it is refused with its own account's reason, and never runs
+  # on a refused account. A check that could not tell decides nothing: the next cue asks again.
+  # The windows are not read here: a resumed turn at a limit is the limit's (`Limit.tla`).
+  defp resume_account(s, own) do
+    case s.usable.(own) do
+      {:ok, account} ->
+        {:ok, account, nil}
+
+      {:refused, why} ->
+        case pick(s, s.accounts.names -- [own]) do
+          {:ok, account} -> {:ok, account, %{from: own, why: why}}
+          {:refused, {:usage, :unread}} -> {:unknown, {:usage, :unread}}
+          {:refused, {:allowance, _}} = limited -> limited
+          {:refused, _none_usable} -> {:refused, why}
+          unknown -> unknown
+        end
+
+      {:unknown, why} ->
+        {:unknown, {:account, own, why}}
+    end
+  end
+
+  # The conversation, from the agent row's account to the one the resume runs on, as the
+  # `Mover` copies a move's and `Mains` a resume's (`Transcripts.Copy`, `Move.tla`'s
+  # ResumeCopy): its process is gone, so the transcript is final. Run in the resume's task, an
+  # act `copy` in `Acts` (with `acts:`); refused, the resume is refused `{:copy, reason}`, as any
+  # refused resume, and `Sessions` is not called.
+  defp copy(_s, _agent, _to, nil), do: fn -> :ok end
+
+  defp copy(s, agent, to, %{from: from, why: why}) do
+    {accounts, acts, actor} = {s.accounts, s.acts, actor(s)}
+    detail = %{from: from, to: to, session_id: agent.session_id, because: why}
+
+    fn ->
+      copied =
+        with {:ok, source} <- Accounts.config_dir(accounts, from),
+             {:ok, target} <- Accounts.config_dir(accounts, to),
+             do: Transcripts.Copy.copy(source, target, agent.cwd, agent.session_id)
+
+      case copied do
+        :ok ->
+          if acts,
+            do: Acts.record(acts, actor, "agent:" <> agent.name, :copy, :verified, detail: detail)
+
+          :ok
+
+        {:refused, reason} ->
+          fields = [detail: detail, reason: reason]
+          if acts, do: Acts.record(acts, actor, "agent:" <> agent.name, :copy, :failed, fields)
+          {:refused, {:copy, reason}}
+      end
     end
   end
 
@@ -1734,11 +1802,13 @@ defmodule CodingAgentFramework.Delegates do
 
   defp streamed(_s, _agent), do: {:unknown, :no_session}
 
-  defp pick(s) do
+  defp pick(s, among \\ nil) do
     with {:ok, %{readings: readings}} <- Usage.readings(s.usage, timeout: @step),
          # F-181: among the usable accounts (prepared, logged in), the one with the most room.
          {:ok, name} <-
-           Usage.pick(readings, s.accounts.names, div(s.clock.(), 1000), usable: s.usable) do
+           Usage.pick(readings, among || s.accounts.names, div(s.clock.(), 1000),
+             usable: s.usable
+           ) do
       Accounts.ready(s.accounts, name)
     else
       :unread -> {:refused, {:usage, :unread}}

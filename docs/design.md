@@ -932,7 +932,7 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 | `resources`, `lease`, `job_lease` | the `Scheduler`'s capacities and the units each start asks for | seat 4, slot 2 |
 | `pressure` | how the host's pressure is read | the host's own |
 | `tool_hooks` | the app's `pre_tool_use`, `post_tool_use` and `stop` callbacks, as `{module, opts}` (`ToolHooks`, F-195) | none |
-| `usable` | which accounts the app lets a start use, as `{module, opts}`: `usable?(account, opts, part)` answers `true` or `{false, reason}`, and the tree hands it to `Mains`, `Delegates` and the `Mover` beside `Logins.usable/3`, an account usable only if both say so (`Usable`, F-207) | none: the framework's check alone |
+| `usable` | which accounts the app lets a start or a resume use, as `{module, opts}`: `usable?(account, opts, part)` answers `true` or `{false, reason}`, and the tree hands it to `Mains`, `Delegates` and the `Mover` beside `Logins.usable/3`, an account usable only if both say so (`Usable`, F-207) | none: the framework's check alone |
 | `heavy` | the app's heavy commands, run under a lease | none |
 | `extensions` | the app's bundles, each `{module, opts}`, made by the module's `bundle/2` | none |
 | `dialogs` | a startup dialog's kind to the label pressed; any other waits on a person | none |
@@ -942,7 +942,7 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 | `remedies`, `remedy_bound` | the healer's allow-list and its caps' window | the healer's acts, 1 h |
 | `viewer` | every viewer's `{columns, rows}`, handed to `Sessions` and `Recoveries` alike (F-190) | `{200, 50}` |
 | `undeclared_cues` | `:route` or `:raise` a cue on a topic no part declares | `:route` |
-| `agents` | `false` starts only the parts a lease needs (`Config.agentless/0`), none that runs or reads an agent (F-195), and no tool home, so its config needs only `home`, `instance`, `programs` and `env`'s `path` (F-201) | `true` |
+| `agents` | `false` starts only the parts a lease needs (`Config.agentless/0`), none that runs or reads an agent (F-195), and no tool home, so its config needs only `home`, `instance`, `programs` and `env`'s `path` (F-201), and refuses `usable`, `tool_hooks`, `extensions` and `dialogs`, which no part of it reads, `{:bad, key}` (F-209) | `true` |
 | `restart_wait` | ms a start waits for an instance of its name still exiting, before it is refused `{:instance_running, name}` (F-195) | 5 s |
 
 An app like a development loop's (views, builders, gates, landings) needs nothing more: a
@@ -1485,7 +1485,12 @@ the others not refused, in one act: the conversation copied there as the `Mover`
 move's (`Transcripts.Copy`: the transcript, the directory beside it and `session-env`, each
 whole), an act `copy` in `Acts`, then the resume under the same session id. A copy refused
 leaves the agent row stopped on its own account, the start refused `{:copy, reason}`; with no
-other account, the resume is refused `{:account, account, reason}`. The operator's `resume` tool of a main session claims its state in
+other account, the resume is refused `{:account, account, reason}`. A delegate's resume, after a
+kill and with its word to go on after a limit, chooses its account the same way by `usable`
+alone, the app's flag among it (F-209): a flagged own account moves the delegate, its
+conversation copied to the account the pick finds; with none usable the resume is refused with
+its own account's reason, `{:app, reason}` for the app's. No resume runs on an account the app
+flags (`Move.tla`'s `NoResumeOnRefused`). The operator's `resume` tool of a main session claims its state in
 `Acts` (`Mains.fix_state/3`: its status, session id and last process) and calls `resume_main`
 with it, which acts only while that state is still the row's (F-144). A state not `stopped` is
 refused `{:not_stopped, status}` before the claim (F-149), and leaves it unclaimed. A move's resume needs
@@ -2694,6 +2699,11 @@ worktree on its branch whose setup finished).
      copy there, in one act; a copy refused or cut leaves the row stopped on its own account.
      `TranscriptKept` is an action property: each new process, a move's or a resume's, starts
      from the whole transcript of the account the row named.
+   - The spec settles (F-209, `Flags`, `Move_Flags`): the app's `usable` flags an account and
+     lifts the flag at any time; a resume, a main session's or a delegate's, never runs on an
+     account it is refused on when it chooses one (`NoResumeOnRefused`, an action property;
+     `Break_Move_ResumeInPlace` resumes in place and fails it): its own while usable, else the
+     one it copies the conversation to, else refused, the row staying down.
 3. **`Delegate.tla`**: a main session, its delegates and restarts of the framework.
    - Invariants: each report is delivered once, and only to a running process of the main
      session whose turn has ended; a delegate ends only after its report is delivered; a report

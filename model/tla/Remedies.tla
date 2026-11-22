@@ -75,6 +75,7 @@ CONSTANTS
     MaxActs,      \* the cap: remedies of one kind per bound
     MaxState, MaxRestarts, MaxBounds,
     MayWait,      \* a resume may find every account limited and wait (a configuration's)
+    Messages,     \* the parent sends d a message, and Mailbox hands it on (a configuration's)
     Break
 
 Breaks == {
@@ -89,7 +90,7 @@ Breaks == {
 
 WaitEnds == {"resumed", "left", "refused"}
 
-ASSUME Break \in Breaks /\ Delegates \cap Mains = {} /\ MayWait \in BOOLEAN
+ASSUME Break \in Breaks /\ Delegates \cap Mains = {} /\ MayWait \in BOOLEAN /\ Messages \in BOOLEAN
 
 Kind(s) == IF s \in Delegates THEN "stuck_background" ELSE "absent_main"
 
@@ -238,7 +239,7 @@ Unwake(d) ==
 
 \* The parent sends d a message; Mailbox holds it due.
 Send(d) ==
-    /\ msg[d] = "none" /\ turn[d] # "ended"
+    /\ Messages /\ msg[d] = "none" /\ turn[d] # "ended"
     /\ msg' = [msg EXCEPT ![d] = "due"]
     /\ UNCHANGED <<on, st, healVars, restarts, bounds, turn, bg, reports, resumes, waits, fidle, joined>>
 
