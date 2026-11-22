@@ -29,7 +29,9 @@ defmodule CodingAgentFramework.Prompts do
   (`"permission:<intake id>"`, `"permission:stream:<session>:<request id>"`,
   `"stop_cap:<intake id>"`, `"dialog:<agent>:<start>:<dialog>"`, `"dialog:<agent>:<at>:menu"`
   (`at` the wall-clock ms of the read that found the menu),
-  `"ask:<mailbox id>"`, `"remedy:<symptom id>"`, `"login:<account>"`, `"limit:<agent>:<until>"`,
+  `"ask:<mailbox id>"`, `"remedy:<symptom id>"`, `"login:<account>:<refused_at>"` (`refused_at`
+  the wall-clock ms of the check that refused it, so an account refused again after a login
+  is a new prompt, F-205), `"limit:<agent>:<until>"`,
   `"usage_credits:<agent>:<until>"`, `"limit:start:delegate:<row>"` and `"limit:start:main:<row>"`);
   `status` is `open`, `answering` (an answer is on its way to the owner; for a remedy answered
   `act`, its act not yet ended),
@@ -169,7 +171,9 @@ defmodule CodingAgentFramework.Prompts do
     or `"leave"` (`Watch.answer/5`); for a state asked for its bound, `"act"` (the remedy once,
     which its healer takes at its next check under `who`'s claim, F-189's new-7) or `"leave"`;
   - `login`: `"check"`, once a person logged the account in (`bin/caf-login`): its login is
-    checked again now (`Logins.recheck/3`), and the prompt closes when it is logged in;
+    checked again now (`Logins.recheck/3`), and the prompt closes when it is logged in. Its
+    id, `login:<account>:<refused_at>`, names the refusal: an account refused again after a
+    login is a new prompt with a new id, and the old id answers `{:refused, :settled}`;
   - a start's `limit` (`limit:start:…`): `"wait"` (its default: the row waits for its reset,
     and the prompt leaves) or `"leave"` (the row refused `left`, its parent told),
     `Delegates.answer_wait/4` or `Mains.answer_wait/4`;
@@ -652,7 +656,7 @@ defmodule CodingAgentFramework.Prompts do
           "then answer check"
 
       fields = %{
-        id: "login:#{row.account}",
+        id: "login:#{row.account}:#{row.refused_at}",
         kind: "login",
         status: "open",
         subagent: nil,
@@ -740,7 +744,7 @@ defmodule CodingAgentFramework.Prompts do
       [kind, agent, _until] when kind in ["limit", "usage_credits"] ->
         settled_if(Agents.get(s.agents, agent) != nil)
 
-      ["login", account] when s.ldb != nil ->
+      ["login", account, _refused_at] when s.ldb != nil ->
         settled_if(Map.has_key?(Logins.Table.rows(s.ldb), account))
 
       _ ->
@@ -855,7 +859,10 @@ defmodule CodingAgentFramework.Prompts do
     do: Watch.answer(owners.watch, int(n), choice, who)
 
   # A check that finds it logged in closes the prompt; one still refused leaves it open.
-  defp hand(owners, %{kind: "login", id: "login:" <> account}, :check, _who) do
+  defp hand(owners, %{kind: "login", id: id}, :check, _who) do
+    # An account's name has no `:`; the id's last part is the refusal's time.
+    ["login", account, _refused_at] = String.split(id, ":")
+
     case Logins.recheck(owners.logins, account) do
       :ok -> {:ok, :logged_in}
       other -> other

@@ -13,6 +13,8 @@ defmodule CafServices.MixProject do
     ]
   end
 
+  def application, do: [extra_applications: [:crypto]]
+
   defp deps do
     [
       {:caf_acts, in_umbrella: true},

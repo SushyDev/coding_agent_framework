@@ -384,17 +384,24 @@ defmodule CodingAgentFramework.PromptsTest do
   end
 
   # F-181: an account whose login a check refused is a login prompt, with no agent, until a
-  # check finds it logged in; its answer `check` is that check.
-  test "a refused login is a login prompt until a check finds it logged in", ctx do
+  # check finds it logged in; its answer `check` is that check. F-205: its id names the refusal
+  # (`login:<account>:<the refused check's time>`), so the same account refused again after a
+  # login is a new prompt with a new id, and the old id stays settled.
+  test "a refused login is a login prompt until a check finds it logged in; refused again, a new one",
+       ctx do
     me = self()
     db = Path.join(ctx.dir, "caf.db")
     {:ok, accounts} = Accounts.new(Path.join(ctx.dir, "home"), ["work"])
     out = ~s({"loggedIn": false, "authMethod": "none"})
+    logged_in = {:ok, %{status: 0, output: ~s({"loggedIn": true})}}
 
     said =
       start_supervised!(
         Supervisor.child_spec({Agent, fn -> {:ok, %{status: 1, output: out}} end}, id: :said)
       )
+
+    # Each check reads the clock once: every refusal has a time of its own.
+    ticks = start_supervised!(Supervisor.child_spec({Agent, fn -> 1_000 end}, id: :ticks))
 
     logins =
       start_supervised!(
@@ -403,6 +410,7 @@ defmodule CodingAgentFramework.PromptsTest do
          host: "test",
          db: db,
          run: fn _ -> Agent.get(said, & &1) end,
+         clock: fn -> Agent.get_and_update(ticks, &{&1, &1 + 1_000}) end,
          notify: &send(me, {:cue, &1})}
       )
 
@@ -410,24 +418,51 @@ defmodule CodingAgentFramework.PromptsTest do
     prompts = start_supervised!({Prompts, ctx.popts ++ [logins: logins, logins_db: db]})
     ctx = %{ctx | prompts: prompts}
     assert Logins.check(logins, "work") == {:refused, {:login, :logged_out}}
-    assert cued(ctx) == ["login:work"]
+    assert cued(ctx) == ["login:work:1000"]
 
-    assert {:ok, [%{id: "login:work", kind: "login", agent: nil, options: ["check"]} = p]} =
+    assert {:ok, [%{id: "login:work:1000", kind: "login", agent: nil, options: ["check"]} = p]} =
              Prompts.read(prompts, kind: "login")
 
     assert p.text =~ "account work is not logged in (logged_out)"
-    assert is_integer(p.opened_at)
+    assert p.opened_at == 1_000
 
-    # Still logged out: the check answers so, and the prompt stays.
+    # Still logged out: the check answers so, and the prompt stays, with the same id: a refusal
+    # that is kept is the same prompt.
     assert {:refused, {:login, :logged_out}} =
-             Prompts.answer(prompts, "login:work", "check", "sam")
+             Prompts.answer(prompts, "login:work:1000", "check", "sam")
 
-    assert {:refused, {:bad, :choice}} = Prompts.answer(prompts, "login:work", "go", "sam")
-    Agent.update(said, fn _ -> {:ok, %{status: 0, output: ~s({"loggedIn": true})}} end)
-    assert {:ok, :logged_in} = Prompts.answer(prompts, "login:work", "check", "sam")
-    assert cued(ctx) == ["login:work"]
+    assert {:ok, [%{id: "login:work:1000"}]} = Prompts.read(prompts, kind: "login")
+
+    assert {:refused, {:bad, :choice}} =
+             Prompts.answer(prompts, "login:work:1000", "go", "sam")
+
+    # The id before the time is no prompt: the id is the refusal's.
+    assert {:refused, :no_prompt} = Prompts.answer(prompts, "login:work", "check", "sam")
+
+    Agent.update(said, fn _ -> logged_in end)
+    assert {:ok, :logged_in} = Prompts.answer(prompts, "login:work:1000", "check", "sam")
+    assert cued(ctx) == ["login:work:1000"]
     assert {:ok, []} = Prompts.read(prompts, kind: "login")
-    assert {:refused, :settled} = Prompts.answer(prompts, "login:work", "check", "sam")
+    assert {:refused, :settled} = Prompts.answer(prompts, "login:work:1000", "check", "sam")
+
+    # Refused again: a new prompt, a new id, its own time. The first id stays settled, though
+    # the account's row is refused again.
+    Agent.update(said, fn _ -> {:ok, %{status: 1, output: out}} end)
+    assert {:refused, {:login, :logged_out}} = Logins.recheck(logins, "work")
+    [again] = cued(ctx)
+    assert again =~ ~r/\Alogin:work:\d+\z/
+    refute again == "login:work:1000"
+
+    assert {:ok, [%{id: ^again, kind: "login", opened_at: opened}]} =
+             Prompts.read(prompts, kind: "login")
+
+    assert opened > 1_000 and again == "login:work:#{opened}"
+    assert {:refused, :settled} = Prompts.answer(prompts, "login:work:1000", "check", "sam")
+
+    Agent.update(said, fn _ -> logged_in end)
+    assert {:ok, :logged_in} = Prompts.answer(prompts, again, "check", "sam")
+    assert cued(ctx) == [again]
+    assert {:ok, []} = Prompts.read(prompts, kind: "login")
   end
 
   # Prompt.tla's AnswerNow and WithdrawNow: an ask is answered or withdrawn, once.

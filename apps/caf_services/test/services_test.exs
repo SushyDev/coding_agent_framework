@@ -7,6 +7,7 @@ defmodule CodingAgentFramework.ServicesTest do
   # holds no port. That is what `OpenByPort` needs: whose process listens, not what it relays.
   use ExUnit.Case, async: true
 
+  doctest CodingAgentFramework.Services
   doctest CodingAgentFramework.Services.Table
 
   import CodingAgentFramework.TestHost
@@ -74,7 +75,7 @@ defmodule CodingAgentFramework.ServicesTest do
     shift
     [ -z "$f" ] && exec #{program!(:sh)} -c "$*"
     : > "#{dir}/pids/$$"
-    [ -s "#{dir}/box/services/db.pid" ] && echo after > "#{dir}/fwd-saw" || echo before > "#{dir}/fwd-saw"
+    [ -s "#{dir}/box/services/#{Services.socket_key("db")}.pid" ] && echo after > "#{dir}/fwd-saw" || echo before > "#{dir}/fwd-saw"
     [ -e "#{dir}/no-forward" ] && exec #{bash} -c 'read -r -t #{stand_in_idle()} l' "#{dir}/fwd"
     (#{program!(:sleep)} #{stand_in_idle()}; #{program!(:kill)} $$) 2>/dev/null &
     l=${f#127.0.0.1:}
@@ -123,6 +124,11 @@ defmodule CodingAgentFramework.ServicesTest do
 
   defp gone(pid), do: await(fn -> if alive?(pid), do: :alive, else: {:ok, :gone} end)
 
+  # A file `Holder.Process` keeps for the service, named by its key (`ext`: ".sock" or ".pid"),
+  # in the services directory of the test's host directory `host` (`ws` or `box`).
+  defp held(c, host, name, ext),
+    do: Path.join([c.dir, host, "services", Services.socket_key(name) <> ext])
+
   for host <- ["test", "box"] do
     test "StartsOnSyncedCopy: a service on #{host} starts on a whole sync, held with its pid",
          c do
@@ -154,7 +160,7 @@ defmodule CodingAgentFramework.ServicesTest do
     end
 
     assert {:ok, %{state: "ended", pid: nil}} = Services.stop(c.services, "web-main", "db")
-    refute File.exists?(Path.join(c.dir, "box/services/db.sock"))
+    refute File.exists?(held(c, "box", "db", ".sock"))
     assert {:ok, :gone} = gone(pid)
     assert {:refused, {:state, "ended"}} = Services.stop(c.services, "web-a", "db")
   end
@@ -287,7 +293,7 @@ defmodule CodingAgentFramework.ServicesTest do
     assert {:refused, {:start, :owner_ended}} = start(c, "web-a", "db", "box")
     assert %{state: "ended", owner: nil} = row(c, "db")
     # The wrapper wrote the program's pid before the settle read the owner's end.
-    {:ok, pid} = File.read(Path.join(c.dir, "box/services/db.pid"))
+    {:ok, pid} = File.read(held(c, "box", "db", ".pid"))
     assert {:ok, :gone} = gone(pid |> String.split() |> hd())
 
     assert {:ok, %{state: "running", owner: "web-main", keep: true}} =
@@ -411,10 +417,9 @@ defmodule CodingAgentFramework.ServicesTest do
     end
   end
 
-  defp fwd_sock(c), do: Path.join(c.dir, "ws/services/db.sock")
+  defp fwd_sock(c), do: held(c, "ws", "db", ".sock")
 
-  defp fwd_pid(c),
-    do: c.dir |> Path.join("ws/services/db.pid") |> File.read!() |> String.split() |> hd()
+  defp fwd_pid(c), do: c |> held("ws", "db", ".pid") |> File.read!() |> String.split() |> hd()
 
   defp start_forwarded(c, opts \\ []) do
     {port, local} = {free_port(), free_port()}
@@ -455,7 +460,7 @@ defmodule CodingAgentFramework.ServicesTest do
              start(c, "web-a", "db", "box", forward: {port, local}, forward_timeout: 2_000)
 
     assert %{state: "ended", fwd: "failed"} = row(c, "db")
-    {:ok, pid} = File.read(Path.join(c.dir, "box/services/db.pid"))
+    {:ok, pid} = File.read(held(c, "box", "db", ".pid"))
     assert {:ok, :gone} = gone(pid |> String.split() |> hd())
     :gen_tcp.close(other)
   end
@@ -468,6 +473,66 @@ defmodule CodingAgentFramework.ServicesTest do
 
     assert Services.list(c.services) == []
     assert {:ok, %{state: "running"}} = start(c, "web-a", String.duplicate("a", 64), "test")
+  end
+
+  test "a socket is named by the name's key, whatever the name; the name stays in the row and the log",
+       c do
+    long = String.duplicate("a", 64)
+
+    for name <- ["db", long] do
+      assert {:ok, %{name: ^name}} = start(c, "web-a", name, "box")
+      key = Services.socket_key(name)
+      assert key =~ ~r/\A[0-9a-f]{16}\z/
+      assert File.exists?(held(c, "box", name, ".sock"))
+      refute File.exists?(Path.join([c.dir, "box", "services", name <> ".sock"]))
+      assert {:ok, "up in one\n"} = log(c, "box", name)
+    end
+
+    assert Services.socket_key("db") != Services.socket_key(long)
+  end
+
+  test "the longest allowed name starts under the longest host directory a socket fits, and a longer directory is refused",
+       c do
+    name = String.duplicate("n", 64)
+    # `<dir>/services/<key>.sock` is 103 bytes, the most `Holder` allows, at 72 bytes of `dir`.
+    # Named by the name, it would be 151 (72 + `/services/` + 64 + `.sock`).
+    fits = host_dir(c, "fits", 72)
+    too_long = host_dir(c, "too-long", 73)
+    assert byte_size(Path.join([fits, "services", name <> ".sock"])) > 103
+
+    on_fits = services_in(c, :fits, fits)
+    on_too_long = services_in(c, :too_long, too_long)
+    where = [host: "test", project: "web", start_timeout: 2_000, worktree: c.wt]
+    argv = [c.bash, Path.join(c.dir, "svc")]
+
+    assert {:ok, %{state: "running", name: ^name}} =
+             Services.start(on_fits, "web-a", name, argv, [copy: "fits"] ++ where)
+
+    sock = Path.join([fits, "services", Services.socket_key(name) <> ".sock"])
+    assert byte_size(sock) == 103
+    assert File.exists?(sock)
+
+    assert {:refused, {:start, {:socket_path_too_long, path}}} =
+             Services.start(on_too_long, "web-a", name, argv, [copy: "too-long"] ++ where)
+
+    assert byte_size(path) == 104
+    assert %{state: "refused"} = Enum.find(Services.list(on_too_long), &(&1.name == name))
+  end
+
+  # A host directory of exactly `size` bytes inside the test's own.
+  defp host_dir(c, label, size) do
+    pad = size - byte_size(c.dir) - 1 - byte_size(label) - 1
+    assert pad >= 0, "the test's directory #{c.dir} leaves no room for a #{size}-byte directory"
+    dir = Path.join([c.dir, String.duplicate("d", pad) <> "-" <> label])
+    assert byte_size(dir) == size
+    dir
+  end
+
+  # A second `Services` of this test, on the one host `test` at `dir`.
+  defp services_in(c, id, dir) do
+    hosts = %{"test" => %{programs: programs(), dir: dir}}
+    opts = Keyword.merge(c.opts, hosts: hosts, dir: Path.join(c.dir, "services-#{id}"))
+    start_supervised!(Supervisor.child_spec({Services, opts}, id: id))
   end
 
   test "a local port another live forward holds is refused, naming its service, before anything starts",

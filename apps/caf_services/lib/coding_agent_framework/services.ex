@@ -11,6 +11,10 @@ defmodule CodingAgentFramework.Services do
   its output appended to `<dir>/services/<name>.log` on the host and its input from dtach's
   terminal. The row then holds the pid and the start time `ps` gives.
 
+  **A socket** is named by the service's `socket_key/1`, never by the name: 16 hex digits, so
+  the socket's path is the host's directory and 31 bytes, whatever the name. The name stays
+  where a person reads it: the row, the log. `socket_key/1` says how long a directory may be.
+
   **An end** (`stop/4`, a restart, the owner's end) is written to the row (`ending` or
   `restarting`, with `end_until`) before it is sent. It sends TERM to the program's group only
   while its pid still has the recorded start time; at `end_until` (the call's timeout, its
@@ -27,7 +31,7 @@ defmodule CodingAgentFramework.Services do
 
   **A forward** (`start/5`'s `:forward`, for a host reached over ssh): once the service runs,
   an `ssh -N -L 127.0.0.1:<local>:127.0.0.1:<port>` with `ExitOnForwardFailure` is held by
-  dtach in the workstation's services directory, on a socket named for the service. It is open
+  dtach in the workstation's services directory, on the service's socket key. It is open
   only when that ssh's own pid listens on the local port (`lsof`); the start answers then, and
   a forward that fails ends the service. An end ends the forward first. `reopen/4` opens a lost
   forward again, once per claimed state (see `model/tla/Copy.tla`'s `Fwds`).
@@ -120,9 +124,7 @@ defmodule CodingAgentFramework.Services do
   are held on (its programs also with `lsof`); and optionally `:acts`, the instance's `Acts`,
   where each `stop/4` of a running service and each `restart/4` is a row, act `service_stop`
   or `service_restart`, target `service:<name>`, and so is an end `owner_ended/3` makes; `:interval` (ms between settles, as `cue/2`
-  settles; without it, rows settle only at its start and at `cue/2`); `:name_room` (bytes, the
-  room the home leaves for a service's socket, `Config.name_room/1`: a longer name is refused
-  `{:bad, :name, {:longer_than, n}}` before any row, F-172); and `:notify`, a function
+  settles; without it, rows settle only at its start and at `cue/2`); and `:notify`, a function
   of one cue: after each write of a row it gets `%{topic: "services", ids: [name]}`.
   """
   @spec start_link(keyword) :: GenServer.on_start()
@@ -134,6 +136,22 @@ defmodule CodingAgentFramework.Services do
   """
   @spec writes() :: [String.t()]
   def writes, do: ~w(services)
+
+  @doc """
+  The key a service's socket and record are named by: the first 16 hex digits of the SHA-256
+  of its name. The socket is `<dir>/services/<key>.sock`, 31 bytes after the host's directory
+  `dir` whatever the name, so the longest allowed name (64 bytes) fits as a short one does. A
+  host's directory may be 72 bytes long, as `Holder` allows a socket path of 103 (macOS cuts
+  one at 104, Linux at 108); in the tree the workstation's is `<home>/ws`, so a home may be 69.
+  A directory longer than that is refused at its first start, `{:refused,
+  {:socket_path_too_long, path}}`. The log stays `<dir>/services/<name>.log`.
+
+      iex> CodingAgentFramework.Services.socket_key("db")
+      "7bdc25d1694ef984"
+  """
+  @spec socket_key(String.t()) :: String.t()
+  def socket_key(name) when is_binary(name),
+    do: :crypto.hash(:sha256, name) |> Base.encode16(case: :lower) |> binary_part(0, 16)
 
   @doc """
   Starts service `name` (a socket name: letters, digits, `-`, `_`) for `owner`, holding `argv`
@@ -174,13 +192,6 @@ defmodule CodingAgentFramework.Services do
       else: {:refused, {:name, name}}
   end
 
-  # The room the home leaves for the service's socket (`Config.name_room/1`, F-172), checked
-  # before any row.
-  defp fits(%{name_room: room}, name) when is_integer(room) and byte_size(name) > room,
-    do: {:refused, {:bad, :name, {:longer_than, room}}}
-
-  defp fits(_config, _name), do: :ok
-
   # A step's timeout, cut to what is left of the start's deadline (none: as it is).
   defp within(opts, key, default) do
     t = Keyword.get(opts, key, default)
@@ -195,7 +206,6 @@ defmodule CodingAgentFramework.Services do
     host = Keyword.fetch!(opts, :host)
 
     with {:ok, config} <- call(services, :config),
-         :ok <- fits(config, name),
          {:ok, port, local} <- forward_of(config, host, Keyword.get(opts, :forward)) do
       {:ok,
        %{
@@ -363,7 +373,7 @@ defmodule CodingAgentFramework.Services do
     with :ok <- input_ok(input),
          {:ok, row} <- fixable(services, caller, name, ~w(running)),
          {:ok, ctx} <- context(services, row, timeout) do
-      case Holder.Process.push(ctx.procs, name, record(row), input, timeout: timeout) do
+      case Holder.Process.push(ctx.procs, ctx.name, record(row), input, timeout: timeout) do
         {:ok, :sent} -> {:ok, :sent}
         {:ok, :gone} -> {:refused, :not_held}
         {:unknown, why} -> {:unknown, {:send, why}}
@@ -756,7 +766,7 @@ defmodule CodingAgentFramework.Services do
   # local port: `{:open, record}`, `{:held, record}` when it runs but does not listen, `:gone`,
   # or `:none` with no record.
   defp read_forward(ws, row) do
-    name = row.name
+    name = socket_key(row.name)
 
     case Holder.Process.read(ws.procs, [name]) do
       {:ok, %{^name => %{process: :live, record: record}}} ->
@@ -782,7 +792,7 @@ defmodule CodingAgentFramework.Services do
   # The forward's ssh by its record: TERM, then KILL; done once it reads dead. Gone, or its
   # wrapper not yet written: the socket says when it ends.
   defp end_forward(ws, row) do
-    case Holder.state(ws.holder, row.name) do
+    case Holder.state(ws.holder, socket_key(row.name)) do
       {:ok, dead} when dead in [:absent, :stale] ->
         :ok
 
@@ -793,7 +803,8 @@ defmodule CodingAgentFramework.Services do
             _ -> nil
           end
 
-        ended(Holder.Process.end_held(ws.procs, row.name, record, @kill_wait, group: true))
+        key = socket_key(row.name)
+        ended(Holder.Process.end_held(ws.procs, key, record, @kill_wait, group: true))
 
       other ->
         {:unknown, {:forward, other}}
@@ -821,7 +832,7 @@ defmodule CodingAgentFramework.Services do
          :ok <- end_forward_of(ctx, row),
          grace = max(until - now(), 0),
          :ok <-
-           end_of(Holder.Process.end_held(ctx.procs, row.name, record(row), grace, group: true)) do
+           end_of(Holder.Process.end_held(ctx.procs, ctx.name, record(row), grace, group: true)) do
       put(services, row.name, after_end(row))
     end
   end
@@ -845,22 +856,31 @@ defmodule CodingAgentFramework.Services do
   end
 
   # An earlier start of this name may have left its offset file: `Held.ready/4` clears it, and
-  # `Holder.Process.hold/4` its record.
+  # `Holder.Process.hold/4` its record. `Held` names the socket and the record by its `name`,
+  # the service's key; the log and the offset file, which a person reads or this part alone
+  # uses, stay named by the service.
   defp context_of(config, row, timeout) do
     where = %{host: row.host, project: row.project, copy: row.copy, kind: "services"}
+    key = socket_key(row.name)
 
-    with {:ok, %{base: b} = ctx} <-
+    with {:ok, %{dir: dir} = ctx} <-
            Held.context(
              config,
-             Map.merge(where, %{name: row.name, run: "service:" <> row.name}),
+             Map.merge(where, %{name: key, run: "service:" <> row.name}),
              timeout
            ),
          {:ok, ws} <- if(forwarded?(config, row), do: ws(config), else: {:ok, nil}),
-         do: {:ok, Map.merge(ctx, %{log: b <> ".log", from: b <> ".from", ws: ws})}
+         do:
+           {:ok,
+            Map.merge(ctx, %{
+              log: Path.join(dir, row.name <> ".log"),
+              from: Path.join(dir, row.name <> ".from"),
+              ws: ws
+            })}
   end
 
-  # Where forwards are held: the workstation's services directory, each socket named for its
-  # service, with its record.
+  # Where forwards are held: the workstation's services directory, each socket named by its
+  # service's key, with its record.
   defp ws(config) do
     with {:ok, %{programs: programs, dir: dir}} <- host_of(config, config.workstation),
          dir = Path.join(dir, "services"),
@@ -900,7 +920,7 @@ defmodule CodingAgentFramework.Services do
         case Shell.run(ws.programs.host, sh, ["-c", @fwd_dir, "caf-forward", mkdir, ws.dir],
                timeout: @hold_read
              ) do
-          {:ok, %{status: 0}} -> Holder.Process.hold(ws.procs, name, argv, env: env)
+          {:ok, %{status: 0}} -> Holder.Process.hold(ws.procs, socket_key(name), argv, env: env)
           other -> {:refused, {:clear, other}}
         end
 
@@ -909,7 +929,7 @@ defmodule CodingAgentFramework.Services do
   end
 
   defp forward_dead(ws, name) do
-    case Holder.state(ws.holder, name) do
+    case Holder.state(ws.holder, socket_key(name)) do
       {:ok, dead} when dead in [:absent, :stale] -> :ok
       {:ok, :live} -> {:refused, :forward_live}
       other -> other
@@ -958,7 +978,6 @@ defmodule CodingAgentFramework.Services do
       config = Map.new(keys, &{&1, Keyword.fetch!(opts, &1)})
       config = Map.put(config, :workstation, Keyword.get(opts, :workstation))
       config = Map.put(config, :acts, Keyword.get(opts, :acts))
-      config = Map.put(config, :name_room, Keyword.get(opts, :name_room))
       # A start not yet sent lost its call with the restart: nothing runs.
       for %{state: "asked"} = row <- Table.all(db),
           do: Table.put(db, %{row | state: "refused", owner: nil})
@@ -1084,7 +1103,7 @@ defmodule CodingAgentFramework.Services do
 
     with :ok <- end_forward_of(ctx, row),
          :ok <- send_end(ctx, row, signal),
-         :ok <- ended(Holder.Process.dead_by(ctx.procs, row.name, now())),
+         :ok <- ended(Holder.Process.dead_by(ctx.procs, ctx.name, now())),
          do: put_row(s, row.name, @ended, %{state: row.state})
   end
 
