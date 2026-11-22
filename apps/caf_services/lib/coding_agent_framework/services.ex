@@ -142,9 +142,10 @@ defmodule CodingAgentFramework.Services do
   of its name. The socket is `<dir>/services/<key>.sock`, 31 bytes after the host's directory
   `dir` whatever the name, so the longest allowed name (64 bytes) fits as a short one does. A
   host's directory may be 72 bytes long, as `Holder` allows a socket path of 103 (macOS cuts
-  one at 104, Linux at 108); in the tree the workstation's is `<home>/ws`, so a home may be 69.
-  A directory longer than that is refused at its first start, `{:refused,
-  {:socket_path_too_long, path}}`. The log stays `<dir>/services/<name>.log`.
+  one at 104, Linux at 108); in the tree the workstation's is `<home>/ws`, so a home may be 69,
+  and `Config.new/1` refuses a longer one (F-207). A directory longer than that, one the config
+  does not check, is refused at its first start, `{:refused, {:socket_path_too_long, path}}`.
+  The log stays `<dir>/services/<name>.log`.
 
       iex> CodingAgentFramework.Services.socket_key("db")
       "7bdc25d1694ef984"

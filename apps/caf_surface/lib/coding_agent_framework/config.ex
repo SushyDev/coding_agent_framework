@@ -12,13 +12,16 @@ defmodule CodingAgentFramework.Config do
     tables of `Copies`, `Jobs`, `Services` and `MCP`) and `ws/` (the workstation's copies and
     service logs). It may hold a space, as macOS's `~/Library/Application Support/<app>` does
     (F-169). Its sockets (`tmux.sock`, `d/<agent>.sock`, `ws/jobs/<job>.sock`,
-    `ws/services/<key>.sock`) must fit macOS's 103 bytes: a home longer than 93 bytes,
-    where `tmux.sock` does not fit, is refused, `{:bad, :home, {:longer_than, 93}}`. The room
-    it leaves for a name is `name_room/1`'s: a delegate's or a main session's start refuses a
-    longer name before any row, `{:bad, :name, {:longer_than, n}}` (a 42-byte home leaves an
-    agent 53 bytes; F-169's new-2, F-172). A service's socket is named by a key of fixed length
-    (`CodingAgentFramework.Services.socket_key/1`, F-205), so its name needs no room; its
-    socket is 34 bytes after the home, and a home longer than 69 bytes cannot start one;
+    `ws/services/<key>.sock`) must fit macOS's 103 bytes. A home longer than 93 bytes, where
+    `tmux.sock` does not fit, is refused, `{:bad, :home, {:longer_than, 93}}`. So is one longer
+    than 69 bytes in a tree that runs services (`agents` is not `false`), `{:bad, :home,
+    {:longer_than, 69}}` (F-207): a service's socket is named by a key of fixed length
+    (`CodingAgentFramework.Services.socket_key/1`, F-205), so its name needs no room, but the
+    socket is 34 bytes after the home, and in a longer home every service start would be
+    refused `socket_path_too_long`. The room the home leaves for an agent's name is
+    `name_room/1`'s: a delegate's or a main session's start refuses a longer name before any
+    row, `{:bad, :name, {:longer_than, n}}` (a 42-byte home leaves an agent 53 bytes; F-169's
+    new-2, F-172);
   - `instance`: this framework instance's name, the name the app finds it by
     (`CodingAgentFramework.subscribe/2`), and so unique in the app (a second start of a running
     name is refused): 1 to 100 bytes, no control character;
@@ -94,6 +97,22 @@ defmodule CodingAgentFramework.Config do
         #=> {:ok, %Config{tool_hooks: {App.Hooks, [proxy: "the board"]}}}
         Config.new(..., tool_hooks: %{pre_tool_use: fn _ -> :pass end})
         #=> {:refused, {:bad, :tool_hooks, {:not_tool_hooks, %{pre_tool_use: #Function<…>}}}}
+
+  - `usable`: which accounts the app lets a start use, as data, `{module, opts}` (F-207,
+    `CodingAgentFramework.Usable`): the module's `usable?(account, opts, part)` answers `true`
+    or `{false, reason}`, and the tree hands it to every part that picks an account (`Delegates`,
+    `Mains` and the `Mover`) beside the framework's own check (prepared, logged in): an account
+    is usable only if both say so. A refused account reads in the pick's refusal as
+    `{:refused, {:app, reason}}`. `opts` is data, as `tool_hooks`' are. None by default: the
+    framework's check alone. A function in its place is refused, `{:refused, {:bad, :usable,
+    {:not_usable, value}}}`, as is a module without `usable?/3`; options that hold a function,
+    pid, port or reference `{:not_data, module}`, and a struct `{:not_data, module, {:struct,
+    struct}}`;
+
+        Config.new(..., usable: {App.Accounts, flagged: ["side"]})
+        #=> {:ok, %Config{usable: {App.Accounts, [flagged: ["side"]]}}}
+        Config.new(..., usable: fn account -> account != "side" end)
+        #=> {:refused, {:bad, :usable, {:not_usable, #Function<…>}}}
 
   - `heavy`: the app's heavy commands (F-171), each `%{match: regex_or_string, class: class}`
     as `CodingAgentFramework.Runs` takes them: an agent's `Bash` call whose command matches
@@ -249,7 +268,7 @@ defmodule CodingAgentFramework.Config do
       {:refused, {:bad, :home}}
   """
 
-  alias CodingAgentFramework.{Mains, MCP, Runs, ToolHooks, Watch}
+  alias CodingAgentFramework.{Mains, MCP, Runs, Services, ToolHooks, Usable, Watch}
   alias CodingAgentFramework.Mains.Checkout
   alias CodingAgentFramework.Scheduler.Queue
   alias CodingAgentFramework.Sessions.Dialog
@@ -282,6 +301,7 @@ defmodule CodingAgentFramework.Config do
     job_lease: %{heavy: %{"slot" => 1}, builder: %{"slot" => 1}, landing: %{"slot" => 1}},
     pressure: nil,
     tool_hooks: nil,
+    usable: nil,
     heavy: [],
     extensions: [],
     dialogs: %{},
@@ -310,12 +330,16 @@ defmodule CodingAgentFramework.Config do
   # What a socket path holds beside the home and the name: `/d/<agent>.sock`.
   @socket 103
   @agent_around byte_size("/d/.sock")
+  # A service's socket, `<home>/ws/services/<key>.sock` (F-205), 34 bytes after the home: the
+  # key's length is `Services.socket_key/1`'s, taken from it so the two never drift.
+  @services_around byte_size("/ws/services/.sock") + byte_size(Services.socket_key(""))
 
   @doc """
   A config from a keyword list or map, checked whole: answers `{:ok, config}`, or
   `{:refused, {:bad, key}}` for the first key out of shape (a key it does not know included),
-  `{:refused, {:bad, :home, {:longer_than, 93}}}`, or `{:refused, {:bad, :extensions, reason}}`
-  with the extensions' own refusal.
+  `{:refused, {:bad, :home, {:longer_than, 69}}}` (93 for a tree with `agents: false`),
+  `{:refused, {:bad, :usable, reason}}` or `{:refused, {:bad, :extensions, reason}}` with the
+  extensions' own refusal.
 
       iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
       ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", user: "me",
@@ -325,9 +349,16 @@ defmodule CodingAgentFramework.Config do
       iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
       ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", user: "me",
       ...>   env: %{path: "/bin"},
+      ...>   usable: {Enum, []})
+      {:refused, {:bad, :usable, {:not_usable, {Enum, []}}}}
+      iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
+      ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", user: "me",
+      ...>   env: %{path: "/bin"},
       ...>   extensions: [%{name: "board"}])
       {:refused, {:bad, :extensions, {:not_an_extension, %{name: "board"}}}}
-      iex> CodingAgentFramework.Config.new(home: "/" <> String.duplicate("a", 93))
+      iex> CodingAgentFramework.Config.new(home: "/" <> String.duplicate("a", 69))
+      {:refused, {:bad, :home, {:longer_than, 69}}}
+      iex> CodingAgentFramework.Config.new(home: "/" <> String.duplicate("a", 93), agents: false)
       {:refused, {:bad, :home, {:longer_than, 93}}}
   """
   @spec new(keyword | map) :: {:ok, t} | {:refused, {:bad, atom} | {:bad, atom, term}}
@@ -342,8 +373,10 @@ defmodule CodingAgentFramework.Config do
       not (is_binary(fields[:home]) and Path.type(fields[:home]) == :absolute) ->
         {:refused, {:bad, :home}}
 
-      byte_size(fields.home) > @max_home ->
-        {:refused, {:bad, :home, {:longer_than, @max_home}}}
+      # The tree's own bound, the nearer of its sockets (F-207): a home that no service can start
+      # in is refused here, not at each service's start.
+      byte_size(fields.home) > max_home(agents?) ->
+        {:refused, {:bad, :home, {:longer_than, max_home(agents?)}}}
 
       missing ->
         {:refused, {:bad, missing}}
@@ -368,6 +401,9 @@ defmodule CodingAgentFramework.Config do
 
       (bad = bad_tool_hooks(Map.get(fields, :tool_hooks))) != nil ->
         {:refused, {:bad, :tool_hooks, bad}}
+
+      (bad = bad_usable(Map.get(fields, :usable))) != nil ->
+        {:refused, {:bad, :usable, bad}}
 
       not is_boolean(Map.get(fields, :agents, true)) ->
         {:refused, {:bad, :agents}}
@@ -621,6 +657,24 @@ defmodule CodingAgentFramework.Config do
   end
 
   defp bad_tool_hooks(other), do: {:not_tool_hooks, other}
+
+  # Why `usable` is out of shape, or nil: a `{module, opts}` whose module has `usable?/3` and
+  # whose options are data, as `tool_hooks`' are. A function in its place is no module.
+  defp bad_usable(nil), do: nil
+
+  defp bad_usable({module, opts} = entry) when is_atom(module) do
+    cond do
+      not Usable.implemented?(module) -> {:not_usable, entry}
+      (bad = not_data(opts)) != nil -> bad_data(module, bad)
+      true -> nil
+    end
+  end
+
+  defp bad_usable(other), do: {:not_usable, other}
+
+  # The longest home a tree's sockets fit in: a tree that runs agents runs `Services` too.
+  defp max_home(true), do: min(@max_home, @socket - @services_around)
+  defp max_home(false), do: @max_home
 
   @doc """
   The hooks the config's `tool_hooks` take, the ones the accounts' settings name beside the
