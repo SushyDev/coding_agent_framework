@@ -319,6 +319,84 @@ defmodule CodingAgentFramework.MoverTest do
     assert why =~ "stranded" and why =~ "flagged work"
   end
 
+  # F-211 (F-210's new-2): a `usable:` that cannot tell holds a move's resume only to the
+  # resume's own deadline; past it the unknown is taken as a refusal, whose reason names it.
+  test "a resume whose usable: stays unknown goes back at its deadline, or leaves the row down",
+       ctx do
+    untold = start_supervised!(Supervisor.child_spec({Agent, fn -> {[], []} end}, id: :untold))
+
+    usable = fn a ->
+      {accounts, _} = Agent.get(untold, & &1)
+
+      if a in accounts do
+        Agent.update(untold, fn {accounts, asked} -> {accounts, [a | asked]} end)
+        {:unknown, {:auth_status, "cannot tell #{a}"}}
+      else
+        Accounts.ready(ctx.accounts, a)
+      end
+    end
+
+    opts = ctx.mover_opts |> Keyword.put(:usable, usable) |> Keyword.put(:resume_wait, 1_000)
+    GenServer.stop(mover())
+    MoverSetup.restart(%{ctx | mover_opts: opts})
+
+    {:ok, account} = Accounts.ready(ctx.accounts, "work")
+    assert {:ok, %{pid: pid, session_id: sid}} = headless(ctx, "d1", account)
+    write_transcript(ctx, "work", sid)
+
+    # A turn that waits for a permission's answer holds the stop, so the check can turn unknown
+    # after the pick and before the resume.
+    held = fn ->
+      assert {:ok, _} = stream_when(ctx, sid, & &1.idle)
+      {:ok, %{uuid: u}} = Stream.write(ctx.stream, sid, {:message, "ask first"})
+      assert {:ok, _} = stream_when(ctx, sid, &(&1.requests["req-" <> u][:state] == :held))
+      "req-" <> u
+    end
+
+    req = held.()
+    assert {:ok, %{act: act, to: "spare"}} = move(ctx, "d1")
+    assert {:ok, _} = row_when(ctx, "d1", &(&1.move == "stopping"))
+    Agent.update(untold, fn _ -> {["spare"], []} end)
+    assert {:ok, _} = Stream.write(ctx.stream, sid, {:answer, req, :allow})
+
+    # It waits, its process gone, asking again; past the deadline it goes back to `work`.
+    assert {:ok, waiting} = row_when(ctx, "d1", &(&1.move == "resuming"))
+    assert waiting.account == "work" and is_integer(waiting.move_deadline)
+
+    past_deadline = fn ->
+      Agent.update(ctx.clock, &(&1 + 2_000))
+      Mover.cue(mover(), %{topic: "sessions"})
+    end
+
+    past_deadline.()
+    assert {:ok, back} = row_when(ctx, "d1", &(moved?(&1, "work") and &1.pid != pid))
+    assert back.session_id == sid
+    refute alive?(pid)
+    assert {_, asked} = Agent.get(untold, & &1)
+    assert length(asked) >= 2 and Enum.all?(asked, &(&1 == "spare"))
+    assert {:ok, %{outcome: "failed", reason: why}} = Acts.get(ctx.acts, act)
+    assert why =~ "unknown_past_deadline" and why =~ "cannot tell spare"
+
+    # Neither account can be told: past the deadline no process of it runs, and the fault ledger
+    # names the unknown that ran out.
+    Agent.update(untold, fn _ -> {[], []} end)
+    req = held.()
+    assert {:ok, %{to: "spare"}} = move(ctx, "d1")
+    assert {:ok, _} = row_when(ctx, "d1", &(&1.move == "stopping"))
+    Agent.update(untold, fn _ -> {["spare", "work"], []} end)
+    assert {:ok, _} = Stream.write(ctx.stream, sid, {:answer, req, :allow})
+    assert {:ok, _} = row_when(ctx, "d1", &(&1.move == "resuming"))
+    past_deadline.()
+
+    assert {:ok, %{status: "stopped", account: "work"}} = row_when(ctx, "d1", &(&1.move == nil))
+    refute alive?(back.pid)
+
+    assert {:ok, [%{outcome: "failed", reason: why}]} =
+             Acts.rows(ctx.acts, actor: "mover:test", act: "move")
+
+    assert why =~ "stranded" and why =~ "unknown_past_deadline" and why =~ "cannot tell work"
+  end
+
   # F-189's new-3: a named account is read by `usable:` before the claim, as the pick reads one;
   # one not logged in is refused, and nothing begins.
   test "a move to a named account usable: refuses begins nothing", ctx do

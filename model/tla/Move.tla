@@ -15,7 +15,8 @@
 (* the idle read of background commands and the resume's launch, F-142;   *)
 (* a limited agent's move, F-191, with Limits, the healer that asks it;   *)
 (* a headless resume's own word, F-193; a resume's account and the app's  *)
-(* flag, F-209; a move's resume reads the flag again, F-210):             *)
+(* flag, F-209; a move's resume reads the flag again, F-210; the           *)
+(* resume's own deadline, F-211):                                          *)
 (*   Usage    each account's allowance: below 90 %, at 90 % (drain), at    *)
 (*            the limit;                                                   *)
 (*   Mover    drains the session, asks Sessions to stop it, waits for the  *)
@@ -26,7 +27,12 @@
 (*            flagged since the pick, the move goes back to its own       *)
 (*            account (MoveBack), and with that one flagged too the row   *)
 (*            is left down with the reason (Stranded); a limited one's    *)
-(*            is Back. Other refusals of a resume are left abstract;      *)
+(*            is Back. With Unsure the check may answer unknown (F-211):   *)
+(*            it waits, asked again, until the resume's deadline           *)
+(*            (`resume_wait:`, one for the resume and its way back) has    *)
+(*            passed, then takes the unknown as a refusal: MoveBack or     *)
+(*            Stranded (ResumeEnds). Other refusals of a resume are left   *)
+(*            abstract;                                                    *)
 (*   Sessions the session's row: its process and account, stopping while  *)
 (*            the stop runs; the stop (the row says stopping, an idle read *)
 (*            in memory, then the SIGTERM by pid and start time); and the  *)
@@ -61,6 +67,8 @@
 (*            at any time (F-207's new-2: the account is not the one it    *)
 (*            claims to be). A move's pick, a move's resume and a resume  *)
 (*            read it when they choose an account (NoResumeOnRefused).    *)
+(*            With Unsure, the check a move's resume reads answers         *)
+(*            unknown for an account, or answers again, at any time.       *)
 (*                                                                         *)
 (* A resumed process has no waiter until a turn of it ends, so the first   *)
 (* row due at the resume goes in as its prompt; a later one is typed.      *)
@@ -152,6 +160,7 @@ CONSTANTS
     Limited,       \* its turn may end at a usage limit, and the limit's move runs (F-191)
     Headless,      \* a headless session: each resume needs a first line (F-193)
     Flags,         \* the app's `usable` may flag an account at any time (F-207, F-209)
+    Unsure,        \* the check at a move's resume may answer unknown at any time (F-211)
     Break         \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -171,13 +180,15 @@ Breaks == {
     "WordAfter",         \* the limit's move begins before the healer stored the word to go on
     "BareHeadless",      \* a headless session with no row due is resumed with no first line
     "ResumeInPlace",     \* a resume runs on its row's account whether or not it is refused
-    "PickOnly"           \* a move reads the app's flag at its pick only, not at its resume
+    "PickOnly",          \* a move reads the app's flag at its pick only, not at its resume
+    "NoResumeWait"       \* a move's resume has no deadline: an unknown waits for an answer
 }
 
 ASSUME Break \in Breaks
 ASSUME Home \in Accounts /\ Cardinality(Accounts) = 2
 ASSUME \A c \in {MaxPrompts, MaxBg, MaxDelegates, MaxMsgs, MaxCrashes, MaxRestarts} : c \in Nat
 ASSUME Resumes \in BOOLEAN /\ Limited \in BOOLEAN /\ Headless \in BOOLEAN /\ Flags \in BOOLEAN
+ASSUME Unsure \in BOOLEAN
 \* Resumes is played by a main session; a headless session is a delegate, whose resume's first
 \* line is Delegate.tla's.
 ASSUME ~(Headless /\ Resumes)
@@ -225,7 +236,9 @@ VARIABLES
     hitPid,        \* the process whose turn ended at the usage limit, or 0
     word,          \* the healer stored the word to go on
     ownWord,       \* the Mover stored its own word for a headless resume (Headless)
-    flagged        \* the accounts the app's `usable` refuses now (Flags)
+    flagged,       \* the accounts the app's `usable` refuses now (Flags)
+    untold,        \* the accounts the check at a move's resume answers unknown for now (Unsure)
+    waited         \* the move's resume's deadline has passed (a field of the row)
 
 dvars == <<row, hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, dlost, wrong>>
 work == <<level, procs, nextPid, turn, bg, bgCount, delegates, prompts, msgs, crashes>>
@@ -233,10 +246,14 @@ mover == <<transcript, phase, target, copied, resumedWith, record, readAt, ends,
 
 lvars == <<hitPid, word, ownWord>>
 
-vars == <<up, restarts, work, mover, dvars, lvars, flagged>>
+\* What only the app, its check and the clock change.
+outer == <<flagged, untold, waited>>
 
-\* Every action but the limit's leaves the limit as it is, and only the app flags an account.
-Kept(A) == A /\ UNCHANGED <<lvars, flagged>>
+vars == <<up, restarts, work, mover, dvars, lvars, outer>>
+
+\* Every action but the limit's leaves the limit as it is, and only the app flags an account,
+\* only its check answers, and only the clock passes a deadline.
+Kept(A) == A /\ UNCHANGED <<lvars, outer>>
 
 Live == {p \in procs : ~p.ending}
 Pids == {p.pid : p \in procs}
@@ -298,7 +315,7 @@ Init ==
     /\ rmem = {} /\ last = [a \in {Main} |-> D!NoResult]
     /\ unsure = {} /\ dlost = {} /\ wrong = {}
     /\ hitPid = 0 /\ word = FALSE /\ ownWord = FALSE
-    /\ flagged = {}
+    /\ flagged = {} /\ untold = {} /\ waited = FALSE
 
 -----------------------------------------------------------------------------
 (* The framework: its tables survive a restart; its memory does not *)
@@ -489,10 +506,17 @@ Copied ==
     /\ UNCHANGED <<up, restarts, work, phase, target, resumedWith, record, readAt, ends, lost,
                    turned, dvars>>
 
+\* What the check at a move's resume answers for account a (`usable:`): unknown while it cannot
+\* tell (Unsure), else the app's flag or ok.
+Answer(a) == IF a \in untold THEN "unknown" ELSE IF a \in flagged THEN "refused" ELSE "ok"
+
 \* The move's resume reads the app's flag on its target first, at the resume and not only at
 \* the pick (F-210): a drain and its stop may take the move's whole timeout. Under PickOnly it
-\* is read at the pick alone.
-TargetTaken == target \notin flagged \/ Break = "PickOnly"
+\* is read at the pick alone. An unknown decides nothing: the Mover asks again.
+TargetTaken == Answer(target) = "ok" \/ Break = "PickOnly"
+
+\* A refusal, or an unknown once the resume's deadline has passed (F-211): taken as a refusal.
+TakenAsRefused(a) == Answer(a) = "refused" \/ (Answer(a) = "unknown" /\ waited)
 
 \* The first row due is marked by launch before the resume (Mailbox.launch),
 \* once the old process is gone: the row is free, no longer stopping.
@@ -532,21 +556,23 @@ ResumedBare ==
 
 Resumed == ResumedBare \/ \E i \in Ids : ResumedWith(i)
 
-\* The target flagged since the pick: the move goes back to its own account, where its
+\* The target flagged since the pick, or unknown past the resume's deadline: the move goes back
+\* to its own account, where its
 \* transcript is, as for a copy or a resume refused there (the Mover's back/3). A limited
 \* session's is Back. The move's target is its own account from then (`move_to`).
 MoveBack ==
     /\ up /\ phase \in {"stopping", "ending"} /\ copied /\ procs = {} /\ ~AtLimit
-    /\ target # Here /\ target \in flagged /\ Break # "PickOnly"
+    /\ target # Here /\ TakenAsRefused(target) /\ Break # "PickOnly"
     /\ target' = Here
     /\ UNCHANGED <<up, restarts, work, transcript, phase, copied, resumedWith, record, readAt,
                    ends, lost, turned, dvars>>
 
-\* Its own account flagged too: no process of it runs, the row left down with the app's reason
-\* and an act `move` failed `stranded` in the fault ledger.
+\* Its own account flagged too, or unknown past the deadline: no process of it runs, the row
+\* left down with the reason (the unknown that ran out) and an act `move` failed `stranded` in
+\* the fault ledger.
 Stranded ==
     /\ up /\ phase \in {"stopping", "ending"} /\ copied /\ procs = {} /\ ~AtLimit
-    /\ target = Here /\ Here \in flagged /\ Break # "PickOnly"
+    /\ target = Here /\ TakenAsRefused(Here) /\ Break # "PickOnly"
     /\ ~\E i \in Ids : row[i].st = "sending"
     /\ phase' = "failed"
     /\ UNCHANGED <<up, restarts, work, transcript, target, copied, resumedWith, record, readAt,
@@ -561,6 +587,15 @@ OwnWord ==
     /\ ownWord' = TRUE
     /\ \E s \in Senders : D!Store(D!NextId, s, Main, "msg")
     /\ UNCHANGED <<up, restarts, work, mover, hitPid, word>>
+
+\* The resume's deadline passes (F-211): written on the row when it takes the phase `resuming`,
+\* once per move, so a way back keeps it and a restart reads it. Only an unknown reads it, so
+\* it passes only with Unsure. Under NoResumeWait it never passes.
+ResumeWaitEnds ==
+    /\ Unsure /\ phase \in {"stopping", "ending"} /\ copied /\ ~waited
+    /\ Break # "NoResumeWait"
+    /\ waited' = TRUE
+    /\ UNCHANGED <<up, restarts, work, mover, dvars, lvars, flagged, untold>>
 
 -----------------------------------------------------------------------------
 (* A limited session's move (Limited, F-191) *)
@@ -698,7 +733,14 @@ Resume == ResumeHere \/ CopyAsked \/ ResumeCopy \/ ResumeCopied \/ CopyRefused \
 AppFlags ==
     /\ Flags
     /\ \E a \in Accounts : flagged' = IF a \in flagged THEN flagged \ {a} ELSE flagged \cup {a}
-    /\ UNCHANGED <<up, restarts, work, mover, dvars, lvars>>
+    /\ UNCHANGED <<up, restarts, work, mover, dvars, lvars, untold, waited>>
+
+\* The check cannot tell for an account (`claude auth status` cannot, say), or tells again, at
+\* any time; it may never tell again (F-211).
+CheckUnsure ==
+    /\ Unsure
+    /\ \E a \in Accounts : untold' = IF a \in untold THEN untold \ {a} ELSE untold \cup {a}
+    /\ UNCHANGED <<up, restarts, work, mover, dvars, lvars, flagged, waited>>
 
 \* Sessions ends the row only when the hook names the row's process.
 SessionEndArrives(pid) ==
@@ -731,11 +773,14 @@ OldNext ==
                       \/ Takes(i)
                       \/ Mailbox(D!SettleSeen(i, Has(i)))
 
-Next == Kept(OldNext) \/ ((LimitNext \/ OwnWord) /\ UNCHANGED flagged) \/ AppFlags
+Next == Kept(OldNext) \/ ((LimitNext \/ OwnWord) /\ UNCHANGED outer) \/ AppFlags \/ CheckUnsure
+        \/ ResumeWaitEnds
 
 \* A move's resume is refused here only by the app's flag (MoveBack, Stranded); any other
 \* refusal sends Mover.ex back to the old account too, and a refused launch makes its row due
-\* again for the next one.
+\* again for the next one. The Mover asks the check at its interval and acts on each answer, so
+\* the resume's step, whichever the answer allows, happens while one is possible: an answer
+\* that changes between asks does not hold it. The clock passes the resume's deadline.
 Fairness ==
     /\ WF_vars(Kept(FrameworkStarts))
     /\ WF_vars(Kept(level[Here] >= DrainLevel /\ Drain))
@@ -743,14 +788,15 @@ Fairness ==
     /\ WF_vars(Kept(Term))
     /\ WF_vars(Kept(Copied)) /\ WF_vars(Kept(Resumed))
     /\ WF_vars(Kept(MoveBack)) /\ WF_vars(Kept(Stranded))
+    /\ WF_vars(Kept(Resumed \/ MoveBack \/ Stranded)) /\ WF_vars(ResumeWaitEnds)
     /\ WF_vars(Kept(\E i \in Ids : LaunchMarked(i)))
     /\ WF_vars(Kept(ResumeCopy)) /\ WF_vars(Kept(ResumeCopied))
     /\ WF_vars(Kept(\E p \in procs : Exits(p, "term")))
     /\ WF_vars(Kept(\E p \in procs : TurnEnds(p)))
     /\ WF_vars(Kept(\E b \in bg : BgEnds(b)))
     /\ WF_vars(Kept(Mailbox(D!Connects(Main))))
-    /\ WF_vars(WordStored /\ UNCHANGED flagged) /\ WF_vars(LimitMove /\ UNCHANGED flagged)
-    /\ WF_vars(OwnWord /\ UNCHANGED flagged)
+    /\ WF_vars(WordStored /\ UNCHANGED outer) /\ WF_vars(LimitMove /\ UNCHANGED outer)
+    /\ WF_vars(OwnWord /\ UNCHANGED outer)
     /\ \A i \in Ids :
          /\ SF_vars(Kept(\E t \in {"waiter", "typed"} : Mailbox(D!Mark(i, t))))
          /\ SF_vars(Kept(Mailbox(D!Handed(i)))) /\ WF_vars(Kept(Mailbox(D!Refused(i))))
@@ -770,7 +816,7 @@ TypeOK ==
     /\ turned \in BOOLEAN
     /\ record.status \in {"running", "stopping", "ended"}
     /\ hitPid \in 0..nextPid /\ word \in BOOLEAN /\ ownWord \in BOOLEAN
-    /\ flagged \subseteq Accounts
+    /\ flagged \subseteq Accounts /\ untold \subseteq Accounts /\ waited \in BOOLEAN
     /\ D!TypeOK
 
 \* A session runs on one account at a time: never two processes of it.
@@ -847,6 +893,12 @@ LimitResumeCarriesRow ==
 HeadlessResumeHasLine ==
     [][(Headless /\ nextPid' # nextPid) =>
          \E i \in Ids : row[i].st = "sending" /\ row[i].via = "launch"]_vars
+
+\* A move's resume ends (F-211): the session runs on the target or back on its own account, or
+\* the row is left down, even when the check never answers again. Under NoResumeWait an
+\* unknown holds it.
+ResumeEnds ==
+    (phase \in {"stopping", "ending"} /\ copied /\ procs = {}) ~> phase \in {"moved", "failed"}
 
 \* A limited session's move settles: it runs on the other account, or a person has it.
 LimitMoveSettles == (AtLimit /\ phase # "idle") ~> phase \in {"moved", "failed"}

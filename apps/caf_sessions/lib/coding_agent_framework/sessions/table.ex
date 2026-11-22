@@ -36,7 +36,8 @@ defmodule CodingAgentFramework.Sessions.Table do
   **A move** (F-133, `Mover`): `move` is the move's phase (`draining`, `stopping`, `copying`,
   `resuming`), NULL when no move is under way; `move_from` and `move_to` the accounts it goes
   between, `move_act` its row in `Acts`, and `move_deadline` (wall-clock ms) when a move not yet
-  past its stop is given up. A start writes none of them, so a move's resume keeps them.
+  past its stop is given up, and from the phase `resuming` on, the resume's own deadline
+  (F-211). A start writes none of them, so a move's resume keeps them.
 
   **An end** (F-143's new-4): `end_asked` is when a main session's end (`Sessions.end_main/3`)
   asked its stop, wall-clock ms, NULL otherwise; a stop of it that answered unknown leaves it,

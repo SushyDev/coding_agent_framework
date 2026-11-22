@@ -1145,7 +1145,8 @@ any reply does (new-4).
   (`Schedule.tla`'s `NoStartWithoutBudget`): no part reads a running lease's account after it
   (what the leases hold is counted per resource, not per account), so a delegate that a resume
   or a move puts on another account keeps its start's lease, whose row names the account the
-  grant was read against, not the one it runs on now; the agent row names that (F-210).
+  grant was read against, not the one it runs on now; the agent row names that (F-210). So the
+  example's console says `lease 3: builder for app asked on work, …` (F-211).
   A request also names its holder: the row of the work the lease
   admits (an agent row, a job row), which its owner writes `starting` before it asks (F-134's
   new-1). The answer comes at once: `{:ok, lease}`; `{:queued, %{id: request_id, position:
@@ -1585,7 +1586,11 @@ beside it and `<config>/session-env/<session id>` (the one other per-session fil
 keeps, F-133's new-4), each whole under a temporary name and renamed, once the row is free (its process
 gone by pid and start time and its socket dead); `resuming` reads the other account by
 `usable:` again (F-210: the app may flag it while the drain and the stop take up to the move's
-deadline), then is `Sessions.resume` on it with the same session id and the app's launch for the agent (a delegate's from
+deadline). An unknown (`claude auth status` cannot tell, say) decides nothing: it is asked
+again at the `Mover`'s step (5 s) and each cue, up to the resume's own deadline (`resume_wait:`,
+5 minutes by default; F-211), which the row's `move_deadline` holds from the phase `resuming`
+on, so a restart reads it and a way back keeps it. Then the resume is `Sessions.resume` on it
+with the same session id and the app's launch for the agent (a delegate's from
 `Delegates.launch/2`), the row's own options and model taken again. An interactive session's
 first due row goes in as the resume's prompt (`launch`, "Delivery"; F-137's new-1), since the
 resumed process has no waiter until a turn of it ends; a row still `sending` settles first. A
@@ -1593,8 +1598,9 @@ headless one's goes as its first line by stream, which Claude Code headless need
 writes its init (F-152); with no row due, the move first stores a word of its own, a notice
 from `framework` under `move:<agent>:<deadline>` ("This session was moved between Claude
 accounts. Go on with your task from where it stopped."), so every headless resume has a first
-line (F-193, `Move.tla`'s `Headless`). The key is the move's deadline, which the row keeps on a
-way back, so one move stores one word whichever account its resume goes to.
+line (F-193, `Move.tla`'s `Headless`). The key is the row's `move_deadline`, the resume's
+deadline, which the row keeps on a way back, so one move stores one word whichever account its
+resume goes to.
 The copy leaves the memory: Claude Code keeps a working directory's agent memory once per
 account, in `<config>/projects/<cwd>/memory/`, and a move would leave it behind. So the memory
 lives once per checkout or worktree in the home, `<home>/memory/<cwd as Claude Code names
@@ -1611,8 +1617,10 @@ Each failure settles on one account:
 - a stop whose process outlives its deadline: the row stays `stopping` for `Recoveries`, and
   the move goes on once it is free, whatever the deadline;
 - the copy or the resume refused on the other account, `usable:` refusing it at the resume
-  included (the app's flag, `{:app, reason}`): the act `failed`, and the session is resumed on
-  its own account, where its transcript is, once `usable:` takes that one too;
+  included (the app's flag, `{:app, reason}`), or answering unknown until the resume's deadline
+  (taken as a refusal, `{:unknown_past_deadline, reason}`, F-211): the act `failed`, and the
+  session is resumed on its own account, where its transcript is, once `usable:` takes that one
+  too, an unknown of it past the same deadline a refusal as well;
 - that resume refused too: no process of it runs; its row says why, and the fault ledger has an
   act `move` `failed`, reason `stranded`, for a person;
 - an agent at a usage limit (F-191, "Usage limits"): its copy or resume refused leaves its
@@ -2717,6 +2725,11 @@ worktree on its branch whose setup finished).
      down (`Stranded`); a limited session's stays gone (`Back`). `NoResumeOnRefused` covers a
      move's resume too, by the flag (a move's windows are read at its pick);
      `Break_Move_PickOnly` reads the flag at the pick alone and fails it.
+   - The spec settles (F-211, `Unsure`, `Move_Unsure`): the check a move's resume reads may
+     answer unknown at any time, and never answer again; the resume's deadline passes
+     (`ResumeWaitEnds`) and an unknown is then taken as a refusal (`MoveBack`, `Stranded`).
+     `ResumeEnds` is liveness: a move's resume ends, moved, back or left down;
+     `Break_Move_NoResumeWait` has no deadline and fails it.
 3. **`Delegate.tla`**: a main session, its delegates and restarts of the framework.
    - Invariants: each report is delivered once, and only to a running process of the main
      session whose turn has ended; a delegate ends only after its report is delivered; a report

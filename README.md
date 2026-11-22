@@ -342,7 +342,10 @@ Built, each from a checked model in `model/tla/`:
   agents refuses the keys only an agent's part reads;
 - a move's resume reads the app's flag again (F-210, against `Move.tla`'s `MoveBack` and
   `Stranded`): a target flagged during the drain sends the move back to its own account, or
-  leaves the row down when that one is flagged too.
+  leaves the row down when that one is flagged too;
+- a move's resume has a deadline (F-211, against `Move.tla`'s `ResumeEnds`): a flag check that
+  stays unknown is asked again until `resume_wait` (5 min), then taken as a refusal, so every
+  move's resume ends moved, back or left down.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

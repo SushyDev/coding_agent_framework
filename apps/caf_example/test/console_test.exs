@@ -292,7 +292,11 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
     see.(fn -> :ok end, ~s|run_delegate unit/two: ok: %{|)
     assert out.() =~ ~s|delegate: "app-unit-two"|
 
-    see.(fn -> Console.leases(caf, true) end, ~r/lease \d+: builder for app on one, seat 1: /)
+    see.(
+      fn -> Console.leases(caf, true) end,
+      ~r/lease \d+: builder for app asked on one, seat 1: /
+    )
+
     see.(fn -> Console.faults(caf) end, "no faults")
 
     # F-189's new-1 and new-6: the inbox, the symptoms, the acts, usage and a delegate's groups.
