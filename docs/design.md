@@ -724,7 +724,7 @@ by label, a default, a deadline, its owner and its status (`open`, `answering`, 
 | `startup` | `Sessions`, from a dialog read on the pane: trust, imports, onboarding; and any numbered menu no rule names on a running interactive session's screen (F-198), its options and `esc`, with no default and no deadline | `Sessions`' checked press; a menu's read back, the marker on the label before Enter |
 | `plan` | `Sessions`, from a held call of Claude Code's plan exit | `Intake`'s hold |
 | `elicitation` | `Sessions`, from an MCP server's request for input, held by its hook | `Intake`'s hold |
-| `limit` | the `Scheduler`, for a start refused at an account's usage limit: wait (its default) or move; `Sessions`, with no deadline, for a `limited` agent past its bound of go-ons, a menu still shown after a press whose outcome is unknown, or a wait still shown past its reset ("Usage limits"); for a main session limited past `move_after` with another account that has room, offering "move to <account>" beside "wait" (F-181) | `Team.operate/4`: a move, or nothing; `Sessions`: go on now (the press cleared, the bound started again), move (a main's, only by this answer), or leave it |
+| `limit` | the start's owner (`Delegates`, `Mains`), for a start or resume every usable account refuses at a usage limit: its row `waiting` for the soonest reset, `wait` (its default at its deadline, the reset plus a margin) or `leave` (F-196); `Sessions`, with no deadline, for a `limited` agent past its bound of go-ons, a menu still shown after a press whose outcome is unknown, or a wait still shown past its reset ("Usage limits"); for a main session limited past `move_after` with another account that has room, offering "move to <account>" beside "wait" (F-181) | the owner's row: it waits and picks its account again at its deadline, or is refused `left`; `Sessions`: go on now (the press cleared, the bound started again), move (a main's, only by this answer), or leave it |
 | `usage_credits` | `Sessions`, at Claude Code's limit menu, only where the account's record allows credits | `Sessions`' checked press of the label answered: "stop and wait" (its default at the deadline) or the credits |
 | `login` | `Logins`, from an account whose `claude auth status`, read before a start or a resume, says it is not logged in (F-181) | a person, at `bin/caf-login`, then `check`: the login is checked again, and the prompt closes once a check finds it logged in |
 | `exit` | `Sessions`, from Claude Code's own exit prompt read on the pane | `Sessions`' checked press |
@@ -743,6 +743,16 @@ owner. At its deadline a prompt whose kind declares a safe default (a `limit`'s 
 recorded as the framework's; any other is `expired` and stays shown, since Claude Code no
 longer reads the hold. A restart keeps every `open` row and settles an `answering` one by its
 owner's evidence, as a dialog's press is settled today. Every write cues `prompts`.
+
+**When an answered prompt leaves** (F-196, from F-192's new-1 and F-193's new-2): once its
+owner's row no longer waits on the answer, the same read that showed it. A hold leaves once it
+is not `held`, a dialog once its press was sent, an ask once its answer or withdrawal is
+stored, a start's wait once it is answered for this reset (and opens again at a newer limit),
+a login once a check finds it logged in. A `remedy` answered `act` is the healer's to take at
+its next check: it stays, `answering`, while the person's act has no row in `Acts` or that
+row is open, and leaves once the row has ended; its outcome is that row, a fault in the fault
+ledger when it failed, interrupted or was not verified. Any other `remedy` answer leaves at
+once, its act the `Watch`'s own.
 
 Built so far (F-179, B6's first part, `caf_prompts`): `Prompts` keeps no table. A prompt is
 its owner's row read by one function: `Intake`'s hold of a `PermissionRequest` (kind
@@ -764,8 +774,12 @@ check found not logged in, id `login:<account>`, no agent, answered `check` (`Lo
 F-186 added the `limit` and `usage_credits` kinds from the agent row's usage limit, opened by
 its healer (`Limits`, not `Sessions` as the table says: `Sessions` is the row's writer), ids
 `limit:<agent>:<until>` and `usage_credits:<agent>:<until>`, answered through
-`Sessions.answer_limit/6`; the `Scheduler`'s `limit` prompt for a start refused at a limit is
-not built (F-193's new-1 says why). F-190 added a headless delegate's permission request: `Prompts` reads each `Stream`
+`Sessions.answer_limit/6`. F-196 added a start's `limit` prompt: the row of a start or resume
+that every usable account refused at a usage limit, `Delegates`' `waiting` row (id
+`limit:start:delegate:<row>`, its parent the start's) or `Mains`' (`limit:start:main:<row>`),
+open until answered for this reset, its deadline the row's, answered `wait` or `leave` through
+the owner's `answer_wait/4`; and a `remedy` answered `act` kept `answering` until its act's row
+ends, read from `Acts`' file (`acts_db:`). F-190 added a headless delegate's permission request: `Prompts` reads each `Stream`
 fold's held `can_use_tool` request as kind `permission`, id
 `permission:stream:<session>:<request id>`, no deadline (Claude Code waits on the stream),
 answered once through `Stream.answer/5` (the fold marks it answering before its line goes, so
@@ -2798,6 +2812,15 @@ and `Break_Limit_MoveTwice`, in `Limit_Move`, `Limit_MoveMain`, `Limit_MoveHeadl
 space. F-187 adds `Delegates`' report of a headless delegate (`Report`): a result at a limit is
 never one (`LimitNotReport`, `Break_Limit_LimitReport`, in `Limit_Headless` and
 `Limit_MoveHeadless`); and `Read` keeps a `prompt` as it keeps an `unknown`, as the code does.
+F-196 adds a start of new work (constant `Starts`): its owner picks its account on the
+record, another with room taking it; refused at a limit, its row waits for the soonest reset
+as a `limit` prompt, answered `wait` or `leave` or its default taken at the reset, then picked
+again under the same row, waiting again for a newer limit; a restart keeps the row. Invariant
+`StartPromptIsRow`, liveness `StartWaitEnds` (a waiting start is granted, here or on another
+account, or left), and `NoStartOnLimited` still holds, in `Limit_Start` and
+`Limit_StartMove`; `Break_Limit_NoRepick` (the start goes at its reset on the pick it was
+refused by, so a newer limit read meanwhile does not hold it) fails `NoStartOnLimited`. Every
+earlier configuration sets `Starts = FALSE` and keeps its state space.
 F-191 models the move's own steps for a limited agent in `Move.tla` (`Limited`): a turn ended
 at the limit (`HitLimit`, its rows given the limit's result), held by `Mailbox` as a stopping
 row is and read as ended by the move's stop alone (`NoRowIntoLimit`,
@@ -2971,8 +2994,9 @@ where the account allows them; the `limit` prompt's answer (go on now, move to a
 or leave it), opened on the agent row by the healer (`Limits`) with no deadline, so it
 waits for a person; and anything a
 person does at the viewer first (an Esc, a menu's option, a prompt typed), which the next screen
-read takes as it finds it and which withdraws the prompt it answered. The `limit` prompt the
-`Scheduler` opens for a start refused at a limit keeps its deadline and its default, the wait.
+read takes as it finds it and which withdraws the prompt it answered. The `limit` prompt of a
+start refused at a limit, its owner's row (F-196), keeps its deadline and its default, the
+wait; its answers are `wait` and `leave`.
 
 **The move** (decided by the operator, 21 Nov; `Limit.tla`'s `Away` and `MoveAct`, F-181). A
 limited delegate moves on its own: when its account's reset is more than `move_after` away and
@@ -3108,6 +3132,21 @@ pane is its `pane`), so a person's answered prompt can be read with its act's ro
 a person's `act` took is `by` that person. The runbook's `usage-limit` record takes the session
 file during Claude Code's own wait. Not built: the `Scheduler`'s `limit` prompt for a start
 refused at a limit, and the inbox's reading of a person's act (F-193's new-1 and new-2).
+
+Built in F-196 (F-193's new-1 and new-2, decided: the prompt is the start's owner's row,
+answered `wait` or `leave`; `Limit.tla`'s StartRefusedAtLimit, AnswerWait, AnswerLeave,
+WaitDefault and StartAtReset). New work picks its account inside its owner; when every
+usable account is limited, `Usage.pick/4` refuses `{:allowance, until}`, the soonest reset,
+before anything is written. Now the owner writes its row first: a delegate's start as
+`Delegates`' row `waiting` (the start's request kept on it, its parent owed the outcome as a
+queued start's is, F-170), a main's start or resume as `Mains`' start row `waiting` (its
+sender owed the outcome). The start answers at once with `waiting: until`, whatever its
+`wait:`. At the reset plus the owner's margin (`limit_margin:`, 2 min) the owner picks again
+and asks for its lease under the row's own request id; a newer limit makes it wait for that
+reset, and its prompt opens again. A restart keeps the row and sets its timer from it. The
+pick reads the owner's clock, as the row's deadline does. While it waits, a second start of
+the name is refused `{:waiting, name}`, and the row holds its place in its parent's cap. The
+inbox's part is in "Prompts".
 
 **Measured** (F-181, by hand on 2.1.322, against a local endpoint at `ANTHROPIC_BASE_URL` that
 answers 429 with the unified rate-limit headers the pinned binary reads, a dummy subscriber's

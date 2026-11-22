@@ -865,30 +865,6 @@ defmodule CodingAgentFramework do
             acts: pid.(:acts),
             notify: notify}
          end},
-        # After every owner of a prompt; the app finds it in the instance's `Registry`.
-        {:prompts,
-         fn pid ->
-           {
-             Prompts,
-             # A headless delegate's permission request is its fold's (F-189's new-2).
-             # Each answer is a row there (F-194).
-             host: host,
-             intake: pid.(:intake),
-             intake_db: db,
-             sessions: pid.(:sessions),
-             sessions_db: db,
-             mailbox: pid.(:mailbox),
-             watch: pid.(:watch),
-             watch_db: db,
-             logins: pid.(:logins),
-             logins_db: db,
-             stream: pid.(:stream),
-             stream_db: db,
-             acts: pid.(:acts),
-             notify: notify,
-             name: {:via, Elixir.Registry, {names(c.instance), :prompts}}
-           }
-         end},
         {:delegates,
          fn pid ->
            {Delegates,
@@ -968,6 +944,36 @@ defmodule CodingAgentFramework do
              intake_db: db,
              interval: every,
              notify: notify
+           }
+         end},
+        # After every owner of a prompt, `Delegates` and `Mains` among them (a start that waits
+        # at a usage limit, F-196); the app finds it in the instance's `Registry`.
+        {:prompts,
+         fn pid ->
+           {
+             Prompts,
+             # A headless delegate's permission request is its fold's (F-189's new-2).
+             # Each answer is a row there (F-194), and a remedy answered `act` is read there.
+             host: host,
+             intake: pid.(:intake),
+             intake_db: db,
+             sessions: pid.(:sessions),
+             sessions_db: db,
+             mailbox: pid.(:mailbox),
+             watch: pid.(:watch),
+             watch_db: db,
+             logins: pid.(:logins),
+             logins_db: db,
+             stream: pid.(:stream),
+             stream_db: db,
+             delegates: pid.(:delegates),
+             delegates_db: db,
+             mains: pid.(:mains),
+             mains_db: db,
+             acts: pid.(:acts),
+             acts_db: db,
+             notify: notify,
+             name: {:via, Elixir.Registry, {names(c.instance), :prompts}}
            }
          end},
         # After `Mains`, whose resume it makes: the healer of an absent main (F-183). A restart

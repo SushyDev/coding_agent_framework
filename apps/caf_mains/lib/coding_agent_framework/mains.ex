@@ -66,6 +66,15 @@ defmodule CodingAgentFramework.Mains do
   copy), an act `copy` in `Acts`, then resumes there under the same session id. A copy refused
   leaves the row on its own account, the start refused `{:copy, reason}`.
 
+  **At a usage limit** (F-196; `Limit.tla`'s StartRefusedAtLimit): a start or a resume that
+  finds every usable account limited writes its row `waiting` for the soonest reset, its
+  request kept on it, and answers at once `{:ok, %{id, name, account: nil, session_id: nil,
+  waiting: until}}`. The row is a `limit` prompt (`answer_wait/4`). At the reset plus
+  `limit_margin:` (default 120 000 ms) it picks its account again and asks for its lease under
+  its own row (StartAtReset); a newer limit makes it wait for that reset. A start's sender is
+  told its outcome once by a notice; a resume's has its prompt and its act. While it waits,
+  a start, resume or end of the name is refused `{:waiting, name}`.
+
   After each write `notify` gets `%{topic: "mains:<host>", ids: [id]}`.
   """
 
@@ -84,6 +93,8 @@ defmodule CodingAgentFramework.Mains do
   @git 10_000
   @fetch 120_000
   @framework "framework"
+  # After a usage limit's reset, before a waiting start picks again (F-196), as the healer's.
+  @margin 120_000
 
   @type outcome(ok) :: {:ok, ok} | {:refused, term} | {:unknown, term}
 
@@ -150,7 +161,9 @@ defmodule CodingAgentFramework.Mains do
   `{:checkout, state}` while the checkout is not made, `{:lease, why}`, or `Sessions`' refusal
   (a brief longer than a launch's argument carries goes as a pointer to its file,
   `Mailbox.launch/4`, F-155); or `{:unknown, reason}` while its row
-  waits, as on a startup dialog (`{:dialog, kind}`).
+  waits, as on a startup dialog (`{:dialog, kind}`). Every usable account limited, it answers
+  `{:ok, %{id, name, account: nil, session_id: nil, waiting: until}}` (the module doc's "At a
+  usage limit").
   """
   @spec start_main(GenServer.server(), String.t(), String.t(), String.t() | nil, keyword) ::
           outcome(map)
@@ -168,7 +181,8 @@ defmodule CodingAgentFramework.Mains do
   that account is refused (`{:not_prepared, account}`, `{:login, :logged_out}`, `{:allowance,
   retry_at}`), the conversation is first copied to the account `Usage.pick/4` finds among the
   others not refused (the most room), and resumed there; with none, the resume is refused
-  `{:account, account, reason}`, and a copy refused `{:copy, reason}`, the row left on its
+  `{:account, account, reason}`, or waits as a start does when every usable account is
+  limited (`waiting: until`), and a copy refused `{:copy, reason}`, the row left on its
   account. Options: `model:` (else the model its row keeps), `state:` (the operator's fix,
   F-144: the state its claim in `Acts` holds, `fix_state/3`'s; the resume is refused `{:moved,
   state}` when the row's is another now) and `timeout:`. Answers as `start_main/5` does;
@@ -183,6 +197,20 @@ defmodule CodingAgentFramework.Mains do
     timeout = Keyword.get(opts, :timeout, 300_000)
     call(mains, {:resume_main, name, opts[:model], Keyword.get(opts, :state, :any)}, timeout)
   end
+
+  @doc """
+  Answers the `limit` prompt of start row `id`, a start or resume that waits at a usage limit
+  (F-196; `Limit.tla`'s AnswerWait and AnswerLeave), as `who`, once per reset: `"wait"` keeps
+  it waiting for its reset, as its default at its deadline would, and the prompt leaves the
+  inbox; `"leave"` refuses the row with reason `left`, its brief settled, and its sender told.
+  Answers `{:ok, :waiting}` or `{:ok, :left}`; `{:refused, :settled}` for a row no longer
+  waiting or answered for this reset; `{:refused, :no_start}`; `{:refused, {:bad, :choice}}`.
+
+      Mains.answer_wait(mains, 3, "wait", "sam")
+      #=> {:ok, :waiting}
+  """
+  @spec answer_wait(GenServer.server(), integer, String.t(), String.t()) :: outcome(atom)
+  def answer_wait(mains, id, choice, who), do: call(mains, {:answer_wait, id, choice, who}, @step)
 
   @doc """
   The state of main session `name` a fix claims in `Acts` (F-143's new-1): its agent row's
@@ -322,6 +350,7 @@ defmodule CodingAgentFramework.Mains do
           clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
           acts: Keyword.get(opts, :acts),
           allowance: Keyword.get(opts, :allowance, fn _account -> :room end),
+          margin: Keyword.get(opts, :limit_margin, @margin),
           usable: Keyword.get(opts, :usable, &Accounts.ready(s.accounts, &1)),
           # Per project: the task under way, whether a pull is owed, and the last reason a
           # rename of its old checkout was held back for (recorded once in `Acts`).
@@ -426,6 +455,7 @@ defmodule CodingAgentFramework.Mains do
       end)
 
     for row <- Starts.starting_rows(s.starts, s.host), do: wake(s, row)
+    for row <- Starts.with_status(s.starts, s.host, "waiting"), do: wake(s, row)
     Process.send_after(self(), :read, s.interval)
     {:noreply, settle(s)}
   end
@@ -459,15 +489,20 @@ defmodule CodingAgentFramework.Mains do
          {:ok, p} <- Map.fetch(s.projects, project) |> known(project),
          :ok <- made(s, project),
          :ok <- free(s, project, name),
+         :ok <- not_waiting(s, name),
          :ok <- brief_ok(brief),
          :ok <- model_ok(model),
          true <- meta == nil or is_map(meta) or {:refused, {:bad, :meta}},
-         {:ok, account} <- pick(s),
-         {:ok, _} <- Sessions.declare(s.sessions, name, project) do
+         picked = pick(s),
+         :ok <- picked_or_limited(picked) do
       uuid = if brief, do: Stream.uuid()
-      row = starting(s, project, name, account, uuid)
-      start = %{p: p, account: account, brief: brief, from: from_name || s.operator}
-      leased(s, row, Map.merge(start, %{model: model, meta: meta, resume: nil}), from)
+      start = %{p: p, brief: brief, from: from_name || s.operator, model: model, meta: meta}
+      start = Map.put(start, :resume, nil)
+
+      case picked do
+        {:ok, account} -> begin_start(s, {project, name, uuid}, start, account, from)
+        {:refused, {:allowance, until}} -> wait(s, {project, name, uuid}, start, until)
+      end
     else
       refused -> {:reply, refused, s}
     end
@@ -479,17 +514,45 @@ defmodule CodingAgentFramework.Mains do
     agent = Agents.get(s.agents, name)
 
     with :ok <- resumable(s, agent),
+         :ok <- not_waiting(s, name),
          :ok <- claimed(s, agent, claimed),
          {:ok, p} <- Map.fetch(s.projects, agent.project) |> known(agent.project),
          :ok <- made(s, agent.project),
-         :ok <- model_ok(model),
-         {:ok, account, copy} <- resume_account(s, agent) do
-      row = starting(s, agent.project, name, account, nil, agent.session_id)
-      start = %{p: p, account: account, brief: nil, from: nil, model: model, kept: agent.model}
-      leased(s, row, Map.merge(start, %{resume: agent.session_id, copy: copy}), from)
+         :ok <- model_ok(model) do
+      start = %{p: p, brief: nil, from: nil, model: model, kept: agent.model}
+      start = Map.put(start, :resume, agent.session_id)
+
+      case resume_account(s, agent) do
+        {:ok, account, copy} ->
+          row = starting(s, agent.project, name, account, nil, agent.session_id)
+          leased(s, row, Map.merge(start, %{account: account, copy: copy}), from)
+
+        # Limit.tla's StartRefusedAtLimit (F-196): no usable account has room.
+        {:refused, {:allowance, until}} ->
+          wait(s, {agent.project, name, nil}, start, until)
+
+        refused ->
+          {:reply, refused, s}
+      end
     else
       refused -> {:reply, refused, s}
     end
+  end
+
+  def handle_call({:answer_wait, id, choice, who}, _from, s) do
+    reply =
+      case Starts.get(s.starts, id) do
+        %{host: host, status: "waiting"} = row when host == s.host ->
+          wait_answer(s, row, choice, who)
+
+        %{host: host} when host == s.host ->
+          {:refused, :settled}
+
+        _ ->
+          {:refused, :no_start}
+      end
+
+    {:reply, reply, s}
   end
 
   def handle_call({:fix_state, name}, _from, s) do
@@ -515,12 +578,20 @@ defmodule CodingAgentFramework.Mains do
 
   # A start of the name under way would run a second process; Sessions refuses the rest.
   def handle_call({:end_main, name, force}, from, s) do
-    if Enum.any?(Starts.starting_rows(s.starts, s.host), &(&1.name == name)) do
-      {:reply, {:refused, {:starting, name}}, s}
-    else
-      sessions = s.sessions
-      task = Task.async(fn -> Sessions.end_main(sessions, name, timeout: @call, force: force) end)
-      {:noreply, put_in(s.ends[task.ref], from)}
+    cond do
+      Enum.any?(Starts.starting_rows(s.starts, s.host), &(&1.name == name)) ->
+        {:reply, {:refused, {:starting, name}}, s}
+
+      not_waiting(s, name) != :ok ->
+        {:reply, not_waiting(s, name), s}
+
+      true ->
+        sessions = s.sessions
+
+        task =
+          Task.async(fn -> Sessions.end_main(sessions, name, timeout: @call, force: force) end)
+
+        {:noreply, put_in(s.ends[task.ref], from)}
     end
   end
 
@@ -563,6 +634,153 @@ defmodule CodingAgentFramework.Mains do
     row = Starts.starting(s.starts, Map.merge(start, %{brief_uuid: uuid, deadline: deadline(s)}))
     announce(s, row.id)
     row
+  end
+
+  # A start with its account: its agent row declared, then its own row, the lease's holder.
+  defp begin_start(s, {project, name, uuid}, start, account, from) do
+    case Sessions.declare(s.sessions, name, project) do
+      {:ok, _} ->
+        row = starting(s, project, name, account, uuid)
+        leased(s, row, Map.put(start, :account, account), from)
+
+      refused ->
+        {:reply, refused, s}
+    end
+  end
+
+  defp picked_or_limited({:ok, _}), do: :ok
+  defp picked_or_limited({:refused, {:allowance, _}}), do: :ok
+  defp picked_or_limited(other), do: other
+
+  # One start or resume of a name at a time: one that waits at a limit holds it (F-196).
+  defp not_waiting(s, name) do
+    if Enum.any?(Starts.with_status(s.starts, s.host, "waiting"), &(&1.name == name)),
+      do: {:refused, {:waiting, name}},
+      else: :ok
+  end
+
+  # Limit.tla's StartRefusedAtLimit (F-196): every usable account is limited, so the start's
+  # row waits for the soonest reset, its request kept on it and its sender owed the outcome;
+  # the caller is answered at once.
+  defp wait(s, {project, name, uuid}, start, until) do
+    kept = Map.put(Map.delete(start, :p), :project, project)
+    fields = %{host: s.host, project: project, name: name, brief_uuid: uuid, resume: start.resume}
+    fields = Map.merge(fields, %{until: until, deadline: until + s.margin, start: kept})
+    row = Starts.waiting(s.starts, Map.put(fields, :tell, start.from))
+    announce(s, row.id)
+    wake(s, row)
+    answer = %{name: name, account: nil, session_id: nil, waiting: until}
+    {:reply, {:ok, Map.put(answer, :id, row.id)}, s}
+  end
+
+  defp wait_answer(_s, %{waited: by}, _choice, _who) when is_binary(by), do: {:refused, :settled}
+
+  defp wait_answer(s, row, "wait", who) do
+    write(s, row, waited: who)
+    {:ok, :waiting}
+  end
+
+  defp wait_answer(s, row, "leave", who) do
+    write(s, row, status: "refused", reason: "left", waited: who)
+    drop_brief(s, row)
+    tell_starts(s)
+    {:ok, :left}
+  end
+
+  defp wait_answer(_s, _row, _choice, _who), do: {:refused, {:bad, :choice}}
+
+  # Limit.tla's StartAtReset (F-196): a waiting row, at its deadline (the reset plus the margin),
+  # whether a person answered `wait` or not, picks its account again and asks for its lease
+  # under its own request id; a newer limit makes it wait for that reset. Any other refusal
+  # refuses the row; a read that failed decides nothing.
+  defp waits(s) do
+    now = s.clock.()
+
+    Starts.with_status(s.starts, s.host, "waiting")
+    |> Enum.filter(&(&1.deadline <= now))
+    |> Enum.reduce(s, &repick(&2, &1))
+  end
+
+  defp repick(s, row) do
+    start = Starts.request(row)
+
+    with {:ok, p} <- Map.fetch(s.projects, start.project) |> known(start.project),
+         start = Map.put(start, :p, p),
+         {:ok, account, copy} <- again_account(s, row, start) do
+      # The call's time as `Starts.starting/2` stamps it, which the agent row's start is read by.
+      now = System.os_time(:millisecond)
+      fields = [status: "starting", account: account.name, called_at: now]
+      write(s, row, fields ++ [deadline: deadline(s), waited: nil])
+      start = Map.merge(start, %{account: account, copy: copy})
+
+      case leased(s, Starts.get(s.starts, row.id), start, nil) do
+        {:noreply, s} -> s
+        {:reply, _reply, s} -> s
+      end
+    else
+      {:refused, {:allowance, until}} ->
+        write(s, row, until: until, deadline: until + s.margin, waited: nil)
+        wake(s, Starts.get(s.starts, row.id))
+        s
+
+      {:refused, {:usage, :unread}} ->
+        s
+
+      {:refused, why} ->
+        write(s, row, status: "refused", reason: why)
+        drop_brief(s, row)
+        s
+
+      {:unknown, _} ->
+        s
+    end
+  end
+
+  # A start picks again and declares its agent row; a resume takes its row's account first, as
+  # `resume_main/3` does, the agent row read now.
+  defp again_account(s, row, %{resume: nil}) do
+    with {:ok, account} <- pick(s),
+         {:ok, _} <- Sessions.declare(s.sessions, row.name, row.project),
+         do: {:ok, account, nil}
+  end
+
+  defp again_account(s, row, start) do
+    agent = Agents.get(s.agents, row.name)
+
+    with :ok <- resumable(s, agent),
+         true <- agent.session_id == start.resume or {:refused, {:moved, agent.session_id}},
+         do: resume_account(s, agent)
+  end
+
+  # Delegate.tla's StartTold, for a main start that waited at a limit: once its row leaves
+  # `waiting` and its call, its sender is told by a notice under the row's key, which `Mailbox`
+  # takes once; the mark is cleared after.
+  defp tell_starts(s) do
+    busy = MapSet.new(Map.values(s.calls) ++ Map.values(s.waiting), & &1.id)
+
+    for row <- Starts.owed(s.starts, s.host),
+        row.status not in ["waiting", "starting"],
+        not MapSet.member?(busy, row.id),
+        match?({:ok, _}, tell_start(s, row)),
+        do: write(s, row, tell: nil)
+
+    s
+  end
+
+  defp tell_start(s, row) do
+    at = row.until |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
+    how = if row.resume, do: "resume", else: "start"
+
+    head =
+      "The #{how} of main session #{row.name}, which waited for a usage limit's reset at #{at}"
+
+    text =
+      if row.status == "running",
+        do: head <> ", has started on #{row.account}.",
+        else: head <> ", did not start: #{row.reason}."
+
+    key = "start:main:#{s.host}:#{row.id}:#{row.created_at}"
+    Mailbox.notify(s.mailbox, row.tell, text, key: key, kind: :notice)
   end
 
   # Schedule.tla: the row is the lease's holder, written before the lease is asked for.
@@ -629,7 +847,8 @@ defmodule CodingAgentFramework.Mains do
       Map.has_key?(s.calls, ref) ->
         {%{id: id, from: from}, calls} = Map.pop(s.calls, ref)
         s = %{s | calls: calls}
-        {:noreply, reply_to(from, answered(s, Starts.get(s.starts, id), answer), s)}
+        s = reply_to(from, answered(s, Starts.get(s.starts, id), answer), s)
+        {:noreply, tell_starts(s)}
 
       Map.has_key?(s.ends, ref) ->
         {from, ends} = Map.pop(s.ends, ref)
@@ -1008,13 +1227,18 @@ defmodule CodingAgentFramework.Mains do
       {:ok, account} ->
         {:ok, account, nil}
 
+      # Every usable account limited is a wait for the soonest reset (F-196), its own among them.
       {:refused, why} ->
         case for(n <- s.accounts.names, n != own, match?({:ok, _}, usable(s, n)), do: n) do
           [] ->
-            {:refused, {:account, own, why}}
+            no_other(own, why)
 
           others ->
-            with {:ok, account} <- pick(s, others), do: {:ok, account, %{from: own, why: why}}
+            case pick(s, others) do
+              {:ok, account} -> {:ok, account, %{from: own, why: why}}
+              {:refused, {:allowance, at}} -> {:refused, {:allowance, soonest(at, why)}}
+              refused -> refused
+            end
         end
 
       # A login check that could not tell is no refusal: the conversation stays where it is,
@@ -1023,6 +1247,12 @@ defmodule CodingAgentFramework.Mains do
         {:unknown, {:account, own, why}}
     end
   end
+
+  defp no_other(_own, {:allowance, _} = why), do: {:refused, why}
+  defp no_other(own, why), do: {:refused, {:account, own, why}}
+
+  defp soonest(at, {:allowance, own_at}), do: min(at, own_at)
+  defp soonest(at, _why), do: at
 
   # An account a launch may run on now: prepared, logged in (`claude auth status`, by
   # `usable:`), and with room in both windows and no limit, as the Scheduler's gate reads them.
@@ -1042,7 +1272,7 @@ defmodule CodingAgentFramework.Mains do
   defp pick(s, among \\ nil) do
     with {:ok, %{readings: readings}} <- Usage.readings(s.usage, timeout: @step),
          {:ok, name} <-
-           Usage.pick(readings, among || s.accounts.names, System.os_time(:second),
+           Usage.pick(readings, among || s.accounts.names, div(s.clock.(), 1000),
              usable: &launchable(s, &1)
            ) do
       Accounts.ready(s.accounts, name)
@@ -1209,6 +1439,7 @@ defmodule CodingAgentFramework.Mains do
   # A start with no call under way here, read again: by the agent row of its call once that row
   # is settled; with none by its deadline, the call never reached Sessions.
   defp settle(s) do
+    s = waits(s)
     busy = MapSet.new(Map.values(s.calls) ++ Map.values(s.waiting), & &1.id)
 
     for row <- Starts.starting_rows(s.starts, s.host), not MapSet.member?(busy, row.id) do
@@ -1232,7 +1463,7 @@ defmodule CodingAgentFramework.Mains do
       end
     end
 
-    s
+    tell_starts(s)
   end
 
   defp deadline(s), do: s.clock.() + @call + @slack

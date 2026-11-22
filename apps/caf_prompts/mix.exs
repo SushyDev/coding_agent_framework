@@ -24,10 +24,14 @@ defmodule CafPrompts.MixProject do
       {:caf_sessions, in_umbrella: true},
       {:caf_watch, in_umbrella: true},
       {:caf_stream, in_umbrella: true},
+      {:caf_delegates, in_umbrella: true},
+      {:caf_mains, in_umbrella: true},
       {:caf_accounts, in_umbrella: true, only: :test},
       {:caf_grants, in_umbrella: true, only: :test},
       {:caf_inlet, in_umbrella: true, only: :test},
       {:caf_tmux, in_umbrella: true, only: :test},
+      {:caf_transcripts, in_umbrella: true, only: :test},
+      {:caf_usage, in_umbrella: true, only: :test},
       {:caf_test, in_umbrella: true, only: :test}
     ]
   end
