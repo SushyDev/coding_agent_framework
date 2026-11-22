@@ -93,13 +93,25 @@ defmodule CodingAgentFramework.Inlet do
   `{:enter, reason}`, or `{:still_shown, reading}` (Enter went and the dialog stayed). An
   unknown press is never made again by the caller: its keys may still land.
 
+  A menu no rule names (`Screen`'s kind `:menu`, F-198, `model/tla/Menu.tla`) is named
+  `{:menu, title, options}`: the pane must show a menu with that title and those options, and
+  the option is read back, the marker on it, before Enter. `label` `:esc` presses Escape in
+  place of a choice, checked the same way: the pane shows that dialog, Escape goes as its own
+  command, and the dialog leaves; unknown `{:escape, reason}` or `{:still_shown, reading}`.
+
       iex> {:ok, fake} = CodingAgentFramework.Tmux.Fake.start_link(key: {"laptop", "fake"})
       iex> server = CodingAgentFramework.Tmux.Fake.new(fake, {"laptop", "fake"})
       iex> {:ok, inlet} = CodingAgentFramework.Inlet.start_link(tmux: server)
       iex> CodingAgentFramework.Inlet.choose(inlet, "alpha", :trust, "Yes", release: nil)
       {:refused, :no_release}
   """
-  @spec choose(GenServer.server(), String.t(), atom, String.t(), keyword) :: outcome
+  @spec choose(
+          GenServer.server(),
+          String.t(),
+          atom | {:menu, String.t(), [String.t()]},
+          String.t() | :esc,
+          keyword
+        ) :: outcome
   def choose(inlet, session, kind, label, opts) do
     request = {:choose, session, kind, label, Keyword.fetch!(opts, :release)}
     call(inlet, request, Keyword.get(opts, :see, @see), opts)
@@ -214,6 +226,24 @@ defmodule CodingAgentFramework.Inlet do
     end
   end
 
+  # Escape on the dialog named: checked shown, then left.
+  defp act({:choose, session, kind, :esc, release}, see, tmux) do
+    with :ok <- if(is_binary(release), do: :ok, else: {:refused, :no_release}),
+         {:ok, pane} <- pane(tmux, session),
+         {:ok, _screen} <- dialog(tmux, pane, session, release, kind) do
+      case Tmux.write(tmux, pane, session, {:keys, ["Escape"]}) do
+        {:ok, :sent} ->
+          left(tmux, pane, session, release, kind, System.monotonic_time(:millisecond) + see)
+
+        {:refused, _} = refused ->
+          refused
+
+        {:unknown, reason} ->
+          {:unknown, {:escape, reason}}
+      end
+    end
+  end
+
   defp act({:choose, session, kind, label, release}, see, tmux) do
     with :ok <- if(is_binary(release), do: :ok, else: {:refused, :no_release}),
          {:ok, pane} <- pane(tmux, session),
@@ -241,8 +271,7 @@ defmodule CodingAgentFramework.Inlet do
 
     gone? =
       case reading do
-        {:ok, %{state: :dialog, kind: ^kind}} -> false
-        {:ok, _} -> true
+        {:ok, screen} -> not shows?(screen, kind)
         {:unknown, {:unrecognized, _}} -> true
         _ -> false
       end
@@ -297,13 +326,22 @@ defmodule CodingAgentFramework.Inlet do
   defp dialog(tmux, pane, session, release, kind) do
     with {:ok, %{text: screen}} <- Tmux.capture(tmux, pane, session) do
       case Screen.read(screen, release) do
-        {:ok, %{state: :dialog, kind: ^kind} = dialog} -> {:ok, dialog}
-        {:ok, reading} -> {:refused, {:screen, reading}}
+        {:ok, reading} -> if shows?(reading, kind), do: {:ok, reading}, else: refused(reading)
         {:unknown, {:unrecognized, _}} -> {:refused, {:screen, :unrecognized}}
         {:refused, _} = refused -> refused
       end
     end
   end
+
+  # Whether a reading is the dialog named: a kind a rule names, or a menu by its title and
+  # options (`{:menu, title, options}`).
+  defp shows?(%{state: :dialog, kind: :menu} = s, {:menu, title, options}),
+    do: s.title == title and s.options == options
+
+  defp shows?(%{state: :dialog, kind: kind}, kind) when is_atom(kind), do: true
+  defp shows?(_screen, _kind), do: false
+
+  defp refused(reading), do: {:refused, {:screen, reading}}
 
   defp move(_tmux, _pane, _session, []), do: {:ok, :sent}
 
@@ -321,7 +359,7 @@ defmodule CodingAgentFramework.Inlet do
            do: Screen.read(screen, release)
 
     cond do
-      match?({:ok, %{state: :dialog, kind: ^kind, selected: ^label}}, reading) ->
+      match?({:ok, %{selected: ^label}}, reading) and shows?(elem(reading, 1), kind) ->
         :selected
 
       System.monotonic_time(:millisecond) >= deadline ->

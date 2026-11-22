@@ -11,7 +11,7 @@ defmodule CodingAgentFramework.PromptsTest do
   import CodingAgentFramework.TestHost
 
   alias CodingAgentFramework.{Accounts, Acts, Grants, Inlet, Intake, Logins, Mailbox, Prompts}
-  alias CodingAgentFramework.{ScreenStandIn, Sessions}
+  alias CodingAgentFramework.{ScreenStandIn, Sessions, Tmux}
   alias CodingAgentFramework.{SessionsSetup, Stream, Watch}
 
   @trust "Yes, I trust this folder"
@@ -415,6 +415,67 @@ defmodule CodingAgentFramework.PromptsTest do
 
     assert {:refused, :no_prompt} =
              Prompts.answer_startup(ctx.prompts, "nobody", "trust", @trust, "sam")
+  end
+
+  # F-198, Menu.tla: a numbered menu no rule names, on a running main session's screen, is a
+  # dialog prompt with its options and esc, no default and no deadline, pressed once by a
+  # person's label with the marker read back, and gone once the screen no longer shows it.
+  test "a menu on a running screen is a dialog prompt, answered once by its label", ctx do
+    [yes, not_now, _] = ScreenStandIn.menu()
+    id = menu_prompt(ctx)
+
+    assert {:ok, [%{id: ^id, kind: "dialog", status: "open", agent: "alpha"} = p]} =
+             Prompts.read(ctx.prompts)
+
+    assert %{options: [^yes, ^not_now, "Don't show again", "esc"], deadline: nil} = p
+    assert p.text =~ "Teach auto mode about your environment? Auto mode works better"
+
+    assert {:refused, {:bad, :choice}} = Prompts.answer(ctx.prompts, id, "Maybe", "sam")
+    assert {:ok, :sent} = Prompts.answer(ctx.prompts, id, not_now, "sam")
+    assert ScreenStandIn.menu_answer(ctx.dir) == not_now
+    assert {:refused, :settled} = Prompts.answer(ctx.prompts, id, yes, "sam")
+    assert {:ok, []} = prompts_until(ctx, &(&1 == []))
+  end
+
+  test "a menu answered esc is Escape, and one answered at the viewer leaves the inbox", ctx do
+    id = menu_prompt(ctx)
+    assert {:ok, :sent} = Prompts.answer(ctx.prompts, id, "esc", "sam")
+    assert ScreenStandIn.menu_answer(ctx.dir) == "esc"
+    assert {:ok, []} = prompts_until(ctx, &(&1 == []))
+
+    # A second session, whose menu a person answers at its viewer first.
+    claude = ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), menu: true)
+    launch = SessionsSetup.launch(ctx, :at_start) |> Keyword.put(:claude, claude)
+    assert {:ok, _} = Sessions.start(ctx.sessions, "main", ctx.account, launch)
+    {:ok, [%{id: "dialog:main:" <> _ = other}]} = prompts_until(ctx, &(&1 != []))
+    {:ok, panes} = Tmux.list_panes(ctx.server)
+    pane = Enum.find_value(panes, &(&1.tag == "main" && &1.pane))
+    assert {:ok, :sent} = Tmux.write(ctx.server, pane, "main", {:keys, ["Enter"]})
+    assert {:ok, []} = prompts_until(ctx, &(&1 == []))
+    assert {:refused, :settled} = Prompts.answer(ctx.prompts, other, "Yes", "sam")
+  end
+
+  # A main session started on the menu screen: its prompt's id once a read of its pane found it.
+  defp menu_prompt(ctx) do
+    claude = ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), menu: true)
+    launch = SessionsSetup.launch(ctx, :at_start) |> Keyword.put(:claude, claude)
+    assert {:ok, _} = Sessions.start(ctx.sessions, "alpha", ctx.account, launch)
+    {:ok, [%{id: "dialog:alpha:" <> _ = id}]} = prompts_until(ctx, &(&1 != []))
+    assert String.ends_with?(id, ":menu")
+    id
+  end
+
+  # The inbox read at each owner's cue, as `Cues` hands them on, until `done?` holds.
+  defp prompts_until(ctx, done?) do
+    await(fn ->
+      flush_cues()
+      Prompts.cue(ctx.prompts, %{topic: "sessions:test"})
+
+      case Prompts.read(ctx.prompts) do
+        {:ok, ps} -> if done?.(ps), do: {:ok, ps}, else: ps
+        other -> other
+      end
+    end)
   end
 
   # F-186: the usage limit's two prompts are the agent row's step, answered once through
