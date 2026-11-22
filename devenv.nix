@@ -167,7 +167,11 @@ in
 
   # The five gates, each alone; `devenv test` runs them all, as gateTasks.
   scripts.gate-format.exec = "mix format --check-formatted";
-  scripts.gate-compile.exec = "mix compile --warnings-as-errors";
+  # The test build too (test/support and the stand-ins), so a warning in test code fails here,
+  # as it fails an app's gate that runs the tests with warnings as errors.
+  scripts.gate-compile.exec = ''
+    mix compile --warnings-as-errors && MIX_ENV=test mix compile --warnings-as-errors
+  '';
   # Each app declares directly every umbrella app it uses, and uses each one it declares. Elixir
   # only checks that a module is somewhere in an app's dependency tree. The task lives in
   # caf_test, which compiles only for tests.
@@ -180,7 +184,7 @@ in
   scripts.gate-test.exec = ''
     vm_file=$(mktemp)
     status=0
-    ( echo "$BASHPID" > "$vm_file"; exec mix test --exclude model ) || status=$?
+    ( echo "$BASHPID" > "$vm_file"; exec mix test --warnings-as-errors --exclude model ) || status=$?
     vm=$(<"$vm_file")
     "$CAF_RM" -f "$vm_file"
     for ((try = 0; try < 50; try++)); do
