@@ -573,7 +573,11 @@ lost a third time within its window, or an end whose outcome is unknown, is acte
 the answer's time, which the healer copies onto its own row in `Acts` (`cleared_at`), where its
 keys and counts read it. A prompt that passed with its target clears its state the same way,
 since no answer can come to it (F-183's new-3). A claim of the healer's that ended badly with
-its state still open is asked (`Heal.tla`'s `Ended`), so a cut ask is not lost.
+its state still open is asked (`Heal.tla`'s `Ended`), so a cut ask is not lost. A person's
+answer elsewhere that already decided the state is its clear too (F-206): an absent main's
+resume that waited at a limit and that a person left (`leave` on its `limit` prompt) is
+asked and cleared at once as that person (`Heal.tla`'s SettledLeft), so no `remedy` prompt asks
+them again.
 
 Built in F-183: `absent_main` (`AbsentMains`, in `caf_recoveries`, after `Mains` in the tree),
 modeled with `stuck_background` in `Remedies.tla`, which instances `Heal.tla` beside
@@ -826,10 +830,14 @@ whoever answered it. `answer/4` hands a label to `Sessions.answer_menu/5`: an ac
 the mark `pressing`, then the `Inlet`'s checked press, the marker moved and read back on the
 label before Enter (`esc` is Escape); sent or unknown, never pressed again. F-203 (F-198's new-4) added
 such a menu that a start meets before its session file as a startup dialog, kind `start_menu`
-(`Sessions.Dialog`), its prompt `dialog:<agent>:<start>:start_menu`, its options with no
+(`Sessions.Dialog`), its options with no
 `esc`, no default (the app's `dialog:` callback is never asked, and `dialogs:` refuses the
-kind) and no deadline, pressed by `answer_dialog/5` as the `Inlet`'s read back of a menu. A
-second menu in the same start reaches no person yet (F-203's new-2). Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
+kind) and no deadline, pressed by `answer_dialog/5` as the `Inlet`'s read back of a menu.
+F-206 (F-203's new-2) keys a start's menu by its read, as a running one is: its `at` is the
+read that found it, kept while the pane shows that menu (its title and options) and its answer
+is not sent, so a start that shows several menus one after another asks a person each, its
+prompt `dialog:<agent>:<at>:start_menu`, its answer naming that read (`answer_dialog/5`'s
+`at:`) and its act's state the read too; each is pressed at most once. Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
 `expired` prompts kept shown, and the kinds that need a reading first.
 
 `Prompt.tla` (B1) is its contract: it instances `Hold` (one response, its deadline, its holder's
@@ -1643,6 +1651,16 @@ runs, as a start's confirm makes it. "No, exit" ends the process, and the row is
 person may give up a start without answering: `Sessions.stop/3` of a row on a dialog sends
 SIGTERM to its held program's record (`Holder.Process`), and the row is `stopped` once its
 process is gone (F-144).
+
+A numbered menu no rule names that a start meets before its session file (an onboarding menu
+on a new account, F-203) is a startup dialog too, kind `start_menu`, which no callback answers.
+A new account's onboarding may show several such menus in one start, so a start's menu is
+keyed by its read, not its kind (F-206, `Dialog.tla`'s reads): the row keeps the read that
+found it (`at`) while the pane shows that menu, by its title and options, and its answer is not
+sent; any other menu, or one read after its answer was sent, is a new read. Each read is its
+own prompt and its own act, answered by a person and pressed at most once; an answer names its
+read (`answer_dialog/5`'s `at:`), so one meant for a menu that has gone never presses the next.
+The trust and imports dialogs show once a start, so for them a read and a kind are one key.
 
 ## The delegate protocol
 
@@ -2743,7 +2761,11 @@ a dialog no one asked to answer), `OnNamed` (a press lands only on the dialog it
 `AtMostOnce` (an answer whose press is unknown is never pressed again, and one cut by a restart
 only once more, after a person's clear), `NotEndedOnDialog` (a row on a
 dialog is never an orphan), `LeaseWhileLive`; liveness `DialogShown` (the next dialog becomes
-the row's after an answer) and `GoesOn`. Each has a `Break_Dialog_*` configuration.
+the row's after an answer) and `GoesOn`. Each has a `Break_Dialog_*` configuration. F-206
+keys each answer by its read, not its kind, so `Dialog_Menus` (the trust dialog, then two
+menus one after another; with restarts in `slow/Dialog_MenusRestarts`) asks a person each menu
+and presses each at most once, and `Break_Dialog_ByKind` (answers kept by kind, F-203's)
+breaks `KeptAcrossRestart`: the second menu has no prompt waiting.
 
 `Menu.tla` (F-198) models a numbered menu no rule names on a running interactive session's
 screen: the pane read into the row's menu, a person's answer by a label or `esc` marked before
@@ -3200,7 +3222,13 @@ outlasts any await; the report comes later as a message. An absent main's resume
 claim is settled from that row's end: `verified` when it ran, `failed` when a person left it
 or its pick was refused, so the fault ledger shows it and the absence is asked
 (`Remedies.tla`'s ActWaits, SettleWait, WaitedEnd and WaitSettled, `Break_Remedies_SettleAtWait`;
-`Heal.tla`'s act whose outcome comes later).
+`Heal.tla`'s act whose outcome comes later). F-206 (F-203's new-3): a person's `leave` of the
+wait is their answer to the absence too, so the same person is not asked the same thing twice.
+The settle of a wait left by a person (its row `refused`, reason `left`, `waited` the person)
+asks the absence and clears it at once, `Watch.clear/3` as that person, as `Recoveries` copies
+a `remedy` prompt's answer; a pick refused at the reset is still asked. `Heal.tla`'s
+SettledLeft takes the state as asked and closed in one step, `Remedies.tla`'s `LeftNotAsked`
+checks no prompt of it is open, and `Break_Remedies_AskLeft` (the leave not copied) breaks it.
 
 **Measured** (F-181, by hand on 2.1.322, against a local endpoint at `ANTHROPIC_BASE_URL` that
 answers 429 with the unified rate-limit headers the pinned binary reads, a dummy subscriber's

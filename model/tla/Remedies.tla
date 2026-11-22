@@ -50,7 +50,15 @@
 (*                     is settled from that end (F-203): verified when the *)
 (*                     main resumed, refused when a person left it or its  *)
 (*                     pick was refused, so the state is asked             *)
-(*                     (WaitedEnd, WaitSettled).                           *)
+(*                     (WaitedEnd, WaitSettled). A person's leave of the   *)
+(*                     wait is copied as the Watch's clear of that absence *)
+(*                     (F-206, H's SettledLeft), as Recoveries copies a    *)
+(*                     remedy prompt's answer: the state is asked, and     *)
+(*                     answered, so no prompt asks that person again       *)
+(*                     (LeftNotAsked). In the code the copy is two calls   *)
+(*                     of the healer's one process, the ask and the clear; *)
+(*                     a person who answers the prompt between them        *)
+(*                     answers it once, as here, and the clear is refused. *)
 (*                                                                         *)
 (* Every property of Heal.tla is checked through H. Left abstract: how the *)
 (* CPU time is read, the Scheduler's lease of the resume, and Mailbox's    *)
@@ -74,6 +82,7 @@ Breaks == {
     "LastResult",   \* the report is read from the latest result, not the brief's own
     "ResumeTwice",  \* a second absence of a main within the bound is resumed again
     "SettleAtWait", \* a resume that waits is settled verified at once, whatever its row's end
+    "AskLeft",      \* a wait a person left settles refused alone, so its state is asked again
     "IdleAtEnd",    \* the fold reads the turn ended at a command's end, before its init
     "NoBound"       \* no bound: a command's end with no init reads busy for ever
 }
@@ -159,10 +168,15 @@ ActWaits(c) ==
     /\ waits' = waits \cup {[k |-> <<c.t, c.s>>, end |-> "waiting"]}
     /\ UNCHANGED <<on, st, dvars, resumes>>
 
-\* The healer reads a waited resume's end and settles its claim from it.
+\* The healer reads a waited resume's end and settles its claim from it; a person's leave is
+\* their answer to the state as well (F-206). Under AskLeft it is refused alone.
 SettleWait(w) ==
     /\ w \in waits /\ w.end # "waiting"
-    /\ \E r \in res : r.k = w.k /\ H!Settled(r, w.end = "resumed")
+    /\ \E r \in res :
+          /\ r.k = w.k
+          /\ IF w.end = "left" /\ Break # "AskLeft"
+             THEN H!SettledLeft(r)
+             ELSE H!Settled(r, w.end = "resumed")
     /\ UNCHANGED <<on, st, mine>>
 
 Healer ==
@@ -341,6 +355,9 @@ TypeOK ==
 WaitedEnd ==
     \A w \in waits : w.end \in {"left", "refused"} =>
         ~\E r \in res : r.k = w.k /\ r.out = "verified"
+
+\* A wait a person left opens no prompt for its state: their leave is its answer (F-206).
+LeftNotAsked == \A w \in waits : w.end = "left" => w.k \notin asked \ closed
 
 \* A waited resume's claim is settled from its row's end, once the row ends.
 WaitSettled ==

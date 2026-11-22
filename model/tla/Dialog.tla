@@ -27,18 +27,27 @@
 (* shows again. A numbered menu no rule names that a start meets (F-203,   *)
 (* kind `start_menu`) is one more such dialog, which the app's callback    *)
 (* never answers; its checked press reads the marker back before Enter.    *)
-(* No step changes: this spec's two dialogs stand for any number of kinds. *)
+(* Each dialog a start shows is its own read and its own prompt (F-206):   *)
+(* the row keeps an answer by the read that found its dialog, not by its   *)
+(* kind, so a start that shows several menus one after another asks a      *)
+(* person each, and presses each at most once. The trust and imports       *)
+(* dialogs show once a start, so for them a read and a kind are one key.   *)
 (*                                                                         *)
 (* Models Sessions' read of a starting session's pane and its answer       *)
 (* (`Sessions.answer_dialog/5`), a person's clear (`clear_dialog/4`) and   *)
 (* stop (`stop/3` of a row on a dialog), the Inlet's checked press         *)
-(* (`Inlet.choose/5`), the callback the app may give (`dialog:`), and the  *)
-(* status lists of `Sessions.Table` the Scheduler's lease reads.           *)
+(* (`Inlet.choose/5`), the callback the app may give (`dialog:`), the      *)
+(* status lists of `Sessions.Table` the Scheduler's lease reads, and       *)
+(* `Sessions.Dialog`'s reads (`seen/3`, a start's menu by its `at`).       *)
 (*                                                                         *)
 (* Left abstract: time (a deadline is a step); what a label says beyond    *)
 (* "yes" and "no" (the trust dialog's "no" exits; the imports dialog's     *)
 (* goes on with imports off); the session file's contents; other           *)
-(* sessions. A person at the viewer may answer the dialog shown at any     *)
+(* sessions. The dialogs a start shows one after another differ from each  *)
+(* other (a start's menus by their titles, as an onboarding's steps do),   *)
+(* so each draw is one read: `Dialogs[i]` is read `i`. The same menu drawn *)
+(* again after its press was sent is a new read in the code, as in         *)
+(* Menu.tla. A person at the viewer may answer the dialog shown at any     *)
 (* step, as a person can. The program draws its first screen before the    *)
 (* start's deadline: a pane still blank then is a start that failed, as    *)
 (* before this spec, and is left out.                                      *)
@@ -81,7 +90,8 @@
 EXTENDS Integers, Sequences, FiniteSets
 
 CONSTANTS
-    Dialogs,      \* the kinds the program shows, in order, e.g. <<"trust", "imports">>
+    Dialogs,      \* the kinds the program shows, in order, e.g. <<"trust", "imports">>; a
+                  \* start's menu ("menu") may show more than once
     Auto,         \* the kinds the app's callback answers ("yes"); {} by default: it asks
     MaxRestarts,  \* restarts of Sessions and of the agent's own process
     Break         \* "none", or the guard removed (see Breaks)
@@ -95,7 +105,8 @@ Breaks == {
     "DialogFree",    \* a row on a dialog counts as free, so its lease is released
     "NoRead",        \* the pane is read only while the start's call waits, not after an answer
     "ClearTwice",    \* a press a restart cut may be cleared again after its second try
-    "PromptInMemory" \* an open prompt is kept in memory, so a whole restart loses it
+    "PromptInMemory", \* an open prompt is kept in memory, so a whole restart loses it
+    "ByKind"         \* answers are kept by kind (F-203): a read whose kind has a prompt opens none
 }
 
 ASSUME Break \in Breaks
@@ -103,45 +114,53 @@ ASSUME Break \in Breaks
 \* The order 2.1.322 shows them in (F-140's captures), for the configurations.
 TrustThenImports == <<"trust", "imports">>
 
+\* A new account's onboarding: the trust dialog, then two menus no rule names (F-206).
+TrustThenMenus == <<"trust", "menu", "menu">>
+
 N == Len(Dialogs)
-Kinds == {Dialogs[i] : i \in 1..N}
+Reads == 1..N
+Kinds == {Dialogs[i] : i \in Reads}
 Labels == {"yes", "no"}
 Statuses == {"starting", "dialog", "running", "orphan", "stopped"}
 
 ASSUME Auto \subseteq Kinds
 
+\* No app's callback answers a start's menu: it has no default, so only a person's answer
+\* presses it (OnlyRightful).
+ASSUME "menu" \notin Auto
+
 VARIABLES
-    at,        \* the program: 0 nothing drawn, i a dialog Dialogs[i], N+1 past them (its file written)
+    at,        \* the program: 0 nothing drawn, i a dialog Dialogs[i] (read i), N+1 past them
     live,      \* the program's process lives
     status,    \* the agent row's status
-    shown,     \* the agent row's dialog: a kind, or "none"
+    shown,     \* the agent row's dialog: the read that found it, or 0 for none
     up,        \* Sessions runs
     restarts,
-    call,      \* a person's answer on its way to Sessions: {} or {[kind, label]}
-    \* k's prompt, as Prompt.tla's row (P): its answer's mark
-    pst,       \* the row: k -> its status: answering is pressing, answered is sent
-    pep,       \* the row: k -> the number of its state
-    pclaims,   \* Acts: the answers' claims, [by, t (the kind), s, act (the label), n]
+    call,      \* a person's answer on its way to Sessions: {} or {[read, label]}
+    \* read i's prompt, as Prompt.tla's row (P): its answer's mark
+    pst,       \* the row: i -> its status: answering is pressing, answered is sent
+    pep,       \* the row: i -> the number of its state
+    pclaims,   \* Acts: the answers' claims, [by, t (the read), s, act (the label), n]
     pending,   \* in memory: the claims marked answering whose task has not pressed yet
     pdone, pacted, ptwice, pcut, pwrong,   \* Prompt's and Claim's own, ghosts but pdone
-    results,   \* in memory: the tasks' answers not yet taken: [kind, mark]
-    cleared,   \* the agent row: the kinds whose cut press a person cleared, once
+    results,   \* in memory: the tasks' answers not yet taken: [read, mark]
+    cleared,   \* the agent row: the reads whose cut press a person cleared, once
     lease,     \* the Scheduler's lease of the start: "held" or "released"
-    sent,      \* ghost: k -> the presses sent for k
-    asked,     \* ghost: the kinds a person or the app's callback asked to answer
-    wrong,     \* ghost: kinds whose press landed on another screen
-    unasked,   \* ghost: kinds pressed that no one asked to answer
-    killedOn   \* ghost: what the screen showed when Recoveries ended the process
+    sent,      \* ghost: i -> the presses sent for read i
+    asked,     \* ghost: the reads a person or the app's callback asked to answer
+    wrong,     \* ghost: reads whose press landed on another screen
+    unasked,   \* ghost: reads pressed that no one asked to answer
+    killedOn   \* ghost: the read the screen showed when Recoveries ended the process, 0 none
 
 pRow == <<pst, pep, pclaims, pending, pdone, pacted, ptwice, pcut, pwrong>>
 
 vars == <<at, live, status, shown, up, restarts, call, pRow, results, cleared, lease,
           sent, asked, wrong, unasked, killedOn>>
 
-\* The prompt of each dialog: a person answers it, or the app's callback for a kind it chose.
+\* The prompt of each read: a person answers it, or the app's callback for a kind it chose.
 \* Its owner is this spec: the press, and the evidence a restart settles it by.
 P == INSTANCE Prompt WITH
-       Ps <- Kinds, Agents <- {"agent"}, Parent <- [a \in {"agent"} |-> "none"],
+       Ps <- Reads, Agents <- {"agent"}, Parent <- [a \in {"agent"} |-> "none"],
        Persons <- {"person"}, ParentKinds <- {}, AppKinds <- Auto, DefaultKinds <- {},
        ExpireKinds <- {}, HeldPs <- {}, Cap <- 0, Budget <- 1, MaxRestarts <- MaxRestarts,
        MaxTools <- 0,
@@ -149,18 +168,20 @@ P == INSTANCE Prompt WITH
                   [] Break = "RetryUnknown" -> "RetryUnknown"
                   [] Break = "PromptInMemory" -> "InMemory"
                   [] OTHER -> "none",
-       st <- pst, ep <- pep, kind <- [k \in Kinds |-> k], asker <- [k \in Kinds |-> "agent"],
+       st <- pst, ep <- pep, kind <- [i \in Reads |-> Dialogs[i]],
+       asker <- [i \in Reads |-> "agent"],
        claims <- pclaims, acting <- pending, cdone <- pdone, acted <- pacted, twice <- ptwice,
        cut <- pcut, pwrong <- pwrong,
        up <- up, restarts <- restarts,
        hconn <- [p \in {} |-> FALSE], hrow <- [p \in {} |-> "none"], hmarking <- {},
        hout <- [p \in {} |-> <<>>], hwrong <- {},
-       took <- [k \in Kinds |-> 0], orec <- [k \in Kinds |-> "none"], otold <- {},
-       told <- [k \in Kinds |-> 0],
+       took <- [i \in Reads |-> 0], orec <- [i \in Reads |-> "none"], otold <- {},
+       told <- [i \in Reads |-> 0],
        turn <- "working", blocks <- 0, tools <- 0, crashes <- 0, gaveUp <- FALSE
 
-OnDialog == at \in 1..N
-Shows(k) == OnDialog /\ Dialogs[at] = k
+OnDialog == at \in Reads
+\* The pane shows read i's dialog: its kind, and for a menu its title and options.
+Shows(i) == at = i
 
 \* What a press with `label` does to the screen it lands on: the trust dialog's "no" exits.
 Lands(label) ==
@@ -168,9 +189,12 @@ Lands(label) ==
     THEN live' = FALSE /\ at' = at
     ELSE at' = at + 1 /\ live' = live
 
-\* The dialog the pane shows becomes the row's, and its prompt opens once.
+\* The dialog the pane shows becomes the row's, and its read's prompt opens once. Under ByKind
+\* a read opens none when another of its kind has one: its answer, kept by kind, is marked.
+ByKindMarked == \E j \in Reads : j # at /\ Dialogs[j] = Dialogs[at] /\ pst[j] # "none"
+
 OpensShown ==
-    IF pst[Dialogs[at]] = "none" THEN P!Open(Dialogs[at]) ELSE UNCHANGED pRow
+    IF pst[at] = "none" /\ ~(Break = "ByKind" /\ ByKindMarked) THEN P!Open(at) ELSE UNCHANGED pRow
 
 -----------------------------------------------------------------------------
 (* The program *)
@@ -197,9 +221,9 @@ Read ==
     /\ up /\ live /\ OnDialog
     /\ status \in {"starting", "dialog"}
     /\ Break = "NoRead" => status = "starting"
-    /\ shown # Dialogs[at]
+    /\ shown # at
     /\ status' = "dialog"
-    /\ shown' = Dialogs[at]
+    /\ shown' = at
     /\ OpensShown
     /\ UNCHANGED <<at, live, up, restarts, call, results, cleared, lease, sent, asked, wrong,
                    unasked, killedOn>>
@@ -207,17 +231,18 @@ Read ==
 \* The app's callback, at a dialog it reads: an answer for a kind it chose, marked first.
 \* Under AutoAnswer Sessions answers the trust dialog with no one asking.
 Callback ==
-    /\ up /\ status = "dialog" /\ shown # "none" /\ pst[shown] = "open" /\ shown \notin cleared
-    /\ shown \in Auto \/ (Break = "AutoAnswer" /\ shown = "trust")
-    /\ P!Answer(shown, IF shown \in Auto THEN "app" ELSE "sessions", "yes")
-    /\ asked' = IF shown \in Auto THEN asked \cup {shown} ELSE asked
+    /\ up /\ status = "dialog" /\ shown # 0 /\ pst[shown] = "open" /\ shown \notin cleared
+    /\ Dialogs[shown] \in Auto \/ (Break = "AutoAnswer" /\ Dialogs[shown] = "trust")
+    /\ P!Answer(shown, IF Dialogs[shown] \in Auto THEN "app" ELSE "sessions", "yes")
+    /\ asked' = IF Dialogs[shown] \in Auto THEN asked \cup {shown} ELSE asked
     /\ UNCHANGED <<at, live, status, shown, up, restarts, call, results, cleared, lease, sent,
                    wrong, unasked, killedOn>>
 
-\* A person reads the row's dialog in a view and answers it by a label.
+\* A person reads the row's dialog in a view and answers it by a label: the answer names its
+\* read (the prompt's id).
 Answer(label) ==
-    /\ status = "dialog" /\ shown # "none" /\ call = {}
-    /\ call' = {[kind |-> shown, label |-> label]}
+    /\ status = "dialog" /\ shown # 0 /\ call = {}
+    /\ call' = {[read |-> shown, label |-> label]}
     /\ asked' = asked \cup {shown}
     /\ UNCHANGED <<at, live, status, shown, up, restarts, pRow, results, cleared, lease, sent,
                    wrong, unasked, killedOn>>
@@ -229,30 +254,30 @@ Answer(label) ==
 Take(c) ==
     /\ up /\ c \in call
     /\ call' = {}
-    /\ IF P!Answerable(c.kind)
-       THEN P!Answer(c.kind, "person", c.label)
+    /\ IF P!Answerable(c.read)
+       THEN P!Answer(c.read, "person", c.label)
        ELSE UNCHANGED pRow
     /\ UNCHANGED <<at, live, status, shown, up, restarts, results, cleared, lease, sent, asked,
                    wrong, unasked, killedOn>>
 
-\* The task's checked press, in one step: the pane must show the dialog the answer names, or
-\* nothing goes (the claim let go). A press that goes is the claim's act: it lands on what the
-\* pane shows; its outcome is known (sent) or not (unknown), and an unknown one may not have
-\* landed. Its answer comes back as a message; until Sessions takes it the prompt stays
+\* The task's checked press, in one step: the pane must show the dialog the answer names (its
+\* kind; a menu's title and options), or nothing goes (the claim let go). A press that goes is
+\* the claim's act: it lands on what the pane shows; its outcome is known (sent) or not
+\* (unknown), and an unknown one may not have landed. Its answer comes back as a message; until Sessions takes it the prompt stays
 \* answering. Under Unchecked the press goes whatever the pane shows.
 Press(p) ==
     /\ up /\ p \in pending
     /\ IF live /\ (Shows(p.t) \/ (Break = "Unchecked" /\ OnDialog))
        THEN /\ P!Hand(p)
             /\ sent' = [sent EXCEPT ![p.t] = @ + 1]
-            /\ wrong' = IF Dialogs[at] # p.t THEN wrong \cup {p.t} ELSE wrong
+            /\ wrong' = IF at # p.t THEN wrong \cup {p.t} ELSE wrong
             /\ unasked' = IF p.t \notin asked THEN unasked \cup {p.t} ELSE unasked
-            /\ \/ Lands(p.act) /\ results' = results \cup {[kind |-> p.t, mark |-> "sent"]}
-               \/ Lands(p.act) /\ results' = results \cup {[kind |-> p.t, mark |-> "unknown"]}
+            /\ \/ Lands(p.act) /\ results' = results \cup {[read |-> p.t, mark |-> "sent"]}
+               \/ Lands(p.act) /\ results' = results \cup {[read |-> p.t, mark |-> "unknown"]}
                \/ UNCHANGED <<at, live>>
-                  /\ results' = results \cup {[kind |-> p.t, mark |-> "unknown"]}
+                  /\ results' = results \cup {[read |-> p.t, mark |-> "unknown"]}
        ELSE /\ P!LetGo(p)
-            /\ results' = results \cup {[kind |-> p.t, mark |-> "none"]}
+            /\ results' = results \cup {[read |-> p.t, mark |-> "none"]}
             /\ UNCHANGED <<at, live, sent, wrong, unasked>>
     /\ UNCHANGED <<status, shown, up, restarts, call, cleared, lease, asked, killedOn>>
 
@@ -263,7 +288,7 @@ Press(p) ==
 Pressed(r) ==
     /\ up /\ r \in results
     /\ results' = results \ {r}
-    /\ P!Settle(r.kind, CASE r.mark = "sent" -> "answered"
+    /\ P!Settle(r.read, CASE r.mark = "sent" -> "answered"
                           [] r.mark = "unknown" -> "unknown"
                           [] OTHER -> "withdrawn")
     /\ UNCHANGED <<at, live, status, shown, up, restarts, call, cleared, lease, sent, asked,
@@ -272,10 +297,10 @@ Pressed(r) ==
 \* A person who saw the pane still show the dialog, its first option selected, clears a press
 \* a restart cut, once: its prompt is open again, and that press is checked as any. Under
 \* ClearTwice a press cut after its clear is cut again, so it may be cleared again.
-Clear(k) ==
-    /\ up /\ live /\ status = "dialog" /\ Shows(k) /\ pst[k] = "cut"
-    /\ P!Clear(k, "open")
-    /\ cleared' = cleared \cup {k}
+Clear(i) ==
+    /\ up /\ live /\ status = "dialog" /\ Shows(i) /\ pst[i] = "cut"
+    /\ P!Clear(i, "open")
+    /\ cleared' = cleared \cup {i}
     /\ UNCHANGED <<at, live, status, shown, up, restarts, call, results, lease, sent, asked,
                    wrong, unasked, killedOn>>
 
@@ -291,7 +316,7 @@ Stop ==
 Confirm ==
     /\ up /\ live /\ at = N + 1
     /\ status \in {"starting", "dialog"}
-    /\ status' = "running" /\ shown' = "none"
+    /\ status' = "running" /\ shown' = 0
     /\ UNCHANGED <<at, live, up, restarts, call, pRow, results, cleared, lease, sent, asked, wrong,
                    unasked, killedOn>>
 
@@ -299,9 +324,9 @@ Confirm ==
 \* dialog makes the row wait on a person; anything else is an orphan, for Recoveries. Under
 \* DeadlineEnds the pane is not read.
 Deadline ==
-    /\ up /\ live /\ status = "starting" /\ at \in 1..N
+    /\ up /\ live /\ status = "starting" /\ at \in Reads
     /\ IF OnDialog /\ Break # "DeadlineEnds"
-       THEN status' = "dialog" /\ shown' = Dialogs[at] /\ OpensShown
+       THEN status' = "dialog" /\ shown' = at /\ OpensShown
        ELSE status' = "orphan" /\ shown' = shown /\ UNCHANGED pRow
     /\ UNCHANGED <<at, live, up, restarts, call, results, cleared, lease, sent, asked, wrong,
                    unasked, killedOn>>
@@ -310,14 +335,14 @@ Deadline ==
 Kill ==
     /\ live /\ status = "orphan"
     /\ live' = FALSE
-    /\ killedOn' = killedOn \cup {IF OnDialog THEN Dialogs[at] ELSE "screen"}
+    /\ killedOn' = killedOn \cup {IF OnDialog THEN at ELSE 0}
     /\ UNCHANGED <<at, status, shown, up, restarts, call, pRow, results, cleared, lease, sent,
                    asked, wrong, unasked>>
 
 \* The process gone (its socket dead): stopped, so its name is free.
 Settle ==
     /\ up /\ ~live /\ status # "stopped"
-    /\ status' = "stopped" /\ shown' = "none"
+    /\ status' = "stopped" /\ shown' = 0
     /\ UNCHANGED <<at, live, up, restarts, call, pRow, results, cleared, lease, sent, asked, wrong,
                    unasked, killedOn>>
 
@@ -345,9 +370,9 @@ Restart ==
 \* after its clear is unknown. Under RetryUnknown it is open again, to be answered again;
 \* under ClearTwice it is cut again.
 Readopted ==
-    [k \in Kinds |->
+    [i \in Reads |->
        CASE Break = "RetryUnknown" -> "open"
-         [] k \in cleared /\ Break # "ClearTwice" -> "unknown"
+         [] i \in cleared /\ Break # "ClearTwice" -> "unknown"
          [] OTHER -> "cut"]
 
 Recover ==
@@ -375,15 +400,15 @@ RestartAgent ==
 
 Init ==
     /\ at = 0 /\ live = TRUE
-    /\ status = "starting" /\ shown = "none"
+    /\ status = "starting" /\ shown = 0
     /\ up = TRUE /\ restarts = 0
     /\ call = {}
-    /\ pst = [k \in Kinds |-> "none"] /\ pep = [k \in Kinds |-> 0]
+    /\ pst = [i \in Reads |-> "none"] /\ pep = [i \in Reads |-> 0]
     /\ pclaims = {} /\ pending = {} /\ pdone = {} /\ pacted = {} /\ ptwice = FALSE
     /\ pcut = {} /\ pwrong = {}
     /\ results = {} /\ cleared = {}
     /\ lease = "held"
-    /\ sent = [k \in Kinds |-> 0]
+    /\ sent = [i \in Reads |-> 0]
     /\ asked = {} /\ wrong = {} /\ unasked = {} /\ killedOn = {}
 
 Next ==
@@ -393,7 +418,7 @@ Next ==
     \/ \E p \in pending : Press(p)
     \/ \E r \in results : Pressed(r)
     \/ \E c \in call : Take(c)
-    \/ \E k \in Kinds : Clear(k)
+    \/ \E i \in Reads : Clear(i)
 
 Fairness ==
     /\ WF_vars(Draw) /\ WF_vars(Read) /\ WF_vars(Callback) /\ WF_vars(\E c \in call : Take(c))
@@ -408,43 +433,44 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 
 TypeOK ==
     /\ at \in 0..(N + 1) /\ live \in BOOLEAN
-    /\ status \in Statuses /\ shown \in Kinds \cup {"none"}
-    /\ pst \in [Kinds -> P!Statuses] /\ pep \in [Kinds -> Nat]
+    /\ status \in Statuses /\ shown \in 0..N
+    /\ pst \in [Reads -> P!Statuses] /\ pep \in [Reads -> Nat]
     /\ up \in BOOLEAN /\ restarts \in 0..MaxRestarts
-    /\ call \subseteq [kind : Kinds, label : Labels] /\ Cardinality(call) <= 1
+    /\ call \subseteq [read : Reads, label : Labels] /\ Cardinality(call) <= 1
     /\ pending \subseteq pclaims
-    /\ results \subseteq [kind : Kinds, mark : {"none", "sent", "unknown"}]
-    /\ cleared \subseteq Kinds
+    /\ results \subseteq [read : Reads, mark : {"none", "sent", "unknown"}]
+    /\ cleared \subseteq Reads
     /\ lease \in {"held", "released"}
 
-\* Nothing answers a dialog unless a person or the app's callback asked for that kind.
+\* Nothing answers a dialog unless a person or the app's callback asked for that read.
 OnlyAsked == unasked = {}
 
-\* ... and Prompt's: every answer's claim is a person's, or the app's for a kind it chose.
+\* ... and Prompt's: every answer's claim is a person's, or the app's for a kind it chose; a
+\* start's menu's, a person's only.
 OnlyRightful == P!OnlyRightful
 
 \* A press lands only on the dialog it names.
 OnNamed == wrong = {}
 
-\* A dialog's answer is pressed at most once, whatever its outcome, and once more only after
+\* Each read's answer is pressed at most once, whatever its outcome, and once more only after
 \* a person cleared a press a restart cut.
-AtMostOnce == \A k \in Kinds : sent[k] <= IF k \in cleared THEN 2 ELSE 1
+AtMostOnce == \A i \in Reads : sent[i] <= IF i \in cleared THEN 2 ELSE 1
 
 \* A process waiting on a dialog is never ended as an orphan.
-NotEndedOnDialog == killedOn \cap Kinds = {}
+NotEndedOnDialog == killedOn \cap Reads = {}
 
 \* The start's lease is held while its process lives.
 LeaseWhileLive == lease = "released" => ~live
 
 \* A row on a dialog the pane still shows has its prompt waiting, across either restart: open,
 \* answering, or its press cut or unknown (Boxes.tla's, with its keys in flight the press's
-\* unknown here).
+\* unknown here). Each read its own: a second menu of one start waits on a person too.
 KeptAcrossRestart ==
-    \A k \in Kinds : status = "dialog" /\ shown = k /\ live /\ Shows(k) => pst[k] \in P!Waiting
+    \A i \in Reads : status = "dialog" /\ shown = i /\ live /\ Shows(i) => pst[i] \in P!Waiting
 
 \* A dialog the pane shows becomes the row's, after any answer, so a view shows the one shown.
 DialogShown ==
-    \A i \in 1..N : (at = i /\ live) ~> (shown = Dialogs[i] \/ at # i \/ ~live)
+    \A i \in Reads : (at = i /\ live) ~> (shown = i \/ at # i \/ ~live)
 
 \* Past the dialogs, the start goes on: the row runs.
 GoesOn == (at = N + 1 /\ live) ~> (status = "running" \/ ~live)

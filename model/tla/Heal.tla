@@ -54,6 +54,8 @@
 (* spec's Act may answer "later", whose claim is open to the fault ledger  *)
 (* until Settled reads its end, "verified" or "refused"; Remedies.tla's    *)
 (* resume that waits at a usage limit. This spec alone never answers it.   *)
+(* SettledLeft reads such an end as a person's leave (F-206): the state    *)
+(* is asked and closed at once, the person's answer copied as its own.     *)
 (*                                                                         *)
 (* Left abstract: what a remedy does (Effect, in the instancing spec: a    *)
 (* fix that may not help); evidence; which remedy (one per kind).          *)
@@ -229,6 +231,16 @@ Settled(r, good) ==
     /\ r \in res /\ r.out = "later"
     /\ res' = (res \ {r}) \cup {[k |-> r.k, out |-> IF good THEN "verified" ELSE "refused"]}
     /\ UNCHANGED <<facts, count, mem, allow, dropped, asked, forBound, closed, claimVars, wrong>>
+
+\* An outcome that came later is read as a person's leave of it (F-206; Remedies.tla's wait a
+\* person left): refused, and that answer is the state's prompt's too, asked and closed in one
+\* step, so no prompt asks the same person again (ActedOrAsked holds: the state was asked).
+SettledLeft(r) ==
+    /\ r \in res /\ r.out = "later"
+    /\ res' = (res \ {r}) \cup {[k |-> r.k, out |-> "refused"]}
+    /\ asked' = asked \cup {r.k}
+    /\ closed' = closed \cup {r.k}
+    /\ UNCHANGED <<facts, count, mem, allow, dropped, forBound, claimVars, wrong>>
 
 \* A remedy prompt, once per symptom state, for a recorded symptom that needs a person; one
 \* asked because the cap is reached is asked for its bound.

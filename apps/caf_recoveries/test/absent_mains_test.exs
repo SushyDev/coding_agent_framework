@@ -252,7 +252,8 @@ defmodule CodingAgentFramework.AbsentMainsTest do
     assert {:ok, %{resumed: []}} = AbsentMains.check(healer)
     assert {:ok, %{outcome: "verified", answer: ~s(["resumed","work"])}} = Acts.get(ctx.acts, id)
 
-    # The next absence waits too, and a person leaves it: a fault, and the main a person's.
+    # The next absence waits too, and a person leaves it: a fault, and their leave is their
+    # answer to the absence (F-206, Remedies.tla's LeftNotAsked): no remedy prompt asks again.
     exit!(ctx, 2)
     :counters.add(ctx.time, 1, @bound)
     assert {:ok, %{resumed: [next]}} = AbsentMains.check(healer)
@@ -261,6 +262,24 @@ defmodule CodingAgentFramework.AbsentMainsTest do
     assert {:ok, %{resumed: []}} = AbsentMains.check(healer)
     assert {:ok, %{outcome: "failed", reason: ~s(["waited","left"])}} = Acts.get(ctx.acts, next)
     assert {:ok, [%{id: ^next}]} = Acts.faults(ctx.acts)
-    assert [%{state: "absent_main:app-epic:2", reason: ~s(["waited","left"])}] = asked(ctx)
+    assert asked(ctx) == []
+
+    assert {:ok, [%{status: "answered", answer: "leave", answered_by: "sam"}]} =
+             Watch.read(ctx.watch, state: "absent_main:app-epic:2")
+
+    # Read again, the absence stays the person's answered one: no prompt, no resume.
+    assert {:ok, %{resumed: []}} = AbsentMains.check(healer)
+    refute_received {:resumed, _, _}
+    assert asked(ctx) == []
+
+    # A pick refused at the reset is no one's answer: that absence is asked.
+    exit!(ctx, 3)
+    :counters.add(ctx.time, 1, @bound)
+    assert {:ok, %{resumed: [last]}} = AbsentMains.check(healer)
+    assert_received {:resumed, "app-epic", row}
+    Mains.Starts.update(starts, row, status: "refused", reason: "no_account")
+    assert {:ok, %{resumed: []}} = AbsentMains.check(healer)
+    assert {:ok, %{outcome: "failed"}} = Acts.get(ctx.acts, last)
+    assert [%{state: "absent_main:app-epic:3", reason: ~s(["waited","no_account"])}] = asked(ctx)
   end
 end

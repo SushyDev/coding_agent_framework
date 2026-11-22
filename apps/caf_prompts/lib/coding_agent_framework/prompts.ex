@@ -27,8 +27,10 @@ defmodule CodingAgentFramework.Prompts do
   Each prompt is `%{id, kind, status, agent, parent, project, subagent, text, options,
   opened_at, deadline}`: `id` names its owner's key, so one state is one prompt
   (`"permission:<intake id>"`, `"permission:stream:<session>:<request id>"`,
-  `"stop_cap:<intake id>"`, `"dialog:<agent>:<start>:<dialog>"`, `"dialog:<agent>:<at>:menu"`
-  (`at` the wall-clock ms of the read that found the menu),
+  `"stop_cap:<intake id>"`, `"dialog:<agent>:<start>:<dialog>"`,
+  `"dialog:<agent>:<at>:start_menu"` and `"dialog:<agent>:<at>:menu"` (`at` the wall-clock ms
+  of the read that found the menu, a start's or a running screen's, so each menu of one start
+  is its own prompt, F-206),
   `"ask:<mailbox id>"`, `"remedy:<symptom id>"`, `"login:<account>:<refused_at>"` (`refused_at`
   the wall-clock ms of the check that refused it, so an account refused again after a login
   is a new prompt, F-205), `"limit:<agent>:<until>"`,
@@ -522,10 +524,13 @@ defmodule CodingAgentFramework.Prompts do
     end
   end
 
+  # A start's menu is keyed by its read (F-206), so each menu of one start is its own prompt.
   defp dialogs(rows) do
     for %{} = row <- rows, d = Agents.dialog(row), status = dialog_status(d.answers[d.kind]) do
+      key = if d.kind == :start_menu, do: d.at, else: row.started_at
+
       fields = %{
-        id: "dialog:#{row.name}:#{row.started_at}:#{d.kind}",
+        id: "dialog:#{row.name}:#{key}:#{d.kind}",
         kind: "dialog",
         status: status,
         subagent: nil,
@@ -867,11 +872,14 @@ defmodule CodingAgentFramework.Prompts do
   end
 
   defp hand(owners, %{kind: "dialog", agent: agent, id: id}, label, who) do
-    [_, _, _, kind] = String.split(id, ":")
+    [_, _, key, kind] = String.split(id, ":")
+    # A start's menu's id names its read, which the answer must still be for (F-206).
+    at = if kind == "start_menu", do: [at: int(key)], else: []
+    opts = [by: who, timeout: @press] ++ at
 
-    case Sessions.answer_dialog(owners.sessions, agent, kind, label, by: who, timeout: @press) do
+    case Sessions.answer_dialog(owners.sessions, agent, kind, label, opts) do
       {:refused, why}
-      when why == :no_session or elem(why, 0) in [:answered, :not_on_dialog, :shown] ->
+      when why == :no_session or elem(why, 0) in [:answered, :not_on_dialog, :shown, :read] ->
         {:refused, :settled}
 
       other ->
