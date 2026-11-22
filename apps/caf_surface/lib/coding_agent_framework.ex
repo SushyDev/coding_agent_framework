@@ -139,8 +139,9 @@ defmodule CodingAgentFramework do
   that runs on; so a second start of a running name answers only after `restart_wait`.
 
   **No agents.** With the config's `agents: false` the tree starts only the parts a lease
-  needs, `Config.agentless/0`'s: no tmux server, no account's settings, no hooks' secret and
-  no endpoint. `parts/1` then names only those.
+  needs, `Config.agentless/0`'s: no tmux server, no account's settings, no hooks' secret, no
+  endpoint and no tool home (so no `gh` or `ssh-keygen` is needed, F-201). `parts/1` then
+  names only those.
   """
   @spec start_link(Config.t()) :: Supervisor.on_start() | {:refused, term} | {:unknown, term}
   def start_link(%Config{} = c) do
@@ -212,11 +213,29 @@ defmodule CodingAgentFramework do
   rows}}`, or `{:refused, {:sqlite, reason}}` when the store cannot be opened (no tree ever
   started on the home, say).
 
+  It also takes the instance's name, as `subscribe/2` does (F-201): the config the running
+  tree of that name started with is read from its `Registry`, and the rows as above; so a tool
+  hook, whose `opts` hold no config, reads them by the name. `{:refused, :no_instance}` when no
+  tree of that name runs.
+
       {:ok, %{agents: [%{name: "app-main", kind: "main", status: "running"} | _],
               delegates: delegates}} = CodingAgentFramework.agent_rows(config)
+      {:ok, %{agents: _, delegates: _}} = CodingAgentFramework.agent_rows("a")
   """
-  @spec agent_rows(Config.t()) ::
+  @spec agent_rows(Config.t() | String.t()) ::
           {:ok, %{agents: [map], delegates: [map]}} | {:refused, term}
+  def agent_rows(instance) when is_binary(instance) do
+    with {:ok, name} <- registry(instance) do
+      case Elixir.Registry.meta(name, :config) do
+        {:ok, %Config{} = c} -> agent_rows(c)
+        :error -> {:refused, :no_instance}
+      end
+    end
+  rescue
+    # The registry ended between the two looks.
+    ArgumentError -> {:refused, :no_instance}
+  end
+
   def agent_rows(%Config{} = c) do
     path = Config.path(c, "caf.db")
 
@@ -629,11 +648,13 @@ defmodule CodingAgentFramework do
 
     [
       {:reaper, fn _ -> {Shell.Reaper, programs: p} end},
-      # The instance's own `Registry`, named from its name: how the app finds it, and the
-      # tree's supervisor, in which this runs, for a subscriber to watch.
+      # The instance's own `Registry`, named from its name: how the app finds it, the tree's
+      # supervisor, in which this runs, for a subscriber to watch, and the config the tree
+      # started with, for a read by the instance's name (`agent_rows/1`).
       {:names,
        fn _ ->
-         {Elixir.Registry, keys: :unique, name: names(c.instance), meta: [tree: self()]}
+         {Elixir.Registry,
+          keys: :unique, name: names(c.instance), meta: [tree: self(), config: c]}
        end},
       {:cues,
        fn _ ->
@@ -1240,7 +1261,11 @@ defmodule CodingAgentFramework do
 
   # Every tool's state lives in the home (F-155): its git config with the author and signing,
   # its ssh files, then the variables that point gh, git, ssh and the XDG directories there, in
-  # every launch and every project's environment (git and the setup).
+  # every launch and every project's environment (git and the setup). A tree that runs no agent
+  # has no tool home, and needs neither gh nor ssh-keygen (F-201): its jobs get `env`'s PATH.
+  defp tools(%Config{agents: false} = c, _programs),
+    do: {:ok, %{c | env: Map.put(c.env, :tools, [])}}
+
   defp tools(c, programs) do
     projects =
       for {name, git} <- c.git.projects, into: %{} do

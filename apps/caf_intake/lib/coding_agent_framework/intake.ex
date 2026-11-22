@@ -43,15 +43,22 @@ defmodule CodingAgentFramework.Intake do
     added to what the agent reads next, at most 10,000 characters, and is best written as facts
     ("`land` runs the gates"), not orders. A correction is a decision as any other: its row has
     the response it sent, the input included. An answer out of shape (a longer context, an
-    input that is not a map, a key it does not know) is a pass, and its row's `problem` names
-    why: `["context_too_long", length]` or `["bad_answer", key]`.
+    input that is not a map, a key it does not know, or a value that does not encode as JSON:
+    an input holding a tuple or a pid, a text that is not UTF-8, F-201) is a pass, never a
+    crash, and its row's `problem` names why: `["context_too_long", length]` or `["bad_answer",
+    key]` (`"reason"` for a deny's reason).
   - `PostToolUse` (F-197): decided by the app's `post_tool_use:` callback, in a process of its
     own, with `tool_deadline:` as `PreToolUse`'s, under the same 10 s timeout. `{:replace,
     response}`, `response` a map of the tool's own response shape (the `tool_response` the
     event carries, such as `%{"stdout" => …, "stderr" => "", "interrupted" => false, "isImage"
     => false}` for `Bash`), answers `updatedToolOutput` with it, and the model reads it in place
-    of the tool's output. Anything else is a pass, and a replacement that is not a map, or not
-    JSON, is a pass whose row's `problem` is `["bad_answer", "replace"]`. Measured on 2.1.322
+    of the tool's output. `{:context, text}` (F-201) answers `additionalContext`, a note on the
+    call it is about, at most 10,000 characters as `PreToolUse`'s: measured on 2.1.322 with
+    `Bash`, from a command hook and from an `http` hook alike, the model reads it on that call
+    as "PostToolUse:Bash hook additional context: <text>", and the tool's output is unchanged.
+    `{:replace, response, context: text}` sends both. Anything else is a pass; a replacement
+    that is not a map, or not JSON, is a pass whose row's `problem` is `["bad_answer",
+    "replace"]`, and a context out of shape names it as `PreToolUse`'s does. Measured on 2.1.322
     with `Bash`: a command hook's object is read, as is an `http` hook's body; a string is
     ignored; an `http` hook past its `timeout` leaves the output unchanged and the turn goes on.
     `updatedMCPToolOutput` and an `Edit`'s output were not measured. A replacement's row has
@@ -61,7 +68,8 @@ defmodule CodingAgentFramework.Intake do
     tool's input and output.
   - `Stop` (`model/tla/Intake.tla`'s HS), with the app's `stop:` callback: each turn's end is
     held and the callback decides it, `:pass` (the turn ends) or `{:block, reason}` (the agent
-    goes on, told the reason); deadline `stop_deadline:`, 570 s by default, under the hook's
+    goes on, told the reason; a reason that is not UTF-8 is a pass whose row's `problem` is
+    `["bad_answer", "block"]`); deadline `stop_deadline:`, 570 s by default, under the hook's
     600 s timeout (`hooks/4` with `:stop`), and a pass at it. Claude Code honors 8 blocks in a
     row with no tool call between and overrides the 9th (measured on 2.1.322), so `Intake`
     keeps each session's count in its table, written before a block goes out and reset by a
@@ -113,13 +121,15 @@ defmodule CodingAgentFramework.Intake do
 
   @typedoc """
   A tool call, as a callback gets it: the agent (`nil` when the `agent:` lookup knows none), its
-  account and session, the tool's name and input, and its `tool_use_id`. A PostToolUse also
-  has `tool_response`.
+  account and session, `cwd` (the directory the call runs in, as Claude Code posted it, or
+  `nil` for a post without one; never guessed, F-201), the tool's name and input, and its
+  `tool_use_id`. A PostToolUse also has `tool_response`.
   """
   @type tool_event :: %{
           required(:agent) => String.t() | nil,
           required(:account) => String.t(),
           required(:session_id) => String.t(),
+          required(:cwd) => String.t() | nil,
           required(:tool_name) => term,
           required(:tool_input) => term,
           required(:tool_use_id) => String.t(),
@@ -128,14 +138,16 @@ defmodule CodingAgentFramework.Intake do
 
   @typedoc """
   A turn's end, as the `stop:` callback gets it: the agent and its project (`nil` when the
-  lookups know none), its account and session, `blocks` (the session's blocks in a row so far,
-  as `Intake` counts them) and `input`, the `Stop` hook's input as Claude Code posted it.
+  lookups know none), its account and session, `cwd` (the input's, or `nil`, as a tool event's),
+  `blocks` (the session's blocks in a row so far, as `Intake` counts them) and `input`, the
+  `Stop` hook's input as Claude Code posted it.
   """
   @type stop_event :: %{
           agent: String.t() | nil,
           project: String.t() | nil,
           account: String.t(),
           session_id: String.t(),
+          cwd: String.t() | nil,
           blocks: non_neg_integer,
           input: map
         }
@@ -150,8 +162,9 @@ defmodule CodingAgentFramework.Intake do
   correction: `{:allow, updated_input: map, additional_context: text}`, `{:pass, updated_input:
   map, additional_context: text}`, `{:ask, updated_input: map, additional_context: text}` or
   `{:deny, reason, additional_context: text}`),
-  `post_tool_use:` (`fun(tool_event) -> :pass | {:replace, response}`, `response` a map of the
-  tool's response shape), `tool_deadline:` (ms each of the two is waited for, under 8.5 s),
+  `post_tool_use:` (`fun(tool_event) -> :pass | {:replace, response} | {:context, text} |
+  {:replace, response, context: text}`, `response` a map of the tool's response shape),
+  `tool_deadline:` (ms each of the two is waited for, under 8.5 s),
   `waiter_deadline:` (ms a waiter is held, under the waiter hook's
   `timeout`; 7,080,000 by default, under `waiter_hook/5`'s 7,200 s), `beat:` (ms between a
   waiter's heartbeats, 5,000 by default), `agent:` (`fun(account, session_id) -> name | nil`,
@@ -665,6 +678,7 @@ defmodule CodingAgentFramework.Intake do
       agent: agent.(account, row.session_id),
       account: account,
       session_id: row.session_id,
+      cwd: cwd(data),
       tool_name: data["tool_name"],
       tool_input: data["tool_input"],
       tool_use_id: data["tool_use_id"]
@@ -674,6 +688,11 @@ defmodule CodingAgentFramework.Intake do
       do: Map.put(event, :tool_response, data["tool_response"]),
       else: event
   end
+
+  # Where the call runs, as the hook posted it (F-201): a post without one, or with one that is
+  # not text, carries nil, so an app never rewrites a command for a directory it guessed.
+  defp cwd(%{"cwd" => cwd}) when is_binary(cwd), do: cwd
+  defp cwd(_data), do: nil
 
   defp store(row, account, {pid, _}, state) do
     # A tool call's row keeps `data` empty until a decision: `Transcripts` has the input and
@@ -825,6 +844,7 @@ defmodule CodingAgentFramework.Intake do
       project: hold.project,
       account: hold.account,
       session_id: hold.session,
+      cwd: cwd(hold.input),
       blocks: blocks,
       input: hold.input
     }
@@ -841,8 +861,13 @@ defmodule CodingAgentFramework.Intake do
     %{db: db, host: host, stop_cap: cap} = state
     blocks = Table.blocks(db, host, hold.account, hold.session)
     hold = unwatch(hold)
+    # A reason that is not UTF-8 does not encode as JSON: out of shape, a pass (F-201).
+    text? = match?({:block, r} when is_binary(r), answer) and String.valid?(elem(answer, 1))
 
     case answer do
+      {:block, reason} when is_binary(reason) and not text? ->
+        release(state, id, hold, "passed", problem: {:bad_answer, :block})
+
       {:block, reason} when is_binary(reason) and blocks < cap - 1 ->
         Table.put_blocks(db, host, hold.account, hold.session, blocks + 1, now())
         state = put_in(state.holds[id], hold)
@@ -889,8 +914,11 @@ defmodule CodingAgentFramework.Intake do
   defp pause_row(:hold), do: {:ok, %{how: "hold"}}
   defp pause_row(:pass), do: {:ok, %{how: "pass"}}
 
-  defp pause_row({:block, reason}) when is_binary(reason) and reason != "",
-    do: {:ok, %{how: "block", reason: reason}}
+  defp pause_row({:block, reason} = how) when is_binary(reason) and reason != "" do
+    if String.valid?(reason),
+      do: {:ok, %{how: "block", reason: reason}},
+      else: {:refused, {:bad_pause, how}}
+  end
 
   defp pause_row(how), do: {:refused, {:bad_pause, how}}
 
@@ -1056,8 +1084,10 @@ defmodule CodingAgentFramework.Intake do
   defp tool_response(:allow), do: tool_response("allow", %{})
   defp tool_response(:ask), do: tool_response("ask", %{})
 
-  defp tool_response({:deny, reason}) when is_binary(reason),
-    do: tool_response("deny", %{"permissionDecisionReason" => reason})
+  defp tool_response({:deny, reason}) when is_binary(reason) do
+    with {:ok, reason} <- reason(reason),
+         do: tool_response("deny", %{"permissionDecisionReason" => reason})
+  end
 
   # A correction (F-169): the call runs with the input the app gives, and Claude Code adds the
   # context to what the agent reads next. A key out of shape refuses the whole answer.
@@ -1083,27 +1113,53 @@ defmodule CodingAgentFramework.Intake do
   end
 
   defp tool_response({:deny, reason, opts}) when is_binary(reason) and is_list(opts) do
-    with {:ok, fields} <- corrections(opts, [:additional_context]),
+    with {:ok, reason} <- reason(reason),
+         {:ok, fields} <- corrections(opts, [:additional_context]),
          do: tool_response("deny", Map.put(fields, "permissionDecisionReason", reason))
   end
 
   defp tool_response(_), do: :pass
 
-  defp tool_answer(:tool, answer), do: tool_response(answer)
-  defp tool_answer(:post_tool, answer), do: post_response(answer)
+  # An answer that raises while it is made is no decision (F-201): each key is checked first, so
+  # this is only the last guard that the `Intake`, which every hold shares, never crashes on one.
+  defp tool_answer(kind, answer) do
+    if kind == :tool, do: tool_response(answer), else: post_response(answer)
+  rescue
+    _ -> {:refused, {:bad_answer, :not_json}}
+  end
 
   # The PostToolUse output Claude Code 2.1.322 reads from an `http` hook (measured, F-197): an
   # `updatedToolOutput` of the tool's own response shape replaces what the model reads. A string
-  # there is ignored, so it is refused here, as is a map that is not JSON.
-  defp post_response({:replace, response}) when is_map(response) do
-    output = %{"hookEventName" => "PostToolUse", "updatedToolOutput" => response}
-    {:decision, JSON.encode!(%{"hookSpecificOutput" => output})}
-  rescue
-    _ in [Protocol.UndefinedError, ArgumentError] -> {:refused, {:bad_answer, :replace}}
+  # there is ignored, so it is refused here, as is a map that is not JSON. `additionalContext`
+  # (F-201) is read on that call, the output unchanged.
+  defp post_response({:replace, response}), do: post_response({:replace, response, []})
+  defp post_response({:context, text}), do: post_output(%{}, context: text)
+
+  defp post_response({:replace, response, opts}) when is_list(opts) do
+    if is_map(response) and json?(response),
+      do: post_output(%{"updatedToolOutput" => response}, opts),
+      else: {:refused, {:bad_answer, :replace}}
   end
 
-  defp post_response({:replace, _response}), do: {:refused, {:bad_answer, :replace}}
   defp post_response(_answer), do: :pass
+
+  defp post_output(fields, opts) do
+    with {:ok, more} <- corrections(opts, [:context]) do
+      output = fields |> Map.merge(more) |> Map.put("hookEventName", "PostToolUse")
+      {:decision, JSON.encode!(%{"hookSpecificOutput" => output})}
+    end
+  end
+
+  # A deny's reason is text Claude Code shows: valid UTF-8, or the answer is out of shape.
+  defp reason(text),
+    do: if(String.valid?(text), do: {:ok, text}, else: {:refused, {:bad_answer, :reason}})
+
+  defp json?(value) do
+    _ = JSON.encode!(value)
+    true
+  rescue
+    _ -> false
+  end
 
   defp tool_response(decision, reason) do
     output =
@@ -1126,13 +1182,22 @@ defmodule CodingAgentFramework.Intake do
 
   defp correction(key, _value, false), do: {:refused, {:bad_answer, key}}
 
-  defp correction(:updated_input, input, true) when is_map(input),
-    do: {:ok, %{"updatedInput" => input}}
+  # Each value must encode as JSON, so an answer that holds a tuple, a pid or bytes that are not
+  # UTF-8 is a pass whose row names its key, never a crash (F-197's new-2, F-201).
+  defp correction(:updated_input, input, true) when is_map(input) do
+    if json?(input),
+      do: {:ok, %{"updatedInput" => input}},
+      else: {:refused, {:bad_answer, :updated_input}}
+  end
 
-  defp correction(:additional_context, text, true) when is_binary(text) do
-    if String.length(text) <= @context_max,
-      do: {:ok, %{"additionalContext" => text}},
-      else: {:refused, {:context_too_long, String.length(text)}}
+  # A PreToolUse's `additional_context:`, a PostToolUse's `context:` (F-201): one bound.
+  defp correction(key, text, true)
+       when key in [:additional_context, :context] and is_binary(text) do
+    cond do
+      not String.valid?(text) -> {:refused, {:bad_answer, key}}
+      String.length(text) > @context_max -> {:refused, {:context_too_long, String.length(text)}}
+      true -> {:ok, %{"additionalContext" => text}}
+    end
   end
 
   defp correction(key, _value, true), do: {:refused, {:bad_answer, key}}
