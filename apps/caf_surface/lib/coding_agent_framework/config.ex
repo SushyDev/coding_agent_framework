@@ -171,7 +171,7 @@ defmodule CodingAgentFramework.Config do
     `timeout` and `stop`; `limits` `margin`, `credits` and `bound`; `stuck_backgrounds`
     `quiet`; `hooks_silent` `bound` and `slack`; `interventions` `person` (the actor of a
     person's interventions, `"person"` by default), `settle` and `slack`; `registry`,
-    `transcripts` and `stream` `timeout`; `mcp` `cap`. Each is ms but for a count and a name. An option not named is the part's own
+    `transcripts` and `stream` `timeout`; `stream` `wake`; `mcp` `cap`. Each is ms but for a count and a name. An option not named is the part's own
     default. A part or option it does not know, or a value out of shape, is refused naming
     both, `{:refused, {:bad, :parts, {part, option}}}`.
 
@@ -539,7 +539,7 @@ defmodule CodingAgentFramework.Config do
     interventions: [person: :name, settle: :ms, slack: :ms],
     registry: [timeout: :ms],
     transcripts: [timeout: :ms],
-    stream: [timeout: :ms],
+    stream: [timeout: :ms, wake: :ms],
     mcp: [cap: :ms]
   }
 

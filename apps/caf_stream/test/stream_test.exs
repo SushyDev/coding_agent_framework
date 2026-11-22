@@ -207,9 +207,30 @@ defmodule CodingAgentFramework.StreamTest do
     assert {:refused, :gone} = Stream.held(ctx.stream, "e1")
   end
 
-  defp start!(ctx) do
+  # Remedies.tla's Unwake (F-204): past `wake:` with no init read, a background command's end
+  # reads the turn ended again, counted in `unwoken`. The bound here is 0, so the read that sees
+  # the end passes it; the stand-in then waits for an init that never comes.
+  test "a background command's end with no init past the bound reads the turn ended", ctx do
+    fifo = Path.join(ctx.dir, "bg.fifo")
+    {_, 0} = System.cmd(program!(:mkfifo), [fifo])
+    s = start!(%{ctx | db: Path.join(ctx.dir, "w.db")}, wake: 0)
+    hold!(%{ctx | stream: s}, "w1")
+
+    {:ok, %{uuid: u}} = Stream.write(s, "w1", {:message, "bg go"})
+    row!(ctx, s, &(&1.messages[u].state == :delivered and &1.idle and &1.tasks != %{}))
+    File.write!(fifo, "end\n")
+
+    assert %{idle: true, waking: nil, unwoken: 1, tasks: %{}} =
+             row!(ctx, s, &(&1.background.changes == 2))
+
+    assert {:ok, _} = Stream.write(s, "w1", {:message, "after"})
+  end
+
+  defp start!(ctx, opts \\ []) do
     {:ok, s} =
-      Stream.start_link(programs: programs(), holder: ctx.holder, home: ctx.dir, db: ctx.db)
+      Stream.start_link(
+        [programs: programs(), holder: ctx.holder, home: ctx.dir, db: ctx.db] ++ opts
+      )
 
     s
   end

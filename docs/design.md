@@ -579,6 +579,20 @@ its result is told to the parent as a turn of its own (F-155), never as a second
 reply (`Remedies.tla`'s `OneReport`, `Break_Remedies_LastResult`). The process meanwhile holds
 its cap and lease, and `Sessions.stop/2` refuses it `turn_running`.
 
+**When a delegate reads idle after a background command** (F-204, from F-196's new-6). The
+command's end and the init of the turn it begins are two events in the log, and a read can
+fall between them. So a command's end read while the turn reads ended makes the fold
+`waking`, stamped with that read's time: busy, not idle, until that turn's init begins it and
+its `result` ends it. Only then does the delegate read idle again, and `Mailbox` hands a
+parent's message on only on an idle read, so none goes into that turn (`Remedies.tla`'s
+`NoMessageIntoOwnTurn`, `Break_Remedies_IdleAtEnd`). An end during a running turn joins that
+turn and changes nothing. A release that starts no turn at the end would leave the delegate
+busy for ever, so the wait is bounded: past `Stream`'s `wake:` (30 s by default, the config's
+`parts` `stream` `wake`) with no init read, the delegate reads idle again and the fold counts
+it in `unwoken` (`ReadsIdleAgain`, `Break_Remedies_NoBound`). The model takes the bound as
+longer than the gap between an end and its init, so it passes only where no init comes; the
+release check records that gap with the background command.
+
 Built in F-184: `stuck_background` (`StuckBackgrounds`, in `caf_recoveries`, one per host):
 a running headless delegate whose fold's turn ended with a result while Claude Code still
 lists a task (`Stream.Fold`'s `background`), and a process group its process started that has
@@ -1965,7 +1979,8 @@ reading for delegates:
   the messages it took. A message goes in only after its delegate's turn has ended: one written
   during a turn joins it. A delegate can start a turn by itself (a background task that ends
   wakes it); a message that joins such a turn is accepted, and is still delivered once, by its
-  replay.
+  replay. The fold reads such a turn busy from the command's end, before its init, so
+  `Mailbox` hands nothing into it ("When a delegate reads idle after a background command").
 - **Delivered once, seen.** A message carries a uuid of the framework's, and with
   `--replay-user-messages` it comes back with that uuid and `isReplay`. Its sending mark, the
   row in `Mailbox`, is settled by the replay that `Stream`'s fold reads; `Stream` keeps the
