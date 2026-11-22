@@ -71,6 +71,21 @@
 (* "move"), Mover.room (`room`) and Mover.move with that claim; the        *)
 (* move's own steps, from a live process or a gone one, are Move.tla's.    *)
 (*                                                                         *)
+(* A start refused at a limit (F-196, F-193's new-1): new work, a          *)
+(* delegate's start, a main's start or a resume that must leave its        *)
+(* account, picks its account (Usage.pick inside Delegates and Mains)      *)
+(* among the usable ones; another with room takes it. When every usable    *)
+(* one is limited the pick refuses, and the start's owner writes its row   *)
+(* `waiting` with the soonest reset: the start's `limit` prompt (Prompts'  *)
+(* `limit:start:<row>`), answered `wait`, its default at its deadline (the *)
+(* reset plus a margin), or `leave`, the row refused `left`. At the reset  *)
+(* plus the margin the owner picks again and asks for its lease again,     *)
+(* under the row's own request id; a newer limit makes the row wait again  *)
+(* for that reset. A restart keeps the row, and its timer is set again     *)
+(* from it. The code: Delegates' and Mains' `waiting` rows and their       *)
+(* timers (Delegates.Wait), and Prompts' reading of them. The parent's     *)
+(* notice is Delegate.tla's (F-170), as a queued start's.                  *)
+(*                                                                         *)
 (* Left abstract: time but the reset's order (a reset is one step, and the *)
 (* framework's clock reads it as the record's `resetsAt` passed); the      *)
 (* windows' kinds (five-hour, weekly, a model family's: one window here,   *)
@@ -113,6 +128,7 @@ CONSTANTS
     AutoMax,      \* Claude Code's automatic continuations in a row (3 on 2.1.322)
     MaxOutside,   \* a person's acts at the viewer and answers, and stale waits, in all
     MaxRestarts,  \* restarts of the framework
+    Starts,       \* a start of new work is asked for in the behavior (F-196)
     Break         \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -127,12 +143,13 @@ Breaks == {
     "NoBound",         \* go-ons that hit the limit again are not counted
     "MoveMain",        \* a main session is moved as a delegate is, on the framework's own
     "MoveTwice",       \* the move's claim is not checked, so a limit may be moved from twice
-    "LimitReport"      \* a headless delegate's result at a limit is taken as its report
+    "LimitReport",     \* a headless delegate's result at a limit is taken as its report
+    "NoRepick"         \* a waiting start goes at its reset on the pick it was refused by
 }
 
 ASSUME Break \in Breaks
 ASSUME Headless \subseteq Agents /\ Mains \subseteq Agents /\ Others \in BOOLEAN
-ASSUME CanSpend \in BOOLEAN
+ASSUME CanSpend \in BOOLEAN /\ Starts \in BOOLEAN
 ASSUME MaxLimits \in Nat \ {0} /\ Bound \in Nat \ {0} /\ AutoMax \in Nat
 ASSUME MaxOutside \in Nat /\ MaxRestarts \in Nat
 
@@ -155,6 +172,17 @@ Labels == {"stop", "spend"}
 \*   moved     the move ran: the agent runs on the other account
 Steps == {"none", "look", "own", "credits", "press", "unknown", "idle", "send", "word",
           "prompt", "left", "move", "moved"}
+
+\* A start of new work (F-196), its owner's row:
+\*   none      not asked for
+\*   new       asked for, its account to pick; no row yet
+\*   waiting   the pick refused at a limit: the row waits for the soonest reset, `sAt`
+\*   again     the reset passed: its owner picks again, under the row's own request id
+\*   granted   it started on this account
+\*   there     it started on another account, which had room
+\*   left      a person answered its prompt "leave": the row is refused
+\*   cut       a restart cut it before its row was written; its caller is answered unknown
+StartRows == {"none", "new", "waiting", "again", "granted", "there", "left", "cut"}
 
 VARIABLES
     \* the account's window, the environment
@@ -192,6 +220,9 @@ VARIABLES
     mv,         \* Acts: a -> the limit whose move was claimed (or asked of a person; 0: none)
     mvBy,       \* Sessions: a -> the claimed move is a person's answer
     reported,   \* Delegates: a -> its report was taken (a headless delegate's)
+    sr,         \* Delegates or Mains: the start's row (StartRows)
+    sAt,        \* ... the limit whose reset its row waits for (0: none)
+    sp,         \* Prompts: the start's limit prompt is open
     \* the framework, in memory
     pend,       \* a -> the limit of a word stored whose agent row does not yet say so (0: none)
     restarts,
@@ -208,11 +239,12 @@ ccVars == <<cc, screen, live, autos, stale, hits, hitLim, menus>>
 rowVars == <<seen, lim, step, label, byPerson, cp, pp, goes, noted>>
 moveVars == <<far, room, where, mv, mvBy>>
 ghosts == <<stored, ownGone, pressedOn, streak, grants, moves, wrong>>
+startVars == <<sr, sAt, sp>>
 vars == <<n, win, near, ccVars, outside, rec, rowVars, due, wkey, req, pend, restarts, ghosts,
-          moveVars, reported>>
+          moveVars, reported, startVars>>
 
-\* Every action but Report leaves the report as it is.
-Kept(A) == A /\ UNCHANGED reported
+\* Every action but Report and the start's leaves the report and the start as they are.
+Kept(A) == A /\ UNCHANGED <<reported, startVars>>
 
 -----------------------------------------------------------------------------
 (* Reading the state *)
@@ -654,7 +686,64 @@ Report(a) ==
     /\ reported' = [reported EXCEPT ![a] = TRUE]
     /\ wrong' = IF cc[a] = "hit" THEN wrong \cup {"reported a limit"} ELSE wrong
     /\ UNCHANGED <<n, win, near, ccVars, outside, rec, rowVars, due, wkey, req, pend, restarts,
-                   stored, ownGone, pressedOn, streak, grants, moves, moveVars>>
+                   stored, ownGone, pressedOn, streak, grants, moves, moveVars, startVars>>
+
+\* A start of new work is asked for: a delegate's, a main's, or a resume that must leave its
+\* account.
+StartAsked ==
+    /\ Starts /\ sr = "none"
+    /\ sr' = "new"
+    /\ UNCHANGED <<n, win, near, ccVars, outside, rec, rowVars, due, wkey, req, pend, restarts,
+                   ghosts, moveVars, reported, sAt, sp>>
+
+\* Its owner picks its account on Usage's record (Usage.pick): another usable account with
+\* room takes it; this one only while its record says it is not limited. Refused at a limit
+\* (StartRefusedAtLimit), the row is written `waiting` for the soonest reset, its limit prompt
+\* open. A row picked again at its reset that meets a newer limit waits for that one.
+Pick ==
+    /\ sr \in {"new", "again"}
+    /\ CASE Others /\ room ->
+              sr' = "there" /\ UNCHANGED <<sAt, sp, grants>>
+         [] Limited ->
+              /\ sr' = "waiting" /\ sAt' = rec /\ sp' = TRUE
+              /\ UNCHANGED grants
+         [] OTHER ->
+              sr' = "granted" /\ grants' = grants + 1 /\ UNCHANGED <<sAt, sp>>
+    /\ UNCHANGED <<n, win, near, ccVars, outside, rec, rowVars, due, wkey, req, pend, restarts,
+                   stored, ownGone, pressedOn, streak, wrong, moveVars, moves, reported>>
+
+\* A person answers the start's limit prompt "wait": the row waits for its reset as it would.
+AnswerWait ==
+    /\ Outside
+    /\ sr = "waiting" /\ sp
+    /\ sp' = FALSE
+    /\ UNCHANGED <<n, win, near, ccVars, rec, rowVars, due, wkey, req, pend, restarts, ghosts,
+                   moveVars, reported, sr, sAt>>
+
+\* ... or "leave": the row is refused, `left`, and nothing starts.
+AnswerLeave ==
+    /\ Outside
+    /\ sr = "waiting" /\ sp
+    /\ sr' = "left" /\ sp' = FALSE
+    /\ UNCHANGED <<n, win, near, ccVars, rec, rowVars, due, wkey, req, pend, restarts, ghosts,
+                   moveVars, reported, sAt>>
+
+\* Its deadline, the reset plus the margin, takes the default, the wait, as the framework's.
+WaitDefault ==
+    /\ sr = "waiting" /\ sp /\ Passed(sAt)
+    /\ sp' = FALSE
+    /\ UNCHANGED <<n, win, near, ccVars, outside, rec, rowVars, due, wkey, req, pend, restarts,
+                   ghosts, moveVars, reported, sr, sAt>>
+
+\* At the reset plus the margin, its prompt answered or its default taken, the owner picks again
+\* under the row's own request id (Pick). Under NoRepick it starts on the pick it was refused by.
+StartAtReset ==
+    /\ sr = "waiting" /\ ~sp /\ Passed(sAt)
+    /\ IF Break = "NoRepick"
+       THEN sr' = "granted" /\ grants' = grants + 1
+       ELSE sr' = "again" /\ UNCHANGED grants
+    /\ UNCHANGED <<n, win, near, ccVars, outside, rec, rowVars, due, wkey, req, pend, restarts,
+                   stored, ownGone, pressedOn, streak, wrong, moveVars, moves, reported, sAt, sp>>
 
 \* The Scheduler answers the other request at once: granted only where the gate admits.
 Answer ==
@@ -674,8 +763,11 @@ Restart ==
     \* (Heal.tla's Ask), never acted on again.
     /\ step' = [a \in Agents |-> IF step[a] = "move" THEN "prompt" ELSE step[a]]
     /\ pp' = [a \in Agents |-> pp[a] \/ step[a] = "move"]
+    \* A start's row stays: a waiting one's timer is set again from it, and one picked again
+    \* at its reset waits to be picked again. A start whose row was not yet written is cut.
+    /\ sr' = CASE sr = "new" -> "cut" [] sr = "again" -> "waiting" [] OTHER -> sr
     /\ UNCHANGED <<n, win, near, ccVars, outside, rec, seen, lim, label, byPerson, cp, goes, noted,
-                   due, wkey, req, ghosts, moveVars>>
+                   due, wkey, req, ghosts, moveVars, reported, sAt, sp>>
 
 -----------------------------------------------------------------------------
 
@@ -711,6 +803,7 @@ Init ==
     /\ req = "none"
     /\ pend = [a \in Agents |-> 0]
     /\ restarts = 0
+    /\ sr = "none" /\ sAt = 0 /\ sp = FALSE
     /\ stored = [a \in Agents |-> [k \in Limits |-> 0]]
     /\ ownGone = [a \in Agents |-> {}]
     /\ pressedOn = [a \in Agents |-> 0]
@@ -728,14 +821,18 @@ Person(a) ==
     \/ \E l \in {"stop", "wait", "spend"} : Choose(a, l)
     \/ \E l \in Labels : AnswerCredits(a, l)
 
+Start == StartAsked \/ Pick \/ AnswerWait \/ AnswerLeave \/ WaitDefault \/ StartAtReset
+
 Next ==
-    \/ Kept(Close \/ Reset \/ Ask \/ Answer \/ Restart \/ Rooms)
+    \/ Kept(Close \/ Reset \/ Ask \/ Answer \/ Rooms)
+    \/ Restart \/ Start
     \/ \E a \in Agents :
           \/ Kept(Hit(a) \/ TurnEnds(a) \/ AutoGo(a) \/ Framework(a) \/ Person(a))
           \/ Report(a)
 
 Fairness ==
     /\ WF_vars(Kept(Reset)) /\ WF_vars(Kept(Answer))
+    /\ WF_vars(Pick) /\ WF_vars(WaitDefault) /\ WF_vars(StartAtReset)
     /\ \A a \in Agents :
           /\ WF_vars(Kept(Hit(a))) /\ WF_vars(Kept(AutoGo(a)))
           /\ WF_vars(Kept(Read(a))) /\ WF_vars(Kept(Look(a))) /\ WF_vars(Kept(CreditsDefault(a)))
@@ -768,6 +865,12 @@ TypeOK ==
     /\ far \in BOOLEAN /\ room \in BOOLEAN /\ where \in [Agents -> {"here", "there"}]
     /\ mv \in [Agents -> Limits] /\ mvBy \in [Agents -> BOOLEAN]
     /\ reported \in [Agents -> BOOLEAN]
+    /\ sr \in StartRows /\ sAt \in Limits /\ sp \in BOOLEAN
+
+\* The start's limit prompt is its waiting row's: open only while the row waits, and a row
+\* waits only for a limit Usage read.
+StartPromptIsRow == /\ sp => sr = "waiting"
+                    /\ sr = "waiting" => sAt > 0
 
 \* A headless delegate's result at a limit is never its report.
 LimitNotReport == "reported a limit" \notin wrong
@@ -810,5 +913,9 @@ NoAgentLeftLimited == \A a \in Agents : lim[a] > 0 ~> (lim[a] = 0 \/ pp[a] \/ st
 
 \* Liveness: every limit record is read: the agent's row says so.
 RecordRead == \A a \in Agents : hits[a] > seen[a] ~> hits[a] = seen[a]
+
+\* Liveness: a start refused at a limit is, after its reset, granted here or on another account,
+\* or left by a person.
+StartWaitEnds == sr = "waiting" ~> sr \in {"granted", "there", "left"}
 
 =============================================================================
