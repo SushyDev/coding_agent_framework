@@ -5,11 +5,17 @@ defmodule CodingAgentFramework.Delegates.Table do
   agent's parent, project, account, session, launch options and whether it has ended are its
   agent row in `Sessions`, read through `Sessions.Agents`.
 
-  `status` is `starting`, `resuming` (after a kill) and `going_on` (with the word to go on
+  `status` is `waiting` while a start refused at a usage limit waits for the soonest reset
+  (F-196): `until` is that reset (wall-clock ms, kept after as the reset it waited for),
+  `deadline` the time its owner picks its account again (the reset plus the margin), `start`
+  the start's request (its parent, project, options, metadata, brief and kind, as a term), and
+  `waited` the person who answered its prompt `wait` for this reset, nil while it is open.
+  Then, or at once, `starting`, `resuming` (after a kill) and `going_on` (with the word to go on
   after a usage limit, F-187, not counted in `resumes`) while a call of `Sessions` is under way (`called_at`,
   in wall-clock ms, tells that call's agent row from an earlier one; `deadline` is the
   wall-clock time it is settled by), then `running`, then `finished` (a reply is its report) or
-  `failed` (a notice is) once, or `refused` with its `reason`. `brief_uuid` and `resume_uuid`
+  `failed` (a notice is) once, or `refused` with its `reason` (`left` for a waiting start a
+  person left). `brief_uuid` and `resume_uuid`
   are the uuids of `Mailbox`'s rows of the brief and of the word to go on, chosen before they
   are stored. `report` is `none`, then `held` with its `text` until `Mailbox` takes it, then
   `taken`; how it is delivered is `Mailbox`'s row, the reply to `brief_uuid`. `model` is what
@@ -32,21 +38,22 @@ defmodule CodingAgentFramework.Delegates.Table do
   alias CodingAgentFramework.Store
 
   @columns ~w(id host name branch model brief_uuid resume_uuid status reason resumes report
-              text called_at deadline created_at updated_at tell effort)a
+              text called_at deadline created_at updated_at tell effort until waited start)a
 
   @create """
   (id INTEGER PRIMARY KEY, host TEXT NOT NULL, name TEXT NOT NULL, branch TEXT NOT NULL,
     model TEXT NOT NULL, brief_uuid TEXT NOT NULL, resume_uuid TEXT, status TEXT NOT NULL,
     reason TEXT, resumes INTEGER NOT NULL, report TEXT NOT NULL, text TEXT,
     called_at INTEGER NOT NULL, deadline INTEGER NOT NULL, created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL, tell TEXT, effort TEXT)
+    updated_at INTEGER NOT NULL, tell TEXT, effort TEXT, until INTEGER, waited TEXT, start BLOB)
   """
   @schema "CREATE TABLE IF NOT EXISTS delegates #{@create};"
-  # Added after a file's table may have been made (`tell`, F-170; `effort`, F-200).
-  @added [delegates: ["tell TEXT", "effort TEXT"]]
+  # Added after a file's table may have been made (`tell`, F-170; `effort`, F-200; the wait at
+  # a limit, F-196).
+  @added [delegates: ["tell TEXT", "effort TEXT", "until INTEGER", "waited TEXT", "start BLOB"]]
 
   # Every status, once, and the lists read from it, checked when the module compiles.
-  @statuses ~w(starting resuming going_on running finished failed refused)
+  @statuses ~w(waiting starting resuming going_on running finished failed refused)
   # A call of `Sessions` is under way, or was when a restart cut it.
   @calling ~w(starting resuming going_on)
   # Rows that may still move.
@@ -165,6 +172,22 @@ defmodule CodingAgentFramework.Delegates.Table do
     keys = ~w(host name branch model effort brief_uuid deadline)a
     first = [status: "starting", resumes: 0, report: "none", called_at: now, created_at: now]
     fields = Enum.map(keys, &{&1, start[&1]}) ++ first ++ [updated_at: now]
+    [[id]] = Store.insert(db, "delegates", fields, "RETURNING id")
+    id
+  end
+
+  @doc """
+  Writes a start refused at a usage limit (F-196) as `waiting`, for the reset `until`, its owner
+  picking again at `deadline`, its request `start` kept as a term, and its parent owed the
+  outcome (`tell`). Returns its id.
+  """
+  @spec waiting(db, map) :: integer
+  def waiting(db, start) do
+    now = System.os_time(:millisecond)
+    keys = ~w(host name branch model effort brief_uuid deadline until tell)a
+    first = [status: "waiting", resumes: 0, report: "none", called_at: now, created_at: now]
+    blob = {:start, {:blob, :erlang.term_to_binary(start.start)}}
+    fields = Enum.map(keys, &{&1, start[&1]}) ++ first ++ [blob, updated_at: now]
     [[id]] = Store.insert(db, "delegates", fields, "RETURNING id")
     id
   end

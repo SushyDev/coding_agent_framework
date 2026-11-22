@@ -68,6 +68,7 @@ defmodule CodingAgentFramework.Delegates.Turn do
   - `:again`: a row with no report whose process is gone does not count as running, so a new
     start goes on, and the old row is history, never resumed;
   - `{:refused, reason}` otherwise: `{:starting, name}` while a call of `Sessions` is under way,
+    `{:waiting, name}` while its start waits at a usage limit (F-196),
     `{:other_parent, name}` for another parent's delegate, and `{:delegate, %{name, status,
     session}}` for one neither live nor gone (a report on its way, a stop under way, a move).
 
@@ -89,6 +90,9 @@ defmodule CodingAgentFramework.Delegates.Turn do
     cond do
       row.status in Table.calling() ->
         {:refused, {:starting, row.name}}
+
+      row.status == "waiting" ->
+        {:refused, {:waiting, row.name}}
 
       agent == nil or Agents.ended?(agent) ->
         :new
