@@ -815,7 +815,7 @@ defmodule CodingAgentFramework.Mailbox do
         s = unwatch(s, id)
 
         if written == :written do
-          write(s, m, status: "delivered")
+          write(s, m, status: "delivered", delivered_at: now())
           {:reply, {:ok, :delivered}, s, {:continue, :settle}}
         else
           again(s, m, :write_failed)
@@ -1104,7 +1104,7 @@ defmodule CodingAgentFramework.Mailbox do
   defp settled(s, m, :delivered) do
     # A pointer's file stays: the line is taken before the agent reads the file, in the turn it
     # starts, and nothing tells when that read is done. The framework keeps its data.
-    write(s, m, status: "delivered", attempt: nil)
+    write(s, m, status: "delivered", attempt: nil, delivered_at: now())
   end
 
   defp settled(s, m, :again), do: again(s, m, nil)

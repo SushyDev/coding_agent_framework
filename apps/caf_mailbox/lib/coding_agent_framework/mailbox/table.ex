@@ -18,7 +18,8 @@ defmodule CodingAgentFramework.Mailbox.Table do
   session's, and no settle reads it (F-138's new-1, `Delivery.tla`'s `StoreRow`).
   A `waiter` row keeps `sent_at`, the wall-clock ms its text was handed on (the take bound runs
   from it), and `from_byte`, how much of the session's transcript was read before its mark.
-  `attempt` is why the last delivery did not go in. A reply or a notice names the uuid of the
+  `attempt` is why the last delivery did not go in. `delivered_at` is the wall-clock ms it was
+  delivered, written once with `delivered` (F-202); a row delivered before F-202 has none. A reply or a notice names the uuid of the
   row it answers in `reply_to` (the report is the reply to the brief's uuid), with a result's
   `subtype` and `is_error`. `reply_to` and `uuid` are unique, so one row has one answer, and a
   row stored twice under one uuid is stored once.
@@ -32,7 +33,8 @@ defmodule CodingAgentFramework.Mailbox.Table do
   alias CodingAgentFramework.Store
 
   @columns ~w(id from_agent to_agent text uuid status session_id attempt reply_to subtype
-              is_error kind via at again sent_at from_byte answer created_at updated_at)a
+              is_error kind via at again sent_at from_byte answer created_at updated_at
+              delivered_at)a
 
   @schema """
   CREATE TABLE IF NOT EXISTS messages (
@@ -41,8 +43,8 @@ defmodule CodingAgentFramework.Mailbox.Table do
     attempt TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
   """
 
-  # Added after a file's table may have been made (F-79, F-81, R7, F-142), so each is added
-  # if missing.
+  # Added after a file's table may have been made (F-79, F-81, R7, F-142, F-202), so each is
+  # added if missing.
   @added [
     "reply_to TEXT",
     "subtype TEXT",
@@ -53,7 +55,8 @@ defmodule CodingAgentFramework.Mailbox.Table do
     "again INTEGER NOT NULL DEFAULT 0",
     "sent_at INTEGER",
     "from_byte INTEGER",
-    "answer TEXT"
+    "answer TEXT",
+    "delivered_at INTEGER"
   ]
   @indexes """
   CREATE UNIQUE INDEX IF NOT EXISTS messages_reply_to ON messages (reply_to);

@@ -102,9 +102,17 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
     # second goes, this time queued by Claude Code into a person's running turn.
     turn = WaiterStandIn.turn_end(main.settings, main.sid, main.transcript, :busy)
     assert {2, "From d1 (message): report two\n\n[delivery " <> _} = Task.await(turn, 10_000)
-    assert %{status: "delivered", attempt: nil} = Table.get(ctx.mtable, one)
+    assert %{status: "delivered", attempt: nil, delivered_at: at} = Table.get(ctx.mtable, one)
     assert {:ok, %{status: "delivered"}} = until(ctx, two, &(&1.status == "delivered"))
     assert %{via: "waiter", again: 0} = Table.get(ctx.mtable, two)
+
+    # Its delivery's time is written once, with `delivered` (F-202), and a later write of the
+    # row leaves it.
+    assert is_integer(at) and at >= Table.get(ctx.mtable, one).created_at
+    Table.update(ctx.mtable, one, attempt: "a later write")
+    assert %{delivered_at: ^at} = Table.get(ctx.mtable, one)
+    assert %{delivered_at: two_at} = Table.get(ctx.mtable, two)
+    assert is_integer(two_at)
   end
 
   # Break_Delivery_SettleEarly's guard, the take bound (F-122's new-2): with no line of the row

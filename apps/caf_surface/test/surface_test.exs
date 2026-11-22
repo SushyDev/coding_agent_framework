@@ -370,20 +370,33 @@ defmodule CodingAgentFramework.SurfaceTest do
       end)
 
     # F-126's new-1: the start, `Delegates`' own resume and `Sessions`' resume are rows of
-    # `Acts`, each settled by its answer; the resume claimed the state it resumed, once.
+    # `Acts`, each settled by its answer; the resume claimed the state it resumed, once. Each
+    # kill `Delegates` saw is a row before it decided (F-202): the first before the resume, the
+    # second before the failure. The permission request each turn waited on is an open
+    # `Prompts` recorded, a row of its own.
     {:ok, acts} =
       await(fn ->
-        {:ok, rows} = Acts.rows(parts.acts, target: "app-unit-one")
-        if Enum.count(rows, &(&1.status == "settled")) == 3, do: {:ok, rows}
+        actors = ["sessions:ws", "delegates:ws"]
+        {:ok, rows} = Acts.rows(parts.acts, target: "app-unit-one", actor: actors)
+        if Enum.count(rows, &(&1.status == "settled")) == 5, do: {:ok, rows}
       end)
+
+    assert {:ok, [_, _ | _] = opened} =
+             Acts.rows(parts.acts, target: "app-unit-one", act: "opened")
+
+    assert Enum.all?(opened, &String.starts_with?(&1.state, "opened:ws:permission:stream:"))
 
     assert [
              %{actor: "sessions:ws", act: "start", outcome: "verified"},
+             %{actor: "delegates:ws", act: "killed", state: "killed:ws:" <> first},
              %{actor: "delegates:ws", act: "resume", outcome: "verified", state: state},
-             %{actor: "sessions:ws", act: "resume", outcome: "verified"}
+             %{actor: "sessions:ws", act: "resume", outcome: "verified"},
+             %{actor: "delegates:ws", act: "killed", state: "killed:ws:" <> second}
            ] = acts
 
     assert state =~ ~s("resumes":0)
+    assert [_id, "0"] = String.split(first, ":")
+    assert [_id, "1"] = String.split(second, ":")
   end
 
   # F-126's new-1: a raised error the app records is a part's crash, a row of `Acts`.

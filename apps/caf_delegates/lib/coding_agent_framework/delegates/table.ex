@@ -23,6 +23,11 @@ defmodule CodingAgentFramework.Delegates.Table do
   of `ClaudeCLI.efforts/0`), which a resume launches with again, or NULL when its start named
   none and no flag goes in (F-200). `tell` names the parent while it is owed the outcome of
   a start that answered queued at once (F-170), and is cleared once `Mailbox` has its notice.
+  `taken_by` says how a finished row's report was taken, written with it (F-202): `result` (a
+  headless turn's `result` named the brief), `transcript` (the transcript's last reply, read
+  once the process was gone with no `result` or no turn's end: a recovery's path), or
+  `turn_end` (an interactive delegate's turn read ended). It is NULL for a failure's notice,
+  which is the framework's, and for a row written before F-202.
 
   **Migration** (F-129): a file an earlier build made also has `parent`, `project`, `account`,
   `brief`, `session_id`, `mark` and `options`, and the status `ended`. `old_tree/1` reads what
@@ -38,19 +43,29 @@ defmodule CodingAgentFramework.Delegates.Table do
   alias CodingAgentFramework.Store
 
   @columns ~w(id host name branch model brief_uuid resume_uuid status reason resumes report
-              text called_at deadline created_at updated_at tell effort until waited start)a
+              text called_at deadline created_at updated_at tell effort until waited start taken_by)a
 
   @create """
   (id INTEGER PRIMARY KEY, host TEXT NOT NULL, name TEXT NOT NULL, branch TEXT NOT NULL,
     model TEXT NOT NULL, brief_uuid TEXT NOT NULL, resume_uuid TEXT, status TEXT NOT NULL,
     reason TEXT, resumes INTEGER NOT NULL, report TEXT NOT NULL, text TEXT,
     called_at INTEGER NOT NULL, deadline INTEGER NOT NULL, created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL, tell TEXT, effort TEXT, until INTEGER, waited TEXT, start BLOB)
+    updated_at INTEGER NOT NULL, tell TEXT, effort TEXT, until INTEGER, waited TEXT, start BLOB,
+    taken_by TEXT)
   """
   @schema "CREATE TABLE IF NOT EXISTS delegates #{@create};"
   # Added after a file's table may have been made (`tell`, F-170; `effort`, F-200; the wait at
-  # a limit, F-196).
-  @added [delegates: ["tell TEXT", "effort TEXT", "until INTEGER", "waited TEXT", "start BLOB"]]
+  # a limit, F-196; `taken_by`, F-202).
+  @added [
+    delegates: [
+      "tell TEXT",
+      "effort TEXT",
+      "until INTEGER",
+      "waited TEXT",
+      "start BLOB",
+      "taken_by TEXT"
+    ]
+  ]
 
   # Every status, once, and the lists read from it, checked when the module compiles.
   @statuses ~w(waiting starting resuming going_on running finished failed refused)

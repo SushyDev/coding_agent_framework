@@ -49,43 +49,51 @@ defmodule CodingAgentFramework.Watch.Metrics do
   one period, `"all"`. The first and last cut are clipped to `since` and `until`. A delegate counts
   in the period its row was made (it started), a recovery in the period it acted (its `acted_at`,
   else its claim), a prompt in the period it opened, a person's act in the period it was
-  claimed, a usage limit in the period it began.
+  claimed, and a usage limit in the period it began (its symptom's `since`; the last two
+  confirmed in F-202, from F-199's new-4).
 
   **The metrics**, each with its evidence (the rows it counted), and a time's median and max
-  where it has one:
+  where it has one. A row written before F-202 lacks the fact a rule reads since (`taken_by`,
+  `held_at`, `delivered_at`, a `killed` or `opened` record), and is read as F-199 read it, where
+  that reading is named below:
 
   - `started`: each delegate row.
   - `reported`: each delegate whose report (`Mailbox`'s reply or notice to its brief) is stored;
     its time is the report's row less the delegate's.
-  - `stalled`: each delegate on which a stall's symptom fired, once, by its own row:
-    `stuck_background` recorded on its name while the row was the name's latest, its bound the
-    symptom's own. A stall that cleared before its symptom fired has no symptom row, and is not
-    counted. Its other symptom, a report read by a recovery's path because its `Stop` never
-    came, is in no row (`unread: ["stop_lost"]`): `Delegates` keeps no fact of the path that took
-    a report.
-  - `late`: each report that reached the parent by a recovery's path, saying which: `"b"`, held
+  - `stalled`: each delegate on which a stall's symptom fired, once, by its own row, saying which
+    (`why`): `"stuck_background"`, recorded on its name while the row was the name's latest, its
+    bound the symptom's own (a stall that cleared before its symptom fired has no symptom row,
+    and is not counted); `"stop_lost"`, its report taken from the transcript once its process
+    was gone, because its `Stop` (a headless turn's `result`, an interactive turn's end) never
+    came (its row's `taken_by` is `transcript`, F-202).
+  - `late`: each report that reached the parent by a recovery's path, saying which: `"a"`, its
+    `Stop` lost and the report taken from the transcript (`taken_by` `transcript`); `"b"`, held
     behind a background command and released by its healer (stored after the
     `stuck_backgrounds` healer's `end` on its delegate); `"c"`, relayed more than 60 s after it was
-    taken (its row `delivered` more than 60 s after it was stored). `"a"`, its `Stop` lost and the
-    report taken from the transcript by a recovery, is in no row (`unread: ["a"]`), as above.
-  - `killed`: each delegate whose process went with no act of the framework's (a crash
-    included): its row counts a resume, or `Delegates`' resume claim names it, and no act that
-    ends a process (`stop`, `end`, `end_main`, `move`) was claimed on its name from its start to
-    that resume.
+    taken (its row's `delivered_at` more than 60 s after it was stored; before F-202, its
+    `updated_at` once `delivered`).
+  - `killed`: each kill of a delegate's process with no act of the framework's (a crash
+    included), a delegate killed twice counted twice (`delegates` counts the delegates): each
+    `killed` record of `Delegates` (F-202), keyed by its row and its resumes before the kill,
+    whatever followed it, a resume or a failure; before F-202, a resume its row counts or its
+    resume claim names. No act that ends a process (`stop`, `end`, `end_main`, `move`) was
+    claimed on its name from the kill before it (or its start) to the kill.
   - `restarted`: each resume `Delegates` claimed after such a kill, with its outcome.
   - `dropped`: each report settled `unknown` or made due again.
   - `limited`: each agent's usage limit (`Watch`'s `limited`), with its account and window, and
     its time past the reset: from the reset until the limit passed.
   - `moves`: each move `Limits` claimed, with its outcome.
   - `prompts`: each prompt that opened, `opened` and `answered`, by kind, its time to answer from
-    its open to its answer. Read from the asks (`Mailbox`), the remedy prompts (`Watch`), the
-    holds still open (`Intake`) and every answer row of `answer/4` (F-194), which names its prompt
-    and when it opened. A hold decided by any other (the app's callback, a pause, its deadline)
-    has lost its open time, since `Intake` writes a hold's time again when it settles
-    (`unread: ["hold_opened_at"]`, F-194's new-4); a dialog, login or limit prompt is counted
-    once answered.
+    its open to its answer, and who answered (`by`). Read from the asks (`Mailbox`), the remedy
+    prompts (`Watch`), every hold (`Intake`), each open `Prompts` recorded (act `opened`,
+    F-202), and every answer row of `answer/4` (F-194), which names its prompt and when it
+    opened. A hold opened at its `held_at` (before F-202, a hold still open at its
+    `written_at`, and a decided one is not counted); one settled `answered` or `passed` by an
+    actor (the app's callback, a pause, a person) was answered by it at its settle. A dialog,
+    login or limit prompt never answered counts from its `opened` record.
   - `recoveries`: each act of a healer (`recoveries:`, `absent_mains:`, `stuck_backgrounds:`,
-    `limits:`, `delegates:`) or of a person's remedy (its `detail` names its healer), by outcome
+    `limits:`, `delegates:`, but not the facts `Delegates` records, `killed`) or of a person's
+    remedy (its `detail` names its healer), by outcome
     (its `outcome`, else its status); and `asked`, each symptom left for a person (its `remedy`
     prompt opened).
   - `interventions`: each of a person's acts, by its act (`by_kind`) and by actor: an answer of
@@ -178,10 +186,15 @@ defmodule CodingAgentFramework.Watch.Metrics do
   end
 
   defp delegates(rows, acts, reports, symptoms) do
-    resumes = for a <- acts, healer?(a, "delegates:"), a.act == "resume", do: a
-    resumes = Enum.group_by(resumes, &(&1.state || %{})["delegate"])
+    own = for a <- acts, healer?(a, "delegates:"), a.act in ["resume", "killed"], do: a
+    {killed, resumes} = Enum.split_with(own, &(&1.act == "killed"))
 
-    for {d, till} <- lives(rows), fact <- delegate(d, till, acts, reports, symptoms, resumes) do
+    of = %{
+      resumes: Enum.group_by(resumes, &field(&1.state, "delegate")),
+      killed: Enum.group_by(killed, &field(&1.detail, "delegate"))
+    }
+
+    for {d, till} <- lives(rows), fact <- delegate(d, till, acts, reports, symptoms, of) do
       fact
     end
   end
@@ -198,11 +211,13 @@ defmodule CodingAgentFramework.Watch.Metrics do
     |> Enum.sort_by(fn {d, _} -> d.id end)
   end
 
-  defp delegate(d, till, acts, reports, symptoms, resumes) do
+  defp delegate(d, till, acts, reports, symptoms, of) do
     at = d.created_at
     who = %{delegate: d.id, name: d.name}
     in_life? = fn t -> is_integer(t) and t >= at and (till == nil or t < till) end
     report = reports[d.brief_uuid]
+    # Its report read from the transcript once its process was gone (F-202): its `Stop` lost.
+    lost? = report != nil and d[:taken_by] == "transcript"
 
     stuck =
       for s <- symptoms,
@@ -219,18 +234,24 @@ defmodule CodingAgentFramework.Watch.Metrics do
           in_life?.(acted(a)),
           do: acted(a)
 
+    stalled = Enum.filter([{"stuck_background", stuck != []}, {"stop_lost", lost?}], &elem(&1, 1))
+    stalled = Map.merge(who, %{symptoms: stuck, why: Enum.map(stalled, &elem(&1, 0))})
+
     [{:started, at, who}] ++
-      if(report, do: report_facts(at, who, report, healed), else: []) ++
-      if(stuck != [], do: [{:stalled, at, Map.put(who, :symptoms, stuck)}], else: []) ++
-      kill_facts(d, who, Map.get(resumes, d.id, []), acts, in_life?)
+      if(report, do: report_facts(at, who, report, healed, lost?), else: []) ++
+      if(stalled.why != [], do: [{:stalled, at, stalled}], else: []) ++
+      kill_facts(d, who, of, acts, in_life?)
   end
 
-  defp report_facts(at, who, m, healed) do
+  defp report_facts(at, who, m, healed, lost?) do
+    relayed = delivered_at(m)
+
     why =
       Enum.filter(
         [
+          {"a", lost?},
           {"b", Enum.any?(healed, &(&1 < m.created_at))},
-          {"c", m.status == "delivered" and m.updated_at - m.created_at > @late}
+          {"c", is_integer(relayed) and relayed - m.created_at > @late}
         ],
         &elem(&1, 1)
       )
@@ -245,23 +266,38 @@ defmodule CodingAgentFramework.Watch.Metrics do
       )
   end
 
-  # Killed: a resume counted on the row, or claimed for it, with no act that ends a process
-  # claimed on its name between its start and that resume.
-  defp kill_facts(d, who, resumes, acts, in_life?) do
-    bound = Enum.min(Enum.map(resumes, & &1.claimed_at), fn -> d.updated_at end)
+  # Killed: each kill of the row, by its resumes before it (0 the first, 1 the second), with no
+  # act that ends a process claimed on its name since the kill before it (or its start). A
+  # kill is `Delegates`' `killed` record (F-202); one before F-202 is read as F-199 read it, from
+  # its resume's claim or the row's count of resumes. Restarted: each resume claimed after a
+  # kill so counted.
+  defp kill_facts(d, who, of, acts, in_life?) do
+    recorded =
+      for a <- Map.get(of.killed, d.id, []), do: {field(a.detail, "resumes"), a.claimed_at}
 
-    ended? =
-      Enum.any?(acts, fn a ->
-        a.act in @ends and a.target == d.name and in_life?.(a.claimed_at) and
-          a.claimed_at <= bound
+    resumes = Map.get(of.resumes, d.id, [])
+    claimed = for a <- resumes, do: {field(a.state, "resumes") || 0, a.claimed_at}
+    counted = if d.resumes > 0, do: [{0, d.updated_at}], else: []
+
+    kills =
+      (recorded ++ claimed ++ counted)
+      |> Enum.filter(fn {n, t} -> is_integer(n) and is_integer(t) end)
+      |> Enum.uniq_by(&elem(&1, 0))
+      |> Enum.sort()
+
+    ends = for a <- acts, a.act in @ends, a.target == d.name, in_life?.(a.claimed_at), do: a
+
+    seen =
+      Enum.zip(kills, [d.created_at | Enum.map(kills, &elem(&1, 1))])
+      |> Enum.reject(fn {{_n, t}, from} ->
+        Enum.any?(ends, &(&1.claimed_at >= from and &1.claimed_at <= t))
       end)
+      |> Enum.map(fn {{n, _t}, _from} -> n end)
 
-    if (d.resumes > 0 or resumes != []) and not ended? do
-      [{:killed, d.created_at, who}] ++
-        for a <- resumes, do: {:restarted, acted(a), Map.merge(who, act(a))}
-    else
-      []
-    end
+    for(n <- seen, do: {:killed, d.created_at, Map.put(who, :resumes, n)}) ++
+      for a <- resumes,
+          (field(a.state, "resumes") || 0) in seen,
+          do: {:restarted, acted(a), Map.merge(who, act(a))}
   end
 
   defp limits(symptoms, acts) do
@@ -302,46 +338,67 @@ defmodule CodingAgentFramework.Watch.Metrics do
         reply =
           Enum.find(messages, &(&1.kind in ["answer", "withdrawn"] and &1.reply_to == m.uuid))
 
-        {"ask:#{m.id}", m.created_at, reply && reply.created_at}
+        {"ask:#{m.id}", {m.created_at, reply && reply.created_at, nil}}
       end
 
     remedies =
       for s <- symptoms,
           is_integer(s[:asked_at]),
-          do: {"remedy:#{s.id}", s.asked_at, s[:answered_at]}
+          do: {"remedy:#{s.id}", {s.asked_at, s[:answered_at], nil}}
 
-    open =
-      for h <- holds, h.hold in ["held", "deciding"] do
-        {"#{if h.prompt == "stop_cap", do: "stop_cap", else: "permission"}:#{h.id}", h.written_at,
-         nil}
-      end
+    # A hold with no open time (decided before F-202) is left to its answer row, if any.
+    holds =
+      for h <- holds,
+          {opened, _, _} = t = hold(h),
+          is_integer(opened),
+          do: {"#{hold_kind(h)}:#{h.id}", t}
 
-    owned = Map.new(asks ++ remedies ++ open, fn {id, opened, at} -> {id, {opened, at}} end)
+    owned = Map.new(asks ++ remedies ++ holds)
 
-    # An answer row names its prompt and when it opened, whatever its owner's rows keep.
+    # Each prompt's open that `Prompts` recorded (F-202), the earliest of its id; then a prompt
+    # only an answer row names (one answered before F-202), with the open time that row carries.
+    recorded =
+      for a <- Enum.sort_by(acts, & &1.claimed_at, :desc),
+          a.act == "opened" and healer?(a, "prompts:"),
+          into: %{},
+          do: {field(a.detail, "prompt"), {field(a.detail, "opened_at"), nil, nil}}
+
     from_answers =
-      for {id, [a | _]} <- answers,
-          not Map.has_key?(owned, id),
-          do: {id, {a.detail["opened_at"], nil}}
+      for {id, [a | _]} <- answers, into: %{}, do: {id, {a.detail["opened_at"], nil, nil}}
 
-    for {id, {opened, at}} <- Map.merge(owned, Map.new(from_answers)), is_integer(opened) do
+    every = from_answers |> Map.merge(recorded) |> Map.merge(owned)
+
+    for {id, {opened, at, by}} <- every, is_binary(id) and is_integer(opened) do
       a = answered[id]
-      at = if a, do: a.claimed_at, else: at
+      {at, by} = if a, do: {a.claimed_at, a.actor}, else: {at, by}
 
       {:prompts, opened,
        %{
          prompt: id,
          kind: (a && a.detail["kind"]) || hd(String.split(id, ":")),
-         by: a && a.actor,
+         by: by,
          ms: if(is_integer(at), do: at - opened)
        }}
     end
   end
 
+  defp hold_kind(h), do: if(h.prompt == "stop_cap", do: "stop_cap", else: "permission")
+
+  # A hold opened at its `held_at` (F-202); one written before F-202 has only its `written_at`,
+  # its open time while it is still held. A hold that settled with an actor (the app's
+  # callback, a pause, a person) was answered by it, at its settle.
+  defp hold(h) do
+    opened = h[:held_at] || if(h.hold in ["held", "deciding"], do: h.written_at)
+    decided? = h.hold in ["answered", "passed"] and is_binary(h[:actor])
+    if decided?, do: {opened, h.written_at, h.actor}, else: {opened, nil, nil}
+  end
+
+  # A kill `Delegates` saw is a fact it recorded, not a recovery.
   defp recoveries(acts, symptoms) do
     for(
       a <- acts,
-      Enum.any?(@healers, &healer?(a, &1)) or is_binary((a.detail || %{})["healer"]),
+      a.act != "killed",
+      Enum.any?(@healers, &healer?(a, &1)) or is_binary(field(a.detail, "healer")),
       do: {:recoveries, acted(a), Map.put(act(a), :actor, a.actor)}
     ) ++
       for s <- symptoms,
@@ -373,8 +430,7 @@ defmodule CodingAgentFramework.Watch.Metrics do
           {k, %{opened: length(of), answered: Enum.count(of, & &1.ms)}}
         end),
       ms: times(es),
-      evidence: es,
-      unread: ["hold_opened_at"]
+      evidence: es
     }
   end
 
@@ -403,8 +459,7 @@ defmodule CodingAgentFramework.Watch.Metrics do
       case metric do
         m when m in [:reported, :limited] -> %{ms: times(es)}
         m when m in [:restarted, :moves] -> %{by_outcome: outcomes(es)}
-        :stalled -> %{unread: ["stop_lost"]}
-        :late -> %{unread: ["a"]}
+        :killed -> %{delegates: es |> Enum.uniq_by(& &1.delegate) |> length()}
         _ -> %{}
       end
 
@@ -425,6 +480,16 @@ defmodule CodingAgentFramework.Watch.Metrics do
 
   defp healer?(%{actor: actor}, prefix),
     do: is_binary(actor) and String.starts_with?(actor, prefix)
+
+  # A key of a decoded `detail` or `state`, nil for one that is not a map.
+  defp field(%{} = map, key), do: map[key]
+  defp field(_other, _key), do: nil
+
+  # When a report was relayed: its `delivered_at` (F-202); a row delivered before F-202 keeps
+  # no time of it, and its `updated_at` is that write's, as F-199 read it.
+  defp delivered_at(%{delivered_at: at}) when is_integer(at), do: at
+  defp delivered_at(%{status: "delivered", updated_at: at}), do: at
+  defp delivered_at(_m), do: nil
 
   defp decode(row, keys),
     do: Enum.reduce(keys, row, &Map.update(&2, &1, nil, fn v -> json_or(v) end))

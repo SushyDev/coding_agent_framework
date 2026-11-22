@@ -12,7 +12,10 @@ defmodule CodingAgentFramework.Intake.Table do
   who decided (`app` for the app's callback, `pause` for a pause's word, `person` for a
   person's answer, or the name the answer gave, `capped` for a `Stop` let pass at Claude Code's
   cap). A held `Stop` that waits on a person has `prompt` `stop_cap`. A held row's `deadline`
-  is the wall-clock ms at which its hold ends with no decision (F-179).
+  is the wall-clock ms at which its hold ends with no decision (F-179). Its `held_at` is when
+  it was held (F-202, from F-194's new-4): written once with the row, while `written_at` moves
+  with each step of the hold and is its settle's time once it settles. A row written before
+  F-202 has none.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "intake.db")
       iex> {:ok, db} = CodingAgentFramework.Intake.Table.open(path)
@@ -23,7 +26,7 @@ defmodule CodingAgentFramework.Intake.Table do
   alias CodingAgentFramework.Store
 
   @columns ~w(id host account key event session_id data problem hold decision written_at actor
-              prompt deadline)a
+              prompt deadline held_at)a
 
   @schema """
   CREATE TABLE IF NOT EXISTS intake_events (
@@ -40,7 +43,9 @@ defmodule CodingAgentFramework.Intake.Table do
     reason TEXT, set_by TEXT, set_at INTEGER NOT NULL, PRIMARY KEY (host, scope, name));
   """
 
-  @open [added: [intake_events: ["actor TEXT", "prompt TEXT", "deadline INTEGER"]]]
+  @open [
+    added: [intake_events: ["actor TEXT", "prompt TEXT", "deadline INTEGER", "held_at INTEGER"]]
+  ]
 
   @type db :: Store.db()
 
@@ -113,11 +118,12 @@ defmodule CodingAgentFramework.Intake.Table do
   def insert(db, host, account, row, at) do
     values =
       [host, account, row.key, row.event, row.session_id, row.data] ++
-        [Store.text(row.problem), if(row.hold, do: "held"), at, row[:deadline]]
+        [Store.text(row.problem), if(row.hold, do: "held"), at, row[:deadline]] ++
+        [if(row.hold, do: at)]
 
     sql =
       "INSERT INTO intake_events (host, account, key, event, session_id, data, problem, hold, " <>
-        "written_at, deadline) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) " <>
+        "written_at, deadline, held_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) " <>
         "ON CONFLICT (host, account, key) DO NOTHING RETURNING id"
 
     case Store.query(db, sql, values) do
@@ -315,8 +321,8 @@ defmodule CodingAgentFramework.Intake.Table do
 
   @doc """
   The host's holds that could wait on a person, as `waiting/2`'s, in every hold, decided ones
-  too, oldest first: what the metrics read (F-199). A decided row's `written_at` is when it
-  settled, not when it opened.
+  too, oldest first: what the metrics read (F-199). A row opened at its `held_at` (F-202); a
+  decided row's `written_at` is when it settled.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "holds.db")
       iex> {:ok, db} = CodingAgentFramework.Intake.Table.open(path)
