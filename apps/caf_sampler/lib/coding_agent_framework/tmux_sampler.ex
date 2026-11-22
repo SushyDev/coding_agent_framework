@@ -15,6 +15,15 @@ defmodule CodingAgentFramework.TmuxSampler do
   beside the last good sample, whose rows and age stay. Before the first good sample, `rows/2`
   answers `:unread`. It acts on nothing: reopening a lost viewer is `Recoveries`' job.
 
+  **A viewer attached** (F-199, from F-194's new-2): given `acts:`, each good sample with the
+  server up also reads its clients (`Tmux.list_clients/1`), and a client that was not there at
+  the last sample is a person's intervention: one row in `Acts`, act `attach`, actor `person:`,
+  target the agent whose tagged pane its session shows, its `detail` the client's `tty`,
+  `session` and `created`. Each is recorded under its key, `attach:<host>:<server>:<tty>:<created>`
+  (`Acts.record/7`'s `state:`), so a restart writes none twice. A client of a session with no
+  agent's pane is no one's viewer and writes nothing. A failed read of the clients writes nothing,
+  and the next sample reads them again.
+
   After a sample that changed rows, the first one, or a failure, it calls `notify` with
   `%{topic: "tmux:<host>:<server>", ids: ids}`, as `Registry` does. `notify` must not raise. `Cues`
   hands the same cue to `Sessions`, which settles its rows again when a held socket goes away or
@@ -34,7 +43,7 @@ defmodule CodingAgentFramework.TmuxSampler do
 
   use GenServer
 
-  alias CodingAgentFramework.{Holder, Reader, Tmux}
+  alias CodingAgentFramework.{Acts, Holder, Reader, Tmux}
   alias CodingAgentFramework.TmuxSampler.{Join, Table}
 
   @timeout 10_000
@@ -42,9 +51,10 @@ defmodule CodingAgentFramework.TmuxSampler do
   @doc """
   Starts a sampler. Options: `server:` (a `Tmux` server), `holder:` (a `Holder` on the same
   host), `db:` (this instance's SQLite path), and optionally `notify:` (a function of one cue),
-  `interval:` (ms between samples; without it, samples happen only on `sample/2`), and `clock:`
-  (a function answering the time in ms, by default the system's). It fails to start with
-  `{:host_mismatch, server_host, holder_host}`.
+  `interval:` (ms between samples; without it, samples happen only on `sample/2`), `clock:`
+  (a function answering the time in ms, by default the system's), `acts:` (the instance's
+  `Acts`, where each viewer attached is a row) and `person:` (those rows' actor, `"person"` by
+  default). It fails to start with `{:host_mismatch, server_host, holder_host}`.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -57,8 +67,10 @@ defmodule CodingAgentFramework.TmuxSampler do
   def writes, do: ~w(tmux:*:*)
 
   @doc """
-  Samples now. Returns `{:ok, %{up, generation, held, unviewed, viewers, problems, ids}}`, where
-  `ids` are the rows written, or `{:unknown, reason}` when a read failed.
+  Samples now. Returns `{:ok, %{up, generation, held, unviewed, viewers, problems, ids,
+  attached}}`, where `ids` are the rows written and `attached` the ids of the `Acts` rows of the
+  viewers attached since the last sample (or the failed read of the clients), or `{:unknown,
+  reason}` when a read failed.
   """
   @spec sample(GenServer.server(), keyword) :: {:ok, map} | {:refused, term} | {:unknown, term}
   def sample(sampler, opts \\ []), do: call(sampler, :sample, opts)
@@ -98,7 +110,10 @@ defmodule CodingAgentFramework.TmuxSampler do
         last: last,
         cache: cache,
         failing: is_integer((Table.last_read(db, host, name) || %{})[:failed_at]),
-        clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end)
+        clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
+        acts: Keyword.get(opts, :acts),
+        person: Keyword.get(opts, :person, "person"),
+        clients: MapSet.new()
       }
 
       {:ok, Map.merge(state, Reader.loop(opts))}
@@ -138,11 +153,20 @@ defmodule CodingAgentFramework.TmuxSampler do
       end
 
     case {panes, Holder.list(state.holder)} do
-      {{:ok, _} = panes, {:ok, held}} -> write(state, Join.join(panes, held, state.last), at)
-      {:no_server, {:ok, held}} -> write(state, Join.join(:no_server, held, state.last), at)
-      {{:ok, _}, failure} -> fail(state, {:holder, failure})
-      {:no_server, failure} -> fail(state, {:holder, failure})
-      {failure, _} -> fail(state, {:tmux, failure})
+      {{:ok, _} = panes, {:ok, held}} ->
+        state |> write(Join.join(panes, held, state.last), at) |> attached(panes)
+
+      {:no_server, {:ok, held}} ->
+        state |> write(Join.join(:no_server, held, state.last), at) |> attached(:no_server)
+
+      {{:ok, _}, failure} ->
+        fail(state, {:holder, failure})
+
+      {:no_server, failure} ->
+        fail(state, {:holder, failure})
+
+      {failure, _} ->
+        fail(state, {:tmux, failure})
     end
   end
 
@@ -175,6 +199,53 @@ defmodule CodingAgentFramework.TmuxSampler do
     }
 
     {{:ok, summary}, %{state | cache: join.rows, last: join, failing: false}}
+  end
+
+  # The sample's summary gains `attached`: the ids of the rows its new clients wrote, or the
+  # failed read of the clients.
+  defp attached({{:ok, summary}, state}, panes) do
+    {attached, state} = clients(state, panes)
+    {{:ok, Map.put(summary, :attached, attached)}, state}
+  end
+
+  defp clients(%{acts: nil} = state, _panes), do: {[], state}
+  defp clients(state, :no_server), do: {[], %{state | clients: MapSet.new()}}
+
+  defp clients(state, {:ok, panes}) do
+    case Tmux.list_clients(state.server) do
+      {:ok, clients} ->
+        agents = for %{session: s, tag: t} <- panes, is_binary(t), into: %{}, do: {s, t}
+
+        {ids, seen} =
+          Enum.reduce(clients, {[], MapSet.new()}, fn
+            %{tty: _} = c, acc -> client(state, agents[c.session], c, acc)
+            {:malformed, _}, acc -> acc
+          end)
+
+        {Enum.reverse(ids), %{state | clients: seen}}
+
+      failed ->
+        {failed, state}
+    end
+  end
+
+  # A client seen at the last sample, or of no agent's session, writes nothing; a row not
+  # written leaves it unseen, so the next sample reads it again.
+  defp client(state, agent, c, {ids, seen}) do
+    key = "attach:#{state.host}:#{state.name}:#{c.tty}:#{c.created}"
+    detail = [detail: Map.take(c, [:tty, :session, :created])]
+
+    cond do
+      MapSet.member?(state.clients, key) or agent == nil ->
+        {ids, MapSet.put(seen, key)}
+
+      true ->
+        case Acts.record(state.acts, state.person, agent, :attach, :verified, detail, state: key) do
+          {:ok, id} -> {[id | ids], MapSet.put(seen, key)}
+          {:refused, {:already_claimed, _}} -> {ids, MapSet.put(seen, key)}
+          _not_written -> {ids, seen}
+        end
+    end
   end
 
   defp topic(state), do: "tmux:#{state.host}:#{state.name}"

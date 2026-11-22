@@ -97,6 +97,41 @@ defmodule CodingAgentFramework.Store do
     end
   end
 
+  @doc """
+  Reads the existing file at `path` read-only, as `read_only/4` does, in one read transaction,
+  so every table `fun` reads is of one instant (F-199). `fun.(db, tables)` gets the names of the
+  file's tables, so it reads only the ones made. Answers `{:ok, fun.(db, tables)}`, or
+  `{:refused, {:sqlite, reason}}` for a file it cannot open, a missing one included.
+
+      iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "snap.db")
+      iex> alias CodingAgentFramework.Store
+      iex> {:ok, db} = Store.open(path, "CREATE TABLE IF NOT EXISTS t (a TEXT);")
+      iex> Store.insert(db, "t", [a: "x"], "")
+      iex> Store.snapshot(path, fn db, tables ->
+      ...>   {MapSet.to_list(tables), Store.query(db, "SELECT a FROM t", [])}
+      ...> end)
+      {:ok, {["t"], [["x"]]}}
+  """
+  @spec snapshot(String.t(), (db, MapSet.t(String.t()) -> term)) ::
+          {:ok, term} | {:refused, {:sqlite, term}}
+  def snapshot(path, fun) do
+    case Sqlite3.open(path, mode: :readonly) do
+      {:ok, db} ->
+        try do
+          :ok = Sqlite3.set_busy_timeout(db, @busy_timeout)
+          # A deferred transaction takes its snapshot at its first read, and ends with the close.
+          :ok = Sqlite3.execute(db, "BEGIN")
+          names = query(db, "SELECT name FROM sqlite_master WHERE type = 'table'", [])
+          {:ok, fun.(db, MapSet.new(names, &hd/1))}
+        after
+          Sqlite3.close(db)
+        end
+
+      {:error, reason} ->
+        {:refused, {:sqlite, reason}}
+    end
+  end
+
   defp add_columns(db, added) do
     added
     |> Enum.flat_map(fn {table, columns} ->

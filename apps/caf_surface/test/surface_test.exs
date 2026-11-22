@@ -242,6 +242,31 @@ defmodule CodingAgentFramework.SurfaceTest do
     assert CodingAgentFramework.agent_rows("none") == {:refused, :no_instance}
   end
 
+  # F-199: the metrics are read from the store alone, once, whether the tree runs or not.
+  test "the metrics read each part's rows from the store, and a table not made has none", ctx do
+    db = Path.join(ctx.home, "caf.db")
+    acts = start_supervised!({Acts, db: db, start_id: "s", host: "ws", instance: "t"})
+    {:ok, delegates} = Delegates.Table.open(db)
+    {:ok, mailbox} = Mailbox.Table.open(db)
+    start = %{host: "ws", name: "app-unit-one", branch: "unit/one", model: "opus"}
+    Delegates.Table.starting(delegates, Map.merge(start, %{brief_uuid: "b1", deadline: 0}))
+    report = %{from: "app-unit-one", to: "app-main", text: "Done.", uuid: "r1", kind: "reply"}
+    Mailbox.Table.store(mailbox, Map.put(report, :reply_to, "b1"))
+    {:ok, _} = Acts.record(acts, "person", "app-main", :typed, :verified, [], state: "typed:ws:1")
+
+    now = System.os_time(:millisecond)
+    window = [since: now - 60_000, until: now + 60_000]
+
+    # No `Watch` nor `Intake` table was made: they read as no rows.
+    assert {:ok, [period]} = CodingAgentFramework.metrics(ctx.config, window)
+
+    assert %{started: %{count: 1}, reported: %{count: 1}, prompts: %{opened: 0}} = period
+    assert %{interventions: %{count: 1, by_kind: %{"typed" => 1}}} = period
+
+    assert {:refused, {:bad, :by}} =
+             CodingAgentFramework.metrics(ctx.config, window ++ [by: :month])
+  end
+
   # F-195's finding: the parent's restart of a tree just killed came while the old tree's named
   # `Registry` still ended, and was refused, so the parent's budget ran out.
   test "a parent's restart of a killed tree waits for the old one and starts", ctx do

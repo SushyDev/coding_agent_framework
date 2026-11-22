@@ -20,8 +20,8 @@ defmodule CodingAgentFramework.Interventions do
   wide (5 s by default) for the two clocks. The framework's own interrupt (a parent's fix) is
   its row there already.
 
-  **A viewer attached** is not read: no part owns a tmux hook to read `client-attached` by
-  (F-194's build note says what that needs).
+  **A viewer attached** is read by `TmuxSampler` (F-199), from the server's clients at each
+  sample, and written under the same actor.
 
   One fact is one row: each is recorded under its state (`Acts.record/7`'s `state:`),
   `typed:<host>:<intake id>` or `interrupt:<agent>:<line uuid>`, so a read after a restart writes

@@ -20,6 +20,7 @@ defmodule CafSampler.MixProject do
 
   defp deps do
     [
+      {:caf_acts, in_umbrella: true},
       {:caf_holder, in_umbrella: true},
       {:caf_tmux, in_umbrella: true},
       {:caf_store, in_umbrella: true},

@@ -26,7 +26,10 @@ defmodule CodingAgentFramework.Tmux.Fake do
   @spec start_link(keyword) :: Agent.on_start()
   def start_link(opts) do
     Keyword.fetch!(opts, :key)
-    Agent.start_link(fn -> %{up: false, next: 0, starts: 0, panes: %{}, received: %{}} end)
+
+    Agent.start_link(fn ->
+      %{up: false, next: 0, starts: 0, panes: %{}, received: %{}, clients: %{}, ticks: 0}
+    end)
   end
 
   @doc "A handle on a started fake."
@@ -80,6 +83,36 @@ defmodule CodingAgentFramework.Tmux.Fake do
         {{:ok, panes}, st}
     end)
   end
+
+  @impl true
+  def list_clients(%__MODULE__{} = s) do
+    call(s, fn
+      %{up: false} = st -> {{:refused, :no_server}, st}
+      st -> {{:ok, Enum.sort_by(Map.values(st.clients), & &1.created)}, st}
+    end)
+  end
+
+  @doc """
+  Test aid: a person's terminal attaches to `session` at `tty`, as `tmux attach` does. Its
+  creation time counts up from 1 per attach, so a tty attached again is a new client. Answers
+  `{:refused, :no_server}` on a server that is down.
+  """
+  @spec attach(t, String.t(), String.t()) :: :ok | {:refused, :no_server}
+  def attach(%__MODULE__{} = s, tty, session) do
+    call(s, fn
+      %{up: false} = st ->
+        {{:refused, :no_server}, st}
+
+      st ->
+        client = %{tty: tty, session: session, created: st.ticks + 1}
+        {:ok, %{st | ticks: st.ticks + 1, clients: Map.put(st.clients, tty, client)}}
+    end)
+  end
+
+  @doc "Test aid: the terminal at `tty` detaches."
+  @spec detach(t, String.t()) :: :ok
+  def detach(%__MODULE__{} = s, tty),
+    do: Agent.update(s.pid, &%{&1 | clients: Map.delete(&1.clients, tty)}, s.timeout)
 
   @impl true
   def write(%__MODULE__{} = s, pane, session, input) do
@@ -160,7 +193,7 @@ defmodule CodingAgentFramework.Tmux.Fake do
   def kill_server(%__MODULE__{} = s) do
     call(s, fn
       %{up: false} = st -> {{:refused, :no_server}, st}
-      st -> {{:ok, :killed}, %{st | up: false, panes: %{}}}
+      st -> {{:ok, :killed}, %{st | up: false, panes: %{}, clients: %{}}}
     end)
   end
 

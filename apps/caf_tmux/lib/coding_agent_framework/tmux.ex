@@ -31,6 +31,8 @@ defmodule CodingAgentFramework.Tmux do
   @type pane_info ::
           %{pane: pane, session: session, tag: session | nil, start: String.t()}
           | {:malformed, String.t()}
+  @type client_info ::
+          %{tty: String.t(), session: session, created: integer} | {:malformed, String.t()}
 
   @doc "The `{host, server}` that names this server."
   @callback key(server) :: key
@@ -49,6 +51,14 @@ defmodule CodingAgentFramework.Tmux do
   that cannot be read is `{:malformed, line}`.
   """
   @callback list_panes(server) :: {:ok, [pane_info]} | {:refused, term} | {:unknown, term}
+
+  @doc """
+  Every client attached to the server (a terminal showing one of its sessions, F-199): its
+  `tty`, the `session` it shows, and `created`, when it attached (Unix seconds), so a client
+  is one fact by its tty and that time. A line that cannot be read is `{:malformed, line}`.
+  Refusals: `:no_server`.
+  """
+  @callback list_clients(server) :: {:ok, [client_info]} | {:refused, term} | {:unknown, term}
 
   @doc """
   Sends `input` to `pane` only when the pane's tag names `session`, in one tmux command.
@@ -118,6 +128,10 @@ defmodule CodingAgentFramework.Tmux do
   @doc "See the `c:list_panes/1` callback."
   @spec list_panes(server) :: {:ok, [pane_info]} | {:refused, term} | {:unknown, term}
   def list_panes(%mod{} = server), do: mod.list_panes(server)
+
+  @doc "See the `c:list_clients/1` callback."
+  @spec list_clients(server) :: {:ok, [client_info]} | {:refused, term} | {:unknown, term}
+  def list_clients(%mod{} = server), do: mod.list_clients(server)
 
   @doc """
   See the `c:write/4` callback. Text goes out literally; a line is text and then Enter in the
