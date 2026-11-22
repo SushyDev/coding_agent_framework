@@ -53,7 +53,8 @@ defmodule CodingAgentFramework.Sessions do
   **A startup dialog** (F-140, `model/tla/Dialog.tla`). Before its first turn an interactive
   session may show the folder trust dialog, then the external imports dialog, or a numbered
   menu no rule names (an onboarding menu on a new account, say: kind `:start_menu`, F-203,
-  which the callback is never asked, so a person answers it); none sends a hook event, and no
+  which the callback is never asked, so a person answers it; several one after another, each
+  its own read, F-206); none sends a hook event, and no
   session file exists while one is shown. With `inlet:`, an interactive
   start reads its pane (`Inlet.look/4`) at each check while it has no session file. A startup
   dialog makes the row `dialog`, with the dialog (`Sessions.Dialog`), and a cue. The app's
@@ -362,15 +363,18 @@ defmodule CodingAgentFramework.Sessions do
   default `"person"`; the operator's tool names the operator) and state the row's start, the
   dialog and its mark, so each is answered once. It is marked on the row, then the `Inlet`'s
   checked press goes (`Inlet.choose/5`) in a task, so `Sessions` answers other calls meanwhile;
-  the start then goes on as before.
+  the start then goes on as before. A start may show several menus (F-206): each is its own
+  read (`Sessions.Dialog.seen/3`), answered and pressed once, and `at:` names the read an answer
+  is for (its prompt's), so an answer to one menu never presses the next.
 
   Answers `{:ok, :sent}` once the dialog has left the pane. Refused, with nothing pressed:
   `:no_session`, `{:not_on_dialog, status}`, `{:bad, :kind}`, `{:shown, kind}` (the row shows
-  another dialog, or none), `{:no_option, label}`, `{:answered, mark}` (an answer to that
+  another dialog, or none), `{:read, at}` (the row's menu is another read), `{:no_option,
+  label}`, `{:answered, mark}` (an answer to that
   dialog was already marked: never pressed twice, but for a cut one a person cleared,
   `clear_dialog/4`), `:no_inlet`, `{:acts, answer}`, or the `Inlet`'s refusal. Unknown: the
   `Inlet`'s, once a key may have gone; that answer is never pressed again. Options: `by:`,
-  `:timeout` (ms, default 25 000).
+  `at:` (a start's menu's read; nil for the one shown), `:timeout` (ms, default 25 000).
 
       Sessions.answer_dialog(sessions, "app-main", :trust, "Yes, I trust this folder")
       #=> {:ok, :sent}
@@ -384,7 +388,7 @@ defmodule CodingAgentFramework.Sessions do
 
     case Dialog.kind(kind) do
       nil -> {:refused, {:bad, :kind}}
-      kind -> call(sessions, {:answer_dialog, name, kind, label, by}, timeout)
+      kind -> call(sessions, {:answer_dialog, name, kind, label, by, opts[:at]}, timeout)
     end
   end
 
@@ -817,10 +821,10 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   # The press goes in a task: its answer replies to the caller once it comes back.
-  def handle_call({:answer_dialog, name, kind, label, by}, from, state) do
+  def handle_call({:answer_dialog, name, kind, label, by, at}, from, state) do
     with %{} = row <- Table.get(state.db, state.host.name, name) || {:refused, :no_session},
          "dialog" <- row.status,
-         :ok <- Dialog.check(row, kind, label),
+         :ok <- Dialog.check(row, kind, label, at),
          :ok <- press(state, row, kind, label, by, from) do
       {:noreply, state}
     else
@@ -1711,7 +1715,7 @@ defmodule CodingAgentFramework.Sessions do
          true <- Dialog.startup?(screen),
          :ok <- before_file(state, row, screen) do
       now = Table.get(state.db, row.host, row.name) || row
-      shown = Dialog.encode(screen)
+      shown = Dialog.seen(now, screen, state.clock.())
 
       if now.status != "dialog" or Dialog.shown(now) != shown,
         do: write(state, now, status: "dialog", reason: nil, dialog: shown)
@@ -1764,14 +1768,16 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   # Dialog.tla's Take and Press: the answer's row in `Acts` (F-144: actor `by`, a person or the
-  # app; state the row's start, the dialog and the mark it is taken from, so each is answered
-  # once), then the answer marked pressing on the row, then the Inlet's checked press in a task
+  # app; state the row's start, the dialog, a start's menu's read and the mark it is taken from,
+  # so each is answered once), then the answer marked pressing on the row, then the Inlet's checked press in a task
   # linked to this process, so other calls go on meanwhile (F-144) and a restart ends it. Its
   # answer comes back as a message (`pressed/3`). `from` is the caller to answer, or nil.
   defp press(%{inlet: nil}, _row, _kind, _label, _by, _from), do: {:refused, :no_inlet}
 
   defp press(state, row, kind, label, by, from) do
     taken = %{start: row.started_at, dialog: kind, mark: Dialog.from_mark(row, kind)}
+    # Each menu of one start is its own read, and its own claim (F-206).
+    taken = if kind == :start_menu, do: Map.put(taken, :read, Dialog.shown(row).at), else: taken
 
     with {:ok, act} <- answer_act(state, by, row.name, taken) do
       write(state, row, answers: Dialog.mark(row, kind, label, "pressing", act: act))

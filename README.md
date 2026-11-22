@@ -332,7 +332,10 @@ Built, each from a checked model in `model/tla/`:
   leaves nothing `unread`;
 - an app says which accounts are usable (F-207): `usable: {module, opts}`, asked after the
   framework's own login check by every part that picks an account, a refusal carrying the app's
-  reason; and a home too long for services refused at the start.
+  reason; and a home too long for services refused at the start;
+- every onboarding menu of a start reaches a person (F-206, against `Dialog.tla`'s menus): each
+  menu a start shows is its own read, prompt and press, and a person's leave of a waited resume is
+  their clear of the absence, so they are not asked twice.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

@@ -133,8 +133,9 @@ defmodule CodingAgentFramework.Sessions.Agents do
 
   @doc """
   The startup dialog the agent's start waits on, for a view (F-140): `%{kind, options,
-  selected, paths, answers}`, `answers` each kind's answer so far (`%{kind => %{label, mark}}`),
-  or nil when its row is not on one. Such a row is neither started nor idle, and not free: its
+  selected, paths, answers}` (a start's menu's with its `title` and `at`, its read's),
+  `answers` each kind's answer so far (`%{kind => %{label, mark}}`; a start's menu's only for
+  the read shown, F-206), or nil when its row is not on one. Such a row is neither started nor idle, and not free: its
   lease stays held. A person answers it through `Sessions.answer_dialog/5`.
 
       iex> row = %{status: "dialog", answers: nil,

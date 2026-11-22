@@ -320,6 +320,56 @@ defmodule CodingAgentFramework.SessionsDialogTest do
     assert {:ok, %{status: "running"}} = await(fn -> running(ctx, sessions, "alpha") end)
   end
 
+  # F-206 (F-203's new-2), Dialog.tla's reads (Dialog_Menus): a start that shows two menus no
+  # rule names one after the other asks a person each, as its own read. The first's answer is
+  # none to the second, an answer naming the first's read presses nothing on the second, each
+  # is pressed once under its own act, and the start goes on after the second.
+  test "each menu of one start is its own read, answered in turn", ctx do
+    acts =
+      start_supervised!(
+        {Acts, db: Path.join(ctx.dir, "acts.db"), start_id: "t", host: "test", instance: "a"}
+      )
+
+    claude = ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), dialogs: [:menu, :menu2])
+    launch = Keyword.put(ctx.launch, :claude, claude)
+    sessions = sessions(ctx, acts: acts)
+    [title, next] = ScreenStandIn.menu_titles()
+
+    assert {:unknown, {:dialog, :start_menu}} =
+             Sessions.start(sessions, "alpha", ctx.account, launch)
+
+    assert %{title: ^title, at: first, answers: %{}} =
+             Agents.dialog(Agents.get(ctx.agents, "alpha"))
+
+    assert {:ok, :sent} =
+             Sessions.answer_dialog(sessions, "alpha", :start_menu, "Not now", at: first)
+
+    # The second menu is a new read, open: the first's answer is not its answer.
+    assert {:ok, %{at: second, answers: answers}} = await(fn -> titled(ctx, next) end)
+    assert second > first and answers == %{}
+
+    assert {:refused, {:read, ^second}} =
+             Sessions.answer_dialog(sessions, "alpha", :start_menu, "Yes", at: first)
+
+    assert {:ok, :sent} =
+             Sessions.answer_dialog(sessions, "alpha", :start_menu, "Yes", at: second)
+
+    assert ScreenStandIn.menu_answers(ctx.dir) == ["Not now", "Yes"]
+    assert {:ok, %{status: "running"}} = await(fn -> running(ctx, sessions, "alpha") end)
+
+    assert {:ok, [one, two]} = Acts.rows(acts, act: "answer_startup")
+    assert %{status: "settled", outcome: "verified"} = one
+    assert %{status: "settled", outcome: "verified"} = two
+    assert one.state =~ "#{first}" and two.state =~ "#{second}"
+  end
+
+  defp titled(ctx, title) do
+    case Agents.dialog(Agents.get(ctx.agents, "alpha")) do
+      %{title: ^title} = d -> {:ok, d}
+      other -> other
+    end
+  end
+
   defp marked(ctx, mark, kind \\ :trust) do
     case Agents.dialog(Agents.get(ctx.agents, "alpha")) do
       %{answers: %{^kind => %{mark: ^mark}}} = d -> {:ok, d}

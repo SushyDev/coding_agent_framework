@@ -19,6 +19,12 @@ defmodule CodingAgentFramework.Sessions.Dialog do
   Inlet's of a menu (`press_kind/2`), the marker read back on the label before Enter. Its kind
   is not `:menu`, so its prompt's id is never a running session's menu's.
 
+  A start may show several menus one after another (F-206), so a start's menu is keyed by its
+  read, as a running session's menu is (`Sessions.Menu`): its `at` is the wall-clock ms of the
+  read that found it (`seen/3`), and its answer holds that `at`. A read of another menu (by its
+  title and options), or of any menu once the row's was sent, is a new read; an answer to an
+  earlier read is no answer to it (`answers/1`), so each menu is asked and pressed once.
+
       iex> alias CodingAgentFramework.Sessions.Dialog
       iex> screen = %{state: :dialog, kind: :trust, options: ["No, exit", "Yes"], selected: "No, exit"}
       iex> row = %{dialog: Dialog.encode(screen), answers: nil}
@@ -90,6 +96,48 @@ defmodule CodingAgentFramework.Sessions.Dialog do
   end
 
   @doc """
+  The row's `dialog` column for a startup dialog `Screen` read at `now` (`Dialog.tla`'s Read):
+  `encode/1`'s, and for a start's menu its read's `at`. The menu the row shows keeps its `at`
+  while the pane shows the same menu (its title and options) and its answer was not sent; any
+  other menu is a new read, `at` now.
+
+      iex> alias CodingAgentFramework.Sessions.Dialog
+      iex> screen = %{state: :dialog, kind: :menu, title: "Pick a style", detail: [],
+      ...>   options: ["Dark", "Light"], selected: "Dark"}
+      iex> first = Dialog.seen(%{dialog: nil, answers: nil}, screen, 100)
+      iex> first.at
+      100
+      iex> Dialog.seen(%{dialog: first, answers: nil}, %{screen | selected: "Light"}, 200).at
+      100
+      iex> Dialog.seen(%{dialog: first, answers: nil}, %{screen | title: "Pick a theme"}, 200).at
+      200
+  """
+  @spec seen(map, map, integer) :: map
+  def seen(row, %{state: :dialog, kind: :menu} = screen, now) do
+    fresh = encode(screen)
+
+    shown = shown(row)
+    last = shown[:at]
+
+    at =
+      cond do
+        not is_integer(last) -> now
+        match?(%{mark: "sent"}, answers(row)[:start_menu]) -> new_read(now, last)
+        same?(shown, fresh) -> last
+        true -> new_read(now, last)
+      end
+
+    Map.put(fresh, :at, at)
+  end
+
+  def seen(_row, screen, _now), do: encode(screen)
+
+  defp same?(a, b), do: a[:title] == b.title and a[:options] == b.options
+
+  # A new read's key is later than the last one, even on a clock that has not moved.
+  defp new_read(now, last), do: max(now, last + 1)
+
+  @doc """
   What the Inlet's checked press names for `kind` on the row (`Inlet.choose/5`): the kind, or
   for a start's menu `{:menu, title, options}`, the menu the pane must still show.
   """
@@ -104,7 +152,7 @@ defmodule CodingAgentFramework.Sessions.Dialog do
   @doc """
   The dialog the row shows, or showed last: `%{kind, options, selected, paths, shortened}`
   (`shortened` the paths the pane drew cut in their middle, `Screen`'s), and a start's menu's
-  `title`; or nil.
+  `title` and `at` (its read's, `seen/3`); or nil.
   """
   @spec shown(map | nil) :: map | nil
   def shown(%{dialog: text}) when is_binary(text) do
@@ -119,7 +167,9 @@ defmodule CodingAgentFramework.Sessions.Dialog do
             shortened: d["shortened"] || []
           }
 
-          if kind == :start_menu, do: Map.put(shown, :title, d["title"]), else: shown
+          if kind == :start_menu,
+            do: Map.merge(shown, %{title: d["title"], at: d["at"]}),
+            else: shown
         end
 
       _ ->
@@ -132,16 +182,30 @@ defmodule CodingAgentFramework.Sessions.Dialog do
 
   @doc """
   Each kind's answer on the row: `%{kind => %{label: label, mark: mark}}`, with `act` (its row
-  in `Acts`) and `cleared: true` (a person cleared a cut press of it) when it has them.
+  in `Acts`) and `cleared: true` (a person cleared a cut press of it) when it has them. A
+  start's menu's answer holds `at`, the read it answers, and is the row's only while the row
+  shows that read (F-206): an answer to an earlier menu is none to the one shown now.
+
+      iex> alias CodingAgentFramework.Sessions.Dialog
+      iex> answers = ~s({"start_menu":{"label":"Dark","mark":"sent","at":100}})
+      iex> Dialog.answers(%{dialog: %{kind: :start_menu, at: 100}, answers: answers})
+      %{start_menu: %{label: "Dark", mark: "sent", at: 100}}
+      iex> Dialog.answers(%{dialog: %{kind: :start_menu, at: 200}, answers: answers})
+      %{}
   """
   @spec answers(map | nil) :: %{kind => %{label: String.t(), mark: String.t()}}
-  def answers(%{answers: text}) when is_binary(text) do
+  def answers(%{answers: text} = row) when is_binary(text) do
     case JSON.decode(text) do
       {:ok, %{} = all} ->
+        read = shown(row)[:at]
+
         for {name, %{"label" => label, "mark" => mark} = a} <- all,
             kind = kind(name),
+            kind != :start_menu or a["at"] == read,
             into: %{} do
-          extra = for {k, v} <- [act: a["act"], cleared: a["cleared"]], v, do: {k, v}
+          extra =
+            for {k, v} <- [act: a["act"], cleared: a["cleared"], at: a["at"]], v, do: {k, v}
+
           {kind, Map.new([label: label, mark: mark] ++ extra)}
         end
 
@@ -154,8 +218,9 @@ defmodule CodingAgentFramework.Sessions.Dialog do
 
   @doc """
   The row's answers with `kind`'s marked `mark`, as the column stores them, with `fields`
-  (`act:`) over what the answer had. A refusal, which pressed nothing, takes the mark back to
-  what it was before the press: none, or `cleared`.
+  (`act:`) over what the answer had. A start's menu's answer holds the read the row shows
+  (`at`). A refusal, which pressed nothing, takes the mark back to what it was before the
+  press: none, or `cleared`.
   """
   @spec mark(map, kind, String.t(), String.t() | nil, keyword) :: map
   def mark(row, kind, label, mark, fields \\ [])
@@ -172,7 +237,8 @@ defmodule CodingAgentFramework.Sessions.Dialog do
   def mark(row, kind, label, mark, fields) do
     all = answers(row)
     old = Map.take(all[kind] || %{}, [:act, :cleared])
-    Map.put(all, kind, Map.merge(old, Map.new([label: label, mark: mark] ++ fields)))
+    read = if kind == :start_menu, do: [at: shown(row)[:at]], else: []
+    Map.put(all, kind, Map.merge(old, Map.new([label: label, mark: mark] ++ read ++ fields)))
   end
 
   @doc """
@@ -244,15 +310,25 @@ defmodule CodingAgentFramework.Sessions.Dialog do
 
   @doc """
   Whether `label` may answer `kind` on this row now: the row shows that dialog, with that
-  option, and no answer to it has been marked but a `cleared` one. Refusals: `{:shown, kind |
-  nil}` (another dialog, or none), `{:no_option, label}`, `{:answered, mark}`.
+  option, and no answer to it has been marked but a `cleared` one. For a start's menu, `at`
+  names the read answered (its prompt's), or nil for the one shown. Refusals: `{:shown, kind |
+  nil}` (another dialog, or none), `{:read, at}` (another menu, the row's read at `at`),
+  `{:no_option, label}`, `{:answered, mark}`.
+
+      iex> alias CodingAgentFramework.Sessions.Dialog
+      iex> row = %{dialog: %{kind: :start_menu, at: 200, options: ["Dark"]}, answers: nil}
+      iex> Dialog.check(row, :start_menu, "Dark", 200)
+      :ok
+      iex> Dialog.check(row, :start_menu, "Dark", 100)
+      {:refused, {:read, 200}}
   """
-  @spec check(map, kind, String.t()) :: :ok | {:refused, term}
-  def check(row, kind, label) do
+  @spec check(map, kind, String.t(), integer | nil) :: :ok | {:refused, term}
+  def check(row, kind, label, at \\ nil) do
     shown = shown(row)
 
     cond do
       shown == nil or shown.kind != kind -> {:refused, {:shown, shown && shown.kind}}
+      at != nil and shown[:at] != at -> {:refused, {:read, shown[:at]}}
       label not in shown.options -> {:refused, {:no_option, label}}
       (a = answers(row)[kind]) && a.mark != "cleared" -> {:refused, {:answered, a.mark}}
       true -> :ok

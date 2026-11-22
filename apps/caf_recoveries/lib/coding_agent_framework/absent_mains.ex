@@ -28,7 +28,9 @@ defmodule CodingAgentFramework.AbsentMains do
   `waiting` at once. The claim is then `acted`, its detail naming that row (`start`), and stays
   open until the row ends: `running` settles it `verified`; `refused` (a person answered its
   `limit` prompt `leave`, or its pick at the reset was refused) settles it `failed`, a fault,
-  and asks, since the main is still absent.
+  and asks, since the main is still absent. A person's leave is their answer to the absence too
+  (F-206, `Heal.tla`'s SettledLeft): its state is asked and cleared at once, `Watch.clear/3` as
+  that person (the row's `waited`), so no `remedy` prompt asks them again.
 
   The embedding app's tree starts one per instance, after `Mains`, given the host's
   `Sessions.Agents` reader, the instance's `Acts` and `Watch`, and `resume:`, the function that
@@ -274,7 +276,18 @@ defmodule CodingAgentFramework.AbsentMains do
   defp settle_wait(s, r, %{status: "running", account: account}),
     do: Acts.settle(s.acts, r.id, :verified, answer: {:resumed, account})
 
-  # Left by a person or its pick refused at the reset: the main is still absent, a person's.
+  # Left by a person (F-206, Heal.tla's SettledLeft): their leave is their answer to the
+  # absence too, so it is asked and cleared at once as that person, as a `remedy` prompt's
+  # answer would be, and no prompt asks them again. A person who answers the prompt between the
+  # two calls answers it once; the clear is then refused, settled.
+  defp settle_wait(s, r, %{reason: "left", waited: who}) when is_binary(who) and who != "" do
+    Acts.settle(s.acts, r.id, :failed, reason: {:waited, "left"})
+
+    with {:ok, id} <- Watch.ask(s.watch, key(r), {:waited, "left"}),
+         do: Watch.clear(s.watch, id, who)
+  end
+
+  # Its pick refused at the reset: the main is still absent, a person's.
   defp settle_wait(s, r, %{reason: reason}) do
     Acts.settle(s.acts, r.id, :failed, reason: {:waited, reason})
     ask(s, r, {:waited, reason})
@@ -315,10 +328,12 @@ defmodule CodingAgentFramework.AbsentMains do
     ask(s, sym, why)
   end
 
-  defp ask(s, %{target: target, state: key}, why) do
-    Watch.ask(s.watch, %{kind: @kind, target: target, state: key}, why)
+  defp ask(s, sym, why) do
+    Watch.ask(s.watch, key(sym), why)
     true
   end
+
+  defp key(%{target: target, state: state}), do: %{kind: @kind, target: target, state: state}
 
   # A person's claim names this healer, whose restart closes it if cut (F-192).
   defp healer(_s, nil), do: []

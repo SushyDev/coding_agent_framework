@@ -595,6 +595,30 @@ defmodule CodingAgentFramework.PromptsTest do
     assert {:refused, :settled} = Prompts.answer(ctx.prompts, other, "Yes", "sam")
   end
 
+  # F-206: a start that shows two menus no rule names one after the other is two prompts, each
+  # keyed by its read; the first's id is settled once the second shows, and the start goes on.
+  test "each menu of one start is its own prompt, answered in turn", ctx do
+    claude = ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), dialogs: [:menu, :menu2])
+    launch = SessionsSetup.launch(ctx, :at_start) |> Keyword.put(:claude, claude)
+
+    assert {:unknown, {:dialog, :start_menu}} =
+             Sessions.start(ctx.sessions, "alpha", ctx.account, launch)
+
+    {:ok, [%{id: first, status: "open"}]} = prompts_until(ctx, &(&1 != []))
+    assert first =~ ~r/^dialog:alpha:\d+:start_menu$/
+    assert {:ok, :sent} = Prompts.answer(ctx.prompts, first, "Not now", "sam")
+
+    {:ok, [%{id: second, status: "open", text: text}]} =
+      prompts_until(ctx, &match?([%{id: id}] when id != first, &1))
+
+    assert second =~ ~r/^dialog:alpha:\d+:start_menu$/
+    assert text =~ Enum.at(ScreenStandIn.menu_titles(), 1)
+    assert {:refused, :settled} = Prompts.answer(ctx.prompts, first, "Yes", "sam")
+    assert {:ok, :sent} = Prompts.answer(ctx.prompts, second, "Yes", "sam")
+    assert ScreenStandIn.menu_answers(ctx.dir) == ["Not now", "Yes"]
+    assert {:ok, []} = prompts_until(ctx, &(&1 == []))
+  end
+
   # A main session started on the menu screen: its prompt's id once a read of its pane found it.
   defp menu_prompt(ctx) do
     claude = ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), menu: true)

@@ -26,7 +26,9 @@ defmodule CodingAgentFramework.ScreenStandIn do
     answers: "Yes, I trust this folder" goes on (and writes `<dir>/trusted`), "No, exit" exits;
     either imports option goes on, and writes it to `<dir>/imports` (`yes` or `no`); `:menu`
     among them draws the `menu` screen as one more startup dialog (F-203), its answer written
-    as a running menu's, and the start goes on;
+    as a running menu's, and the start goes on; `:menu2` draws it with another title
+    (`menu_titles/0`), a second onboarding step (F-206), and each menu's answer is appended
+    to `<dir>/menus` (`menu_answers/1`);
   - written with `transcript: true`, the start's prompt also goes into its transcript
     (`$CLAUDE_CONFIG_DIR/projects/<cwd>/<session>.jsonl`) as 2.1.322 writes a start's first
     turn, past its startup dialogs and not before: the session's title, agent name and modes,
@@ -49,6 +51,10 @@ defmodule CodingAgentFramework.ScreenStandIn do
   # The options of the menu fixture (`menu.ansi`), in order.
   @menu ["Yes", "Not now", "Don't show again"]
 
+  # The fixture's title, and the one `:menu2` draws in its place: a second onboarding step.
+  @title "Teach auto mode about your environment?"
+  @title2 "Turn on notifications for this device?"
+
   @doc "The options of the menu `--screen menu` draws, in order."
   def menu, do: @menu
 
@@ -58,6 +64,21 @@ defmodule CodingAgentFramework.ScreenStandIn do
       {:ok, n} when n in ["1", "2", "3"] -> Enum.at(@menu, String.to_integer(n) - 1)
       {:ok, other} -> other
       {:error, :enoent} -> nil
+    end
+  end
+
+  @doc "The titles of the menus `:menu` and `:menu2` draw among the startup dialogs, in order."
+  def menu_titles, do: [@title, @title2]
+
+  @doc "Every answer to a menu in `dir`, oldest first: labels, or `esc`."
+  def menu_answers(dir) do
+    case File.read(Path.join(dir, "menus")) do
+      {:ok, text} ->
+        for n <- String.split(text, "\n", trim: true),
+            do: if(n in ["1", "2", "3"], do: Enum.at(@menu, String.to_integer(n) - 1), else: n)
+
+      {:error, :enoent} ->
+        []
     end
   end
 
@@ -86,7 +107,8 @@ defmodule CodingAgentFramework.ScreenStandIn do
     wait = File.read!(Path.join(fixtures(release), "usage-limit-wait.txt"))
     File.write!(Path.join(screens, "limit_wait"), String.trim_trailing(wait, "\n"))
 
-    menu!(screens, release)
+    menu!(screens, release, "menu", @title)
+    menu!(screens, release, "menu2", @title2)
     dialog!(screens, release, "trust", " ", "No, exit", "Yes, I trust this folder")
 
     dialog!(
@@ -162,9 +184,11 @@ defmodule CodingAgentFramework.ScreenStandIn do
     File.write!(Path.join(screens, "#{kind}-yes"), selected)
   end
 
-  # The menu no rule names (F-198) with the marker on each option: `menu-1` to `menu-3`.
-  defp menu!(screens, release) do
+  # The menu no rule names (F-198) with the marker on each option: `<name>-1` to `<name>-3`,
+  # its title `title`.
+  defp menu!(screens, release, name, title) do
     shown = String.trim_trailing(File.read!(Path.join(fixtures(release), "menu.ansi")), "\n")
+    shown = String.replace(shown, @title, title)
     options = Enum.with_index(@menu, 1)
 
     plain =
@@ -175,7 +199,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
     for {o, n} <- options,
         do:
           File.write!(
-            Path.join(screens, "menu-#{n}"),
+            Path.join(screens, "#{name}-#{n}"),
             String.replace(plain, "  #{n}. #{o}", "❯ #{n}. #{o}")
           )
   end
@@ -258,8 +282,8 @@ defmodule CodingAgentFramework.ScreenStandIn do
         #{program!(:cat)} "#{screens}/$screen"
       elif [ $screen = trust ] || [ $screen = imports ]; then
         #{program!(:cat)} "#{screens}/$screen-$choice"
-      elif [ $screen = menu ]; then
-        #{program!(:cat)} "#{screens}/menu-$sel"
+      elif [ $screen = menu ] || [ $screen = menu2 ]; then
+        #{program!(:cat)} "#{screens}/$screen-$sel"
       else
         #{program!(:cat)} "#{screens}/top"
         rule
@@ -291,7 +315,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
     while IFS= read -r -N1 -t #{idle} key; do
       if [ $screen = limit_wait ]; then
         continue
-      elif [ $screen = menu ]; then
+      elif [ $screen = menu ] || [ $screen = menu2 ]; then
         # The marker moves; Enter answers its option, a lone Escape esc: the idle screen after,
         # or for a startup menu the next dialog, then the session as past the others.
         answer=''
@@ -306,6 +330,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
         esac
         if [ -n "$answer" ]; then
           printf '%s' $answer > "#{dir}/menu"
+          printf '%s\\n' $answer >> "#{dir}/menus"
           if [ $# -gt 0 ]; then
             shift; sel=1
             if [ $# -gt 0 ]; then screen=$1; else screen=idle; first; fi
