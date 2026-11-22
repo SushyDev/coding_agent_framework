@@ -14,7 +14,15 @@ defmodule CodingAgentFramework.ToolHooks do
   - `pre_tool_use/3`: `:allow`, `{:deny, reason}`, `:ask`, `:pass`, or a correction
     (`{:allow, updated_input: map, additional_context: text}` and the others `Intake.start_link/1`
     lists), within `Intake`'s tool deadline (5 s by default), else a pass;
-  - `post_tool_use/3`: its value is ignored; the call has already run;
+  - `post_tool_use/3`: `:pass`, or `{:replace, response}` (F-197) within the same tool
+    deadline, else a pass. The call has already run; a replacement changes what the model
+    reads of it. `response` is a map of the tool's own response shape, the event's
+    `tool_response` (`%{"stdout" => …, "stderr" => "", "interrupted" => false, "isImage" =>
+    false}` for `Bash`), and goes out as `updatedToolOutput`. Measured on Claude Code 2.1.322
+    with `Bash`, from a command hook and from an `http` hook as the framework's is: an object of
+    that shape is what the model reads; a string is ignored, so `Intake` passes it; a hook past
+    its `timeout` leaves the output as it was. Not measured: `updatedMCPToolOutput`, an MCP
+    tool's output, and an `Edit`'s;
   - `stop/3`: `:pass` (the turn ends) or `{:block, reason}` (the agent goes on, told the reason).
 
   The framework's own `PreToolUse` callback (a move's drain) decides first, and a heavy
@@ -41,7 +49,8 @@ defmodule CodingAgentFramework.ToolHooks do
   @type part :: (atom -> pid | nil)
 
   @callback pre_tool_use(event :: Intake.tool_event(), opts :: term, part) :: term
-  @callback post_tool_use(event :: Intake.tool_event(), opts :: term, part) :: term
+  @callback post_tool_use(event :: Intake.tool_event(), opts :: term, part) ::
+              :pass | {:replace, map}
   @callback stop(event :: Intake.stop_event(), opts :: term, part) ::
               :pass | {:block, String.t()}
 

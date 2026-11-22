@@ -242,13 +242,79 @@ defmodule CodingAgentFramework.IntakeToolsTest do
     assert [%{hold: "lost", decision: nil}] = rows(db)
   end
 
-  test "a PostToolUse is answered at once and handed on, with no row", %{db: db, start: start} do
-    me = self()
-    intake = start.(post_tool_use: &send(me, {:after, &1}))
-    body = JSON.encode!(Map.put(JSON.decode!(tool("PostToolUse", "t1")), "tool_response", "ok"))
-    assert %{status: 200, resp_body: ""} = post(intake, body)
-    assert_receive {:after, %{tool_use_id: "t1", tool_response: "ok", agent: nil}}, 5_000
-    assert rows(db) == []
+  # A PostToolUse of `Bash`, with the tool's response as Claude Code 2.1.322 posts it.
+  defp ran(id) do
+    response = %{"stdout" => "ORIGINAL", "stderr" => "", "interrupted" => false}
+    JSON.encode!(Map.put(JSON.decode!(tool("PostToolUse", id)), "tool_response", response))
+  end
+
+  test "a PostToolUse's replacement goes out as updatedToolOutput, and its row says so",
+       %{db: db, start: start} do
+    replaced = %{"stdout" => "REPLACED", "stderr" => "", "interrupted" => false}
+    answers = %{"t1" => {:replace, replaced}, "t2" => :pass, "t3" => :ok}
+    intake = start.(post_tool_use: telling(self(), &answers[&1.tool_use_id]))
+
+    assert decision(post(intake, ran("t1"))) == %{
+             "hookEventName" => "PostToolUse",
+             "updatedToolOutput" => replaced
+           }
+
+    assert_received {:asked, %{tool_use_id: "t1", agent: nil} = event}
+    assert event.tool_response["stdout"] == "ORIGINAL"
+
+    # A pass, and a value that is not an answer, are an empty body: the output stays.
+    assert %{status: 200, resp_body: ""} = post(intake, ran("t2"))
+    assert %{status: 200, resp_body: ""} = post(intake, ran("t3"))
+
+    assert [r1, r2, r3] = rows(db)
+
+    assert Enum.map([r1, r2, r3], &{&1.key, &1.actor, &1.hold}) == [
+             {"PostToolUse:s1:t1", "app", "answered"},
+             {"PostToolUse:s1:t2", nil, "passed"},
+             {"PostToolUse:s1:t3", nil, "passed"}
+           ]
+
+    # The replacement's row keeps the tool and its id, and what was sent; never the output it
+    # replaced, which `Transcripts` has.
+    assert JSON.decode!(r1.data) == %{"tool_name" => "Bash", "tool_use_id" => "t1"}
+    assert JSON.decode!(r1.decision)["hookSpecificOutput"]["updatedToolOutput"] == replaced
+    assert r2.data == nil
+  end
+
+  test "a PostToolUse's replacement out of shape is a pass, and its row names why",
+       %{db: db, start: start} do
+    # A string is what Claude Code 2.1.322 ignores; a tuple is not JSON.
+    answers = %{"t1" => {:replace, "REPLACED"}, "t2" => {:replace, %{"stdout" => {:x}}}}
+    intake = start.(post_tool_use: &answers[&1.tool_use_id])
+    assert %{status: 200, resp_body: ""} = post(intake, ran("t1"))
+    assert %{status: 200, resp_body: ""} = post(intake, ran("t2"))
+    why = {"passed", ~s(["bad_answer","replace"])}
+    assert Enum.map(rows(db), &{&1.hold, &1.problem}) == [why, why]
+    assert Process.alive?(intake)
+  end
+
+  test "at a PostToolUse's deadline the output stays, and a later replacement is dropped",
+       %{db: db, start: start} do
+    intake = start.(post_tool_use: waiting(self()), tool_deadline: 50)
+    task = Task.async(fn -> post(intake, ran("t1")) end)
+    assert_receive {:asked, worker, _}, 5_000
+    assert %{status: 200, resp_body: ""} = Task.await(task)
+
+    mon = Process.monitor(worker)
+    send(worker, {:answer, {:replace, %{"stdout" => "late"}}})
+    assert_receive {:DOWN, ^mon, :process, _, :normal}, 5_000
+    :sys.get_state(intake)
+    assert [%{hold: "expired", decision: nil}] = rows(db)
+  end
+
+  test "a second post of a replaced call answers the replacement, and asks no one",
+       %{db: db, start: start} do
+    intake = start.(post_tool_use: telling(self(), fn _ -> {:replace, %{"stdout" => ""}} end))
+    first = post(intake, ran("t1"))
+    assert post(intake, ran("t1")).resp_body == first.resp_body
+    assert_received {:asked, _}
+    refute_received {:asked, _}
+    assert [%{actor: "app", hold: "answered"}] = rows(db)
   end
 
   test "with no callback a tool event is answered empty and stored nowhere",

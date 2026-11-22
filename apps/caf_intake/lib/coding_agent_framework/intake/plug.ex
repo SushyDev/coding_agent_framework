@@ -8,8 +8,8 @@ defmodule CodingAgentFramework.Intake.Plug do
   with the secret in `x-caf-secret`, compared in constant time. Anything else is refused with a
   status and writes no row: 404 for another path, 405 for another method, 403 from another
   address, 401 for a wrong secret, 503 when the `Intake` does not answer. A stored event gets
-  200 with an empty body; a held `PermissionRequest` or `PreToolUse` gets its decision, or an
-  empty body at its deadline.
+  200 with an empty body; a held `PermissionRequest`, `PreToolUse`, `PostToolUse` or `Stop` gets
+  its decision, or an empty body at its deadline.
 
   A waiter (`Intake.waiter_hook/5`) gets 200 at once and a chunked response: a newline every
   `beat` ms, and one at once on `{ref, :beat}`, then its text as the last chunk, or nothing
@@ -76,7 +76,7 @@ defmodule CodingAgentFramework.Intake.Plug do
 
   defp post(conn, intake, account, body) do
     case Intake.post(intake, account, body) do
-      {:ok, stored} when stored in [:stored, :seen, :not_read, :handed] ->
+      {:ok, stored} when stored in [:stored, :seen, :not_read] ->
         send_resp(conn, 200, "")
 
       # `wait` is past the hold's own deadline, in case the `Intake` stops answering.
