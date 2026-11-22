@@ -12,11 +12,13 @@ defmodule CodingAgentFramework.Config do
     tables of `Copies`, `Jobs`, `Services` and `MCP`) and `ws/` (the workstation's copies and
     service logs). It may hold a space, as macOS's `~/Library/Application Support/<app>` does
     (F-169). Its sockets (`tmux.sock`, `d/<agent>.sock`, `ws/jobs/<job>.sock`,
-    `ws/services/<service>.sock`) must fit macOS's 103 bytes: a home longer than 93 bytes,
+    `ws/services/<key>.sock`) must fit macOS's 103 bytes: a home longer than 93 bytes,
     where `tmux.sock` does not fit, is refused, `{:bad, :home, {:longer_than, 93}}`. The room
-    it leaves for a name is `name_room/1`'s: a delegate's or a main session's start, and a
-    service's, refuse a longer name before any row, `{:bad, :name, {:longer_than, n}}` (a
-    42-byte home leaves an agent 53 bytes, a service 43; F-169's new-2, F-172);
+    it leaves for a name is `name_room/1`'s: a delegate's or a main session's start refuses a
+    longer name before any row, `{:bad, :name, {:longer_than, n}}` (a 42-byte home leaves an
+    agent 53 bytes; F-169's new-2, F-172). A service's socket is named by a key of fixed length
+    (`CodingAgentFramework.Services.socket_key/1`, F-205), so its name needs no room; its
+    socket is 34 bytes after the home, and a home longer than 69 bytes cannot start one;
   - `instance`: this framework instance's name, the name the app finds it by
     (`CodingAgentFramework.subscribe/2`), and so unique in the app (a second start of a running
     name is refused): 1 to 100 bytes, no control character;
@@ -305,11 +307,9 @@ defmodule CodingAgentFramework.Config do
   # `<home>/tmux.sock`, is the one whose name is fixed, and tmux would fail on it only at its
   # first command: 103 - 10.
   @max_home 93
-  # What a socket path holds beside the home and the name: `/d/<agent>.sock` and
-  # `/ws/services/<service>.sock`.
+  # What a socket path holds beside the home and the name: `/d/<agent>.sock`.
   @socket 103
   @agent_around byte_size("/d/.sock")
-  @service_around byte_size("/ws/services/.sock")
 
   @doc """
   A config from a keyword list or map, checked whole: answers `{:ok, config}`, or
@@ -664,22 +664,20 @@ defmodule CodingAgentFramework.Config do
   end
 
   @doc """
-  The room the home leaves for a name, in bytes, so its socket fits macOS's 103 (F-172): an
-  agent's, `<home>/d/<agent>.sock`, and a workstation service's,
-  `<home>/ws/services/<service>.sock`. The tree hands each to the parts that start them,
-  `Delegates`, `Mains` and `Services` (`name_room:`), which refuse a longer name before any row.
+  The room the home leaves for an agent's name, in bytes, so its socket,
+  `<home>/d/<agent>.sock`, fits macOS's 103 (F-172). The tree hands it to the parts that start
+  agents, `Delegates` and `Mains` (`name_room:`), which refuse a longer name before any row. A
+  service's socket is named by a key of fixed length, not its name (F-205).
 
       iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/" <> String.duplicate("h", 41),
       ...>   instance: "a", programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2},
       ...>   claude: "/bin/claude", env: %{path: "/bin"}, user: "me")
       iex> CodingAgentFramework.Config.name_room(c)
-      %{agent: 53, service: 43}
+      %{agent: 53}
   """
-  @spec name_room(t) :: %{agent: non_neg_integer, service: non_neg_integer}
-  def name_room(%__MODULE__{home: home}) do
-    left = @socket - byte_size(home)
-    %{agent: max(left - @agent_around, 0), service: max(left - @service_around, 0)}
-  end
+  @spec name_room(t) :: %{agent: non_neg_integer}
+  def name_room(%__MODULE__{home: home}),
+    do: %{agent: max(@socket - byte_size(home) - @agent_around, 0)}
 
   @doc "A path under the home."
   @spec path(t, String.t()) :: String.t()

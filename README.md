@@ -323,7 +323,9 @@ Built, each from a checked model in `model/tla/`:
 - the loose ends of F-196 to F-201 (F-203, against `Heal.tla` and `Remedies.tla`'s waits): an
   answered act whose state passed leaves the inbox, `run_delegate` of a waiting start answers at
   once, a waited resume is settled from its row's end into the fault ledger, a start's menu is a
-  startup dialog, and an `env` without `path` is refused for every tree.
+  startup dialog, and an `env` without `path` is refused for every tree;
+- a service's socket named by a short key of its name, so every allowed name fits a home of up to
+  69 bytes, and a login prompt's id naming its refusal (F-205).
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

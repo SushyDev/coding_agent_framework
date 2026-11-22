@@ -787,7 +787,9 @@ delegate, keyed by the prompt). The operator's `answer_startup` and `withdraw` g
 F-182 added the `remedy` kind: the `Watch`'s symptom row the healer asked, open while it is
 `asked`, answered by `Watch.answer/5`; it is not told to the agent's parent, since it is the
 `Watch`'s wait, not the agent's. F-181 added the `login` kind: `Logins`' row of an account a
-check found not logged in, id `login:<account>`, no agent, answered `check` (`Logins.recheck/3`).
+check found not logged in, id `login:<account>:<the refused check's time>`, as a menu's id names the
+read that found it, so an account refused again after a login is a new prompt with its own id
+(F-205), no agent, answered `check` (`Logins.recheck/3`).
 F-186 added the `limit` and `usage_credits` kinds from the agent row's usage limit, opened by
 its healer (`Limits`, not `Sessions` as the table says: `Sessions` is the row's writer), ids
 `limit:<agent>:<until>` and `usage_credits:<agent>:<until>`, answered through
@@ -877,9 +879,13 @@ no tool home; `agent_rows/1` also takes the instance's name, read from the confi
 tree keeps in its `Registry`, since a hook's `opts` are plain data and a struct there, the
 config among them, is refused by name (`{:not_data, module, {:struct, struct}}`); and
 `post_tool_use/3` may answer `{:context, text}`. The other calls are B3's rest.
-The config answers the room the home leaves for an agent's and a service's name (`Config.name_room/1`, F-172), and the tree hands it to `Delegates`, `Mains` and
-`Services`, which refuse a longer name `{:bad, :name, {:longer_than, n}}` before any row;
-sockets stay in the home.
+The config answers the room the home leaves for an agent's name (`Config.name_room/1`, F-172), and the tree hands it to `Delegates` and
+`Mains`, which refuse a longer name `{:bad, :name, {:longer_than, n}}` before any row;
+sockets stay in the home. A service's socket is named by the first 16 hex digits of the SHA-256
+of its name (`Services.socket_key/1`, F-205), not by the name, so its path is 31 bytes after its
+host's directory whatever the name (the workstation's is `<home>/ws`): a name has no room to
+keep, and only a directory longer than 72 bytes (a home longer than 69) refuses a service's
+start, `{:refused, {:socket_path_too_long, path}}`. The name stays in the row and the log.
 
 **The config** (`CodingAgentFramework.Config`, whose module doc gives each key's example).
 Every setting the tree reads is a key here, checked once by `Config.new/1`; a value out of

@@ -1076,7 +1076,6 @@ defmodule CodingAgentFramework do
            {Services,
             [
               dir: Config.path(c, "parts/services"),
-              name_room: Config.name_room(c).service,
               copies: pid.(:copies),
               grants: grants,
               ended: &Sessions.Agents.ended?(Sessions.Agents.get(w.agents, &1)),

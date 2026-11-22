@@ -313,18 +313,11 @@ defmodule CodingAgentFramework.SurfaceTest do
     svc = Path.join(ctx.dir, "svc")
     argv = [program!(:sh), "-c", echo_tail!(svc), Path.join(svc, "it")]
 
-    # A service's name past the room the home leaves for its socket is refused before any row
-    # (F-172).
-    room = Config.name_room(ctx.config).service
-    long = String.duplicate("s", room + 1)
-    args = %{"name" => long, "argv" => argv}
+    # A service's socket is named by a key, not its name (F-205): the longest allowed name starts
+    # in the tree's own home.
+    long = String.duplicate("s", 64)
 
-    assert {:refused, {:bad, :name, {:longer_than, ^room}}} =
-             MCP.call(parts.mcp, "app-unit-one", "service_start", args)
-
-    refute Enum.any?(Services.list(parts.services), &(&1.name == long))
-
-    for {name, keep} <- [{"plain", false}, {"kept", true}] do
+    for {name, keep} <- [{"plain", false}, {"kept", true}, {long, false}] do
       {:ok, %{state: "running"}} =
         MCP.call(parts.mcp, "app-unit-one", "service_start", %{
           "name" => name,
@@ -344,7 +337,10 @@ defmodule CodingAgentFramework.SurfaceTest do
       await(
         fn ->
           rows = Map.new(Services.list(parts.services), &{&1.name, &1})
-          if rows["plain"].state == "ended" and rows["kept"].owner == "app-main", do: {:ok, rows}
+
+          if rows["plain"].state == "ended" and rows[long].state == "ended" and
+               rows["kept"].owner == "app-main",
+             do: {:ok, rows}
         end,
         20_000
       )

@@ -259,7 +259,9 @@ defmodule CodingAgentFramework.MainsTest do
     Agent.update(ctx.clock, fn _ -> until + 120_000 end)
     Mains.cue(mains, %{topic: "sessions:test", ids: []})
     assert {:ok, %{account: "work"}} = await(fn -> start_row(ctx, id, "starting") end)
-    assert [%{holder: {"main", _}}] = Scheduler.leases(ctx.scheduler)
+
+    # The row says `starting` before the start asks `Scheduler` for its lease: wait for the lease.
+    assert {:ok, [%{holder: {"main", _}}]} = await(fn -> leases(ctx, fn _ -> true end) end)
     assert {:ok, _} = await(fn -> dialog(ctx, "app-epic") end)
     assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :trust, @trust)
     assert {:ok, _} = await(fn -> running(ctx, "app-epic") end)
