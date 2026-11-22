@@ -1589,7 +1589,11 @@ gone by pid and start time and its socket dead); `resuming` reads the other acco
 deadline). An unknown (`claude auth status` cannot tell, say) decides nothing: it is asked
 again at the `Mover`'s step (5 s) and each cue, up to the resume's own deadline (`resume_wait:`,
 5 minutes by default; F-211), which the row's `move_deadline` holds from the phase `resuming`
-on, so a restart reads it and a way back keeps it. Then the resume is `Sessions.resume` on it
+on, so a restart reads it and a way back keeps it. The same deadline bounds every other
+unknown of the resume (F-212): the app's launch (a part it needs has not started),
+`Mailbox.launch/4`'s mark, the own word's store, and no first line for a headless resume. A
+row still `sending` is asked again but never taken as a refusal: `Mailbox` settles it once the
+row is free. Then the resume is `Sessions.resume` on it
 with the same session id and the app's launch for the agent (a delegate's from
 `Delegates.launch/2`), the row's own options and model taken again. An interactive session's
 first due row goes in as the resume's prompt (`launch`, "Delivery"; F-137's new-1), since the
@@ -1617,8 +1621,10 @@ Each failure settles on one account:
 - a stop whose process outlives its deadline: the row stays `stopping` for `Recoveries`, and
   the move goes on once it is free, whatever the deadline;
 - the copy or the resume refused on the other account, `usable:` refusing it at the resume
-  included (the app's flag, `{:app, reason}`), or answering unknown until the resume's deadline
-  (taken as a refusal, `{:unknown_past_deadline, reason}`, F-211): the act `failed`, and the
+  included (the app's flag, `{:app, reason}`), or an unknown of the resume past its deadline
+  (taken as a refusal, `{:unknown_past_deadline, reason}`, F-211; `reason` names the unknown
+  that ran out, `{:usable, _}`, `{:app_launch, _}`, `{:launch, _}`, `{:word, _}` or
+  `:no_first_line`, F-212): the act `failed`, and the
   session is resumed on its own account, where its transcript is, once `usable:` takes that one
   too, an unknown of it past the same deadline a refusal as well;
 - that resume refused too: no process of it runs; its row says why, and the fault ledger has an
@@ -2729,7 +2735,9 @@ worktree on its branch whose setup finished).
      answer unknown at any time, and never answer again; the resume's deadline passes
      (`ResumeWaitEnds`) and an unknown is then taken as a refusal (`MoveBack`, `Stranded`).
      `ResumeEnds` is liveness: a move's resume ends, moved, back or left down;
-     `Break_Move_NoResumeWait` has no deadline and fails it.
+     `Break_Move_NoResumeWait` has no deadline and fails it. The resume's launch may answer
+     unknown too (F-212, `LaunchUnsure`), under the same deadline (`ResumeRefused`);
+     `Break_Move_FlagOnlyWait` bounds the check's unknown alone and fails `ResumeEnds`.
 3. **`Delegate.tla`**: a main session, its delegates and restarts of the framework.
    - Invariants: each report is delivered once, and only to a running process of the main
      session whose turn has ended; a delegate ends only after its report is delivered; a report

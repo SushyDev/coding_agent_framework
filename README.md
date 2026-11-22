@@ -345,7 +345,8 @@ Built, each from a checked model in `model/tla/`:
   leaves the row down when that one is flagged too;
 - a move's resume has a deadline (F-211, against `Move.tla`'s `ResumeEnds`): a flag check that
   stays unknown is asked again until `resume_wait` (5 min), then taken as a refusal, so every
-  move's resume ends moved, back or left down.
+  move's resume ends moved, back or left down; and every other unknown of that resume (the
+  app's launch, the word, the first line) under the same deadline (F-212).
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
