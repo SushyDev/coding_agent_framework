@@ -210,6 +210,26 @@ defmodule CodingAgentFramework.ConfigTest do
     assert Config.new(Keyword.delete(@fields, :accounts)) == {:refused, {:bad, :accounts}}
   end
 
+  # F-209, from F-207's new-3: no part of an agentless tree reads these, so each is refused
+  # there, a well-formed value and an empty one alike; a tree that runs agents takes each.
+  test "an agentless config refuses each key only an agent's part reads" do
+    agentless = [home: "/srv/caf", instance: "a", programs: %{}, env: %{path: "/bin"}]
+
+    keys = [
+      usable: [{Flagged, flagged: ["side"]}, nil],
+      tool_hooks: [{Hooks, why: "no"}, nil],
+      extensions: [[{Board, board: "web"}], []],
+      dialogs: [%{trust: "Yes, I trust this folder"}, %{}]
+    ]
+
+    for {key, values} <- keys, value <- values do
+      assert Config.new([{:agents, false}, {key, value}] ++ agentless) == {:refused, {:bad, key}}
+      assert {:ok, %Config{}} = new([{key, value}])
+    end
+
+    assert {:ok, %Config{agents: false}} = Config.new([agents: false] ++ agentless)
+  end
+
   # F-203, from F-201's new-2: a tree that runs agents reads `env.path` at its start, so a config
   # without one is refused, never a crash of the tree's `init`.
   test "an env without a path is refused for a tree that runs agents too" do

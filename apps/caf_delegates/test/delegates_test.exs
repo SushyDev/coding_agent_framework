@@ -620,6 +620,126 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "message #{r}"]
   end
 
+  # F-209 (F-207's new-2; Move.tla's CopyAsked, ResumeCopy, ResumeCopied, NoResumeOnRefused):
+  # the app flags the account the delegate ran on after its kill, so its resume goes to the
+  # account the pick finds, its conversation copied there first, an act `copy`.
+  test "a resume on an account the app flags moves: copied to the picked account, resumed there",
+       ctx do
+    acts = with_acts(ctx)
+    flags = two_accounts(ctx, ["side"], acts: acts.pid)
+    hold(ctx)
+
+    assert {:ok, %{id: id, name: name, account: "work", brief_uuid: u}} =
+             start(ctx, "app", "unit/one")
+
+    stream_row(ctx, id, &(&1.messages[u].state == :delivered))
+    %{session_id: sid, cwd: cwd} = Agents.get(ctx.agents, name)
+    from = conversation(ctx, "work", cwd, sid)
+    kill_delegate(ctx, id, [])
+
+    Agent.update(flags, fn _ -> ["work"] end)
+    File.rm!(Path.join(ctx.dir, "hold"))
+    {:ok, _} = resumed(ctx, id)
+
+    assert {:ok, %{report: "taken", resumes: 1, resume_uuid: r}} =
+             cue_until(ctx, id, &(&1.status == "finished"))
+
+    # The agent row runs on `side` now, under the same session id, from the copy.
+    assert %{account: "side", session_id: ^sid} = Agents.get(ctx.agents, name)
+    dir = side_dir(ctx)
+    {:ok, copy} = Transcripts.path(dir, cwd, sid)
+    assert File.read!(copy) == File.read!(from)
+    assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "message #{r}"]
+
+    assert [
+             %{act: "killed"},
+             %{act: "resume"},
+             %{act: "copy", target: "agent:" <> ^name, outcome: "verified", detail: detail}
+           ] = Enum.sort_by(own_acts(acts), & &1.id)
+
+    assert %{"from" => "work", "to" => "side", "session_id" => ^sid} = JSON.decode!(detail)
+  end
+
+  # F-209: with every account refused, the resume is refused with its own account's reason, the
+  # app's: the delegate is not resumed, its row failed, and the refusal is its parent's report.
+  test "a resume with no account usable is refused with the app's reason, and nothing resumes",
+       ctx do
+    flags = two_accounts(ctx, ["side"])
+    hold(ctx)
+
+    assert {:ok, %{id: id, name: name, account: "work", brief_uuid: u}} =
+             start(ctx, "app", "unit/one")
+
+    stream_row(ctx, id, &(&1.messages[u].state == :delivered))
+    kill_delegate(ctx, id, [])
+
+    Agent.update(flags, fn _ -> ["work", "side"] end)
+    File.rm!(Path.join(ctx.dir, "hold"))
+
+    assert {:ok, %{status: "failed", resumes: 0, report: "taken", text: text}} =
+             settled(ctx, id, &(&1.status == "failed"))
+
+    assert text =~ ~s({:app, "flagged work"})
+
+    assert {:ok, %{kind: "notice", from: "framework", to: "main"}} =
+             Mailbox.answer_to(ctx.mailbox, u)
+
+    assert %{account: "work", status: "stopped"} = Agents.get(ctx.agents, name)
+    assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}"]
+  end
+
+  # F-209: an account the app does not flag keeps its resume, as before: no copy, no move.
+  test "a resume on an account the app does not flag runs there, with no copy", ctx do
+    acts = with_acts(ctx)
+    _flags = two_accounts(ctx, ["side"], acts: acts.pid)
+    hold(ctx)
+
+    assert {:ok, %{id: id, name: name, account: "work", brief_uuid: u}} =
+             start(ctx, "app", "unit/one")
+
+    stream_row(ctx, id, &(&1.messages[u].state == :delivered))
+    %{session_id: sid, cwd: cwd} = Agents.get(ctx.agents, name)
+    conversation(ctx, "work", cwd, sid)
+    kill_delegate(ctx, id, [])
+
+    File.rm!(Path.join(ctx.dir, "hold"))
+    {:ok, _} = resumed(ctx, id)
+    assert {:ok, %{report: "taken", resumes: 1}} = cue_until(ctx, id, &(&1.status == "finished"))
+
+    assert %{account: "work", session_id: ^sid} = Agents.get(ctx.agents, name)
+    dir = side_dir(ctx)
+    {:ok, copy} = Transcripts.path(dir, cwd, sid)
+    refute File.exists?(copy)
+    assert ["killed", "resume"] = Enum.map(Enum.sort_by(own_acts(acts), & &1.id), & &1.act)
+  end
+
+  # F-209: the word to go on after a limit chooses its account as a resume after a kill does:
+  # with every account refused, `go_on/5` is refused with the app's reason, the row still running
+  # at its limit and nothing resumed.
+  test "a word to go on with no account usable is refused with the app's reason", ctx do
+    flags = two_accounts(ctx, ["side"])
+    File.write!(Path.join(ctx.dir, "limit"), "1800000000")
+    assert {:ok, %{id: id, name: name, brief_uuid: u}} = start(ctx, "app", "unit/one")
+    stream_row(ctx, id, &(&1.gone and &1.last_result.api_error == "usage_limit_reached"))
+
+    {:ok, _} =
+      await(fn ->
+        Sessions.cue(ctx.sessions, %{topic: "stream:test", ids: []})
+        cue(ctx, current(ctx))
+        if Agents.free?(Agents.get(ctx.agents, name)), do: {:ok, :exited}
+      end)
+
+    Agent.update(flags, fn _ -> ["work", "side"] end)
+    key = "limit:#{name}:1800000000"
+
+    assert Delegates.go_on(current(ctx), name, "Go on.", key) ==
+             {:refused, {:app, "flagged work"}}
+
+    assert %{status: "running", resumes: 0, report: "none"} = Table.get(ctx.dtable, id)
+    assert %{account: "work"} = Agents.get(ctx.agents, name)
+    assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}"]
+  end
+
   # Limit.tla's Report and Deliver (F-186's new-1): the stand-in plays F-181's measured headless
   # hit, so the turn ends with a result at the limit and the process exits 1. That is no report
   # and no kill; at the reset the healer's word goes on with the brief's turn, by a resume
@@ -1159,6 +1279,63 @@ defmodule CodingAgentFramework.DelegatesTest do
   end
 
   defp own_acts(%{db: db}), do: Acts.Table.select(db, "actor = 'delegates:test'", [])
+
+  # F-209: two prepared accounts, `work` and `side`, and the app's flag on the accounts an
+  # Agent holds, read at each check after the framework's own (prepared). Delegates starts again
+  # with both. Answers the Agent.
+  defp two_accounts(ctx, flagged, more \\ []) do
+    two = two(ctx)
+    {:ok, _} = Accounts.prepare(two, "side", %{})
+    flags = start_supervised!({Agent, fn -> flagged end}, id: make_ref())
+
+    usable = fn name ->
+      with {:ok, account} <- Accounts.ready(two, name) do
+        if name in Agent.get(flags, & &1),
+          do: {:refused, {:app, "flagged #{name}"}},
+          else: {:ok, account}
+      end
+    end
+
+    restart(ctx, [accounts: two, usable: usable] ++ more)
+    flags
+  end
+
+  defp two(ctx) do
+    {:ok, two} = Accounts.new(Path.join(ctx.dir, "home"), ["work", "side"])
+    two
+  end
+
+  defp side_dir(ctx) do
+    {:ok, dir} = Accounts.config_dir(two(ctx), "side")
+    dir
+  end
+
+  # The conversation so far in `account`'s config directory: a user line with no reply after it.
+  defp conversation(ctx, account, cwd, sid) do
+    {:ok, dir} = Accounts.config_dir(Keyword.fetch!(ctx.dopts, :accounts), account)
+    {:ok, path} = Transcripts.path(dir, cwd, sid)
+    File.mkdir_p!(Path.dirname(path))
+    user = %{"type" => "user", "message" => %{"content" => "Go."}}
+    File.write!(path, [JSON.encode!(user), "\n"])
+    path
+  end
+
+  # Cues Sessions, then Delegates, until row `id` satisfies `ready?`: a kill's row decides only
+  # once Sessions' row of the killed process has ended.
+  defp settled(ctx, id, ready?) do
+    name = Table.get(ctx.dtable, id).name
+
+    await(
+      fn ->
+        Sessions.cue(ctx.sessions, %{topic: "stream:test", ids: []})
+        Sessions.viewer_argv(ctx.sessions, name)
+        cue(ctx, current(ctx))
+        row = Table.get(ctx.dtable, id)
+        if ready?.(row), do: {:ok, row}, else: row
+      end,
+      10_000
+    )
+  end
 
   defp restart(ctx, more \\ []) do
     if Process.alive?(current(ctx)), do: Process.exit(current(ctx), :kill)

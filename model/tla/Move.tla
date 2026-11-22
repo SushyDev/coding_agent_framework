@@ -14,7 +14,8 @@
 (* Models these modules of CodingAgentFramework (Mover is built, F-133;   *)
 (* the idle read of background commands and the resume's launch, F-142;   *)
 (* a limited agent's move, F-191, with Limits, the healer that asks it;   *)
-(* a headless resume's own word, F-193):                                  *)
+(* a headless resume's own word, F-193; a resume's account and the app's  *)
+(* flag, F-209):                                                           *)
 (*   Usage    each account's allowance: below 90 %, at 90 % (drain), at    *)
 (*            the limit;                                                   *)
 (*   Mover    drains the session, asks Sessions to stop it, waits for the  *)
@@ -37,11 +38,24 @@
 (*   Mains    with Resumes (F-177): the resume of the session once its     *)
 (*            process ended by itself (`resume_main`), on the account its  *)
 (*            row names, where its conversation is; only when that         *)
-(*            account is refused (its windows; a login refused is the same *)
-(*            refusal, left abstract) the conversation is first copied to  *)
-(*            the picked account, as the Mover's copy, and the resume runs *)
-(*            there under the same session id. A copy refused, or cut by a *)
-(*            restart, leaves the row stopped on its own account.          *)
+(*            account is refused (its windows, or with Flags the app's     *)
+(*            `usable`, F-207; a login refused is the same refusal, left   *)
+(*            abstract) the conversation is first copied to the picked     *)
+(*            account, as the Mover's copy, and the resume runs there      *)
+(*            under the same session id. A copy refused, or cut by a       *)
+(*            restart, leaves the row stopped on its own account. With no  *)
+(*            account usable the resume is refused and the row stays       *)
+(*            stopped: no step of it is enabled;                           *)
+(*   Delegates a delegate's resume (F-209): after a kill (`resume/4`) and  *)
+(*            with its word to go on after a limit (`went_on/4`), it       *)
+(*            chooses its account as Mains does, by `usable` alone (the    *)
+(*            login and the app's flag; its windows are Limit.tla's). Its  *)
+(*            first line is Delegate.tla's, so Resumes is played by an     *)
+(*            interactive session here;                                    *)
+(*   the app  with Flags, its `usable` flags an account or lifts the flag  *)
+(*            at any time (F-207's new-2: the account is not the one it    *)
+(*            claims to be). A move's pick and a resume read it when they  *)
+(*            choose an account (NoResumeOnRefused).                       *)
 (*                                                                         *)
 (* A resumed process has no waiter until a turn of it ends, so the first   *)
 (* row due at the resume goes in as its prompt; a later one is typed.      *)
@@ -132,6 +146,7 @@ CONSTANTS
     Resumes,       \* the process may end by itself and Mains resume it (F-177)
     Limited,       \* its turn may end at a usage limit, and the limit's move runs (F-191)
     Headless,      \* a headless session: each resume needs a first line (F-193)
+    Flags,         \* the app's `usable` may flag an account at any time (F-207, F-209)
     Break         \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -149,14 +164,16 @@ Breaks == {
     "LimitIdleForAll",   \* a limited turn is ended for Mailbox too, not only for the move's stop
     "BackIntoLimit",     \* a failed move of a limited session resumes it on its own account
     "WordAfter",         \* the limit's move begins before the healer stored the word to go on
-    "BareHeadless"       \* a headless session with no row due is resumed with no first line
+    "BareHeadless",      \* a headless session with no row due is resumed with no first line
+    "ResumeInPlace"      \* a resume runs on its row's account whether or not it is refused
 }
 
 ASSUME Break \in Breaks
 ASSUME Home \in Accounts /\ Cardinality(Accounts) = 2
 ASSUME \A c \in {MaxPrompts, MaxBg, MaxDelegates, MaxMsgs, MaxCrashes, MaxRestarts} : c \in Nat
-ASSUME Resumes \in BOOLEAN /\ Limited \in BOOLEAN /\ Headless \in BOOLEAN
-\* Mains' resume is a main session's; a headless session is a delegate.
+ASSUME Resumes \in BOOLEAN /\ Limited \in BOOLEAN /\ Headless \in BOOLEAN /\ Flags \in BOOLEAN
+\* Resumes is played by a main session; a headless session is a delegate, whose resume's first
+\* line is Delegate.tla's.
 ASSUME ~(Headless /\ Resumes)
 
 \* Allowance levels.
@@ -200,7 +217,8 @@ VARIABLES
     \* the limit (Limited)
     hitPid,        \* the process whose turn ended at the usage limit, or 0
     word,          \* the healer stored the word to go on
-    ownWord        \* the Mover stored its own word for a headless resume (Headless)
+    ownWord,       \* the Mover stored its own word for a headless resume (Headless)
+    flagged        \* the accounts the app's `usable` refuses now (Flags)
 
 dvars == <<row, hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, dlost, wrong>>
 work == <<level, procs, nextPid, turn, bg, bgCount, delegates, prompts, msgs, crashes>>
@@ -208,10 +226,10 @@ mover == <<transcript, phase, target, copied, resumedWith, record, readAt, ends,
 
 lvars == <<hitPid, word, ownWord>>
 
-vars == <<up, restarts, work, mover, dvars, lvars>>
+vars == <<up, restarts, work, mover, dvars, lvars, flagged>>
 
-\* Every action but the limit's leaves the limit as it is.
-Kept(A) == A /\ UNCHANGED lvars
+\* Every action but the limit's leaves the limit as it is, and only the app flags an account.
+Kept(A) == A /\ UNCHANGED <<lvars, flagged>>
 
 Live == {p \in procs : ~p.ending}
 Pids == {p.pid : p \in procs}
@@ -248,8 +266,8 @@ D == INSTANCE Delivery WITH
 \* Starts are refused from the drain on until the session has moved.
 Draining == phase \in {"draining", "clear", "stopping", "ending"} /\ Break # "NoDrain"
 
-\* An account a start or a resume is refused on: its windows have no room.
-Refused(a) == level[a] = Limit
+\* An account a start or a resume is refused on: its windows have no room, or the app flags it.
+Refused(a) == level[a] = Limit \/ a \in flagged
 
 DelegatesStarted == Cardinality({d \in Delegates : delegates[d] # "none"})
 
@@ -273,6 +291,7 @@ Init ==
     /\ rmem = {} /\ last = [a \in {Main} |-> D!NoResult]
     /\ unsure = {} /\ dlost = {} /\ wrong = {}
     /\ hitPid = 0 /\ word = FALSE /\ ownWord = FALSE
+    /\ flagged = {}
 
 -----------------------------------------------------------------------------
 (* The framework: its tables survive a restart; its memory does not *)
@@ -386,7 +405,7 @@ Has(i) == \E k \in DOMAIN Read : Read[k] = i
 \* Drain: a press, or the session's account at 90 % (Fairness).
 Drain ==
     /\ up /\ phase = "idle" /\ ~AtLimit
-    /\ \E a \in Accounts \ {Here} : level[a] = Ok /\ target' = a
+    /\ \E a \in Accounts \ {Here} : level[a] = Ok /\ a \notin flagged /\ target' = a
     /\ phase' = "draining"
     /\ UNCHANGED <<up, restarts, work, transcript, copied, resumedWith, record, readAt, ends,
                    lost, turned, dvars>>
@@ -552,7 +571,7 @@ WordStored ==
 LimitMove ==
     /\ up /\ Limited /\ AtLimit /\ phase = "idle"
     /\ word \/ Break = "WordAfter"
-    /\ \E a \in Accounts \ {Here} : level[a] = Ok /\ target' = a
+    /\ \E a \in Accounts \ {Here} : level[a] = Ok /\ a \notin flagged /\ target' = a
     /\ phase' = IF Current = 0 THEN "ending" ELSE "draining"
     /\ UNCHANGED <<up, restarts, work, transcript, copied, resumedWith, record, readAt, ends,
                    lost, turned, dvars, lvars>>
@@ -595,9 +614,11 @@ Resuming ==
     /\ up /\ phase = "stopped" /\ record.status = "ended" /\ procs = {}
     /\ ~\E i \in Ids : row[i].st = "sending"
 
-\* On the account the row names, where the conversation is, while it has room.
+\* On the account the row names, where the conversation is, while it is not refused: it has
+\* room and the app does not flag it (under ResumeInPlace, whether or not it is refused).
 ResumeHere ==
-    /\ Resuming /\ ~Refused(Here) /\ Break # "ResumeOnPicked"
+    /\ Resuming /\ Break # "ResumeOnPicked"
+    /\ ~Refused(Here) \/ Break = "ResumeInPlace"
     /\ NewProcOn(Here)
     /\ UNCHANGED dvars
 
@@ -641,6 +662,12 @@ ResumePicked ==
 
 Resume == ResumeHere \/ CopyAsked \/ ResumeCopy \/ ResumeCopied \/ CopyRefused \/ ResumePicked
 
+\* The app flags an account, or lifts its flag, at any time; nothing else changes (F-207).
+AppFlags ==
+    /\ Flags
+    /\ \E a \in Accounts : flagged' = IF a \in flagged THEN flagged \ {a} ELSE flagged \cup {a}
+    /\ UNCHANGED <<up, restarts, work, mover, dvars, lvars>>
+
 \* Sessions ends the row only when the hook names the row's process.
 SessionEndArrives(pid) ==
     /\ up /\ pid \in ends
@@ -671,7 +698,7 @@ OldNext ==
                       \/ Takes(i)
                       \/ Mailbox(D!SettleSeen(i, Has(i)))
 
-Next == Kept(OldNext) \/ LimitNext \/ OwnWord
+Next == Kept(OldNext) \/ ((LimitNext \/ OwnWord) /\ UNCHANGED flagged) \/ AppFlags
 
 \* A resume is not refused here: Mover.ex goes back to the old account then,
 \* and a refused launch makes its row due again for the next one.
@@ -687,7 +714,8 @@ Fairness ==
     /\ WF_vars(Kept(\E p \in procs : TurnEnds(p)))
     /\ WF_vars(Kept(\E b \in bg : BgEnds(b)))
     /\ WF_vars(Kept(Mailbox(D!Connects(Main))))
-    /\ WF_vars(WordStored) /\ WF_vars(LimitMove) /\ WF_vars(OwnWord)
+    /\ WF_vars(WordStored /\ UNCHANGED flagged) /\ WF_vars(LimitMove /\ UNCHANGED flagged)
+    /\ WF_vars(OwnWord /\ UNCHANGED flagged)
     /\ \A i \in Ids :
          /\ SF_vars(Kept(\E t \in {"waiter", "typed"} : Mailbox(D!Mark(i, t))))
          /\ SF_vars(Kept(Mailbox(D!Handed(i)))) /\ WF_vars(Kept(Mailbox(D!Refused(i))))
@@ -707,6 +735,7 @@ TypeOK ==
     /\ turned \in BOOLEAN
     /\ record.status \in {"running", "stopping", "ended"}
     /\ hitPid \in 0..nextPid /\ word \in BOOLEAN /\ ownWord \in BOOLEAN
+    /\ flagged \subseteq Accounts
     /\ D!TypeOK
 
 \* A session runs on one account at a time: never two processes of it.
@@ -743,6 +772,14 @@ DeliveredIsKept == \A i \in Ids : row[i].st = "delivered" => Has(i)
 
 \* A drained session moves.
 DrainedParentMoves == phase = "draining" ~> phase = "moved"
+
+\* A resume after its process ended by itself never runs on an account it is refused on (F-209):
+\* it chooses its own while that is usable, else the one it copies the conversation to, and with
+\* none it is refused and the row stays stopped. The choice is the step that leaves "stopped"; a
+\* flag set after it is the app's own, as one set after the launch would be.
+NoResumeOnRefused ==
+    [][(phase = "stopped" /\ phase' # "stopped") =>
+         ~Refused(IF phase' = "copying" THEN target' ELSE record'.account)]_vars
 
 \* A resume's copy ends: the session runs on the picked account, or the row
 \* stays stopped on its own.
