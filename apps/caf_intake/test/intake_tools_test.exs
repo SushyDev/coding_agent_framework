@@ -57,6 +57,7 @@ defmodule CodingAgentFramework.IntakeToolsTest do
              agent: "builder-1",
              account: "work",
              session_id: "s1",
+             cwd: nil,
              tool_name: "Bash",
              tool_input: %{"x" => 1},
              tool_use_id: "t1"
@@ -140,6 +141,47 @@ defmodule CodingAgentFramework.IntakeToolsTest do
              {"passed", ~s(["bad_answer","nope"])},
              {"answered", nil}
            ]
+  end
+
+  # F-201: an app's rewrite of a command that depends on where it runs needs the directory.
+  test "a PreToolUse event carries the cwd Claude Code posted, and nil without one",
+       %{start: start} do
+    intake = start.(pre_tool_use: telling(self(), fn _ -> :pass end))
+
+    with_cwd =
+      JSON.decode!(tool("PreToolUse", "t1")) |> Map.put("cwd", "/w/app") |> JSON.encode!()
+
+    post(intake, with_cwd)
+    post(intake, tool("PreToolUse", "t2"))
+    assert_received {:asked, %{tool_use_id: "t1", cwd: "/w/app"}}
+    assert_received {:asked, %{tool_use_id: "t2", cwd: nil}}
+  end
+
+  # F-197's new-2, F-201: an answer that does not encode as JSON never reaches the encoder.
+  test "a PreToolUse answer that is not JSON is a pass, and its row names its key",
+       %{db: db, start: start} do
+    answers = %{
+      "t1" => {:allow, updated_input: %{"command" => {:ls}}},
+      "t2" => {:pass, updated_input: %{"x" => self()}},
+      "t3" => {:allow, additional_context: <<255>>},
+      "t4" => {:deny, <<0xC3>>},
+      "t5" => {:deny, "no", additional_context: <<255>>}
+    }
+
+    intake = start.(pre_tool_use: &answers[&1.tool_use_id])
+
+    for id <- ~w(t1 t2 t3 t4 t5),
+        do: assert(%{status: 200, resp_body: ""} = post(intake, tool("PreToolUse", id)))
+
+    assert Enum.map(rows(db), &{&1.hold, &1.problem}) == [
+             {"passed", ~s(["bad_answer","updated_input"])},
+             {"passed", ~s(["bad_answer","updated_input"])},
+             {"passed", ~s(["bad_answer","additional_context"])},
+             {"passed", ~s(["bad_answer","reason"])},
+             {"passed", ~s(["bad_answer","additional_context"])}
+           ]
+
+    assert Process.alive?(intake)
   end
 
   test "a second post of one call answers the row's decision, and asks no one",
@@ -291,6 +333,54 @@ defmodule CodingAgentFramework.IntakeToolsTest do
     why = {"passed", ~s(["bad_answer","replace"])}
     assert Enum.map(rows(db), &{&1.hold, &1.problem}) == [why, why]
     assert Process.alive?(intake)
+  end
+
+  test "a PostToolUse event carries the cwd Claude Code posted", %{start: start} do
+    intake = start.(post_tool_use: telling(self(), fn _ -> :pass end))
+    post(intake, ran("t1") |> JSON.decode!() |> Map.put("cwd", "/w/app") |> JSON.encode!())
+    post(intake, ran("t2"))
+    assert_received {:asked, %{tool_use_id: "t1", cwd: "/w/app"}}
+    assert_received {:asked, %{tool_use_id: "t2", cwd: nil}}
+  end
+
+  # F-201: a note on the call it is about, as Claude Code 2.1.322 reads it from PostToolUse.
+  test "a PostToolUse's context goes out as additionalContext, alone or with a replacement",
+       %{db: db, start: start} do
+    replaced = %{"stdout" => "REPLACED", "stderr" => "", "interrupted" => false}
+
+    answers = %{
+      "t1" => {:context, "`land` runs the gates."},
+      "t2" => {:replace, replaced, context: "The output was cut."},
+      "t3" => {:context, String.duplicate("é", 10_001)},
+      "t4" => {:context, <<255>>},
+      "t5" => {:replace, replaced, nope: 1},
+      "t6" => {:context, :x}
+    }
+
+    intake = start.(post_tool_use: &answers[&1.tool_use_id])
+
+    assert decision(post(intake, ran("t1"))) == %{
+             "hookEventName" => "PostToolUse",
+             "additionalContext" => "`land` runs the gates."
+           }
+
+    assert decision(post(intake, ran("t2"))) == %{
+             "hookEventName" => "PostToolUse",
+             "updatedToolOutput" => replaced,
+             "additionalContext" => "The output was cut."
+           }
+
+    for id <- ~w(t3 t4 t5 t6),
+        do: assert(%{status: 200, resp_body: ""} = post(intake, ran(id)))
+
+    assert Enum.map(rows(db), &{&1.actor, &1.hold, &1.problem}) == [
+             {"app", "answered", nil},
+             {"app", "answered", nil},
+             {nil, "passed", ~s(["context_too_long",10001])},
+             {nil, "passed", ~s(["bad_answer","context"])},
+             {nil, "passed", ~s(["bad_answer","nope"])},
+             {nil, "passed", ~s(["bad_answer","context"])}
+           ]
   end
 
   test "at a PostToolUse's deadline the output stays, and a later replacement is dropped",

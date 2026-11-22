@@ -302,7 +302,11 @@ Built, each from a checked model in `model/tla/`:
   menu no rule names by its shape and footer, `Sessions` keeps it on the running row from a read
   of the pane, and the inbox shows it as a `dialog` prompt with its options and `esc`, no default
   and no deadline, pressed only by a person's answer with the marker read back before Enter; and
-  a dim prompt suggestion in the input box is read as no text.
+  a dim prompt suggestion in the input box is read as no text;
+- what an app's first run on the tree found (F-201): a tool event carries Claude Code's `cwd`, an
+  agentless config needs only what it reads, `agent_rows/1` takes the instance's name, an answer
+  that is not JSON is a pass with its problem recorded, and `post_tool_use/3` may add context to
+  the call it is about (`{:context, text}`, measured on 2.1.322).
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

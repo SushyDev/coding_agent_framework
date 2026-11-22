@@ -25,7 +25,8 @@ defmodule CodingAgentFramework.Config do
   - `hosts`: the other hosts, name to `%{programs: programs, dir: dir}` as `Jobs` and `Services`
     read them, each host reached by `Host.ssh/5` with the home's `ToolHome.ssh_options/1`;
     none by default;
-  - `accounts`: the Claude accounts' names;
+  - `accounts`: the Claude accounts' names; required, as `ports` and `claude` are, unless
+    `agents: false` (below);
   - `projects`: name to the project, as `CodingAgentFramework.Mains` takes it: its `origin`
     (the repository its stacks land on, which its checkout is cloned from), `trunk`, `setup`,
     `setup_timeout`, `env`, `branches`, `cap` and `dir` (its checkout's directory, by default
@@ -54,7 +55,8 @@ defmodule CodingAgentFramework.Config do
   - `user`: the OS user's name, which every launch passes as `USER` (the app gives it; no part
     reads it from the environment). Required on macOS, where Claude Code finds the login's
     Keychain item, whose account is the OS user, by `USER` alone: `{:refused, {:bad, :user}}`
-    when it is missing there. Optional elsewhere. It is added to `env` as `:user`;
+    when it is missing there. Optional elsewhere, and for a tree with `agents: false`. It is
+    added to `env` as `:user`;
   - `interval`: ms between the reads of the readers that read on a timer.
   - `resources`: each resource the `Scheduler` leases, name to capacity; by default
     `%{"seat" => 4, "slot" => 2}`, an agent's seat and a heavy run's slot. Placeholders until
@@ -81,7 +83,9 @@ defmodule CodingAgentFramework.Config do
     runs with its stdin at end of file (`Intake.Background`, always on). The old form, a map of
     functions, is refused, `{:refused, {:bad, :tool_hooks, {:not_tool_hooks, value}}}`, as a
     module with none of the callbacks is; options that hold a function, pid, port or reference
-    `{:not_data, module}`;
+    `{:not_data, module}`, and options that hold a struct (this config among them: the hooks
+    reach the instance by its name, as `CodingAgentFramework.agent_rows/1` takes it) `{:not_data,
+    module, {:struct, struct}}`;
 
         Config.new(..., tool_hooks: {App.Hooks, proxy: "the board"})
         #=> {:ok, %Config{tool_hooks: {App.Hooks, [proxy: "the board"]}}}
@@ -199,8 +203,21 @@ defmodule CodingAgentFramework.Config do
   - `agents`: `false` for a tree that runs no agent (F-195): it starts only the parts a lease
     needs, `agentless/0`'s, the reaper, the instance's `Registry`, `Cues`, `Acts`, the
     `Scheduler`, the `Tracker`, `Copies` and `Jobs`, and none that runs or reads an agent: no
-    tmux server, no account's settings, no hooks, no endpoints. Its `Scheduler` asks only a
-    job's owner, `Jobs`, about a lease. `true` by default;
+    tmux server, no account's settings, no hooks, no endpoints, and no tool home
+    (`ToolHome.prepare/2` is not run, so its jobs run with `env`'s `path` alone). Its
+    `Scheduler` asks only a job's owner, `Jobs`, about a lease. `true` by default. Such a config
+    needs only what that tree reads (F-201): `home`, `instance`, `programs` and `env` with its
+    `path`, which `Jobs` reads (`{:bad, :env}` without it). `accounts`, `ports`, `claude` and
+    `user`, which only the agents' parts read, may be left out there, on macOS too;
+
+        iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
+        ...>   programs: %{}, env: %{path: "/bin"}, agents: false)
+        iex> {c.accounts, c.ports, c.claude}
+        {[], nil, nil}
+        iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
+        ...>   env: %{}, agents: false)
+        {:refused, {:bad, :env}}
+
   - `restart_wait`: ms a start waits for an instance of its name that is still exiting
     (`CodingAgentFramework.start_link/1`), so a parent's restart of a tree just killed is not
     refused while the old one ends; 5,000 by default, and never `:infinity`;
@@ -229,15 +246,18 @@ defmodule CodingAgentFramework.Config do
   alias CodingAgentFramework.Scheduler.Queue
   alias CodingAgentFramework.Sessions.Dialog
 
-  @enforce_keys [:home, :instance, :programs, :accounts, :ports, :claude, :env]
+  @enforce_keys [:home, :instance, :programs, :env]
+  # What only a tree that runs agents reads, so a config with `agents: false` may leave it out
+  # (F-201).
+  @agent_keys [:accounts, :ports, :claude]
   defstruct [
     :home,
     :instance,
     :programs,
-    :accounts,
-    :ports,
-    :claude,
     :env,
+    accounts: [],
+    ports: nil,
+    claude: nil,
     user: nil,
     workstation: "ws",
     hosts: %{},
@@ -305,7 +325,9 @@ defmodule CodingAgentFramework.Config do
   @spec new(keyword | map) :: {:ok, t} | {:refused, {:bad, atom} | {:bad, atom, term}}
   def new(fields) do
     fields = Map.new(fields)
-    missing = Enum.find(@enforce_keys, &(not Map.has_key?(fields, &1)))
+    agents? = Map.get(fields, :agents, true) != false
+    required = if agents?, do: @enforce_keys ++ @agent_keys, else: @enforce_keys
+    missing = Enum.find(required, &(not Map.has_key?(fields, &1)))
     unknown = Enum.find(Map.keys(fields), &(not Map.has_key?(__MODULE__.__struct__(), &1)))
 
     cond do
@@ -321,8 +343,13 @@ defmodule CodingAgentFramework.Config do
       unknown ->
         {:refused, {:bad, unknown}}
 
-      not match?(%{intake: i, mcp: m} when is_integer(i) and is_integer(m), fields.ports) ->
+      agents? and
+          not match?(%{intake: i, mcp: m} when is_integer(i) and is_integer(m), fields.ports) ->
         {:refused, {:bad, :ports}}
+
+      # A tree with no agent still runs jobs, with the PATH of `env` (F-201).
+      not agents? and not match?(%{path: path} when is_binary(path), fields.env) ->
+        {:refused, {:bad, :env}}
 
       not instance?(fields.instance) ->
         {:refused, {:bad, :instance}}
@@ -339,7 +366,7 @@ defmodule CodingAgentFramework.Config do
       not match?(n when is_integer(n) and n > 0, Map.get(fields, :restart_wait, 5_000)) ->
         {:refused, {:bad, :restart_wait}}
 
-      not user?(fields) ->
+      not user?(fields, agents?) ->
         {:refused, {:bad, :user}}
 
       not match?({:ok, _}, Runs.heavy(Map.get(fields, :heavy, []))) ->
@@ -427,8 +454,8 @@ defmodule CodingAgentFramework.Config do
       not (Code.ensure_loaded?(module) and function_exported?(module, :bundle, 2)) ->
         {:refused, {:not_an_extension, entry}}
 
-      not data?(opts) ->
-        {:refused, {:not_data, module}}
+      (bad = not_data(opts)) != nil ->
+        {:refused, bad_data(module, bad)}
 
       true ->
         try do
@@ -441,12 +468,17 @@ defmodule CodingAgentFramework.Config do
 
   defp bundle(entry, _part), do: {:refused, {:not_an_extension, entry}}
 
-  # Plain data: what a config file could hold.
-  defp data?(v) when is_function(v) or is_pid(v) or is_port(v) or is_reference(v), do: false
-  defp data?(v) when is_list(v), do: Enum.all?(v, &data?/1)
-  defp data?(v) when is_tuple(v), do: data?(Tuple.to_list(v))
-  defp data?(%{} = v), do: Enum.all?(v, fn {k, x} -> data?(k) and data?(x) end)
-  defp data?(_v), do: true
+  # Plain data, what a config file could hold: the first value in `v` that is not, or nil. A
+  # struct is not (a `Config` handed as an option, F-201), and is named by its module.
+  defp not_data(v) when is_function(v) or is_pid(v) or is_port(v) or is_reference(v), do: v
+  defp not_data(%s{}) when is_atom(s), do: {:struct, s}
+  defp not_data([h | t]), do: not_data(h) || not_data(t)
+  defp not_data(v) when is_tuple(v), do: not_data(Tuple.to_list(v))
+  defp not_data(%{} = v), do: Enum.find_value(v, fn {k, x} -> not_data(k) || not_data(x) end)
+  defp not_data(_v), do: nil
+
+  defp bad_data(module, {:struct, s}), do: {:not_data, module, {:struct, s}}
+  defp bad_data(module, _v), do: {:not_data, module}
 
   @doc """
   The answer the config's `dialogs` gives startup dialog `kind` showing `options`, as
@@ -574,7 +606,7 @@ defmodule CodingAgentFramework.Config do
   defp bad_tool_hooks({module, opts} = entry) when is_atom(module) do
     cond do
       ToolHooks.implemented(module) == [] -> {:not_tool_hooks, entry}
-      not data?(opts) -> {:not_data, module}
+      (bad = not_data(opts)) != nil -> bad_data(module, bad)
       true -> nil
     end
   end
@@ -605,10 +637,11 @@ defmodule CodingAgentFramework.Config do
   @spec agentless() :: [atom]
   def agentless, do: @agentless
 
-  # A name with no control character; on macOS it must be there (see `user` above).
-  defp user?(fields) do
+  # A name with no control character; on macOS a tree that runs agents must have it (see `user`
+  # above).
+  defp user?(fields, agents?) do
     case Map.get(fields, :user) do
-      nil -> :os.type() != {:unix, :darwin}
+      nil -> not agents? or :os.type() != {:unix, :darwin}
       name -> is_binary(name) and name != "" and not (name =~ ~r/[[:cntrl:]]/)
     end
   end
