@@ -18,10 +18,13 @@ defmodule CodingAgentFramework.MCP do
     delegates' `start_delegate/7` with the caller as parent (the operator names a main session
     as `parent`); answers `%{delegate: name}`, with `already: true` when the branch's delegate
     was running already and is answered in place of a new one, or the start's refusal. The
-    report comes later as a message. Both take optional `options`. With `wait: false`, the
-    default for an agent (it keeps working), a start whose lease is queued answers `%{delegate:
-    name, queued: position}` at once, and its outcome comes later as a notice from `framework`,
-    once (F-170); the operator's start waits for the lease unless it says `wait: false`;
+    report comes later as a message. Both take optional `options` and `effort` (how hard the
+    model thinks: `low`, `medium`, `high`, `xhigh` or `max`, launched as `--effort`, kept on the
+    delegate's row for its resumes, and refused `{:effort, value}` for any other, F-200). With
+    `wait: false`, the default for an agent (it keeps working), a start whose lease is queued
+    answers `%{delegate: name, queued: position}` at once, and its outcome comes later as a
+    notice from `framework`, once (F-170); the operator's start waits for the lease unless it
+    says `wait: false`;
   - `run_delegate(project, branch, model, brief, timeout)`: as `start_delegate`, then the
     mailbox's `await/4` on the report, the answer to the brief's uuid, all within `timeout`
     (ms, at most the `:cap`, a day unless the app says, and under the client's tool timeout less the margin:
@@ -141,6 +144,14 @@ defmodule CodingAgentFramework.MCP do
   # The most a delegate's start may take of a `run_delegate`'s timeout: `Delegates`' own default.
   @start_wait 300_000
   @options %{type: "object", description: "the delegate's own launch options (ClaudeCLI.Options)"}
+  # `Delegates` checks the level against `ClaudeCLI.efforts/0`; this part, which does not use
+  # `caf_cli`, only names them for the client.
+  @effort %{
+    type: "string",
+    description:
+      "how hard the model thinks, as `claude --effort` takes it: low, medium, high, xhigh or " <>
+        "max; by default no flag goes in"
+  }
   @wait %{
     type: "boolean",
     description:
@@ -149,6 +160,7 @@ defmodule CodingAgentFramework.MCP do
   }
   @start Map.new(~w(project branch model brief)a, &{&1, %{type: "string"}})
          |> Map.put(:options, @options)
+         |> Map.put(:effort, @effort)
          |> Map.put(:interactive, %{
            type: "boolean",
            description: "runs the terminal interface, so a person can attach and type"
@@ -1060,7 +1072,14 @@ defmodule CodingAgentFramework.MCP do
     with true <- Enum.all?(start, &is_binary/1) or {:refused, {:bad, :args}},
          {:ok, meta} <- app_meta(ctx, caller, args),
          do:
-           {:ok, start ++ [Map.get(args, "options"), Map.get(args, "interactive") == true, meta]}
+           {:ok,
+            start ++
+              [
+                Map.get(args, "options"),
+                Map.get(args, "interactive") == true,
+                meta,
+                Map.get(args, "effort")
+              ]}
   end
 
   # The app's metadata on the agent a start makes (F-154) is the operator's to give, never an
@@ -1085,9 +1104,17 @@ defmodule CodingAgentFramework.MCP do
 
   # The start's own wait is at most `timeout`. `Delegates` checks the options and the metadata.
   defp start_delegate(ctx, caller, start, timeout, wait) do
-    [parent, project, branch, model, brief, options, i, m] = start
+    [parent, project, branch, model, brief, options, i, m, effort] = start
     {mod, server} = ctx.delegates
-    opts = [timeout: timeout, options: options, interactive: i, meta: m, wait: wait]
+
+    opts = [
+      timeout: timeout,
+      options: options,
+      interactive: i,
+      meta: m,
+      wait: wait,
+      effort: effort
+    ]
 
     with :ok <- Grants.may_start_delegate?(ctx.grants, caller, parent),
          do: mod.start_delegate(server, parent, project, branch, model, brief, opts)

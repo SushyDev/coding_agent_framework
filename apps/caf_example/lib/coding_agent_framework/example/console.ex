@@ -191,7 +191,8 @@ defmodule CodingAgentFramework.Example.Console do
 
   @doc """
   Starts a delegate of main session `parent` on `branch`; its report goes to `parent`.
-  Options: `model:` (`"opus"`), `interactive:` (false).
+  Options: `model:` (`"opus"`), `interactive:` (false), `effort:` (none: `"low"`, `"medium"`,
+  `"high"`, `"xhigh"` or `"max"`).
   """
   @spec start_delegate(pid, String.t(), String.t(), String.t(), String.t(), keyword) :: :ok
   def start_delegate(caf, parent, project, branch, brief, opts \\ []),
@@ -587,7 +588,7 @@ defmodule CodingAgentFramework.Example.Console do
   defp choices(%{options: options}), do: Enum.map_join(options, " | ", &inspect/1)
 
   defp delegate(parent, project, branch, brief, opts) do
-    %{
+    args = %{
       "parent" => parent,
       "project" => project,
       "branch" => branch,
@@ -595,6 +596,8 @@ defmodule CodingAgentFramework.Example.Console do
       "model" => Keyword.get(opts, :model, "opus"),
       "interactive" => Keyword.get(opts, :interactive, false)
     }
+
+    if effort = opts[:effort], do: Map.put(args, "effort", effort), else: args
   end
 
   defp via(%{via: nil}), do: ""

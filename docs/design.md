@@ -314,7 +314,7 @@ resume after a kill, a reconnect, a placement).
 
 | Verb | Job | Options | Replaces today's tools |
 |---|---|---|---|
-| `delegate(brief, opts)` | hand off work and get the report | `project`, `branch`, `model`, `interactive`, `wait` (seconds to hold the call for the report), `review: true` (decided: a fresh-context reviewer, read-only by its launch's settings, not by its brief, checks the work against the brief's objective and an acceptance list stored as data the builder cannot edit, runs the checks itself, and its verdict goes up with the report; a builder's "tests pass" is a claim, not a verdict), `variants: n` with `select:` (decided: `:review`, `:gates` or an app's check, and `take: :first_passing \| :compare`; refused `{:refused, :no_selector}` without one; all variants under one shared budget), `budget` and `steps` (decided: tokens, cost, time and a cap on tool calls; reaching one is told to the parent and counted, never a kill), `fresh` (decided: a context reset of the branch's delegate, whose new session's first prompt is the brief, the progress note the agent keeps in its worktree, the branch and its last results, all recorded in the `Ledger`; not a prose summary), `main: name` (a main session of a project, no report) | `start_delegate`, `run_delegate`, `start_main` |
+| `delegate(brief, opts)` | hand off work and get the report | `project`, `branch`, `model`, `effort` (`low`, `medium`, `high`, `xhigh` or `max`, as `claude --effort`; built, F-200), `interactive`, `wait` (seconds to hold the call for the report), `review: true` (decided: a fresh-context reviewer, read-only by its launch's settings, not by its brief, checks the work against the brief's objective and an acceptance list stored as data the builder cannot edit, runs the checks itself, and its verdict goes up with the report; a builder's "tests pass" is a claim, not a verdict), `variants: n` with `select:` (decided: `:review`, `:gates` or an app's check, and `take: :first_passing \| :compare`; refused `{:refused, :no_selector}` without one; all variants under one shared budget), `budget` and `steps` (decided: tokens, cost, time and a cap on tool calls; reaching one is told to the parent and counted, never a kill), `fresh` (decided: a context reset of the branch's delegate, whose new session's first prompt is the brief, the progress note the agent keeps in its worktree, the branch and its last results, all recorded in the `Ledger`; not a prose summary), `main: name` (a main session of a project, no report) | `start_delegate`, `run_delegate`, `start_main` |
 | `message(to, text)` | say something along an edge | `urgent` (a nudge: interrupt, then this message ahead of every due row, as one checked step) | `message` |
 | `ask(questions)` | ask a person; opens a prompt, and the answer comes as a message | as today | `ask` |
 | `look(target, opts)` | see the tree, an agent, a service | `what`: `tree`, `state`, `screen`, `transcript`, `diff`, `cost`, `leases`, `stuck`, `logs`, `services`; `from` an offset; `all` | `agents`, `look`, `transcript`, `services`, `service_logs` |
@@ -1631,9 +1631,23 @@ is told at most once per idle state across restarts.
   delegate holds its parent's cap from its start (its call under way in `Delegates`, then its
   agent row) until it has ended or its start was refused. `Delegates`' own row keeps the marks
   of its own calls (starting, resuming, going_on), the protocol's outcome (running, finished with a
-  reply, failed with a notice, refused) and its own facts: branch, model, brief uuid, resume
-  uuid, resumes, and whether the report was taken. It reads `Sessions`' state only through
-  `Sessions.Agents`.
+  reply, failed with a notice, refused) and its own facts: branch, model, effort, brief uuid,
+  resume uuid, resumes, and whether the report was taken. It reads `Sessions`' state only
+  through `Sessions.Agents`.
+- A delegate's start names how hard its model thinks, `effort`: optional, one of `low`,
+  `medium`, `high`, `xhigh` and `max`, the levels `claude --effort` lists on the pinned release
+  (`ClaudeCLI.efforts/0` is the one list). `start_delegate` and `run_delegate` take it, and so
+  does `Operator.start_delegate`; any other value is refused `{:effort, value}` before any
+  row. It goes to the launch as `--effort <level>` and is kept on `Delegates`' row (a column
+  added to a file made before it), and a resume, its own or a move's (`Delegates.launch/2`),
+  launches with the row's again. With none there is no flag, and Claude Code uses its own.
+- A delegate starts without Claude Code's built-in git instructions, which a main session
+  keeps. Claude Code reads the setting as `includeGitInstructions ?? true`, so every delegate's
+  settings overlay (`Accounts.overlay/5`, written by `Sessions` at each start and resume, an
+  interactive delegate's too, though it runs in the main role) has `includeGitInstructions:
+  false` as a default under the account's settings file and the delegate's own options. An app
+  that wants them back sets `includeGitInstructions` to true in that delegate's `options`
+  settings, which wins; a main session's settings say nothing of it.
 - A main session is an agent row of kind `main` with no parent, declared by `Mains`, and the
   delegate's agent row names its parent. `Grants` reads the tree from those
   rows, so a delegate can name only one parent (F-73's new-3 and new-4 end with R9).
@@ -3350,7 +3364,8 @@ code:
 11. **Launch options per agent**: a settings overlay (permission deny rules), extra environment,
     `--add-dir`, `--append-system-prompt`, allowed and disallowed tools, each checked and kept
     on the agent's row (F-110). Then the narrow-only check of a delegate's launch against its
-    parent's, in `Grants`.
+    parent's, in `Grants`. Then a delegate's `effort` (`--effort`) and its default
+    `includeGitInstructions: false` (F-200; "What `Delegates` holds").
 12. **PreToolUse and PostToolUse hooks**: held like `PermissionRequest`, PreToolUse answered by
     an app callback with a short deadline (allow, deny or ask), PostToolUse by a replacement
     of the call's output (F-197); then a permission policy asked

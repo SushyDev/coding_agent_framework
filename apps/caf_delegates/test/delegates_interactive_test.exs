@@ -211,6 +211,30 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     assert {:ok, %{kind: "reply", from: ^name, to: "main"}} = Mailbox.answer_to(ctx.mailbox, u)
   end
 
+  # F-200: an interactive delegate is run as a main session is (role `parent`), but it is a
+  # delegate: its launch line has `--effort`, and its settings file says no git instructions.
+  test "an interactive delegate has its effort on its launch and no git instructions", ctx do
+    start = &Delegates.start_delegate(ctx.delegates, "main", "app", "unit/one", "opus", "Go.", &1)
+    assert {:refused, {:effort, "ultra"}} = start.(interactive: true, effort: "ultra")
+    assert Table.rows(ctx.dtable, "test") == []
+    assert ScreenStandIn.argvs(ctx.dir) == []
+
+    assert {:ok, %{id: id, name: name}} = start.(interactive: true, effort: "max")
+    assert %{effort: "max"} = Table.get(ctx.dtable, id)
+    assert {:ok, [argv]} = await(fn -> nonempty(ScreenStandIn.argvs(ctx.dir)) end)
+    assert ["--model", "opus", "--name", name, "--effort", "max"] == Enum.slice(argv, 0, 6)
+    assert "--remote-control" in argv
+
+    file = argv |> Enum.drop_while(&(&1 != "--settings")) |> Enum.at(1)
+    {:ok, dir} = Accounts.config_dir(ctx.accounts, "work")
+    assert file == Path.join(dir, "framework/agents/#{name}.settings.json")
+    assert %{"includeGitInstructions" => false} = JSON.decode!(File.read!(file))
+
+    # What a resume launches with (its own, or a move's) is the row's effort again.
+    assert {:ok, launch} = Delegates.launch(ctx.delegates, name)
+    assert launch[:effort] == "max"
+  end
+
   # Delegate.tla's OwnWakes, OwnTurnEnds and TurnTold for an interactive delegate (F-155): a turn
   # a background command of its own began is told to its parent once, by its reply's uuid; a
   # row the framework delivered and a person's turn are not its own, and none is the report.

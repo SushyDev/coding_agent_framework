@@ -608,6 +608,79 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert session_row(ctx, name).options == kept
   end
 
+  # F-200: `--effort` after `--model` on the launch line, the level on the row, and the row's on
+  # the resume; a level `claude --help` does not list is refused before any row.
+  test "a delegate's effort is checked, a flag on its launch, kept on its row, given on its resume",
+       ctx do
+    start = &Delegates.start_delegate(ctx.delegates, "main", "app", "unit/one", "opus", "Go.", &1)
+
+    for bad <- ["ultra", "HIGH", "", :high, 3, ["high"]] do
+      assert start.(effort: bad) == {:refused, {:effort, bad}}
+    end
+
+    # Nothing was written for any of them: no row, no brief, no agent, no process.
+    assert Table.rows(ctx.dtable, "test") == []
+    assert Enum.filter(rows(ctx), &(&1.kind == "brief")) == []
+    assert session_row(ctx, "app-unit-one") == nil
+    assert File.ls(Path.join(ctx.dir, "pids")) in [{:error, :enoent}, {:ok, []}]
+
+    hold(ctx)
+    assert {:ok, %{id: id, name: name, session_id: sid, brief_uuid: u}} = start.(effort: "xhigh")
+    assert %{effort: "xhigh", model: "opus"} = Table.get(ctx.dtable, id)
+
+    {:ok, first} = await(fn -> if a = HeadlessStandIn.argv(ctx.dir, sid), do: {:ok, a} end)
+    assert ["--model", "opus", "--effort", "xhigh"] == Enum.slice(first, 2, 4)
+    assert {:ok, launch} = Delegates.launch(current(ctx), name)
+    assert launch[:effort] == "xhigh"
+
+    stream_row(ctx, id, &(&1.messages[u].state == :delivered))
+    kill_delegate(ctx, id, [])
+    File.rm!(Path.join([ctx.dir, "argv", sid]))
+    File.rm!(Path.join(ctx.dir, "hold"))
+    {:ok, _} = resumed(ctx, id)
+    {:ok, again} = await(fn -> if a = HeadlessStandIn.argv(ctx.dir, sid), do: {:ok, a} end)
+    assert ["--effort", "xhigh", "--resume", sid] -- again == []
+    assert Enum.slice(again, 2, 4) == ["--model", "opus", "--effort", "xhigh"]
+    assert %{effort: "xhigh"} = Table.get(ctx.dtable, id)
+  end
+
+  test "a delegate that names no effort launches with no flag, and a resume names none either",
+       ctx do
+    hold(ctx)
+    assert {:ok, %{id: id, session_id: sid, brief_uuid: u}} = start(ctx, "app", "unit/one")
+    assert %{effort: nil} = Table.get(ctx.dtable, id)
+    {:ok, first} = await(fn -> if a = HeadlessStandIn.argv(ctx.dir, sid), do: {:ok, a} end)
+    refute "--effort" in first
+
+    stream_row(ctx, id, &(&1.messages[u].state == :delivered))
+    kill_delegate(ctx, id, [])
+    File.rm!(Path.join([ctx.dir, "argv", sid]))
+    File.rm!(Path.join(ctx.dir, "hold"))
+    {:ok, _} = resumed(ctx, id)
+    {:ok, again} = await(fn -> if a = HeadlessStandIn.argv(ctx.dir, sid), do: {:ok, a} end)
+    refute "--effort" in again
+  end
+
+  # F-200: Claude Code reads `includeGitInstructions ?? true`, so a delegate's settings file says
+  # false unless the app's own settings for it say otherwise.
+  test "a delegate's settings turn Claude Code's git instructions off by default", ctx do
+    assert {:ok, %{session_id: sid}} = start(ctx, "app", "unit/one")
+    assert %{"includeGitInstructions" => false} = launch_settings(ctx, sid)
+  end
+
+  test "an app's other settings for a delegate keep the default", ctx do
+    deny = %{"permissions" => %{"deny" => ["Bash(git push *)"]}}
+    assert {:ok, %{session_id: sid}} = start_with(ctx, options: %{settings: deny})
+    assert %{"includeGitInstructions" => false} = launch_settings(ctx, sid)
+    assert launch_settings(ctx, sid)["permissions"] == deny["permissions"]
+  end
+
+  test "an app that wants a delegate's git instructions back sets true, which wins", ctx do
+    own = %{settings: %{"includeGitInstructions" => true}}
+    assert {:ok, %{session_id: sid}} = start_with(ctx, options: own)
+    assert %{"includeGitInstructions" => true} = launch_settings(ctx, sid)
+  end
+
   test "a second kill before the last reply is the report, never resumed again", ctx do
     # KillSeen twice: the first resumed, the second failed with its text held as the report.
     hold(ctx)
@@ -866,6 +939,21 @@ defmodule CodingAgentFramework.DelegatesTest do
 
   defp start(ctx, project, branch),
     do: Delegates.start_delegate(current(ctx), "main", project, branch, "opus", "Review it.")
+
+  defp start_with(ctx, opts),
+    do: Delegates.start_delegate(current(ctx), "main", "app", "unit/one", "opus", "Go.", opts)
+
+  # The settings file a delegate's launch line names, as the stand-in recorded the line: the
+  # delegate's own overlay in its account's framework directory, decoded.
+  defp launch_settings(ctx, session_id) do
+    {:ok, argv} = await(fn -> if a = HeadlessStandIn.argv(ctx.dir, session_id), do: {:ok, a} end)
+    file = argv |> Enum.drop_while(&(&1 != "--settings")) |> Enum.at(1)
+
+    assert file ==
+             Path.join(ctx.account.config_dir, "framework/agents/app-unit-one.settings.json")
+
+    JSON.decode!(File.read!(file))
+  end
 
   # A held turn waits on its permission request: answering it lets the turn end.
   defp allow(ctx, id, uuid) do

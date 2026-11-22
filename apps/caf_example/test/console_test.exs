@@ -263,6 +263,14 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
       ~s|ok: %{delegate: "app-unit-one"}|
     )
 
+    # F-200: the console's `effort:` is the tool's; a level `claude --effort` lacks is refused.
+    see.(
+      fn ->
+        Console.start_delegate(caf, "app-main", "app", "unit/three", "Go.", effort: "ultra")
+      end,
+      ~s|refused: {:effort, "ultra"}|
+    )
+
     see.(fn -> Console.agents(caf) end, "  app-unit-one: delegate of app-main, on one, idle")
 
     :ok = Console.message(caf, "app-unit-one", "Hi.")

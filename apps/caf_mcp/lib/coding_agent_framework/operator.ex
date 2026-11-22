@@ -29,8 +29,9 @@ defmodule CodingAgentFramework.Operator do
   Starts a delegate of main session `parent` on `branch` of `project`; its report goes to
   `parent`. `opts` are the tool's own options (F-170), so an app never names the tool:
   `interactive:` (a boolean), `meta:` (the app's map on the agent row), `options:` (the
-  delegate's launch options, `ClaudeCLI.Options`) and `wait:`. The operator's start waits for a
-  queued lease by default; with `wait: false` it answers `{:ok, %{delegate: name, queued:
+  delegate's launch options, `ClaudeCLI.Options`), `effort:` (how hard the model thinks: `"low"`,
+  `"medium"`, `"high"`, `"xhigh"` or `"max"`, which its resumes keep, F-200) and `wait:`. The
+  operator's start waits for a queued lease by default; with `wait: false` it answers `{:ok, %{delegate: name, queued:
   position}}` at once, and the start's outcome is told to `parent` later as a notice, once. Any
   other option is refused `{:bad, {:option, key}}`, with no call made.
 
@@ -47,7 +48,7 @@ defmodule CodingAgentFramework.Operator do
          do: MCP.operate(mcp, "start_delegate", args)
   end
 
-  @start_options ~w(interactive meta options wait)a
+  @start_options ~w(effort interactive meta options wait)a
 
   defp start_options(opts, args) do
     Enum.reduce_while(opts, {:ok, args}, fn

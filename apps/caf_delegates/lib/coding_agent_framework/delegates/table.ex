@@ -13,7 +13,9 @@ defmodule CodingAgentFramework.Delegates.Table do
   are the uuids of `Mailbox`'s rows of the brief and of the word to go on, chosen before they
   are stored. `report` is `none`, then `held` with its `text` until `Mailbox` takes it, then
   `taken`; how it is delivered is `Mailbox`'s row, the reply to `brief_uuid`. `model` is what
-  its start and its resume launch with. `tell` names the parent while it is owed the outcome of
+  its start and its resume launch with. `effort` is how hard that model thinks (`--effort`, one
+  of `ClaudeCLI.efforts/0`), which a resume launches with again, or NULL when its start named
+  none and no flag goes in (F-200). `tell` names the parent while it is owed the outcome of
   a start that answered queued at once (F-170), and is cleared once `Mailbox` has its notice.
 
   **Migration** (F-129): a file an earlier build made also has `parent`, `project`, `account`,
@@ -30,18 +32,18 @@ defmodule CodingAgentFramework.Delegates.Table do
   alias CodingAgentFramework.Store
 
   @columns ~w(id host name branch model brief_uuid resume_uuid status reason resumes report
-              text called_at deadline created_at updated_at tell)a
+              text called_at deadline created_at updated_at tell effort)a
 
   @create """
   (id INTEGER PRIMARY KEY, host TEXT NOT NULL, name TEXT NOT NULL, branch TEXT NOT NULL,
     model TEXT NOT NULL, brief_uuid TEXT NOT NULL, resume_uuid TEXT, status TEXT NOT NULL,
     reason TEXT, resumes INTEGER NOT NULL, report TEXT NOT NULL, text TEXT,
     called_at INTEGER NOT NULL, deadline INTEGER NOT NULL, created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL, tell TEXT)
+    updated_at INTEGER NOT NULL, tell TEXT, effort TEXT)
   """
   @schema "CREATE TABLE IF NOT EXISTS delegates #{@create};"
-  # Added after a file's table may have been made (F-170).
-  @added [delegates: ["tell TEXT"]]
+  # Added after a file's table may have been made (`tell`, F-170; `effort`, F-200).
+  @added [delegates: ["tell TEXT", "effort TEXT"]]
 
   # Every status, once, and the lists read from it, checked when the module compiles.
   @statuses ~w(starting resuming going_on running finished failed refused)
@@ -160,7 +162,7 @@ defmodule CodingAgentFramework.Delegates.Table do
   @spec starting(db, map) :: integer
   def starting(db, start) do
     now = System.os_time(:millisecond)
-    keys = ~w(host name branch model brief_uuid deadline)a
+    keys = ~w(host name branch model effort brief_uuid deadline)a
     first = [status: "starting", resumes: 0, report: "none", called_at: now, created_at: now]
     fields = Enum.map(keys, &{&1, start[&1]}) ++ first ++ [updated_at: now]
     [[id]] = Store.insert(db, "delegates", fields, "RETURNING id")
