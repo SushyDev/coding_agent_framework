@@ -335,7 +335,11 @@ Built, each from a checked model in `model/tla/`:
   reason; and a home too long for services refused at the start;
 - every onboarding menu of a start reaches a person (F-206, against `Dialog.tla`'s menus): each
   menu a start shows is its own read, prompt and press, and a person's leave of a waited resume is
-  their clear of the absence, so they are not asked twice.
+  their clear of the absence, so they are not asked twice;
+- a delegate's resume never goes on an account the app flags (F-209, against `Move.tla`'s
+  `NoResumeOnRefused`): it asks `usable:` for its own account, moves to the account the pick finds
+  when refused, and stays down with the app's reason when none is usable; and a tree without
+  agents refuses the keys only an agent's part reads.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
