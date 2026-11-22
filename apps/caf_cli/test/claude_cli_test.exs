@@ -60,6 +60,43 @@ defmodule CodingAgentFramework.ClaudeCLITest do
              {:refused, {:bad, :mcp}}
   end
 
+  # F-200: `--effort <level>` follows the model and the name; no effort is no flag.
+  test "an effort is a flag after the model, each level of `claude --help` is taken, none is no flag" do
+    assert ClaudeCLI.efforts() == ~w(low medium high xhigh max)
+
+    for effort <- ClaudeCLI.efforts() do
+      assert {:ok, %{argv: s}} = ClaudeCLI.session(:parent, account(), opts(effort: effort))
+
+      assert Enum.take(s, 7) ==
+               ["/run/claude", "--model", "opus", "--name", "unit-7"] ++
+                 ["--effort", effort]
+
+      headless = Keyword.delete(opts(effort: effort, session_id: "s"), :name)
+      assert {:ok, %{argv: h}} = ClaudeCLI.headless(account(), headless)
+
+      assert Enum.take(h, 7) ==
+               ["/run/claude", "-p", "--verbose", "--model", "opus", "--effort", effort]
+    end
+
+    for none <- [opts([]), opts(effort: nil)] do
+      assert {:ok, %{argv: s}} = ClaudeCLI.session(:parent, account(), none)
+      refute "--effort" in s
+
+      assert {:ok, %{argv: h}} =
+               ClaudeCLI.headless(account(), Keyword.delete([session_id: "s"] ++ none, :name))
+
+      refute "--effort" in h
+    end
+
+    for bad <- ["", "ultra", "HIGH", :high, 3, "--max"] do
+      assert ClaudeCLI.session(:parent, account(), opts(effort: bad)) ==
+               {:refused, {:bad, :effort}}
+
+      headless = Keyword.delete(opts(effort: bad, session_id: "s"), :name)
+      assert ClaudeCLI.headless(account(), headless) == {:refused, {:bad, :effort}}
+    end
+  end
+
   test "a delegate needs a brief unless it resumes" do
     assert ClaudeCLI.session(:delegate, account(), opts([])) ==
              {:refused, :delegate_without_brief}

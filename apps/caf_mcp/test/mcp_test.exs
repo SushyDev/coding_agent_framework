@@ -372,6 +372,21 @@ defmodule CodingAgentFramework.MCPTest do
     assert opts[:wait] == true and opts[:interactive] == true
     assert opts[:meta] == %{"card" => 41}
     assert opts[:options] == %{"env" => %{"APP_MODE" => "review"}}
+    assert opts[:effort] == nil
+
+    # F-200: the surface's `effort:` is the tool's `effort`, and an agent's call carries it too.
+    assert {:ok, %{delegate: "app-unit-one"}} =
+             Operator.start_delegate(operator, "app-main", "app", "unit/one", "opus", "Go.",
+               effort: "xhigh"
+             )
+
+    assert_received {:start_opts, "unit/one", opts}
+    assert opts[:effort] == "xhigh"
+
+    with_effort = Map.merge(args, %{"branch" => "unit/one", "effort" => "max"})
+    tool(mcp, t["app-main"], "start_delegate", with_effort)
+    assert_received {:start_opts, "unit/one", opts}
+    assert opts[:effort] == "max"
 
     assert {:ok, %{delegate: "app-unit-queued", queued: 2}} =
              Operator.start_delegate(operator, "app-main", "app", "unit/queued", "opus", "Go.",

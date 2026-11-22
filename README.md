@@ -293,7 +293,11 @@ Built, each from a checked model in `model/tla/`:
   ignored), and past the deadline the call goes on unchanged, recorded;
 - the metrics' first rows (F-194, B7): every answer through `answer/4` is an `Acts` row (who,
   the choice, when the prompt opened and when it was answered), and a person's typed input and
-  interrupts are rows of their own (`Interventions`), each read from a fact, never a guess.
+  interrupts are rows of their own (`Interventions`), each read from a fact, never a guess;
+- a delegate's effort (F-200): `start_delegate` and `run_delegate` take `effort`, passed as
+  `claude --effort` and kept in the delegate's row for its resumes, and every delegate starts
+  without Claude Code's git instructions (`includeGitInstructions: false`) unless its settings
+  say otherwise.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

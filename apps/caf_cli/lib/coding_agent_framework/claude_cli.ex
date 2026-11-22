@@ -6,7 +6,8 @@ defmodule CodingAgentFramework.ClaudeCLI do
 
   The flags are those of Claude Code 2.1.322 (`claude --help`), the version devenv pins:
 
-  - `--model <model>` and `--name <name>`;
+  - `--model <model>` and `--name <name>`, and `--effort <level>` after them when the launch
+    names an `:effort` (`efforts/0`, the levels `claude --help` lists);
   - `--settings <file>` (the role's settings file) and `--mcp-config <file>` with
     `--strict-mcp-config`, the files `CodingAgentFramework.Accounts.prepare/3` wrote, and
     after the account's file the agent's own (`mcp:`, from `CodingAgentFramework.MCP.issue/2`),
@@ -86,8 +87,21 @@ defmodule CodingAgentFramework.ClaudeCLI do
 
   @env [home: "HOME", path: "PATH", term: "TERM", lang: "LANG"]
 
+  # What `claude --help` lists for `--effort` in 2.1.322; one list, so a start's refusal and the
+  # launch check the same levels.
+  @efforts ~w(low medium high xhigh max)
+
   # Set by the framework, not given by the caller, so no launch can leave it out.
   @fixed [{"DISABLE_AUTOUPDATER", "1"}]
+
+  @doc """
+  The levels `--effort` takes, as `claude --help` lists them on the pinned release.
+
+      iex> CodingAgentFramework.ClaudeCLI.efforts()
+      ["low", "medium", "high", "xhigh", "max"]
+  """
+  @spec efforts() :: [String.t()]
+  def efforts, do: @efforts
 
   @doc """
   The argv and environment of a session of `role` on `account` (from
@@ -96,7 +110,8 @@ defmodule CodingAgentFramework.ClaudeCLI do
   Options: `:claude` (its absolute path, from `Programs`), `:model`, `:name`, `:env` (a map of
   `:home`, `:path`, `:term`, `:lang` and optionally `:user`), `:tool_timeout` (ms, 1 000 to 2 147 483 647: the MCP
   tool timeout), and optionally `:resume` (a session id), `:prompt` (the first prompt),
-  `:options` and `:settings`. A delegate needs its brief as `:prompt` unless it resumes.
+  `:effort` (one of `efforts/0`; nil is none), `:options` and `:settings`. A delegate needs its
+  brief as `:prompt` unless it resumes.
 
   Returns `{:ok, %{argv: argv, env: env}}` or `{:refused, reason}`: `:no_account_dir` when
   `account` is not an account with a config directory, `{:missing, option}`, `{:bad, option}`,
@@ -112,6 +127,7 @@ defmodule CodingAgentFramework.ClaudeCLI do
     with {:ok, claude} <- path(opts, :claude),
          {:ok, model} <- word(opts, :model),
          {:ok, name} <- word(opts, :name),
+         {:ok, effort} <- effort(opts),
          {:ok, resume} <- optional_word(opts, :resume),
          {:ok, mcp} <- mcp(account, opts),
          {:ok, prompt} <- prompt(role, opts, resume),
@@ -119,6 +135,7 @@ defmodule CodingAgentFramework.ClaudeCLI do
          {:ok, env} <- env(account, opts, own.options) do
       argv =
         [claude, "--model", model, "--name", name] ++
+          effort ++
           own.argv ++
           ["--mcp-config" | mcp] ++
           ["--strict-mcp-config"] ++
@@ -170,8 +187,8 @@ defmodule CodingAgentFramework.ClaudeCLI do
   `--replay-user-messages` and `--permission-prompts host`, then `--session-id <id>` for a start
   or `--resume <id>` in its place. No prompt: the first message is a line on stdin.
 
-  Options: `:claude`, `:model`, `:env`, `:tool_timeout` and `:mcp` as for `session/3`, and
-  exactly one of `:session_id` and `:resume`; `:options` and `:settings` as well.
+  Options: `:claude`, `:model`, `:env`, `:tool_timeout`, `:mcp` and `:effort` as for `session/3`,
+  and exactly one of `:session_id` and `:resume`; `:options` and `:settings` as well.
 
       iex> account = CodingAgentFramework.Accounts.Account.at("work", "/caf/accounts/work/claude")
       iex> env = %{home: "/h", path: "/bin", term: "dumb", lang: "C.UTF-8"}
@@ -186,12 +203,14 @@ defmodule CodingAgentFramework.ClaudeCLI do
   def headless(%Account{config_dir: "/" <> _} = account, opts) do
     with {:ok, claude} <- path(opts, :claude),
          {:ok, model} <- word(opts, :model),
+         {:ok, effort} <- effort(opts),
          {:ok, id} <- start_or_resume(opts),
          {:ok, mcp} <- mcp(account, opts),
          {:ok, own} <- own(account.settings.delegate, opts),
          {:ok, env} <- env(account, opts, own.options) do
       argv =
         [claude, "-p", "--verbose", "--model", model] ++
+          effort ++
           own.argv ++
           ["--mcp-config" | mcp] ++
           [
@@ -313,6 +332,15 @@ defmodule CodingAgentFramework.ClaudeCLI do
       nil -> {:refused, {:missing, key}}
       v when is_binary(v) -> if word?(v), do: {:ok, v}, else: {:refused, {:bad, key}}
       _ -> {:refused, {:bad, key}}
+    end
+  end
+
+  # `--effort <level>` when the launch names one; nil is none.
+  defp effort(opts) do
+    case Keyword.get(opts, :effort) do
+      nil -> {:ok, []}
+      level when level in @efforts -> {:ok, ["--effort", level]}
+      _ -> {:refused, {:bad, :effort}}
     end
   end
 

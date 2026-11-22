@@ -29,6 +29,9 @@ defmodule CodingAgentFramework.ScreenStandIn do
   - with `--name`, the rule above the box carries the name, as 2.1.322 draws a session started
     with `--name` (`──── name ─`, F-153's capture).
 
+  - its arguments, one to a line, go to `<dir>/argv/<pid>` (`argvs/1`), so a test reads the
+    launch line a start gave it, as `HeadlessStandIn.argv/2` does for a headless delegate.
+
   Started by `Sessions` (`CLAUDE_CONFIG_DIR` set), it writes its session file as
   `CodingAgentFramework.ClaudeStandIn` does, once its startup dialogs are answered (2.1.322
   writes none while one is shown, F-140), and records its pid in `<dir>/pids/`. It exits after
@@ -50,6 +53,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
     File.mkdir_p!(screens)
     File.mkdir_p!(Path.join(dir, "pids"))
     File.mkdir_p!(Path.join(dir, "prompts"))
+    File.mkdir_p!(Path.join(dir, "argv"))
     {top, bottom} = split_at_box(File.read!(Path.join(fixtures(release), "text-typed.txt")))
     # The rule above the box is drawn by the script, with the session's name when it has one.
     {top, [rule]} = Enum.split(top, -1)
@@ -92,6 +96,21 @@ defmodule CodingAgentFramework.ScreenStandIn do
     end
   end
 
+  @doc """
+  The arguments each stand-in started in `dir` was given, one list per start, in no order a
+  test may rely on when it started more than one.
+  """
+  def argvs(dir) do
+    case File.ls(Path.join(dir, "argv")) do
+      {:ok, files} ->
+        for f <- files,
+            do: Path.join([dir, "argv", f]) |> File.read!() |> String.split("\n", trim: true)
+
+      {:error, :enoent} ->
+        []
+    end
+  end
+
   @doc "The lines the stand-in started in `dir` took at an Enter, oldest first."
   def submitted(dir) do
     case File.read(Path.join(dir, "submitted")) do
@@ -131,6 +150,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
     ~s"""
     #!#{program!(:bash)}
     name='' resume='' screen=idle prompt='' dialogs='#{dialogs}' choice=no transcript='#{transcript}'
+    given=$(printf '%s\\n' "$@")
     while [ $# -gt 0 ]; do
       case $1 in
         --version) printf '%s (Claude Code)\\n' '#{release}'; exit 0 ;;
@@ -145,6 +165,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
     set -- $dialogs
     [ $# -gt 0 ] && screen=$1
     : 2>/dev/null > "#{dir}/pids/$$" || exit 0
+    printf '%s\\n' "$given" 2>/dev/null > "#{dir}/argv/$$"
     file="${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/sessions/$$.json}"
     announce() {
       [ -n "$file" ] || return 0

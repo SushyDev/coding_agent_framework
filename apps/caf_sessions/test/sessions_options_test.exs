@@ -47,5 +47,29 @@ defmodule CodingAgentFramework.SessionsOptionsTest do
     assert %{options: ^kept, model: "opus"} = Table.get(ctx.table, "test", "o1")
   end
 
+  # F-200: a delegate's settings default `includeGitInstructions` to false; a main session's say
+  # nothing of it, so Claude Code reads its own default (`?? true`) and keeps the instructions.
+  test "a delegate's overlay has includeGitInstructions false, a main session's has none", ctx do
+    deny = %{"permissions" => %{"deny" => ["Bash(git push *)"]}}
+    own = Path.join(ctx.account.config_dir, "framework/agents/o1.settings.json")
+    written = fn path -> JSON.decode!(File.read!(path)) end
+
+    # A delegate with no options of its own still has an overlay, and its settings win.
+    assert {:ok, %{session_id: id}} = start(ctx, headless(ctx, :on_message))
+    assert %{"includeGitInstructions" => false} = written.(own)
+
+    assert Enum.chunk_every(HeadlessStandIn.argv(ctx.dir, id), 2, 1)
+           |> Enum.member?(["--settings", own])
+
+    # A main session's file is the account's, or its overlay over it: never the default.
+    assert Map.has_key?(written.(ctx.account.settings.parent), "includeGitInstructions") == false
+
+    main = launch(ctx, :at_start) ++ [options: %{settings: deny}]
+    assert {:ok, _} = Sessions.start(ctx.sessions, "m1", ctx.account, main)
+    overlay = written.(Path.join(ctx.account.config_dir, "framework/agents/m1.settings.json"))
+    assert overlay["permissions"] == deny["permissions"]
+    refute Map.has_key?(overlay, "includeGitInstructions")
+  end
+
   defp start(ctx, launch), do: Sessions.start(ctx.sessions, "o1", ctx.account, launch)
 end

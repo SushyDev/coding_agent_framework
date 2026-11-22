@@ -23,7 +23,9 @@ defmodule CodingAgentFramework.Accounts do
     of their own for a limit: Intake's post every `StopFailure` and `Notification`;
   - `mcp.json`: the MCP servers, loaded with `--mcp-config` and `--strict-mcp-config`, so no
     server from `.claude.json` joins them;
-  - `agents/<agent>.settings.json`: an agent's own settings over the account's (`overlay/4`);
+  - `agents/<agent>.settings.json`: an agent's own settings over the account's (`overlay/5`),
+    which `Sessions` writes for every delegate, with `includeGitInstructions: false` under them
+    (F-200);
   - `statusline.sh`, when `prepare/3` is given the host's `Programs`: the settings' `statusLine`
     command. Claude Code hands it a JSON text with the account's rate limits; it copies a text
     that has the weekly window to `usage_file/2`, which `CodingAgentFramework.Usage` reads, and
@@ -141,19 +143,25 @@ defmodule CodingAgentFramework.Accounts do
   `permissions` rule lists (`allow`, `deny`, `ask`, `additionalDirectories`) add to the
   account's, and so do the `hooks` of each event (the account's first, as `prepare/3` puts
   Intake's after the caller's), so a main session's waiter never drops Intake's hooks; any
-  other key replaces it. Answers `{:ok, path}`, `{:refused, {:bad, :name}}`,
-  `{:refused, {:not_prepared, account}}` or `{:unknown, {path, reason}}`.
+  other key replaces it. `defaults` (a map, none by default) sit under the account's file: a key
+  the account's file or `settings` gives wins over it, so a default is only what nobody said
+  (a delegate's `includeGitInstructions: false`, F-200). Answers `{:ok, path}`,
+  `{:refused, {:bad, :name}}`, `{:refused, {:not_prepared, account}}` or
+  `{:unknown, {path, reason}}`.
   """
-  @spec overlay(Account.t(), :parent | :delegate, String.t(), map) ::
+  @spec overlay(Account.t(), :parent | :delegate, String.t(), map, map) ::
           {:ok, String.t()} | {:refused, term} | {:unknown, term}
-  def overlay(%Account{} = account, role, name, settings)
-      when role in [:parent, :delegate] and is_map(settings) do
+  def overlay(account, role, name, settings, defaults \\ %{})
+
+  def overlay(%Account{} = account, role, name, settings, defaults)
+      when role in [:parent, :delegate] and is_map(settings) and is_map(defaults) do
     dir = Path.join([account.config_dir, "framework", "agents"])
 
     with true <- (is_binary(name) and name =~ @agent) or {:refused, {:bad, :name}},
          path = Path.join(dir, name <> ".settings.json"),
          {:ok, text} <- File.read(account.settings[role]),
          {:ok, %{} = base} <- JSON.decode(text),
+         base = Map.merge(defaults, base),
          :ok <- mkdir(dir),
          :ok <- write_all([{path, JSON.encode!(Map.merge(base, settings, &merge/3))}]) do
       {:ok, path}
@@ -164,7 +172,7 @@ defmodule CodingAgentFramework.Accounts do
     end
   end
 
-  def overlay(_account, _role, _name, _settings), do: {:refused, {:bad, :overlay}}
+  def overlay(_account, _role, _name, _settings, _defaults), do: {:refused, {:bad, :overlay}}
 
   defp merge("permissions", %{} = account, %{} = own) do
     Map.merge(account, own, fn

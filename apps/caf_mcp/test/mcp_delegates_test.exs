@@ -152,6 +152,48 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     assert JSON.decode!(agent(ctx, name).options) == options
   end
 
+  # F-200: both tools take `effort`, which `Delegates` checks before any row.
+  test "start_delegate and run_delegate take an effort, which Delegates checks", ctx do
+    for tool <- ~w(start_delegate run_delegate) do
+      [%{inputSchema: %{properties: properties, required: required}}] =
+        Enum.filter(MCP.tools(ctx.mcp, "main"), &(&1.name == tool))
+
+      assert %{type: "string"} = properties.effort
+      assert properties.effort.description =~ "low, medium, high, xhigh or max"
+      refute "effort" in required
+    end
+
+    args = &Map.put(start_args("unit/one"), "effort", &1)
+
+    assert tool(ctx, "main", "start_delegate", args.("ultra")) == %{
+             "refused" => ["effort", "ultra"]
+           }
+
+    assert tool(ctx, "main", "start_delegate", args.(3)) == %{"refused" => ["effort", 3]}
+    assert Table.rows(ctx.dtable, "test") == []
+
+    assert %{"ok" => %{"delegate" => "app-unit-one"}} =
+             tool(ctx, "main", "start_delegate", args.("high"))
+
+    assert [%{name: name, effort: "high"}] = Table.rows(ctx.dtable, "test")
+    assert {:ok, launch} = Delegates.launch(ctx.delegates, name)
+    assert launch[:effort] == "high"
+
+    # An absent effort, and a null one, are no effort.
+    none = Map.put(start_args("unit/two"), "effort", nil)
+    assert %{"ok" => %{"delegate" => "app-unit-two"}} = tool(ctx, "main", "start_delegate", none)
+
+    assert %{effort: nil} =
+             Enum.find(Table.rows(ctx.dtable, "test"), &(&1.name == "app-unit-two"))
+  end
+
+  test "run_delegate's effort is on its delegate's row", ctx do
+    args = Map.merge(start_args("unit/one"), %{"timeout" => 60_000, "effort" => "low"})
+    call = Task.async(fn -> tool(ctx, "main", "run_delegate", args) end)
+    {:ok, %{effort: "low"}} = cue_until(ctx, &(&1.report == "taken"))
+    assert %{"ok" => %{"delegate" => "app-unit-one", "status" => "finished"}} = Task.await(call)
+  end
+
   test "start_delegate is the main session's, by its token, and answers the name at once", ctx do
     args = Map.put(start_args("unit/one"), "parent", "app-old")
     assert tool(ctx, "main", "start_delegate", args) == %{"ok" => %{"delegate" => "app-unit-one"}}
