@@ -25,7 +25,8 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     test writes to the FIFO `<dir>/bg.fifo` ends it (`task_updated`, `task_notification` and the
     list empty), a second line writes the new `system`/`init` that begins a turn of its own (two
     events, so a test reads the moment between them, F-204), and a third ends that turn with a
-    `result` (`the command ended`, uuid `r-bg-<uuid>`) that names no message;
+    `result` (`the command ended`, uuid `r-bg-<uuid>`) that names no message. Each wait takes one
+    whole line, so one write never passes two;
   - for `interrupt`: a cancel of the request pending, and a `result`;
   - `end_session` ends it; a line that is not a JSON object ends it with status 1.
 
@@ -102,6 +103,9 @@ defmodule CodingAgentFramework.HeadlessStandIn do
       ev '{"type":"result","subtype":"'"${2:-success}"'","is_error":false,"result":"done '"$1"'","session_id":"'"$sid"'","uuid":"r-'"$1"'","user_message_uuids":["'"$1"'"]}'
     }
     init() { ev '{"type":"system","subtype":"init","session_id":"'"$sid"'","uuid":"init"}'; }
+    # The test's next line on bg.fifo. An open while the last write still holds the FIFO reads
+    # end-of-file at once, so one write could pass two waits: wait for a whole line (F-204).
+    word() { until read -r _ < "DIR/bg.fifo"; do :; done; }
     mode=MODE
     [ $mode = at_start ] && init
     pending='' asker='' half=''
@@ -136,13 +140,13 @@ defmodule CodingAgentFramework.HeadlessStandIn do
               turn_end "$u"
               (
                 : > "DIR/pids/$BASHPID"
-                read -r _ < "DIR/bg.fifo"
+                word
                 ev '{"type":"system","subtype":"task_updated","task_id":"t-'"$u"'","patch":{"status":"completed"}}'
                 ev '{"type":"system","subtype":"task_notification","task_id":"t-'"$u"'","status":"completed"}'
                 ev '{"type":"system","subtype":"background_tasks_changed","tasks":[],"session_id":"'"$sid"'"}'
-                read -r _ < "DIR/bg.fifo"
+                word
                 init
-                read -r _ < "DIR/bg.fifo"
+                word
                 ev '{"type":"result","subtype":"success","is_error":false,"result":"the command ended","session_id":"'"$sid"'","uuid":"r-bg-'"$u"'","user_message_uuids":[]}'
               ) & ;;
             *'"content":"quiet'*|*'"content":"From '*'): quiet'*)
