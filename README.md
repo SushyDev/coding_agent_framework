@@ -339,7 +339,10 @@ Built, each from a checked model in `model/tla/`:
 - a delegate's resume never goes on an account the app flags (F-209, against `Move.tla`'s
   `NoResumeOnRefused`): it asks `usable:` for its own account, moves to the account the pick finds
   when refused, and stays down with the app's reason when none is usable; and a tree without
-  agents refuses the keys only an agent's part reads.
+  agents refuses the keys only an agent's part reads;
+- a move's resume reads the app's flag again (F-210, against `Move.tla`'s `MoveBack` and
+  `Stranded`): a target flagged during the drain sends the move back to its own account, or
+  leaves the row down when that one is flagged too.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
