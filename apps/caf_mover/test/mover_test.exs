@@ -14,7 +14,7 @@ defmodule CodingAgentFramework.MoverTest do
   import CodingAgentFramework.TestHost
 
   alias CodingAgentFramework.{Accounts, Acts, Mailbox, Mover, MoverSetup, Sessions}
-  alias CodingAgentFramework.{HeadlessStandIn, Transcripts, WaiterStandIn}
+  alias CodingAgentFramework.{HeadlessStandIn, Stream, Transcripts, WaiterStandIn}
   alias CodingAgentFramework.Sessions.Agents
 
   setup {MoverSetup, :mover}
@@ -260,6 +260,65 @@ defmodule CodingAgentFramework.MoverTest do
 
   # Move.tla's restart: the phase is a row, so a new Mover goes on from it; an act cut before
   # its row began nothing, and is settled at the next start.
+  # NoResumeOnRefused for a move (F-210), PickOnly: the app flags the target while the move waits
+  # for the delegate's turn to end, so its resume reads `usable:` again and goes back to its own
+  # account; with that one flagged too, it is left down with the app's reason.
+  test "a target the app flags during the drain sends the delegate back, or leaves it down",
+       ctx do
+    flags = start_supervised!(Supervisor.child_spec({Agent, fn -> [] end}, id: :flags))
+
+    usable = fn a ->
+      if a in Agent.get(flags, & &1),
+        do: {:refused, {:app, "flagged #{a}"}},
+        else: Accounts.ready(ctx.accounts, a)
+    end
+
+    GenServer.stop(mover())
+    MoverSetup.restart(%{ctx | mover_opts: Keyword.put(ctx.mover_opts, :usable, usable)})
+
+    {:ok, account} = Accounts.ready(ctx.accounts, "work")
+    assert {:ok, %{pid: pid, session_id: sid}} = headless(ctx, "d1", account)
+    write_transcript(ctx, "work", sid)
+
+    # A turn that waits for a permission's answer holds the stop.
+    held = fn ->
+      assert {:ok, _} = stream_when(ctx, sid, & &1.idle)
+      {:ok, %{uuid: u}} = Stream.write(ctx.stream, sid, {:message, "ask first"})
+      assert {:ok, _} = stream_when(ctx, sid, &(&1.requests["req-" <> u][:state] == :held))
+      "req-" <> u
+    end
+
+    req = held.()
+    assert {:ok, %{act: act, to: "spare"}} = move(ctx, "d1")
+    assert {:ok, _} = row_when(ctx, "d1", &(&1.move == "stopping"))
+    Agent.update(flags, fn _ -> ["spare"] end)
+    assert {:ok, _} = Stream.write(ctx.stream, sid, {:answer, req, :allow})
+
+    assert {:ok, back} = row_when(ctx, "d1", &(moved?(&1, "work") and &1.pid != pid))
+    assert back.session_id == sid
+    refute alive?(pid)
+    assert {:ok, %{outcome: "failed", reason: why}} = Acts.get(ctx.acts, act)
+    assert why =~ "flagged spare"
+    assert HeadlessStandIn.argv(ctx.dir, sid) |> Enum.member?("--resume")
+
+    # Both flagged by the time of the resume: no process of it runs, and the fault ledger says
+    # why.
+    Agent.update(flags, fn _ -> [] end)
+    req = held.()
+    assert {:ok, %{to: "spare"}} = move(ctx, "d1")
+    assert {:ok, _} = row_when(ctx, "d1", &(&1.move == "stopping"))
+    Agent.update(flags, fn _ -> ["spare", "work"] end)
+    assert {:ok, _} = Stream.write(ctx.stream, sid, {:answer, req, :allow})
+
+    assert {:ok, %{status: "stopped", account: "work"}} = row_when(ctx, "d1", &(&1.move == nil))
+    refute alive?(back.pid)
+
+    assert {:ok, [%{outcome: "failed", reason: why}]} =
+             Acts.rows(ctx.acts, actor: "mover:test", act: "move")
+
+    assert why =~ "stranded" and why =~ "flagged work"
+  end
+
   # F-189's new-3: a named account is read by `usable:` before the claim, as the pick reads one;
   # one not logged in is refused, and nothing begins.
   test "a move to a named account usable: refuses begins nothing", ctx do
@@ -470,6 +529,16 @@ defmodule CodingAgentFramework.MoverTest do
       end,
       20_000
     )
+  end
+
+  # The `Stream`'s row of the session's latest process, once `ready?` holds; the `Stream` reads
+  # each log on its interval.
+  defp stream_when(ctx, sid, ready?) do
+    await(fn ->
+      {:ok, %{rows: rows}} = Stream.rows(ctx.stream)
+      row = rows |> Enum.filter(&(&1.session == sid)) |> List.last()
+      if row && ready?.(row) == true, do: {:ok, row}, else: row
+    end)
   end
 
   defp mrow(ctx, id), do: Mailbox.Table.get(ctx.mtable, id)

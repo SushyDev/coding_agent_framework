@@ -29,8 +29,9 @@ defmodule CodingAgentFramework.Mover do
      it of that name and `<config>/session-env/<session id>` are copied into the other
      account's config directory, each under a temporary name and renamed into place, and the
      transcript's size checked against the source's.
-  4. `resuming`: `Sessions.resume/6` on the other account with the same session id and name,
-     the launch the app gives (`launch:`, without options, so the row's own are taken again),
+  4. `resuming`: `usable:` reads the other account again (the app may have flagged it during
+     the drain and the stop: F-210), then `Sessions.resume/6` on it with the same session id
+     and name, the launch the app gives (`launch:`, without options, so the row's own are taken again),
      and so Remote Control and the waiter's hook of that account. An interactive session's
      first due row goes in as the resume's prompt (`Mailbox.launch/4`, then `launched/3`), since
      the resumed process has no waiter until a turn of it ends. A headless session's goes as
@@ -46,8 +47,9 @@ defmodule CodingAgentFramework.Mover do
   - the old process ending by itself during the move: the move goes on from the copy;
   - a stop whose process outlives its deadline: the row stays `stopping` (`Recoveries` ends it
     by its record), and the move goes on once the row is free;
-  - a copy or a resume refused on the other account: the act `failed`, and the session is
-    resumed on its own account, where its transcript is;
+  - a copy or a resume refused on the other account, `usable:` refusing it at the resume
+    included: the act `failed`, and the session is resumed on its own account, where its
+    transcript is, once `usable:` takes that one;
   - that resume refused too: the session runs on no account. Its row says why and the fault
     ledger has an act `move` `failed` with reason `stranded`, for a person;
   - an agent at a usage limit (F-191): its copy or resume refused leaves its process gone, the
@@ -87,8 +89,9 @@ defmodule CodingAgentFramework.Mover do
   `claude:`, `env:`, `tool_timeout:`, `mcp:`; with no `model:` the row's is taken), a refusal (the move then goes back, as
   for a refused resume), or `{:unknown, reason}` (asked again at the next cue). Optionally `timeout:`
   (ms, 30 min by default), `stop:` (ms, each stop's own deadline, 30 s by default), `usable:` (a
-  function of an account answering `{:ok, account}` for one a launch may run on now, else why
-  not: `CodingAgentFramework.Logins.usable/3`, prepared and logged in; by default
+  function of an account answering `{:ok, account}` (the `Accounts.Account`) for one a launch
+  may run on now, else why not: `CodingAgentFramework.Logins.usable/3`, prepared and logged in,
+  then the app's own check; read at the pick and again at each resume; by default
   `Accounts.ready/2`) and `clock:`
   (wall-clock ms).
   """
@@ -402,8 +405,13 @@ defmodule CodingAgentFramework.Mover do
     end
   end
 
+  # F-210 (F-209's new-1; `Move.tla`'s TargetTaken, MoveBack and Stranded): the account is read
+  # by `usable:` again at the resume, not only at the pick, since a drain and its stop may take
+  # the move's whole timeout and the app may flag the account meanwhile. Refused, the move goes
+  # back (`answered/4`): to its own account, read the same way, and with that refused too the
+  # row is left down with the reason.
   defp resume(s, row) do
-    with {:ok, account} <- Accounts.ready(s.accounts, row.move_to),
+    with {:ok, account} <- s.usable.(row.move_to),
          {:ok, launch} <- s.launch.(row),
          {:ok, launched} <- launch_first(s, row) do
       launch = Keyword.delete(launch, :options)
