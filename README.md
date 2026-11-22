@@ -319,7 +319,11 @@ Built, each from a checked model in `model/tla/`:
   id; and a `remedy` answered `act` shows `answering` until its act's row ends;
 - no message into a delegate's own turn (F-204, against `Remedies.tla`'s `NoMessageIntoOwnTurn`):
   a background command's end reads the delegate busy until the turn it begins has started and
-  ended, bounded by `wake:` (30 s), so a parent's message waits through that turn.
+  ended, bounded by `wake:` (30 s), so a parent's message waits through that turn;
+- the loose ends of F-196 to F-201 (F-203, against `Heal.tla` and `Remedies.tla`'s waits): an
+  answered act whose state passed leaves the inbox, `run_delegate` of a waiting start answers at
+  once, a waited resume is settled from its row's end into the fault ledger, a start's menu is a
+  startup dialog, and an `env` without `path` is refused for every tree.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
