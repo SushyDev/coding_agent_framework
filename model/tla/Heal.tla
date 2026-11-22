@@ -46,7 +46,14 @@
 (* behavior this spec's one step already covers. A cut between the       *)
 (* person's claim and its act is the healer's restart: the claim names    *)
 (* its healer (F-192, the row's detail in Acts), so the restart settles   *)
-(* it as it settles its own (SettleCut, any claim).                        *)
+(* it as it settles its own (SettleCut, any claim). A state that passes    *)
+(* after the answer and before that check gets no act, as above, and its   *)
+(* answered prompt passes with it (F-203): no row of this spec.            *)
+(*                                                                         *)
+(* An act whose outcome comes later (F-203, Acts' `acted`): an instancing  *)
+(* spec's Act may answer "later", whose claim is open to the fault ledger  *)
+(* until Settled reads its end, "verified" or "refused"; Remedies.tla's    *)
+(* resume that waits at a usage limit. This spec alone never answers it.   *)
 (*                                                                         *)
 (* Left abstract: what a remedy does (Effect, in the instancing spec: a    *)
 (* fix that may not help); evidence; which remedy (one per kind).          *)
@@ -102,6 +109,9 @@ ASSUME "healer" \in Actors /\ MaxActs \in Nat
 
 Outcomes == {"ok", "refused", "unknown"}
 
+\* What an instancing spec's act may answer beside them: its outcome later, or read so at once.
+Answers == Outcomes \cup {"later", "verified"}
+
 VARIABLES
     on,        \* s -> the symptom holds (the world's)
     st,        \* s -> its target's state number (the world's)
@@ -137,10 +147,11 @@ Count(k) == IF Break = "CountInMemory" THEN mem[k] ELSE count[k]
 Held(k) == \E c \in claims \cup acting \cup cdone : <<c.t, c.s>> = k
 
 \* A claim on k ended with no outcome that may yet be good: refused, unknown, its verify failed,
-\* or a restart cut it (settled interrupted, never acted on).
+\* or a restart cut it (settled interrupted, never acted on). One whose outcome comes later is
+\* not ended until it is read.
 Ended(k) ==
     /\ \E c \in cdone : <<c.t, c.s>> = k
-    /\ ~\E r \in res : r.k = k /\ r.out \in {"ok", "recovered"}
+    /\ ~\E r \in res : r.k = k /\ r.out \in {"ok", "recovered", "later", "verified"}
 
 \* What makes a recorded symptom a person's: no remedy on the list, the cap reached, or a
 \* remedy that ended without helping. Under SilentCap the cap asks nothing.
@@ -181,7 +192,7 @@ Claim(s) ==
 \* answer "act" (AnswerAct), which the healer takes on that person's claim.
 Act(c, out) ==
     LET k == <<c.t, c.s>> IN
-    /\ c.by \in {"healer", "person"} /\ out \in Outcomes
+    /\ c.by \in {"healer", "person"} /\ out \in Answers
     /\ C!Act(c)
     /\ res' = res \cup {[k |-> k, out |-> out]}
     /\ wrong' = wrong \cup (IF on[c.t] THEN {} ELSE {"acted on no symptom"})
@@ -211,6 +222,13 @@ Verify(r) ==
         /\ allow' = IF still /\ Break # "NoNarrow" THEN [allow EXCEPT ![kd] = FALSE] ELSE allow
         /\ dropped' = IF still THEN [dropped EXCEPT ![kd] = TRUE] ELSE dropped
         /\ UNCHANGED <<facts, count, mem, asked, forBound, closed, claimVars, wrong>>
+
+\* An outcome that came later is read: verified, or refused (no fix of the remedy's, so the
+\* list stays as it is, and the state is asked).
+Settled(r, good) ==
+    /\ r \in res /\ r.out = "later"
+    /\ res' = (res \ {r}) \cup {[k |-> r.k, out |-> IF good THEN "verified" ELSE "refused"]}
+    /\ UNCHANGED <<facts, count, mem, allow, dropped, asked, forBound, closed, claimVars, wrong>>
 
 \* A remedy prompt, once per symptom state, for a recorded symptom that needs a person; one
 \* asked because the cap is reached is asked for its bound.
@@ -344,7 +362,7 @@ TypeOK ==
     /\ on \in [Symptoms -> BOOLEAN] /\ st \in [Symptoms -> 0..MaxState]
     /\ facts \subseteq Symptoms \X (0..MaxState)
     /\ \A r \in res : r.k \in Symptoms \X (0..MaxState)
-                     /\ r.out \in Outcomes \cup {"recovered", "failed"}
+                     /\ r.out \in Answers \cup {"recovered", "failed"}
     /\ count \in [Kinds -> Nat] /\ mem \in [Kinds -> Nat]
     /\ allow \in [Kinds -> BOOLEAN] /\ dropped \in [Kinds -> BOOLEAN]
     /\ asked \subseteq facts /\ forBound \subseteq asked /\ closed \subseteq asked

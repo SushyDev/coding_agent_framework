@@ -290,6 +290,36 @@ defmodule CodingAgentFramework.SessionsDialogTest do
     refute alive?(pid)
   end
 
+  # F-203, from F-198's new-4: a numbered menu no rule names before the session file (an
+  # onboarding menu on a new account, say) is a startup dialog with no default: the app's
+  # callback is never asked, and a person's press is the Inlet's read back of the menu.
+  test "a start's menu is a startup dialog that only a person answers", ctx do
+    me = self()
+    claude = ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), dialogs: [:menu])
+    launch = Keyword.put(ctx.launch, :claude, claude)
+
+    dialog = fn kind, options ->
+      send(me, {:asked, kind})
+      {:answer, hd(options)}
+    end
+
+    sessions = sessions(ctx, dialog: dialog)
+
+    assert {:unknown, {:dialog, :start_menu}} =
+             Sessions.start(sessions, "alpha", ctx.account, launch)
+
+    refute_received {:asked, _}
+    options = ScreenStandIn.menu()
+
+    assert %{kind: :start_menu, title: title, options: ^options, answers: %{}} =
+             Agents.dialog(Agents.get(ctx.agents, "alpha"))
+
+    assert is_binary(title)
+    assert {:ok, :sent} = Sessions.answer_dialog(sessions, "alpha", "start_menu", "Not now")
+    assert ScreenStandIn.menu_answer(ctx.dir) == "Not now"
+    assert {:ok, %{status: "running"}} = await(fn -> running(ctx, sessions, "alpha") end)
+  end
+
   defp marked(ctx, mark, kind \\ :trust) do
     case Agents.dialog(Agents.get(ctx.agents, "alpha")) do
       %{answers: %{^kind => %{mark: ^mark}}} = d -> {:ok, d}

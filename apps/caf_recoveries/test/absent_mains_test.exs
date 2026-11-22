@@ -1,16 +1,17 @@
 defmodule CodingAgentFramework.AbsentMainsTest do
   @moduledoc """
-  The `absent_main` healer on real `Acts`, `Watch` and `Sessions` files in this test's own
-  directory. A main session's row is written as `Sessions` settles one whose process exited;
-  the resume is a stand-in for `Mains.resume_main/3` (whose contract `MainsTest` checks) that
-  tells the test of each call and writes the row as a confirmed resume leaves it. All three
-  share a clock the test moves, so no test sleeps.
+  The `absent_main` healer on real `Acts`, `Watch`, `Sessions` and `Mains` files in this test's
+  own directory. A main session's row is written as `Sessions` settles one whose process
+  exited; the resume is a stand-in for `Mains.resume_main/3` (whose contract `MainsTest`
+  checks) that tells the test of each call and writes the row as a confirmed resume leaves it,
+  or a start's row waiting at a limit as `Mains` writes one. All three share a clock the test
+  moves, so no test sleeps.
   """
   use ExUnit.Case, async: true
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{AbsentMains, Acts, Sessions, Watch}
+  alias CodingAgentFramework.{AbsentMains, Acts, Mains, Sessions, Watch}
 
   doctest AbsentMains
 
@@ -45,21 +46,37 @@ defmodule CodingAgentFramework.AbsentMainsTest do
     row = %{host: "test", name: "app-epic", socket: "app-epic", account: "work", cwd: dir}
     id = Sessions.Table.starting(table, Map.merge(row, %{role: "parent", resume: nil}))
 
-    %{acts: acts, watch: watch, table: table, agents: agents, id: id, time: time, clock: clock}
+    ctx = %{acts: acts, watch: watch, table: table, agents: agents, id: id, time: time}
+    Map.merge(ctx, %{clock: clock, db: db})
   end
 
-  # A healer whose resume answers `answer` and, when it is ok, leaves the row running.
+  # A healer whose resume answers `answer` and, when it is ok, leaves the row running; or, for
+  # `{:waiting, starts, row}`, writes a start's row waiting at a limit, as `Mains` does, and
+  # answers so.
   defp healer!(ctx, answer) do
     me = self()
 
     resume = fn name ->
-      send(me, {:resumed, name})
-      if match?({:ok, _}, answer), do: Sessions.Table.update(ctx.table, ctx.id, status: "running")
-      answer
+      case answer do
+        {:waiting, starts, row} ->
+          %{id: id} = Mains.Starts.waiting(starts, row)
+          send(me, {:resumed, name, id})
+          {:ok, %{id: id, name: name, account: nil, session_id: nil, waiting: row.until}}
+
+        {:ok, _} ->
+          send(me, {:resumed, name})
+          Sessions.Table.update(ctx.table, ctx.id, status: "running")
+          answer
+
+        _ ->
+          send(me, {:resumed, name})
+          answer
+      end
     end
 
     opts = [agents: ctx.agents, acts: ctx.acts, watch: ctx.watch, resume: resume, host: "test"]
-    {:ok, healer} = AbsentMains.start_link(Keyword.put(opts, :clock, ctx.clock))
+    opts = [mains_db: ctx.db, clock: ctx.clock] ++ opts
+    {:ok, healer} = AbsentMains.start_link(opts)
     # Its first check, at start, found nothing: no main has gone yet.
     assert {:ok, %{resumed: []}} = AbsentMains.check(healer)
     healer
@@ -163,6 +180,7 @@ defmodule CodingAgentFramework.AbsentMainsTest do
     end
 
     opts = [agents: ctx.agents, acts: ctx.acts, watch: ctx.watch, host: "test", clock: ctx.clock]
+    opts = [mains_db: ctx.db] ++ opts
     {:ok, cut} = AbsentMains.start_link([resume: held] ++ opts)
     assert_receive {:holding, "app-epic"}, 5_000
 
@@ -207,5 +225,42 @@ defmodule CodingAgentFramework.AbsentMainsTest do
     exit!(ctx, 2)
     assert {:ok, %{resumed: [_]}} = AbsentMains.check(healer)
     assert_received {:resumed, "app-epic"}
+  end
+
+  # Remedies.tla's ActWaits and SettleWait (F-203, from F-196's new-4): a resume that waits at a
+  # usage limit keeps its claim acted until its row in `Mains` ends, and is settled from it.
+  test "a resume that waits at a limit is settled from its row's end", ctx do
+    {:ok, starts} = Mains.Starts.open(ctx.db)
+    wait = %{host: "test", project: "app", name: "app-epic", deadline: 9, until: 7, start: %{}}
+    healer = healer!(ctx, {:waiting, starts, wait})
+    exit!(ctx, 1)
+    assert {:ok, %{resumed: [id]}} = AbsentMains.check(healer)
+    assert_received {:resumed, "app-epic", row}
+    assert {:ok, %{status: "acted", outcome: nil, detail: detail}} = Acts.get(ctx.acts, id)
+    assert detail == ~s({"start":#{row},"symptom":"absent_main:app-epic:1"})
+
+    # While it waits, or its pick at the reset is under way: no outcome, no second resume.
+    assert {:ok, %{resumed: []}} = AbsentMains.check(healer)
+    Mains.Starts.update(starts, row, status: "starting", account: "work")
+    assert {:ok, %{resumed: []}} = AbsentMains.check(healer)
+    refute_received {:resumed, _, _}
+    assert {:ok, %{status: "acted"}} = Acts.get(ctx.acts, id)
+    assert asked(ctx) == []
+
+    Mains.Starts.update(starts, row, status: "running")
+    Sessions.Table.update(ctx.table, ctx.id, status: "running")
+    assert {:ok, %{resumed: []}} = AbsentMains.check(healer)
+    assert {:ok, %{outcome: "verified", answer: ~s(["resumed","work"])}} = Acts.get(ctx.acts, id)
+
+    # The next absence waits too, and a person leaves it: a fault, and the main a person's.
+    exit!(ctx, 2)
+    :counters.add(ctx.time, 1, @bound)
+    assert {:ok, %{resumed: [next]}} = AbsentMains.check(healer)
+    assert_received {:resumed, "app-epic", row}
+    Mains.Starts.update(starts, row, status: "refused", reason: "left", waited: "sam")
+    assert {:ok, %{resumed: []}} = AbsentMains.check(healer)
+    assert {:ok, %{outcome: "failed", reason: ~s(["waited","left"])}} = Acts.get(ctx.acts, next)
+    assert {:ok, [%{id: ^next}]} = Acts.faults(ctx.acts)
+    assert [%{state: "absent_main:app-epic:2", reason: ~s(["waited","left"])}] = asked(ctx)
   end
 end

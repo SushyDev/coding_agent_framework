@@ -165,7 +165,10 @@ defmodule CodingAgentFramework.Watch do
   What `source` reads of `kind` now, `%{targets: targets, states: states}`: an `open` symptom
   state of it not in `states` passes; an `asked` one passes only when its target is not in
   `targets`, since a person's prompt stays while its target shows the kind at all (a remedy
-  that failed leaves its target in a new state, still a symptom). Answers `{:ok, ids}`.
+  that failed leaves its target in a new state, still a symptom). One `answered` `"act"` passes
+  by the `open` row's rule (F-203): the healer takes the act only on the state it still reads,
+  so a state gone before its next check is never acted on, and its prompt leaves the inbox.
+  Answers `{:ok, ids}`.
   """
   @spec pass(GenServer.server(), {String.t(), String.t()}, map, keyword) ::
           {:ok, [integer]} | {:refused, term} | {:unknown, term}
@@ -380,15 +383,17 @@ defmodule CodingAgentFramework.Watch do
   end
 
   def handle_call({:pass, source, kind, targets, states}, _from, s) do
+    where =
+      "source = ?1 AND kind = ?2 AND " <>
+        "(status IN ('open', 'asked') OR (status = 'answered' AND answer = 'act'))"
+
     ids =
       for %{id: id, state: state, target: target, status: status} <-
-            Table.select(s.db, "source = ?1 AND kind = ?2 AND status IN ('open', 'asked')", [
-              source,
-              kind
-            ]),
-          if(status == "open",
-            do: not MapSet.member?(states, state),
-            else: not MapSet.member?(targets, target)
+            Table.select(s.db, where, [source, kind]),
+          # An answered act is the healer's to take only while its state is read (F-203).
+          if(status == "asked",
+            do: not MapSet.member?(targets, target),
+            else: not MapSet.member?(states, state)
           ) do
         Store.update(s.db, "symptoms", id, status: "passed", passed_at: now(s))
         id

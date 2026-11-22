@@ -13,6 +13,12 @@ defmodule CodingAgentFramework.Sessions.Dialog do
   is never pressed again, but for a `cut` one a person cleared (`clear/2`, F-144): it is
   `cleared`, may be answered once more, and a press of it cut again is `unknown`.
 
+  A numbered menu no rule names that a start meets (`Screen`'s kind `:menu`; an onboarding menu
+  on a new account, say) is a startup dialog too (F-203), kind `:start_menu`, kept with its
+  `title`: no app's `dialogs:` answers it ahead, so it waits on a person, and its press is the
+  Inlet's of a menu (`press_kind/2`), the marker read back on the label before Enter. Its kind
+  is not `:menu`, so its prompt's id is never a running session's menu's.
+
       iex> alias CodingAgentFramework.Sessions.Dialog
       iex> screen = %{state: :dialog, kind: :trust, options: ["No, exit", "Yes"], selected: "No, exit"}
       iex> row = %{dialog: Dialog.encode(screen), answers: nil}
@@ -24,10 +30,10 @@ defmodule CodingAgentFramework.Sessions.Dialog do
       {:refused, {:answered, "sent"}}
   """
 
-  @kinds [:trust, :imports]
+  @kinds [:trust, :imports, :start_menu]
 
   @typedoc "A startup dialog's kind."
-  @type kind :: :trust | :imports
+  @type kind :: :trust | :imports | :start_menu
 
   @doc "The kinds a start meets before its first turn: those `Sessions` reads and answers."
   @spec kinds() :: [kind]
@@ -47,13 +53,36 @@ defmodule CodingAgentFramework.Sessions.Dialog do
   def kind(name) when is_binary(name), do: Enum.find(@kinds, &(Atom.to_string(&1) == name))
   def kind(_), do: nil
 
-  @doc "Whether a `Screen` reading is a startup dialog."
+  @doc """
+  The kinds an app's `dialogs:` may answer ahead: every kind but a start's menu, which has no
+  default.
+  """
+  @spec preset_kinds() :: [kind]
+  def preset_kinds, do: @kinds -- [:start_menu]
+
+  @doc "Whether a `Screen` reading is a startup dialog: a start's menu among them."
   @spec startup?(map) :: boolean
+  def startup?(%{state: :dialog, kind: :menu}), do: true
   def startup?(%{state: :dialog, kind: kind}) when kind in @kinds, do: true
   def startup?(_), do: false
 
-  @doc "The row's `dialog` column for a startup dialog `Screen` read."
+  @doc """
+  The row's `dialog` column for a startup dialog `Screen` read; a menu's is kind
+  `:start_menu`, with its `title`.
+
+      iex> screen = %{state: :dialog, kind: :menu, title: "Choose the text style", detail: [],
+      ...>   options: ["Dark mode", "Light mode"], selected: "Dark mode"}
+      iex> CodingAgentFramework.Sessions.Dialog.encode(screen)
+      %{kind: :start_menu, title: "Choose the text style", options: ["Dark mode", "Light mode"],
+        selected: "Dark mode", paths: [], shortened: []}
+  """
   @spec encode(map) :: map
+  def encode(%{state: :dialog, kind: :menu} = screen) do
+    %{screen | kind: :start_menu}
+    |> Map.take([:kind, :title, :options, :selected])
+    |> Map.merge(%{paths: [], shortened: []})
+  end
+
   def encode(%{state: :dialog, kind: kind} = screen) do
     %{kind: kind, options: screen.options, selected: screen.selected}
     |> Map.put(:paths, Map.get(screen, :paths, []))
@@ -61,21 +90,37 @@ defmodule CodingAgentFramework.Sessions.Dialog do
   end
 
   @doc """
+  What the Inlet's checked press names for `kind` on the row (`Inlet.choose/5`): the kind, or
+  for a start's menu `{:menu, title, options}`, the menu the pane must still show.
+  """
+  @spec press_kind(map, kind) :: kind | {:menu, String.t(), [String.t()]}
+  def press_kind(row, :start_menu) do
+    %{title: title, options: options} = shown(row)
+    {:menu, title, options}
+  end
+
+  def press_kind(_row, kind), do: kind
+
+  @doc """
   The dialog the row shows, or showed last: `%{kind, options, selected, paths, shortened}`
-  (`shortened` the paths the pane drew cut in their middle, `Screen`'s), or nil.
+  (`shortened` the paths the pane drew cut in their middle, `Screen`'s), and a start's menu's
+  `title`; or nil.
   """
   @spec shown(map | nil) :: map | nil
   def shown(%{dialog: text}) when is_binary(text) do
     case JSON.decode(text) do
       {:ok, %{"kind" => name, "options" => options, "selected" => selected} = d} ->
-        if kind = kind(name),
-          do: %{
+        if kind = kind(name) do
+          shown = %{
             kind: kind,
             options: options,
             selected: selected,
             paths: d["paths"] || [],
             shortened: d["shortened"] || []
           }
+
+          if kind == :start_menu, do: Map.put(shown, :title, d["title"]), else: shown
+        end
 
       _ ->
         nil

@@ -820,8 +820,9 @@ defmodule CodingAgentFramework.SurfaceTest do
       :absent_mains,
       :limits
     ],
-    # A start that waits at a usage limit is a limit prompt (F-196).
-    "mains" => [:scheduler, :prompts],
+    # A start that waits at a usage limit is a limit prompt (F-196), and a waited resume's end
+    # settles its healer's claim (F-203).
+    "mains" => [:scheduler, :prompts, :absent_mains],
     # A transcript's limit line is the account's record (F-185).
     "transcripts" => [:delegates, :mailbox, :hooks_silent, :usage, :limits, :interventions],
     "delegates" => [:mailbox, :scheduler, :prompts],

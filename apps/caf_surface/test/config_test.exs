@@ -159,6 +159,13 @@ defmodule CodingAgentFramework.ConfigTest do
     assert Config.new(Keyword.delete(@fields, :accounts)) == {:refused, {:bad, :accounts}}
   end
 
+  # F-203, from F-201's new-2: a tree that runs agents reads `env.path` at its start, so a config
+  # without one is refused, never a crash of the tree's `init`.
+  test "an env without a path is refused for a tree that runs agents too" do
+    for bad <- [%{}, %{path: nil}, %{home: "/srv/caf"}],
+        do: assert(new(env: bad) == {:refused, {:bad, :env}})
+  end
+
   test "agents and restart_wait: an agentless tree on request; a bounded wait" do
     assert {:ok, %Config{agents: true, restart_wait: 5_000}} = new([])
 

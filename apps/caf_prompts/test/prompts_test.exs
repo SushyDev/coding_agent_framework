@@ -317,6 +317,27 @@ defmodule CodingAgentFramework.PromptsTest do
     {:ok, :failed} = Acts.settle(ctx.acts, act, :failed, reason: :no_pane)
     assert {:ok, []} = Prompts.read(ctx.prompts, kind: "remedy")
     assert {:ok, [%{id: ^act, outcome: "failed"}]} = Acts.faults(ctx.acts)
+
+    # F-203: a state that passes before its act leaves with it, passed before its act; one whose
+    # act is under way stays until that act ends.
+    acts =
+      for state <- ["k3", "k4"] do
+        {:ok, %{id: n}} = Watch.record(ctx.watch, %{sym | state: state})
+        {:ok, ^n} = Watch.ask(ctx.watch, %{sym | state: state}, {:cap, 10, 3_600_000})
+        {:ok, :answered} = Prompts.answer(ctx.prompts, "remedy:#{n}", "act", "sam")
+        "remedy:#{n}"
+      end
+
+    {:ok, k4} = Acts.claim(ctx.acts, "sam", "d1", "k4", :reopen, detail: %{symptom: "k4"})
+    assert {:ok, [_, _]} = Prompts.read(ctx.prompts, kind: "remedy")
+
+    {:ok, [_, _, _]} =
+      Watch.pass(ctx.watch, {"healer", "lost_viewer"}, %{targets: [], states: []})
+
+    assert {:ok, [%{id: id}]} = Prompts.read(ctx.prompts, kind: "remedy")
+    assert id == List.last(acts)
+    {:ok, :recovered} = Acts.settle(ctx.acts, k4, :recovered)
+    assert {:ok, []} = Prompts.read(ctx.prompts, kind: "remedy")
   end
 
   # Limit.tla's StartRefusedAtLimit and AnswerLeave (F-196): a start that every usable account

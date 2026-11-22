@@ -116,6 +116,24 @@ defmodule CodingAgentFramework.WatchTest do
     assert {:ok, [%{status: "passed"}, %{status: "passed"}]} = Watch.read(ctx.watch)
   end
 
+  # F-203, from F-196's new-1: an answered act is taken only on the state still read.
+  test "an answered act passes with its state, as an open state does", ctx do
+    {:ok, %{id: act}} = Watch.record(ctx.watch, symptom("k1"))
+    {:ok, ^act} = Watch.ask(ctx.watch, symptom("k1"), {:cap, 2, 3_600_000})
+    {:ok, :answered} = Watch.answer(ctx.watch, act, "act", "sam")
+    {:ok, %{id: left}} = Watch.record(ctx.watch, symptom("k2"))
+    {:ok, ^left} = Watch.ask(ctx.watch, symptom("k2"), :why)
+    {:ok, :answered} = Watch.answer(ctx.watch, left, "leave", "sam")
+    lv = {"healer", "lost_viewer"}
+    assert {:ok, []} = Watch.pass(ctx.watch, lv, %{targets: ["alpha"], states: ["k1"]})
+    # Its target still shows the kind in a new state: the act's state is gone all the same.
+    assert {:ok, [^act]} = Watch.pass(ctx.watch, lv, %{targets: ["alpha"], states: ["k3"]})
+    assert {:ok, [%{status: "passed", answer: "act"}]} = Watch.read(ctx.watch, state: "k1")
+    assert Watch.acting(Watch.record(ctx.watch, symptom("k1")), "healer") == nil
+    # Any other answer is the end of its prompt, and stays as it was.
+    assert {:ok, [%{status: "answered", answer: "leave"}]} = Watch.read(ctx.watch, state: "k2")
+  end
+
   defp open!(ctx) do
     {:ok, db} = Table.open(ctx.db)
     db
