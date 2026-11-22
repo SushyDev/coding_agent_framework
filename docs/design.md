@@ -609,8 +609,8 @@ a lookup of the parts that a tool calls when it runs, so the config holds no fun
 stand until B5 makes the verbs (F-154's new-1). The app's `PreToolUse` callback corrects a
 call (F-169): `{:allow, updated_input: map, additional_context: text}` and `{:deny, reason,
 additional_context: text}`, written as Claude Code's `updatedInput` and `additionalContext`
-(at most 10,000 characters; a longer one, or any answer out of shape, is a pass whose row's
-`problem` names why).
+(at most 10,000 characters; a longer one, or any answer out of shape, a value that does not
+encode as JSON among them (F-201), is a pass whose row's `problem` names why, never a crash).
 
 An extension adds no protocol of its own: its events go through `Mailbox`'s subscriptions, its
 acts through `Team`'s claims, its questions to a person through `Prompts`, and its context is a
@@ -789,8 +789,14 @@ agent and delegate rows read once through a read-only connection to the store th
 names, as `processes/1` reads the holder's records), the tool hooks as `{module, opts}`
 (`CodingAgentFramework.ToolHooks`, each callback given the live `part` lookup), and the
 restart that waits for the old tree's `Registry`. F-197 made `post_tool_use/3`'s answer a
-replacement of the call's output (`{:replace, response}`, "A held `PostToolUse`"). The other
-calls are B3's rest.
+replacement of the call's output (`{:replace, response}`, "A held `PostToolUse`"). F-201, from
+an app's first run on the tree: each tool hook's event carries the `cwd` Claude Code posted (nil
+without one, never guessed), so a rewrite of a command that depends on where it runs can apply;
+a config with `agents: false` needs only the keys that tree reads (the table below) and makes
+no tool home; `agent_rows/1` also takes the instance's name, read from the config its running
+tree keeps in its `Registry`, since a hook's `opts` are plain data and a struct there, the
+config among them, is refused by name (`{:not_data, module, {:struct, struct}}`); and
+`post_tool_use/3` may answer `{:context, text}`. The other calls are B3's rest.
 The config answers the room the home leaves for an agent's and a service's name (`Config.name_room/1`, F-172), and the tree hands it to `Delegates`, `Mains` and
 `Services`, which refuse a longer name `{:bad, :name, {:longer_than, n}}` before any row;
 sockets stay in the home.
@@ -806,12 +812,12 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 | `instance` | the tree's name in the app, unique, 1 to 100 bytes | required |
 | `programs`, `workstation` | the workstation's programs, and its host name | required, `"ws"` |
 | `hosts` | the other hosts, name to `%{programs, dir}` | none |
-| `accounts` | the Claude accounts' names | required |
+| `accounts` | the Claude accounts' names | required, unless `agents: false` |
 | `projects`, `mains` | the projects, and the main sessions declared on them | none |
 | `main_model`, `operator` | a main session's model; the operator's name | `"opus"`, `"operator"` |
-| `ports` | `%{intake, mcp}` on 127.0.0.1 | required |
+| `ports` | `%{intake, mcp}` on 127.0.0.1 | required, unless `agents: false` |
 | `git` | the author agents commit as, and each project's override | no author |
-| `claude`, `env`, `user` | what every launch shares; the OS user (required on macOS) | required |
+| `claude`, `env`, `user` | what every launch shares; the OS user (required on macOS) | required; with `agents: false` only `env`, with its `path` (F-201) |
 | `tool_timeout`, `margin` | Claude Code's MCP tool timeout, and what `run_delegate` keeps under it | 1 h, 1 min |
 | `interval` | ms between the timed readers' reads | 2 s |
 | `resources`, `lease`, `job_lease` | the `Scheduler`'s capacities and the units each start asks for | seat 4, slot 2 |
@@ -826,7 +832,7 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 | `remedies`, `remedy_bound` | the healer's allow-list and its caps' window | the healer's acts, 1 h |
 | `viewer` | every viewer's `{columns, rows}`, handed to `Sessions` and `Recoveries` alike (F-190) | `{200, 50}` |
 | `undeclared_cues` | `:route` or `:raise` a cue on a topic no part declares | `:route` |
-| `agents` | `false` starts only the parts a lease needs (`Config.agentless/0`), none that runs or reads an agent (F-195) | `true` |
+| `agents` | `false` starts only the parts a lease needs (`Config.agentless/0`), none that runs or reads an agent (F-195), and no tool home, so its config needs only `home`, `instance`, `programs` and `env`'s `path` (F-201) | `true` |
 | `restart_wait` | ms a start waits for an instance of its name still exiting, before it is refused `{:instance_running, name}` (F-195) | 5 s |
 
 An app like a development loop's (views, builders, gates, landings) needs nothing more: a
@@ -2404,7 +2410,13 @@ section.
   | `http` | the same object, as the body | the replacement |
   | `http`, `timeout` 5 | the same object, after 12 s | the original; the turn went on at about 5 s |
 
-  Not measured: `updatedMCPToolOutput`, an MCP tool's output, and an `Edit`'s. Without the
+  Not measured: `updatedMCPToolOutput`, an MCP tool's output, and an `Edit`'s. F-201 added
+  `{:context, text}`, sent as `hookSpecificOutput.additionalContext` under `PreToolUse`'s bound
+  of 10,000 characters, so a note goes on the call it is about; `{:replace, response, context:
+  text}` sends both. Measured by the main session on 2.1.322, headless, a `Bash` call and the
+  model asked to quote any note with the result: from a command hook and from an `http` hook
+  alike the model read the text on that call, shown as "PostToolUse:Bash hook additional
+  context: <text>", and the tool's result was unchanged. Without the
   callback a `PostToolUse` post (the `Stop` hold's settings add it, for the count of blocks)
   is answered at once, with no row. `Intake.tla`'s `HT` models both tool kinds.
 - **A held `Stop`** (F-157, decision 10). With the app's `stop:` callback, the `Stop` hook

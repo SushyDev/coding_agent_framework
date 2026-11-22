@@ -129,9 +129,34 @@ defmodule CodingAgentFramework.ConfigTest do
           {{Enum, []}, {:not_tool_hooks, {Enum, []}}},
           {{NoSuchModule, []}, {:not_tool_hooks, {NoSuchModule, []}}},
           {{Hooks, to: self()}, {:not_data, Hooks}},
+          # F-201: the config itself, handed as an option, was a raise; it is refused by name.
+          {{Hooks, config: c}, {:not_data, Hooks, {:struct, Config}}},
+          {{Hooks, [%{at: [MapSet.new([1])]}]}, {:not_data, Hooks, {:struct, MapSet}}},
           {Hooks, {:not_tool_hooks, Hooks}}
         ],
         do: assert(new(tool_hooks: bad) == {:refused, {:bad, :tool_hooks, why}})
+
+    # An extension's options are checked the same way.
+    assert new(extensions: [{Board, config: c}]) ==
+             {:refused, {:bad, :extensions, {:not_data, Board, {:struct, Config}}}}
+  end
+
+  # F-201: a config with `agents: false` needs only what that tree reads.
+  test "an agentless config needs only home, instance, programs and env's path" do
+    fields = [home: "/srv/caf", instance: "a", programs: %{}, agents: false]
+
+    assert {:ok, %Config{accounts: [], ports: nil, claude: nil, user: nil}} =
+             Config.new(fields ++ [env: %{path: "/bin"}])
+
+    for bad <- [%{}, %{path: nil}, nil],
+        do: assert(Config.new(fields ++ [env: bad]) == {:refused, {:bad, :env}})
+
+    assert Config.new(fields) == {:refused, {:bad, :env}}
+    # A user given is still checked; the agents' keys stay required where agents run.
+    assert Config.new(fields ++ [env: %{path: "/bin"}, user: ""]) == {:refused, {:bad, :user}}
+    assert Config.new(Keyword.delete(@fields, :ports)) == {:refused, {:bad, :ports}}
+    assert Config.new(Keyword.delete(@fields, :claude)) == {:refused, {:bad, :claude}}
+    assert Config.new(Keyword.delete(@fields, :accounts)) == {:refused, {:bad, :accounts}}
   end
 
   test "agents and restart_wait: an agentless tree on request; a bounded wait" do

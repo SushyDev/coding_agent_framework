@@ -200,10 +200,14 @@ defmodule CodingAgentFramework.SurfaceTest do
     assert %{units: %{"slot" => 1, "land:app" => 1}, holder: {"job", "land-2"}} = lease
   end
 
-  # F-195: an app that only leases its jobs runs the tree with no agent part.
+  # F-195: an app that only leases its jobs runs the tree with no agent part. F-201: its config
+  # has only the keys that tree reads, and its programs no gh, ssh or ssh-keygen, since it
+  # makes no tool home.
   test "a tree with agents: false starts the lease parts alone, and a job takes its lease",
        ctx do
-    {:ok, config} = Config.new(ctx.fields ++ [agents: false])
+    programs = Map.drop(ctx.fields[:programs], [:gh, :ssh, :ssh_keygen])
+    fields = [home: ctx.home, instance: "t", programs: programs, env: %{path: "/nonexistent"}]
+    {:ok, config} = Config.new(fields ++ [agents: false])
     parts = CodingAgentFramework.parts(start_supervised!({CodingAgentFramework, config}))
     assert Enum.sort(Map.keys(parts)) == Enum.sort(Config.agentless())
 
@@ -229,10 +233,13 @@ defmodule CodingAgentFramework.SurfaceTest do
 
     # Nothing an agent needs was made: no hooks' secret, no heavy commands' wrapper, no
     # account's settings, and the agent rows' reader answers none.
-    for path <- ["intake.secret", "bin/caf-run", "accounts"],
+    for path <- ["intake.secret", "bin/caf-run", "accounts", "gh", "git", "ssh"],
         do: refute(File.exists?(Path.join(ctx.home, path)), path)
 
     assert CodingAgentFramework.agent_rows(config) == {:ok, %{agents: [], delegates: []}}
+    # By the instance's name, as `subscribe/2` takes it (F-201).
+    assert CodingAgentFramework.agent_rows("t") == {:ok, %{agents: [], delegates: []}}
+    assert CodingAgentFramework.agent_rows("none") == {:refused, :no_instance}
   end
 
   # F-195's finding: the parent's restart of a tree just killed came while the old tree's named

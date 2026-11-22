@@ -60,6 +60,25 @@ defmodule CodingAgentFramework.IntakeStopTest do
     assert blocks(db) == 0
   end
 
+  test "a Stop event carries the input's cwd, and nil without one", %{start: start} do
+    intake = start_with(start, fn _ -> :pass end)
+    post(intake, body("Stop", %{"cwd" => "/w/app"}))
+    post(intake, @stop)
+    assert_received {:asked, %{cwd: "/w/app"}}
+    assert_received {:asked, %{cwd: nil}}
+  end
+
+  test "a block whose reason is not UTF-8 is a pass, and its row names it",
+       %{db: db, start: start} do
+    intake = start_with(start, fn _ -> {:block, <<255>>} end)
+    assert %{status: 200, resp_body: ""} = post(intake, @stop)
+    assert [%{hold: "passed", problem: ~s(["bad_answer","block"])}] = rows(db)
+    assert blocks(db) == 0
+
+    assert Intake.pause(intake, {:agent, "a"}, {:block, <<255>>}, "app") ==
+             {:refused, {:bad_pause, {:block, <<255>>}}}
+  end
+
   test "a Stop passed resets the count: the next turn has the whole cap again",
        %{db: db, start: start} do
     {:ok, answers} = Agent.start_link(fn -> [:block, :block, :pass, :block, :block] end)

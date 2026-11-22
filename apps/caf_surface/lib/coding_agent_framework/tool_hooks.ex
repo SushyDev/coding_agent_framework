@@ -1,11 +1,15 @@
 defmodule CodingAgentFramework.ToolHooks do
   @moduledoc ~S"""
   The app's tool hooks, named in the config as data (F-195): `tool_hooks: {module, opts}`,
-  where `module` implements a callback per hook it takes and `opts` is plain data. A hook the
-  module does not implement is not written into the accounts' settings, so Claude Code never
-  posts it.
+  where `module` implements a callback per hook it takes and `opts` is plain data, what a
+  config file could hold. A function, pid, port or reference in it is refused `{:not_data,
+  module}`, and a struct `{:not_data, module, {:struct, struct}}`: the config itself is one, so
+  a hook that reads the agent rows names the instance instead
+  (`CodingAgentFramework.agent_rows("a")`, F-201). A hook the module does not implement is not
+  written into the accounts' settings, so Claude Code never posts it.
 
-  Each callback gets the event as `CodingAgentFramework.Intake` hands it, the config's `opts`,
+  Each callback gets the event as `CodingAgentFramework.Intake` hands it (its `cwd`, where the
+  call runs, as Claude Code posted it, or nil, F-201), the config's `opts`,
   and `part`, a lookup of a part's process by its key in the tree (`CodingAgentFramework.parts/1`'s
   keys), called when the hook runs, so a hook reaches the live part after a restart, as an
   extension's tool does (`CodingAgentFramework.Extension`). It answers what `Intake`'s callback
@@ -22,7 +26,11 @@ defmodule CodingAgentFramework.ToolHooks do
     with `Bash`, from a command hook and from an `http` hook as the framework's is: an object of
     that shape is what the model reads; a string is ignored, so `Intake` passes it; a hook past
     its `timeout` leaves the output as it was. Not measured: `updatedMCPToolOutput`, an MCP
-    tool's output, and an `Edit`'s;
+    tool's output, and an `Edit`'s. Or `{:context, text}` (F-201), a note on the call it is
+    about, sent as `additionalContext` (at most 10,000 characters, as `PreToolUse`'s): measured
+    on 2.1.322 with `Bash`, from a command hook and from an `http` hook alike, the model reads it
+    on that call as "PostToolUse:Bash hook additional context: <text>", and the tool's output
+    is unchanged. `{:replace, response, context: text}` does both;
   - `stop/3`: `:pass` (the turn ends) or `{:block, reason}` (the agent goes on, told the reason).
 
   The framework's own `PreToolUse` callback (a move's drain) decides first, and a heavy
@@ -50,7 +58,7 @@ defmodule CodingAgentFramework.ToolHooks do
 
   @callback pre_tool_use(event :: Intake.tool_event(), opts :: term, part) :: term
   @callback post_tool_use(event :: Intake.tool_event(), opts :: term, part) ::
-              :pass | {:replace, map}
+              :pass | {:replace, map} | {:context, String.t()} | {:replace, map, keyword}
   @callback stop(event :: Intake.stop_event(), opts :: term, part) ::
               :pass | {:block, String.t()}
 
