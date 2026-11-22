@@ -127,6 +127,7 @@ defmodule CodingAgentFramework.Delegates do
   alias CodingAgentFramework.Mailbox.Transport.Waiter
   alias CodingAgentFramework.Sessions.Turn, as: SessionsTurn
   alias CodingAgentFramework.Transcripts.Fold
+  alias CodingAgentFramework.ClaudeCLI
   alias CodingAgentFramework.ClaudeCLI.Options
   alias CodingAgentFramework.Delegates.{Table, Turn, Work}
   alias CodingAgentFramework.Sessions.Agents
@@ -191,11 +192,19 @@ defmodule CodingAgentFramework.Delegates do
   delegate, and `{:delegate, %{name, status, session}}` for one neither live nor gone.
   Options: `:timeout`, what the caller waits (default 300 000 ms; the start goes on past it),
   and `:options` (`ClaudeCLI.Options`), checked before the row and kept on the agent row,
-  which its resume takes again; `:meta`, a map of the app's own keys kept on the agent row
+  which its resume takes again; `:effort`, how hard the model thinks, one of
+  `ClaudeCLI.efforts/0` (`low`, `medium`, `high`, `xhigh`, `max`), launched as `--effort <level>`
+  and kept on the delegate's row, which its resume launches with again (F-200), and refused
+  `{:effort, value}` for any other value, before any row, with none meaning no flag;
+  `:meta`, a map of the app's own keys kept on the agent row
   (`Sessions.start/5`; refused `{:bad, :meta}` when not a map), never read by the framework;
   and `interactive: true` for the terminal interface, refused
   `:no_registry` by a `Delegates` given no `registry:`. A brief longer than a launch's argument
   carries goes as a pointer to its file (`Mailbox.launch/4`, F-155).
+
+  A delegate's settings default `includeGitInstructions` to false, so it starts without Claude
+  Code's built-in git instructions; a main session keeps them. An app that wants a delegate's
+  back sets it true in that delegate's `:options` settings, which wins over the default (F-200).
 
   `wait: false` (F-170; `Delegate.tla`'s Queued): a start whose lease is queued answers at
   once, `{:ok, %{id, name, brief_uuid, session_id: nil, account, queued: position}}`, and goes
@@ -207,7 +216,9 @@ defmodule CodingAgentFramework.Delegates do
   """
   def start_delegate(delegates, parent, project, branch, model, brief, opts \\ []) do
     how = if Keyword.get(opts, :interactive, false), do: :interactive, else: :headless
-    own = {Keyword.get(opts, :options), Keyword.get(opts, :meta), Keyword.get(opts, :wait, true)}
+    meta = Keyword.get(opts, :meta)
+    wait = Keyword.get(opts, :wait, true)
+    own = {Keyword.get(opts, :options), meta, wait, Keyword.get(opts, :effort)}
     call(delegates, {:start, parent, project, branch, model, brief, own, how}, opts, 300_000)
   end
 
@@ -415,9 +426,16 @@ defmodule CodingAgentFramework.Delegates do
 
   defp fits(_s, _name), do: :ok
 
+  # The effort a start names (F-200): one of the levels `claude --effort` takes, or none. Checked
+  # before any row, so a bad one writes nothing.
+  defp effort_ok(nil), do: :ok
+
+  defp effort_ok(effort),
+    do: if(effort in ClaudeCLI.efforts(), do: :ok, else: {:refused, {:effort, effort}})
+
   @impl true
   def handle_call(
-        {:start, parent, project, branch, model, brief, {options, meta, wait}, how},
+        {:start, parent, project, branch, model, brief, {options, meta, wait, effort}, how},
         from,
         s
       ) do
@@ -426,6 +444,7 @@ defmodule CodingAgentFramework.Delegates do
              {:refused, {:bad, :start}},
          :ok <- interactive_ok(s, how),
          {:ok, options} <- Options.check(options),
+         :ok <- effort_ok(effort),
          true <- meta == nil or is_map(meta) or {:refused, {:bad, :meta}},
          {:ok, p} <- Turn.check(s.projects, project, branch),
          name = Turn.name(p, branch),
@@ -438,7 +457,7 @@ defmodule CodingAgentFramework.Delegates do
          {:ok, account} <- pick(s),
          :ok <- if(again, do: replaced(s, old), else: :ok) do
       # StartAsked: the row first, as starting, with its brief's uuid; then the brief's row.
-      row = %{host: s.host, name: name, branch: branch, model: model}
+      row = %{host: s.host, name: name, branch: branch, model: model, effort: effort}
       row = Map.merge(row, %{brief_uuid: Stream.uuid(), deadline: deadline(s, p)})
       id = Table.starting(s.db, row)
       announce(s, id)
@@ -745,11 +764,13 @@ defmodule CodingAgentFramework.Delegates do
   end
 
   # An interactive delegate runs Claude Code's terminal interface, as a main session does: role
-  # `:parent`, kind `:delegate`.
+  # `:parent`, kind `:delegate`. The row's effort goes in at every launch, a resume's too, and
+  # none is no flag.
   defp launch(s, row, p, how) do
     role = if how == :interactive, do: :parent, else: :delegate
     tree = %{project: p, branch: row.branch}
-    [role: role, kind: :delegate, worktree: tree, model: row.model] ++ s.launch
+    effort = if row[:effort], do: [effort: row.effort], else: []
+    [role: role, kind: :delegate, worktree: tree, model: row.model] ++ effort ++ s.launch
   end
 
   defp how(agent), do: if(agent && not Agents.headless?(agent), do: :interactive, else: :headless)

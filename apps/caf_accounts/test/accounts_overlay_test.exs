@@ -28,6 +28,33 @@ defmodule CodingAgentFramework.AccountsOverlayTest do
     assert Accounts.overlay(gone, :delegate, "a", %{}) == {:refused, {:not_prepared, "gone"}}
   end
 
+  # F-200: a default is only what nobody said; the account's file and then the agent's win.
+  test "an overlay's defaults sit under the account's file and the agent's own settings" do
+    home = Path.join(TestHost.test_dir(), "overlay-#{System.unique_integer([:positive])}")
+    {:ok, accounts} = Accounts.new(home, ["work"])
+    {:ok, account} = Accounts.prepare(accounts, "work", %{settings: %{"theme" => "dark"}})
+    defaults = %{"includeGitInstructions" => false, "theme" => "light"}
+    written = &JSON.decode!(File.read!(elem(&1, 1)))
+
+    # Nobody said: the default stands. The account's file wins over a default it names.
+    assert %{"includeGitInstructions" => false, "theme" => "dark"} =
+             written.(Accounts.overlay(account, :delegate, "d-1", %{}, defaults))
+
+    # The agent's own value wins over both.
+    own = %{"includeGitInstructions" => true, "theme" => "own"}
+
+    assert %{"includeGitInstructions" => true, "theme" => "own"} =
+             written.(Accounts.overlay(account, :delegate, "d-2", own, defaults))
+
+    # No defaults, as before: nothing is added.
+    refute Map.has_key?(
+             written.(Accounts.overlay(account, :delegate, "d-3", %{})),
+             "includeGitInstructions"
+           )
+
+    assert Accounts.overlay(account, :delegate, "d-4", %{}, :none) == {:refused, {:bad, :overlay}}
+  end
+
   test "an overlay's hooks add to the account's per event; they never replace them" do
     home = Path.join(TestHost.test_dir(), "overlay-#{System.unique_integer([:positive])}")
     {:ok, accounts} = Accounts.new(home, ["work"])

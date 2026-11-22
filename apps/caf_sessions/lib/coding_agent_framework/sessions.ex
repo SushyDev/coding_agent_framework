@@ -197,6 +197,8 @@ defmodule CodingAgentFramework.Sessions do
   @press 20_000
   # The actor of an answer the app's `dialog:` callback gives, in `Acts`.
   @app "app"
+  # What every delegate's settings say unless the account's file or its own options do (F-200).
+  @delegate_settings %{"includeGitInstructions" => false}
 
   @type outcome(ok) :: {:ok, ok} | {:refused, term} | {:unknown, term}
 
@@ -243,9 +245,12 @@ defmodule CodingAgentFramework.Sessions do
   project as `Sessions.Worktree.project/1` reads it; `cwd:` is then not read); the agent row's
   `kind:`, `parent:` and `project:` (the module doc's "The agent row"; a delegate with no parent
   is refused `{:missing, :parent}`, a main session with one `{:bad, :parent}`); and
-  `ClaudeCLI.session/3`'s `claude:`, `model:`, `env:`, `tool_timeout:`, `prompt:` and `mcp:` (the agent's own MCP config),
-  and `options:`, kept on the row with the model, each of which a resume that names none takes
-  again; and `meta:`, a map of the app's own keys kept on the row (refused `{:bad, :meta}`
+  `ClaudeCLI.session/3`'s `claude:`, `model:`, `effort:`, `env:`, `tool_timeout:`, `prompt:` and
+  `mcp:` (the agent's own MCP config), and `options:`, kept on the row with the model, each of
+  which a resume that names none takes again (`effort:` is not kept here: `Delegates` keeps a
+  delegate's and names it at each resume); a delegate's settings overlay, written at every
+  start, has `includeGitInstructions: false` under its own settings, which a main session's does
+  not (F-200); and `meta:`, a map of the app's own keys kept on the row (refused `{:bad, :meta}`
   otherwise, `Table.meta_text/1`), which any start that names none keeps from the row (F-154).
   Options:
   `:timeout`, to which a worktree's start adds its setup's deadline and its git commands'
@@ -2066,7 +2071,7 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   defp tree_place(state, row, role, launch, place, resume) do
-    kind = launch[:kind] || (resume && kind_of(row)) || default_kind(role)
+    kind = kind(row, role, launch, resume)
     parent = Keyword.get(launch, :parent, resume && row && row.parent)
     tree_project = place.tree && place.tree.project.name
     project = launch[:project] || tree_project || (row && row.project)
@@ -2125,6 +2130,10 @@ defmodule CodingAgentFramework.Sessions do
   defp default_kind(:delegate), do: :delegate
   defp default_kind(_role), do: :main
 
+  # The kind a start is of: the launch's, or on a resume the row's, or its role's default.
+  defp kind(row, role, launch, resume),
+    do: launch[:kind] || (resume && kind_of(row)) || default_kind(role)
+
   # Where a start runs: the directory it is given, or its worktree's path, which RowWritten
   # first checks no other row that has not ended holds.
   defp place(state, name, launch) do
@@ -2178,7 +2187,7 @@ defmodule CodingAgentFramework.Sessions do
   defp release(_state, _role, _launch), do: nil
 
   defp cli(role, account, name, resume, launch, own) do
-    opts = Keyword.take(launch, [:claude, :model, :env, :tool_timeout, :prompt, :mcp])
+    opts = Keyword.take(launch, [:claude, :model, :effort, :env, :tool_timeout, :prompt, :mcp])
     opts = opts ++ [name: name] ++ own
     opts = if resume, do: opts ++ [resume: resume], else: opts
     ClaudeCLI.session(role, account, opts)
@@ -2199,16 +2208,23 @@ defmodule CodingAgentFramework.Sessions do
   # row's. A start refused after the overlay's write leaves the file for the next to rewrite.
   # An interactive session's waiter hook goes into its overlay beside the agent's own settings;
   # the row keeps only the agent's own options, so a resume adds the hook again.
+  #
+  # A delegate's (headless or interactive, whatever its role) always has an overlay, with
+  # `includeGitInstructions: false` under the account's file and its own settings (F-200): Claude
+  # Code reads the setting as `?? true`, so a main session, which has none, keeps the git
+  # instructions, and an app that wants a delegate's back sets it true in the delegate's options.
   defp own(state, role, account, name, resume, launch, hooks \\ nil) do
-    row =
-      resume && not Keyword.has_key?(launch, :options) &&
-        Table.get(state.db, state.host.name, name)
-
-    given = if row, do: Options.decode(row.options), else: Options.check(launch[:options])
+    row = Table.get(state.db, state.host.name, name)
+    kept = resume && not Keyword.has_key?(launch, :options) && row
+    given = if kept, do: Options.decode(kept.options), else: Options.check(launch[:options])
+    delegate? = kind(row, role, launch, resume) == :delegate
 
     with {:ok, options} <- given,
          s = with_hooks(options[:settings], hooks),
-         {:ok, file} <- if(s, do: Accounts.overlay(account, role, name, s), else: {:ok, nil}),
+         s = if(delegate?, do: s || %{}, else: s),
+         defaults = if(delegate?, do: @delegate_settings, else: %{}),
+         {:ok, file} <-
+           if(s, do: Accounts.overlay(account, role, name, s, defaults), else: {:ok, nil}),
          do: {:ok, options, [options: options] ++ if(file, do: [settings: file], else: [])}
   end
 
@@ -2235,7 +2251,7 @@ defmodule CodingAgentFramework.Sessions do
   defp way(state, :delegate, account, name, cwd, resume, launch) do
     id = resume || Stream.uuid()
     start = if resume, do: [resume: id], else: [session_id: id]
-    keys = [:claude, :model, :env, :tool_timeout, :mcp]
+    keys = [:claude, :model, :effort, :env, :tool_timeout, :mcp]
 
     # The id names the delegate's directory, so a resume's is a plain id, never a path.
     with {:ok, stream} <- if(state.stream && state.home, do: {:ok, state.stream}, else: :error),
