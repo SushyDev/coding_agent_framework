@@ -36,6 +36,25 @@ defmodule CodingAgentFramework.Transcripts.Fold do
       iex> fold.limit.followed
       true
 
+  **An interrupt** (F-194): a turn a key ended (Esc, whoever pressed it, or the framework's own
+  interrupt) writes a user line whose text is `[Request interrupted by user]`, or `[Request
+  interrupted by user for tool use]` when a tool call was under way (both checked by name in
+  the 2.1.322 binary). `interrupts` keeps each, oldest first: `uuid`, `at` (ms), `offset`,
+  `tool_use`, and `turn_at`, the time of the prompt that opened the turn it ended (nil when
+  the fold read none), so a reader can tell whether the framework interrupted that turn.
+
+      iex> alias CodingAgentFramework.Transcripts.Fold
+      iex> go = ~s({"type":"user","timestamp":"2026-11-21T09:00:00.000Z","message":{"content":"go"}}\\n)
+      iex> esc = ~s({"type":"user","uuid":"i1","timestamp":"2026-11-21T09:00:05.000Z",) <>
+      ...>   ~s("message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}\\n)
+      iex> {:ok, fold} = Fold.take(Fold.new(), go <> esc)
+      iex> [%{uuid: "i1", tool_use: false, at: at, turn_at: turn_at}] = fold.interrupts
+      iex> at - turn_at
+      5000
+
+  A fold an earlier build stored has other keys, so it is read again from the file's start
+  (`Transcripts.Table.load_fold/1`), and its interrupts with it.
+
   The offset counts only whole lines: a partial last line waits for the next read. The fold
   keeps the last bytes before its offset (`seam`); a read resumes `byte_size(seam)` bytes before
   the offset, and when those bytes differ (the file shrank or was replaced), `take/2` answers
@@ -57,6 +76,8 @@ defmodule CodingAgentFramework.Transcripts.Fold do
               cost-state last-prompt content-replacement memory-mode artifact-comment-monitor
               artifact-autoreact-ledger fork-context-ref repl-mode)
   @usage ~w(input_tokens output_tokens cache_creation_input_tokens cache_read_input_tokens)
+  @tool_use "[Request interrupted by user for tool use]"
+  @interrupts ["[Request interrupted by user]", @tool_use]
 
   @type t :: %{
           offset: non_neg_integer,
@@ -69,6 +90,7 @@ defmodule CodingAgentFramework.Transcripts.Fold do
           subagents: %{String.t() => map},
           usage: %{String.t() => non_neg_integer},
           limit: map | nil,
+          interrupts: [map],
           problems: [map],
           problem_count: non_neg_integer
         }
@@ -87,6 +109,7 @@ defmodule CodingAgentFramework.Transcripts.Fold do
       subagents: %{},
       usage: zero(),
       limit: nil,
+      interrupts: [],
       problems: [],
       problem_count: 0
     }
@@ -409,7 +432,7 @@ defmodule CodingAgentFramework.Transcripts.Fold do
       results != [] -> Enum.reduce(results, fold, &result(&2, &1, e))
       notification(content) -> ended(fold, content, e)
       e["isMeta"] == true -> fold
-      true -> prompt(fold, content, e, at)
+      true -> fold |> interrupt(content, e, at) |> prompt(content, e, at)
     end
   end
 
@@ -419,6 +442,47 @@ defmodule CodingAgentFramework.Transcripts.Fold do
     do: if(notification(p), do: ended(fold, p, e), else: fold)
 
   defp read(fold, _type, _e, _at), do: fold
+
+  # Claude Code's line for a turn a key ended (F-194; the two texts checked by name in the
+  # 2.1.322 binary): kept with the time of the prompt that opened the turn it ended. It stays a
+  # prompt too, as every user line that is not a tool's result or meta is.
+  defp interrupt(fold, content, e, at) do
+    case Enum.find(prompt_texts(content), &(&1 in @interrupts)) do
+      nil ->
+        fold
+
+      text ->
+        opened = Enum.find(Enum.reverse(fold.prompts), &(not interrupt?(&1.text)))
+
+        entry = %{
+          uuid: e["uuid"],
+          at: ms(e["timestamp"]),
+          offset: at,
+          tool_use: text == @tool_use,
+          turn_at: opened && ms(opened.at)
+        }
+
+        %{fold | interrupts: fold.interrupts ++ [entry]}
+    end
+  end
+
+  defp prompt_texts(text) when is_binary(text), do: [String.trim(text)]
+
+  defp prompt_texts(blocks) when is_list(blocks),
+    do: for(%{"type" => "text", "text" => t} <- blocks, is_binary(t), do: String.trim(t))
+
+  defp prompt_texts(_), do: []
+
+  @doc """
+  Whether `text` is Claude Code's line for a turn a key ended: `[Request interrupted by user]`,
+  or `[Request interrupted by user for tool use]` when it ended in a tool call.
+
+      iex> CodingAgentFramework.Transcripts.Fold.interrupt?("[Request interrupted by user]")
+      true
+  """
+  @spec interrupt?(term) :: boolean
+  def interrupt?(text) when is_binary(text), do: String.trim(text) in @interrupts
+  def interrupt?(_), do: false
 
   # A prompt is a string, or a list of blocks when it holds an image.
   defp prompt(fold, content, e, at) do

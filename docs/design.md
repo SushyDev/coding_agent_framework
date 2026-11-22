@@ -424,6 +424,25 @@ a fact, nothing pruned. No metric is counted by code sprinkled through the parts
 | `prompt_wait` | each prompt's time open, by kind and depth, and the ones past their deadline |
 | `limited` | each usage limit of an account: its window and reset, the agents it ended, the time each waited and the remedy taken ("Usage limits") |
 
+**Every answer and a person's interventions are rows** (F-194, from F-179's new-4, so the
+metrics read who did what and when from the ledger, never from a guess). Each answer through
+`answer/4`, of every kind, is one row in `Acts`, claimed before its owner takes it and settled
+by the owner's answer (`Prompts.answering/4`): actor who answered, target the prompt's agent,
+act `answer`, and in its detail the prompt's id and kind, the choice and when the prompt
+opened; the row's `claimed_at` is when it was answered. A person's intervention is one row of
+actor `person` (or the name an app gives, `parts: %{interventions: %{person: …}}`), target the
+agent, written once per fact by `Interventions` (one per host, in `caf_recoveries`):
+
+- `typed`: a `UserPromptSubmit` of an interactive agent's session whose prompt carries no mark
+  of a row `Mailbox` handed that agent (every text the framework puts into a session carries
+  `[delivery <uuid>]`);
+- `interrupt`: Claude Code's interrupt line in an interactive agent's transcript (`[Request
+  interrupted by user]`, or `… for tool use]`, both checked by name in the 2.1.322 binary) on a
+  turn no `interrupt` act of the framework's was claimed in.
+
+A viewer attached is not read yet: no part owns a tmux hook (F-194's new-2). The one reading of
+the metrics over these rows (`metrics/2`) is the next unit's (F-194's new-1).
+
 Time in each state (per agent, per status) is a fold of the status facts. `look(what: :stuck)`
 is the agent-facing view of the same folds for its own subtree.
 
@@ -714,7 +733,8 @@ fold's held `can_use_tool` request as kind `permission`, id
 `permission:stream:<session>:<request id>`, no deadline (Claude Code waits on the stream),
 answered once through `Stream.answer/5` (the fold marks it answering before its line goes, so
 a second answer, the parent's through `answer` among them, is refused `settled`), and told to
-the parent once as any delegate's prompt. `Prompt.tla`'s header says why no property changes. Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
+the parent once as any delegate's prompt. `Prompt.tla`'s header says why no property changes. F-194 made each answer through `answer/4`
+a row in `Acts` ("Metrics and healing"). Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
 `expired` prompts kept shown, and the kinds that need a reading first.
 
 `Prompt.tla` (B1) is its contract: it instances `Hold` (one response, its deadline, its holder's
@@ -921,13 +941,13 @@ write fails its tests; an app's default routes it as any other. A cue of each to
 | `watch` | `Watch` | `Prompts` (a `remedy` prompt opened or closed), the healers (`Recoveries`, `AbsentMains`, `StuckBackgrounds`, `Limits`: an answer is their clear) |
 | `sessions:<host>` | `Sessions` | `Delegates`, `Mailbox`, `Mover`, `Scheduler`, `Mains` (a start that runs or is refused), `Prompts`, `AbsentMains`, `Limits` (a limit's phase moved, or a person's answer), the app's end of an owner's services |
 | `mains:<host>` | `Mains` | `Scheduler` (a main session's start ended) |
-| `transcripts:<host>:<account>` | `Transcripts` | `Delegates`, `Mailbox` (a waiter row's lines are read only on this cue, the waiters' and the take bound), `Usage` (a transcript's limit line, F-185), `Limits` (an agent's limit line, and a turn after it) |
+| `transcripts:<host>:<account>` | `Transcripts` | `Delegates`, `Mailbox` (a waiter row's lines are read only on this cue, the waiters' and the take bound), `Usage` (a transcript's limit line, F-185), `Limits` (an agent's limit line, and a turn after it), `Interventions` (an interrupt line, F-194) |
 | `delegates:<host>` | `Delegates` | `Mailbox`, `Scheduler` (a delegate's work ended) |
 | `mailbox` | `Mailbox` | `Delegates`, `Mover` |
 | `intake:<host>:<account>:waiters` | `Intake` | `Mailbox`, `Limits` (a turn ended: its screen read again) |
 | `usage:<host>:<account>` | `Usage` | `Scheduler` (a queued request's window ran out) |
 | `jobs` | `Jobs` | `Scheduler` (a job's work ended) |
-| `intake:<host>:<account>` | `Intake` | `Prompts`, `HooksSilent`, `Limits` (a `StopFailure` or a `quota_auto_resume_*`: the screen read again, F-186) |
+| `intake:<host>:<account>` | `Intake` | `Prompts`, `HooksSilent`, `Limits` (a `StopFailure` or a `quota_auto_resume_*`: the screen read again, F-186), `Interventions` (a prompt a person typed, F-194) |
 | `acts:…`, `services`, `copies`, `scheduler:<host>` (a lease's row, or `pressure: level` at each change of the level) | their parts | none |
 
 No cue says that a host's job or service changed, so `Jobs` and `Services` settle their rows on

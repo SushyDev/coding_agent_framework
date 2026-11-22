@@ -73,7 +73,8 @@ defmodule CodingAgentFramework.SurfaceTest do
 
     keys =
       keys ++
-        ~w(prompts mains absent_mains limits stuck_backgrounds hooks_silent mcp mcp_http ends)a
+        ~w(prompts mains absent_mains limits stuck_backgrounds hooks_silent interventions)a ++
+        ~w(mcp mcp_http ends)a
 
     assert Enum.sort(Map.keys(parts)) ==
              Enum.sort(keys ++ [:registry, :transcripts])
@@ -789,15 +790,15 @@ defmodule CodingAgentFramework.SurfaceTest do
     ],
     "mains" => [:scheduler],
     # A transcript's limit line is the account's record (F-185).
-    "transcripts" => [:delegates, :mailbox, :hooks_silent, :usage, :limits],
+    "transcripts" => [:delegates, :mailbox, :hooks_silent, :usage, :limits, :interventions],
     "delegates" => [:mailbox, :scheduler],
     "usage" => [:scheduler],
     "jobs" => [:scheduler],
     "mailbox" => [:delegates, :mover, :prompts],
     # The inbox reads every hook row's cue: a held request opens a prompt (F-179).
     # A StopFailure or a quota_auto_resume_* is the limit's screen to read again (F-186).
-    "intake" => [:prompts, :hooks_silent, :limits],
-    "waiters" => [:mailbox, :prompts, :hooks_silent, :limits],
+    "intake" => [:prompts, :hooks_silent, :limits, :interventions],
+    "waiters" => [:mailbox, :prompts, :hooks_silent, :limits, :interventions],
     # A symptom the healer asks about is a remedy prompt (F-182); its answer is the healers'
     # clear (F-183).
     "watch" => [:prompts, :recoveries, :absent_mains, :stuck_backgrounds, :limits],

@@ -313,6 +313,26 @@ defmodule CodingAgentFramework.Intake.Table do
     Store.select(db, "intake_events", @columns, where, [host])
   end
 
+  @doc """
+  The host's rows of hook event `event` whose id is past `past`, oldest first: what a reader
+  that keeps its place reads next (`Interventions`' prompts, F-194).
+
+      iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "events.db")
+      iex> {:ok, db} = CodingAgentFramework.Intake.Table.open(path)
+      iex> CodingAgentFramework.Intake.Table.events(db, "laptop", "UserPromptSubmit", 0)
+      []
+  """
+  @spec events(db, String.t(), String.t(), integer) :: [map]
+  def events(db, host, event, past),
+    do:
+      Store.select(
+        db,
+        "intake_events",
+        @columns,
+        "host = ?1 AND event = ?2 AND id > ?3 ORDER BY id",
+        [host, event, past]
+      )
+
   @doc "The rows with these ids; an id with no row is absent."
   @spec rows_by_id(db, [integer]) :: [map]
   def rows_by_id(db, ids), do: Store.rows_by_id(db, "intake_events", @columns, ids)

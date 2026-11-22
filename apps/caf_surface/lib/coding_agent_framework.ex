@@ -68,7 +68,7 @@ defmodule CodingAgentFramework do
   use Supervisor
 
   alias CodingAgentFramework.{AbsentMains, Accounts, Acts, ClaudeCLI, Copies, Delegates, Grants}
-  alias CodingAgentFramework.{Holder, HooksSilent, Host, Inlet, Limits, Logins}
+  alias CodingAgentFramework.{Holder, HooksSilent, Host, Inlet, Interventions, Limits, Logins}
 
   alias CodingAgentFramework.{
     Cues,
@@ -364,8 +364,10 @@ defmodule CodingAgentFramework do
   Answers prompt `id` with `choice`, as `who` (a person's name), once, through the part that owns
   it (`Prompts.answer/5` says each kind's choices): a held request's `Intake`, a dialog's
   `Sessions`, an ask's `Mailbox`; `{:withdraw, reason}` withdraws an ask. A late or second
-  answer is refused `{:refused, :settled}`. Answers the owner's `{:ok, value}`, `{:refused,
-  :no_instance}`, or as `Prompts.answer/5` does.
+  answer is refused `{:refused, :settled}`. Each answer that reaches its owner is one row in
+  `Acts` (act `answer`, actor `who`, F-194: `Prompts.answering/4`), read with the fault ledger's
+  cue. Answers the owner's `{:ok, value}`, `{:refused, :no_instance}`, or as `Prompts.answer/5`
+  does.
 
       CodingAgentFramework.answer("a", id, "allow", "sam")
       #=> {:ok, :sent}
@@ -496,6 +498,7 @@ defmodule CodingAgentFramework do
       limits: Limits.reads(),
       stuck_backgrounds: StuckBackgrounds.reads(),
       hooks_silent: HooksSilent.reads(),
+      interventions: Interventions.reads(),
       prompts: Prompts.reads(),
       ends: Ends.reads()
     ]
@@ -797,6 +800,7 @@ defmodule CodingAgentFramework do
            {
              Prompts,
              # A headless delegate's permission request is its fold's (F-189's new-2).
+             # Each answer is a row there (F-194).
              host: host,
              intake: pid.(:intake),
              intake_db: db,
@@ -809,6 +813,7 @@ defmodule CodingAgentFramework do
              logins_db: db,
              stream: pid.(:stream),
              stream_db: db,
+             acts: pid.(:acts),
              notify: notify,
              name: {:via, Elixir.Registry, {names(c.instance), :prompts}}
            }
@@ -960,6 +965,18 @@ defmodule CodingAgentFramework do
             watch: pid.(:watch),
             host: host,
             interval: every}
+         end},
+        # The reader of a person's interventions (F-194): each a row in `Acts`, read from the
+        # hooks' prompts and the transcripts' interrupt lines, for the metrics.
+        {:interventions,
+         fn pid ->
+           {Interventions,
+            agents: w.agents,
+            transcripts: pid.(:transcripts),
+            intake_db: db,
+            mailbox_db: db,
+            acts: pid.(:acts),
+            host: host}
          end},
         {:copies,
          fn _ -> {Copies, dir: Config.path(c, "parts/copies"), programs: p, notify: notify} end},
