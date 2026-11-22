@@ -404,7 +404,8 @@ Both are folds of what is already recorded: every act a row in the `Ledger`, eve
 a fact, nothing pruned. No metric is counted by code sprinkled through the parts.
 
 **Metrics** are named folds, each with its evidence (the rows it counted), queried by
-`Watch.metrics/2` over a window and summed by `Watch.digest/2`. The first named symptoms:
+`Watch.metrics/2` over a window (built in F-199 as `CodingAgentFramework.metrics/2` over
+`Watch.Metrics.fold/2`, below) and summed by `Watch.digest/2`. The first named symptoms:
 
 | Symptom | Evidence |
 |---|---|
@@ -440,8 +441,44 @@ agent, written once per fact by `Interventions` (one per host, in `caf_recoverie
   interrupted by user]`, or `… for tool use]`, both checked by name in the 2.1.322 binary) on a
   turn no `interrupt` act of the framework's was claimed in.
 
-A viewer attached is not read yet: no part owns a tmux hook (F-194's new-2). The one reading of
-the metrics over these rows (`metrics/2`) is the next unit's (F-194's new-1).
+- `attach` (F-199, from F-194's new-2): a viewer attached, written by `TmuxSampler`, which reads
+  the server's clients (`list-clients`) at each sample: a client not there at the last sample
+  is one row, target the agent whose tagged pane its session shows, under its key
+  `attach:<host>:<server>:<tty>:<created>`, so a restart writes none twice. No hook is set: a
+  framework that was down reads the attach at its next sample.
+
+**One reading of the metrics** (F-199, from F-194's new-1): `CodingAgentFramework.metrics(config,
+since:, until:, by:)`, the `Watch` box's `metrics/2`, reads the rows once, in one read-only
+snapshot of the instance's store, and folds them (`Watch.Metrics.fold/2`, a pure module with no
+table of its own). The rules are those of the baseline an app measured itself by before it
+moved onto the framework, so the two compare (decided in F-199's brief):
+
+- **Cuts** are UTC: `by: :day`, `:week` (ISO, Monday to Sunday) or `:all`. A delegate counts in
+  the period it started, a recovery in the period it acted, a prompt in the period it opened, a
+  person's act in the period it was claimed, a usage limit in the period it began.
+- **Stalled**: a delegate on which a stall's symptom fired, once, by its own row, the bound the
+  symptom's own; a stall that cleared before any symptom fired is not counted.
+- **Late**: a report that reached the parent by a recovery's path: (a) its `Stop` lost and the
+  report taken from the transcript by a recovery, (b) held behind a background command and
+  released by its healer, (c) relayed more than 60 s after it was taken. Each says which.
+- **Killed**: a delegate whose process went with no act of the framework's, a crash included;
+  restarted by a recovery, the resumes after such a kill.
+
+| Metric | Rows | Rule |
+|---|---|---|
+| `started` | `delegates` | each row, by its `created_at` |
+| `reported` | `delegates`; `messages` | the reply or notice to the row's `brief_uuid`; its time, that row's `created_at` less the delegate's |
+| `stalled` | `delegates`; `symptoms` | `stuck_background` on the delegate's name while the row is the name's latest; a `Stop` that never came is in no row yet (`unread`) |
+| `late` | `delegates`; `messages`; `acts` | (b) the report stored after the `stuck_backgrounds` healer's `end` on its delegate; (c) the report's row `delivered` more than 60 s after it was stored; (a) is in no row yet (`unread`) |
+| `killed`, `restarted` | `delegates`; `acts` | a resume counted on the row or claimed by `Delegates` for it, and no `stop`, `end`, `end_main` or `move` claimed on its name from its start to that resume; each such resume by its outcome |
+| `dropped` | `messages` | a report settled `unknown`, or made due again |
+| `limited`, `moves` | `symptoms`; `acts` | each `limited` symptom, its account and window, and its time from the reset to its pass; each `move` of `Limits`, by outcome |
+| `prompts` | `messages`; `symptoms`; `holds`; `acts` | each ask, remedy prompt, hold still open and prompt an answer row names, opened and answered, by kind, and the time to answer; a hold decided by any other has lost its open time (`unread`, F-194's new-4) |
+| `recoveries` | `acts`; `symptoms` | each act of a healer (`recoveries:`, `absent_mains:`, `stuck_backgrounds:`, `limits:`, `delegates:`) or a person's remedy, by outcome; and each symptom asked of a person |
+| `interventions` | `acts` | each answer of `answer/4`, each `typed`, `interrupt` and `attach` fact under its own key, and the operator's `stop`, `end` and `end_main`, by act and by actor |
+
+A rule whose fact no row holds yet counts nothing, and its metric names it in `unread`, so a
+zero is never read as measured. Each metric carries its evidence, the rows it counted.
 
 Time in each state (per agent, per status) is a fold of the status facts. `look(what: :stuck)`
 is the agent-facing view of the same folds for its own subtree.

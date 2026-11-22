@@ -13,6 +13,8 @@ defmodule CodingAgentFramework.InletTest.Probe do
   @impl true
   def list_panes(s), do: Tmux.list_panes(s.inner)
   @impl true
+  def list_clients(s), do: Tmux.list_clients(s.inner)
+  @impl true
   def capture(s, pane, session), do: Tmux.capture(s.inner, pane, session)
   @impl true
   def kill_pane(s, pane, session), do: Tmux.kill_pane(s.inner, pane, session)
