@@ -215,6 +215,9 @@ defmodule CodingAgentFramework.AbsentMains do
              detail ++ healer(s, actor)
            ) do
       case s.resume.(sym.target) do
+        # Every usable account limited (F-196): the resume waits as its own row, a prompt, and
+        # goes on at the reset; nothing to verify now, and no fault of the remedy.
+        {:ok, %{waiting: until}} -> Acts.settle(s.acts, id, :verified, answer: {:waiting, until})
         {:ok, _} -> verify(s, id, sym)
         {:refused, why} -> settle(s, id, sym, :failed, {:refused, why}, acted: false)
         {:unknown, why} -> settle(s, id, sym, :unknown, {:unknown, why}, acted: true)

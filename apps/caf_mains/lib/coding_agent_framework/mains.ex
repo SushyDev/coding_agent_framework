@@ -701,10 +701,8 @@ defmodule CodingAgentFramework.Mains do
     |> Enum.reduce(s, &repick(&2, &1))
   end
 
-  @request %{project: nil, brief: nil, from: nil, model: nil, meta: nil, resume: nil, kept: nil}
-
   defp repick(s, row) do
-    {start, _} = Store.load(row.start, @request)
+    start = Starts.request(row)
 
     with {:ok, p} <- Map.fetch(s.projects, start.project) |> known(start.project),
          start = Map.put(start, :p, p),

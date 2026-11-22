@@ -66,6 +66,8 @@ defmodule CodingAgentFramework.Delegates.Table do
       do: raise(CompileError, description: "#{status} is not a status of delegates")
   end
 
+  @request %{parent: nil, project: nil, options: nil, brief: nil, how: :headless, meta: nil}
+
   @type db :: Store.db()
 
   @doc "The statuses of a call of `Sessions` under way."
@@ -191,6 +193,13 @@ defmodule CodingAgentFramework.Delegates.Table do
     [[id]] = Store.insert(db, "delegates", fields, "RETURNING id")
     id
   end
+
+  @doc """
+  The start's request a `waiting` row keeps (`waiting/2`), read back as a term: `%{parent,
+  project, options, brief, how, meta}`, each nil (`how` `:headless`) for a row with none.
+  """
+  @spec request(map) :: map
+  def request(row), do: elem(Store.load(row[:start], @request), 0)
 
   @doc "Sets `fields` on row `id`."
   @spec update(db, integer, keyword) :: :ok

@@ -11,7 +11,7 @@ defmodule CodingAgentFramework.PromptsTest do
   import CodingAgentFramework.TestHost
 
   alias CodingAgentFramework.{Accounts, Acts, Grants, Inlet, Intake, Logins, Mailbox, Prompts}
-  alias CodingAgentFramework.{ScreenStandIn, Sessions, Tmux}
+  alias CodingAgentFramework.{Delegates, ScreenStandIn, Sessions, Tmux, Transcripts, Usage}
   alias CodingAgentFramework.{SessionsSetup, Stream, Watch}
 
   @trust "Yes, I trust this folder"
@@ -59,7 +59,7 @@ defmodule CodingAgentFramework.PromptsTest do
     watch = start_supervised!({Watch, db: db, remedies: Watch.default_remedies(), notify: cue})
     acts = start_supervised!({Acts, db: db, start_id: "s1", host: "test", instance: "t"})
     popts = [host: "test", intake: intake, intake_db: db, sessions: sessions, sessions_db: db]
-    popts = popts ++ [mailbox: mailbox, watch: watch, watch_db: db, acts: acts]
+    popts = popts ++ [mailbox: mailbox, watch: watch, watch_db: db, acts: acts, acts_db: db]
     popts = popts ++ [notify: &send(me, {:prompts, &1})]
 
     {:ok,
@@ -298,6 +298,68 @@ defmodule CodingAgentFramework.PromptsTest do
     assert {:refused, {:bad, :choice}} = Prompts.answer(ctx.prompts, id, "approve", "sam")
     assert {:ok, :answered} = Prompts.answer(ctx.prompts, id, "act", "sam")
     assert {:ok, [%{answer: "act", answered_by: "sam"}]} = Watch.read(ctx.watch, state: "k2")
+
+    # F-196: answered `act`, it shows `answering` while the act is the healer's to take and while
+    # it runs, and leaves once the act's row has ended; its outcome is that row, a fault here.
+    assert {:ok, [%{id: ^id, status: "answering", text: text}]} =
+             Prompts.read(ctx.prompts, kind: "remedy")
+
+    assert text == "lost_viewer of d1: sam answered act; its healer takes it next"
+    assert {:refused, :settled} = Prompts.answer(ctx.prompts, id, "leave", "sam")
+    # Another act of the target, or another person's, is not this one.
+    {:ok, _} = Acts.claim(ctx.acts, "sam", "d1", "k1", :reopen, detail: %{symptom: "k1"})
+    {:ok, act} = Acts.claim(ctx.acts, "sam", "d1", "k2", :reopen, detail: %{symptom: "k2"})
+
+    assert {:ok, [%{id: ^id, status: "answering", text: text}]} =
+             Prompts.read(ctx.prompts, kind: "remedy")
+
+    assert text =~ "its reopen is claimed"
+    {:ok, :failed} = Acts.settle(ctx.acts, act, :failed, reason: :no_pane)
+    assert {:ok, []} = Prompts.read(ctx.prompts, kind: "remedy")
+    assert {:ok, [%{id: ^act, outcome: "failed"}]} = Acts.faults(ctx.acts)
+  end
+
+  # Limit.tla's StartRefusedAtLimit and AnswerLeave (F-196): a start that every usable account
+  # refuses at a limit is its owner's row, a limit prompt with the row's deadline, its parent's,
+  # answered once through `Delegates`.
+  test "a start waiting at a usage limit is a limit prompt, its owner's row, answered once",
+       ctx do
+    db = Path.join(ctx.dir, "caf.db")
+    {:ok, accounts} = Accounts.new(Path.join(ctx.dir, "home"), ["work"])
+    usage = start_supervised!({Usage, accounts: accounts, host: "test", db: db})
+    resets = div(System.os_time(:millisecond), 1000) + 3_600
+    limit = %{"status" => "rejected", "resetsAt" => resets, "rateLimitType" => "five_hour"}
+    fact = %{at: System.os_time(:millisecond), evidence: %{"source" => "test"}, limit: limit}
+    {:ok, _} = Usage.take(usage, "work", fact)
+    transcripts = {Transcripts, programs: programs(), accounts: ["work"], db: db}
+    project = %{name: "app", repo: ctx.dir, trunk: "main", setup: [], setup_timeout: 1_000}
+    project = Map.merge(project, %{env: %{}, branches: ~r/\Aunit\//, cap: 1})
+
+    dopts = [host: "test", db: db, sessions_db: db, sessions: ctx.sessions, stream: ctx.stream]
+    dopts = dopts ++ [usage: usage, accounts: accounts, mailbox: ctx.mailbox, launch: []]
+    dopts = dopts ++ [transcripts: start_supervised!(transcripts), projects: %{"app" => project}]
+    delegates = start_supervised!({Delegates, dopts})
+    popts = ctx.popts ++ [delegates: delegates, delegates_db: db]
+    prompts = start_supervised!(Supervisor.child_spec({Prompts, popts}, id: :starts))
+
+    assert {:ok, %{id: row, waiting: until}} =
+             Delegates.start_delegate(delegates, "main", "app", "unit/one", "opus", "Go.")
+
+    id = "limit:start:delegate:#{row}"
+    assert {:ok, [p]} = Prompts.read(prompts, kind: "limit")
+    assert %{id: ^id, agent: "app-unit-one", parent: "main", project: "app", status: "open"} = p
+    assert p.options == ["wait", "leave"] and p.deadline == until + 120_000
+    assert p.text =~ "delegate app-unit-one waits to start until a usage limit's reset"
+    # It has no agent row yet: its parent places it in the subtree.
+    assert {:ok, [%{id: ^id}]} = Prompts.read(prompts, subtree: "main")
+
+    assert {:refused, {:bad, :choice}} = Prompts.answer(prompts, id, "go_on", "sam")
+    assert {:ok, :left} = Prompts.answer(prompts, id, "leave", "sam")
+    assert {:refused, :settled} = Prompts.answer(prompts, id, "wait", "sam")
+    assert {:ok, []} = Prompts.read(prompts, kind: "limit")
+
+    assert {:ok, [%{act: "answer", target: "app-unit-one", outcome: "verified"}]} =
+             Acts.rows(ctx.acts, actor: "sam")
   end
 
   # F-181: an account whose login a check refused is a login prompt, with no agent, until a

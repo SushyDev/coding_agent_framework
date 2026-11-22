@@ -44,6 +44,8 @@ defmodule CodingAgentFramework.Mains.Starts do
   # Added after a file's table may have been made (`resume`, F-143; the wait at a limit, F-196).
   @added ["resume TEXT", "until INTEGER", "waited TEXT", "start BLOB", "tell TEXT"]
 
+  @request %{project: nil, brief: nil, from: nil, model: nil, meta: nil, resume: nil, kept: nil}
+
   @type db :: Store.db()
 
   @doc "Opens (and creates) the file at `path`, with the table."
@@ -86,6 +88,13 @@ defmodule CodingAgentFramework.Mains.Starts do
   @doc "The host's rows whose sender is owed a waited start's outcome (`tell` names it)."
   @spec owed(db, String.t()) :: [map]
   def owed(db, host), do: select(db, "host = ?1 AND tell IS NOT NULL", [host])
+
+  @doc """
+  The start's request a `waiting` row keeps (`waiting/2`), read back as a term: `%{project,
+  brief, from, model, meta, resume, kept}`, each nil for a row with none.
+  """
+  @spec request(map) :: map
+  def request(row), do: elem(Store.load(row[:start], @request), 0)
 
   @doc "Sets `fields` on row `id`."
   @spec update(db, integer, keyword) :: :ok

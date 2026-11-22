@@ -123,7 +123,7 @@ defmodule CodingAgentFramework.Delegates do
   alias CodingAgentFramework.{Accounts, Acts, Inlet, Intake, Mailbox, Registry}
   alias CodingAgentFramework.Scheduler
   alias CodingAgentFramework.Intake.Table, as: IntakeTable
-  alias CodingAgentFramework.{Sessions, Store, Stream, Transcripts, Usage}
+  alias CodingAgentFramework.{Sessions, Stream, Transcripts, Usage}
   alias CodingAgentFramework.Mailbox.Transport.Waiter
   alias CodingAgentFramework.Sessions.Turn, as: SessionsTurn
   alias CodingAgentFramework.Transcripts.Fold
@@ -967,9 +967,7 @@ defmodule CodingAgentFramework.Delegates do
 
   defp wait_answer(_s, _row, _choice, _who), do: {:refused, {:bad, :choice}}
 
-  # The start's request a waiting row keeps, read back as a term (`Store.load/2`).
-  @request %{parent: nil, project: nil, options: nil, brief: nil, how: :headless, meta: nil}
-  defp request(row), do: elem(Store.load(row.start, @request), 0)
+  defp request(row), do: Table.request(row)
 
   # Delegate.tla's StartTold and StartCleared (F-170): a start that answered queued at once,
   # once its row has left starting with no call under way, is told to the parent its row names,

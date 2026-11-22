@@ -24,7 +24,9 @@ defmodule CodingAgentFramework.MCP do
     `wait: false`, the default for an agent (it keeps working), a start whose lease is queued
     answers `%{delegate: name, queued: position}` at once, and its outcome comes later as a
     notice from `framework`, once (F-170); the operator's start waits for the lease unless it
-    says `wait: false`;
+    says `wait: false`. A start that finds every usable account at a usage limit answers
+    `%{delegate: name, waiting: until}` at once, whatever `wait`, and its outcome comes as that
+    notice too (F-196);
   - `run_delegate(project, branch, model, brief, timeout)`: as `start_delegate`, then the
     mailbox's `await/4` on the report, the answer to the brief's uuid, all within `timeout`
     (ms, at most the `:cap`, a day unless the app says, and under the client's tool timeout less the margin:
@@ -38,8 +40,9 @@ defmodule CodingAgentFramework.MCP do
   - `start_main(project, name, brief)` (F-141): `Grants.may_start_main?/2` (a main session, or
     the operator), then the mains' `start_main/5`, the brief from the caller; answers `%{main:
     name}` once the session runs, `{:unknown, {:dialog, kind}}` while its start waits on a
-    person's answer to a startup dialog, or the start's refusal (`{:running, name}` for a name
-    in use or reserved);
+    person's answer to a startup dialog, `%{main: name, waiting: until}` while it waits at a
+    usage limit (F-196; its outcome a notice from `framework` to the caller), or the start's
+    refusal (`{:running, name}` for a name in use or reserved);
   - `ask(questions)`: the mailbox's `ask/4`, which checks the questions and the caller and
     stores the ask for the app; answers `%{ask: id}` at once. The person's answer comes later
     as a message (`Mailbox.answer/4`), or its withdrawal with the reason (`Mailbox.withdraw/4`);
@@ -655,7 +658,7 @@ defmodule CodingAgentFramework.MCP do
     with {:ok, wait} <- lease_wait(ctx, caller, args),
          {:ok, start} <- start_args(ctx, args, caller),
          {:ok, %{name: name} = started} <- start_delegate(ctx, caller, start, @start_wait, wait),
-         do: {:ok, Map.merge(%{delegate: name}, Map.take(started, [:already, :queued]))}
+         do: {:ok, Map.merge(%{delegate: name}, Map.take(started, [:already, :queued, :waiting]))}
   end
 
   defp act(ctx, caller, _id, "run_delegate", %{"timeout" => t} = args)
@@ -688,8 +691,8 @@ defmodule CodingAgentFramework.MCP do
          true <- ctx.mains != nil or {:refused, :no_mains},
          {mod, server} = ctx.mains,
          opts = [from: caller, model: a["model"], timeout: @start_wait, meta: meta],
-         {:ok, %{name: name}} <- mod.start_main(server, p, n, b, opts),
-         do: {:ok, %{main: name}}
+         {:ok, %{name: name} = started} <- mod.start_main(server, p, n, b, opts),
+         do: {:ok, Map.merge(%{main: name}, Map.take(started, [:waiting]))}
   end
 
   # A main session's end is the operator's alone (Team.tla's MainEnds): no agent ends one.
