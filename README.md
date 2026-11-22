@@ -316,7 +316,10 @@ Built, each from a checked model in `model/tla/`:
   delegate's or a main's start or resume that finds every usable account limited is written
   `waiting` with the soonest reset, shown in the inbox as a `limit` prompt answered `wait` (its
   default) or `leave`, and at the reset picks again and asks for its lease under its own request
-  id; and a `remedy` answered `act` shows `answering` until its act's row ends.
+  id; and a `remedy` answered `act` shows `answering` until its act's row ends;
+- no message into a delegate's own turn (F-204, against `Remedies.tla`'s `NoMessageIntoOwnTurn`):
+  a background command's end reads the delegate busy until the turn it begins has started and
+  ended, bounded by `wake:` (30 s), so a parent's message waits through that turn.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
