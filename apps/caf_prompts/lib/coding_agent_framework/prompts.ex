@@ -16,9 +16,11 @@ defmodule CodingAgentFramework.Prompts do
   | `dialog` | `Sessions`' running row whose screen shows a numbered menu no rule names (F-198, `Sessions.Menu`) | the row's last read of its pane found it, and no press of it was sent |
   | `ask` | `Mailbox`'s ask, from an agent to the operator | no answer row and no withdrawal |
   | `remedy` | `Watch`'s symptom state the healer left to a person (F-182) | the row is `asked` |
+  | `remedy` | the same row answered `act` (F-196), shown `answering` | no row in `Acts` of that act has ended |
   | `login` | `Logins`' row of an account whose login a check refused (F-181) | no check found it logged in since |
   | `limit` | `Sessions`' agent row at a usage limit the healer left to a person (F-186) | its step is `prompt` |
   | `usage_credits` | `Sessions`' agent row on the usage limit menu, the account able to spend | its step is `credits` |
+  | `limit` | `Delegates`' or `Mains`' start row refused at a usage limit (F-196) | the row is `waiting`, not answered for this reset |
 
   A later kind is one more clause of `list/2` and of `answer/5`, and the same data.
 
@@ -28,7 +30,9 @@ defmodule CodingAgentFramework.Prompts do
   `"stop_cap:<intake id>"`, `"dialog:<agent>:<start>:<dialog>"`, `"dialog:<agent>:<at>:menu"`
   (`at` the wall-clock ms of the read that found the menu),
   `"ask:<mailbox id>"`, `"remedy:<symptom id>"`, `"login:<account>"`, `"limit:<agent>:<until>"`,
-  `"usage_credits:<agent>:<until>"`); `status` is `open`, `answering` (an answer is on its way to the owner),
+  `"usage_credits:<agent>:<until>"`, `"limit:start:delegate:<row>"` and `"limit:start:main:<row>"`);
+  `status` is `open`, `answering` (an answer is on its way to the owner; for a remedy answered
+  `act`, its act not yet ended),
   or for a dialog `cut` or `unknown` (a restart cut its press: a person clears it,
   `Sessions.clear_dialog/4`); `agent` is the agent whose session asks (nil for a session no
   agent row names; a remedy's is its symptom's target when an agent row has that name; a
@@ -37,8 +41,15 @@ defmodule CodingAgentFramework.Prompts do
   or for an ask its questions, each with its options; `opened_at` and `deadline` wall-clock ms,
   `deadline` nil for a kind that waits for ever (a stream's request among them: Claude Code
   waits on the stream for its answer). A `usage_credits` prompt has the deadline the
-  healer set, whose default is the stop, the healer's (`CodingAgentFramework.Limits`); a `limit`
-  prompt has none.
+  healer set, whose default is the stop, the healer's (`CodingAgentFramework.Limits`); an
+  agent's `limit` prompt has none, and a start's has its row's: the reset plus the margin, at
+  which its owner takes the default, the wait, and picks its account again.
+
+  **A remedy answered `act`** (F-196, from F-193's new-2): the person's act is the healer's to
+  take at its next check, under a claim in `Acts` whose actor is the person and whose detail's
+  `symptom` is the state. With `acts_db:` the prompt stays, `answering`, until that row has
+  ended (settled or interrupted), and then leaves the inbox: its outcome is the act's row, a
+  fault in the fault ledger when it failed.
 
   **One answer.** `answer/5` checks the prompt read now (still open, the choice one it offers)
   and hands the choice to its owner, whose own guard is the claim that lets one answer in
@@ -63,7 +74,8 @@ defmodule CodingAgentFramework.Prompts do
 
   use GenServer
 
-  alias CodingAgentFramework.{Acts, Intake, Logins, Mailbox, Sessions, Stream, Watch}
+  alias CodingAgentFramework.{Acts, Delegates, Intake, Logins, Mailbox, Mains, Sessions, Stream}
+  alias CodingAgentFramework.Watch
   alias CodingAgentFramework.Sessions.{Agents, Limit, Menu}
 
   @timeout 5_000
@@ -95,8 +107,10 @@ defmodule CodingAgentFramework.Prompts do
   `watch:` (the `Watch`) and `watch_db:` (its file), `acts:` (where each answer is a row,
   `answering/4`), and optionally `logins:` (the instance's
   `Logins`) with `logins_db:` (its file), `stream:` (the host's `Stream`) with `stream_db:` (its
-  file), `notify:` (a function of one cue) and `name:` (for the embedding app's tree;
-  the library looks up no name).
+  file), `delegates:` and `delegates_db:`, `mains:` and `mains_db:` (the starts that wait at a
+  usage limit, F-196), `acts_db:` (`acts:`'s file, where a remedy answered `act` is read),
+  `notify:` (a function of one cue) and `name:` (for the embedding app's tree; the library
+  looks up no name).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
@@ -110,7 +124,11 @@ defmodule CodingAgentFramework.Prompts do
 
   @doc "What it reads, for `Cues`: its owners' topics, each cue a read of every prompt."
   @spec reads() :: %{topics: [String.t()], cue: (pid, map -> :ok)}
-  def reads, do: %{topics: ~w(intake sessions mailbox watch logins stream), cue: &cue/2}
+  def reads,
+    do: %{
+      topics: ~w(intake sessions mailbox watch logins stream delegates mains acts),
+      cue: &cue/2
+    }
 
   @doc "The kinds it reads."
   @spec kinds() :: [String.t()]
@@ -150,6 +168,9 @@ defmodule CodingAgentFramework.Prompts do
     which its healer takes at its next check under `who`'s claim, F-189's new-7) or `"leave"`;
   - `login`: `"check"`, once a person logged the account in (`bin/caf-login`): its login is
     checked again now (`Logins.recheck/3`), and the prompt closes when it is logged in;
+  - a start's `limit` (`limit:start:…`): `"wait"` (its default: the row waits for its reset,
+    and the prompt leaves) or `"leave"` (the row refused `left`, its parent told),
+    `Delegates.answer_wait/4` or `Mains.answer_wait/4`;
   - `limit`: `"go_on"` (the healer reads the screen again and the go-ons in a row start again)
     or `"leave"` (nothing more acts on that limit), and `"move"` where it offers one (a main's
     limit far from its reset, F-191: the healer moves it to the account the prompt names, the
@@ -258,8 +279,12 @@ defmodule CodingAgentFramework.Prompts do
          {:ok, agents} <- Agents.open(Keyword.fetch!(opts, :sessions_db), host),
          {:ok, wdb} <- Watch.Table.open(Keyword.fetch!(opts, :watch_db)),
          {:ok, ldb} <- logins_db(opts[:logins_db]),
-         {:ok, sdb} <- stream_db(opts[:stream_db]) do
+         {:ok, sdb} <- stream_db(opts[:stream_db]),
+         {:ok, ddb} <- maybe(opts[:delegates_db], &Delegates.Table.open_read/1),
+         {:ok, mdb} <- maybe(opts[:mains_db], &Mains.Starts.open/1),
+         {:ok, adb} <- maybe(opts[:acts_db], &Acts.Table.open/1) do
       owners = Map.new(~w(intake sessions mailbox watch acts)a, &{&1, Keyword.fetch!(opts, &1)})
+      owners = Map.merge(owners, %{delegates: opts[:delegates], mains: opts[:mains]})
 
       s = %{
         host: host,
@@ -268,6 +293,9 @@ defmodule CodingAgentFramework.Prompts do
         wdb: wdb,
         ldb: ldb,
         sdb: sdb,
+        ddb: ddb,
+        mdb: mdb,
+        adb: adb,
         owners: Map.merge(owners, %{logins: opts[:logins], stream: opts[:stream]}),
         notify: Keyword.get(opts, :notify, fn _ -> :ok end),
         # id -> status, as the last read found them: what the next cue says moved.
@@ -288,6 +316,9 @@ defmodule CodingAgentFramework.Prompts do
 
   defp stream_db(nil), do: {:ok, nil}
   defp stream_db(path), do: Stream.Table.open(path)
+
+  defp maybe(nil, _open), do: {:ok, nil}
+  defp maybe(path, open), do: open.(path)
 
   @impl true
   def handle_continue(:read, s), do: {:noreply, reread(s)}
@@ -368,7 +399,11 @@ defmodule CodingAgentFramework.Prompts do
           requests(s, rows) ++
           dialogs(rows) ++
           menus(rows) ++
-          Enum.map(asks, &ask(&1, rows)) ++ remedies(s, rows) ++ logins(s) ++ limits(rows)
+          Enum.map(asks, &ask(&1, rows)) ++
+          remedies(s, rows) ++
+          acting(s, rows) ++
+          logins(s) ++
+          limits(rows) ++ starts(s)
 
       {:ok, Enum.sort_by(prompts, &{&1.opened_at || 0, &1.id})}
     end
@@ -531,6 +566,78 @@ defmodule CodingAgentFramework.Prompts do
     end
   end
 
+  # A remedy answered `act` (F-196): `answering` while the person's act is the healer's to take
+  # or under way, gone once its row in `Acts` has ended, whatever its outcome.
+  defp acting(%{adb: nil}, _rows), do: []
+
+  defp acting(s, rows) do
+    by_name = Map.new(rows, &{&1.name, &1})
+
+    for sym <- Watch.Table.select(s.wdb, "status = 'answered' AND answer = 'act'", []),
+        act <- [person_act(s, sym)],
+        act == nil or act.status in ["claimed", "acted"] do
+      now = if act, do: "its #{act.act} is #{act.status}", else: "its healer takes it next"
+
+      fields = %{
+        id: "remedy:#{sym.id}",
+        kind: "remedy",
+        status: "answering",
+        subagent: nil,
+        text: "#{sym.kind} of #{sym.target}: #{sym.answered_by} answered act; " <> now,
+        options: Watch.choices(sym),
+        opened_at: sym.asked_at,
+        deadline: nil
+      }
+
+      Map.merge(of(by_name[sym.target]), fields)
+    end
+  end
+
+  # The person's act of an answered state, one read of the rows (F-193's new-2): its row in
+  # `Acts` by its actor and target whose detail's `symptom` is the state.
+  defp person_act(s, sym) do
+    s.adb
+    |> Acts.Table.select("actor = ?1 AND target = ?2", [sym.answered_by, sym.target])
+    |> Enum.find(&(decode(&1.detail)["symptom"] == sym.state))
+  end
+
+  # A start refused at a usage limit (F-196): its owner's row while it waits, open until a person
+  # answers it for this reset; its deadline the row's, at which the owner takes the wait.
+  defp starts(s) do
+    waiting =
+      Enum.map(
+        if(s.ddb, do: Delegates.Table.with_status(s.ddb, s.host, ["waiting"]), else: []),
+        &{"delegate", &1, Delegates.Table.request(&1)}
+      ) ++
+        Enum.map(
+          if(s.mdb, do: Mains.Starts.with_status(s.mdb, s.host, "waiting"), else: []),
+          &{"main", &1, Mains.Starts.request(&1)}
+        )
+
+    for {owner, row, request} <- waiting, row.waited == nil do
+      text =
+        "#{owner} #{row.name} waits to start until a usage limit's reset at #{iso(row.until)}: " <>
+          "wait (the default at #{iso(row.deadline)}) or leave"
+
+      %{
+        id: "limit:start:#{owner}:#{row.id}",
+        kind: "limit",
+        status: "open",
+        agent: row.name,
+        parent: if(owner == "delegate", do: request.parent),
+        project: request.project,
+        subagent: nil,
+        text: text,
+        options: ~w(wait leave),
+        opened_at: row.updated_at,
+        deadline: row.deadline
+      }
+    end
+  end
+
+  defp iso(ms) when is_integer(ms),
+    do: ms |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
+
   defp logins(%{ldb: nil}), do: []
 
   defp logins(s) do
@@ -618,6 +725,12 @@ defmodule CodingAgentFramework.Prompts do
 
       ["remedy", n] ->
         settled_if(Watch.Table.select(s.wdb, "id = ?1", [int(n)]) != [])
+
+      ["limit", "start", "delegate", n] when s.ddb != nil ->
+        settled_if(Delegates.Table.get(s.ddb, int(n)) != nil)
+
+      ["limit", "start", "main", n] when s.mdb != nil ->
+        settled_if(Mains.Starts.get(s.mdb, int(n)) != nil)
 
       [kind, agent, _until] when kind in ["limit", "usage_credits"] ->
         settled_if(Agents.get(s.agents, agent) != nil)
@@ -744,6 +857,20 @@ defmodule CodingAgentFramework.Prompts do
     end
   end
 
+  # A start's wait is its owner's row: `Delegates` or `Mains` lets one answer in per reset.
+  defp hand(owners, %{kind: "limit", id: "limit:start:" <> key}, choice, who) do
+    answer =
+      case String.split(key, ":") do
+        ["delegate", n] -> Delegates.answer_wait(owners.delegates, int(n), choice, who)
+        ["main", n] -> Mains.answer_wait(owners.mains, int(n), choice, who)
+      end
+
+    case answer do
+      {:refused, why} when why in [:settled, :no_start] -> {:refused, :settled}
+      other -> other
+    end
+  end
+
   defp hand(owners, %{kind: kind, agent: agent}, choice, who)
        when kind in ["limit", "usage_credits"],
        do: Sessions.answer_limit(owners.sessions, agent, kind, choice, who)
@@ -763,9 +890,16 @@ defmodule CodingAgentFramework.Prompts do
 
   defp filtered(all, filter, rows) do
     Enum.reduce(filter, all, fn
-      {:agent, name}, ps -> Enum.filter(ps, &(&1.agent == name))
-      {:kind, kind}, ps -> Enum.filter(ps, &(&1.kind == kind))
-      {:subtree, name}, ps -> Enum.filter(ps, &(&1.agent in subtree(rows, name)))
+      {:agent, name}, ps ->
+        Enum.filter(ps, &(&1.agent == name))
+
+      {:kind, kind}, ps ->
+        Enum.filter(ps, &(&1.kind == kind))
+
+      # A start that waits has no agent row yet: its parent places it (F-196).
+      {:subtree, name}, ps ->
+        tree = subtree(rows, name)
+        Enum.filter(ps, &(&1.agent in tree or (&1.parent != nil and &1.parent in tree)))
     end)
   end
 

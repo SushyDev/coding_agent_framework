@@ -511,6 +511,57 @@ defmodule CodingAgentFramework.DelegatesTest do
     %{scheduler: scheduler, work: work}
   end
 
+  # Limit.tla's StartRefusedAtLimit, AnswerWait, a restart that keeps the row, Pick again at a
+  # newer limit, and StartAtReset (F-196): the start waits as its row, told to its parent after.
+  test "a start refused at a usage limit waits as its row, and starts at its reset", ctx do
+    until = limit(ctx, 3_600)
+
+    assert {:ok, %{id: id, name: "app-unit-one", waiting: ^until, session_id: nil}} =
+             start(ctx, "app", "unit/one")
+
+    assert %{status: "waiting", tell: "main", until: ^until, waited: nil} = row = get(ctx, id)
+    assert row.deadline == until + 120_000
+    assert session_row(ctx, "app-unit-one") == nil
+    assert {:refused, {:waiting, "app-unit-one"}} = start(ctx, "app", "unit/one")
+    assert {:refused, {:cap, 1}} = start(ctx, "app", "unit/two")
+
+    # The prompt's answer `wait` once per reset; a restart keeps the row.
+    assert {:ok, :waiting} = Delegates.answer_wait(current(ctx), id, "wait", "sam")
+    assert {:refused, :settled} = Delegates.answer_wait(current(ctx), id, "leave", "sam")
+    restart(ctx)
+    assert %{status: "waiting", waited: "sam"} = get(ctx, id)
+
+    # At its deadline a newer limit holds the account: the row waits for that reset, its
+    # prompt open again.
+    later = limit(ctx, 7_200)
+    Agent.update(ctx.clock, fn _ -> until + 120_000 end)
+    cue(ctx, current(ctx))
+    assert %{status: "waiting", until: ^later, waited: nil} = get(ctx, id)
+
+    # Past that reset the pick finds room: the start goes on under its own row, and its parent
+    # is told once.
+    Agent.update(ctx.clock, fn _ -> later + 120_000 end)
+    assert {:ok, %{report: "taken"}} = cue_until(ctx, id, &(&1.status == "finished"))
+    assert %{account: "work", parent: "main"} = session_row(ctx, "app-unit-one")
+    {:ok, notice} = await(fn -> ok(waited_notice(ctx)) end)
+    assert notice.to_agent == "main" and notice.text =~ "app-unit-one, which waited for"
+    assert notice.text =~ "has started"
+  end
+
+  # Limit.tla's AnswerLeave (F-196): the row refused `left`, and its parent told.
+  test "a start waiting at a usage limit that a person leaves is refused, left", ctx do
+    limit(ctx, 3_600)
+    assert {:ok, %{id: id}} = start(ctx, "app", "unit/one")
+    assert {:refused, {:bad, :choice}} = Delegates.answer_wait(current(ctx), id, "go", "sam")
+    assert {:ok, :left} = Delegates.answer_wait(current(ctx), id, "leave", "sam")
+    assert {:refused, :settled} = Delegates.answer_wait(current(ctx), id, "wait", "sam")
+    assert {:refused, :no_start} = Delegates.answer_wait(current(ctx), id + 1, "wait", "sam")
+    {:ok, notice} = await(fn -> ok(waited_notice(ctx)) end)
+    assert notice.text =~ "did not start: left"
+    assert %{status: "refused", reason: "left", tell: nil} = get(ctx, id)
+    assert session_row(ctx, "app-unit-one") == nil
+  end
+
   test "no delegate starts under a parent a move drains", ctx do
     id = Sessions.Table.declare(ctx.table, "test", "main", "app")
     :ok = Sessions.Table.update(ctx.table, id, move: "draining")
@@ -1028,6 +1079,22 @@ defmodule CodingAgentFramework.DelegatesTest do
   # The framework's notice of a queued start's outcome (F-170).
   defp start_notice(ctx),
     do: Enum.find(rows(ctx), &(&1.kind == "notice" and &1.text =~ "queued for a seat"))
+
+  # The framework's notice of the outcome of a start that waited at a usage limit (F-196).
+  defp waited_notice(ctx),
+    do: Enum.find(rows(ctx), &(&1.kind == "notice" and &1.text =~ "waited for a usage limit"))
+
+  # The account's record of a usage limit `s` seconds from the test's clock, read by `Usage`:
+  # its reset in ms.
+  defp limit(ctx, s) do
+    resets = div(Agent.get(ctx.clock, & &1), 1000) + s
+    limit = %{"status" => "rejected", "resetsAt" => resets, "rateLimitType" => "five_hour"}
+    fact = %{at: System.os_time(:millisecond), evidence: %{"source" => "test"}, limit: limit}
+    {:ok, _} = Usage.take(Keyword.fetch!(ctx.dopts, :usage), "work", fact)
+    resets * 1000
+  end
+
+  defp get(ctx, id), do: Table.get(ctx.dtable, id)
 
   # The framework's notices that a delegate is idle with no report.
   defp notices(ctx),

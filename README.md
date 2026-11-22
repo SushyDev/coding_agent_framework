@@ -311,7 +311,12 @@ Built, each from a checked model in `model/tla/`:
   stalled, late, killed and restarted, usage-limit stalls and moves, prompts and their time to
   answer, recoveries and a person's interventions (a viewer attached among them), as a pure fold
   of the rows cut by UTC day, ISO week or all, each rule in its `@doc`; a fact no row holds yet is
-  listed as `unread`, never guessed.
+  listed as `unread`, never guessed;
+- a start refused at a limit waits as its owner's row (F-196, against `Limit.tla`'s `Starts`): a
+  delegate's or a main's start or resume that finds every usable account limited is written
+  `waiting` with the soonest reset, shown in the inbox as a `limit` prompt answered `wait` (its
+  default) or `leave`, and at the reset picks again and asks for its lease under its own request
+  id; and a `remedy` answered `act` shows `answering` until its act's row ends.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

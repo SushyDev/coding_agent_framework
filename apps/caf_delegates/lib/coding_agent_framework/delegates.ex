@@ -136,6 +136,8 @@ defmodule CodingAgentFramework.Delegates do
   @call 30_000
   @slack 120_000
   @step 5_000
+  # After a usage limit's reset, before a waiting start picks again (F-196), as the healer's.
+  @margin 120_000
   @twice "The delegate was killed twice before its last reply; it is not resumed again."
 
   @doc """
@@ -164,7 +166,9 @@ defmodule CodingAgentFramework.Delegates do
   delegate idle with no report for longer than it is told to its parent, once per idle state;
   an interactive one's needs `registry:` and `intake:`. With `name_room:` (bytes, the room the
   home leaves for an agent's socket, `Config.name_room/1`), a start whose delegate's name is
-  longer is refused `{:bad, :name, {:longer_than, n}}` before any row (F-172).
+  longer is refused `{:bad, :name, {:longer_than, n}}` before any row (F-172). With
+  `limit_margin:` (ms, default 120 000), a start that waits at a usage limit picks again that
+  long after its reset (F-196).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -213,6 +217,15 @@ defmodule CodingAgentFramework.Delegates do
   restart cut, at its deadline) the parent is told by a notice from `framework`
   (`Mailbox.notify/4`, `kind: :notice`) stored under the row's key, which `Mailbox` takes once,
   across restarts. By default (`wait: true`) the caller waits for the lease, as before.
+
+  **At a usage limit** (F-196; `Limit.tla`'s StartRefusedAtLimit): when every usable account is
+  limited, the pick refuses `{:allowance, until}`, and the start writes its row `waiting` for
+  that soonest reset, its request kept on the row and its parent owed the outcome, and answers
+  at once, whatever `wait:`, `{:ok, %{id, name, brief_uuid, session_id: nil, account: nil,
+  waiting: until}}`. The row is a `limit` prompt (`answer_wait/4`). At the reset plus
+  `limit_margin:` it picks its account again and asks for its lease under its own request id
+  (StartAtReset); a newer limit makes it wait for that reset. Once it leaves `waiting` its
+  parent is told as above. A second start of its name is refused `{:waiting, name}`.
   """
   def start_delegate(delegates, parent, project, branch, model, brief, opts \\ []) do
     how = if Keyword.get(opts, :interactive, false), do: :interactive, else: :headless
@@ -339,6 +352,20 @@ defmodule CodingAgentFramework.Delegates do
       call(delegates, {:go_on, name, text, key, Keyword.get(opts, :resume, true)}, opts, 300_000)
 
   @doc """
+  Answers the `limit` prompt of start row `id`, which waits at a usage limit (F-196;
+  `Limit.tla`'s AnswerWait and AnswerLeave), as `who`, once per reset: `"wait"` keeps it waiting
+  for its reset, as its default at its deadline would (`waited` names `who`, and the prompt
+  leaves the inbox); `"leave"` refuses the row with reason `left`, and its parent is told.
+  Answers `{:ok, :waiting}` or `{:ok, :left}`; `{:refused, :settled}` for a row no longer
+  waiting or answered for this reset; `{:refused, :no_start}`; `{:refused, {:bad, :choice}}`.
+
+      Delegates.answer_wait(delegates, 7, "leave", "sam")
+      #=> {:ok, :left}
+  """
+  def answer_wait(delegates, id, choice, who),
+    do: call(delegates, {:answer_wait, id, choice, who}, [], @step)
+
+  @doc """
   What `Delegates` reads, for `Cues`: a stream's events and a transcript's lines (a turn's end
   and its report), the agent rows (a start or an end) and `Mailbox`'s rows (a report taken).
   """
@@ -375,6 +402,7 @@ defmodule CodingAgentFramework.Delegates do
           acts: Keyword.get(opts, :acts),
           scheduler: Keyword.get(opts, :scheduler),
           lease: Keyword.get(opts, :lease, %{"seat" => 1}),
+          margin: Keyword.get(opts, :limit_margin, @margin),
           registry: Keyword.get(opts, :registry),
           # An interactive delegate's fixes: Escape through the Inlet, and its held
           # PermissionRequests answered through Intake (F-137's new-3).
@@ -411,7 +439,7 @@ defmodule CodingAgentFramework.Delegates do
     # A resume this process's last life claimed and never saw answered ended with its call.
     if s.acts, do: Acts.interrupt(s.acts, actor(s))
     Stream.read(s.stream, timeout: @step)
-    for row <- Table.with_status(s.db, s.host, Table.calling()), do: wake(s, row)
+    for row <- Table.with_status(s.db, s.host, ["waiting" | Table.calling()]), do: wake(s, row)
 
     {:noreply, settle(s)}
   end
@@ -454,44 +482,55 @@ defmodule CodingAgentFramework.Delegates do
          # Move.tla's NoStartWhileDraining: no delegate starts under a parent a move drains.
          false <- Agents.moving?(Agents.get(s.agents, parent)) and {:refused, {:moving, parent}},
          true <- holding(s, parent, name) <= p.cap or {:refused, {:cap, p.cap}},
-         {:ok, account} <- pick(s),
+         picked = pick(s),
+         :ok <- picked_or_limited(picked),
          :ok <- if(again, do: replaced(s, old), else: :ok) do
-      # StartAsked: the row first, as starting, with its brief's uuid; then the brief's row.
       row = %{host: s.host, name: name, branch: branch, model: model, effort: effort}
-      row = Map.merge(row, %{brief_uuid: Stream.uuid(), deadline: deadline(s, p)})
-      id = Table.starting(s.db, row)
-      announce(s, id)
-      # StartAgain: the old row is history now, never resumed; it says why.
-      if again, do: write(s, old, reason: "replaced")
-      row = Table.get(s.db, id)
-      start = %{p: p, account: account, parent: parent, options: options, brief: brief, how: how}
-      start = Map.put(start, :meta, meta)
+      row = Map.put(row, :brief_uuid, Stream.uuid())
+      start = %{p: p, parent: parent, options: options, brief: brief, how: how, meta: meta}
 
-      # Schedule.tla: the row is the lease's holder, written before the lease is asked for.
-      case lease(s, row, project, account) do
-        {:ok, _lease} ->
-          begin(s, row, start, from)
+      case picked do
+        {:ok, account} ->
+          # StartAsked: the row first, as starting, with its brief's uuid; then the brief's row.
+          id = Table.starting(s.db, Map.put(row, :deadline, deadline(s, p)))
+          announce(s, id)
+          # StartAgain: the old row is history now, never resumed; it says why.
+          if again, do: write(s, old, reason: "replaced")
+          leased(s, Table.get(s.db, id), Map.put(start, :account, account), from, wait)
 
-        {:queued, %{id: request}} when wait ->
-          waiting = %{id: row.id, from: from, parent: parent, name: row.name, start: start}
-          {:noreply, put_in(s.pending[request], waiting)}
-
-        # Delegate.tla's Queued: the row says first that its parent is owed the outcome, then
-        # the caller is answered; the one more answer of the lease comes to no caller.
-        {:queued, %{id: request} = queued} ->
-          write(s, row, tell: parent)
-          waiting = %{id: row.id, from: nil, parent: parent, name: row.name, start: start}
-          answer = %{started(row, nil) | account: account.name}
-          answer = Map.put(answer, :queued, queued[:position])
-          {:reply, {:ok, answer}, put_in(s.pending[request], waiting)}
-
-        not_granted ->
-          reply(answered(s, row, {:refused, {:lease, lease_refusal(not_granted)}}))
+        # Limit.tla's StartRefusedAtLimit (F-196): every usable account is limited, so the row
+        # waits for the soonest reset, its parent owed the outcome, and the caller is answered.
+        {:refused, {:allowance, until}} ->
+          kept = Map.put(Map.delete(start, :p), :project, project)
+          fields = %{until: until, deadline: until + s.margin, tell: parent, start: kept}
+          id = Table.waiting(s.db, Map.merge(row, fields))
+          announce(s, id)
+          if again, do: write(s, old, reason: "replaced")
+          row = Table.get(s.db, id)
+          wake(s, row)
+          answer = %{started(row, nil) | account: nil}
+          {:reply, {:ok, Map.put(answer, :waiting, until)}, s}
       end
     else
       # A refusal, or the answer of the delegate already there.
       answer -> {:reply, answer, s}
     end
+  end
+
+  def handle_call({:answer_wait, id, choice, who}, _from, s) do
+    reply =
+      case Table.get(s.db, id) do
+        %{host: host, status: "waiting"} = row when host == s.host ->
+          wait_answer(s, row, choice, who)
+
+        %{host: host} when host == s.host ->
+          {:refused, :settled}
+
+        _ ->
+          {:refused, :no_start}
+      end
+
+    {:reply, reply, s}
   end
 
   def handle_call({:launch, name}, _from, s) do
@@ -650,6 +689,37 @@ defmodule CodingAgentFramework.Delegates do
     {:noreply, s}
   end
 
+  # A pick that found an account, or refused at a limit (the start waits); any other refusal
+  # refuses the start.
+  defp picked_or_limited({:ok, _}), do: :ok
+  defp picked_or_limited({:refused, {:allowance, _}}), do: :ok
+  defp picked_or_limited(other), do: other
+
+  # Schedule.tla: the row is the lease's holder, written before the lease is asked for. `from`
+  # is nil for a start that picked again at its reset (F-196): its caller was answered.
+  defp leased(s, row, start, from, wait) do
+    case lease(s, row, start.p.name, start.account) do
+      {:ok, _lease} ->
+        begin(s, row, start, from)
+
+      {:queued, %{id: request}} when wait and from != nil ->
+        waiting = %{id: row.id, from: from, parent: start.parent, name: row.name, start: start}
+        {:noreply, put_in(s.pending[request], waiting)}
+
+      # Delegate.tla's Queued: the row says first that its parent is owed the outcome, then
+      # the caller is answered; the one more answer of the lease comes to no caller.
+      {:queued, %{id: request} = queued} ->
+        write(s, row, tell: start.parent)
+        waiting = %{id: row.id, from: nil, parent: start.parent, name: row.name, start: start}
+        answer = %{started(row, nil) | account: start.account.name}
+        answer = Map.put(answer, :queued, queued[:position])
+        {:reply, {:ok, answer}, put_in(s.pending[request], waiting)}
+
+      not_granted ->
+        reply(answered(s, row, {:refused, {:lease, lease_refusal(not_granted)}}))
+    end
+  end
+
   defp lease(%{scheduler: nil}, _row, _p, _account), do: {:ok, nil}
 
   defp lease(s, row, project, account) do
@@ -674,7 +744,9 @@ defmodule CodingAgentFramework.Delegates do
   # it reached `Sessions` never will). A name started again is counted once (StartAgain).
   defp holding(s, parent, name) do
     starting = for {_, %{parent: ^parent, name: n}} <- s.pending, do: n
-    Agents.children(s.agents, parent, [name | starting])
+    # A start that waits at a usage limit holds its place too (F-196).
+    waiting = for %{tell: ^parent, name: n} <- Table.with_status(s.db, s.host, ["waiting"]), do: n
+    Agents.children(s.agents, parent, [name | starting ++ waiting])
   end
 
   # A start idempotent per branch (`Delegates.Turn.again/3`): `{:go, false}` for a new start,
@@ -833,10 +905,69 @@ defmodule CodingAgentFramework.Delegates do
   # Each name's latest row that may still move, with no call under way, read again; then the
   # running ones idle with no report.
   defp settle(s) do
+    s = waits(s)
     s = Enum.reduce(movable(s), s, &settle_row(&2, &1, agent(&2, &1)))
     s = idle(s, Enum.filter(movable(s), &(&1.status == "running")))
     tell_starts(s)
   end
+
+  # Limit.tla's StartAtReset (F-196): a waiting start, at its deadline (the reset plus the
+  # margin), whether a person answered `wait` or not, picks its account again (Pick) and asks
+  # for its lease under the row's own request id. A newer limit makes it wait for that reset.
+  # A pick refused otherwise refuses the row; one that read no reading decides nothing.
+  defp waits(s) do
+    now = s.clock.()
+
+    Table.with_status(s.db, s.host, ["waiting"])
+    |> Enum.filter(&(&1.deadline <= now))
+    |> Enum.reduce(s, &repick(&2, &1))
+  end
+
+  defp repick(s, row) do
+    start = request(row)
+
+    with {:ok, p} <- Map.fetch(s.projects, start.project) |> known(start.project),
+         {:ok, account} <- pick(s) do
+      # The call's time as `Table.starting/2` stamps it, which the agent row's start is read by.
+      now = System.os_time(:millisecond)
+      write(s, row, status: "starting", called_at: now, deadline: deadline(s, p))
+      start = Map.merge(start, %{p: p, account: account})
+      {:noreply, s} = began(leased(s, Table.get(s.db, row.id), start, nil, false), nil)
+      s
+    else
+      {:refused, {:allowance, until}} ->
+        write(s, row, until: until, deadline: until + s.margin, waited: nil)
+        wake(s, Table.get(s.db, row.id))
+        s
+
+      {:refused, {:usage, :unread}} ->
+        s
+
+      {:refused, why} ->
+        write(s, row, status: "refused", reason: why)
+        s
+
+      {:unknown, _} ->
+        s
+    end
+  end
+
+  defp wait_answer(_s, %{waited: by}, _choice, _who) when is_binary(by), do: {:refused, :settled}
+
+  defp wait_answer(s, row, "wait", who) do
+    write(s, row, waited: who)
+    {:ok, :waiting}
+  end
+
+  defp wait_answer(s, row, "leave", who) do
+    write(s, row, status: "refused", reason: "left", waited: who)
+    tell_starts(s)
+    {:ok, :left}
+  end
+
+  defp wait_answer(_s, _row, _choice, _who), do: {:refused, {:bad, :choice}}
+
+  defp request(row), do: Table.request(row)
 
   # Delegate.tla's StartTold and StartCleared (F-170): a start that answered queued at once,
   # once its row has left starting with no call under way, is told to the parent its row names,
@@ -847,7 +978,7 @@ defmodule CodingAgentFramework.Delegates do
     busy = MapSet.new(Map.values(s.pending), & &1.id)
 
     for row <- Table.owed(s.db, s.host),
-        row.status not in Table.calling(),
+        row.status not in ["waiting" | Table.calling()],
         not MapSet.member?(busy, row.id),
         match?({:ok, _}, tell_start(s, row)),
         do: write(s, row, tell: nil)
@@ -861,19 +992,25 @@ defmodule CodingAgentFramework.Delegates do
   end
 
   defp start_text(%{status: "refused"} = row) do
-    "Your delegate #{row.name}, queued for a seat, did not start: " <> refusal(row.reason) <> "."
+    "Your delegate #{row.name}, #{queued(row)}, did not start: " <> refusal(row.reason) <> "."
   end
 
   defp start_text(row),
-    do:
-      "Your delegate #{row.name}, queued for a seat, has started. Its report comes as a message."
+    do: "Your delegate #{row.name}, #{queued(row)}, has started. Its report comes as a message."
+
+  # A row that waited at a usage limit keeps the reset it waited for (F-196).
+  defp queued(%{until: until}) when is_integer(until),
+    do: "which waited for a usage limit's reset at #{iso(until)}"
+
+  defp queued(_row), do: "queued for a seat"
+
+  defp iso(ms), do: ms |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
 
   # The reason as `Store.text/1` kept it; a lease's refusal names its retry time.
   defp refusal(reason) when is_binary(reason) do
     case JSON.decode(reason) do
       {:ok, ["lease", [why, at]]} when is_integer(at) ->
-        retry = at |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
-        "the Scheduler refused its lease (#{why}); ask again after #{retry}"
+        "the Scheduler refused its lease (#{why}); ask again after #{iso(at)}"
 
       {:ok, ["lease", why]} ->
         "the Scheduler refused its lease (#{JSON.encode!(why)})"
@@ -1388,6 +1525,10 @@ defmodule CodingAgentFramework.Delegates do
       row.status == "refused" and mine? ->
         {:refused, {:not_started, row.status}}
 
+      # A start that waits at a usage limit has nothing to fix yet (F-196).
+      row.status == "waiting" and row.tell == parent ->
+        {:refused, {:not_started, row.status}}
+
       own? ->
         with {:ok, _} <- Stream.read(s.stream, timeout: @step),
              {:ok, fold} <- followed(s, agent),
@@ -1560,7 +1701,7 @@ defmodule CodingAgentFramework.Delegates do
     with {:ok, %{readings: readings}} <- Usage.readings(s.usage, timeout: @step),
          # F-181: among the usable accounts (prepared, logged in), the one with the most room.
          {:ok, name} <-
-           Usage.pick(readings, s.accounts.names, System.os_time(:second), usable: s.usable) do
+           Usage.pick(readings, s.accounts.names, div(s.clock.(), 1000), usable: s.usable) do
       Accounts.ready(s.accounts, name)
     else
       :unread -> {:refused, {:usage, :unread}}
