@@ -286,7 +286,11 @@ Built, each from a checked model in `model/tla/`:
   app passed by hand a config key; and a person's claim closed by the healer's restart;
 - what an app's move onto the tree wired by hand (F-195): a tree with `agents: false` that runs
   only leases, `agent_rows/1` reading the rows by the config, `tool_hooks` as `{module, opts}`,
-  and a start right after a kill waiting up to `restart_wait` for the old tree's exit.
+  and a start right after a kill waiting up to `restart_wait` for the old tree's exit;
+- a `PostToolUse` that waits (F-197, against `Hold.tla` and `Intake.tla`): the app's
+  `post_tool_use/3` may answer `{:replace, response}` within the tool deadline, sent as Claude
+  Code's `updatedToolOutput` in the tool's own response shape (measured on 2.1.322: a string is
+  ignored), and past the deadline the call goes on unchanged, recorded.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
