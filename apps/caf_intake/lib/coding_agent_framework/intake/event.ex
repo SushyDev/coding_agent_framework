@@ -37,8 +37,9 @@ defmodule CodingAgentFramework.Intake.Event do
   def names, do: @names
 
   @doc """
-  The tool events, posted only when the app gives `Intake` a callback for them. PreToolUse's row
-  is its hold's, and PostToolUse has none.
+  The tool events, posted only when the app gives `Intake` a callback for them. Each one's row
+  is its hold's; `Intake` holds a PostToolUse only when it has the `post_tool_use:` callback,
+  since the `Stop` hold's settings post it too.
   """
   @spec tool_names() :: [String.t()]
   def tool_names, do: @tools

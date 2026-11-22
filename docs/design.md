@@ -132,7 +132,7 @@ Each word below names one thing, and the design, the code and the views use it o
   write, the prompt argument of an interactive session's start (`launch`), or the answer of a
   waiting `run_delegate`.
 - **Hold**: a request held open with a deadline, answered exactly once by a named decider, and
-  settled when its holder dies. `Intake` keeps four kinds.
+  settled when its holder dies. `Intake` keeps five kinds.
 
 **Boxes and verbs** (F-162)
 
@@ -768,7 +768,9 @@ the reaper, the instance's `Registry`, `Cues`, `Acts`, the `Tracker`, the `Sched
 agent and delegate rows read once through a read-only connection to the store the config
 names, as `processes/1` reads the holder's records), the tool hooks as `{module, opts}`
 (`CodingAgentFramework.ToolHooks`, each callback given the live `part` lookup), and the
-restart that waits for the old tree's `Registry`. The other calls are B3's rest.
+restart that waits for the old tree's `Registry`. F-197 made `post_tool_use/3`'s answer a
+replacement of the call's output (`{:replace, response}`, "A held `PostToolUse`"). The other
+calls are B3's rest.
 The config answers the room the home leaves for an agent's and a service's name (`Config.name_room/1`, F-172), and the tree hands it to `Delegates`, `Mains` and
 `Services`, which refuse a longer name `{:bad, :name, {:longer_than, n}}` before any row;
 sockets stay in the home.
@@ -878,7 +880,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Screen` | a pure reading of a main session's screen and dialogs, per Claude Code release, from real fixtures captured with a script: the startup dialogs (trust, and external imports with the paths it lists), typed commands and their result lines, the box before a typed write | — |
 | `Inlet` | the checked typed write into an interactive session with no waiter: `Screen`'s box check, then `Tmux`'s one-command check, one per host; and the typed commands a session's start or a tool needs (a startup dialog's checked press, `/mcp reconnect`, the interrupt key), and a read of a pane for `Sessions`. It is one transport of `Mailbox` | no table |
 | `Stream` | a headless session's transport: a FIFO per process, a spool removed as the line's claim, the event log read from an offset, and its `can_use_tool` requests. Its fold of the log (each message's replay, each result) is evidence `Mailbox` and `Sessions` read; it keeps no delivery state of its own | `stream_delegates` |
-| `Intake` | hook events in; one hold, of four kinds: `permission` (a person's or an agent's `answer`), `tool` (`PreToolUse`, the app's callback), `stop` (`Stop` held for the app's callback) and `waiter` (a main session's waiting Stop hook, answered with `Mailbox`'s due text) | `intake_events` |
+| `Intake` | hook events in; one hold, of five kinds: `permission` (a person's or an agent's `answer`), `tool` (`PreToolUse`, the app's callback), `post_tool` (`PostToolUse`, the app's callback), `stop` (`Stop` held for the app's callback) and `waiter` (a main session's waiting Stop hook, answered with `Mailbox`'s due text) | `intake_events` |
 | `Sessions` | the agent row: one row per agent, main session or delegate, with its kind, parent, project, account, launch options and model, held process and status; start, resume, and stop by SIGTERM once idle; the tree as one function of its rows; each session's turn state as one function per kind of session, from its evidence. Other parts read its rows only through `Sessions.Agents`, a pure module over a reader's own connection, which answers what each status means | `agents` |
 | `Mover` | drains a session, a main session or a delegate, and moves it between accounts; its phase is a field of the agent row (`move`, with the accounts, its act and its deadline), which `Sessions` writes for it | — |
 | `Mains` | each project's main sessions, as agent rows of kind `main` it declares in `Sessions`; the project's checkout, made once, and the pull after a landing; the start of one (`start_main`), through the `Scheduler` and the startup dialogs (F-141, `Checkout.tla`); its resume under a lease of its own, and its end, the operator's (`end_main`, F-143, `Team.tla`) | `checkouts`: each checkout's reading, for a view; `main_starts`: each start, the holder of its lease |
@@ -989,7 +991,7 @@ any reply does (new-4).
 - **A hook.** `Intake` writes the event, then answers, as before. A hook that waits is a hold:
   a key, a deadline under the hook's timeout, a named decider, exactly one response, and a
   settle when the holder or its connection dies (`lost` or `unknown` for a hold with a row,
-  nothing for the others). The four kinds differ only in their decider, deadline and response.
+  nothing for the others). The five kinds differ only in their decider, deadline and response.
 - **An act.** Every fix, recovery, kill, resume, start and raised error is a row in `Acts`,
   `{actor, target, state, act, start_id, status, outcome}`, written before it acts, refused for
   a state already acted on, and `interrupted` when a restart cut it. A start or a resume by
@@ -2331,11 +2333,12 @@ section.
   UserPromptSubmit, PermissionRequest and PermissionDenied. Each hook posts to
   `http://127.0.0.1:<port>/hooks/<account>` on the framework's node, with the home's secret
   (kept per home, so it outlives a restart) in a header, and sets its own `timeout`. No program
-  on the host takes part, so a held hook is one open request. PreToolUse and PostToolUse are written only when the app gives
-  `Intake` a callback for them, and are not stored as they come: they carry every tool input,
-  and `Transcripts` reads those. A main session's waiter is the one `command` hook: it posts to
-  `/hooks/<account>/waiter` ("Delivery into a main session").
-- **One hold, four kinds** (F-115, R5). A hook that waits is a hold: a key, a deadline under
+  on the host takes part, so a held hook is one open request. PreToolUse and PostToolUse are
+  written only when the app gives `Intake` a callback for them (PostToolUse also for the
+  `Stop` hold's count), and are not stored as they come: they carry every tool input and
+  output, and `Transcripts` reads those. A main session's waiter is the one `command` hook: it
+  posts to `/hooks/<account>/waiter` ("Delivery into a main session").
+- **One hold, five kinds** (F-115, R5). A hook that waits is a hold: a key, a deadline under
   the hook's `timeout`, a named decider, exactly one response, a late answer dropped, and a
   settle when the holder or its connection dies (`lost` or `unknown` for a hold with a row,
   nothing for the others). `Intake` keeps one structure of holds, one `:DOWN` lookup and one
@@ -2345,6 +2348,7 @@ section.
   |---|---|---|---|---|
   | `permission` | `PermissionRequest` | a person, or an agent's or the operator's `answer` | 570 s of 600 s | yes |
   | `tool` | `PreToolUse` | the app's callback | 5 s of 10 s | yes |
+| `post_tool` | `PostToolUse` | the app's callback (F-197) | 5 s of 10 s, the same `tool_deadline` | yes |
   | `stop` | `Stop` | the app's callback (item 14), a pause's word, or a person at the cap | 570 s of 600 s | yes |
   | `waiter` | the `asyncRewake` Stop hook | `Mailbox`'s due row, by `deliver` | 7,080 s of 7,200 s, with a heartbeat every 5 s | the delivery's, in `Mailbox` |
 
@@ -2359,8 +2363,30 @@ section.
   before the response, then "answered"; a pass leaves it "passed" and the deadline "expired".
   Its `data`, the tool's input, stays empty until a decision is taken, since `Transcripts`
   holds the input (F-121's new-4).
-  A second post of the key answers the row's decision, or an empty body. A PostToolUse is
-  answered at once and handed to its callback, with no row.
+  A second post of the key answers the row's decision, or an empty body.
+- **A held `PostToolUse`** (F-197). With the app's `post_tool_use` callback, the post is a hold
+  of its own kind, asked as a `PreToolUse` is, under the same `tool_deadline` and 10 s timeout.
+  The call has already run; the answer changes what the model reads of it. `{:replace,
+  response}`, `response` a map of the tool's own response shape (the event's `tool_response`),
+  goes out as `hookSpecificOutput.updatedToolOutput`. `:pass`, any other value, a crash and
+  the deadline are an empty body, and the output stays as the tool gave it; a replacement that
+  is not a map, or not JSON, is a pass whose row names it (`["bad_answer", "replace"]`). The
+  row is the hold's, as a `PreToolUse`'s: "answered" with the actor `app`, the response it
+  sent and, as `data`, the tool's name and `tool_use_id` (never the output, which
+  `Transcripts` has); "passed" for a pass; "expired" at the deadline. Measured on Claude Code
+  2.1.322, headless, a `Bash` call of `echo ORIGINAL-OUTPUT` and a prompt asking the model to
+  quote what it read:
+
+  | hook | answer | the model read |
+  |---|---|---|
+  | command | `updatedToolOutput` as a string | the original: ignored |
+  | command | `updatedToolOutput` as an object of the tool's response shape (`stdout`, `stderr`, `interrupted`, `isImage`) | the replacement |
+  | `http` | the same object, as the body | the replacement |
+  | `http`, `timeout` 5 | the same object, after 12 s | the original; the turn went on at about 5 s |
+
+  Not measured: `updatedMCPToolOutput`, an MCP tool's output, and an `Edit`'s. Without the
+  callback a `PostToolUse` post (the `Stop` hold's settings add it, for the count of blocks)
+  is answered at once, with no row. `Intake.tla`'s `HT` models both tool kinds.
 - **A held `Stop`** (F-157, decision 10). With the app's `stop:` callback, the `Stop` hook
   waits 600 s and each turn's end is a hold whose row is written "held". The callback gets the
   agent, its project, the session, its count of blocks and the hook's input, and answers
@@ -3306,7 +3332,8 @@ code:
     on the agent's row (F-110). Then the narrow-only check of a delegate's launch against its
     parent's, in `Grants`.
 12. **PreToolUse and PostToolUse hooks**: held like `PermissionRequest`, PreToolUse answered by
-    an app callback with a short deadline (allow, deny or ask); then a permission policy asked
+    an app callback with a short deadline (allow, deny or ask), PostToolUse by a replacement
+    of the call's output (F-197); then a permission policy asked
     before any request waits for a person, its decision recorded as a person's is.
 **The remodel** (F-115, taken in F-116) comes next, before the rest of item 13 and item 14, so
 that each later unit is a few lines in one part of one shape rather than one more copy of a

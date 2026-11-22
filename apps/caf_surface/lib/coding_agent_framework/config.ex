@@ -73,7 +73,8 @@ defmodule CodingAgentFramework.Config do
     same live `part` lookup an extension's tool has. `opts` is data, as an extension's is. Every
     account's settings name the `PreToolUse` hook, since the framework's own callback
     (`Mover.pre_tool_use/2`, a move's drain) decides first and hands any other call to the
-    app's; `post_tool_use` adds its hook when the module has it; `stop` holds each turn's end
+    app's; `post_tool_use` adds its hook when the module has it, and may replace what the
+    model reads of a call's output (`{:replace, response}`, F-197); `stop` holds each turn's end
     for the app (the `Stop` hold, with its cap and pauses). None by default. A callback may
     correct a call rather than refuse it (`Intake`'s `{:allow, updated_input: map,
     additional_context: text}`). Whatever it answers, a background `Bash` command it lets run

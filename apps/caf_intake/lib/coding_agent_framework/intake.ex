@@ -45,9 +45,20 @@ defmodule CodingAgentFramework.Intake do
     the response it sent, the input included. An answer out of shape (a longer context, an
     input that is not a map, a key it does not know) is a pass, and its row's `problem` names
     why: `["context_too_long", length]` or `["bad_answer", key]`.
-  - A `PostToolUse` is answered 200 at once and handed to the `post_tool_use:` callback in a
-    process of its own, with no row. A tool call's row keeps `data` empty until a decision is
-    taken: `Transcripts` holds the tool's input.
+  - `PostToolUse` (F-197): decided by the app's `post_tool_use:` callback, in a process of its
+    own, with `tool_deadline:` as `PreToolUse`'s, under the same 10 s timeout. `{:replace,
+    response}`, `response` a map of the tool's own response shape (the `tool_response` the
+    event carries, such as `%{"stdout" => …, "stderr" => "", "interrupted" => false, "isImage"
+    => false}` for `Bash`), answers `updatedToolOutput` with it, and the model reads it in place
+    of the tool's output. Anything else is a pass, and a replacement that is not a map, or not
+    JSON, is a pass whose row's `problem` is `["bad_answer", "replace"]`. Measured on 2.1.322
+    with `Bash`: a command hook's object is read, as is an `http` hook's body; a string is
+    ignored; an `http` hook past its `timeout` leaves the output unchanged and the turn goes on.
+    `updatedMCPToolOutput` and an `Edit`'s output were not measured. A replacement's row has
+    the actor `app`, the response it sent, and as `data` the tool's name and `tool_use_id`. With
+    no callback a `PostToolUse` has no row.
+  - A tool call's row keeps `data` empty until a decision is taken: `Transcripts` holds the
+    tool's input and output.
   - `Stop` (`model/tla/Intake.tla`'s HS), with the app's `stop:` callback: each turn's end is
     held and the callback decides it, `:pass` (the turn ends) or `{:block, reason}` (the agent
     goes on, told the reason); deadline `stop_deadline:`, 570 s by default, under the hook's
@@ -92,7 +103,7 @@ defmodule CodingAgentFramework.Intake do
   @beat 5_000
   # How long past a kind's deadline the plug waits, if the `Intake` stops answering: a
   # PreToolUse's deadline is at most 8 s under the hook's 10 s timeout.
-  @margins %{permission: 5_000, tool: 1_500, waiter: 5_000, stop: 5_000}
+  @margins %{permission: 5_000, tool: 1_500, post_tool: 1_500, waiter: 5_000, stop: 5_000}
   # A secret goes into a curl config file between double quotes, so it keeps to these.
   @secret_chars ~r/\A[A-Za-z0-9._~+\/=-]{1,256}\z/
   @timeout 5_000
@@ -139,8 +150,9 @@ defmodule CodingAgentFramework.Intake do
   correction: `{:allow, updated_input: map, additional_context: text}`, `{:pass, updated_input:
   map, additional_context: text}`, `{:ask, updated_input: map, additional_context: text}` or
   `{:deny, reason, additional_context: text}`),
-  `post_tool_use:` (`fun(tool_event)`, its value ignored), `tool_deadline:` (ms the first is
-  waited for, under 8 s), `waiter_deadline:` (ms a waiter is held, under the waiter hook's
+  `post_tool_use:` (`fun(tool_event) -> :pass | {:replace, response}`, `response` a map of the
+  tool's response shape), `tool_deadline:` (ms each of the two is waited for, under 8.5 s),
+  `waiter_deadline:` (ms a waiter is held, under the waiter hook's
   `timeout`; 7,080,000 by default, under `waiter_hook/5`'s 7,200 s), `beat:` (ms between a
   waiter's heartbeats, 5,000 by default), `agent:` (`fun(account, session_id) -> name | nil`,
   for the events' `agent`), `stop:` (`fun(stop_event) -> :pass | {:block, reason}`, which
@@ -163,10 +175,12 @@ defmodule CodingAgentFramework.Intake do
   The settings' `hooks` for `account`: an `http` hook per event of `Event.names/0`, and one for
   each tool callback named in `tools` (`:pre_tool_use`, `:post_tool_use`), posting to this
   host's port with the secret in the `x-caf-secret` header. PermissionRequest waits 600 s and
-  the rest 10 s, which also raises SessionEnd's shared 1.5 s budget. With `:stop` (the app's
-  `stop:` callback), `Stop` waits 600 s too, and `PostToolUse` posts, which resets the count
-  of blocks. `onFailure` is left at its default, continue, so a framework that is down never
-  refuses a tool call or keeps a turn from ending.
+  the rest 10 s, which also raises SessionEnd's shared 1.5 s budget: `PreToolUse` and
+  `PostToolUse` wait 10 s, over `tool_deadline:` and the plug's margin. With `:stop` (the
+  app's `stop:` callback), `Stop` waits 600 s too, and `PostToolUse` posts, which resets the
+  count of blocks; without `:post_tool_use` that post is answered at once. `onFailure` is left
+  at its default, continue, so a framework that is down never refuses a tool call or keeps a
+  turn from ending.
 
       iex> hooks = CodingAgentFramework.Intake.hooks(4790, "work", "s3")
       iex> [%{"hooks" => [hook]}] = hooks["PermissionRequest"]
@@ -357,16 +371,14 @@ defmodule CodingAgentFramework.Intake do
   `{:ok, :seen}` (a row with its key was there), or `{:ok, {:held, id, ref, wait}}` for a
   hold of any kind: the caller holds the request and waits up to `wait` ms for
   `{ref, {:decision, body}}` or `{ref, :release}`, and after writing a decision calls
-  `written/3`. A PreToolUse whose row has a decision is `{:ok, {:decided, body}}`. A tool event
-  with no callback is `{:ok, :not_read}`, and a PostToolUse handed to its callback
-  `{:ok, :handed}`.
+  `written/3`. A tool call whose row has a decision is `{:ok, {:decided, body}}`. A tool event
+  with no callback is `{:ok, :not_read}`.
   """
   @spec post(GenServer.server(), String.t(), binary, keyword) ::
           {:ok,
            :stored
            | :seen
            | :not_read
-           | :handed
            | {:held, integer, reference, pos_integer}
            | {:decided, binary}}
           | {:refused, term}
@@ -476,6 +488,7 @@ defmodule CodingAgentFramework.Intake do
           deadlines: %{
             permission: Keyword.get(opts, :deadline, @deadline),
             tool: Keyword.get(opts, :tool_deadline, @tool_deadline),
+            post_tool: Keyword.get(opts, :tool_deadline, @tool_deadline),
             waiter: Keyword.get(opts, :waiter_deadline, @waiter_deadline),
             stop: Keyword.get(opts, :stop_deadline, @stop_deadline)
           },
@@ -513,10 +526,13 @@ defmodule CodingAgentFramework.Intake do
 
       %{event: "PostToolUse"} = row ->
         # Spec action ToolRuns: a tool call ran, so the session's blocks are no longer in a row.
-        if state.stop && row.session_id,
+        if state.stop,
           do: Table.reset_blocks(state.db, state.host, account, row.session_id, now())
 
-        post_tool_use(row, account, state)
+        # The `Stop` hold's settings post it for the reset alone: with no callback, no row.
+        if state.post_tool_use,
+          do: store(%{row | hold: true}, account, from, state),
+          else: {:reply, {:ok, :not_read}, state}
 
       %{event: "Stop", problem: nil} = row when state.stop != nil ->
         # Claude Code never posts one Stop twice, and two Stops may carry the same body: each
@@ -640,15 +656,6 @@ defmodule CodingAgentFramework.Intake do
     {:reply, {:ok, Map.has_key?(state.waiters, {account, session})}, state}
   end
 
-  defp post_tool_use(_row, _account, %{post_tool_use: nil} = state),
-    do: {:reply, {:ok, :not_read}, state}
-
-  defp post_tool_use(row, account, state) do
-    %{post_tool_use: callback, agent: agent} = state
-    spawn(fn -> callback.(tool_event(row, account, agent)) end)
-    {:reply, {:ok, :handed}, state}
-  end
-
   # Built in the callback's own process, unlinked, so neither a slow `agent` lookup nor a crash
   # reaches this process. The answer comes back as a message, and a crash or exit as `:DOWN`.
   defp tool_event(row, account, agent) do
@@ -669,16 +676,19 @@ defmodule CodingAgentFramework.Intake do
   end
 
   defp store(row, account, {pid, _}, state) do
-    # A tool call's row keeps `data` empty until a decision: `Transcripts` has the input.
-    stored = if row.event == "PreToolUse", do: %{row | data: nil}, else: row
-    kind = Map.get(%{"PreToolUse" => :tool, "Stop" => :stop}, row.event, :permission)
+    # A tool call's row keeps `data` empty until a decision: `Transcripts` has the input and
+    # the output.
+    tool? = row.event in ["PreToolUse", "PostToolUse"]
+    stored = if tool?, do: %{row | data: nil}, else: row
+    kinds = %{"PreToolUse" => :tool, "PostToolUse" => :post_tool, "Stop" => :stop}
+    kind = Map.get(kinds, row.event, :permission)
     # A hold's row keeps when it ends with no decision, for the inbox (F-179).
     stored =
       if row.hold, do: Map.put(stored, :deadline, now() + state.deadlines[kind]), else: stored
 
     case Table.insert(state.db, state.host, account, stored, now()) do
-      # A second post of a PreToolUse answers the row's decision, or none.
-      {:seen, _id, _hold, decision} when row.event == "PreToolUse" and decision != nil ->
+      # A second post of a tool call answers the row's decision, or none.
+      {:seen, _id, _hold, decision} when tool? and decision != nil ->
         {:reply, {:ok, {:decided, decision}}, state}
 
       {:seen, _id, _hold, _decision} ->
@@ -694,7 +704,7 @@ defmodule CodingAgentFramework.Intake do
           pid: pid,
           ref: make_ref(),
           mon: Process.monitor(pid),
-          data: if(kind == :tool, do: row.data)
+          data: hold_data(kind, row)
         }
 
         hold =
@@ -702,7 +712,8 @@ defmodule CodingAgentFramework.Intake do
 
         hold =
           case kind do
-            :tool -> ask(state, id, hold, row)
+            :tool -> ask(state, id, hold, row, state.pre_tool_use)
+            :post_tool -> ask(state, id, hold, row, state.post_tool_use)
             :stop -> who(state, id, hold, row)
             :permission -> hold
           end
@@ -718,9 +729,20 @@ defmodule CodingAgentFramework.Intake do
     end
   end
 
+  # What a decided tool call's row keeps as `data`: a PreToolUse's whole input, and a
+  # PostToolUse's tool and id, not the output it replaced, which `Transcripts` has.
+  defp hold_data(:tool, row), do: row.data
+
+  defp hold_data(:post_tool, row) do
+    data = JSON.decode!(row.data)
+    JSON.encode!(Map.take(data, ["tool_name", "tool_use_id"]))
+  end
+
+  defp hold_data(_kind, _row), do: nil
+
   # Spec action ToolHeld: the app's callback is asked in a process of its own.
-  defp ask(state, id, hold, row) do
-    {me, %{pre_tool_use: callback, agent: agent}} = {self(), state}
+  defp ask(state, id, hold, row, callback) do
+    {me, %{agent: agent}} = {self(), state}
     ask = fn -> send(me, {:tool_answer, id, callback.(tool_event(row, hold.account, agent))}) end
     {_, wmon} = spawn_monitor(ask)
     Map.put(hold, :wmon, wmon)
@@ -911,7 +933,9 @@ defmodule CodingAgentFramework.Intake do
   end
 
   def handle_info({:tool_answer, id, answer}, state) do
-    case {state.holds[id], tool_response(answer)} do
+    hold = state.holds[id]
+
+    case {hold, hold && tool_answer(hold.kind, answer)} do
       # A decision after the deadline, or for a request gone: dropped, never sent (LateDropped).
       {nil, _} -> {:noreply, state}
       {%{deciding: true}, _} -> {:noreply, state}
@@ -1064,6 +1088,22 @@ defmodule CodingAgentFramework.Intake do
   end
 
   defp tool_response(_), do: :pass
+
+  defp tool_answer(:tool, answer), do: tool_response(answer)
+  defp tool_answer(:post_tool, answer), do: post_response(answer)
+
+  # The PostToolUse output Claude Code 2.1.322 reads from an `http` hook (measured, F-197): an
+  # `updatedToolOutput` of the tool's own response shape replaces what the model reads. A string
+  # there is ignored, so it is refused here, as is a map that is not JSON.
+  defp post_response({:replace, response}) when is_map(response) do
+    output = %{"hookEventName" => "PostToolUse", "updatedToolOutput" => response}
+    {:decision, JSON.encode!(%{"hookSpecificOutput" => output})}
+  rescue
+    _ in [Protocol.UndefinedError, ArgumentError] -> {:refused, {:bad_answer, :replace}}
+  end
+
+  defp post_response({:replace, _response}), do: {:refused, {:bad_answer, :replace}}
+  defp post_response(_answer), do: :pass
 
   defp tool_response(decision, reason) do
     output =

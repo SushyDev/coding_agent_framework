@@ -524,7 +524,13 @@ defmodule CodingAgentFramework.SurfaceTest do
     def pre_tool_use(_event, _opts, _part), do: :pass
 
     @impl true
-    def post_tool_use(event, opts, part), do: send(opts[:to], {:after, event, part.(:mailbox)})
+    def post_tool_use(%{tool_name: "Grep"}, _opts, _part),
+      do: {:replace, %{"stdout" => "src/a.ex", "stderr" => ""}}
+
+    def post_tool_use(event, opts, part) do
+      send(opts[:to], {:after, event, part.(:mailbox)})
+      :pass
+    end
   end
 
   test "the app's PreToolUse callback denies or corrects a call through the account's hook",
@@ -565,6 +571,10 @@ defmodule CodingAgentFramework.SurfaceTest do
     assert correction["additionalContext"] == "Code is in src; mailbox true."
     assert post.("PreToolUse", "Read") == ""
     assert post.("PostToolUse", "Read") == ""
+
+    # The app's replacement of a call's output goes out as `updatedToolOutput` (F-197).
+    assert %{"updatedToolOutput" => %{"stdout" => "src/a.ex"}} =
+             JSON.decode!(post.("PostToolUse", "Grep"))["hookSpecificOutput"]
 
     # A background command the app passes runs with its stdin at end of file, and the decision
     # stays Claude Code's (F-180).
