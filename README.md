@@ -325,7 +325,11 @@ Built, each from a checked model in `model/tla/`:
   once, a waited resume is settled from its row's end into the fault ledger, a start's menu is a
   startup dialog, and an `env` without `path` is refused for every tree;
 - a service's socket named by a short key of its name, so every allowed name fits a home of up to
-  69 bytes, and a login prompt's id naming its refusal (F-205).
+  69 bytes, and a login prompt's id naming its refusal (F-205);
+- the facts the metrics could not read (F-202): how a delegate's report was taken
+  (`taken_by`), a hold's open time (`held_at`), a kill seen (an `Acts` fact), a delivery time
+  (`delivered_at`) and each prompt's open, each written once when it happens, so `metrics/2`
+  leaves nothing `unread`.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
