@@ -43,6 +43,7 @@ defmodule CafSurface.MixProject do
       {:caf_scheduler, in_umbrella: true},
       {:caf_sessions, in_umbrella: true},
       {:caf_shell, in_umbrella: true},
+      {:caf_store, in_umbrella: true},
       {:caf_stream, in_umbrella: true},
       {:caf_tmux, in_umbrella: true},
       {:caf_tool_home, in_umbrella: true},

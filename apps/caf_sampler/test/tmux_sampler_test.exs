@@ -10,7 +10,7 @@ defmodule CodingAgentFramework.TmuxSamplerTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Holder, SamplerSetup, Tmux, TmuxSampler}
+  alias CodingAgentFramework.{Acts, Holder, SamplerSetup, Tmux, TmuxSampler}
   alias CodingAgentFramework.TmuxSampler.Join
 
   doctest TmuxSampler
@@ -76,6 +76,47 @@ defmodule CodingAgentFramework.TmuxSamplerTest do
     rows = sample!(ctx)
     assert %{status: :stale, socket: :stale} = rows["held:alpha"]
     assert %{status: :stale, name: "alpha"} = rows["viewer:0:" <> pane]
+  end
+
+  # tmux makes a client only for a terminal; the fake attaches one as a person's `tmux attach`.
+  test "a viewer attached is one row in Acts, once, across a restart of the sampler" do
+    dir = test_dir()
+    {:ok, pid} = Tmux.Fake.start_link(key: {"test", "fake"})
+    server = Tmux.Fake.new(pid, {"test", "fake"})
+    {:ok, holder} = Holder.new(programs(), dir)
+
+    {:ok, acts} =
+      Acts.start_link(db: Path.join(dir, "acts.db"), start_id: "s", host: "test", instance: "a")
+
+    opts = [server: server, holder: holder, db: Path.join(dir, "s.db"), acts: acts, person: "sam"]
+    {:ok, sampler} = TmuxSampler.start_link(opts)
+
+    {:ok, _} = Tmux.new_session(server, "app-main", [program!(:cat)])
+    {:ok, other} = Tmux.new_session(server, "scratch", [program!(:cat)])
+    Tmux.Fake.set_tag(server, other, nil)
+    :ok = Tmux.Fake.attach(server, "/dev/ttys003", "app-main")
+    # A terminal on a session no agent's pane is in is no one's viewer.
+    :ok = Tmux.Fake.attach(server, "/dev/ttys004", "scratch")
+
+    assert {:ok, %{attached: [id]}} = TmuxSampler.sample(sampler)
+    assert {:ok, %{attached: []}} = TmuxSampler.sample(sampler)
+
+    assert {:ok, [%{id: ^id, actor: "sam", act: "attach", target: "app-main", detail: detail}]} =
+             Acts.rows(acts, act: "attach")
+
+    assert %{"tty" => "/dev/ttys003", "session" => "app-main", "created" => 1} =
+             JSON.decode!(detail)
+
+    # Detached and attached again: a new client, a new row. A restart reads none twice.
+    Tmux.Fake.detach(server, "/dev/ttys003")
+    :ok = Tmux.Fake.attach(server, "/dev/ttys003", "app-main")
+    GenServer.stop(sampler)
+    {:ok, sampler} = TmuxSampler.start_link(opts)
+    assert {:ok, %{attached: [_]}} = TmuxSampler.sample(sampler)
+    GenServer.stop(sampler)
+    {:ok, sampler} = TmuxSampler.start_link(opts)
+    assert {:ok, %{attached: []}} = TmuxSampler.sample(sampler)
+    assert {:ok, [_, _]} = Acts.rows(acts, act: "attach")
   end
 
   describe "the join" do

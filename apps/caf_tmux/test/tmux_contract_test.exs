@@ -110,6 +110,12 @@ defmodule CodingAgentFramework.TmuxContractTest do
         assert {:ok, [%{session: "beta"}]} = Tmux.list_panes(ctx.server)
       end
 
+      test "a server with no terminal attached lists no client; one down is refused", ctx do
+        assert {:refused, :no_server} = Tmux.list_clients(ctx.server)
+        {:ok, _} = Tmux.new_session(ctx.server, "alpha", stand_in(ctx, "alpha"))
+        assert {:ok, []} = Tmux.list_clients(ctx.server)
+      end
+
       test "a killed session's pane is gone", ctx do
         {:ok, pane} = Tmux.new_session(ctx.server, "alpha", stand_in(ctx, "alpha"))
         {:ok, _} = Tmux.new_session(ctx.server, "beta", stand_in(ctx, "beta"))

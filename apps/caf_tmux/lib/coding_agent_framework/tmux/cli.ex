@@ -28,7 +28,7 @@ defmodule CodingAgentFramework.Tmux.CLI do
 
   @behaviour CodingAgentFramework.Tmux
 
-  alias CodingAgentFramework.{Host, Programs, Shell}
+  alias CodingAgentFramework.{Host, Programs, Shell, Tmux}
 
   @enforce_keys [:host, :server, :tmux, :rm]
   defstruct [:host, :server, :tmux, :rm, tag: "@caf_session", config: "/dev/null", timeout: 5_000]
@@ -99,6 +99,39 @@ defmodule CodingAgentFramework.Tmux.CLI do
 
       other ->
         failure(other)
+    end
+  end
+
+  @impl true
+  def list_clients(%__MODULE__{} = s) do
+    format = Enum.join(["\#{client_tty}", "\#{client_session}", "\#{client_created}"], "\t")
+
+    case run(s, ["list-clients", "-F", format]) do
+      {:ok, %{status: 0, output: out}} ->
+        {:ok, for(line <- String.split(out, "\n", trim: true), do: client_info(line))}
+
+      other ->
+        failure(other)
+    end
+  end
+
+  @doc """
+  One line of `list-clients` as `list_clients/1` asks for it, tty, session and creation time
+  apart by tabs: total over the line, one tmux could not have printed being kept whole.
+
+      iex> CodingAgentFramework.Tmux.CLI.client_info("/dev/ttys003\\tapp-main\\t1795000000")
+      %{tty: "/dev/ttys003", session: "app-main", created: 1795000000}
+      iex> CodingAgentFramework.Tmux.CLI.client_info("/dev/ttys003")
+      {:malformed, "/dev/ttys003"}
+  """
+  @spec client_info(String.t()) :: Tmux.client_info()
+  def client_info(line) do
+    with [tty, session, created] <- String.split(line, "\t", parts: 3),
+         true <- tty != "",
+         {created, ""} <- Integer.parse(created) do
+      %{tty: tty, session: session, created: created}
+    else
+      _ -> {:malformed, line}
     end
   end
 

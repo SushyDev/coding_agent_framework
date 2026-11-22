@@ -86,7 +86,7 @@ defmodule CodingAgentFramework do
     Watch
   }
 
-  alias CodingAgentFramework.{Runs, Scheduler, Sessions, Shell, Stream, StuckBackgrounds}
+  alias CodingAgentFramework.{Runs, Scheduler, Sessions, Shell, Store, Stream, StuckBackgrounds}
   alias CodingAgentFramework.{Tmux, TmuxSampler}
   alias CodingAgentFramework.Tracker
   alias CodingAgentFramework.{ToolHome, ToolHooks, Transcripts, Usage}
@@ -242,6 +242,45 @@ defmodule CodingAgentFramework do
     with {:ok, agents} <- Sessions.Agents.read_only(path, c.workstation),
          {:ok, delegates} <- Delegates.Table.read_only(path, c.workstation),
          do: {:ok, %{agents: agents, delegates: delegates}}
+  end
+
+  @doc """
+  The metrics of the instance `config` names, on its workstation, within `since:` and `until:`
+  (wall-clock ms, `until` not in it), cut `by:` `:day`, `:week` or `:all` (F-199): one pure fold
+  (`Watch.Metrics.fold/2`, whose doc says each metric and the rule it counts by) over the rows
+  read once, in one read-only snapshot of the instance's store, as `agent_rows/1` reads: every
+  act (`Acts`), the delegate rows, `Mailbox`'s rows, the `Watch`'s symptoms and `Intake`'s holds.
+  It keeps no table of its own, and whether the tree runs does not matter. The operator's stops
+  count among a person's interventions, by the config's `operator`.
+
+  Answers `{:ok, periods}`, oldest first, each `%{period, from, until}` and one entry per metric;
+  `{:refused, {:bad, key}}` for a bound or a cut out of shape; or `{:refused, {:sqlite, reason}}`
+  when the store cannot be opened. A rule whose fact no row holds yet counts nothing, and its
+  metric names it in `unread`.
+
+      {:ok, [%{period: "2026-W48", started: %{count: 12}, killed: %{count: 1},
+               late: %{count: 2, evidence: [%{name: "app-unit", why: ["c"]} | _]}} | _]} =
+        CodingAgentFramework.metrics(config, since: since, until: until, by: :week)
+  """
+  @spec metrics(Config.t(), keyword) :: {:ok, [Watch.Metrics.period()]} | {:refused, term}
+  def metrics(%Config{} = c, opts) do
+    read = &metric_rows(&1, &2, c.workstation)
+
+    with {:ok, rows} <- Store.snapshot(Config.path(c, "caf.db"), read),
+         do: Watch.Metrics.fold(rows, Keyword.put(opts, :operator, c.operator))
+  end
+
+  # A table not made yet (a tree with `agents: false` makes no agent's table) has no rows.
+  defp metric_rows(db, tables, host) do
+    read = fn table, fun -> if MapSet.member?(tables, table), do: fun.(), else: [] end
+
+    %{
+      acts: read.("acts", fn -> Acts.Table.select(db, "1 = 1", []) end),
+      delegates: read.("delegates", fn -> Delegates.Table.rows(db, host) end),
+      messages: read.("messages", fn -> Mailbox.Table.rows(db) end),
+      symptoms: read.("symptoms", fn -> Watch.Table.select(db, "1 = 1", []) end),
+      holds: read.("intake_events", fn -> Intake.Table.holds(db, host) end)
+    }
   end
 
   @doc "Each part's process, by its key (`:sessions`, `:registry`, …)."
@@ -724,9 +763,20 @@ defmodule CodingAgentFramework do
          opts = [intake: pid.(:intake), secret: w.secret, runs: runs]
          {Bandit, plug: {Endpoint, opts}, ip: @local, port: c.ports.intake, startup_log: false}
        end},
+      # A viewer attached is a person's intervention in `Acts`, under the name `Interventions`
+      # writes a person's others by (F-199).
       {:sampler,
-       fn _ ->
-         {TmuxSampler, server: w.tmux, holder: w.holder, db: db, notify: notify, interval: every}
+       fn pid ->
+         person = Config.options(c, :interventions, person: "person")[:person]
+
+         {TmuxSampler,
+          server: w.tmux,
+          holder: w.holder,
+          db: db,
+          notify: notify,
+          interval: every,
+          acts: pid.(:acts),
+          person: person}
        end}
     ] ++
       readers ++

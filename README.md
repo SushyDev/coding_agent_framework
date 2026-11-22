@@ -306,7 +306,12 @@ Built, each from a checked model in `model/tla/`:
 - what an app's first run on the tree found (F-201): a tool event carries Claude Code's `cwd`, an
   agentless config needs only what it reads, `agent_rows/1` takes the instance's name, an answer
   that is not JSON is a pass with its problem recorded, and `post_tool_use/3` may add context to
-  the call it is about (`{:context, text}`, measured on 2.1.322).
+  the call it is about (`{:context, text}`, measured on 2.1.322);
+- one reading of the metrics (F-199, B7): `metrics/2` counts builders started, reported,
+  stalled, late, killed and restarted, usage-limit stalls and moves, prompts and their time to
+  answer, recoveries and a person's interventions (a viewer attached among them), as a pure fold
+  of the rows cut by UTC day, ISO week or all, each rule in its `@doc`; a fact no row holds yet is
+  listed as `unread`, never guessed.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

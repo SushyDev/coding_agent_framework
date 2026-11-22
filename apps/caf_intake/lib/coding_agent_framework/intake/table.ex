@@ -314,6 +314,25 @@ defmodule CodingAgentFramework.Intake.Table do
   end
 
   @doc """
+  The host's holds that could wait on a person, as `waiting/2`'s, in every hold, decided ones
+  too, oldest first: what the metrics read (F-199). A decided row's `written_at` is when it
+  settled, not when it opened.
+
+      iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "holds.db")
+      iex> {:ok, db} = CodingAgentFramework.Intake.Table.open(path)
+      iex> CodingAgentFramework.Intake.Table.holds(db, "laptop")
+      []
+  """
+  @spec holds(db, String.t()) :: [map]
+  def holds(db, host) do
+    where =
+      "host = ?1 AND hold IS NOT NULL AND " <>
+        "(event = 'PermissionRequest' OR prompt = 'stop_cap') ORDER BY id"
+
+    Store.select(db, "intake_events", @columns, where, [host])
+  end
+
+  @doc """
   The host's rows of hook event `event` whose id is past `past`, oldest first: what a reader
   that keeps its place reads next (`Interventions`' prompts, F-194).
 

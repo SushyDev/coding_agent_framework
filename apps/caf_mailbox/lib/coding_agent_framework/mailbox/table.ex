@@ -162,5 +162,9 @@ defmodule CodingAgentFramework.Mailbox.Table do
   @spec get(db, integer) :: map | nil
   def get(db, id), do: List.first(select(db, "id = ?1", [id]))
 
+  @doc "Every row, oldest first: what the metrics read (F-199)."
+  @spec rows(db) :: [map]
+  def rows(db), do: select(db, "1 = 1 ORDER BY id", [])
+
   defp select(db, where, args), do: Store.select(db, "messages", @columns, where, args)
 end
