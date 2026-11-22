@@ -463,8 +463,8 @@ defmodule CodingAgentFramework.Sessions do
 
   @doc """
   Sets the phase of agent `name`'s move under way (`"stopping"`, `"copying"`, `"resuming"`), with
-  `fields` (`to:`, `act:`), or ends it with `nil`, which clears every move field. `Mover` is its
-  one caller. Refused `:no_move` for a row with no move under way, or `:no_session`.
+  `fields` (`to:`, `act:`, `deadline:`, the resume's own: F-211), or ends it with `nil`, which
+  clears every move field. `Mover` is its one caller. Refused `:no_move` for a row with no move under way, or `:no_session`.
   """
   @spec move_phase(GenServer.server(), String.t(), String.t() | nil, keyword, keyword) ::
           outcome(:ok)
@@ -1111,7 +1111,7 @@ defmodule CodingAgentFramework.Sessions do
           {:ok, :ok}
 
         row when phase in ~w(stopping copying resuming) ->
-          extra = for {k, v} <- fields, k in [:to, :act], do: {:"move_#{k}", v}
+          extra = for {k, v} <- fields, k in [:to, :act, :deadline], do: {:"move_#{k}", v}
           write(state, row, [move: phase] ++ extra)
           {:ok, :ok}
 

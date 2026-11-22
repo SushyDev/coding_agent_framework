@@ -30,7 +30,9 @@ defmodule CodingAgentFramework.Mover do
      account's config directory, each under a temporary name and renamed into place, and the
      transcript's size checked against the source's.
   4. `resuming`: `usable:` reads the other account again (the app may have flagged it during
-     the drain and the stop: F-210), then `Sessions.resume/6` on it with the same session id
+     the drain and the stop: F-210). While it answers `{:unknown, _}` it is asked again at
+     each step (5 s) and cue, up to the resume's own deadline (`resume_wait:`, F-211), written
+     on the row with the phase. Then `Sessions.resume/6` on it with the same session id
      and name, the launch the app gives (`launch:`, without options, so the row's own are taken again),
      and so Remote Control and the waiter's hook of that account. An interactive session's
      first due row goes in as the resume's prompt (`Mailbox.launch/4`, then `launched/3`), since
@@ -48,8 +50,10 @@ defmodule CodingAgentFramework.Mover do
   - a stop whose process outlives its deadline: the row stays `stopping` (`Recoveries` ends it
     by its record), and the move goes on once the row is free;
   - a copy or a resume refused on the other account, `usable:` refusing it at the resume
-    included: the act `failed`, and the session is resumed on its own account, where its
-    transcript is, once `usable:` takes that one;
+    included, or answering unknown until the resume's deadline (the reason
+    `{:unknown_past_deadline, why}`): the act `failed`, and the session is resumed on its own
+    account, where its transcript is, once `usable:` takes that one (by the same deadline,
+    which a way back keeps);
   - that resume refused too: the session runs on no account. Its row says why and the fault
     ledger has an act `move` `failed` with reason `stranded`, for a person;
   - an agent at a usage limit (F-191): its copy or resume refused leaves its process gone, the
@@ -76,6 +80,8 @@ defmodule CodingAgentFramework.Mover do
   @stop 30_000
   # A resume's deadline in `Sessions`, which bounds the launch that carries its first row.
   @resume 30_000
+  # The longest a move's resume asks `usable:` while it answers unknown (F-211).
+  @resume_wait 300_000
   # The word a headless session moved with nothing due goes on with (F-193).
   @moved "This session was moved between Claude accounts. Go on with your task from where it stopped."
 
@@ -88,7 +94,9 @@ defmodule CodingAgentFramework.Mover do
   resume on another account (`Sessions.resume/6`'s: its role and its `cwd:` or `worktree:`,
   `claude:`, `env:`, `tool_timeout:`, `mcp:`; with no `model:` the row's is taken), a refusal (the move then goes back, as
   for a refused resume), or `{:unknown, reason}` (asked again at the next cue). Optionally `timeout:`
-  (ms, 30 min by default), `stop:` (ms, each stop's own deadline, 30 s by default), `usable:` (a
+  (ms, 30 min by default), `stop:` (ms, each stop's own deadline, 30 s by default),
+  `resume_wait:` (ms, 5 min by default: how long a move's resume asks `usable:` again while it
+  answers unknown, before it takes the unknown as a refusal), `usable:` (a
   function of an account answering `{:ok, account}` (the `Accounts.Account`) for one a launch
   may run on now, else why not: `CodingAgentFramework.Logins.usable/3`, prepared and logged in,
   then the app's own check; read at the pick and again at each resume; by default
@@ -197,9 +205,11 @@ defmodule CodingAgentFramework.Mover do
           agents: agents,
           timeout: Keyword.get(opts, :timeout, @timeout),
           stop: Keyword.get(opts, :stop, @stop),
+          resume_wait: Keyword.get(opts, :resume_wait, @resume_wait),
           usable: Keyword.get(opts, :usable, &Accounts.ready(s.accounts, &1)),
           clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
-          calls: %{}
+          calls: %{},
+          asks: %{}
         })
 
       {:ok, s, {:continue, :start}}
@@ -282,6 +292,16 @@ defmodule CodingAgentFramework.Mover do
   end
 
   def handle_info(:deadline, s), do: {:noreply, steps(s, :evidence)}
+
+  # A resume whose `usable:` answered unknown asks again (F-211).
+  def handle_info({:ask, name}, s) do
+    s = %{s | asks: Map.delete(s.asks, name)}
+
+    case Agents.get(s.agents, name) do
+      nil -> {:noreply, s}
+      row -> {:noreply, step(s, row, :cue)}
+    end
+  end
 
   # The act, claimed on the session's current process and the moves of it already ended, so a
   # second press while one is under way is refused, and a press after one ended is new. It is
@@ -390,7 +410,7 @@ defmodule CodingAgentFramework.Mover do
     row = if row.move == "copying", do: row, else: phase(s, row, "copying")
 
     case copied(s, row) do
-      :ok -> resume(s, phase(s, row, "resuming"))
+      :ok -> resuming_phase(s, row, [])
       {:refused, why} -> back(s, row, {:copy, why})
     end
   end
@@ -405,14 +425,56 @@ defmodule CodingAgentFramework.Mover do
     end
   end
 
+  # The phase `resuming` with the resume's own deadline (F-211), then the resume. The deadline
+  # goes in `move_deadline`, which the drain and the stop read only before the copy. It is
+  # written once per move, at the copy or at a way back from a copy refused, so a way back from
+  # the resume keeps it and a restart reads it from the row.
+  defp resuming_phase(s, row, fields) do
+    deadline = s.clock.() + s.resume_wait
+
+    case Sessions.move_phase(s.sessions, row.name, "resuming", fields ++ [deadline: deadline]) do
+      {:ok, _} ->
+        wake(s, deadline)
+        resume(s, Agents.get(s.agents, row.name))
+
+      _ ->
+        s
+    end
+  end
+
   # F-210 (F-209's new-1; `Move.tla`'s TargetTaken, MoveBack and Stranded): the account is read
   # by `usable:` again at the resume, not only at the pick, since a drain and its stop may take
   # the move's whole timeout and the app may flag the account meanwhile. Refused, the move goes
   # back (`answered/4`): to its own account, read the same way, and with that refused too the
   # row is left down with the reason.
   defp resume(s, row) do
-    with {:ok, account} <- s.usable.(row.move_to),
-         {:ok, launch} <- s.launch.(row),
+    case s.usable.(row.move_to) do
+      {:ok, account} -> resume_on(s, row, account)
+      {:unknown, why} -> unanswered(s, row, why)
+      refused -> answered(s, row, :resume, refused)
+    end
+  end
+
+  # F-211 (F-210's new-2; `Move.tla`'s ResumeWaitEnds, ResumeEnds): an unknown decides nothing,
+  # so it is asked again at the next step or cue, up to the resume's deadline; past it, it is
+  # taken as a refusal that names it: back to the own account, or the row left down.
+  defp unanswered(s, row, why) do
+    if past?(s, row) do
+      answered(s, row, :resume, {:refused, {:unknown_past_deadline, why}})
+    else
+      Logger.debug("mover: usable: cannot tell for #{row.move_to} yet: #{inspect(why)}")
+      ask_again(s, row)
+    end
+  end
+
+  defp ask_again(s, row) do
+    if Map.has_key?(s.asks, row.name),
+      do: s,
+      else: put_in(s.asks[row.name], Process.send_after(self(), {:ask, row.name}, @step))
+  end
+
+  defp resume_on(s, row, account) do
+    with {:ok, launch} <- s.launch.(row),
          {:ok, launched} <- launch_first(s, row) do
       launch = Keyword.delete(launch, :options)
 
@@ -545,9 +607,15 @@ defmodule CodingAgentFramework.Mover do
     Logger.warning("mover: #{row.name} goes back to #{row.move_from}: #{inspect(why)}")
     if row.move_act, do: Acts.settle(s.acts, row.move_act, :failed, reason: why)
 
-    case Sessions.move_phase(s.sessions, row.name, "resuming", to: row.move_from, act: nil) do
-      {:ok, _} -> resume(s, Agents.get(s.agents, row.name))
-      _ -> s
+    fields = [to: row.move_from, act: nil]
+
+    if row.move == "resuming" do
+      case Sessions.move_phase(s.sessions, row.name, "resuming", fields) do
+        {:ok, _} -> resume(s, Agents.get(s.agents, row.name))
+        _ -> s
+      end
+    else
+      resuming_phase(s, row, fields)
     end
   end
 

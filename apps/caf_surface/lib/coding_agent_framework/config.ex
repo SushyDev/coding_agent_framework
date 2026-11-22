@@ -192,8 +192,8 @@ defmodule CodingAgentFramework.Config do
     `queue_bound` and `max_wait` (a count, or a map with every class), and `age` (or nil);
     `logins` `max_age`; `mailbox` `take_bound`; `mains` `clone_timeout`; `delegates`
     `idle_bound` (none by default: an idle delegate is not told to its parent); `mover`
-    `timeout` and `stop`; `limits` `margin`, `credits` and `bound`; `stuck_backgrounds`
-    `quiet`; `hooks_silent` `bound` and `slack`; `interventions` `person` (the actor of a
+    `timeout`, `stop` and `resume_wait`; `limits` `margin`, `credits` and `bound`;
+    `stuck_backgrounds` `quiet`; `hooks_silent` `bound` and `slack`; `interventions` `person` (the actor of a
     person's interventions, `"person"` by default), `settle` and `slack`; `registry`,
     `transcripts` and `stream` `timeout`; `stream` `wake`; `mcp` `cap`. Each is ms but for a count and a name. An option not named is the part's own
     default. A part or option it does not know, or a value out of shape, is refused naming
@@ -590,7 +590,7 @@ defmodule CodingAgentFramework.Config do
     mailbox: [take_bound: :ms],
     mains: [clone_timeout: :ms],
     delegates: [idle_bound: :ms],
-    mover: [timeout: :ms, stop: :ms],
+    mover: [timeout: :ms, stop: :ms, resume_wait: :ms],
     limits: [margin: :ms, credits: :ms, bound: :count, move_after: :ms],
     stuck_backgrounds: [quiet: :ms],
     hooks_silent: [bound: :ms, slack: :ms],

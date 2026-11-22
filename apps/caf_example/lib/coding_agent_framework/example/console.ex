@@ -483,7 +483,13 @@ defmodule CodingAgentFramework.Example.Console do
   @spec move(pid, String.t(), String.t() | nil) :: :ok
   def move(caf, agent, to \\ nil), do: show(Operator.move(mcp(caf), agent, to))
 
-  @doc "The leases still held, and every refusal; with `all` every lease ever written."
+  @doc """
+  The leases still held, and every refusal; with `all` every lease ever written. A lease names
+  the account its grant was read against, `asked on work`, which is not where a delegate a
+  resume or a move put on another account runs now: its agent row names that (F-211).
+
+      lease 3: builder for app asked on work, seat 1: held by delegate laptop:12
+  """
   @spec leases(pid, boolean) :: :ok
   def leases(caf, all \\ false) do
     rows = Scheduler.leases(part(caf, :scheduler))
@@ -609,7 +615,8 @@ defmodule CodingAgentFramework.Example.Console do
   defp lease(l) do
     units = Enum.map_join(l.units || %{}, ", ", fn {k, n} -> "#{k} #{n}" end)
     holder = with {kind, key} <- l[:holder], do: "#{kind} #{key}"
-    head = "lease #{l.id}: #{l.class} for #{l.module} on #{l[:account] || "any"}, #{units}"
+    asked = l[:account] || "any"
+    head = "lease #{l.id}: #{l.class} for #{l.module} asked on #{asked}, #{units}"
 
     cond do
       refused?(l) -> "#{head}: refused #{l.reason}, retry at #{l[:retry_at]}"
