@@ -721,7 +721,7 @@ by label, a default, a deadline, its owner and its status (`open`, `answering`, 
 |---|---|---|
 | `permission` | `Sessions`, from a held `PermissionRequest`, a subagent's included (the hook names it); a headless delegate's `can_use_tool` request held in its `Stream` fold (F-190) | `Intake`'s hold; `Stream.answer/5` |
 | `question` | `ask`, and Claude Code's question tool intercepted | `Mailbox`, a row to the agent |
-| `startup` | `Sessions`, from a dialog read on the pane: trust, imports, onboarding; and any numbered menu no rule names on a running interactive session's screen (F-198), its options and `esc`, with no default and no deadline | `Sessions`' checked press; a menu's read back, the marker on the label before Enter |
+| `startup` | `Sessions`, from a dialog read on the pane: trust, imports, and a numbered menu no rule names before the session file, an onboarding menu say (`start_menu`, F-203, its options, no default); and any numbered menu no rule names on a running interactive session's screen (F-198), its options and `esc`, with no default and no deadline | `Sessions`' checked press; a menu's read back, the marker on the label before Enter |
 | `plan` | `Sessions`, from a held call of Claude Code's plan exit | `Intake`'s hold |
 | `elicitation` | `Sessions`, from an MCP server's request for input, held by its hook | `Intake`'s hold |
 | `limit` | the start's owner (`Delegates`, `Mains`), for a start or resume every usable account refuses at a usage limit: its row `waiting` for the soonest reset, `wait` (its default at its deadline, the reset plus a margin) or `leave` (F-196); `Sessions`, with no deadline, for a `limited` agent past its bound of go-ons, a menu still shown after a press whose outcome is unknown, or a wait still shown past its reset ("Usage limits"); for a main session limited past `move_after` with another account that has room, offering "move to <account>" beside "wait" (F-181) | the owner's row: it waits and picks its account again at its deadline, or is refused `left`; `Sessions`: go on now (the press cleared, the bound started again), move (a main's, only by this answer), or leave it |
@@ -751,8 +751,11 @@ stored, a start's wait once it is answered for this reset (and opens again at a 
 a login once a check finds it logged in. A `remedy` answered `act` is the healer's to take at
 its next check: it stays, `answering`, while the person's act has no row in `Acts` or that
 row is open, and leaves once the row has ended; its outcome is that row, a fault in the fault
-ledger when it failed, interrupted or was not verified. Any other `remedy` answer leaves at
-once, its act the `Watch`'s own.
+ledger when it failed, interrupted or was not verified. A state the healer no longer reads
+before it takes the act (the viewer came back, the main resumed by itself) passes, by the
+`open` row's rule (`Watch.pass/4`, F-203), and its prompt leaves then with no row in `Acts`,
+its outcome "passed before its act". Any other `remedy` answer leaves at once, its act the
+`Watch`'s own.
 
 Built so far (F-179, B6's first part, `caf_prompts`): `Prompts` keeps no table. A prompt is
 its owner's row read by one function: `Intake`'s hold of a `PermissionRequest` (kind
@@ -792,7 +795,12 @@ from a read of the pane every `look:` ms; the inbox shows it as kind `dialog`, i
 default and no deadline, open until a press of it is sent, and gone once a read finds no menu,
 whoever answered it. `answer/4` hands a label to `Sessions.answer_menu/5`: an act in `Acts`,
 the mark `pressing`, then the `Inlet`'s checked press, the marker moved and read back on the
-label before Enter (`esc` is Escape); sent or unknown, never pressed again. Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
+label before Enter (`esc` is Escape); sent or unknown, never pressed again. F-203 (F-198's new-4) added
+such a menu that a start meets before its session file as a startup dialog, kind `start_menu`
+(`Sessions.Dialog`), its prompt `dialog:<agent>:<start>:start_menu`, its options with no
+`esc`, no default (the app's `dialog:` callback is never asked, and `dialogs:` refuses the
+kind) and no deadline, pressed by `answer_dialog/5` as the `Inlet`'s read back of a menu. A
+second menu in the same start reaches no person yet (F-203's new-2). Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
 `expired` prompts kept shown, and the kinds that need a reading first.
 
 `Prompt.tla` (B1) is its contract: it instances `Hold` (one response, its deadline, its holder's
@@ -875,7 +883,7 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 | `main_model`, `operator` | a main session's model; the operator's name | `"opus"`, `"operator"` |
 | `ports` | `%{intake, mcp}` on 127.0.0.1 | required, unless `agents: false` |
 | `git` | the author agents commit as, and each project's override | no author |
-| `claude`, `env`, `user` | what every launch shares; the OS user (required on macOS) | required; with `agents: false` only `env`, with its `path` (F-201) |
+| `claude`, `env`, `user` | what every launch shares; the OS user (required on macOS) | required, `env` with its `path` for every tree (F-203); with `agents: false` only `env` (F-201) |
 | `tool_timeout`, `margin` | Claude Code's MCP tool timeout, and what `run_delegate` keeps under it | 1 h, 1 min |
 | `interval` | ms between the timed readers' reads | 2 s |
 | `resources`, `lease`, `job_lease` | the `Scheduler`'s capacities and the units each start asks for | seat 4, slot 2 |
@@ -3147,6 +3155,15 @@ reset, and its prompt opens again. A restart keeps the row and sets its timer fr
 pick reads the owner's clock, as the row's deadline does. While it waits, a second start of
 the name is refused `{:waiting, name}`, and the row holds its place in its parent's cap. The
 inbox's part is in "Prompts".
+
+Built in F-203 (F-196's new-3 and new-4): `run_delegate` of a start that waits answers
+`%{delegate: name, waiting: until}` at once, as `start_delegate` does, since a reset hours away
+outlasts any await; the report comes later as a message. An absent main's resume that waits
+(`AbsentMains`) leaves the healer's claim `acted`, its detail naming the `Mains` row, and the
+claim is settled from that row's end: `verified` when it ran, `failed` when a person left it
+or its pick was refused, so the fault ledger shows it and the absence is asked
+(`Remedies.tla`'s ActWaits, SettleWait, WaitedEnd and WaitSettled, `Break_Remedies_SettleAtWait`;
+`Heal.tla`'s act whose outcome comes later).
 
 **Measured** (F-181, by hand on 2.1.322, against a local endpoint at `ANTHROPIC_BASE_URL` that
 answers 429 with the unified rate-limit headers the pinned binary reads, a dummy subscriber's

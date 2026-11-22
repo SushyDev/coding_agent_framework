@@ -12,11 +12,11 @@ defmodule CodingAgentFramework.Prompts do
   | `permission` | `Intake`'s hold of a `PermissionRequest` (a subagent's included; `subagent` names it) | the hold is `held` |
   | `permission` | a headless delegate's `can_use_tool` request, held in its `Stream` fold (F-189's new-2) | the request is `held` |
   | `stop_cap` | `Intake`'s hold of a `Stop` at Claude Code's cap of blocks in a row | the hold is `held` |
-  | `dialog` | `Sessions`' agent row on a startup dialog (`trust`, `imports`) | the row shows it, no press marked |
+  | `dialog` | `Sessions`' agent row on a startup dialog (`trust`, `imports`, a start's menu `start_menu`, F-203) | the row shows it, no press marked |
   | `dialog` | `Sessions`' running row whose screen shows a numbered menu no rule names (F-198, `Sessions.Menu`) | the row's last read of its pane found it, and no press of it was sent |
   | `ask` | `Mailbox`'s ask, from an agent to the operator | no answer row and no withdrawal |
   | `remedy` | `Watch`'s symptom state the healer left to a person (F-182) | the row is `asked` |
-  | `remedy` | the same row answered `act` (F-196), shown `answering` | no row in `Acts` of that act has ended |
+  | `remedy` | the same row answered `act` (F-196), shown `answering` | no row in `Acts` of that act has ended, and its state did not pass before its act (F-203) |
   | `login` | `Logins`' row of an account whose login a check refused (F-181) | no check found it logged in since |
   | `limit` | `Sessions`' agent row at a usage limit the healer left to a person (F-186) | its step is `prompt` |
   | `usage_credits` | `Sessions`' agent row on the usage limit menu, the account able to spend | its step is `credits` |
@@ -49,7 +49,9 @@ defmodule CodingAgentFramework.Prompts do
   take at its next check, under a claim in `Acts` whose actor is the person and whose detail's
   `symptom` is the state. With `acts_db:` the prompt stays, `answering`, until that row has
   ended (settled or interrupted), and then leaves the inbox: its outcome is the act's row, a
-  fault in the fault ledger when it failed.
+  fault in the fault ledger when it failed. A state the healer no longer reads before it takes
+  the act (the viewer came back, the main resumed by itself) is `passed` by `Watch.pass/4` with
+  no row in `Acts`, and the prompt leaves then, its outcome "passed before its act" (F-203).
 
   **One answer.** `answer/5` checks the prompt read now (still open, the choice one it offers)
   and hands the choice to its owner, whose own guard is the claim that lets one answer in
@@ -493,7 +495,8 @@ defmodule CodingAgentFramework.Prompts do
         kind: "dialog",
         status: status,
         subagent: nil,
-        text: Enum.join(["#{d.kind} dialog" | d.paths], ": "),
+        # A start's menu names its title (F-203); the imports dialog its paths.
+        text: Enum.join(["#{d.kind} dialog" | List.wrap(d[:title]) ++ d.paths], ": "),
         options: d.options,
         opened_at: row.updated_at,
         deadline: nil
@@ -567,15 +570,17 @@ defmodule CodingAgentFramework.Prompts do
   end
 
   # A remedy answered `act` (F-196): `answering` while the person's act is the healer's to take
-  # or under way, gone once its row in `Acts` has ended, whatever its outcome.
+  # or under way, gone once its row in `Acts` has ended, whatever its outcome. A state that
+  # passed with no act is gone too, passed before its act (F-203).
   defp acting(%{adb: nil}, _rows), do: []
 
   defp acting(s, rows) do
     by_name = Map.new(rows, &{&1.name, &1})
+    answered = "status IN ('answered', 'passed') AND answer = 'act'"
 
-    for sym <- Watch.Table.select(s.wdb, "status = 'answered' AND answer = 'act'", []),
+    for sym <- Watch.Table.select(s.wdb, answered, []),
         act <- [person_act(s, sym)],
-        act == nil or act.status in ["claimed", "acted"] do
+        if(act, do: act.status in ["claimed", "acted"], else: sym.status == "answered") do
       now = if act, do: "its #{act.act} is #{act.status}", else: "its healer takes it next"
 
       fields = %{

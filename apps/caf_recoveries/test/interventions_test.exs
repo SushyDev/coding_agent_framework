@@ -58,6 +58,12 @@ defmodule CodingAgentFramework.InterventionsTest do
       clock: now
     ]
 
+    # Its read at start is queued before this call, so it has read nothing yet when the call
+    # answers, and only a test's own check reads the rows the test writes after (F-203: the
+    # start's read once ran after a test's rows and before its check).
+    reader = start_supervised!({Interventions, opts})
+    {:ok, %{recorded: []}} = Interventions.check(reader)
+
     %{
       acts: acts,
       intake: intake,
@@ -66,7 +72,7 @@ defmodule CodingAgentFramework.InterventionsTest do
       path: path,
       clock: clock,
       opts: opts,
-      reader: start_supervised!({Interventions, opts})
+      reader: reader
     }
   end
 

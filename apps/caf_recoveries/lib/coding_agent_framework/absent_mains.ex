@@ -23,6 +23,13 @@ defmodule CodingAgentFramework.AbsentMains do
   and asks); refused and unknown are asked, never tried again in that state. A claim a restart
   cut is asked at `init`. Each check passes the absences it no longer reads.
 
+  **A resume that waits** (F-203, `Remedies.tla`'s ActWaits and SettleWait): every usable
+  account limited, `Mains` keeps the resume as its own row, `waiting` for the reset, and answers
+  `waiting` at once. The claim is then `acted`, its detail naming that row (`start`), and stays
+  open until the row ends: `running` settles it `verified`; `refused` (a person answered its
+  `limit` prompt `leave`, or its pick at the reset was refused) settles it `failed`, a fault,
+  and asks, since the main is still absent.
+
   The embedding app's tree starts one per instance, after `Mains`, given the host's
   `Sessions.Agents` reader, the instance's `Acts` and `Watch`, and `resume:`, the function that
   resumes a main by name (`&Mains.resume_main(mains, &1)`). It checks at start and at each cue
@@ -37,6 +44,7 @@ defmodule CodingAgentFramework.AbsentMains do
   use GenServer
 
   alias CodingAgentFramework.{Acts, Sessions, Watch}
+  alias CodingAgentFramework.Mains.Starts
 
   @kind "absent_main"
   @remedy "resume"
@@ -44,9 +52,10 @@ defmodule CodingAgentFramework.AbsentMains do
 
   @doc """
   Starts the healer. Options: `agents:` (a `Sessions.Agents` reader), `acts:`, `watch:`,
-  `resume:` (name -> `{:ok, _} | {:refused, _} | {:unknown, _}`), `host:` (for its actor,
+  `mains_db:` (`Mains`' file, whose start rows a waited resume is read from), `resume:` (name
+  -> `{:ok, _} | {:refused, _} | {:unknown, _}`), `host:` (for its actor,
   `absent_mains:<host>`) and optionally `clock:` (ms). Fails to start with `Acts`' answer when
-  it cannot close the rows a restart cut.
+  it cannot close the rows a restart cut, or the file's refusal.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -73,9 +82,12 @@ defmodule CodingAgentFramework.AbsentMains do
     :ok
   end
 
-  @doc "What it reads, for `Cues`: `Sessions`' rows, and the `Watch`'s answers."
+  @doc """
+  What it reads, for `Cues`: `Sessions`' rows, the `Watch`'s answers, and `Mains`' start rows,
+  where a resume that waits ends.
+  """
   @spec reads() :: %{topics: [String.t()], cue: (pid, map -> :ok)}
-  def reads, do: %{topics: ~w(sessions watch), cue: &cue/2}
+  def reads, do: %{topics: ~w(sessions watch mains), cue: &cue/2}
 
   @doc "The absences in agent rows: main sessions whose process exited by itself. Pure."
   @spec absences([map]) :: [map]
@@ -92,25 +104,30 @@ defmodule CodingAgentFramework.AbsentMains do
 
   @impl true
   def init(opts) do
-    s = %{
-      agents: Keyword.fetch!(opts, :agents),
-      acts: Keyword.fetch!(opts, :acts),
-      watch: Keyword.fetch!(opts, :watch),
-      resume: Keyword.fetch!(opts, :resume),
-      actor: "absent_mains:#{Keyword.fetch!(opts, :host)}",
-      clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end)
-    }
+    with {:ok, starts} <- Starts.open(Keyword.fetch!(opts, :mains_db)) do
+      s = %{
+        agents: Keyword.fetch!(opts, :agents),
+        acts: Keyword.fetch!(opts, :acts),
+        watch: Keyword.fetch!(opts, :watch),
+        starts: starts,
+        resume: Keyword.fetch!(opts, :resume),
+        actor: "absent_mains:#{Keyword.fetch!(opts, :host)}",
+        clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end)
+      }
 
-    # A claim this actor wrote, or a person's it took (F-192), and did not act on: never
-    # acted on; its state is a person's.
-    case Acts.interrupt(s.acts, s.actor) do
-      {:ok, cut} ->
-        for id <- cut, {:ok, row} <- [Acts.get(s.acts, id)], do: ask(s, row, :interrupted)
-        send(self(), :check)
-        {:ok, s}
+      # A claim this actor wrote, or a person's it took (F-192), and did not act on: never
+      # acted on; its state is a person's.
+      case Acts.interrupt(s.acts, s.actor) do
+        {:ok, cut} ->
+          for id <- cut, {:ok, row} <- [Acts.get(s.acts, id)], do: ask(s, row, :interrupted)
+          send(self(), :check)
+          {:ok, s}
 
-      {_, reason} ->
-        {:stop, reason}
+        {_, reason} ->
+          {:stop, reason}
+      end
+    else
+      {:refused, reason} -> {:stop, reason}
     end
   end
 
@@ -124,7 +141,8 @@ defmodule CodingAgentFramework.AbsentMains do
   end
 
   defp check_now(s) do
-    with {:ok, list} <- Watch.remedies(s.watch, :list) do
+    with :ok <- waited(s),
+         {:ok, list} <- Watch.remedies(s.watch, :list) do
       absent = absences(Sessions.Agents.rows(s.agents))
       resumed = for a <- absent, id = heal(s, list, a), is_integer(id), do: id
       present = %{targets: Enum.map(absent, & &1.name), states: Enum.map(absent, & &1.key)}
@@ -215,12 +233,19 @@ defmodule CodingAgentFramework.AbsentMains do
              detail ++ healer(s, actor)
            ) do
       case s.resume.(sym.target) do
-        # Every usable account limited (F-196): the resume waits as its own row, a prompt, and
-        # goes on at the reset; nothing to verify now, and no fault of the remedy.
-        {:ok, %{waiting: until}} -> Acts.settle(s.acts, id, :verified, answer: {:waiting, until})
-        {:ok, _} -> verify(s, id, sym)
-        {:refused, why} -> settle(s, id, sym, :failed, {:refused, why}, acted: false)
-        {:unknown, why} -> settle(s, id, sym, :unknown, {:unknown, why}, acted: true)
+        # Every usable account limited (F-196): the resume waits as its own row in `Mains`, a
+        # prompt, and goes on at the reset. Its outcome is that row's end (F-203).
+        {:ok, %{waiting: until, id: start}} ->
+          Acts.acted(s.acts, id, answer: {:waiting, until}, detail: %{start: start})
+
+        {:ok, _} ->
+          verify(s, id, sym)
+
+        {:refused, why} ->
+          settle(s, id, sym, :failed, {:refused, why}, acted: false)
+
+        {:unknown, why} ->
+          settle(s, id, sym, :unknown, {:unknown, why}, acted: true)
       end
 
       id
@@ -228,6 +253,41 @@ defmodule CodingAgentFramework.AbsentMains do
       _claimed_elsewhere -> nil
     end
   end
+
+  # Remedies.tla's SettleWait (F-203): a resume of this healer's, or a person's it took, that
+  # waited at a usage limit is settled from its row in `Mains` once that row has ended. A row
+  # still waiting or starting, or not read, decides nothing.
+  defp waited(s) do
+    with {:ok, rows} <- Acts.rows(s.acts, act: "resume", status: "acted") do
+      for r <- rows,
+          detail = decode(r.detail),
+          r.actor == s.actor or detail["healer"] == s.actor,
+          is_integer(detail["start"]),
+          %{status: status} = start when status in ["running", "refused"] <-
+            [Starts.get(s.starts, detail["start"])],
+          do: settle_wait(s, r, start)
+
+      :ok
+    end
+  end
+
+  defp settle_wait(s, r, %{status: "running", account: account}),
+    do: Acts.settle(s.acts, r.id, :verified, answer: {:resumed, account})
+
+  # Left by a person or its pick refused at the reset: the main is still absent, a person's.
+  defp settle_wait(s, r, %{reason: reason}) do
+    Acts.settle(s.acts, r.id, :failed, reason: {:waited, reason})
+    ask(s, r, {:waited, reason})
+  end
+
+  defp decode(text) when is_binary(text) do
+    case JSON.decode(text) do
+      {:ok, %{} = detail} -> detail
+      _ -> %{}
+    end
+  end
+
+  defp decode(_), do: %{}
 
   # Heal.tla's Verify, read at once: the resume's ok means its start was confirmed, so the row
   # reads running unless the process went again. One that did not help leaves the list.

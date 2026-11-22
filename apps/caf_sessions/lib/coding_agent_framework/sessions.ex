@@ -51,8 +51,10 @@ defmodule CodingAgentFramework.Sessions do
   longer first row as a pointer to its file.
 
   **A startup dialog** (F-140, `model/tla/Dialog.tla`). Before its first turn an interactive
-  session may show the folder trust dialog, then the external imports dialog; neither sends a
-  hook event, and no session file exists while one is shown. With `inlet:`, an interactive
+  session may show the folder trust dialog, then the external imports dialog, or a numbered
+  menu no rule names (an onboarding menu on a new account, say: kind `:start_menu`, F-203,
+  which the callback is never asked, so a person answers it); none sends a hook event, and no
+  session file exists while one is shown. With `inlet:`, an interactive
   start reads its pane (`Inlet.look/4`) at each check while it has no session file. A startup
   dialog makes the row `dialog`, with the dialog (`Sessions.Dialog`), and a cue. The app's
   `dialog:` callback is asked once per kind: `{:answer, label}` presses that option, and
@@ -355,8 +357,8 @@ defmodule CodingAgentFramework.Sessions do
   @doc """
   Answers the startup dialog agent `name`'s start waits on (its row `dialog`) by the option
   labeled `label`: a person's answer, from the app's view or the operator's tool. `kind` is the
-  dialog's (`:trust` or `:imports`, or its name), so an answer meant for one dialog never
-  presses another. The answer is an act in `Acts` (with `acts:`), actor `by:` (the person, by
+  dialog's (`:trust`, `:imports` or `:start_menu`, or its name), so an answer meant for one
+  dialog never presses another. The answer is an act in `Acts` (with `acts:`), actor `by:` (the person, by
   default `"person"`; the operator's tool names the operator) and state the row's start, the
   dialog and its mark, so each is answered once. It is marked on the row, then the `Inlet`'s
   checked press goes (`Inlet.choose/5`) in a task, so `Sessions` answers other calls meanwhile;
@@ -1706,7 +1708,8 @@ defmodule CodingAgentFramework.Sessions do
   # says; anything else, or a failed read, decides nothing.
   defp shown(state, row, look) do
     with {:ok, screen} <- look,
-         true <- Dialog.startup?(screen) do
+         true <- Dialog.startup?(screen),
+         :ok <- before_file(state, row, screen) do
       now = Table.get(state.db, row.host, row.name) || row
       shown = Dialog.encode(screen)
 
@@ -1714,11 +1717,24 @@ defmodule CodingAgentFramework.Sessions do
         do: write(state, now, status: "dialog", reason: nil, dialog: shown)
 
       now = Table.get(state.db, row.host, row.name)
-      decide(state, now, screen)
+      decide(state, now, shown)
     else
       _ -> :none
     end
   end
+
+  # A menu is a start's only while no session file names the process, read again after the
+  # pane: a session may write its file and draw a menu between the start's read of the file
+  # and its read of the pane, and that menu is a running session's (F-203). The trust and
+  # imports dialogs are never drawn with a file.
+  defp before_file(state, row, %{kind: :menu}) do
+    case confirm(state, row, true) do
+      {:live, :no_session_file} -> :ok
+      _ -> :file
+    end
+  end
+
+  defp before_file(_state, _row, _screen), do: :ok
 
   # An unknown row's pane is read in a task (`{:peek, name}`), never in this process: at each
   # settle and each look, so a slow pane read cannot starve the calls.
@@ -1727,18 +1743,23 @@ defmodule CodingAgentFramework.Sessions do
   defp peek(_state, row), do: send(self(), {:peek, row.name})
 
   # The app's callback, for a dialog no answer has been marked for: an answer it gives is
-  # pressed, as a person's is; anything else leaves the dialog to a person.
+  # pressed, as a person's is; anything else leaves the dialog to a person. A start's menu has
+  # no default, so it is always a person's (F-203).
   defp decide(state, row, %{kind: kind, options: options}) do
-    if Dialog.answers(row)[kind] do
+    cond do
+      Dialog.answers(row)[kind] -> :pressed
+      kind == :start_menu -> {:ask, kind}
+      true -> decide_by_app(state, row, kind, options)
+    end
+  end
+
+  defp decide_by_app(state, row, kind, options) do
+    with {:answer, label} <- state.dialog.(kind, options),
+         :ok <- Dialog.check(row, kind, label),
+         :ok <- press(state, row, kind, label, @app, nil) do
       :pressed
     else
-      with {:answer, label} <- state.dialog.(kind, options),
-           :ok <- Dialog.check(row, kind, label),
-           :ok <- press(state, row, kind, label, @app, nil) do
-        :pressed
-      else
-        _ -> {:ask, kind}
-      end
+      _ -> {:ask, kind}
     end
   end
 
@@ -1755,12 +1776,12 @@ defmodule CodingAgentFramework.Sessions do
     with {:ok, act} <- answer_act(state, by, row.name, taken) do
       write(state, row, answers: Dialog.mark(row, kind, label, "pressing", act: act))
       inlet = state.inlet
-      {name, release} = {row.name, row.release}
+      {name, release, as} = {row.name, row.release, Dialog.press_kind(row, kind)}
 
       Task.async(fn ->
         answer =
           try do
-            Inlet.choose(inlet, name, kind, label, release: release, timeout: @press)
+            Inlet.choose(inlet, name, as, label, release: release, timeout: @press)
           catch
             how, _ -> {:unknown, {how, :press}}
           end

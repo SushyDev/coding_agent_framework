@@ -24,6 +24,7 @@ defmodule CafRecoveries.MixProject do
       {:caf_holder, in_umbrella: true},
       {:caf_intake, in_umbrella: true},
       {:caf_mailbox, in_umbrella: true},
+      {:caf_mains, in_umbrella: true},
       {:caf_shell, in_umbrella: true},
       {:caf_sampler, in_umbrella: true},
       {:caf_sessions, in_umbrella: true},

@@ -31,7 +31,13 @@
 (*                     then H's ActedOrAsked): asked for its bound, so a   *)
 (*                     person may answer "act", one resume of their own    *)
 (*                     (H's AnswerAct, F-190), which the healer's bound    *)
-(*                     does not count.                                     *)
+(*                     does not count. A resume that finds every account   *)
+(*                     limited waits as its own row (F-196): its claim     *)
+(*                     stays acted, H's "later", until the row ends, and   *)
+(*                     is settled from that end (F-203): verified when the *)
+(*                     main resumed, refused when a person left it or its  *)
+(*                     pick was refused, so the state is asked             *)
+(*                     (WaitedEnd, WaitSettled).                           *)
 (*                                                                         *)
 (* Every property of Heal.tla is checked through H. Left abstract: how the *)
 (* CPU time is read, the Scheduler's lease of the resume, and Mailbox's    *)
@@ -47,15 +53,19 @@ CONSTANTS
     Mains,        \* the targets of absent_main
     MaxActs,      \* the cap: remedies of one kind per bound
     MaxState, MaxRestarts, MaxBounds,
+    MayWait,      \* a resume may find every account limited and wait (a configuration's)
     Break
 
 Breaks == {
     "none",
     "LastResult",   \* the report is read from the latest result, not the brief's own
-    "ResumeTwice"   \* a second absence of a main within the bound is resumed again
+    "ResumeTwice",  \* a second absence of a main within the bound is resumed again
+    "SettleAtWait"  \* a resume that waits is settled verified at once, whatever its row's end
 }
 
-ASSUME Break \in Breaks /\ Delegates \cap Mains = {}
+WaitEnds == {"resumed", "left", "refused"}
+
+ASSUME Break \in Breaks /\ Delegates \cap Mains = {} /\ MayWait \in BOOLEAN
 
 Kind(s) == IF s \in Delegates THEN "stuck_background" ELSE "absent_main"
 
@@ -65,12 +75,13 @@ VARIABLES
     turn,      \* d -> "brief" (its brief's turn runs), "idle", "own" (a turn of its own), "ended"
     bg,        \* d -> a background command of d runs
     reports,   \* d -> the reports taken as the brief's reply
-    resumes    \* m -> the resumes of m claimed in the bound: a fold of the rows (durable)
+    resumes,   \* m -> the resumes of m claimed in the bound: a fold of the rows (durable)
+    waits      \* the resumes that wait at a limit, [k (the claim's state), end] (Mains' rows)
 
 healVars == <<facts, claims, acting, cdone, acted, twice, cut, res, count, mem, allow,
               dropped, asked, forBound, closed, wrong>>
 dvars == <<turn, bg, reports>>
-mine == <<turn, bg, reports, resumes>>
+mine == <<turn, bg, reports, resumes, waits>>
 vars == <<on, st, healVars, restarts, bounds, mine>>
 
 H == INSTANCE Heal WITH Symptoms <- Delegates \cup Mains,
@@ -86,7 +97,7 @@ Claim(s) ==
     /\ H!Claim(s)
     /\ s \in Mains => resumes[s] < 1 \/ Break = "ResumeTwice"
     /\ resumes' = IF s \in Mains THEN [resumes EXCEPT ![s] = @ + 1] ELSE resumes
-    /\ UNCHANGED dvars
+    /\ UNCHANGED <<dvars, waits>>
 
 \* A second absence of a main within the bound, with no claim on it: a person's, asked for its
 \* bound.
@@ -105,7 +116,21 @@ Act(c, out) ==
     /\ IF c.t \in Delegates /\ on[c.t] /\ ~on'[c.t]
        THEN bg' = [bg EXCEPT ![c.t] = FALSE] /\ turn' = [turn EXCEPT ![c.t] = "own"]
        ELSE UNCHANGED <<bg, turn>>
-    /\ UNCHANGED <<reports, resumes>>
+    /\ UNCHANGED <<reports, resumes, waits>>
+
+\* A main's resume finds every usable account limited: its row waits for the reset, and the
+\* claim stays acted, its outcome later. Under SettleAtWait it is verified at once.
+ActWaits(c) ==
+    /\ MayWait /\ c.t \in Mains
+    /\ H!Act(c, IF Break = "SettleAtWait" THEN "verified" ELSE "later")
+    /\ waits' = waits \cup {[k |-> <<c.t, c.s>>, end |-> "waiting"]}
+    /\ UNCHANGED <<on, st, dvars, resumes>>
+
+\* The healer reads a waited resume's end and settles its claim from it.
+SettleWait(w) ==
+    /\ w \in waits /\ w.end # "waiting"
+    /\ \E r \in res : r.k = w.k /\ H!Settled(r, w.end = "resumed")
+    /\ UNCHANGED <<on, st, mine>>
 
 Healer ==
     \/ \E s \in Delegates \cup Mains :
@@ -113,6 +138,8 @@ Healer ==
           \/ Claim(s) /\ UNCHANGED <<on, st>>
           \/ AskAgain(s)
     \/ \E c \in acting, out \in H!Outcomes : Act(c, out)
+    \/ \E c \in acting : ActWaits(c)
+    \/ \E w \in waits : SettleWait(w)
     \/ \E c \in acting : H!LetGo(c) /\ UNCHANGED <<on, st, mine>>
     \/ \E c \in claims : H!SettleCut(c) /\ UNCHANGED <<on, st, mine>>
     \/ \E r \in res : H!Verify(r) /\ UNCHANGED <<on, st, mine>>
@@ -124,13 +151,13 @@ Healer ==
 Background(d) ==
     /\ turn[d] = "brief" /\ ~bg[d]
     /\ bg' = [bg EXCEPT ![d] = TRUE]
-    /\ UNCHANGED <<on, st, healVars, restarts, bounds, turn, reports, resumes>>
+    /\ UNCHANGED <<on, st, healVars, restarts, bounds, turn, reports, resumes, waits>>
 
 \* The brief's turn ends with its result, whether a command runs or not: the report, taken.
 BriefResult(d) ==
     /\ turn[d] = "brief"
     /\ turn' = [turn EXCEPT ![d] = "idle"] /\ reports' = [reports EXCEPT ![d] = @ + 1]
-    /\ UNCHANGED <<on, st, healVars, restarts, bounds, bg, resumes>>
+    /\ UNCHANGED <<on, st, healVars, restarts, bounds, bg, resumes, waits>>
 
 \* The command ends by itself. Its end starts a turn of Claude Code's own when none runs; a
 \* stuck symptom of it goes with it.
@@ -139,7 +166,7 @@ TaskEnds(d) ==
     /\ IF on[d] THEN H!Goes(d) ELSE UNCHANGED <<on, st, healVars>>
     /\ bg' = [bg EXCEPT ![d] = FALSE]
     /\ turn' = [turn EXCEPT ![d] = IF @ = "idle" THEN "own" ELSE @]
-    /\ UNCHANGED <<restarts, bounds, reports, resumes>>
+    /\ UNCHANGED <<restarts, bounds, reports, resumes, waits>>
 
 \* The turn of its own ends with a result that names no brief: never the report. Under
 \* LastResult the report is read from the latest result, so it is taken again.
@@ -147,13 +174,13 @@ OwnResult(d) ==
     /\ turn[d] = "own"
     /\ turn' = [turn EXCEPT ![d] = "idle"]
     /\ reports' = IF Break = "LastResult" THEN [reports EXCEPT ![d] = @ + 1] ELSE reports
-    /\ UNCHANGED <<on, st, healVars, restarts, bounds, bg, resumes>>
+    /\ UNCHANGED <<on, st, healVars, restarts, bounds, bg, resumes, waits>>
 
 \* Its stop: only with its report taken and no turn or command running.
 End(d) ==
     /\ turn[d] = "idle" /\ ~bg[d] /\ reports[d] >= 1
     /\ turn' = [turn EXCEPT ![d] = "ended"]
-    /\ UNCHANGED <<on, st, healVars, restarts, bounds, bg, reports, resumes>>
+    /\ UNCHANGED <<on, st, healVars, restarts, bounds, bg, reports, resumes, waits>>
 
 -----------------------------------------------------------------------------
 (* The world *)
@@ -167,20 +194,35 @@ Comes(s) ==
 \* The command used CPU time again.
 Goes(s) == H!Goes(s) /\ UNCHANGED mine
 
+\* A waiting resume's row ends (Mains, at the reset, or a person's "leave"): resumed, the main
+\* runs again, a new state; left or refused, it stays absent. A main at its last state is not
+\* resumed here, since no new state is left to number it.
+WaitEnd(w, e) ==
+    LET m == w.k[1] IN
+    /\ w \in waits /\ w.end = "waiting" /\ e \in WaitEnds
+    /\ e = "resumed" => ~(on[m] /\ st[m] = MaxState)
+    /\ waits' = (waits \ {w}) \cup {[k |-> w.k, end |-> e]}
+    /\ IF e = "resumed" /\ on[m]
+       THEN on' = [on EXCEPT ![m] = FALSE] /\ st' = [st EXCEPT ![m] = @ + 1]
+       ELSE UNCHANGED <<on, st>>
+    /\ UNCHANGED <<healVars, restarts, bounds, dvars, resumes>>
+
 Bound ==
     /\ H!Bound
     /\ resumes' = [m \in Mains |-> 0]
-    /\ UNCHANGED dvars
+    /\ UNCHANGED <<dvars, waits>>
 
 Init ==
     /\ H!Init
     /\ turn = [d \in Delegates |-> "brief"] /\ bg = [d \in Delegates |-> FALSE]
     /\ reports = [d \in Delegates |-> 0]
     /\ resumes = [m \in Mains |-> 0]
+    /\ waits = {}
 
 Next ==
     \/ Healer /\ UNCHANGED <<restarts, bounds>>
     \/ \E s \in Delegates \cup Mains : Comes(s) \/ Goes(s)
+    \/ \E w \in waits, e \in WaitEnds : WaitEnd(w, e)
     \/ \E d \in Delegates : Background(d) \/ BriefResult(d) \/ TaskEnds(d) \/ OwnResult(d) \/ End(d)
     \/ restarts < MaxRestarts /\ H!Restart /\ restarts' = restarts + 1
        /\ UNCHANGED <<on, st, bounds, mine>>
@@ -201,6 +243,9 @@ Fairness ==
     /\ WF_vars(\E c \in claims : H!SettleCut(c) /\ UNCHANGED <<on, st, restarts, bounds, mine>>)
     /\ WF_vars(\E r \in res : H!Verify(r) /\ UNCHANGED <<on, st, restarts, bounds, mine>>)
     /\ \A d \in Delegates : WF_vars(BriefResult(d)) /\ WF_vars(OwnResult(d))
+    \* A wait ends (its reset comes), and the healer reads its end.
+    /\ WF_vars(\E w \in waits, e \in WaitEnds : WaitEnd(w, e))
+    /\ WF_vars(\E w \in waits : SettleWait(w) /\ UNCHANGED <<restarts, bounds>>)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -213,6 +258,18 @@ TypeOK ==
     /\ bg \in [Delegates -> BOOLEAN]
     /\ reports \in [Delegates -> 0..2]
     /\ resumes \in [Mains -> Nat]
+    /\ waits \subseteq [k : Mains \X (0..MaxState), end : {"waiting"} \cup WaitEnds]
+
+\* A waited resume's end reaches the fault ledger: one left or refused is never verified.
+WaitedEnd ==
+    \A w \in waits : w.end \in {"left", "refused"} =>
+        ~\E r \in res : r.k = w.k /\ r.out = "verified"
+
+\* A waited resume's claim is settled from its row's end, once the row ends.
+WaitSettled ==
+    \A m \in Mains, n \in 0..MaxState :
+        (\E r \in res : r.k = <<m, n>> /\ r.out = "later")
+            ~> ~\E r \in res : r.k = <<m, n>> /\ r.out = "later"
 
 \* One report per brief across a background command's turn: the brief's result, once.
 OneReport == \A d \in Delegates : reports[d] <= 1

@@ -49,7 +49,8 @@ defmodule CodingAgentFramework.Config do
   - `claude` and `env`: what every agent's launch shares (`CodingAgentFramework.ClaudeCLI`); at
     its start the app adds `env`'s `:tools`, where gh, git and ssh keep their state in the home
     (`ToolHome.env/2`), to every launch, every project's `env` and the workstation's jobs and
-    services;
+    services. `env` has a `path` (the `PATH` jobs and launches run with) for every tree, one
+    that runs agents too (F-203): `{:bad, :env}` without it;
     `tool_timeout` and `margin`, Claude Code's MCP tool timeout and what `run_delegate` keeps
     under it;
   - `user`: the OS user's name, which every launch passes as `USER` (the app gives it; no part
@@ -127,11 +128,12 @@ defmodule CodingAgentFramework.Config do
   - `dialogs`: how a startup dialog is answered (F-140, `Sessions`' `dialog:`), its kind
     (`:trust`, `:imports`) to the label of the option to press; a kind not named, or a label
     the dialog does not show, waits on a person (the `dialog` prompt). None by default: every
-    dialog waits. `dialog/3` is the answer the tree hands `Sessions`;
+    dialog waits. A start's menu (`:start_menu`, F-203) has no default and is refused here.
+    `dialog/3` is the answer the tree hands `Sessions`;
 
         iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
         ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
-        ...>   env: %{}, user: "me", dialogs: %{trust: "Yes, I trust this folder"})
+        ...>   env: %{path: "/bin"}, user: "me", dialogs: %{trust: "Yes, I trust this folder"})
         iex> CodingAgentFramework.Config.dialog(c, :trust, ["No, exit", "Yes, I trust this folder"])
         {:answer, "Yes, I trust this folder"}
         iex> CodingAgentFramework.Config.dialog(c, :imports, ["Yes", "No"])
@@ -144,7 +146,7 @@ defmodule CodingAgentFramework.Config do
 
         iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
         ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
-        ...>   env: %{}, user: "me")
+        ...>   env: %{path: "/bin"}, user: "me")
         iex> c.secret_file
         "/srv/caf/intake.secret"
 
@@ -153,7 +155,8 @@ defmodule CodingAgentFramework.Config do
     supervisor decides. `%{max_restarts: 3, max_seconds: 5}`, OTP's own, by default;
 
         iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
-        ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{},
+        ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
+        ...>   env: %{path: "/bin"},
         ...>   user: "me", restarts: %{max_restarts: -1})
         {:refused, {:bad, :restarts}}
 
@@ -177,11 +180,12 @@ defmodule CodingAgentFramework.Config do
 
         iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
         ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
-        ...>   env: %{}, user: "me", parts: %{delegates: %{idle_bound: 600_000}})
+        ...>   env: %{path: "/bin"}, user: "me", parts: %{delegates: %{idle_bound: 600_000}})
         iex> CodingAgentFramework.Config.options(c, :delegates, host: "ws")
         [host: "ws", idle_bound: 600_000]
         iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
-        ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{},
+        ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
+        ...>   env: %{path: "/bin"},
         ...>   user: "me", parts: %{intake: %{tool_deadline: 9_000}})
         {:refused, {:bad, :parts, {:intake, :tool_deadline}}}
 
@@ -196,7 +200,8 @@ defmodule CodingAgentFramework.Config do
     draw at different sizes (F-188's new-2). `{200, 50}` by default;
 
         iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
-        ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{},
+        ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
+        ...>   env: %{path: "/bin"},
         ...>   user: "me", viewer: {0, 50})
         {:refused, {:bad, :viewer}}
 
@@ -223,7 +228,8 @@ defmodule CodingAgentFramework.Config do
     refused while the old one ends; 5,000 by default, and never `:infinity`;
 
         iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
-        ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{},
+        ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
+        ...>   env: %{path: "/bin"},
         ...>   user: "me", restart_wait: :infinity)
         {:refused, {:bad, :restart_wait}}
 
@@ -312,11 +318,13 @@ defmodule CodingAgentFramework.Config do
   with the extensions' own refusal.
 
       iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
-      ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{}, user: "me",
+      ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", user: "me",
+      ...>   env: %{path: "/bin"},
       ...>   tool_hooks: {Enum, []})
       {:refused, {:bad, :tool_hooks, {:not_tool_hooks, {Enum, []}}}}
       iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
-      ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", env: %{}, user: "me",
+      ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude", user: "me",
+      ...>   env: %{path: "/bin"},
       ...>   extensions: [%{name: "board"}])
       {:refused, {:bad, :extensions, {:not_an_extension, %{name: "board"}}}}
       iex> CodingAgentFramework.Config.new(home: "/" <> String.duplicate("a", 93))
@@ -347,8 +355,9 @@ defmodule CodingAgentFramework.Config do
           not match?(%{intake: i, mcp: m} when is_integer(i) and is_integer(m), fields.ports) ->
         {:refused, {:bad, :ports}}
 
-      # A tree with no agent still runs jobs, with the PATH of `env` (F-201).
-      not agents? and not match?(%{path: path} when is_binary(path), fields.env) ->
+      # Every tree runs jobs with the PATH of `env` (F-201), and one that runs agents reads it
+      # in its supervisor's `init` too (F-203).
+      not match?(%{path: path} when is_binary(path), fields.env) ->
         {:refused, {:bad, :env}}
 
       not instance?(fields.instance) ->
@@ -494,7 +503,7 @@ defmodule CodingAgentFramework.Config do
   defp dialogs?(d) do
     is_map(d) and
       Enum.all?(d, fn {kind, label} ->
-        kind in Dialog.kinds() and is_binary(label) and label != "" and
+        kind in Dialog.preset_kinds() and is_binary(label) and label != "" and
           not (label =~ ~r/[[:cntrl:]]/)
       end)
   end
@@ -558,7 +567,7 @@ defmodule CodingAgentFramework.Config do
 
       iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
       ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
-      ...>   env: %{}, user: "me", parts: %{sampler: %{interval: 500}})
+      ...>   env: %{path: "/bin"}, user: "me", parts: %{sampler: %{interval: 500}})
       iex> CodingAgentFramework.Config.options(c, :sampler, db: "caf.db", interval: 2_000)
       [db: "caf.db", interval: 500]
   """
@@ -619,7 +628,7 @@ defmodule CodingAgentFramework.Config do
 
       iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
       ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
-      ...>   env: %{}, user: "me")
+      ...>   env: %{path: "/bin"}, user: "me")
       iex> CodingAgentFramework.Config.hooks(c)
       []
   """
@@ -662,7 +671,7 @@ defmodule CodingAgentFramework.Config do
 
       iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/" <> String.duplicate("h", 41),
       ...>   instance: "a", programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2},
-      ...>   claude: "/bin/claude", env: %{}, user: "me")
+      ...>   claude: "/bin/claude", env: %{path: "/bin"}, user: "me")
       iex> CodingAgentFramework.Config.name_room(c)
       %{agent: 53, service: 43}
   """

@@ -29,9 +29,12 @@ defmodule CodingAgentFramework.MCPTest do
       send(test, {:start_opts, branch, opts})
       answer = %{id: 9, name: "app-" <> String.replace(branch, "/", "-"), brief_uuid: "b9"}
 
-      if branch == "unit/queued" and opts[:wait] == false,
-        do: {:ok, Map.put(answer, :queued, 2)},
-        else: {:ok, answer}
+      # A start of `unit/limited` waits for a usage limit's reset, whatever `wait` (F-196).
+      cond do
+        branch == "unit/queued" and opts[:wait] == false -> {:ok, Map.put(answer, :queued, 2)}
+        branch == "unit/limited" -> {:ok, Map.put(answer, :waiting, 1_800_000_000)}
+        true -> {:ok, answer}
+      end
     end
 
     # A `Mains` whose every end ends, and a `Mailbox` with two rows in flight to its session.
@@ -299,6 +302,17 @@ defmodule CodingAgentFramework.MCPTest do
       assert {:error, {{:bad, :tool_timeout}, _}} =
                start_supervised({MCP, Keyword.merge(mcp_opts(name), opts)}, id: name)
     end
+  end
+
+  # F-203, from F-196's new-3: no report comes before the reset, so none is awaited.
+  test "run_delegate of a start that waits at a limit answers its name and reset at once",
+       %{mcp: mcp} do
+    args = %{run_delegate(10_000) | "branch" => "unit/limited"}
+
+    assert MCP.call(mcp, "app-main", "run_delegate", args) ==
+             {:ok, %{delegate: "app-unit-limited", waiting: 1_800_000_000}}
+
+    refute_received {:await, _, _}
   end
 
   test "a call's timeout is at most the cap, an option" do

@@ -104,7 +104,7 @@ defmodule CodingAgentFramework do
 
       iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
       ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
-      ...>   env: %{}, user: "me")
+      ...>   env: %{path: "/bin"}, user: "me")
       iex> %{id: id, type: :supervisor} = CodingAgentFramework.child_spec(c)
       iex> id
       {CodingAgentFramework, "a"}
@@ -986,6 +986,7 @@ defmodule CodingAgentFramework do
             agents: w.agents,
             acts: pid.(:acts),
             watch: pid.(:watch),
+            mains_db: db,
             host: host,
             resume: &Mains.resume_main(mains, &1)}
          end},
@@ -1204,7 +1205,7 @@ defmodule CodingAgentFramework do
 
       iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
       ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
-      ...>   env: %{}, user: "me", projects: %{"web" => %{}})
+      ...>   env: %{path: "/bin"}, user: "me", projects: %{"web" => %{}})
       iex> CodingAgentFramework.resources(c)
       %{"land:web" => 1, "seat" => 4, "slot" => 2}
   """
@@ -1218,7 +1219,7 @@ defmodule CodingAgentFramework do
 
       iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
       ...>   programs: %{}, accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
-      ...>   env: %{}, user: "me", projects: %{"web" => %{}})
+      ...>   env: %{path: "/bin"}, user: "me", projects: %{"web" => %{}})
       iex> CodingAgentFramework.job_units(c, :landing, "web")
       {:ok, %{"land:web" => 1, "slot" => 1}}
       iex> CodingAgentFramework.job_units(c, :heavy, "web")

@@ -24,7 +24,9 @@ defmodule CodingAgentFramework.ScreenStandIn do
     first draws each startup dialog's screen in turn, its first option selected, as 2.1.322
     does: `trust-dialog`'s, then `imports-dialog`'s. Down and Up move the selection, Enter
     answers: "Yes, I trust this folder" goes on (and writes `<dir>/trusted`), "No, exit" exits;
-    either imports option goes on, and writes it to `<dir>/imports` (`yes` or `no`);
+    either imports option goes on, and writes it to `<dir>/imports` (`yes` or `no`); `:menu`
+    among them draws the `menu` screen as one more startup dialog (F-203), its answer written
+    as a running menu's, and the start goes on;
   - written with `transcript: true`, the start's prompt also goes into its transcript
     (`$CLAUDE_CONFIG_DIR/projects/<cwd>/<session>.jsonl`) as 2.1.322 writes a start's first
     turn, past its startup dialogs and not before: the session's title, agent name and modes,
@@ -283,22 +285,34 @@ defmodule CodingAgentFramework.ScreenStandIn do
     [ $screen = idle ] && first
     [ $screen = running ] && announce idle
     [ $screen = limit_wait ] && announce busy
-    [ $screen = menu ] && announce idle
+    # A menu among the startup dialogs is shown before the session file; a running one after it.
+    [ $screen = menu ] && [ $# -eq 0 ] && announce idle
     draw
     while IFS= read -r -N1 -t #{idle} key; do
       if [ $screen = limit_wait ]; then
         continue
       elif [ $screen = menu ]; then
-        # The marker moves; Enter answers its option, a lone Escape esc: the idle screen after.
+        # The marker moves; Enter answers its option, a lone Escape esc: the idle screen after,
+        # or for a startup menu the next dialog, then the session as past the others.
+        answer=''
         case $key in
           $'\\e') seq=''; IFS= read -r -N2 -t 0.2 seq
                  case $seq in
                    '[B') [ $sel -lt 3 ] && sel=$((sel + 1)) ;;
                    '[A') [ $sel -gt 1 ] && sel=$((sel - 1)) ;;
-                   '') printf esc > "#{dir}/menu"; screen=idle ;;
+                   '') answer=esc ;;
                  esac ;;
-          $'\\n'|$'\\r') printf '%s' $sel > "#{dir}/menu"; screen=idle ;;
+          $'\\n'|$'\\r') answer=$sel ;;
         esac
+        if [ -n "$answer" ]; then
+          printf '%s' $answer > "#{dir}/menu"
+          if [ $# -gt 0 ]; then
+            shift; sel=1
+            if [ $# -gt 0 ]; then screen=$1; else screen=idle; first; fi
+          else
+            screen=idle
+          fi
+        fi
       elif [ $screen = trust ] || [ $screen = imports ]; then
         case $key in
           $'\\e') IFS= read -r -N2 -t 1 seq

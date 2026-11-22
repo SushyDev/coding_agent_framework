@@ -33,10 +33,13 @@ defmodule CodingAgentFramework.MCP do
     `:tool_timeout` and `:margin`, so the client never gives up first). Answers `%{delegate:
     name, status: status, report: text}`, `status` `finished` for the delegate's reply and
     `failed` for the framework's notice, or at the timeout `{:unknown, %{delegate: name,
-    reason: :timeout}}`, the report then due for another transport. A report it took is
-    `sending` by the call in `Mailbox` until the answer is written, then `told/3` `:written`
-    when the write succeeded, or anything else (due again) when it failed (`answer/5`). A call
-    through `call/4` has its answer in hand, so it is told `:written` at once;
+    reason: :timeout}}`, the report then due for another transport. A start that waits at a
+    usage limit answers `%{delegate: name, waiting: until}` at once, as `start_delegate` does,
+    since no report comes before the reset; it comes later as a message (F-203). A report it
+    took is `sending` by the call in `Mailbox` until the answer is written, then `told/3`
+    `:written` when the write succeeded, or anything else (due again) when it failed
+    (`answer/5`). A call through `call/4` has its answer in hand, so it is told `:written` at
+    once;
   - `start_main(project, name, brief)` (F-141): `Grants.may_start_main?/2` (a main session, or
     the operator), then the mains' `start_main/5`, the brief from the caller; answers `%{main:
     name}` once the session runs, `{:unknown, {:dialog, kind}}` while its start waits on a
@@ -207,7 +210,10 @@ defmodule CodingAgentFramework.MCP do
     },
     %{
       name: "run_delegate",
-      description: "Starts a delegate and answers its report, or its name at the timeout.",
+      description:
+        "Starts a delegate and answers its report, or its name at the timeout. A start that " <>
+          "waits for a usage limit's reset answers its name and the reset at once; its " <>
+          "report comes later as a message.",
       inputSchema: %{
         type: "object",
         properties:
@@ -669,15 +675,13 @@ defmodule CodingAgentFramework.MCP do
 
     with true <- t < under or {:refused, {:timeout, {:under, under}}},
          {:ok, [parent | _] = start} <- start_args(ctx, args, caller),
-         {:ok, %{name: name, brief_uuid: key}} <-
+         {:ok, %{name: name} = started} <-
            start_delegate(ctx, caller, start, min(t, @start_wait), true) do
-      left = deadline - now()
-      answer = if left > 0, do: mod.await(server, parent, key, left), else: {:unknown, :timeout}
-
-      case answer do
-        {:ok, r} -> {:taken, r.id, {:ok, %{delegate: name, status: status(r), report: r.text}}}
-        {:unknown, reason} -> {:unknown, %{delegate: name, reason: reason}}
-        refused -> refused
+      case started do
+        # A reset hours away outlasts any await (F-203, from F-196's new-3): the start's answer
+        # is the tool's, and the report comes later as a message, as for `start_delegate`.
+        %{waiting: until} -> {:ok, %{delegate: name, waiting: until}}
+        %{brief_uuid: key} -> await(mod, server, parent, name, key, deadline - now())
       end
     end
   end
@@ -1102,6 +1106,17 @@ defmodule CodingAgentFramework.MCP do
       nil -> {:ok, caller == Grants.operator(ctx.grants)}
       wait when is_boolean(wait) -> {:ok, wait}
       _ -> {:refused, {:bad, :args}}
+    end
+  end
+
+  # The report of a delegate that started, within what is `left` of the tool's timeout.
+  defp await(mod, server, parent, name, key, left) do
+    answer = if left > 0, do: mod.await(server, parent, key, left), else: {:unknown, :timeout}
+
+    case answer do
+      {:ok, r} -> {:taken, r.id, {:ok, %{delegate: name, status: status(r), report: r.text}}}
+      {:unknown, reason} -> {:unknown, %{delegate: name, reason: reason}}
+      refused -> refused
     end
   end
 
