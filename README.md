@@ -329,7 +329,10 @@ Built, each from a checked model in `model/tla/`:
 - the facts the metrics could not read (F-202): how a delegate's report was taken
   (`taken_by`), a hold's open time (`held_at`), a kill seen (an `Acts` fact), a delivery time
   (`delivered_at`) and each prompt's open, each written once when it happens, so `metrics/2`
-  leaves nothing `unread`.
+  leaves nothing `unread`;
+- an app says which accounts are usable (F-207): `usable: {module, opts}`, asked after the
+  framework's own login check by every part that picks an account, a refusal carrying the app's
+  reason; and a home too long for services refused at the start.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

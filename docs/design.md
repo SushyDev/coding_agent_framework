@@ -897,8 +897,10 @@ The config answers the room the home leaves for an agent's name (`Config.name_ro
 sockets stay in the home. A service's socket is named by the first 16 hex digits of the SHA-256
 of its name (`Services.socket_key/1`, F-205), not by the name, so its path is 31 bytes after its
 host's directory whatever the name (the workstation's is `<home>/ws`): a name has no room to
-keep, and only a directory longer than 72 bytes (a home longer than 69) refuses a service's
-start, `{:refused, {:socket_path_too_long, path}}`. The name stays in the row and the log.
+keep, and only a directory longer than 72 bytes refuses a service's start, `{:refused,
+{:socket_path_too_long, path}}`. A home longer than 69 is that for the workstation, so
+`Config.new/1` refuses it for a tree that runs services, `{:bad, :home, {:longer_than, 69}}`
+(F-207), not at the first service's start. The name stays in the row and the log.
 
 **The config** (`CodingAgentFramework.Config`, whose module doc gives each key's example).
 Every setting the tree reads is a key here, checked once by `Config.new/1`; a value out of
@@ -907,7 +909,7 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 
 | key | what | default |
 | --- | --- | --- |
-| `home` | the framework home, absolute, at most 93 bytes | required |
+| `home` | the framework home, absolute, at most 69 bytes (93 with `agents: false`, which runs no service, F-207) | required |
 | `instance` | the tree's name in the app, unique, 1 to 100 bytes | required |
 | `programs`, `workstation` | the workstation's programs, and its host name | required, `"ws"` |
 | `hosts` | the other hosts, name to `%{programs, dir}` | none |
@@ -922,6 +924,7 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 | `resources`, `lease`, `job_lease` | the `Scheduler`'s capacities and the units each start asks for | seat 4, slot 2 |
 | `pressure` | how the host's pressure is read | the host's own |
 | `tool_hooks` | the app's `pre_tool_use`, `post_tool_use` and `stop` callbacks, as `{module, opts}` (`ToolHooks`, F-195) | none |
+| `usable` | which accounts the app lets a start use, as `{module, opts}`: `usable?(account, opts, part)` answers `true` or `{false, reason}`, and the tree hands it to `Mains`, `Delegates` and the `Mover` beside `Logins.usable/3`, an account usable only if both say so (`Usable`, F-207) | none: the framework's check alone |
 | `heavy` | the app's heavy commands, run under a lease | none |
 | `extensions` | the app's bundles, each `{module, opts}`, made by the module's `bundle/2` | none |
 | `dialogs` | a startup dialog's kind to the label pressed; any other waits on a person | none |
@@ -994,7 +997,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Cues` | one per instance: each part declares the topics it reads and the ones it writes, and `Cues` hands each cue to the `Tracker`, to every part that declared its topic, and to each of the app's processes that subscribed to it (`subscribe/2`, by a plain send, monitored); the order in which the system settles is the library's, not the app's | no table |
 | `Accounts` | the Claude accounts, each with its own config directory `<home>/accounts/<account>/claude` | — |
 | `Usage` | each account's allowance, its weekly and five-hour windows, from what Claude Code hands its status line and a headless session's `rate_limit_event`, the newer of the two, never stale (a window past its reset is whole again); the account limited until its reset, from any agent's limit record ("Usage limits"); `Usage.Room`, the one rule of an account's room (the tighter window, none while limited), which `Usage.pick/4` (the usable account with the most room, F-181) and `Usage.Allowance` (the `Scheduler`'s gate) share; a `Reader` | its readings, with the limit's `limited_until`, window, `can_spend` and evidence |
-| `Logins` | each account's login, read with `claude auth status` under the launch's own environment and kept 10 minutes (F-181): `Logins.usable/3` (prepared and logged in) is what `Mains`, `Delegates` and the `Mover` give `Usage.pick/4`, and what the `Mover` reads of a named `to:` before its claim, refusing `{:account, to, reason}` with nothing begun (F-190); a refused login is a `login` prompt until a check finds it logged in | `logins` |
+| `Logins` | each account's login, read with `claude auth status` under the launch's own environment and kept 10 minutes (F-181): `Logins.usable/3` (prepared and logged in) is what `Mains`, `Delegates` and the `Mover` give `Usage.pick/4`, with the app's own check after it when the config has a `usable` (`Usable`, F-207; a refusal reads `{:app, reason}`), and what the `Mover` reads of a named `to:` before its claim, refusing `{:account, to, reason}` with nothing begun (F-190); a refused login is a `login` prompt until a check finds it logged in | `logins` |
 | `Tmux` | sessions, panes, tags, keys and viewers on one server, and the one-command check of every write to a pane; a contract with a CLI (its fake is a test aid) | — |
 | `TmuxSampler` | samples each server's panes and each host's held sockets, reports a held agent with no viewer, and cues when a held socket goes away; a `Reader` | `tmux_samples` |
 | `Holder` | dtach: hold a process in a clean environment, open a viewer, list sockets and whether each lives | — |
@@ -3370,7 +3373,8 @@ command the framework writes into each account's settings (`rate_limits.seven_da
   built in F-147): nothing on it has run, and an account has no reading until a session on it
   draws its status line, so a new home could otherwise start no session. The first status line
   replaces it.
-- `pick` answers, among the usable accounts (prepared and logged in), the one with the most room
+- `pick` answers, among the usable accounts (prepared, logged in, and any the app's `usable`
+  lets), the one with the most room
   in the tighter of its two windows, the first named at the same room; a spent one, by a window
   or by its limit, never, and credits never count as room. With none it refuses, saying why
   (`none_usable` with each account's reason, or `allowance` with the earliest reset).

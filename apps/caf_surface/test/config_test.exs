@@ -141,6 +141,57 @@ defmodule CodingAgentFramework.ConfigTest do
              {:refused, {:bad, :extensions, {:not_data, Board, {:struct, Config}}}}
   end
 
+  # F-207: which accounts the app lets a start use, as data, a module and its options.
+  defmodule Flagged do
+    @behaviour CodingAgentFramework.Usable
+
+    @impl true
+    def usable?(account, opts, _part),
+      do: if(account in opts[:flagged], do: {false, "flagged"}, else: true)
+  end
+
+  test "usable: a module's check with plain options; a function and the rest refused" do
+    assert {:ok, %Config{usable: {Flagged, [flagged: ["side"]]}}} =
+             new(usable: {Flagged, flagged: ["side"]})
+
+    assert {:ok, %Config{usable: nil}} = new([])
+
+    fun = fn account -> account != "side" end
+
+    for {bad, why} <- [
+          {fun, {:not_usable, fun}},
+          {{fun, []}, {:not_usable, {fun, []}}},
+          {{Enum, []}, {:not_usable, {Enum, []}}},
+          {{NoSuchModule, []}, {:not_usable, {NoSuchModule, []}}},
+          {Flagged, {:not_usable, Flagged}},
+          {%{usable?: fun}, {:not_usable, %{usable?: fun}}},
+          {{Flagged, flagged: [fun]}, {:not_data, Flagged}},
+          {{Flagged, to: self()}, {:not_data, Flagged}},
+          {{Flagged, config: elem(new([]), 1)}, {:not_data, Flagged, {:struct, Config}}}
+        ],
+        do: assert(new(usable: bad) == {:refused, {:bad, :usable, why}})
+  end
+
+  # F-207's new-1 of F-205: a home no service can start in is refused here, not at each start.
+  test "home: at most 69 bytes for a tree that runs services, 93 for one that does not" do
+    home = fn n -> "/" <> String.duplicate("h", n - 1) end
+    assert byte_size(home.(69)) == 69
+
+    assert {:ok, %Config{}} = new(home: home.(69))
+    assert new(home: home.(70)) == {:refused, {:bad, :home, {:longer_than, 69}}}
+    # Over 93 it is still the nearer bound that says so.
+    assert new(home: home.(94)) == {:refused, {:bad, :home, {:longer_than, 69}}}
+
+    # An agentless tree starts no service and no tmux server: its bound is the old one.
+    agentless = [home: home.(93), instance: "a", programs: %{}, env: %{path: "/bin"}]
+    assert {:ok, %Config{}} = Config.new([agents: false] ++ agentless)
+
+    assert Config.new([agents: false, home: home.(94)] ++ Keyword.delete(agentless, :home)) ==
+             {:refused, {:bad, :home, {:longer_than, 93}}}
+
+    assert new(home: "caf") == {:refused, {:bad, :home}}
+  end
+
   # F-201: a config with `agents: false` needs only what that tree reads.
   test "an agentless config needs only home, instance, programs and env's path" do
     fields = [home: "/srv/caf", instance: "a", programs: %{}, agents: false]

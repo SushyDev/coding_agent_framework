@@ -700,6 +700,122 @@ defmodule CodingAgentFramework.SurfaceTest do
     refute File.exists?(Path.join(ctx.home, "intake.secret"))
   end
 
+  # F-207: the app's `usable` beside the framework's check, an account's flag the app's own
+  # state, read at each pick.
+  defmodule Flagged do
+    @behaviour CodingAgentFramework.Usable
+
+    # The flags are found by a name in the options (data), so a test changes them while the
+    # tree runs. The lookup of a part must be live, as a hook's is.
+    @impl true
+    def usable?(account, opts, part) do
+      if account in Agent.get(opts[:flags], & &1) and is_pid(part.(:logins)),
+        do: {false, "flagged #{account}"},
+        else: true
+    end
+  end
+
+  test "the config's usable keeps a start off an account the app flags, in every part that picks",
+       ctx do
+    flags = :"surface_flags_#{System.unique_integer([:positive])}"
+
+    start_supervised!(%{
+      id: flags,
+      start: {Agent, :start_link, [fn -> ["work"] end, [name: flags]]}
+    })
+
+    flag = fn accounts -> Agent.update(flags, fn _ -> accounts end) end
+
+    # Room under the parent's cap for the four starts below and the refused fifth, which the
+    # cap is checked before the account is picked for.
+    projects = Map.update!(ctx.fields[:projects], "app", &Map.put(&1, :cap, 5))
+
+    {:ok, config} =
+      Config.new(
+        Keyword.merge(ctx.fields,
+          accounts: ["work", "side"],
+          projects: projects,
+          usable: {Flagged, flags: flags}
+        )
+      )
+
+    parts = start(config)
+
+    # The account a start picked, from the agent's row, once the start wrote it.
+    account = fn name ->
+      {:ok, %{account: account}} =
+        await(
+          fn ->
+            case Table.get(ctx.sessions, "ws", name) do
+              %{account: account} = row when is_binary(account) -> {:ok, row}
+              _ -> nil
+            end
+          end,
+          20_000
+        )
+
+      account
+    end
+
+    by_parent = &MCP.call(parts.mcp, "app-main", "start_delegate", args(&1))
+    by_operator = &Operator.start_delegate(parts.mcp, "app-main", "app", &1, "opus", "Go.")
+
+    # With `work` flagged, a start picks `side` though `work` is first at equal room: a
+    # delegate's start by its parent, which takes its lease from the `Scheduler` for the account
+    # it picked, and the operator's.
+    assert {:ok, %{delegate: "app-unit-one"}} = by_parent.("unit/one")
+    assert account.("app-unit-one") == "side"
+
+    assert %{outcome: "granted", account: "side"} =
+             Enum.find(Scheduler.leases(parts.scheduler), &match?({"delegate", _}, &1.holder))
+
+    assert {:ok, %{delegate: "app-unit-two"}} = by_operator.("unit/two")
+    assert account.("app-unit-two") == "side"
+
+    # The flag lifted, each goes to `work`.
+    flag.([])
+    assert {:ok, %{delegate: "app-unit-three"}} = by_parent.("unit/three")
+    assert account.("app-unit-three") == "work"
+    assert {:ok, %{delegate: "app-unit-four"}} = by_operator.("unit/four")
+    assert account.("app-unit-four") == "work"
+
+    # Every account flagged, none is picked, and each refusal reads with the app's reason beside
+    # the framework's own answers, in a delegate's start and in a main session's. No row is
+    # written for either. (A main session's start that is allowed is not run here: the headless
+    # stand-in gives an interactive session no session file, which `Mains` waits for.)
+    flag.(["work", "side"])
+
+    both = %{
+      "work" => {:refused, {:app, "flagged work"}},
+      "side" => {:refused, {:app, "flagged side"}}
+    }
+
+    assert {:refused, {:none_usable, ^both}} = by_operator.("unit/five")
+
+    assert {:refused, {:none_usable, ^both}} =
+             Operator.start_main(parts.mcp, "app", "app-two", "Go.")
+
+    assert Table.get(ctx.sessions, "ws", "app-unit-five") == nil
+    assert Table.get(ctx.sessions, "ws", "app-two") == nil
+
+    # A move's named account is read by `usable` before the claim, with nothing begun (F-190).
+    {:ok, _} =
+      await(
+        fn ->
+          case Table.get(ctx.sessions, "ws", "app-unit-four") do
+            %{status: "running"} = row -> {:ok, row}
+            _ -> nil
+          end
+        end,
+        20_000
+      )
+
+    assert {:refused, {:account, "side", {:app, "flagged side"}}} =
+             Operator.move(parts.mcp, "app-unit-four", "side")
+
+    assert account.("app-unit-four") == "work"
+  end
+
   # The checkout is the framework's own clone, and `start_main` goes through `MCP` to `Mains`:
   # a reserved name is refused for a main session and for the operator alike.
   test "the whole tree runs under a home whose path has a space (F-175)", ctx do

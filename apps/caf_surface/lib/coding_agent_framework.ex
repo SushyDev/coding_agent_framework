@@ -89,7 +89,7 @@ defmodule CodingAgentFramework do
   alias CodingAgentFramework.{Runs, Scheduler, Sessions, Shell, Store, Stream, StuckBackgrounds}
   alias CodingAgentFramework.{Tmux, TmuxSampler}
   alias CodingAgentFramework.Tracker
-  alias CodingAgentFramework.{ToolHome, ToolHooks, Transcripts, Usage}
+  alias CodingAgentFramework.{ToolHome, ToolHooks, Transcripts, Usable, Usage}
   alias CodingAgentFramework.{Config, Endpoint, Ends}
 
   require Logger
@@ -888,7 +888,7 @@ defmodule CodingAgentFramework do
             acts: pid.(:acts),
             scheduler: pid.(:scheduler),
             lease: c.lease,
-            usable: &Logins.usable(pid.(:logins), w.accounts, &1),
+            usable: usable(c, w, pid),
             notify: notify}
          end},
         # After `Delegates`, whose launch a delegate's move resumes with.
@@ -902,7 +902,7 @@ defmodule CodingAgentFramework do
             accounts: w.accounts,
             usage: pid.(:usage),
             acts: pid.(:acts),
-            usable: &Logins.usable(pid.(:logins), w.accounts, &1),
+            usable: usable(c, w, pid),
             launch: &launch(c, pid, &1)}
          end},
         # After `Sessions`, `Mailbox` and the `Scheduler`, and before `MCP`, whose `start_main`
@@ -926,7 +926,7 @@ defmodule CodingAgentFramework do
              mailbox: pid.(:mailbox),
              usage: pid.(:usage),
              allowance: &Usage.Allowance.check(w.mains_allowance, &1),
-             usable: &Logins.usable(pid.(:logins), w.accounts, &1),
+             usable: usable(c, w, pid),
              accounts: w.accounts,
              projects: c.projects,
              mains: c.mains,
@@ -1266,6 +1266,19 @@ defmodule CodingAgentFramework do
   end
 
   defp pressure(%Config{pressure: pressure}, _p), do: pressure
+
+  # What every part that picks an account is handed as its `usable:` (F-207): the framework's
+  # check first (prepared, logged in), then the app's, the config's `usable`. An account is
+  # usable only if both say so, and the first to refuse is the answer. The app's callback is
+  # given the live lookup of the parts, called at each check.
+  defp usable(c, w, pid) do
+    fn name ->
+      with {:ok, account} <- Logins.usable(pid.(:logins), w.accounts, name),
+           :ok <- Usable.check(c.usable, name, pid) do
+        {:ok, account}
+      end
+    end
+  end
 
   # `claude auth status` on an account, with the launch's own environment (F-181): what
   # `Logins` checks before a start or a resume. Bounded, as every run is.
