@@ -15,13 +15,18 @@
 (* the idle read of background commands and the resume's launch, F-142;   *)
 (* a limited agent's move, F-191, with Limits, the healer that asks it;   *)
 (* a headless resume's own word, F-193; a resume's account and the app's  *)
-(* flag, F-209):                                                           *)
+(* flag, F-209; a move's resume reads the flag again, F-210):             *)
 (*   Usage    each account's allowance: below 90 %, at 90 % (drain), at    *)
 (*            the limit;                                                   *)
 (*   Mover    drains the session, asks Sessions to stop it, waits for the  *)
 (*            exit, copies the transcript, and resumes it on the other     *)
 (*            account, the first due row as the resume's prompt (launch);  *)
-(*            its phase is a row, so a restart goes on from it;            *)
+(*            its phase is a row, so a restart goes on from it. The       *)
+(*            resume reads the app's flag on the target again (F-210):    *)
+(*            flagged since the pick, the move goes back to its own       *)
+(*            account (MoveBack), and with that one flagged too the row   *)
+(*            is left down with the reason (Stranded); a limited one's    *)
+(*            is Back. Other refusals of a resume are left abstract;      *)
 (*   Sessions the session's row: its process and account, stopping while  *)
 (*            the stop runs; the stop (the row says stopping, an idle read *)
 (*            in memory, then the SIGTERM by pid and start time); and the  *)
@@ -54,8 +59,8 @@
 (*            interactive session here;                                    *)
 (*   the app  with Flags, its `usable` flags an account or lifts the flag  *)
 (*            at any time (F-207's new-2: the account is not the one it    *)
-(*            claims to be). A move's pick and a resume read it when they  *)
-(*            choose an account (NoResumeOnRefused).                       *)
+(*            claims to be). A move's pick, a move's resume and a resume  *)
+(*            read it when they choose an account (NoResumeOnRefused).    *)
 (*                                                                         *)
 (* A resumed process has no waiter until a turn of it ends, so the first   *)
 (* row due at the resume goes in as its prompt; a later one is typed.      *)
@@ -165,7 +170,8 @@ Breaks == {
     "BackIntoLimit",     \* a failed move of a limited session resumes it on its own account
     "WordAfter",         \* the limit's move begins before the healer stored the word to go on
     "BareHeadless",      \* a headless session with no row due is resumed with no first line
-    "ResumeInPlace"      \* a resume runs on its row's account whether or not it is refused
+    "ResumeInPlace",     \* a resume runs on its row's account whether or not it is refused
+    "PickOnly"           \* a move reads the app's flag at its pick only, not at its resume
 }
 
 ASSUME Break \in Breaks
@@ -182,7 +188,8 @@ DrainLevel == 1   \* 90 % of the weekly allowance
 Limit == 2
 
 \* "stopped", "copying" and "copied" are a resume's (Resumes): Mains' start row. "failed" is a
-\* limited session's move refused on the other account: its process gone, a person's prompt.
+\* limited session's move refused on the other account, or a move whose resume found both
+\* accounts flagged (Stranded): its process gone, a person's prompt or the fault ledger's.
 Phases == {"idle", "draining", "clear", "stopping", "ending", "moved",
            "stopped", "copying", "copied", "failed"}
 \* The rows: delegates' reports, messages, the limit's word to go on, and the Mover's own word.
@@ -482,10 +489,15 @@ Copied ==
     /\ UNCHANGED <<up, restarts, work, phase, target, resumedWith, record, readAt, ends, lost,
                    turned, dvars>>
 
+\* The move's resume reads the app's flag on its target first, at the resume and not only at
+\* the pick (F-210): a drain and its stop may take the move's whole timeout. Under PickOnly it
+\* is read at the pick alone.
+TargetTaken == target \notin flagged \/ Break = "PickOnly"
+
 \* The first row due is marked by launch before the resume (Mailbox.launch),
 \* once the old process is gone: the row is free, no longer stopping.
 LaunchMarked(i) ==
-    /\ up /\ phase \in {"stopping", "ending"} /\ copied /\ procs = {}
+    /\ up /\ phase \in {"stopping", "ending"} /\ copied /\ procs = {} /\ TargetTaken
     /\ Mailbox(D!Mark(i, "launch"))
 
 \* Resume on account a, with --resume; the row names the new process, whose
@@ -503,14 +515,14 @@ NewProc == NewProcOn(target)
 
 \* The resume carries the row marked by launch as its prompt.
 ResumedWith(i) ==
-    /\ up /\ phase \in {"stopping", "ending"} /\ copied /\ procs = {}
+    /\ up /\ phase \in {"stopping", "ending"} /\ copied /\ procs = {} /\ TargetTaken
     /\ D!Launch(i, nextPid + 1)
     /\ NewProc
 
 \* A resume with no prompt, when no row to the session is due or in flight: never a headless
 \* one's (under BareHeadless it is).
 ResumedBare ==
-    /\ up /\ phase \in {"stopping", "ending"} /\ copied
+    /\ up /\ phase \in {"stopping", "ending"} /\ copied /\ TargetTaken
     /\ ~Headless \/ Break = "BareHeadless"
     /\ procs = {} \/ Break = "ResumeBeforeEnd"
     /\ \/ Break \in {"ResumeBeforeEnd"}
@@ -519,6 +531,26 @@ ResumedBare ==
     /\ UNCHANGED dvars
 
 Resumed == ResumedBare \/ \E i \in Ids : ResumedWith(i)
+
+\* The target flagged since the pick: the move goes back to its own account, where its
+\* transcript is, as for a copy or a resume refused there (the Mover's back/3). A limited
+\* session's is Back. The move's target is its own account from then (`move_to`).
+MoveBack ==
+    /\ up /\ phase \in {"stopping", "ending"} /\ copied /\ procs = {} /\ ~AtLimit
+    /\ target # Here /\ target \in flagged /\ Break # "PickOnly"
+    /\ target' = Here
+    /\ UNCHANGED <<up, restarts, work, transcript, phase, copied, resumedWith, record, readAt,
+                   ends, lost, turned, dvars>>
+
+\* Its own account flagged too: no process of it runs, the row left down with the app's reason
+\* and an act `move` failed `stranded` in the fault ledger.
+Stranded ==
+    /\ up /\ phase \in {"stopping", "ending"} /\ copied /\ procs = {} /\ ~AtLimit
+    /\ target = Here /\ Here \in flagged /\ Break # "PickOnly"
+    /\ ~\E i \in Ids : row[i].st = "sending"
+    /\ phase' = "failed"
+    /\ UNCHANGED <<up, restarts, work, transcript, target, copied, resumedWith, record, readAt,
+                   ends, lost, turned, dvars>>
 
 \* A headless resume with no row due or in flight (F-193): the Mover stores a word of its own
 \* first, a notice under the move's key, once per move; the resume then carries it.
@@ -687,6 +719,7 @@ OldNext ==
     \/ \E d \in Delegates : DelegateReports(d)
     \/ \E s \in Senders : MessageSent(s)
     \/ Drain \/ Cleared \/ StopAsked \/ IdleRead \/ Term \/ Copied \/ Resumed
+    \/ MoveBack \/ Stranded
     \/ \E p \in procs : EndsAlone(p)
     \/ Resume
     \/ \E pid \in ends : SessionEndArrives(pid)
@@ -700,14 +733,16 @@ OldNext ==
 
 Next == Kept(OldNext) \/ ((LimitNext \/ OwnWord) /\ UNCHANGED flagged) \/ AppFlags
 
-\* A resume is not refused here: Mover.ex goes back to the old account then,
-\* and a refused launch makes its row due again for the next one.
+\* A move's resume is refused here only by the app's flag (MoveBack, Stranded); any other
+\* refusal sends Mover.ex back to the old account too, and a refused launch makes its row due
+\* again for the next one.
 Fairness ==
     /\ WF_vars(Kept(FrameworkStarts))
     /\ WF_vars(Kept(level[Here] >= DrainLevel /\ Drain))
     /\ WF_vars(Kept(Cleared)) /\ WF_vars(Kept(StopAsked)) /\ WF_vars(Kept(IdleRead))
     /\ WF_vars(Kept(Term))
     /\ WF_vars(Kept(Copied)) /\ WF_vars(Kept(Resumed))
+    /\ WF_vars(Kept(MoveBack)) /\ WF_vars(Kept(Stranded))
     /\ WF_vars(Kept(\E i \in Ids : LaunchMarked(i)))
     /\ WF_vars(Kept(ResumeCopy)) /\ WF_vars(Kept(ResumeCopied))
     /\ WF_vars(Kept(\E p \in procs : Exits(p, "term")))
@@ -776,10 +811,14 @@ DrainedParentMoves == phase = "draining" ~> phase = "moved"
 \* A resume after its process ended by itself never runs on an account it is refused on (F-209):
 \* it chooses its own while that is usable, else the one it copies the conversation to, and with
 \* none it is refused and the row stays stopped. The choice is the step that leaves "stopped"; a
-\* flag set after it is the app's own, as one set after the launch would be.
+\* flag set after it is the app's own, as one set after the launch would be. A move's resume
+\* never runs on an account the app flags at the resume (F-210): its target, or on the way back
+\* its own account (a move's windows are read at its pick, by Usage.pick).
 NoResumeOnRefused ==
-    [][(phase = "stopped" /\ phase' # "stopped") =>
-         ~Refused(IF phase' = "copying" THEN target' ELSE record'.account)]_vars
+    [][/\ (phase = "stopped" /\ phase' # "stopped") =>
+            ~Refused(IF phase' = "copying" THEN target' ELSE record'.account)
+       /\ (phase \in {"stopping", "ending"} /\ phase' = "moved") =>
+            record'.account \notin flagged]_vars
 
 \* A resume's copy ends: the session runs on the picked account, or the row
 \* stays stopped on its own.

@@ -1141,7 +1141,12 @@ any reply does (new-4).
   without a lease from the `Scheduler`; it reads the host's own signals, so work it did not
   start still counts. A request names its request id, class, module, account and the units of
   each resource it needs (an agent's seat, a heavy slot, a lock); every lockable thing is a
-  resource with a capacity. A request also names its holder: the row of the work the lease
+  resource with a capacity. The account is read once, by the grant's budget gate
+  (`Schedule.tla`'s `NoStartWithoutBudget`): no part reads a running lease's account after it
+  (what the leases hold is counted per resource, not per account), so a delegate that a resume
+  or a move puts on another account keeps its start's lease, whose row names the account the
+  grant was read against, not the one it runs on now; the agent row names that (F-210).
+  A request also names its holder: the row of the work the lease
   admits (an agent row, a job row), which its owner writes `starting` before it asks (F-134's
   new-1). The answer comes at once: `{:ok, lease}`; `{:queued, %{id: request_id, position:
   n}}`, its place when it was queued, after which exactly one more answer comes, the lease or a
@@ -1578,8 +1583,9 @@ ended. A stop refused while a turn runs is asked again only on a `registry:` or 
 `copying` copies `<config>/projects/<cwd>/<session id>.jsonl`, the directory of that name
 beside it and `<config>/session-env/<session id>` (the one other per-session file 2.1.322
 keeps, F-133's new-4), each whole under a temporary name and renamed, once the row is free (its process
-gone by pid and start time and its socket dead); `resuming` is `Sessions.resume` on the other
-account with the same session id and the app's launch for the agent (a delegate's from
+gone by pid and start time and its socket dead); `resuming` reads the other account by
+`usable:` again (F-210: the app may flag it while the drain and the stop take up to the move's
+deadline), then is `Sessions.resume` on it with the same session id and the app's launch for the agent (a delegate's from
 `Delegates.launch/2`), the row's own options and model taken again. An interactive session's
 first due row goes in as the resume's prompt (`launch`, "Delivery"; F-137's new-1), since the
 resumed process has no waiter until a turn of it ends; a row still `sending` settles first. A
@@ -1604,8 +1610,9 @@ Each failure settles on one account:
 - the old process ending by itself during the move: the move goes on from the copy;
 - a stop whose process outlives its deadline: the row stays `stopping` for `Recoveries`, and
   the move goes on once it is free, whatever the deadline;
-- the copy or the resume refused on the other account: the act `failed`, and the session is
-  resumed on its own account, where its transcript is;
+- the copy or the resume refused on the other account, `usable:` refusing it at the resume
+  included (the app's flag, `{:app, reason}`): the act `failed`, and the session is resumed on
+  its own account, where its transcript is, once `usable:` takes that one too;
 - that resume refused too: no process of it runs; its row says why, and the fault ledger has an
   act `move` `failed`, reason `stranded`, for a person;
 - an agent at a usage limit (F-191, "Usage limits"): its copy or resume refused leaves its
@@ -2704,6 +2711,12 @@ worktree on its branch whose setup finished).
      account it is refused on when it chooses one (`NoResumeOnRefused`, an action property;
      `Break_Move_ResumeInPlace` resumes in place and fails it): its own while usable, else the
      one it copies the conversation to, else refused, the row staying down.
+   - The spec settles (F-210, `Move_Flags`, `Move_LimitFlags`): a move's resume reads the flag on its target
+     again, not only at the pick, since the app may flag it during the drain; flagged, the move
+     goes back to its own account (`MoveBack`), and with that one flagged too the row is left
+     down (`Stranded`); a limited session's stays gone (`Back`). `NoResumeOnRefused` covers a
+     move's resume too, by the flag (a move's windows are read at its pick);
+     `Break_Move_PickOnly` reads the flag at the pick alone and fails it.
 3. **`Delegate.tla`**: a main session, its delegates and restarts of the framework.
    - Invariants: each report is delivered once, and only to a running process of the main
      session whose turn has ended; a delegate ends only after its report is delivered; a report
