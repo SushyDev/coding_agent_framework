@@ -13,7 +13,7 @@ defmodule CodingAgentFramework.MoverTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, Acts, Mailbox, Mover, MoverSetup, Sessions}
+  alias CodingAgentFramework.{Accounts, Acts, Mailbox, MailboxGate, Mover, MoverSetup, Sessions}
   alias CodingAgentFramework.{HeadlessStandIn, Stream, Transcripts, WaiterStandIn}
   alias CodingAgentFramework.Sessions.Agents
 
@@ -395,6 +395,126 @@ defmodule CodingAgentFramework.MoverTest do
              Acts.rows(ctx.acts, actor: "mover:test", act: "move")
 
     assert why =~ "stranded" and why =~ "unknown_past_deadline" and why =~ "cannot tell work"
+  end
+
+  # F-212 (F-211's new-1; `Move.tla`'s ResumeRefused, ResumeEnds, FlagOnlyWait): the app's
+  # `launch:` answering unknown holds a move's resume only to the resume's deadline, as
+  # `usable:`'s unknown does; past it the move goes back, and with the own account's launch
+  # unknown too the row is left down, each reason naming the app's launch.
+  test "a resume whose app launch stays unknown goes back at its deadline, or leaves the row down",
+       ctx do
+    asked = start_supervised!(Supervisor.child_spec({Agent, fn -> [] end}, id: :asked))
+
+    unknown_on = fn accounts ->
+      MoverSetup.set_launch(ctx, fn row ->
+        if row.move_to in accounts do
+          Agent.update(asked, &[row.move_to | &1])
+          {:unknown, {:not_started, "no tool host for #{row.move_to}"}}
+        else
+          MoverSetup.launch(ctx.dir, row)
+        end
+      end)
+    end
+
+    d1 = moving_with(ctx, &Keyword.put(&1, :resume_wait, 1_000))
+    unknown_on.(["spare"])
+    assert {:ok, %{act: act, to: "spare"}} = move(ctx, "d1")
+    assert {:ok, waiting} = row_when(ctx, "d1", &(&1.move == "resuming"))
+    assert waiting.account == "work"
+    assert {:ok, _} = some(fn -> Agent.get(asked, & &1) end)
+
+    past_deadline(ctx)
+    assert {:ok, back} = row_when(ctx, "d1", &(moved?(&1, "work") and &1.pid != d1.pid))
+    assert back.session_id == d1.sid
+    refute alive?(d1.pid)
+    assert length(Agent.get(asked, & &1)) >= 2
+    assert {:ok, %{outcome: "failed", reason: why}} = Acts.get(ctx.acts, act)
+    assert why =~ "unknown_past_deadline" and why =~ "app_launch" and why =~ "for spare"
+
+    # Both accounts' launches unknown: past the deadline no process of it runs.
+    assert {:ok, _} = stream_when(ctx, d1.sid, & &1.idle)
+    unknown_on.(["spare", "work"])
+    assert {:ok, %{to: "spare"}} = move(ctx, "d1")
+    assert {:ok, _} = row_when(ctx, "d1", &(&1.move == "resuming"))
+    past_deadline(ctx)
+
+    assert {:ok, %{status: "stopped", account: "work"}} = row_when(ctx, "d1", &(&1.move == nil))
+    refute alive?(back.pid)
+
+    assert {:ok, [%{outcome: "failed", reason: why}]} =
+             Acts.rows(ctx.acts, actor: "mover:test", act: "move")
+
+    assert why =~ "stranded" and why =~ "app_launch" and why =~ "for work"
+  end
+
+  # F-212: `Mailbox`'s unknowns at a headless resume with nothing due, each held to the resume's
+  # deadline and then taken as a refusal that names it: `Mailbox.launch/4` cannot mark, the own
+  # word cannot be stored, or the word was stored before and no row is due for the first line.
+  # Each account answers the same, so the move goes back and is left down at once (F-211's
+  # new-2), the gate asked again before the deadline.
+  for {kind, request, reply, named} <- [
+        {"Mailbox.launch/4", :launch, {:unknown, {:timeout, 5_000}}, "launch\\W+timeout"},
+        {"the own word", :notify, {:refused, :cannot_store}, "word\\W+cannot_store"},
+        {"the first line", :notify, {:ok, :stored_before}, "no_first_line"}
+      ] do
+    test "a resume #{kind} cannot answer leaves the row down at its deadline, naming it",
+         ctx do
+      {request, reply} = {unquote(request), unquote(Macro.escape(reply))}
+      named = Regex.compile!(unquote(named))
+
+      answer = fn
+        req when is_tuple(req) and tuple_size(req) > 1 and elem(req, 0) == request ->
+          if elem(req, 1) == "d1", do: {:answer, reply}, else: :pass
+
+        _req ->
+          :pass
+      end
+
+      gate = start_supervised!({MailboxGate, mailbox: ctx.mailbox, answer: answer})
+
+      d1 =
+        moving_with(ctx, fn opts ->
+          opts |> Keyword.put(:resume_wait, 1_000) |> Keyword.put(:mailbox, gate)
+        end)
+
+      assert {:ok, %{act: act, to: "spare"}} = move(ctx, "d1")
+      assert {:ok, _} = row_when(ctx, "d1", &(&1.move == "resuming"))
+      assert {:ok, _} = some(fn -> MailboxGate.answered(gate) end)
+      past_deadline(ctx)
+
+      assert {:ok, %{status: "stopped", account: "work"}} =
+               row_when(ctx, "d1", &(&1.move == nil))
+
+      refute alive?(d1.pid)
+      assert length(MailboxGate.answered(gate)) >= 3
+      assert {:ok, %{outcome: "failed", reason: why}} = Acts.get(ctx.acts, act)
+      assert why =~ "unknown_past_deadline" and why =~ named
+
+      assert {:ok, [%{outcome: "failed", reason: why}]} =
+               Acts.rows(ctx.acts, actor: "mover:test", act: "move")
+
+      assert why =~ "stranded" and why =~ named
+    end
+  end
+
+  # A headless delegate on `work`, idle, under a `Mover` restarted with `opts` changed.
+  defp moving_with(ctx, opts) do
+    GenServer.stop(mover())
+    MoverSetup.restart(%{ctx | mover_opts: opts.(ctx.mover_opts)})
+    {:ok, account} = Accounts.ready(ctx.accounts, "work")
+    assert {:ok, %{pid: pid, session_id: sid}} = headless(ctx, "d1", account)
+    write_transcript(ctx, "work", sid)
+    assert {:ok, _} = stream_when(ctx, sid, & &1.idle)
+    %{pid: pid, sid: sid}
+  end
+
+  # Once `list` answers a list that is not empty: the Mover asks in its own step.
+  defp some(list), do: await(fn -> if list.() != [], do: {:ok, list.()} end)
+
+  # The test's clock past a 1 s resume deadline, and a cue for the Mover to read it.
+  defp past_deadline(ctx) do
+    Agent.update(ctx.clock, &(&1 + 2_000))
+    Mover.cue(mover(), %{topic: "sessions"})
   end
 
   # F-189's new-3: a named account is read by `usable:` before the claim, as the pick reads one;
