@@ -9,7 +9,7 @@ defmodule CodingAgentFramework.DelegatesTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, Delegates, Grants, HeadlessStandIn, Holder, Mailbox}
+  alias CodingAgentFramework.{Accounts, Acts, Delegates, Grants, HeadlessStandIn, Holder, Mailbox}
   alias CodingAgentFramework.{Scheduler, Sessions, SessionsSetup, Stream, Transcripts, Usage}
   alias CodingAgentFramework.ClaudeCLI.Options
   alias CodingAgentFramework.Delegates.{Table, Turn, Work}
@@ -121,7 +121,9 @@ defmodule CodingAgentFramework.DelegatesTest do
     # The cap counts a delegate until it ends: a finished one holds its report and its tree.
     assert {:refused, {:cap, 1}} = start(ctx, "app", "unit/two")
 
-    assert {:ok, %{report: "taken", text: text}} = cue_until(ctx, id, &(&1.status == "finished"))
+    assert {:ok, %{report: "taken", text: text, taken_by: "result"}} =
+             cue_until(ctx, id, &(&1.status == "finished"))
+
     assert text == "done #{u}"
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}"]
 
@@ -576,24 +578,38 @@ defmodule CodingAgentFramework.DelegatesTest do
        ctx do
     # KillSeen waits for Sessions' row to end (RunningSettled, F-61); then the resume, counted
     # first, with a message of its own since the brief went in; Called, CallAnswered,
-    # InputWritten under that uuid, StopHandled.
+    # InputWritten under that uuid, StopHandled. The kill is a row in Acts before the resume
+    # (F-202), and the resume's claim is one after it.
+    acts = with_acts(ctx)
     hold(ctx)
     assert {:ok, %{id: id, brief_uuid: u}} = start(ctx, "app", "unit/one")
     stream_row(ctx, id, &(&1.messages[u].state == :delivered))
     kill_delegate(ctx, id, [])
 
-    # Sessions has not settled its row yet: it still says running, so nothing is asked.
+    # Sessions has not settled its row yet: it still says running, so nothing is asked, and no
+    # kill is recorded until the row decides.
     assert %{status: "running"} = session_row(ctx, "app-unit-one")
     cue(ctx, current(ctx))
 
     assert %{status: "running", resumes: 0, resume_uuid: nil, report: "none"} =
              Table.get(ctx.dtable, id)
 
+    assert [] = own_acts(acts)
+
     File.rm!(Path.join(ctx.dir, "hold"))
     {:ok, _} = resumed(ctx, id)
 
-    assert {:ok, %{report: "taken", text: text, resumes: 1, resume_uuid: r}} =
+    assert {:ok, %{report: "taken", text: text, resumes: 1, resume_uuid: r, taken_by: "result"}} =
              cue_until(ctx, id, &(&1.status == "finished"))
+
+    key = "killed:test:#{id}:0"
+
+    assert [
+             %{act: "killed", target: "app-unit-one", state: ^key, outcome: "verified"},
+             %{act: "resume", state: resume}
+           ] = own_acts(acts)
+
+    assert %{"delegate" => ^id, "resumes" => 0} = JSON.decode!(resume)
 
     # The word to go on was Mailbox's row, from framework, and the report is still the reply to
     # the brief.
@@ -743,6 +759,8 @@ defmodule CodingAgentFramework.DelegatesTest do
 
   test "a second kill before the last reply is the report, never resumed again", ctx do
     # KillSeen twice: the first resumed, the second failed with its text held as the report.
+    # Each kill is a row of its own in Acts (F-202), the second's key its one resume.
+    acts = with_acts(ctx)
     hold(ctx)
     assert {:ok, %{id: id, brief_uuid: u}} = start(ctx, "app", "unit/one")
     stream_row(ctx, id, &(&1.messages[u].state == :delivered))
@@ -752,10 +770,19 @@ defmodule CodingAgentFramework.DelegatesTest do
     stream_row(ctx, id, &(&1.messages[r].state == :delivered))
     kill_delegate(ctx, id, killed)
 
-    assert {:ok, %{report: "taken", text: text, resumes: 1}} =
+    assert {:ok, %{report: "taken", text: text, resumes: 1, taken_by: nil}} =
              cue_until(ctx, id, &(&1.status == "failed"))
 
     assert text =~ "killed twice"
+
+    assert [
+             %{act: "killed", state: "killed:test:" <> first, detail: d0},
+             %{act: "resume"},
+             %{act: "killed", state: "killed:test:" <> second, detail: d1}
+           ] = own_acts(acts)
+
+    assert {first, second} == {"#{id}:0", "#{id}:1"}
+    assert [%{"resumes" => 0}, %{"resumes" => 1}] = Enum.map([d0, d1], &JSON.decode!/1)
     assert {:ok, %{kind: "notice", from: "framework"}} = Mailbox.answer_to(ctx.mailbox, u)
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u}", "message #{r}"]
   end
@@ -780,8 +807,9 @@ defmodule CodingAgentFramework.DelegatesTest do
     File.write!(path, JSON.encode!(reply) <> "\n")
     kill_delegate(ctx, id, [])
 
-    # Sessions' row still runs: a finish does not wait for it.
-    assert {:ok, %{report: "taken", text: "all done", resumes: 0}} =
+    # Sessions' row still runs: a finish does not wait for it. The report was read from the
+    # transcript, its result never written (F-202).
+    assert {:ok, %{report: "taken", text: "all done", resumes: 0, taken_by: "transcript"}} =
              cue_until(ctx, id, &(&1.status == "finished"))
 
     assert {:ok, %{kind: "reply", from: "app-unit-one"}} = Mailbox.answer_to(ctx.mailbox, u)
@@ -1120,6 +1148,17 @@ defmodule CodingAgentFramework.DelegatesTest do
   end
 
   defp current(ctx), do: Process.get(:delegates, ctx.delegates)
+
+  # An `Acts` in this test's directory, given to a Delegates started again with it.
+  defp with_acts(ctx) do
+    path = Path.join(ctx.dir, "acts.db")
+    pid = start_supervised!({Acts, db: path, start_id: "s1", host: "test", instance: "t"})
+    restart(ctx, acts: pid)
+    {:ok, db} = Acts.Table.open(path)
+    %{pid: pid, db: db}
+  end
+
+  defp own_acts(%{db: db}), do: Acts.Table.select(db, "actor = 'delegates:test'", [])
 
   defp restart(ctx, more \\ []) do
     if Process.alive?(current(ctx)), do: Process.exit(current(ctx), :kill)

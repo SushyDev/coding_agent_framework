@@ -200,7 +200,8 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
       reply("m2", "Other.")
     ])
 
-    assert {:ok, %{status: "finished", text: "Done.", report: "taken"}} =
+    # Its turn was read ended, closed by the next, its process still running (F-202).
+    assert {:ok, %{status: "finished", text: "Done.", report: "taken", taken_by: "turn_end"}} =
              cue_until(ctx, id, &(&1.status == "finished" and &1.report == "taken"))
 
     # F-137's new-4: the brief's marked line, once found, is read from its offset.

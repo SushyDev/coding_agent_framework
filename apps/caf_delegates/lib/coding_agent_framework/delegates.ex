@@ -93,7 +93,8 @@ defmodule CodingAgentFramework.Delegates do
 
   **The report** is handed to `Mailbox` (`Mailbox.report/5`) under the brief's uuid, to the
   agent row's parent, and the row's `report` is then `taken`; until `Mailbox` takes it, it is
-  `held`, with its text, and handed again at each cue.
+  `held`, with its text, and handed again at each cue. The row keeps how the report was taken
+  (`taken_by`, F-202): `result`, `transcript` (its process gone first) or `turn_end`.
 
   **An ended delegate**: once no process of it may live, a failed one at once (it is never
   resumed again), one whose start was refused after its call reached `Sessions` at once too
@@ -156,6 +157,9 @@ defmodule CodingAgentFramework.Delegates do
   instance's `Acts`), its own resume after a first kill is a row there, actor
   `delegates:<host>`, state the delegate's row and resumes, claimed before the row counts it
   and settled by `Sessions`' answer (`Acts.answered/4`); a claim not taken resumes nothing.
+  Each kill it sees is a row there first (F-202), act `killed`, keyed
+  `killed:<host>:<row id>:<resumes>`, written before the row decides between a resume and a
+  failure, so the metrics count a kill whatever followed it.
   With `scheduler:` (the instance's `Scheduler`), each start asks it for a lease first, of the
   units `lease:` names (default `%{"seat" => 1}`); a resume runs under the start's lease.
   With `registry:` (the host's `Registry`), it starts interactive delegates, whose turn's end
@@ -1165,7 +1169,7 @@ defmodule CodingAgentFramework.Delegates do
          :headless <- how(agent),
          {:ok, fold} <- followed(s, agent) do
       case Turn.next(row, fold) do
-        {:finished, r} -> finish(s, row, "finished", {:reply, r.text, r})
+        {:finished, r} -> finish(s, row, "finished", {:reply, r.text, r}, "result")
         :exited -> exited(s, row, agent, fold)
         # Its turn is at a usage limit: no report and no resume here; the healer goes on.
         :limited -> s
@@ -1262,7 +1266,10 @@ defmodule CodingAgentFramework.Delegates do
 
       cond do
         reply && Agents.free?(agent) ->
-          finish(s, row, "finished", {:reply, reply, %{}})
+          finish(s, row, "finished", {:reply, reply, %{}}, "transcript")
+
+        Agents.free?(agent) and kill_seen(s, row) != :ok ->
+          s
 
         Agents.free?(agent) and row.resumes > 0 ->
           finish(s, row, "failed", {:notice, @twice})
@@ -1271,7 +1278,7 @@ defmodule CodingAgentFramework.Delegates do
           resume(s, row, agent, brief != :absent)
 
         reply && (match?({:ok, %{closed: true}}, turn) or turn_ended?(s, agent)) ->
-          finish(s, row, "finished", {:reply, reply, %{}})
+          finish(s, row, "finished", {:reply, reply, %{}}, "turn_end")
 
         true ->
           s
@@ -1346,18 +1353,29 @@ defmodule CodingAgentFramework.Delegates do
   # Its process is gone with no result of its turn. TranscriptRead: a last reply is a finish.
   # KillSeen: a second kill is the report; a first is resumed once the agent row is free, which
   # Sessions' settle and cue bring (Sessions refuses to start a name whose process may live). A
-  # read that fails decides nothing.
+  # read that fails decides nothing, and so does a kill not yet recorded (`kill_seen/2`).
   defp exited(s, row, agent, fold) do
     t = s.transcripts
     session = {agent.account, agent.session_id, fold.transcript}
+    decides? = row.resumes > 0 or Agents.free?(agent)
 
     with {:ok, %{failed: []}} <- Transcripts.read(t, [session], timeout: @step),
          {:ok, tr} <- Transcripts.session(t, agent.account, agent.session_id, timeout: @step) do
       cond do
-        tr.ends_with_reply -> finish(s, row, "finished", {:reply, tr.last_reply.text, %{}})
-        row.resumes > 0 -> finish(s, row, "failed", {:notice, @twice})
-        Agents.free?(agent) -> resume(s, row, agent, went_in?(row, fold))
-        true -> s
+        tr.ends_with_reply ->
+          finish(s, row, "finished", {:reply, tr.last_reply.text, %{}}, "transcript")
+
+        decides? and kill_seen(s, row) != :ok ->
+          s
+
+        row.resumes > 0 ->
+          finish(s, row, "failed", {:notice, @twice})
+
+        Agents.free?(agent) ->
+          resume(s, row, agent, went_in?(row, fold))
+
+        true ->
+          s
       end
     else
       _ -> s
@@ -1485,10 +1503,29 @@ defmodule CodingAgentFramework.Delegates do
   defp known(:error, project), do: {:refused, {:unknown_project, project}}
   defp known(ok, _project), do: ok
 
-  # The report's text is kept until Mailbox takes it.
-  defp finish(s, row, status, answer) do
-    write(s, row, status: status, report: "held", text: elem(answer, 1))
+  # The report's text is kept until Mailbox takes it, with how it was taken (`taken_by`, F-202):
+  # `result`, `transcript` or `turn_end`; nil for a failure's notice.
+  defp finish(s, row, status, answer, taken_by \\ nil) do
+    write(s, row, status: status, report: "held", text: elem(answer, 1), taken_by: taken_by)
     hand(s, Table.get(s.db, row.id), answer)
+  end
+
+  # KillSeen as a fact (F-202, from F-199's new-6): the kill is one row in `Acts`, act `killed`,
+  # actor `delegates:<host>`, keyed by the delegate's row and its resumes, recorded before the
+  # row decides between a resume and a failure. So a kill whose resume is refused before its
+  # claim is still counted, and a second kill is a row of its own. `:ok` once it is recorded,
+  # now or before; anything else decides nothing now, and the next cue reads the kill again.
+  defp kill_seen(%{acts: nil}, _row), do: :ok
+
+  defp kill_seen(s, row) do
+    key = "killed:#{s.host}:#{row.id}:#{row.resumes}"
+    detail = [detail: %{delegate: row.id, resumes: row.resumes}]
+
+    case Acts.record(s.acts, actor(s), row.name, :killed, :verified, detail, state: key) do
+      {:ok, _} -> :ok
+      {:refused, {:already_claimed, _}} -> :ok
+      other -> other
+    end
   end
 
   defp answer(%{status: "finished"} = row), do: {:reply, row.text, %{}}

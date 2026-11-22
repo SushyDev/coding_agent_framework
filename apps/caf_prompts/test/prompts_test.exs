@@ -175,6 +175,17 @@ defmodule CodingAgentFramework.PromptsTest do
     assert {:ok, [%{id: ^id}]} = Prompts.read(prompts)
     assert [_one] = notices(ctx, "main")
 
+    # Its open is one row in `Acts` (F-202), the first read's, and a restart writes none again.
+    key = "opened:test:#{id}"
+
+    assert {:ok, [%{actor: "prompts:test", target: "d1", state: ^key, detail: detail}]} =
+             Acts.rows(ctx.acts, act: "opened")
+
+    assert %{"prompt" => ^id, "kind" => "permission", "agent" => "d1", "opened_at" => opened} =
+             JSON.decode!(detail)
+
+    assert opened == p.opened_at
+
     # A choice it does not offer, or no answerer, hands nothing on.
     assert {:refused, {:bad, :choice}} = Prompts.answer(prompts, id, "maybe", "sam")
     assert {:refused, {:bad, :who}} = Prompts.answer(prompts, id, "allow", "")
@@ -463,6 +474,17 @@ defmodule CodingAgentFramework.PromptsTest do
     assert {:ok, :logged_in} = Prompts.answer(prompts, again, "check", "sam")
     assert cued(ctx) == [again]
     assert {:ok, []} = Prompts.read(prompts, kind: "login")
+
+    # Each open stays a row (F-202), its target the prompt's id, which names its refusal (F-205):
+    # the second refusal of one account is an open of its own.
+    assert {:ok, rows} = Acts.rows(ctx.acts, act: "opened")
+    assert Enum.sort(Enum.map(rows, & &1.target)) == Enum.sort(["login:work:1000", again])
+    first = Enum.find(rows, &(&1.target == "login:work:1000"))
+
+    assert %{"kind" => "login", "agent" => nil, "opened_at" => 1_000} =
+             JSON.decode!(first.detail)
+
+    assert p.opened_at == 1_000
   end
 
   # Prompt.tla's AnswerNow and WithdrawNow: an ask is answered or withdrawn, once.

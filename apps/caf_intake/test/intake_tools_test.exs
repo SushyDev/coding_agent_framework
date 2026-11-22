@@ -220,7 +220,13 @@ defmodule CodingAgentFramework.IntakeToolsTest do
     intake = start.(pre_tool_use: waiting(self()), tool_deadline: 50)
     task = Task.async(fn -> post(intake, tool("PreToolUse", "t1")) end)
     assert_receive {:asked, worker, _}, 5_000
+    assert [%{hold: "held", held_at: held, written_at: held}] = rows(db)
+    assert is_integer(held)
     assert %{status: 200, resp_body: ""} = Task.await(task)
+
+    # Its settle moves `written_at`, never `held_at`, the hold's open (F-202).
+    assert [%{hold: "expired", held_at: ^held, written_at: settled}] = rows(db)
+    assert settled - held >= 50
 
     mon = Process.monitor(worker)
     send(worker, {:answer, {:deny, "late"}})
@@ -262,11 +268,12 @@ defmodule CodingAgentFramework.IntakeToolsTest do
     intake = start.(pre_tool_use: waiting(self()))
     task = Task.async(fn -> post(intake, tool("PreToolUse", "t1")) end)
     assert_receive {:asked, _, _}, 5_000
+    assert [%{held_at: held}] = rows(db)
     stop_supervised!(Intake)
     assert %{status: 200, resp_body: ""} = Task.await(task)
     start.([])
     assert_receive %{topic: "intake:h:work", ids: [_]}, 5_000
-    assert [%{hold: "lost"}] = rows(db)
+    assert [%{hold: "lost", held_at: ^held}] = rows(db)
   end
 
   test "a request that closes while held is lost, and the late decision dropped",

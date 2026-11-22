@@ -68,15 +68,20 @@ defmodule CodingAgentFramework.Watch.MetricsTest do
     assert %{started: %{count: 2}, reported: %{count: 2, ms: %{median: 60_000}}} = all(rows)
   end
 
-  test "stalled: once per delegate on which stuck_background fired, never a stall that cleared" do
+  test "stalled: once per delegate, on a stall's symptom or a Stop that never came" do
     rows = %{
       delegates: [
         delegate(1, "app-hung", @monday),
         delegate(2, "app-quiet", @monday),
         delegate(3, "app-clear", @monday),
         # The name's next row: what fires on the name from now on is this row's.
-        delegate(4, "app-hung", @monday + @hour)
+        delegate(4, "app-hung", @monday + @hour),
+        # Its report read from the transcript once its process was gone (F-202), and one
+        # taken from its result.
+        delegate(5, "app-lost", @monday, taken_by: "transcript"),
+        delegate(6, "app-fine", @monday, taken_by: "result")
       ],
+      messages: [report(10, 5, @monday + 60_000), report(11, 6, @monday + 60_000)],
       symptoms: [
         symptom(20, "stuck_background", "app-hung", @monday + 60_000),
         symptom(21, "stuck_background", "app-hung", @monday + 120_000),
@@ -86,27 +91,55 @@ defmodule CodingAgentFramework.Watch.MetricsTest do
     }
 
     stalled = all(rows).stalled
-    assert %{count: 2, unread: ["stop_lost"]} = stalled
+    assert %{count: 3} = stalled
+    refute Map.has_key?(stalled, :unread)
 
-    assert [%{delegate: 1, symptoms: [20, 21]}, %{delegate: 4, symptoms: [23]}] =
-             stalled.evidence
+    assert [
+             %{delegate: 1, symptoms: [20, 21], why: ["stuck_background"]},
+             %{delegate: 4, symptoms: [23], why: ["stuck_background"]},
+             %{delegate: 5, symptoms: [], why: ["stop_lost"]}
+           ] = stalled.evidence
   end
 
-  test "late: (b) released by its healer, (c) relayed past 60 s; (a) is in no row" do
+  test "late: (a) its Stop lost, (b) released by its healer, (c) relayed past 60 s" do
     rows = %{
-      delegates: for(id <- 1..4, do: delegate(id, "app-#{id}", @monday)),
+      delegates:
+        for(id <- 1..4, do: delegate(id, "app-#{id}", @monday)) ++
+          [
+            delegate(5, "app-5", @monday, taken_by: "transcript"),
+            delegate(6, "app-6", @monday),
+            delegate(7, "app-7", @monday)
+          ],
       messages: [
         report(10, 1, @monday + 600_000),
+        # Rows of an earlier build: no `delivered_at`, so `updated_at` is read.
         report(11, 2, @monday + 1_000, updated_at: @monday + 1_000 + 61_000),
         report(12, 3, @monday + 1_000, updated_at: @monday + 1_000 + 59_000),
-        report(13, 4, @monday + 1_000, status: "queued", updated_at: @monday + 900_000)
+        report(13, 4, @monday + 1_000, status: "queued", updated_at: @monday + 900_000),
+        report(14, 5, @monday + 1_000),
+        # `delivered_at` (F-202) is read, whatever wrote the row later.
+        report(15, 6, @monday + 1_000,
+          delivered_at: @monday + 1_000 + 61_000,
+          updated_at: @monday + 2_000
+        ),
+        report(16, 7, @monday + 1_000,
+          delivered_at: @monday + 1_000 + 59_000,
+          updated_at: @monday + 900_000
+        )
       ],
       acts: [act(30, "stuck_backgrounds:ws", "end", "app-1", @monday + 500_000)]
     }
 
     late = all(rows).late
-    assert %{count: 2, unread: ["a"]} = late
-    assert [%{name: "app-1", why: ["b"]}, %{name: "app-2", why: ["c"]}] = late.evidence
+    assert %{count: 4} = late
+    refute Map.has_key?(late, :unread)
+
+    assert [
+             %{name: "app-1", why: ["b"]},
+             %{name: "app-2", why: ["c"]},
+             %{name: "app-5", why: ["a"]},
+             %{name: "app-6", why: ["c"]}
+           ] = late.evidence
   end
 
   test "killed: a process gone with no act of the framework's; restarted: its resume" do
@@ -143,6 +176,51 @@ defmodule CodingAgentFramework.Watch.MetricsTest do
     # A recovery counts in the period it acted, the kill in the period its delegate started.
     days = read(rows, :day, @monday - 24 * @hour, @monday + 2 * 24 * @hour)
     assert [0, 2, 0] = Enum.map(days, & &1.killed.count)
+  end
+
+  test "killed: each kill Delegates recorded, one whose resume was refused and a second" do
+    killed = fn id, delegate, resumes, at ->
+      act(id, "delegates:ws", "killed", "app-#{delegate}", at,
+        state: "killed:ws:#{delegate}:#{resumes}",
+        detail: ~s({"delegate":#{delegate},"resumes":#{resumes}})
+      )
+    end
+
+    rows = %{
+      delegates: [
+        # Its resume refused before its claim (F-199's new-6): failed, with no resume counted.
+        delegate(1, "app-1", @monday, status: "failed"),
+        # Killed twice: the first resumed, the second its report.
+        delegate(2, "app-2", @monday, status: "failed", resumes: 1),
+        # Killed once more after the operator's end of its first life: only the second counts.
+        delegate(3, "app-3", @monday, status: "failed", resumes: 1)
+      ],
+      acts: [
+        killed.(50, 1, 0, @monday + 60_000),
+        killed.(51, 2, 0, @monday + 60_000),
+        act(52, "delegates:ws", "resume", "app-2", @monday + 61_000,
+          state: ~s({"delegate":2,"resumes":0})
+        ),
+        killed.(53, 2, 1, @monday + 120_000),
+        act(54, "operator", "end", "app-3", @monday + 30_000),
+        killed.(55, 3, 0, @monday + 60_000),
+        killed.(56, 3, 1, @monday + 120_000)
+      ]
+    }
+
+    period = all(rows)
+    assert %{count: 4, delegates: 3} = period.killed
+
+    assert [
+             %{delegate: 1, resumes: 0},
+             %{delegate: 2, resumes: 0},
+             %{delegate: 2, resumes: 1},
+             %{delegate: 3, resumes: 1}
+           ] = period.killed.evidence
+
+    assert %{count: 1, by_outcome: %{"verified" => 1}} = period.restarted
+    # A kill is a fact Delegates recorded, never a recovery.
+    assert %{fired: 1} = period.recoveries
   end
 
   test "dropped: a report settled unknown or made due again" do
@@ -189,6 +267,12 @@ defmodule CodingAgentFramework.Watch.MetricsTest do
       act(id, "sam", "answer", "app-1", at, detail: detail)
     end
 
+    opened = fn id, prompt, at ->
+      kind = hd(String.split(prompt, ":"))
+      detail = ~s({"prompt":"#{prompt}","kind":"#{kind}","opened_at":#{at}})
+      act(id, "prompts:ws", "opened", "app-1", at, state: "opened:ws:#{prompt}", detail: detail)
+    end
+
     rows = %{
       messages: [
         %{id: 1, kind: "ask", uuid: "q1", reply_to: nil, status: "kept", created_at: @monday},
@@ -209,10 +293,23 @@ defmodule CodingAgentFramework.Watch.MetricsTest do
         )
       ],
       holds: [
+        # Rows of an earlier build, with no `held_at`: one still held opened at its
+        # `written_at`; one decided has lost its open time, and one an answer row names is
+        # read from that row.
         %{id: 70, hold: "held", prompt: nil, written_at: @monday + 5_000},
-        # Decided by the app's callback: its open time is gone, so it is not counted.
         %{id: 71, hold: "answered", prompt: nil, written_at: @monday + 9_000},
-        %{id: 72, hold: "answered", prompt: nil, written_at: @monday + 9_000}
+        %{id: 72, hold: "answered", prompt: nil, written_at: @monday + 9_000},
+        # F-202's: held at `held_at`, and decided by the app's callback at its settle; one
+        # that expired is opened and never answered.
+        %{
+          id: 73,
+          hold: "answered",
+          prompt: nil,
+          actor: "app",
+          held_at: @monday + 1_000,
+          written_at: @monday + 1_500
+        },
+        %{id: 74, hold: "expired", prompt: nil, held_at: @monday + 2_000, written_at: @monday + 9}
       ],
       acts: [
         answer.(80, "ask:1", @monday, @monday + 30_000),
@@ -222,22 +319,37 @@ defmodule CodingAgentFramework.Watch.MetricsTest do
         act(83, "sam", "answer", "app-1", @monday + 6_000,
           detail: ~s({"prompt":"stop_cap:90","kind":"stop_cap","opened_at":#{@monday}}),
           outcome: "failed"
-        )
+        ),
+        # Each open Prompts recorded (F-202): a login and a limit never answered count too.
+        opened.(84, "dialog:app-1:5:trust", @monday + 3_000),
+        opened.(85, "login:work", @monday + 7_000),
+        opened.(86, "limit:app-1:99", @monday + 8_000),
+        opened.(87, "permission:70", @monday + 5_000)
       ]
     }
 
     prompts = all(rows).prompts
-    assert %{opened: 7, answered: 4, unread: ["hold_opened_at"]} = prompts
+    assert %{opened: 11, answered: 5} = prompts
+    refute Map.has_key?(prompts, :unread)
 
     assert %{
              "ask" => %{opened: 2, answered: 1},
              "remedy" => %{opened: 1, answered: 1},
-             "permission" => %{opened: 2, answered: 1},
+             "permission" => %{opened: 4, answered: 2},
              "dialog" => %{opened: 1, answered: 1},
-             "stop_cap" => %{opened: 1, answered: 0}
+             "stop_cap" => %{opened: 1, answered: 0},
+             "login" => %{opened: 1, answered: 0},
+             "limit" => %{opened: 1, answered: 0}
            } = prompts.by_kind
 
     assert %{median: 6_000, max: 30_000} = prompts.ms
+
+    assert [%{by: "app", ms: 500}] =
+             Enum.filter(prompts.evidence, &(&1.prompt == "permission:73"))
+
+    # A prompt counts in the period it opened.
+    days = read(rows, :day, @monday - 24 * @hour, @monday + 24 * @hour)
+    assert [0, 11] = Enum.map(days, & &1.prompts.opened)
   end
 
   test "recoveries by outcome and those left for a person; a person's interventions" do

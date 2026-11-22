@@ -455,30 +455,43 @@ moved onto the framework, so the two compare (decided in F-199's brief):
 
 - **Cuts** are UTC: `by: :day`, `:week` (ISO, Monday to Sunday) or `:all`. A delegate counts in
   the period it started, a recovery in the period it acted, a prompt in the period it opened, a
-  person's act in the period it was claimed, a usage limit in the period it began.
+  person's act in the period it was claimed, a usage limit in the period it began (the last two
+  confirmed in F-202, from F-199's new-4).
 - **Stalled**: a delegate on which a stall's symptom fired, once, by its own row, the bound the
-  symptom's own; a stall that cleared before any symptom fired is not counted.
+  symptom's own; a stall that cleared before any symptom fired is not counted. Its other
+  symptom is a `Stop` that never came, its report taken from the transcript by a recovery.
 - **Late**: a report that reached the parent by a recovery's path: (a) its `Stop` lost and the
   report taken from the transcript by a recovery, (b) held behind a background command and
   released by its healer, (c) relayed more than 60 s after it was taken. Each says which.
-- **Killed**: a delegate whose process went with no act of the framework's, a crash included;
-  restarted by a recovery, the resumes after such a kill.
+- **Killed**: a kill of a delegate's process with no act of the framework's, a crash included,
+  a delegate killed twice counted twice; restarted by a recovery, the resumes after such a kill.
 
 | Metric | Rows | Rule |
 |---|---|---|
 | `started` | `delegates` | each row, by its `created_at` |
 | `reported` | `delegates`; `messages` | the reply or notice to the row's `brief_uuid`; its time, that row's `created_at` less the delegate's |
-| `stalled` | `delegates`; `symptoms` | `stuck_background` on the delegate's name while the row is the name's latest; a `Stop` that never came is in no row yet (`unread`) |
-| `late` | `delegates`; `messages`; `acts` | (b) the report stored after the `stuck_backgrounds` healer's `end` on its delegate; (c) the report's row `delivered` more than 60 s after it was stored; (a) is in no row yet (`unread`) |
-| `killed`, `restarted` | `delegates`; `acts` | a resume counted on the row or claimed by `Delegates` for it, and no `stop`, `end`, `end_main` or `move` claimed on its name from its start to that resume; each such resume by its outcome |
+| `stalled` | `delegates`; `symptoms` | `stuck_background` on the delegate's name while the row is the name's latest; or a `Stop` that never came, the row's `taken_by` `transcript` |
+| `late` | `delegates`; `messages`; `acts` | (a) the row's `taken_by` `transcript`; (b) the report stored after the `stuck_backgrounds` healer's `end` on its delegate; (c) the report's `delivered_at` more than 60 s after it was stored |
+| `killed`, `restarted` | `delegates`; `acts` | each `killed` record of `Delegates`, keyed by the row and its resumes, and no `stop`, `end`, `end_main` or `move` claimed on its name since the kill before it (or its start); each resume after such a kill by its outcome |
 | `dropped` | `messages` | a report settled `unknown`, or made due again |
 | `limited`, `moves` | `symptoms`; `acts` | each `limited` symptom, its account and window, and its time from the reset to its pass; each `move` of `Limits`, by outcome |
-| `prompts` | `messages`; `symptoms`; `holds`; `acts` | each ask, remedy prompt, hold still open and prompt an answer row names, opened and answered, by kind, and the time to answer; a hold decided by any other has lost its open time (`unread`, F-194's new-4) |
+| `prompts` | `messages`; `symptoms`; `holds`; `acts` | each ask, remedy prompt, hold (by its `held_at`), open `Prompts` recorded (act `opened`) and prompt an answer row names, opened and answered, by kind, with who answered and the time to answer; a hold settled by an actor was answered by it |
 | `recoveries` | `acts`; `symptoms` | each act of a healer (`recoveries:`, `absent_mains:`, `stuck_backgrounds:`, `limits:`, `delegates:`) or a person's remedy, by outcome; and each symptom asked of a person |
 | `interventions` | `acts` | each answer of `answer/4`, each `typed`, `interrupt` and `attach` fact under its own key, and the operator's `stop`, `end` and `end_main`, by act and by actor |
 
 A rule whose fact no row holds yet counts nothing, and its metric names it in `unread`, so a
-zero is never read as measured. Each metric carries its evidence, the rows it counted.
+zero is never read as measured; since F-202 no rule has one. Each metric carries its evidence,
+the rows it counted.
+
+**The facts the rules read** (F-202, from F-199's new-1, 2, 3, 5 and 6 and F-194's new-4), each
+written once, when it happens: `Delegates` writes `taken_by` on the row with its report
+(`result`, `transcript` once its process was gone, `turn_end` for an interactive turn read
+ended) and records each kill it sees in `Acts` (act `killed`, keyed
+`killed:<host>:<row>:<resumes>`) before it decides between a resume and a failure; `Intake`
+writes a hold's `held_at` with its row, never moved by its settle; `Mailbox` writes
+`delivered_at` with `delivered`; `Prompts` records each prompt's open in `Acts` the first time it
+lists it (act `opened`, keyed `opened:<host>:<prompt id>`, its kind, agent and `opened_at`). A
+row written before F-202 has none of them, and is read as F-199 read it.
 
 Time in each state (per agent, per status) is a fold of the status facts. `look(what: :stuck)`
 is the agent-facing view of the same folds for its own subtree.

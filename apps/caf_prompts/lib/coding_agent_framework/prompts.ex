@@ -65,6 +65,12 @@ defmodule CodingAgentFramework.Prompts do
   takes it and settled by the owner's answer, so who answered, and when, is read from the
   ledger (F-194).
 
+  **Each open a fact** (F-202). The first read that lists a prompt records its open in `Acts`
+  (`Acts.record/7`, actor `prompts:<host>`, act `opened`, keyed `opened:<host>:<prompt id>`),
+  its `detail` the prompt's id, kind, agent and `opened_at`. The inbox never reads it back: it
+  is for the metrics, so a dialog, login or limit prompt never answered still counts, with its
+  open time.
+
   **The parent told once.** When a delegate's prompt opens, its parent gets one notice through
   `Mailbox` (`Mailbox.notify/4`, kind `prompt`, from the delegate): ``From <delegate> (prompt):
   waiting on <kind>: <text> (prompt <id>)``, stored under the prompt's id, so a read after a
@@ -308,7 +314,9 @@ defmodule CodingAgentFramework.Prompts do
         shown: %{},
         # The prompts whose parent was told since this start; Mailbox's key keeps it once
         # across starts, and this keeps it to one call per start.
-        told: MapSet.new()
+        told: MapSet.new(),
+        # The prompts whose open is recorded in `Acts` since this start, the same way.
+        opened: MapSet.new()
       }
 
       {:ok, s, {:continue, :read}}
@@ -361,10 +369,31 @@ defmodule CodingAgentFramework.Prompts do
         now = Map.new(all, &{&1.id, &1.status})
         moved = for {id, _} <- Map.merge(s.shown, now), s.shown[id] != now[id], do: id
         if moved != [], do: s.notify.(%{topic: "prompts", ids: Enum.sort(moved)})
-        tell(%{s | shown: now}, all)
+        %{s | shown: now} |> opened(all) |> tell(all)
 
       _unread ->
         s
+    end
+  end
+
+  # Each prompt's open as a fact (F-202, from F-199's new-3), so one never answered still counts:
+  # one row in `Acts` per prompt id, the first time a read lists it, actor `prompts:<host>`,
+  # act `opened`, its `detail` the prompt's id, kind, agent and `opened_at` (its own, or this
+  # read's time for a prompt that has none). Its key keeps it once across restarts; a record
+  # not written is tried again at the next read.
+  defp opened(s, all) do
+    for p <- all, not MapSet.member?(s.opened, p.id), reduce: s do
+      s ->
+        at = p.opened_at || System.os_time(:millisecond)
+        detail = [detail: %{prompt: p.id, kind: p.kind, agent: p.agent, opened_at: at}]
+        key = [state: "opened:#{s.host}:#{p.id}"]
+        actor = "prompts:" <> s.host
+
+        case Acts.record(s.owners.acts, actor, p.agent || p.id, :opened, :verified, detail, key) do
+          {:ok, _} -> %{s | opened: MapSet.put(s.opened, p.id)}
+          {:refused, {:already_claimed, _}} -> %{s | opened: MapSet.put(s.opened, p.id)}
+          _not_written -> s
+        end
     end
   end
 
@@ -435,8 +464,9 @@ defmodule CodingAgentFramework.Prompts do
         kind: kind,
         status: if(row.hold == "held", do: "open", else: "answering"),
         subagent: if(is_binary(data["agent_id"]), do: data["agent_id"]),
-        # A held row is written once when it opens, and again only when it settles.
-        opened_at: row.written_at,
+        # Its hold's time (F-202); a row of an earlier build is written again only as its hold
+        # moves, and its `written_at` is that time.
+        opened_at: row.held_at || row.written_at,
         deadline: row.deadline
       }
 
