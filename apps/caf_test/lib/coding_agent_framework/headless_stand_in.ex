@@ -22,9 +22,10 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     ends its turn with an empty `result` that names no message, so no report is read from it;
     `bg` plays a background command as Claude Code 2.1.322 does (F-184): `task_started` and
     `background_tasks_changed` listing it, then the turn's `result` while it runs; a line the
-    test writes to the FIFO `<dir>/bg.fifo` ends it (`task_updated`, `task_notification`, the
-    list empty, and a new `system`/`init` that begins a turn of its own), and a second line ends
-    that turn with a `result` (`the command ended`, uuid `r-bg-<uuid>`) that names no message;
+    test writes to the FIFO `<dir>/bg.fifo` ends it (`task_updated`, `task_notification` and the
+    list empty), a second line writes the new `system`/`init` that begins a turn of its own (two
+    events, so a test reads the moment between them, F-204), and a third ends that turn with a
+    `result` (`the command ended`, uuid `r-bg-<uuid>`) that names no message;
   - for `interrupt`: a cancel of the request pending, and a `result`;
   - `end_session` ends it; a line that is not a JSON object ends it with status 1.
 
@@ -139,6 +140,7 @@ defmodule CodingAgentFramework.HeadlessStandIn do
                 ev '{"type":"system","subtype":"task_updated","task_id":"t-'"$u"'","patch":{"status":"completed"}}'
                 ev '{"type":"system","subtype":"task_notification","task_id":"t-'"$u"'","status":"completed"}'
                 ev '{"type":"system","subtype":"background_tasks_changed","tasks":[],"session_id":"'"$sid"'"}'
+                read -r _ < "DIR/bg.fifo"
                 init
                 read -r _ < "DIR/bg.fifo"
                 ev '{"type":"result","subtype":"success","is_error":false,"result":"the command ended","session_id":"'"$sid"'","uuid":"r-bg-'"$u"'","user_message_uuids":[]}'

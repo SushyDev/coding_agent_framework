@@ -231,9 +231,10 @@ defmodule CodingAgentFramework.DelegatesTest do
     assert [_] = turn_notices(ctx)
   end
 
-  # Remedies.tla's BriefResult, TaskEnds and OwnResult (F-184): OneReport. The stand-in's `bg`
-  # plays the order measured on Claude Code 2.1.322: the brief's result while its background
-  # command runs, then, at the test's word, the command's end and a turn of Claude Code's own.
+  # Remedies.tla's BriefResult, TaskEnds, OwnInit and OwnResult (F-184, F-204): OneReport and
+  # NoMessageIntoOwnTurn. The stand-in's `bg` plays the order measured on Claude Code 2.1.322:
+  # the brief's result while its background command runs, then, each at the test's word, the
+  # command's end, the init of a turn of Claude Code's own, and that turn's result.
   test "a turn a background command's end begins is never a second report or a reply", ctx do
     fifo = Path.join(ctx.dir, "bg.fifo")
     {_, 0} = System.cmd(program!(:mkfifo), [fifo])
@@ -249,11 +250,19 @@ defmodule CodingAgentFramework.DelegatesTest do
     running = stream_row(ctx, id, &(&1.background.tasks == ["t-#{u}"]))
     assert SessionsTurn.stream(running) == :running
 
-    # A parent's message waits while the command runs, and through the turn its end begins.
+    # A parent's message waits while the command runs, and through the turn its end begins:
+    # read between the end and that turn's init, the delegate is busy (F-196's new-6).
     {:ok, {:queued, m}} = Mailbox.message(ctx.mailbox, "main", name, "Later.")
     File.write!(fifo, "end\n")
-    own = stream_row(ctx, id, &(&1.background.changes == 2 and not &1.idle))
-    assert {own.tasks, SessionsTurn.stream(own)} == {%{}, :running}
+    ended = stream_row(ctx, id, &(&1.background.changes == 2))
+    cue(ctx, current(ctx))
+    assert %{status: "queued"} = Mailbox.Table.get(ctx.mtable, m)
+    assert {ended.tasks, ended.waking != nil, SessionsTurn.stream(ended)} == {%{}, true, :running}
+
+    # The init: the turn of its own begins, and the message still waits.
+    File.write!(fifo, "init\n")
+    own = stream_row(ctx, id, &(&1.waking == nil and not &1.idle))
+    assert {own.unwoken, SessionsTurn.stream(own)} == {0, :running}
     cue(ctx, current(ctx))
     assert %{status: "queued"} = Mailbox.Table.get(ctx.mtable, m)
 

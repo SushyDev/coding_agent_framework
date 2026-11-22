@@ -22,8 +22,13 @@ defmodule CodingAgentFramework.Stream.Fold do
   many such events came), which `StuckBackgrounds` reads. A turn's `result` comes while its
   background command runs; the command's end then starts a turn of Claude Code's own, which
   begins with a new `system`/`init` (measured on 2.1.322, F-184): an init while the turn reads
-  ended clears `idle` until that turn's result, so nothing is written into it. It is total: a
-  line that is not a JSON object is counted as a problem.
+  ended clears `idle` until that turn's result, so nothing is written into it. The command's
+  end and that init are two events, and a read can fall between them (F-196's new-6), so a
+  command's end while the turn reads ended clears `idle` already: the fold is `waking`, stamped
+  with the read's time (`stamp/2`), until the init comes or a result ends the turn. A release
+  that starts no turn at the end would leave it waking for ever, so `Stream` ends it past its
+  bound (`unwake/3`), reads the turn ended and counts it in `unwoken`. It is total: a line that
+  is not a JSON object is counted as a problem.
 
       iex> alias CodingAgentFramework.Stream.Fold
       iex> fold = Fold.mark(Fold.new(), {:message, "u1", "hi"}, ~s({"x":1}\\n), 0)
@@ -47,6 +52,8 @@ defmodule CodingAgentFramework.Stream.Fold do
           own: [map],
           tasks: %{String.t() => map},
           background: %{tasks: [String.t()], changes: non_neg_integer},
+          waking: %{at: integer | nil} | nil,
+          unwoken: non_neg_integer,
           rate_limit: map | nil,
           events: non_neg_integer,
           problems: non_neg_integer
@@ -70,6 +77,8 @@ defmodule CodingAgentFramework.Stream.Fold do
       own: [],
       tasks: %{},
       background: %{tasks: [], changes: 0},
+      waking: nil,
+      unwoken: 0,
       rate_limit: nil,
       events: 0,
       problems: 0
@@ -106,12 +115,13 @@ defmodule CodingAgentFramework.Stream.Fold do
   @doc "`Handle`: what one event writes."
   @spec event(t, map) :: t
   # A later init while the turn reads ended begins a turn of Claude Code's own: a background
-  # command's end woke it (measured on 2.1.322, F-184). Its result ends it, as any turn's.
+  # command's end woke it (measured on 2.1.322, F-184). Its result ends it, as any turn's. The
+  # init a command's end waits for (`waking`) begins that turn too.
   def event(fold, %{"type" => "system", "subtype" => "init", "session_id" => id})
       when is_binary(id) do
     if fold.session_id != nil and fold.idle and not fold.gone,
-      do: %{fold | session_id: id, idle: false},
-      else: %{fold | session_id: id}
+      do: %{fold | session_id: id, idle: false, waking: nil},
+      else: %{fold | session_id: id, waking: nil}
   end
 
   # Claude Code's own list of its background tasks, as it last said it, and how many times.
@@ -127,9 +137,16 @@ defmodule CodingAgentFramework.Stream.Fold do
       when is_binary(id),
       do: %{fold | tasks: Map.put(Map.get(fold, :tasks, %{}), id, %{state: :running})}
 
+  # Remedies.tla's CommandEnds: an end while the turn reads ended begins a turn of Claude
+  # Code's own, whose init comes later; until then the fold reads it coming, not ended.
   def event(fold, %{"type" => "system", "subtype" => "task_notification", "task_id" => id})
-      when is_binary(id),
-      do: %{fold | tasks: Map.delete(Map.get(fold, :tasks, %{}), id)}
+      when is_binary(id) do
+    fold = %{fold | tasks: Map.delete(Map.get(fold, :tasks, %{}), id)}
+
+    if fold.session_id != nil and fold.idle and not fold.gone,
+      do: %{fold | idle: false, waking: %{at: nil}},
+      else: fold
+  end
 
   def event(fold, %{"type" => "user", "isReplay" => true, "uuid" => uuid}),
     do: settle(fold, :messages, uuid, :writing, :delivered)
@@ -141,7 +158,7 @@ defmodule CodingAgentFramework.Stream.Fold do
     result = %{subtype: e["subtype"], is_error: e["is_error"], user_message_uuids: uuids}
     result = Map.merge(result, %{text: text, api_error: e["api_error"]})
     messages = Enum.reduce(uuids, fold.messages, &keep(&2, &1, result))
-    fold = %{fold | idle: true, last_result: result, messages: messages}
+    fold = %{fold | idle: true, waking: nil, last_result: result, messages: messages}
     if Enum.any?(uuids, &Map.has_key?(messages, &1)), do: fold, else: own(fold, e["uuid"], result)
   end
 
@@ -319,6 +336,7 @@ defmodule CodingAgentFramework.Stream.Fold do
 
     # A background command is a child of the process, and ended with it.
     %{fold | gone: true, messages: messages, requests: requests, lines: %{}, tasks: %{}}
+    |> Map.put(:waking, nil)
     |> no_background()
   end
 
@@ -351,6 +369,7 @@ defmodule CodingAgentFramework.Stream.Fold do
         ending: false,
         tasks: %{}
     }
+    |> Map.put(:waking, nil)
     |> no_background()
   end
 
@@ -428,6 +447,8 @@ defmodule CodingAgentFramework.Stream.Fold do
     %{fold | messages: messages}
     |> Map.put_new(:tasks, %{})
     |> Map.put_new(:background, %{tasks: [], changes: 0})
+    |> Map.put_new(:waking, nil)
+    |> Map.put_new(:unwoken, 0)
   end
 
   def upgrade(fold), do: fold
@@ -435,7 +456,7 @@ defmodule CodingAgentFramework.Stream.Fold do
   @doc """
   Stamps each request with no `held_at` with `at` (wall-clock ms), the time of the read that
   folded it: when `Prompts` shows it opened (F-189's new-2). A request stamped before keeps its
-  time. Pure.
+  time, and so does a `waking` fold: the read that saw the command's end. Pure.
 
       iex> alias CodingAgentFramework.Stream.Fold
       iex> fold = %{Fold.new() | requests: %{"r1" => %{state: :held}}}
@@ -443,11 +464,33 @@ defmodule CodingAgentFramework.Stream.Fold do
       %{"r1" => %{state: :held, held_at: 5}}
   """
   @spec stamp(t, integer) :: t
-  def stamp(fold, at),
-    do: %{
-      fold
-      | requests: Map.new(fold.requests, fn {id, r} -> {id, Map.put_new(r, :held_at, at)} end)
-    }
+  def stamp(fold, at) do
+    requests = Map.new(fold.requests, fn {id, r} -> {id, Map.put_new(r, :held_at, at)} end)
+
+    case fold do
+      %{waking: %{at: nil}} -> %{fold | requests: requests, waking: %{at: at}}
+      _ -> %{fold | requests: requests}
+    end
+  end
+
+  @doc """
+  `Unwake`: a fold `waking` since a read `bound` ms or more before `now` (wall-clock ms) with
+  no init read reads the turn ended again, and counts it in `unwoken`: the release started no
+  turn at the command's end. Any other fold is unchanged. Pure.
+
+      iex> alias CodingAgentFramework.Stream.Fold
+      iex> fold = %{Fold.new() | idle: false, waking: %{at: 1_000}}
+      iex> Fold.unwake(fold, 30_999, 30_000) == fold
+      true
+      iex> fold = Fold.unwake(fold, 31_000, 30_000)
+      iex> {fold.idle, fold.waking, fold.unwoken}
+      {true, nil, 1}
+  """
+  @spec unwake(t, integer, non_neg_integer) :: t
+  def unwake(%{waking: %{at: at}} = fold, now, bound) when is_integer(at) and now - at >= bound,
+    do: %{fold | idle: true, waking: nil, unwoken: fold.unwoken + 1}
+
+  def unwake(fold, _now, _bound), do: fold
 
   @doc "Messages still waiting for their replay: the ones the transcript settles at the exit."
   @spec writing(t) :: [String.t()]
