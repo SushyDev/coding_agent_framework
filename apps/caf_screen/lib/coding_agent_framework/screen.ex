@@ -3,7 +3,8 @@ defmodule CodingAgentFramework.Screen do
   Reads one captured screen of an interactive Claude Code session for a named release.
 
   A capture is what `tmux capture-pane -p` prints for the pane, with or without `-e` (the
-  escapes are dropped before reading). `read/2` places it in one state, by what the release
+  escapes are dropped before reading, after the input box's line drops its runs drawn dim;
+  `Tmux.capture/3` captures with them). `read/2` places it in one state, by what the release
   draws at the bottom of the screen (`CodingAgentFramework.Screen.Reading`):
 
       iex> rule = String.duplicate("─", 20)
@@ -17,7 +18,12 @@ defmodule CodingAgentFramework.Screen do
   The states:
 
     * `%{state: :idle, box: :empty}`: the turn has ended and the input box is empty;
-    * `%{state: :idle, box: {:text, text}}`: text typed in the box and not sent;
+    * `%{state: :idle, box: {:text, text}}`: text typed in the box and not sent. A prompt
+      suggestion is not typed text: Claude Code draws it dim (`ESC[2m` up to the reset), and a
+      run drawn dim on the box's line is dropped, so a box holding only a suggestion is
+      `:empty`. Only a capture with escapes (`capture-pane -e`) shows it; without them a
+      suggestion reads as text. Only the screen sees a suggestion: what a person typed and sent
+      reaches the framework from `UserPromptSubmit` (F-194), never from here;
     * `%{state: :running}`: a turn runs. Only the footer under the box says so; a spinner line
       alone does not, and an ended turn's `… · done` line stays above the box;
     * `%{state: :usage_limit_wait, at: time}`: Claude Code's own wait at a usage limit, `at` the
@@ -33,6 +39,12 @@ defmodule CodingAgentFramework.Screen do
       (the menu at a usage limit, in place of the input box; its options are read by label,
       since the third is what the account allows, F-181's new-4). The two a start meets first,
       `:trust` and `:imports`, send no hook event;
+    * `%{state: :dialog, kind: :menu, title: title, detail: [line], options: [label], selected:
+      label}`: any other numbered menu (F-198), read by its shape where no kind names it: under
+      a rule, its title (its first line), the lines under it (`detail`), two or more numbered
+      options in a row, numbered from 1 at one indent with the `❯` on one, and the footer
+      "Enter to confirm · Esc to cancel", drawn in place of the box or above it. Only with that
+      footer is it a menu, so a numbered list in the agent's own output never reads as one;
     * `%{state: :exited}`: Claude Code has exited.
 
   A screen the release's reading cannot place, or places only by a guess, is unrecognized: a
@@ -56,6 +68,8 @@ defmodule CodingAgentFramework.Screen do
               required(:kind) => atom,
               required(:options) => [String.t()],
               required(:selected) => String.t(),
+              optional(:title) => String.t(),
+              optional(:detail) => [String.t()],
               optional(:paths) => [String.t()],
               optional(:shortened) => [String.t()]
             }
@@ -74,7 +88,8 @@ defmodule CodingAgentFramework.Screen do
           | {:refused, {:unknown_release, term}}
   def read(capture, release) when is_binary(capture) do
     with {:ok, reading} <- reading(release),
-         {:ok, screen} <- place(lines(capture), reading) do
+         {lines, typed} = lines(capture),
+         {:ok, screen} <- place(lines, typed, reading) do
       {:ok, screen}
     else
       :no_reading -> {:refused, {:unknown_release, release}}
@@ -118,25 +133,56 @@ defmodule CodingAgentFramework.Screen do
 
   defp reading(_release), do: :no_reading
 
-  # Trailing spaces say nothing, and a capture with escapes keeps some that one without drops.
+  # Each line with its escapes dropped, and each as typed: with the runs drawn dim dropped too,
+  # for the input line (a prompt suggestion is drawn dim). Trailing spaces say nothing, and a
+  # capture with escapes keeps some that one without drops.
   defp lines(capture) do
-    capture
-    |> String.replace(~r{\e\[[0-?]*[ -/]*[@-~]|\e\][^\a\e]*(?:\a|\e\\)}, "")
-    |> String.split("\n")
-    |> Enum.map(&String.trim_trailing(&1, " "))
-    |> drop_trailing_blanks()
+    raw = String.split(capture, "\n")
+    lines = raw |> Enum.map(&plain/1) |> drop_trailing_blanks()
+    {lines, raw |> Enum.take(length(lines)) |> Enum.map(&(&1 |> undim() |> plain()))}
   end
 
-  defp place(lines, reading) do
+  @escape ~r{\e\[[0-?]*[ -/]*[@-~]|\e\][^\a\e]*(?:\a|\e\\)}
+
+  defp plain(line), do: line |> String.replace(@escape, "") |> String.trim_trailing(" ")
+
+  # The line with every run drawn dim (SGR 2, up to a reset, SGR 0 or 22) dropped; its other
+  # escapes stay, for `plain/1`.
+  defp undim(line) do
+    ~r/\e\[([0-9;]*)m/
+    |> Regex.split(line, include_captures: true)
+    |> Enum.reduce({[], false}, fn part, {kept, dim} ->
+      case Regex.run(~r/\A\e\[([0-9;]*)m\z/, part) do
+        [_, params] -> {kept, dim(String.split(params, ";"), dim)}
+        nil -> {if(dim, do: kept, else: [part | kept]), dim}
+      end
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+    |> Enum.join()
+  end
+
+  # An SGR's parameters in order; a color's own (38, 48 or 58, then 5;n or 2;r;g;b) are no dim.
+  defp dim([], dim), do: dim
+  defp dim([p | rest], _dim) when p in ["", "0", "22"], do: dim(rest, false)
+  defp dim(["2" | rest], _dim), do: dim(rest, true)
+  defp dim([c, "5", _ | rest], dim) when c in ["38", "48", "58"], do: dim(rest, dim)
+  defp dim([c, "2", _, _, _ | rest], dim) when c in ["38", "48", "58"], do: dim(rest, dim)
+  defp dim([_ | rest], dim), do: dim(rest, dim)
+
+  # A dialog drawn in place of the box comes first, then a menu no rule names, which may be
+  # drawn above the box, then the box.
+  defp place(lines, typed, reading) do
     with :error <- exited(lines, reading),
-         :error <- boxed(lines, reading) do
-      dialog(lines, reading)
+         :error <- dialog(lines, reading),
+         :none <- menu(lines, reading) do
+      boxed(lines, typed, reading)
     end
   end
 
-  defp boxed(lines, reading) do
+  defp boxed(lines, typed, reading) do
     case split_at_last_rule(lines) do
-      {:ok, above, below} -> box(above, below, reading)
+      {:ok, above, below} -> box(above, below, typed, reading)
       :error -> :error
     end
   end
@@ -150,11 +196,12 @@ defmodule CodingAgentFramework.Screen do
 
   # The box sits between two rules; its footer, under the lower one, is the last thing drawn.
   # The upper rule carries the session's name when it has one (`--name`).
-  defp box(above, footer, reading) do
-    upper? = &(rule?(&1) or Regex.match?(reading.named_rule, &1))
-
-    with {:ok, _, [first | _] = inside} <- split_at_last_rule(above, upper?),
+  defp box(above, footer, typed, reading) do
+    with {:ok, before, [first | _] = inside} <- split_at_last_rule(above, &upper?(&1, reading)),
          true <- first == reading.prompt or String.starts_with?(first, reading.box) do
+      # The box's line as typed: a prompt suggestion, drawn dim, is not in it.
+      first = Enum.at(typed, length(before) + 1, first)
+
       wait =
         Enum.find_value(
           footer,
@@ -171,6 +218,8 @@ defmodule CodingAgentFramework.Screen do
       _ -> :error
     end
   end
+
+  defp upper?(line, reading), do: rule?(line) or Regex.match?(reading.named_rule, line)
 
   defp box_text(line, %{prompt: line}), do: :empty
 
@@ -192,6 +241,85 @@ defmodule CodingAgentFramework.Screen do
         :error -> nil
       end
     end)
+  end
+
+  # A menu no rule names (F-198): under a rule, its title, any lines under it, two or more
+  # numbered options in a row at one indent, one marked, then the release's menu footer, with
+  # nothing but blank lines under it before the box's upper rule or the screen's end. The footer
+  # makes it a menu, so a numbered list in the agent's own output is never one; with the footer
+  # and anything else in that shape, the screen is unrecognized.
+  defp menu(lines, %{menu: %{footer: footer}} = reading) do
+    top = box_top(lines, reading)
+
+    at =
+      lines
+      |> Enum.with_index()
+      |> Enum.filter(fn {line, _} -> String.starts_with?(String.trim_leading(line), footer) end)
+      |> Enum.map(&elem(&1, 1))
+      |> Enum.filter(&closed?(lines, &1, top))
+      |> List.last()
+
+    with at when is_integer(at) <- at || :none,
+         {:ok, _, region} <- split_at_last_rule(Enum.take(lines, at)) do
+      menu_options(region)
+    else
+      :none -> :none
+      :error -> :none
+    end
+  end
+
+  # Under a menu's footer: blank lines, then the box's own upper rule or the screen's end. A
+  # rule the agent's output prints (a capture of a menu, say) is not the box's.
+  defp closed?(lines, at, top) do
+    case lines
+         |> Enum.with_index()
+         |> Enum.drop(at + 1)
+         |> Enum.drop_while(&(elem(&1, 0) == "")) do
+      [] -> true
+      [{_, i} | _] -> i == top
+    end
+  end
+
+  # The index of the box's upper rule: above the last rule, the last rule or named rule.
+  defp box_top(lines, reading) do
+    with {:ok, above, _} <- split_at_last_rule(lines),
+         {:ok, before, _} <- split_at_last_rule(above, &upper?(&1, reading)) do
+      length(before)
+    else
+      :error -> nil
+    end
+  end
+
+  @option ~r/\A( *)([❯ ]) (\d+)\. (\S.*)\z/u
+
+  defp menu_options(region) do
+    body = region |> Enum.drop_while(&(&1 == "")) |> drop_trailing_blanks()
+    numbered = for {line, i} <- Enum.with_index(body), m = Regex.run(@option, line), do: {i, m}
+
+    with [{first, _} | _] when first > 0 <- numbered,
+         [title | detail] = Enum.take(body, first),
+         indices = Enum.map(numbered, &elem(&1, 0)),
+         true <- indices == Enum.to_list(first..(length(body) - 1)//1),
+         true <- length(numbered) >= 2,
+         parsed =
+           Enum.map(numbered, fn {_, [_, pad, mark, n, label]} -> {pad, mark, n, label} end),
+         true <- parsed |> Enum.map(&elem(&1, 0)) |> Enum.uniq() |> length() == 1,
+         true <- Enum.map(parsed, &elem(&1, 2)) == Enum.map(1..length(parsed), &to_string/1),
+         labels = Enum.map(parsed, &elem(&1, 3)),
+         true <- Enum.uniq(labels) == labels,
+         [selected] <- for({_, "❯", _, label} <- parsed, do: label) do
+      {:ok,
+       %{
+         state: :dialog,
+         kind: :menu,
+         title: String.trim(title),
+         detail: for(line <- detail, line != "", do: String.trim(line)),
+         options: labels,
+         selected: selected
+       }}
+    else
+      _ -> :error
+    end
   end
 
   defp options(body, kind) do

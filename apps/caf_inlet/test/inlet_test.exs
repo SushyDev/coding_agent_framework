@@ -173,6 +173,36 @@ defmodule CodingAgentFramework.InletTest do
     refute_received {:write, ^inlet, _}
   end
 
+  # F-198, Menu.tla's Check and Back: a menu no rule names, named by its title and options,
+  # moved to its option, the marker read back on it, then Enter; Escape for esc; another
+  # menu, or none, takes no key.
+  test "answers a menu by its label, read back before Enter, or by Escape", ctx do
+    [_, not_now, _] = options = ScreenStandIn.menu()
+    menu = {:menu, "Teach auto mode about your environment?", options}
+    inlet = ctx.inlet
+
+    open(ctx, "alpha", ["--screen", "menu"], :dialog)
+    other = {:menu, "Another menu?", options}
+
+    assert {:refused, {:screen, %{kind: :menu}}} =
+             Inlet.choose(inlet, "alpha", other, not_now, release: @release)
+
+    refute_received {:write, ^inlet, _}
+
+    assert {:ok, :sent} = Inlet.choose(inlet, "alpha", menu, not_now, release: @release)
+    assert_received {:write, ^inlet, {:keys, ["Down"]}}
+    assert_received {:write, ^inlet, {:keys, ["Enter"]}}
+    assert ScreenStandIn.menu_answer(ctx.dir) == not_now
+
+    assert {:refused, {:screen, %{state: :idle}}} =
+             Inlet.choose(inlet, "alpha", menu, :esc, release: @release)
+
+    open(ctx, "beta", ["--screen", "menu"], :dialog)
+    assert {:ok, :sent} = Inlet.choose(inlet, "beta", menu, :esc, release: @release)
+    assert_received {:write, ^inlet, {:keys, ["Escape"]}}
+    refute_received {:write, ^inlet, _}
+  end
+
   # F-142, item 4: an interactive delegate's interrupt. Checked: a turn runs, the Escape lands,
   # the turn ends; an idle screen takes no key.
   test "interrupts a running turn by Escape, and nothing when no turn runs", ctx do
@@ -190,10 +220,10 @@ defmodule CodingAgentFramework.InletTest do
     refute_received {:write, ^inlet, _}
   end
 
-  defp open(ctx, name, args \\ []) do
+  defp open(ctx, name, args \\ [], state \\ nil) do
     script = ScreenStandIn.write!(ctx.dir)
     {:ok, _} = Tmux.new_session(ctx.server, name, [script | args], size: {120, 40})
-    {:ok, _} = screen(ctx, name, &(&1.state in [:idle, :running]))
+    {:ok, _} = screen(ctx, name, &(&1.state in if(state, do: [state], else: [:idle, :running])))
   end
 
   defp pane(ctx, name) do

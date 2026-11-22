@@ -16,6 +16,12 @@ defmodule CodingAgentFramework.Screen.Reading.V2_1_322 do
   the empty box with its notice under the lower rule, "Continuing automatically at <time> · Esc
   to cancel", and the menu replaces the box, under a rule of `▔`, its numbered options three
   columns in under "What do you want to do?".
+
+  A menu no rule names (F-198's capture of "Teach auto mode about your environment?") is drawn
+  under a rule of `─`, above the box's named rule: its title two columns in, a line under it,
+  its numbered options with the marker two columns in, and "Enter to confirm · Esc to cancel".
+  The box under it may hold a prompt suggestion, drawn dim (`ESC[2m` up to `ESC[0m`) after the
+  prompt mark and its no-break space, as the placeholder is.
   """
 
   @behaviour CodingAgentFramework.Screen.Reading
@@ -31,6 +37,7 @@ defmodule CodingAgentFramework.Screen.Reading.V2_1_322 do
       wait: ~r/\AContinuing automatically at (.+) · Esc to cancel\z/u,
       exited: "Resume this session with:",
       resume: "claude --resume ",
+      menu: %{footer: "Enter to confirm · Esc to cancel"},
       dialogs: [
         %{
           kind: :trust,

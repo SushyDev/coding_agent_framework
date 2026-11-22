@@ -452,7 +452,8 @@ defmodule CodingAgentFramework.SessionsTest do
   # A stand-in held under a wrapper that outlives it, as dtach holds a socket a moment after its
   # process exits: when the stand-in exits, the wrapper writes `exited` and keeps the socket live
   # while the file `hold` is there, for at most 20 s. Both record their pids, and the test's end
-  # ends them by those.
+  # ends them by those. The start's read of the release (`--version`) goes straight to the
+  # stand-in: held too, it would write `exited` before any stop and wait out the read's bound.
   defp linger(ctx, name) do
     dir = Path.join(ctx.dir, name)
     inner = ClaudeStandIn.write!(dir, :at_start)
@@ -463,6 +464,7 @@ defmodule CodingAgentFramework.SessionsTest do
 
     File.write!(tmp, """
     #!#{program!(:sh)}
+    [ "$1" = --version ] && exec "#{inner}" "$@"
     : > "#{dir}/pids/$$"
     "#{inner}" "$@"
     : > "#{dir}/exited"

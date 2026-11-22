@@ -13,6 +13,7 @@ defmodule CodingAgentFramework.Prompts do
   | `permission` | a headless delegate's `can_use_tool` request, held in its `Stream` fold (F-189's new-2) | the request is `held` |
   | `stop_cap` | `Intake`'s hold of a `Stop` at Claude Code's cap of blocks in a row | the hold is `held` |
   | `dialog` | `Sessions`' agent row on a startup dialog (`trust`, `imports`) | the row shows it, no press marked |
+  | `dialog` | `Sessions`' running row whose screen shows a numbered menu no rule names (F-198, `Sessions.Menu`) | the row's last read of its pane found it, and no press of it was sent |
   | `ask` | `Mailbox`'s ask, from an agent to the operator | no answer row and no withdrawal |
   | `remedy` | `Watch`'s symptom state the healer left to a person (F-182) | the row is `asked` |
   | `login` | `Logins`' row of an account whose login a check refused (F-181) | no check found it logged in since |
@@ -24,7 +25,8 @@ defmodule CodingAgentFramework.Prompts do
   Each prompt is `%{id, kind, status, agent, parent, project, subagent, text, options,
   opened_at, deadline}`: `id` names its owner's key, so one state is one prompt
   (`"permission:<intake id>"`, `"permission:stream:<session>:<request id>"`,
-  `"stop_cap:<intake id>"`, `"dialog:<agent>:<start>:<dialog>"`,
+  `"stop_cap:<intake id>"`, `"dialog:<agent>:<start>:<dialog>"`, `"dialog:<agent>:<at>:menu"`
+  (`at` the wall-clock ms of the read that found the menu),
   `"ask:<mailbox id>"`, `"remedy:<symptom id>"`, `"login:<account>"`, `"limit:<agent>:<until>"`,
   `"usage_credits:<agent>:<until>"`); `status` is `open`, `answering` (an answer is on its way to the owner),
   or for a dialog `cut` or `unknown` (a restart cut its press: a person clears it,
@@ -62,7 +64,7 @@ defmodule CodingAgentFramework.Prompts do
   use GenServer
 
   alias CodingAgentFramework.{Acts, Intake, Logins, Mailbox, Sessions, Stream, Watch}
-  alias CodingAgentFramework.Sessions.{Agents, Limit}
+  alias CodingAgentFramework.Sessions.{Agents, Limit, Menu}
 
   @timeout 5_000
   # A dialog's press reads the pane, presses and reads it again (`Sessions.answer_dialog/5`).
@@ -137,7 +139,10 @@ defmodule CodingAgentFramework.Prompts do
 
   - `permission`: `"allow"`, `"deny"`, or `{"deny", message}` (the agent reads the message);
   - `stop_cap`: `"go_on"` (the cap's last block Claude Code honors) or `"end"` (the turn ends);
-  - `dialog`: one of its options' labels;
+  - `dialog`: one of its options' labels; for a menu (`…:menu`), also `"esc"`, which presses
+    Escape (`Sessions.answer_menu/5`: the marker moved to the label and read back on it before
+    Enter). A menu has no default and no deadline: only a person's answer presses it, and its
+    prompt leaves once a read of the pane no longer finds it, whoever answered;
   - `ask`: one answer per question, as `Mailbox.answer/4` takes them, or `{:withdraw, reason}`
     (a person dismissed it, `Mailbox.withdraw/4`: one more settle);
   - `remedy`: `"approve"` (its kind's remedy back on the allow-list, the operator's widening)
@@ -362,6 +367,7 @@ defmodule CodingAgentFramework.Prompts do
         holds(s, rows) ++
           requests(s, rows) ++
           dialogs(rows) ++
+          menus(rows) ++
           Enum.map(asks, &ask(&1, rows)) ++ remedies(s, rows) ++ logins(s) ++ limits(rows)
 
       {:ok, Enum.sort_by(prompts, &{&1.opened_at || 0, &1.id})}
@@ -455,6 +461,25 @@ defmodule CodingAgentFramework.Prompts do
         text: Enum.join(["#{d.kind} dialog" | d.paths], ": "),
         options: d.options,
         opened_at: row.updated_at,
+        deadline: nil
+      }
+
+      Map.merge(of(row), fields)
+    end
+  end
+
+  # A numbered menu on a running screen (F-198): a dialog with no default and no deadline, its
+  # options and `esc`, open while the row's menu is that read's and not sent.
+  defp menus(rows) do
+    for %{} = row <- rows, m = Agents.menu(row), status = Menu.status(m) do
+      fields = %{
+        id: "dialog:#{row.name}:#{m["at"]}:menu",
+        kind: "dialog",
+        status: status,
+        subagent: nil,
+        text: Menu.text(m),
+        options: Menu.choices(m),
+        opened_at: m["at"],
         deadline: nil
       }
 
@@ -673,6 +698,18 @@ defmodule CodingAgentFramework.Prompts do
 
     case Intake.answer(owners.intake, int(n), decision, by: who) do
       {:refused, {:not_held, _}} -> {:refused, :settled}
+      other -> other
+    end
+  end
+
+  defp hand(owners, %{kind: "dialog", agent: agent, id: "dialog:" <> key}, label, who)
+       when binary_part(key, byte_size(key), -5) == ":menu" do
+    [_, at, "menu"] = String.split(key, ":")
+    opts = [by: who, timeout: @press]
+
+    case Sessions.answer_menu(owners.sessions, agent, int(at), label, opts) do
+      {:refused, why} when why in [:no_session, :settled] -> {:refused, :settled}
+      {:refused, {why, _}} when why in [:answered, :not_running] -> {:refused, :settled}
       other -> other
     end
   end

@@ -18,6 +18,8 @@ defmodule CodingAgentFramework.Screen.Reading do
       itself, its one capture the time it names;
     * `exited`: the line Claude Code leaves on the screen when it exits;
     * `resume`: what starts the line under `exited`;
+    * `menu`: what makes a menu no dialog names (F-198): its `footer`, what starts its last
+      line; `Screen` reads any numbered menu with it, by its shape alone;
     * `dialogs`: each dialog `Screen` knows, by its kind: its `title` (a line inside it), its
       `footer` (what starts its last line), whether its options are `numbered`, their `indent`
       (the spaces before the selection mark), and, for a dialog that lists paths, the heading
@@ -44,6 +46,7 @@ defmodule CodingAgentFramework.Screen.Reading do
           wait: Regex.t(),
           exited: String.t(),
           resume: String.t(),
+          menu: %{footer: String.t()},
           dialogs: [dialog]
         }
 

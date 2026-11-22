@@ -59,9 +59,11 @@ defmodule CodingAgentFramework.Tmux do
               {:ok, :sent} | {:refused, term} | {:unknown, term}
 
   @doc """
-  The screen of `pane` as it shows now (`capture-pane -p`: its visible rows, each with its
-  trailing spaces dropped) and the pane's width in columns, only when its tag names `session`,
-  checked in the same tmux command as a write is. Refusals as `c:write/4`'s.
+  The screen of `pane` as it shows now (`capture-pane -p -e`: its visible rows, each with its
+  trailing spaces dropped, with the escapes of their colors and attributes, so a reader can
+  tell a run drawn dim from typed text, F-198) and the pane's width in columns, only when its
+  tag names `session`, checked in the same tmux command as a write is. Refusals as
+  `c:write/4`'s.
   """
   @callback capture(server, pane, session) ::
               {:ok, %{text: String.t(), width: pos_integer}} | {:refused, term} | {:unknown, term}

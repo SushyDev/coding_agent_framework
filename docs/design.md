@@ -684,7 +684,7 @@ by label, a default, a deadline, its owner and its status (`open`, `answering`, 
 |---|---|---|
 | `permission` | `Sessions`, from a held `PermissionRequest`, a subagent's included (the hook names it); a headless delegate's `can_use_tool` request held in its `Stream` fold (F-190) | `Intake`'s hold; `Stream.answer/5` |
 | `question` | `ask`, and Claude Code's question tool intercepted | `Mailbox`, a row to the agent |
-| `startup` | `Sessions`, from a dialog read on the pane: trust, imports, onboarding | `Sessions`' checked press |
+| `startup` | `Sessions`, from a dialog read on the pane: trust, imports, onboarding; and any numbered menu no rule names on a running interactive session's screen (F-198), its options and `esc`, with no default and no deadline | `Sessions`' checked press; a menu's read back, the marker on the label before Enter |
 | `plan` | `Sessions`, from a held call of Claude Code's plan exit | `Intake`'s hold |
 | `elicitation` | `Sessions`, from an MCP server's request for input, held by its hook | `Intake`'s hold |
 | `limit` | the `Scheduler`, for a start refused at an account's usage limit: wait (its default) or move; `Sessions`, with no deadline, for a `limited` agent past its bound of go-ons, a menu still shown after a press whose outcome is unknown, or a wait still shown past its reset ("Usage limits"); for a main session limited past `move_after` with another account that has room, offering "move to <account>" beside "wait" (F-181) | `Team.operate/4`: a move, or nothing; `Sessions`: go on now (the press cleared, the bound started again), move (a main's, only by this answer), or leave it |
@@ -734,7 +734,14 @@ fold's held `can_use_tool` request as kind `permission`, id
 answered once through `Stream.answer/5` (the fold marks it answering before its line goes, so
 a second answer, the parent's through `answer` among them, is refused `settled`), and told to
 the parent once as any delegate's prompt. `Prompt.tla`'s header says why no property changes. F-194 made each answer through `answer/4`
-a row in `Acts` ("Metrics and healing"). Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
+a row in `Acts` ("Metrics and healing"). F-198 added any numbered menu on a running interactive session's screen (`Menu.tla`): a menu
+`Screen` reads by its shape (kind `menu`) is the agent row's `menu`, which `Sessions` writes
+from a read of the pane every `look:` ms; the inbox shows it as kind `dialog`, id
+`dialog:<agent>:<at>:menu` (`at` the read that found it), its options' labels and `esc`, no
+default and no deadline, open until a press of it is sent, and gone once a read finds no menu,
+whoever answered it. `answer/4` hands a label to `Sessions.answer_menu/5`: an act in `Acts`,
+the mark `pressing`, then the `Inlet`'s checked press, the marker moved and read back on the
+label before Enter (`esc` is Escape); sent or unknown, never pressed again. Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
 `expired` prompts kept shown, and the kinds that need a reading first.
 
 `Prompt.tla` (B1) is its contract: it instances `Hold` (one response, its deadline, its holder's
@@ -903,7 +910,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `ClaudeCLI` | the command line and environment of a session, per role and account, and the paths of a headless session's stream directory | — |
 | `Registry` | one per host, over every account the framework holds: reads Claude Code's `<config>/sessions/*.json`, and so each held agent's pid and its session file's `status`; a `Reader` | `registry_sessions` |
 | `Transcripts` | one per host, over every account: a session's transcript tail, its chats and its subagents, and whether a transcript holds a delivery's line; a `Reader` | `transcripts_sessions` |
-| `Screen` | a pure reading of a main session's screen and dialogs, per Claude Code release, from real fixtures captured with a script: the startup dialogs (trust, and external imports with the paths it lists), typed commands and their result lines, the box before a typed write | — |
+| `Screen` | a pure reading of a main session's screen and dialogs, per Claude Code release, from real fixtures captured with a script: the startup dialogs (trust, and external imports with the paths it lists), any numbered menu by its shape (F-198), typed commands and their result lines, the box before a typed write, a dim prompt suggestion in it read as no text | — |
 | `Inlet` | the checked typed write into an interactive session with no waiter: `Screen`'s box check, then `Tmux`'s one-command check, one per host; and the typed commands a session's start or a tool needs (a startup dialog's checked press, `/mcp reconnect`, the interrupt key), and a read of a pane for `Sessions`. It is one transport of `Mailbox` | no table |
 | `Stream` | a headless session's transport: a FIFO per process, a spool removed as the line's claim, the event log read from an offset, and its `can_use_tool` requests. Its fold of the log (each message's replay, each result) is evidence `Mailbox` and `Sessions` read; it keeps no delivery state of its own | `stream_delegates` |
 | `Intake` | hook events in; one hold, of five kinds: `permission` (a person's or an agent's `answer`), `tool` (`PreToolUse`, the app's callback), `post_tool` (`PostToolUse`, the app's callback), `stop` (`Stop` held for the app's callback) and `waiter` (a main session's waiting Stop hook, answered with `Mailbox`'s due text) | `intake_events` |
@@ -1965,6 +1972,15 @@ reading for delegates:
 
 A main session stays interactive. `Screen` reads only a main session's screen: its dialogs by
 label, a typed command's result line, and whether its input box is empty before a typed write.
+A dialog no rule names is still read when it is a numbered menu (F-198): two or more options
+numbered from 1 in a row, the marker on one, under a title and a rule, and Claude Code's footer
+"Enter to confirm · Esc to cancel", drawn in place of the box or above it. Only with that
+footer is it a menu, so a numbered list in the agent's own output never reads as one; a dialog
+a rule names (trust, imports, the usage limit's menu) keeps its rule. A run drawn dim on the
+input box's line (`ESC[2m` up to the reset) is a prompt suggestion, never typed text: a box
+holding only a suggestion is empty, so the pane is captured with its escapes
+(`capture-pane -e`). Only the screen sees a suggestion; what a person types and sends reaches
+the framework from `UserPromptSubmit` (F-194).
 Its fixtures are captured from a real session once per pinned Claude Code release by a script,
 run and reviewed, with names and paths scrubbed; no test runs the real Claude Code. They include
 a session launched as the framework launches a main session (`--name`, `--remote-control`),
@@ -2632,6 +2648,17 @@ a dialog no one asked to answer), `OnNamed` (a press lands only on the dialog it
 only once more, after a person's clear), `NotEndedOnDialog` (a row on a
 dialog is never an orphan), `LeaseWhileLive`; liveness `DialogShown` (the next dialog becomes
 the row's after an answer) and `GoesOn`. Each has a `Break_Dialog_*` configuration.
+
+`Menu.tla` (F-198) models a numbered menu no rule names on a running interactive session's
+screen: the pane read into the row's menu, a person's answer by a label or `esc` marked before
+its press in a task, the press checked (the pane shows that menu), the marker moved and read
+back on the label before Enter, Escape for `esc`, a key that lands or not, a person at the
+viewer who moves the marker or answers first, and a restart that makes a press under way
+unknown. Invariants: `OnlyAsked` (no default: every key that answers a menu comes from a
+person's answer), `OnNamed` (a press lands only on the menu it names, and Enter confirms only
+the label answered), `AtMostOnce` (a menu drawn is pressed at most once); liveness
+`LeavesWhenGone` (the row's menu, and so its prompt, goes once the pane shows none) and
+`MenuShown`. Each has a `Break_Menu_*` configuration.
 
 `Checkout.tla` (F-141) models a project's checkout ("Main sessions"): the clone made once under
 a temporary name and renamed whole, the pull owed after a landing and at each start of `Mains`,

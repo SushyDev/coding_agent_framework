@@ -27,6 +27,7 @@ defmodule CafPrompts.MixProject do
       {:caf_accounts, in_umbrella: true, only: :test},
       {:caf_grants, in_umbrella: true, only: :test},
       {:caf_inlet, in_umbrella: true, only: :test},
+      {:caf_tmux, in_umbrella: true, only: :test},
       {:caf_test, in_umbrella: true, only: :test}
     ]
   end
