@@ -24,6 +24,8 @@ defmodule CodingAgentFramework.Stream do
   alias CodingAgentFramework.Stream.{Fold, Line, Table}
 
   @timeout 5_000
+  # How long a background command's end waits for the init of the turn it begins (F-204).
+  @wake 30_000
   # The process's own FIFO ($4), and a last line a death cut ended with a newline, so the next
   # process's first event is a line of its own. `$(…)` drops a trailing newline, so it is empty
   # when the log already ends with one.
@@ -51,7 +53,10 @@ defmodule CodingAgentFramework.Stream do
   Starts a `Stream`. Options: `programs:` (naming sh, rm, cat, tail, mkdir and mkfifo),
   `holder:` (the `Holder` whose sockets hold the delegates), `home:` (the framework home on the
   host), `db:`, and optionally `notify:`, `interval:` (ms between reads, as `read/2` reads;
-  without it, reads happen only on `read/2`) and `timeout:` (ms per shell run, default 5 s).
+  without it, reads happen only on `read/2`), `timeout:` (ms per shell run, default 5 s) and
+  `wake:` (ms a delegate whose background command ended while its turn read ended reads busy,
+  waiting for the `system`/`init` of the turn the end begins, default 30 s; past it the turn
+  reads ended again and the fold counts it in `unwoken`, `Fold.unwake/3`).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -195,6 +200,7 @@ defmodule CodingAgentFramework.Stream do
          holder: %Holder{} = Keyword.fetch!(opts, :holder),
          home: Keyword.fetch!(opts, :home),
          timeout: Keyword.get(opts, :timeout, @timeout),
+         wake: Keyword.get(opts, :wake, @wake),
          delegates: Table.delegates(db, host.name)
        }
        |> Map.merge(Reader.loop(opts))}
@@ -293,7 +299,8 @@ defmodule CodingAgentFramework.Stream do
          {:ok, bytes} <- tail(s, Path.join(dir(s.home, session), "events.jsonl"), d.fold.offset) do
       # Read: the whole lines, handled; the offset is saved with them in one transaction.
       fold = %{Fold.take(d.fold, bytes) | live_seen: d.fold.live_seen or state == :live}
-      fold = Fold.stamp(fold, System.os_time(:millisecond))
+      now = System.os_time(:millisecond)
+      fold = fold |> Fold.stamp(now) |> Fold.unwake(now, s.wake)
 
       if state != :live and fold.live_seen,
         do: exit_seen(s, %{d | fold: fold}),

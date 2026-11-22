@@ -62,9 +62,10 @@ defmodule CodingAgentFramework.StreamFoldTest do
     assert fold.last_result.subtype == "error_during_execution"
   end
 
-  # Remedies.tla's BriefResult, TaskEnds and OwnResult, in the order measured on Claude Code
-  # 2.1.322 (F-184): the result comes while the background command runs; its end starts a turn
-  # of Claude Code's own with a new init, whose result is never the brief's.
+  # Remedies.tla's BriefResult, TaskEnds, OwnInit and OwnResult, in the order measured on Claude
+  # Code 2.1.322 (F-184): the result comes while the background command runs; its end starts a
+  # turn of Claude Code's own with a new init, whose result is never the brief's. Between the
+  # end and the init the fold is waking: nothing is written (F-204, NoMessageIntoOwnTurn).
   test "a background command's end starts a turn of its own, which is never the brief's" do
     task = %{"task_id" => "t1", "run_id" => "r1", "task_type" => "local_bash"}
     changed = &%{"type" => "system", "subtype" => "background_tasks_changed", "tasks" => &1}
@@ -87,18 +88,56 @@ defmodule CodingAgentFramework.StreamFoldTest do
       |> Fold.event(%{"type" => "system", "subtype" => "task_notification", "task_id" => "t1"})
       |> Fold.event(changed.([]))
 
-    assert {ended.idle, ended.tasks, ended.background} == {true, %{}, %{tasks: [], changes: 2}}
+    assert {ended.idle, ended.waking, ended.tasks, ended.background} ==
+             {false, %{at: nil}, %{}, %{tasks: [], changes: 2}}
+
+    assert Fold.check(ended, {:message, "m1", "hi"}) == {:refused, :turn_running}
+    # The read that saw the end stamps it; a later read keeps that time.
+    assert Fold.stamp(Fold.stamp(ended, 5), 9).waking == %{at: 5}
 
     # Its init: a turn runs, so nothing is written into it until its result.
-    own = Fold.event(ended, init)
+    own = Fold.event(Fold.stamp(ended, 5), init)
 
-    assert {own.idle, Fold.check(own, {:message, "m1", "hi"})} ==
-             {false, {:refused, :turn_running}}
+    assert {own.idle, own.waking, Fold.check(own, {:message, "m1", "hi"})} ==
+             {false, nil, {:refused, :turn_running}}
+
+    # Past the bound, a fold whose init came is not changed.
+    assert Fold.unwake(own, 1_000_000, 1) == own
 
     own = named(own, [], %{"result" => "the command ended", "uuid" => "r-own"})
     assert own.idle
     assert Fold.outcome(own, "b1") == {:result, %{text: "report", subtype: nil, is_error: nil}}
     assert [%{uuid: "r-own", text: "the command ended"}] = own.own
+  end
+
+  # Remedies.tla's CommandEnds and Unwake (F-204): an end while a turn runs joins it; an end
+  # with no init after it reads the turn ended again past the bound, counted in `unwoken`.
+  test "a command's end waits for its init only while the turn reads ended, and for a bound" do
+    init = %{"type" => "system", "subtype" => "init", "session_id" => "s1"}
+    note = %{"type" => "system", "subtype" => "task_notification", "task_id" => "t1"}
+
+    running =
+      Fold.mark(Fold.new(), {:message, "b1", "brief"}, "", 0)
+      |> Fold.event(init)
+      |> Fold.event(%{"type" => "user", "isReplay" => true, "uuid" => "b1"})
+
+    # Into a running turn: no turn of its own is coming, and its result ends the turn.
+    joined = Fold.event(running, note)
+    assert {joined.idle, joined.waking} == {false, nil}
+    assert named(joined, ["b1"], %{"result" => "r"}).idle
+
+    # Before any init, no process has started a turn: nothing is waking.
+    assert Fold.event(Fold.new(), note).waking == nil
+
+    waking = running |> named(["b1"], %{"result" => "r"}) |> Fold.event(note) |> Fold.stamp(100)
+    assert Fold.unwake(waking, 1_099, 1_000) == waking
+    unwoken = Fold.unwake(waking, 1_100, 1_000)
+    assert {unwoken.idle, unwoken.waking, unwoken.unwoken} == {true, nil, 1}
+    assert Fold.check(unwoken, {:message, "m1", "hi"}) == :ok
+
+    # An exit or a follow again ends the wait.
+    assert Fold.exit_seen(waking, fn _ -> false end).waking == nil
+    assert Fold.again(waking).waking == nil
   end
 
   # Team.tla's fold[i] = "exited": delivered, its turn begun, the process gone with no result.
