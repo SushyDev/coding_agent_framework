@@ -118,6 +118,90 @@ defmodule CodingAgentFramework.StoreTest do
     assert [%{host: "g"}] = Store.select(db, "t", @columns, "1 = 1", [])
   end
 
+  # F-216: a busy answer comes after the bound and no later than the bound and its slack.
+  @slack 100
+
+  # Holds `path`'s write lock from a second connection while `write` runs, and answers what
+  # `write` answered or raised and how long it took, in ms by the monotonic clock.
+  defp against_held(path, write) do
+    {:ok, held} = Store.hold(path)
+
+    try do
+      began = System.monotonic_time(:millisecond)
+      answer = try(do: write.(), rescue: (e in Store.Busy -> {:raised, e}))
+      {answer, System.monotonic_time(:millisecond) - began}
+    after
+      Store.let_go(held)
+    end
+  end
+
+  defp assert_bounded(ms) do
+    assert ms >= Store.busy_bound()
+    assert ms <= Store.busy_bound() + @slack
+  end
+
+  test "a statement against a held lock raises Busy within the bound; after the let-go it runs" do
+    path = path()
+    {:ok, db} = Store.open(path, @schema)
+
+    assert {{:raised, %Store.Busy{waited: waited}}, ms} =
+             against_held(path, fn -> Store.insert(db, "t", host: "h") end)
+
+    assert_bounded(ms)
+    assert waited >= Store.busy_bound() and waited <= ms
+    assert [[1]] = Store.insert(db, "t", [host: "h"], "RETURNING id")
+  end
+
+  test "a transaction against a held lock raises Busy within the bound and begins nothing" do
+    path = path()
+    {:ok, db} = Store.open(path, @schema)
+
+    assert {{:raised, %Store.Busy{}}, ms} =
+             against_held(path, fn -> Store.transaction(db, fn -> :ran end) end)
+
+    assert_bounded(ms)
+    assert :ran = Store.transaction(db, fn -> Store.insert(db, "t", host: "h") && :ran end)
+  end
+
+  test "write and open against a held lock are refused busy within the bound, under one deadline" do
+    path = path()
+    {:ok, _} = Store.open(path, @schema)
+    write = fn -> Store.write(path, @schema, &Store.insert(&1, "t", host: "h")) end
+    assert {{:refused, {:sqlite, :busy}}, ms} = against_held(path, write)
+    assert_bounded(ms)
+
+    # Two columns to add: two statements that each meet the lock, and one bound for both.
+    added = [added: [t: ["b TEXT", "c TEXT"]]]
+    open = fn -> Store.open(path, @schema, added) end
+    assert {{:refused, {:sqlite, :busy}}, ms} = against_held(path, open)
+    assert_bounded(ms)
+
+    assert {:ok, []} = write.()
+    assert {:ok, _} = open.()
+  end
+
+  test "a write waits while the lock is held and runs once it is let go, before the bound" do
+    path = path()
+    {:ok, db} = Store.open(path, @schema)
+    me = self()
+
+    holder =
+      spawn_link(fn ->
+        {:ok, held} = Store.hold(path)
+        send(me, :held)
+        receive(do: (:let_go -> Store.let_go(held)))
+        send(me, :let_go)
+      end)
+
+    assert_receive :held
+    began = System.monotonic_time(:millisecond)
+    Process.send_after(holder, :let_go, 200)
+    assert [[1]] = Store.insert(db, "t", [host: "h"], "RETURNING id")
+    ms = System.monotonic_time(:millisecond) - began
+    assert_receive :let_go
+    assert ms >= 200 and ms < Store.busy_bound()
+  end
+
   test "load fills a newer field and names a field it does not know; bad bytes load fresh" do
     fresh = %{a: 0, b: []}
     assert Store.load(:erlang.term_to_binary(%{a: 1}), fresh) == {%{a: 1, b: []}, []}
