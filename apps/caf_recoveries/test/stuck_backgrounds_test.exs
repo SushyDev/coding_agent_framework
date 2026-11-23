@@ -116,7 +116,7 @@ defmodule CodingAgentFramework.StuckBackgroundsTest do
   defp asked(ctx), do: elem(Watch.read(ctx.watch, status: "asked"), 1)
 
   defp dead?(ctx),
-    do: Holder.Process.dead_by(ctx.procs, "bg", System.os_time(:millisecond) + 5_000)
+    do: Holder.Process.dead_by(ctx.procs, "bg", System.monotonic_time(:millisecond) + 5_000)
 
   test "a group quiet for the bound is ended by its record once, and verified by the list", ctx do
     healer = healer!(ctx)

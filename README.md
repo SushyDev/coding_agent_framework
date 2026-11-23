@@ -363,7 +363,12 @@ Built, each from a checked model in `model/tla/`:
 - every bounded wait reads the clock (F-217): the waits that counted sleeps, all in a host's
   shell (`Holder.Process`'s `read` wait and `await_dead`, `Services`' offset wait, `caf-run`'s
   asks with no answer), now run one sleep of the whole bound beside their reads and stop when
-  it ends.
+  it ends;
+- the last waits with no bound have one (F-218): one `caf-run` ask is cut by curl at the plug's
+  `:wait` and 5 s, and counts as no answer; the waiter stand-in's hook run ends, with its
+  group, after 5 s; and a deadline that lives in one call (`Holder.Process`'s end,
+  `Services.wait/4`, `Jobs`' read retries) is on the monotonic clock, while a row's stays on
+  OS time to outlive a restart.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

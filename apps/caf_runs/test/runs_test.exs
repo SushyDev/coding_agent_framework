@@ -236,6 +236,51 @@ defmodule CodingAgentFramework.RunsTest do
       assert waited in 2_000..(2_000 + 1_500)
     end
 
+    # One ask is bounded (F-218): curl's `--max-time` is the plug's `:wait` and 5 s. An intake
+    # that accepts and never answers holds each ask to that bound, and the wrapper takes it as
+    # no answer: it asks again while its no-answer bound lasts, then runs without a lease.
+    test "an ask the intake never answers ends at its bound, and counts as no answer", ctx do
+      {:ok, listener} =
+        :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true])
+
+      {:ok, port} = :inet.port(listener)
+      test = self()
+      spawn_link(fn -> stall(listener, test, []) end)
+      # A bound of 1 s and the 5 s past it: 6 s an ask.
+      :ok = Runs.prepare(ctx.runs, programs(), port, @secret, wait: 1_000, unanswered: 1_000)
+
+      from = System.monotonic_time(:millisecond)
+      assert {:ok, %{status: 0, output: out}} = wrapped(ctx.runs, "toolu_s", "echo ran", 40_000)
+      waited = System.monotonic_time(:millisecond) - from
+
+      assert out ==
+               "caf-run: no lease (the framework did not answer); the command runs without one\n" <>
+                 "ran\n"
+
+      # Two asks were accepted: the first was cut at its bound and, the no-answer bound being
+      # 1 s, the wrapper asked once more after a second's pause. Each bound has 3 s of stated
+      # slack for the late wakes of a sleep and of curl's timer under load, and 0.1 s below for
+      # the few ms between a curl's start and its accept.
+      assert_received {:accepted, first}
+      assert_received {:accepted, second}
+      refute_received {:accepted, _}
+      assert (second - first) in 6_900..(7_000 + 3_000)
+
+      # No ask ran past its bound: the run is two asks, each cut at 6 s, and a pause.
+      assert waited in 12_900..(13_000 + 3_000)
+    end
+
+    test "the wrapper's ask bound is the plug's wait and 5 s; a bad wait is refused", ctx do
+      :ok = Runs.prepare(ctx.runs, programs(), 4790, @secret)
+      assert File.read!(Runs.wrapper(ctx.runs)) =~ "asked='605.000'\n"
+
+      :ok = Runs.prepare(ctx.runs, programs(), 4790, @secret, wait: 1_500)
+      assert File.read!(Runs.wrapper(ctx.runs)) =~ "asked='6.500'\n"
+
+      assert {:refused, :bad_wait} = Runs.prepare(ctx.runs, programs(), 4790, @secret, wait: 0)
+      assert {:refused, :bad_wait} = Runs.prepare(ctx.runs, programs(), 4790, @secret, wait: 1.5)
+    end
+
     test "a bound that is not a positive integer is refused", ctx do
       assert {:refused, :bad_unanswered} =
                Runs.prepare(ctx.runs, programs(), 4790, @secret, unanswered: 0)
@@ -247,6 +292,19 @@ defmodule CodingAgentFramework.RunsTest do
       {:ok, conn} ->
         :gen_tcp.close(conn)
         hang_up(listener)
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
+  # A stand-in intake that accepts each connection, tells the test when, and never answers or
+  # closes it: the sockets stay open with this process.
+  defp stall(listener, test, held) do
+    case :gen_tcp.accept(listener) do
+      {:ok, conn} ->
+        send(test, {:accepted, System.monotonic_time(:millisecond)})
+        stall(listener, test, [conn | held])
 
       {:error, _} ->
         :ok

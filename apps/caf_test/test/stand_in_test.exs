@@ -8,7 +8,7 @@ defmodule CodingAgentFramework.StandInTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{ClaudeStandIn, HeadlessStandIn}
+  alias CodingAgentFramework.{ClaudeStandIn, HeadlessStandIn, WaiterStandIn}
 
   doctest CodingAgentFramework.TestHost
 
@@ -64,6 +64,43 @@ defmodule CodingAgentFramework.StandInTest do
 
     assert end_recorded(dir) == []
     assert alive?(pid)
+  end
+
+  # F-218: the waiter stand-in's wait for the hook has the test's own 5 s bound. A hook that
+  # never exits is ended with its group, the task answers `{:timeout, 5_000}`, and nothing is
+  # written to the transcript.
+  test "a waiter hook that never exits is ended with its group after 5 s" do
+    dir = test_dir()
+    {hook, child} = {Path.join(dir, "hook.pid"), Path.join(dir, "child.pid")}
+
+    on_exit(fn ->
+      for file <- [hook, child],
+          {:ok, pid} <- [File.read(file)],
+          do: kill(String.trim(pid), "-KILL")
+    end)
+
+    # The hook is a shell with a child of its own in its group, waiting on it for ever.
+    command =
+      ~s(echo $$ > '#{hook}'; '#{program!(:sleep)}' 600 & echo $! > '#{child}'; wait)
+
+    settings = Path.join(dir, "settings.json")
+    hooks = [%{"hooks" => [%{"type" => "command", "command" => command, "asyncRewake" => true}]}]
+    File.write!(settings, JSON.encode!(%{"hooks" => %{"Stop" => hooks}}))
+    transcript = Path.join(dir, "transcript.jsonl")
+
+    from = System.monotonic_time(:millisecond)
+    task = WaiterStandIn.turn_end(settings, "s1", transcript, :idle)
+    assert {:timeout, 5_000} = Task.await(task, 15_000)
+    waited = System.monotonic_time(:millisecond) - from
+
+    # No sooner than its bound, and within 3 s after it: the KILL and the exit's wait.
+    assert waited in 5_000..(5_000 + 3_000)
+    refute File.exists?(transcript)
+
+    for file <- [hook, child] do
+      pid = file |> File.read!() |> String.trim()
+      assert {:ok, :ended} = await(fn -> if not alive?(pid), do: {:ok, :ended} end)
+    end
   end
 
   # Runs `argv` with the stand-ins' one variable, through `env` as `Holder` does.

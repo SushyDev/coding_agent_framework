@@ -107,6 +107,17 @@ defmodule CodingAgentFramework.Holder.ProcessTest do
     assert waited in 1_500..(1_500 + @slack)
   end
 
+  # A deadline that lives in one call is on the monotonic clock (F-218): `dead_by/3` reads a
+  # live program until its monotonic deadline, and no sooner. Read as OS time, a monotonic
+  # reading (small, or negative) has long passed, and the wait would end at its first read.
+  test "dead_by waits for a deadline on the monotonic clock, and no sooner", %{p: p} = ctx do
+    hold!(ctx, "waited", echo_tail!(ctx.dir))
+    deadline = System.monotonic_time(:millisecond) + 1_000
+    {waited, answer} = timed(fn -> Holder.Process.dead_by(p, "waited", deadline) end)
+    assert {:unknown, {:not_dead, %{process: :live}}} = answer
+    assert waited in 1_000..(1_000 + @slack)
+  end
+
   test "input reaches the program only while its record is the held one", %{p: p} = ctx do
     out = Path.join(ctx.dir, "said")
     script = ~s(read -r l; echo "$l" > "#{out}"; ) <> echo_tail!(ctx.dir)
