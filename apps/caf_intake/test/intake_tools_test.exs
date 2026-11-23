@@ -215,9 +215,11 @@ defmodule CodingAgentFramework.IntakeToolsTest do
     assert [%{hold: "answered"}] = rows(db)
   end
 
+  # A deadline the read of the held row can beat on a loaded host: at 50 ms the hold had
+  # expired before the read (F-223's gate run).
   test "at the deadline the response is empty, and a later decision is dropped",
        %{db: db, start: start} do
-    intake = start.(pre_tool_use: waiting(self()), tool_deadline: 50)
+    intake = start.(pre_tool_use: waiting(self()), tool_deadline: 1_000)
     task = Task.async(fn -> post(intake, tool("PreToolUse", "t1")) end)
     assert_receive {:asked, worker, _}, 5_000
     assert [%{hold: "held", held_at: held, written_at: held}] = rows(db)
@@ -226,7 +228,7 @@ defmodule CodingAgentFramework.IntakeToolsTest do
 
     # Its settle moves `written_at`, never `held_at`, the hold's open (F-202).
     assert [%{hold: "expired", held_at: ^held, written_at: settled}] = rows(db)
-    assert settled - held >= 50
+    assert settled - held >= 1_000
 
     mon = Process.monitor(worker)
     send(worker, {:answer, {:deny, "late"}})
