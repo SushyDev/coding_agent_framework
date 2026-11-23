@@ -16,8 +16,9 @@ defmodule CodingAgentFramework.Accounts do
 
   - `parent.settings.json` and `delegate.settings.json`: the account's settings and hooks,
     loaded with `--settings`. They differ only in `remoteControlAtStartup`: true for a main session
-    and false for a delegate, since 2.1.322 has a flag to turn Remote Control on but none to
-    turn it off. Both set `autoContinueAtUsageLimit` true, whatever the caller's settings say:
+    and false for a headless delegate (an interactive one runs in the main role, F-227), since
+    2.1.322 has a flag to turn Remote Control on but none to turn it off. Both set
+    `autoContinueAtUsageLimit` true, whatever the caller's settings say:
     at a usage limit under 24 hours away an interactive session waits and goes on by itself, as
     `Limit.tla`'s own wait does (`docs/design.md`, "Usage limits"). The hooks need no matcher
     of their own for a limit: Intake's post every `StopFailure` and `Notification`;

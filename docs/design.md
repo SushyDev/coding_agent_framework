@@ -962,6 +962,7 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 | `accounts` | the Claude accounts' names | required, unless `agents: false` |
 | `projects`, `mains` | the projects, and the main sessions declared on them | none |
 | `main_model`, `operator` | a main session's model; the operator's name | `"opus"`, `"operator"` |
+| `permission_modes` | each role's `--permission-mode` (`main`, `interactive`, `headless`), pinned, not the account's own default; `manual` asks before a tool runs, so the request reaches the inbox (F-227) | `auto`, `auto`, `manual` |
 | `ports` | `%{intake, mcp}` on 127.0.0.1 | required, unless `agents: false` |
 | `git` | the author agents commit as, and each project's override | no author |
 | `claude`, `env`, `user` | what every launch shares; the OS user (required on macOS) | required, `env` with its `path` for every tree (F-203); with `agents: false` only `env` (F-201) |
@@ -3449,7 +3450,9 @@ without it.
   waiter through a long idle and a compaction.
 - Remote Control starts only with an interactive session, so a headless delegate never has it;
   its settings still set `remoteControlAtStartup` to false, and a check against each pinned
-  Claude Code release confirms a delegate starts with it off.
+  Claude Code release confirms a headless delegate starts with it off. An interactive delegate
+  runs in the main role and has Remote Control as a main session does, so a person can look in
+  on it, or steer it, from another device (decided, F-227).
 - An interactive session in a new directory meets the workspace trust dialog first, and until it
   is trusted Claude Code runs no status line; a project whose `CLAUDE.md` imports a file outside
   its folder meets the imports dialog next. Neither sends a hook event, and no session file

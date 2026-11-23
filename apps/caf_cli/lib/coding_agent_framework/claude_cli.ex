@@ -7,7 +7,8 @@ defmodule CodingAgentFramework.ClaudeCLI do
   The flags are those of Claude Code 2.1.322 (`claude --help`), the version devenv pins:
 
   - `--model <model>` and `--name <name>`, and `--effort <level>` after them when the launch
-    names an `:effort` (`efforts/0`, the levels `claude --help` lists);
+    names an `:effort` (`efforts/0`, the levels `claude --help` lists), then
+    `--permission-mode <mode>` when it names a `:permission_mode` (`permission_modes/0`, F-227);
   - `--settings <file>` (the role's settings file) and `--mcp-config <file>` with
     `--strict-mcp-config`, the files `CodingAgentFramework.Accounts.prepare/3` wrote, and
     after the account's file the agent's own (`mcp:`, from `CodingAgentFramework.MCP.issue/2`),
@@ -91,6 +92,10 @@ defmodule CodingAgentFramework.ClaudeCLI do
   # launch check the same levels.
   @efforts ~w(low medium high xhigh max)
 
+  # What `claude --help` lists for `--permission-mode` in 2.1.322 (F-227). `manual` is the mode
+  # whose init reads `"default"`: Claude Code asks before a tool runs.
+  @permission_modes ~w(acceptEdits auto bypassPermissions manual dontAsk plan)
+
   # Set by the framework, not given by the caller, so no launch can leave it out.
   @fixed [{"DISABLE_AUTOUPDATER", "1"}]
 
@@ -102,6 +107,17 @@ defmodule CodingAgentFramework.ClaudeCLI do
   """
   @spec efforts() :: [String.t()]
   def efforts, do: @efforts
+
+  @doc """
+  The modes `--permission-mode` takes, as `claude --help` lists them on the pinned release
+  (F-227). `manual` asks before a tool runs (its init reads `"default"`); `auto` lets Claude
+  Code's classifier decide.
+
+      iex> "manual" in CodingAgentFramework.ClaudeCLI.permission_modes()
+      true
+  """
+  @spec permission_modes() :: [String.t()]
+  def permission_modes, do: @permission_modes
 
   @doc """
   The argv and environment of a session of `role` on `account` (from
@@ -128,6 +144,7 @@ defmodule CodingAgentFramework.ClaudeCLI do
          {:ok, model} <- word(opts, :model),
          {:ok, name} <- word(opts, :name),
          {:ok, effort} <- effort(opts),
+         {:ok, mode} <- permission_mode(opts),
          {:ok, resume} <- optional_word(opts, :resume),
          {:ok, mcp} <- mcp(account, opts),
          {:ok, prompt} <- prompt(role, opts, resume),
@@ -136,6 +153,7 @@ defmodule CodingAgentFramework.ClaudeCLI do
       argv =
         [claude, "--model", model, "--name", name] ++
           effort ++
+          mode ++
           own.argv ++
           ["--mcp-config" | mcp] ++
           ["--strict-mcp-config"] ++
@@ -207,6 +225,7 @@ defmodule CodingAgentFramework.ClaudeCLI do
     with {:ok, claude} <- path(opts, :claude),
          {:ok, model} <- word(opts, :model),
          {:ok, effort} <- effort(opts),
+         {:ok, mode} <- permission_mode(opts),
          {:ok, id} <- start_or_resume(opts),
          {:ok, mcp} <- mcp(account, opts),
          {:ok, own} <- own(account.settings.delegate, opts),
@@ -214,6 +233,7 @@ defmodule CodingAgentFramework.ClaudeCLI do
       argv =
         [claude, "-p", "--verbose", "--model", model] ++
           effort ++
+          mode ++
           own.argv ++
           ["--mcp-config" | mcp] ++
           [
@@ -336,6 +356,15 @@ defmodule CodingAgentFramework.ClaudeCLI do
       nil -> {:refused, {:missing, key}}
       v when is_binary(v) -> if word?(v), do: {:ok, v}, else: {:refused, {:bad, key}}
       _ -> {:refused, {:bad, key}}
+    end
+  end
+
+  # `--permission-mode <mode>` when the launch names one (F-227); nil is none, the account's own.
+  defp permission_mode(opts) do
+    case Keyword.get(opts, :permission_mode) do
+      nil -> {:ok, []}
+      mode when mode in @permission_modes -> {:ok, ["--permission-mode", mode]}
+      _ -> {:refused, {:bad, :permission_mode}}
     end
   end
 

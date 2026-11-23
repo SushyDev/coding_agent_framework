@@ -882,6 +882,7 @@ defmodule CodingAgentFramework do
              notify: notify,
              inlet: pid.(:inlet),
              dialog: &Config.dialog(c, &1, &2),
+             permission_modes: c.permission_modes,
              open_to: &Mailbox.open_to(pid.(:mailbox), &1, status: &2),
              waiter: %{port: c.ports.intake, secret: w.secret},
              acts: pid.(:acts),

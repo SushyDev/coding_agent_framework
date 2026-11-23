@@ -61,6 +61,26 @@ defmodule CodingAgentFramework.ClaudeCLITest do
   end
 
   # F-200: `--effort <level>` follows the model and the name; no effort is no flag.
+  # F-227: a permission mode is a flag after the effort, any of `claude --help`'s; none is no flag.
+  test "a permission mode is a flag after the effort; a mode the release lacks is refused" do
+    for mode <- ClaudeCLI.permission_modes() do
+      assert {:ok, %{argv: s}} =
+               ClaudeCLI.session(:parent, account(), opts(effort: "max", permission_mode: mode))
+
+      assert Enum.slice(s, 5, 4) == ["--effort", "max", "--permission-mode", mode]
+
+      headless = Keyword.delete(opts(permission_mode: mode, session_id: "s"), :name)
+      assert {:ok, %{argv: h}} = ClaudeCLI.headless(account(), headless)
+      assert Enum.slice(h, 5, 2) == ["--permission-mode", mode]
+    end
+
+    assert {:ok, %{argv: s}} = ClaudeCLI.session(:parent, account(), opts([]))
+    refute "--permission-mode" in s
+
+    assert {:refused, {:bad, :permission_mode}} =
+             ClaudeCLI.session(:parent, account(), opts(permission_mode: "default"))
+  end
+
   test "an effort is a flag after the model, each level of `claude --help` is taken, none is no flag" do
     assert ClaudeCLI.efforts() == ~w(low medium high xhigh max)
 

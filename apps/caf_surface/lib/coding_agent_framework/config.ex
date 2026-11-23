@@ -44,6 +44,10 @@ defmodule CodingAgentFramework.Config do
     several. None by default;
   - `main_model`: the model a main session `Mains` starts runs (`--model`); `"opus"` by
     default. A move's resume takes the agent row's;
+  - `permission_modes`: each role's `--permission-mode` (F-227), a map of `main`,
+    `interactive` and `headless` to modes `ClaudeCLI.permission_modes/0` lists; a role left out
+    keeps its default, `auto` for a main session and an interactive delegate, `manual` for a
+    headless one, whose requests then reach the inbox;
   - `operator`: the name the operator acts under (`CodingAgentFramework.Operator`), a person or
     this app acting from outside the tree; `"operator"` by default. It is no agent's name, nor
     `framework`;
@@ -277,7 +281,7 @@ defmodule CodingAgentFramework.Config do
       {:refused, {:bad, :home}}
   """
 
-  alias CodingAgentFramework.{Mains, MCP, Runs, Services, ToolHooks, Usable, Watch}
+  alias CodingAgentFramework.{ClaudeCLI, Mains, MCP, Runs, Services, ToolHooks, Usable, Watch}
   alias CodingAgentFramework.Mains.Checkout
   alias CodingAgentFramework.Scheduler.Queue
   alias CodingAgentFramework.Sessions.Dialog
@@ -288,7 +292,7 @@ defmodule CodingAgentFramework.Config do
   @agent_keys [:accounts, :ports, :claude]
   # What only an agent's part reads, so a config with `agents: false` that sets it is refused
   # (F-209): an app that sets `usable` there would believe a start is guarded.
-  @agent_only [:usable, :tool_hooks, :extensions, :dialogs]
+  @agent_only [:usable, :tool_hooks, :extensions, :dialogs, :permission_modes]
   defstruct [
     :home,
     :instance,
@@ -304,6 +308,7 @@ defmodule CodingAgentFramework.Config do
     mains: %{},
     git: %{author: nil, projects: %{}},
     main_model: "opus",
+    permission_modes: %{},
     operator: "operator",
     tool_timeout: 3_600_000,
     margin: 60_000,
@@ -420,6 +425,9 @@ defmodule CodingAgentFramework.Config do
 
       (bad = bad_usable(Map.get(fields, :usable))) != nil ->
         {:refused, {:bad, :usable, bad}}
+
+      not permission_modes?(Map.get(fields, :permission_modes, %{})) ->
+        {:refused, {:bad, :permission_modes}}
 
       not is_boolean(Map.get(fields, :agents, true)) ->
         {:refused, {:bad, :agents}}
@@ -727,6 +735,15 @@ defmodule CodingAgentFramework.Config do
 
   defp instance?(name),
     do: is_binary(name) and byte_size(name) in 1..100 and not (name =~ ~r/[[:cntrl:]]/)
+
+  # A map of roles to the modes the pinned Claude Code takes (F-227).
+  defp permission_modes?(modes) when is_map(modes) do
+    Enum.all?(modes, fn {role, mode} ->
+      role in [:main, :interactive, :headless] and mode in ClaudeCLI.permission_modes()
+    end)
+  end
+
+  defp permission_modes?(_), do: false
 
   defp operator?(fields) do
     op = Map.get(fields, :operator, "operator")
