@@ -336,6 +336,36 @@ defmodule CodingAgentFramework.Sessions.Dialog do
   end
 
   @doc """
+  The option an end presses on the row's dialog (F-231, `Dialog.tla`'s EndPress): the trust
+  dialog's exit option, `No, exit`, while it may still be answered (`check/4`). Refused
+  `{:no_exit, kind}` for a dialog with no exit option (the imports dialog goes on with imports
+  off; a start's menu names none), or `check/4`'s refusal: an end then sends SIGTERM instead.
+
+      iex> alias CodingAgentFramework.Sessions.Dialog
+      iex> row = %{dialog: %{kind: :trust, options: ["No, exit", "Yes"]}, answers: nil}
+      iex> Dialog.exit_option(row)
+      {:ok, "No, exit"}
+      iex> Dialog.exit_option(%{row | dialog: %{kind: :imports, options: ["Yes", "No"]}})
+      {:refused, {:no_exit, :imports}}
+  """
+  @spec exit_option(map) :: {:ok, String.t()} | {:refused, term}
+  def exit_option(row) do
+    case shown(row) do
+      %{kind: :trust, options: options} ->
+        case Enum.find(options, &String.ends_with?(&1, "exit")) do
+          nil ->
+            {:refused, {:no_exit, :trust}}
+
+          label ->
+            with :ok <- check(row, :trust, label), do: {:ok, label}
+        end
+
+      shown ->
+        {:refused, {:no_exit, shown && shown.kind}}
+    end
+  end
+
+  @doc """
   The default of the app's `dialog:` callback: ask a person. Nothing answers a startup dialog
   on its own unless the app gives a callback that does.
 

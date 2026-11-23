@@ -17,6 +17,11 @@ defmodule CodingAgentFramework.Acts do
   `unknown`, `verified` or `not_verified`) and `interrupted` (a restart cut it before its act;
   never acted on). A settled or interrupted row is never reopened, and its state stays claimed:
   a second claim is refused `{:already_claimed, by}`, a claim of an open one `{:claimed, by}`.
+  But a caller whose act was refused before it acted may settle its row with `free: true`
+  (F-231, `Claim.tla`'s Free): settled `failed` or `not_verified` with no act's time, it has
+  nothing to repeat or guard, so a later claim of its state is taken, and the old row stays as
+  a record, its state moved into its detail as `state`. A refusal that waits on a person
+  (`Recoveries`' `repeating`) keeps its state, so the next sample does not act and ask again.
 
   **A restart** opens the table with a new `start_id` (made once per framework start by the
   embedding app): every row still `claimed` that another start wrote is closed `interrupted`.
@@ -74,7 +79,8 @@ defmodule CodingAgentFramework.Acts do
   @doc """
   Claims `target` in `state` for `act` by `actor`: writes its row `claimed` before the act.
   Refused `{:claimed, by}` while another claim of that state is open, and `{:already_claimed,
-  by}` once one has ended, whatever its end. A `skipped` row of the state is taken over.
+  by}` once one has ended, but for one settled with `free: true` (`settle/5`, F-231), whose
+  state is free again. A `skipped` row of the state is taken over.
   Option `detail:` is written on the row with the claim, so a reader knows the act's kind
   before it runs: the operator's forced end, `%{force: true}` (F-172). Option `healer:` names
   the process that takes a person's act for them (F-192): it is written in the detail as
@@ -136,11 +142,27 @@ defmodule CodingAgentFramework.Acts do
   Ends an open row (`claimed` or `acted`) with `outcome`, one of #{inspect(@outcomes)}, and
   `fields` (`reason`, `answer`, `detail`; `acted: true` stamps the act's time on a row that had
   none). Refused `{:not_open, status}` for an ended row, `:unknown_act` for none.
+
+  `free: true` (F-231, `Claim.tla`'s Free) is a caller's word that its act was refused before it
+  acted: a row settled `failed` or `not_verified` with no act's time then leaves its state
+  free, so the next claim of that state is taken. The row stays as a record, its state moved
+  into its detail as `state`. Without it, as for a row a person must look at first, the state
+  stays claimed; a row with an act's time keeps it whatever is asked.
+
+      iex> dir = CodingAgentFramework.TestHost.test_dir()
+      iex> alias CodingAgentFramework.Acts
+      iex> {:ok, acts} = Acts.start_link(db: Path.join(dir, "free.db"), start_id: "s1",
+      ...>   host: "laptop", instance: "a")
+      iex> {:ok, id} = Acts.claim(acts, "operator", "app-api", %{report: "queued"}, :stop)
+      iex> Acts.settle(acts, id, :not_verified, answer: {:refused, :queued}, free: true)
+      {:ok, :not_verified}
+      iex> {:ok, _} = Acts.claim(acts, "operator", "app-api", %{report: "queued"}, :stop)
   """
   @spec settle(GenServer.server(), id, atom, keyword, keyword) :: answer(atom)
   def settle(acts, id, outcome, fields \\ [], opts \\ []) when outcome in @outcomes do
     acted = Keyword.get(fields, :acted, false)
-    call(acts, {:settle, id, outcome, dump(fields), acted}, opts)
+    free = Keyword.get(fields, :free, false) == true and outcome in [:failed, :not_verified]
+    call(acts, {:settle, id, outcome, dump(fields), acted, free}, opts)
   end
 
   @doc """
@@ -330,7 +352,7 @@ defmodule CodingAgentFramework.Acts do
     {:reply, reply, s}
   end
 
-  def handle_call({:settle, id, outcome, fields, acted}, _from, s) do
+  def handle_call({:settle, id, outcome, fields, acted, free}, _from, s) do
     reply =
       case fetch(s.db, id) do
         nil ->
@@ -341,6 +363,7 @@ defmodule CodingAgentFramework.Acts do
           stamp = if acted and is_nil(row.acted_at), do: [acted_at: at], else: []
           end_fields = [status: "settled", outcome: Atom.to_string(outcome), ended_at: at]
           write(s, id, end_fields ++ stamp ++ fields)
+          if free and not acted, do: free(s, id)
           {:ok, outcome}
 
         %{status: status} ->
@@ -459,6 +482,29 @@ defmodule CodingAgentFramework.Acts do
 
         {:refused, {if(held in @open, do: :claimed, else: :already_claimed), by}}
     end
+  end
+
+  # `Claim.tla`'s Free (F-231): a row settled failed or not_verified with no act's time acted
+  # on nothing, so it has nothing to repeat or guard. It stays as a record, its state moved into
+  # its detail (`state`), and the state takes the next claim.
+  defp free(s, id) do
+    object =
+      "CASE WHEN detail IS NULL THEN '{}' " <>
+        "WHEN json_valid(detail) AND json_type(detail) = 'object' THEN detail " <>
+        "ELSE json_object('text', detail) END"
+
+    ids =
+      for [id] <-
+            Store.query(
+              s.db,
+              "UPDATE acts SET detail = json_set(#{object}, '$.state', state), state = NULL " <>
+                "WHERE id = ?1 AND state IS NOT NULL AND status = 'settled' " <>
+                "AND outcome IN ('failed', 'not_verified') AND acted_at IS NULL RETURNING id",
+              [id]
+            ),
+          do: id
+
+    if ids != [], do: cue(s, ids)
   end
 
   # The act's detail into the claim's, the claim's keys kept (`acted/4`).

@@ -276,8 +276,10 @@ defmodule CodingAgentFramework.Mains do
   @doc """
   Ends main session `name` for good (F-143; `Team.tla`'s `MainEnds`): the operator's act
   alone, which the app or the operator's tool `end_main` calls. Refused `{:starting, name}`
-  while a start of it is under way here; then `Sessions.end_main/3` refuses it while any of its
-  delegates has not ended (`{:delegates, names}`), stops it once idle, and marks its agent row
+  while a start of it is under way here, but for one whose call answered and whose agent row
+  waits on a startup dialog (F-231): `Sessions` presses that dialog's exit option, or sends
+  SIGTERM, and ends it, and the start is then refused, `ended`. `Sessions.end_main/3` refuses
+  it while any of its delegates has not ended (`{:delegates, names}`), stops it once idle, and marks its agent row
   `ended`, so the app's end of an owner's services ends every one it owns, kept ones too. Its
   name never starts again. Answers `{:ok, :ended}` or what `Sessions.end_main/3` answers.
   Options: `:timeout`, and `force: true` (F-170), the operator's forced end, whose stop does not
@@ -594,10 +596,13 @@ defmodule CodingAgentFramework.Mains do
     {:reply, reply, s}
   end
 
-  # A start of the name under way would run a second process; Sessions refuses the rest.
+  # A start of the name under way would run a second process; Sessions refuses the rest. A
+  # start whose call answered and whose agent row waits on a dialog is ended through it
+  # (`Dialog.tla`'s AskEnd, F-231): its row then settles refused, `ended`.
   def handle_call({:end_main, name, force}, from, s) do
     cond do
-      Enum.any?(Starts.starting_rows(s.starts, s.host), &(&1.name == name)) ->
+      Enum.any?(Starts.starting_rows(s.starts, s.host), &(&1.name == name)) and
+          not on_dialog?(s, name) ->
         {:reply, {:refused, {:starting, name}}, s}
 
       not_waiting(s, name) != :ok ->
@@ -611,6 +616,16 @@ defmodule CodingAgentFramework.Mains do
 
         {:noreply, put_in(s.ends[task.ref], from)}
     end
+  end
+
+  # The start's agent row waits on a dialog and no call of its start is under way here.
+  defp on_dialog?(s, name) do
+    calling = MapSet.new(Map.values(s.calls), & &1.id)
+
+    match?(%{status: "dialog"}, Agents.get(s.agents, name)) and
+      Enum.all?(Starts.starting_rows(s.starts, s.host), fn row ->
+        row.name != name or not MapSet.member?(calling, row.id)
+      end)
   end
 
   defp main_agent(s, name) do

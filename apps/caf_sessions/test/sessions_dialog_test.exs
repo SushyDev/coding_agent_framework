@@ -10,7 +10,7 @@ defmodule CodingAgentFramework.SessionsDialogTest do
   import CodingAgentFramework.TestHost
 
   alias CodingAgentFramework.{Acts, Inlet, Registry, ScreenStandIn, Sessions, SessionsSetup}
-  alias CodingAgentFramework.Sessions.{Agents, Table}
+  alias CodingAgentFramework.Sessions.{Agents, Dialog, Table}
 
   @trust "Yes, I trust this folder"
   @no_imports "No, disable external imports"
@@ -144,8 +144,8 @@ defmodule CodingAgentFramework.SessionsDialogTest do
              await(fn -> marked(ctx, "sent") end)
   end
 
-  # Dialog.tla's Stop (F-144): a person gives up a start without answering, by SIGTERM to the
-  # held program's record; the row is stopped and its name free.
+  # Dialog.tla's Stop (F-144) and EndPress (F-231): a person gives up a start without answering;
+  # the trust dialog's exit option is pressed, and the row is stopped and its name free.
   test "a stop of a row on a dialog ends its process", ctx do
     sessions = sessions(ctx)
 
@@ -157,6 +157,52 @@ defmodule CodingAgentFramework.SessionsDialogTest do
     assert row.status == "stopped"
     assert Agents.free?(row)
     refute File.exists?(Path.join(ctx.dir, "trusted"))
+  end
+
+  # Dialog.tla's AskEnd, EndPress and EndDone (F-231's new-3): the operator's end of a main
+  # session waiting on its trust dialog presses the dialog's exit option, an act in Acts by the
+  # operator, and the row is ended once its process is gone; it never ran a turn.
+  test "an end of a main session on its trust dialog presses its exit and ends it", ctx do
+    acts =
+      start_supervised!(
+        {Acts, db: Path.join(ctx.dir, "acts.db"), start_id: "t", host: "test", instance: "a"}
+      )
+
+    sessions = sessions(ctx, acts: acts)
+    launch = Keyword.put(ctx.launch, :kind, :main)
+    assert {:unknown, {:dialog, :trust}} = Sessions.start(sessions, "alpha", ctx.account, launch)
+
+    assert {:ok, :ended} = Sessions.end_main(sessions, "alpha", force: true, timeout: 30_000)
+    row = Agents.get(ctx.agents, "alpha")
+    assert row.status == "ended"
+    assert Agents.ended?(row)
+    refute File.exists?(Path.join(ctx.dir, "trusted"))
+    assert ScreenStandIn.prompts(ctx.dir) == []
+
+    # The press of "No, exit" is the operator's act: it went, though its read back may not come
+    # once the process exits.
+    assert {:ok, [%{actor: "operator", target: "alpha", status: "settled"} = press]} =
+             Acts.rows(acts, act: "answer_startup")
+
+    assert press.outcome in ~w(verified unknown)
+    assert %{trust: %{label: "No, exit"}} = Dialog.answers(row)
+    assert {:refused, {:ended, "alpha"}} = Sessions.start(sessions, "alpha", ctx.account, launch)
+  end
+
+  # Dialog.tla's EndTerm (F-231): the imports dialog has no exit option, so the end sends SIGTERM
+  # to the held program's record, and the row is ended; the dialog is never answered.
+  test "an end of a main session on a dialog with no exit option sends SIGTERM", ctx do
+    dialog = fn kind, _options -> if kind == :trust, do: {:answer, @trust}, else: :ask end
+    sessions = sessions(ctx, dialog: dialog)
+    launch = Keyword.put(ctx.launch, :kind, :main)
+
+    assert {:unknown, {:dialog, :imports}} =
+             Sessions.start(sessions, "alpha", ctx.account, launch)
+
+    assert {:ok, :ended} = Sessions.end_main(sessions, "alpha", timeout: 30_000)
+    assert %{status: "ended"} = row = Agents.get(ctx.agents, "alpha")
+    refute Map.has_key?(Dialog.answers(row), :imports)
+    refute File.exists?(Path.join(ctx.dir, "imports"))
   end
 
   # The press goes in a task (F-144): while the Inlet is held up, the row is marked pressing and

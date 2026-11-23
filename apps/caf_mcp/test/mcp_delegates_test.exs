@@ -396,14 +396,20 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
     assert tool(ctx, "main", "stop", two) == %{"refused" => ["report", "queued"]}
 
     # Its report handed but not delivered is what the stop meets when it acts, after its claim:
-    # the claim settles not verified, and the state stays claimed.
-    assert tool(ctx, "main", "stop", two) == %{"refused" => ["already_claimed", "main"]}
+    # the claim settles not verified, and since the stop acted on nothing its state is free
+    # (F-231's new-6): a second stop of the same state is taken, and meets the same refusal.
+    assert tool(ctx, "main", "stop", two) == %{"refused" => ["report", "queued"]}
 
     assert %{"ok" => %{"done" => "stopped", "settled" => %{"ok" => "verified"}}} =
              tool(ctx, "main", "stop", %{"agent" => "app-unit-one"})
 
-    assert {:ok, [_, %{outcome: "not_verified"}, %{target: "app-unit-one", outcome: "verified"}]} =
-             Acts.rows(ctx.acts)
+    assert {:ok,
+            [
+              _,
+              %{outcome: "not_verified", state: nil, acted_at: nil},
+              %{outcome: "not_verified", state: nil, acted_at: nil},
+              %{target: "app-unit-one", outcome: "verified"}
+            ]} = Acts.rows(ctx.acts)
 
     assert "interrupt" in HeadlessStandIn.taken(ctx.dir)
     assert "end" in HeadlessStandIn.taken(ctx.dir)

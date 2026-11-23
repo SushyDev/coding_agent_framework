@@ -360,6 +360,27 @@ defmodule CodingAgentFramework.MainsTest do
     assert {:refused, {:not_main, "delegate"}} = Mains.end_main(mains, "app-epic-api")
   end
 
+  # Dialog.tla's AskEnd and EndDone (F-231's new-3): a main session whose start waits on its trust
+  # dialog is ended by the operator, forced or not, with no answer first: its exit option is
+  # pressed, its agent row ended, and the start that waited is refused, `ended`. It ran no turn.
+  test "end_main ends a main session whose start waits on its trust dialog", ctx do
+    mains = mains(ctx)
+    assert {:ok, _} = level(ctx, mains)
+
+    assert {:unknown, {:dialog, :trust}} = Mains.start_main(mains, "app", "app-epic", "Plan.")
+    assert [%{status: "starting", id: id}] = Starts.rows(ctx.starts, "test")
+
+    assert {:ok, :ended} = Mains.end_main(mains, "app-epic", force: true)
+    assert Agents.ended?(Agents.get(ctx.agents, "app-epic"))
+    assert ScreenStandIn.prompts(ctx.dir) == []
+
+    Mains.cue(mains, %{topic: "sessions:test", ids: []})
+    assert {:ok, %{reason: reason}} = await(fn -> start_row(ctx, id, "refused") end)
+    assert reason =~ "ended"
+    assert {:ok, [_]} = await(fn -> leases(ctx, &(&1.released_at != nil)) end)
+    assert {:refused, {:running, "app-epic"}} = Mains.start_main(mains, "app", "app-epic", "Go.")
+  end
+
   # F-141's new-5: a resume is new work, with a lease of its own, class main session; the first
   # start's lease went once its process ended.
   test "resume_main resumes a stopped main session under a lease of its own", ctx do
