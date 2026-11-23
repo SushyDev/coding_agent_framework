@@ -62,12 +62,21 @@ defmodule CodingAgentFramework.Holder.Process do
   if [ -e "$1" ] && "$0" -p "$1" </dev/null >/dev/null 2>&1; then echo live; exit 0; fi
   "$3" -f -- "$2" && echo cleared
   """
-  # $0 dtach; $1 ps, $2 sleep, $3 tries 0.1 s apart, $4 what a name waits for: `record` (its
+  # $0 dtach; $1 ps, $2 sleep, $3 the wait in seconds, $4 what a name waits for: `record` (its
   # record, while its socket lives, as just after a hold), `dead`, or `none`; then pairs of a
   # socket and its record. One line per pair: the socket's state, the record (or -), and what ps
   # prints for its pid (gone, failed, or the start time). The socket is read first.
+  #
+  # The wait is bounded by the clock, not by a count of reads (F-217): one sleep of the whole
+  # wait runs beside the reads, and a name is read again, 0.1 s apart, only while that sleep
+  # lives. A count of short sleeps overshoots, since each wakes late under load. Every name's
+  # wait ends at that one deadline. The timer is this shell's own child, so its pid is no other
+  # program's until this shell reaps it, and it is ended only while `kill -0` finds it.
   @read ~S"""
-  p=$1 z=$2 n=$3 m=$4; shift 4
+  p=$1 z=$2 w=$3 m=$4; shift 4
+  d=
+  [ "$m" = none ] || { "$z" "$w" </dev/null >/dev/null 2>&1 & d=$!; }
+  timer() { [ -n "$d" ] && kill -0 "$d" 2>/dev/null; }
   look() {
     if [ ! -e "$1" ]; then st=absent
     elif out=$("$0" -p "$1" </dev/null 2>&1); then st=live
@@ -94,10 +103,12 @@ defmodule CodingAgentFramework.Holder.Process do
   }
   while [ "$#" -ge 2 ]; do
     s=$1 f=$2; shift 2
-    look "$s" "$f"; i=0
-    while waiting && [ "$i" -lt "$n" ]; do "$z" 0.1; i=$((i+1)); look "$s" "$f"; done
+    look "$s" "$f"
+    while waiting && timer; do "$z" 0.1; look "$s" "$f"; done
     printf '%s\t%s\t%s\n' "$st" "$r" "$t"
   done
+  ! timer || kill "$d" 2>/dev/null
+  exit 0
   """
   # $1 ps, $2 the pid, $3 its start time, $4 dtach, $5 the socket, $6 the input. The same check
   # as a signal's, in the process that pushes, so input never reaches a program put in its place.
@@ -176,8 +187,10 @@ defmodule CodingAgentFramework.Holder.Process do
   @doc """
   Reads each of `names` in one shell on the host: `{:ok, %{name => reading}}`. Option
   `:wait` (ms, default 0): how long a name whose socket lives waits for its record, as just
-  after a hold, when the wrapper may not have run yet. Option `:timeout` (ms) bounds the shell,
-  by default the holder's plus the wait.
+  after a hold, when the wrapper may not have run yet. The wait is one deadline for all the
+  names, by the host's clock: a name is read again 0.1 s apart until it is met or the wait has
+  passed, so the answer comes within one read of the wait. Option `:timeout` (ms) bounds the
+  shell, by default the holder's plus the wait.
   """
   @spec read(t, [String.t()], keyword) :: {:ok, %{String.t() => reading}} | {:unknown, term}
   def read(%__MODULE__{} = p, names, opts \\ []) do
@@ -186,9 +199,9 @@ defmodule CodingAgentFramework.Holder.Process do
   end
 
   @doc """
-  Waits on the host, in one shell, until `name`'s program reads dead or `wait` ms pass, and
-  answers the last reading: `{:ok, reading}`, dead or not (`dead?/1` says which), or `{:unknown,
-  reason}`. A job's end is waited for this way, so a host reached over ssh is asked once, not
+  Waits on the host, in one shell, until `name`'s program reads dead or `wait` ms pass by the
+  host's clock (as `read/3`'s wait), and answers the last reading: `{:ok, reading}`, dead or not
+  (`dead?/1` says which), or `{:unknown, reason}`. A job's end is waited for this way, so a host reached over ssh is asked once, not
   every few hundred ms.
   """
   @spec await_dead(t, String.t(), non_neg_integer) :: {:ok, reading} | {:unknown, term}
@@ -199,7 +212,9 @@ defmodule CodingAgentFramework.Holder.Process do
   defp run_read(%{holder: h} = p, names, mode, wait, opts) do
     timeout = Keyword.get(opts, :timeout, h.timeout + wait)
     pairs = Enum.flat_map(names, &[Path.join(h.dir, &1 <> ".sock"), record_path(p, &1)])
-    args = ["-c", @read, h.dtach, p.ps, p.sleep, "#{div(wait, 100)}", mode | pairs]
+    mode = if wait > 0, do: mode, else: "none"
+    secs = :erlang.float_to_binary(max(wait, 0) / 1000, decimals: 3)
+    args = ["-c", @read, h.dtach, p.ps, p.sleep, secs, mode | pairs]
 
     case Shell.run(h.host, h.sh, args, timeout: timeout) do
       {:ok, %{status: 0, output: out}} -> readings(names, String.split(out, "\n", trim: true))

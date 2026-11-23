@@ -87,10 +87,13 @@ defmodule CodingAgentFramework.Services do
   cd "$c" && exec "$@" >>"$l" 2>&1
   """
   # $1 the offset file, $2 sleep: the wrapper writes it a moment after the record, so it is
-  # waited for, 0.1 s apart, for at most 2 s.
+  # read again, 0.1 s apart, for at most 2 s by the clock: a sleep of 2 s runs beside the reads,
+  # as `Holder.Process`'s read waits (F-217), since 20 short sleeps wake late under load. The
+  # timer is this shell's own child, ended only while `kill -0` finds it.
   @offset ~S"""
-  i=0
-  while [ ! -s "$1" ] && [ "$i" -lt 20 ]; do "$2" 0.1; i=$((i+1)); done
+  "$2" 2 </dev/null >/dev/null 2>&1 & d=$!
+  while [ ! -s "$1" ] && kill -0 "$d" 2>/dev/null; do "$2" 0.1; done
+  ! kill -0 "$d" 2>/dev/null || kill "$d" 2>/dev/null
   [ -s "$1" ] && read -r f < "$1" && echo "$f"
   """
   # On the workstation: $1 mkdir, $2 the forwards' directory.

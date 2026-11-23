@@ -211,6 +211,46 @@ defmodule CodingAgentFramework.RunsTest do
       assert {:ok, %{status: 0, output: out}} = wrapped(ctx.runs, "toolu_n", "echo ran")
       assert out == "caf-run: no lease (no_scheduler); the command runs without one\nran\n"
     end
+
+    # The no-answer bound is by the clock (F-217): the wrapper asks once a second, so it sees
+    # the bound pass at its next ask, one second and a late wake after it at most.
+    test "with no answer it asks again until its bound by the clock, then runs without a lease",
+         ctx do
+      # A listener that hangs up on every ask: an answer never comes, and no other test's
+      # server can take the port.
+      {:ok, listener} =
+        :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true])
+
+      {:ok, port} = :inet.port(listener)
+      spawn_link(fn -> hang_up(listener) end)
+      :ok = Runs.prepare(ctx.runs, programs(), port, @secret, unanswered: 2_000)
+
+      from = System.monotonic_time(:millisecond)
+      assert {:ok, %{status: 0, output: out}} = wrapped(ctx.runs, "toolu_d", "echo ran")
+      waited = System.monotonic_time(:millisecond) - from
+
+      assert out ==
+               "caf-run: no lease (the framework did not answer); the command runs without one\n" <>
+                 "ran\n"
+
+      assert waited in 2_000..(2_000 + 1_500)
+    end
+
+    test "a bound that is not a positive integer is refused", ctx do
+      assert {:refused, :bad_unanswered} =
+               Runs.prepare(ctx.runs, programs(), 4790, @secret, unanswered: 0)
+    end
+  end
+
+  defp hang_up(listener) do
+    case :gen_tcp.accept(listener) do
+      {:ok, conn} ->
+        :gen_tcp.close(conn)
+        hang_up(listener)
+
+      {:error, _} ->
+        :ok
+    end
   end
 
   test "the endpoint refuses a wrong secret and a request out of shape" do

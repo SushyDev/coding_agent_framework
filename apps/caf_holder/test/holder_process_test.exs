@@ -84,6 +84,29 @@ defmodule CodingAgentFramework.Holder.ProcessTest do
     assert Holder.Process.dead?(r)
   end
 
+  # A wait on the host ends by its clock (F-217): within one round of reads (0.1 s apart) after
+  # its bound, never before. Each round runs `dtach` and `ps`, and every sleep wakes late under
+  # load, so the slack is stated wide.
+  @slack 1_000
+
+  test "a wait on the host ends by the clock, one deadline for every name, never before it",
+       %{p: p} = ctx do
+    hold!(ctx, "waited", echo_tail!(ctx.dir))
+    {waited, answer} = timed(fn -> Holder.Process.await_dead(p, "waited", 1_500) end)
+    assert {:ok, %{process: :live}} = answer
+    assert waited in 1_500..(1_500 + @slack)
+
+    # Two live sockets whose records never come: both wait out the one bound, not one each.
+    for name <- ["bare1", "bare2"] do
+      argv = [program!(:sh), "-c", echo_tail!(ctx.dir), Path.join(ctx.dir, name)]
+      assert {:ok, _} = Holder.hold(p.holder, name, argv)
+    end
+
+    {waited, answer} = timed(fn -> Holder.Process.read(p, ["bare1", "bare2"], wait: 1_500) end)
+    assert {:ok, %{"bare1" => %{record: nil}, "bare2" => %{record: nil}}} = answer
+    assert waited in 1_500..(1_500 + @slack)
+  end
+
   test "input reaches the program only while its record is the held one", %{p: p} = ctx do
     out = Path.join(ctx.dir, "said")
     script = ~s(read -r l; echo "$l" > "#{out}"; ) <> echo_tail!(ctx.dir)
@@ -155,6 +178,13 @@ defmodule CodingAgentFramework.Holder.ProcessTest do
   defp zombie_state(pid) do
     {out, _} = System.cmd(program!(:ps), ["-o", "stat=", "-p", "#{pid}"])
     if String.starts_with?(String.trim(out), "Z"), do: {:ok, :zombie}, else: {:waiting, out}
+  end
+
+  # What `fun` answered and how long it took, in ms by the monotonic clock.
+  defp timed(fun) do
+    from = System.monotonic_time(:millisecond)
+    answer = fun.()
+    {System.monotonic_time(:millisecond) - from, answer}
   end
 
   # Holds `sh -c script` as `name` and answers the pid its record names.
