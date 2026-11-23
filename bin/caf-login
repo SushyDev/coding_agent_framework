@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Logs a framework home's accounts in, each with its own tool's login, in this terminal:
+# Sets up a framework home's logins, in this terminal. The person does only what only a person
+# can do: each browser login and Claude Code's onboarding screens. Every other step runs by
+# itself, ends with its own check, and is skipped, with a line saying so, when it is done.
 #
+#   bin/caf-login --setup [--no-git] <config.json> [account …]
+#   bin/caf-login --setup [--no-git] <home> <account> …
+#                                            # each account, then gh and the home's signing key
 #   bin/caf-login <home> <account>           # claude auth login, then Claude Code's first run
 #   bin/caf-login --check <home> <account>   # claude auth status, and whether the first run passed
 #   bin/caf-login --gh <home>                # gh auth login, with the home's GH_CONFIG_DIR
@@ -8,37 +13,51 @@
 #   bin/caf-login --git <home> [--key <name>] [--title <title>]
 #                                            # the home's commit signing key, made once
 #
+# --setup reads the home, the accounts and `git.signing_key` from the config file
+# (CodingAgentFramework.Example.ConfigFile), or takes the home and the accounts as named, for an
+# app whose config is built in code. With accounts named after a config, it sets up only those,
+# each of which the config must name. For each account in order it runs `<home> <account>`
+# (login, first run, check); then `--gh` and `--git` (gh, the key, their checks), which
+# --no-git leaves out. It stops at the first step that fails; running it again skips each step
+# done.
+#
 # The account's Claude config directory is <home>/accounts/<account>/claude, the one the
 # framework sets as CLAUDE_CONFIG_DIR at every launch on that account (docs/design.md,
 # "Claude Code"). Give <home> spelled as the config file's `home`: the directory is named by
 # that path. The framework never reads a credential, so whether an account is logged in is
 # unknown to it until a session on the account starts or fails; --check asks Claude Code.
+# A login is skipped when `claude auth status` says the account is logged in already.
 #
 # Claude Code's first run on an account shows its onboarding (a theme picker, then more
 # screens) before anything else, and no session the framework starts reads those screens. So
-# after the login this runs Claude Code once, in a scratch folder it removes after, for the
-# person to pass the onboarding there; then the folder's trust dialog; then /exit. The account's
+# after the login this runs Claude Code once, in a scratch folder it removes after, with /exit
+# as its first prompt: the person passes the onboarding and the folder's trust dialog, and
+# Claude Code then runs /exit and ends by itself (measured on 2.1.322, F-220). The account's
 # .claude.json records the onboarding passed (hasCompletedOnboarding), which --check reads. An
 # account that passed it is not run again.
 #
 # --gh logs the GitHub CLI in with <home>/gh, the GH_CONFIG_DIR every launch, job and service
 # sets (F-155): agents push with the person's own GitHub login, kept in the home. The login runs
 # `gh auth login --insecure-storage`, so the token is a file in the home (gh's hosts.yml, mode
-# 600), never the OS keyring (macOS's Keychain), which is gh's default and outside the home.
-# --check --gh says where the token is, and ends with status 1 when gh is logged in on a token
-# that is not in that file.
+# 600), never the OS keyring (macOS's Keychain), which is gh's default and outside the home. It
+# asks for the scope admin:ssh_signing_key, which --git needs to add the signing key. A login
+# whose token is in the home but lacks that scope gets it by `gh auth refresh`, one browser
+# step, rather than a new login. --check --gh says where the token is and whether it has the
+# scope, and ends with status 1 when either is not so.
 #
 # --git makes <home>/git/<name> (signing_key by default), an ed25519 key of the home's own,
 # never one of the person's keys, with no passphrase, since a headless session signs with no
-# ssh agent. It never writes over an existing key. It prints the public key and offers to add
-# it to the person's GitHub account as a signing key (gh ssh-key add --type signing), with the
-# home's gh. GitHub shows a commit Verified when that key is on the account and the commit's
-# email (the config's git.email) is one of the account's verified emails.
+# ssh agent. It never writes over an existing key. It first reads the gh token's scopes, and
+# stops with status 1 and the command that adds the scope when it lacks it. It adds the key to
+# the person's GitHub account as a signing key (gh ssh-key add --type signing), with the home's
+# gh, unless GitHub lists it already. GitHub shows a commit Verified when that key is on the
+# account and the commit's email (the config's git.email) is one of the account's verified
+# emails.
 #
 # It runs devenv's pinned programs (CAF_CLAUDE, CAF_GH, CAF_SSH_KEYGEN, CAF_MKDIR, CAF_MKTEMP,
-# CAF_RM, CAF_CAT, CAF_ID), with Claude Code's updater off; outside devenv it runs itself again
-# through `devenv shell`. Nothing of a Claude Code session this was typed in (CLAUDECODE,
-# CLAUDE_CODE_*) reaches the login.
+# CAF_RM, CAF_CAT, CAF_ID, and elixir to read a config), with Claude Code's updater off; outside
+# devenv it runs itself again through `devenv shell`. Nothing of a Claude Code session this was
+# typed in (CLAUDECODE, CLAUDE_CODE_*) reaches the login.
 #
 # USER is set to the OS user's name (`id -un`), whatever the shell had: on macOS Claude Code
 # names the login's Keychain item by USER alone, and every launch the framework holds passes the
@@ -50,21 +69,47 @@ usage() {
   echo "usage: bin/caf-login [--check] <home> <account>"
   echo "       bin/caf-login [--check] --gh <home>"
   echo "       bin/caf-login --git <home> [--key <name>] [--title <title>]"
+  echo "       bin/caf-login --setup [--no-git] <config.json> [account …]"
+  echo "       bin/caf-login --setup [--no-git] <home> <account> …"
 }
 fail() {
   echo "caf-login: $*" >&2
   exit 2
 }
+name_ok() { [[ "$1" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]]; }
 
 all=("$@")
-check=0 mode=claude key=signing_key title=""
+check=0 mode=claude key=signing_key title="" git=1 config="" accounts=()
 if [[ "${1:-}" == --check ]]; then check=1; shift; fi
 case "${1:-}" in
   -h | --help) usage; exit 0 ;;
   --gh) mode=gh; shift ;;
   --git) mode=git; shift ;;
+  --setup) mode=setup; shift ;;
 esac
-if [[ $mode == git ]]; then
+if [[ $mode == setup ]]; then
+  ((check == 0)) || { usage >&2; exit 2; }
+  args=()
+  for arg in "$@"; do
+    if [[ "$arg" == --no-git ]]; then git=0; else args+=("$arg"); fi
+  done
+  ((${#args[@]} >= 1)) || { usage >&2; exit 2; }
+  home=${args[0]}
+  accounts=("${args[@]:1}")
+  if [[ -f "$home" ]]; then
+    # A config file; made absolute here, since the run through devenv starts in the root.
+    config="$(cd "$(dirname "$home")" && pwd -P)/$(basename "$home")"
+    home=""
+  else
+    ((${#accounts[@]} >= 1)) || fail "$home is no config file; name the home and its accounts"
+  fi
+  for account in ${accounts[@]+"${accounts[@]}"}; do
+    name_ok "$account" || fail "$account is not an account's name"
+  done
+  all=(--setup)
+  ((git)) || all+=(--no-git)
+  all+=("${config:-$home}" ${accounts[@]+"${accounts[@]}"})
+elif [[ $mode == git ]]; then
   ((check == 0)) || { usage >&2; exit 2; }
   (($# >= 1)) || { usage >&2; exit 2; }
   home=$1; shift
@@ -82,15 +127,16 @@ elif [[ $mode == gh ]]; then
 else
   (($# == 2)) || { usage >&2; exit 2; }
   home=$1 account=$2
-  [[ "$account" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || fail "$account is not an account's name"
+  name_ok "$account" || fail "$account is not an account's name"
 fi
-[[ "$home" == /* ]] || fail "$home is not an absolute path"
+[[ -n "$config" || "$home" == /* ]] || fail "$home is not an absolute path"
 
+root="$(cd "$(dirname "$0")/.." && pwd -P)"
+self="$root/bin/caf-login"
 if [[ -z "${CAF_CLAUDE:-}" ]]; then
   command -v devenv >/dev/null || fail "devenv is not on PATH; see README.md, Development"
-  root="$(cd "$(dirname "$0")/.." && pwd -P)"
   cd "$root"
-  exec devenv shell -- "$root/bin/caf-login" "${all[@]}"
+  exec devenv shell -- "$self" "${all[@]}"
 fi
 
 unset CLAUDECODE TMUX TMUX_PANE
@@ -100,23 +146,108 @@ while IFS= read -r name; do
   if [[ "$name" == CLAUDE_CODE_* ]]; then unset "$name"; fi
 done < <(compgen -e)
 
+if [[ $mode == setup ]]; then
+  if [[ -n "$config" ]]; then
+    # The keys this needs, as ConfigFile names them; the app checks the rest at its start.
+    read_config='
+      [path] = System.argv()
+      stop = fn why -> IO.puts(:stderr, "caf-login: #{path}: #{why}"); System.halt(2) end
+      data =
+        with {:ok, text} <- File.read(path), {:ok, %{} = data} <- JSON.decode(text) do
+          data
+        else
+          {:ok, _} -> stop.("not a JSON object")
+          {:error, why} -> stop.("not read: #{inspect(why)}")
+        end
+      home = data["home"]
+      accounts = data["accounts"]
+      key = case data["git"] do
+        %{"signing_key" => key} -> key
+        _ -> "signing_key"
+      end
+      line? = &(is_binary(&1) and &1 != "" and not String.contains?(&1, "\n"))
+      line?.(home) || stop.("\"home\" is not a path")
+      (is_list(accounts) and accounts != [] and Enum.all?(accounts, line?)) ||
+        stop.("\"accounts\" is not a list of names")
+      line?.(key) || stop.("\"git.signing_key\" is not a file name")
+      Enum.each([home, key | accounts], &IO.puts/1)
+    '
+    lines=$(elixir -e "$read_config" "$config") || exit 2
+    read_lines=()
+    while IFS= read -r line; do read_lines+=("$line"); done <<<"$lines"
+    home=${read_lines[0]} key=${read_lines[1]}
+    listed=("${read_lines[@]:2}")
+    [[ "$home" == /* ]] || fail "$config: home $home is not an absolute path"
+    for account in "${listed[@]}"; do
+      name_ok "$account" || fail "$config: $account is not an account's name"
+    done
+    for account in ${accounts[@]+"${accounts[@]}"}; do
+      [[ " ${listed[*]} " == *" $account "* ]] || fail "$config names no account $account"
+    done
+    ((${#accounts[@]} > 0)) || accounts=("${listed[@]}")
+  fi
+
+  steps=()
+  for account in "${accounts[@]}"; do steps+=("account $account"); done
+  if ((git)); then steps+=("gh" "git"); fi
+  printf -v listing '%s, ' "${steps[@]}"
+  listing=${listing%, }
+  echo "caf-login: setting up $home: $listing"
+  n=0
+  for step in "${steps[@]}"; do
+    n=$((n + 1))
+    echo
+    echo "caf-login: step $n of ${#steps[@]}: $step"
+    status=0
+    case "$step" in
+      "account "*) "$BASH" "$self" "$home" "${step#account }" || status=$? ;;
+      gh) "$BASH" "$self" --gh "$home" || status=$? ;;
+      git) "$BASH" "$self" --git "$home" --key "$key" || status=$? ;;
+    esac
+    if ((status)); then
+      echo
+      echo "caf-login: setup stopped at $step (status $status); after fixing it, run the same command again: each step done is checked and skipped" >&2
+      exit "$status"
+    fi
+  done
+  echo
+  echo "caf-login: setup of $home done: $listing, each checked"
+  exit 0
+fi
+
 # Where gh and git keep their state: the home's, as every launch sets it (ToolHome.env/2).
 export GH_CONFIG_DIR="$home/gh" GIT_CONFIG_GLOBAL="$home/git/config" GIT_CONFIG_NOSYSTEM=1
 export XDG_CONFIG_HOME="$home/xdg/config" XDG_CACHE_HOME="$home/xdg/cache"
 export XDG_DATA_HOME="$home/xdg/data" XDG_STATE_HOME="$home/xdg/state"
 
+# The scope GitHub asks of a token that adds a signing key (user/ssh_signing_keys answers 404
+# without it), and the command that adds it to a login without a new one. --insecure-storage
+# keeps the refreshed token in the home's file: without it gh saves it to the OS keyring.
+scope=admin:ssh_signing_key
+refresh=(auth refresh -h github.com -s "$scope" --insecure-storage)
+hosts="$GH_CONFIG_DIR/hosts.yml"
+# Whether gh keeps a token in the home's own file. Without a token there, gh's status may
+# still pass on a token in the OS keyring or in GH_TOKEN, which are outside the home.
+token_in_home() { [[ -r "$hosts" && "$(<"$hosts")" == *"oauth_token:"* ]]; }
+# gh's status of github.com's active account, into gh_out and gh_status. Its text names the
+# token's scopes on one line: "- Token scopes: 'gist', 'read:org', 'repo'".
+gh_read() {
+  gh_status=0
+  gh_out=$("$CAF_GH" auth status -h github.com -a 2>&1) || gh_status=$?
+}
+scope_line="Token scopes:[^"$'\n'"]*$scope"
+has_scope() { [[ "$gh_out" =~ $scope_line ]]; }
+
 if [[ $mode == gh ]]; then
   "$CAF_MKDIR" -p "$GH_CONFIG_DIR" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
-  hosts="$GH_CONFIG_DIR/hosts.yml"
-  # Whether gh keeps a token in the home's own file. Without a token there, gh's status may
-  # still pass on a token in the OS keyring or in GH_TOKEN, which are outside the home.
-  token_in_home() { [[ -r "$hosts" && "$(<"$hosts")" == *"oauth_token:"* ]]; }
   if ((check)); then
     echo "caf-login: GitHub CLI, $GH_CONFIG_DIR:"
-    status=0
-    "$CAF_GH" auth status || status=$?
+    gh_read
+    printf '%s\n' "$gh_out"
+    status=$gh_status
     if token_in_home; then
-      echo "caf-login: the token is in the home: a file, $hosts"
+      # gh's label in parentheses above may read (keyring) for a token that is in hosts.yml.
+      echo "caf-login: the token is in the home: a file, $hosts (caf-login reads the file; gh's label above does not count)"
     elif ((status == 0)); then
       echo "caf-login: the token is not in the home: $hosts holds none, so gh reads it from the OS keyring or the environment" >&2
       echo "caf-login: run bin/caf-login --gh $home to log in again, with the token in the home" >&2
@@ -124,23 +255,45 @@ if [[ $mode == gh ]]; then
     else
       echo "caf-login: no token in the home: $hosts holds none"
     fi
+    if ((gh_status == 0)); then
+      if has_scope; then
+        echo "caf-login: the token has the scope $scope, which --git needs"
+      else
+        echo "caf-login: the token lacks the scope $scope, which --git needs; run bin/caf-login --gh $home to add it" >&2
+        status=1
+      fi
+    fi
     exit "$status"
   fi
-  echo "caf-login: logging the GitHub CLI in, with $GH_CONFIG_DIR"
-  # gh's own default is the OS keyring (macOS's Keychain), outside the home.
-  "$CAF_GH" auth login --insecure-storage
-  echo
-  if ! token_in_home; then
-    echo "caf-login: the token is not in $hosts; run bin/caf-login --gh $home again" >&2
-    exit 1
+  gh_read
+  if ((gh_status == 0)) && token_in_home && has_scope; then
+    echo "caf-login: the GitHub CLI is logged in already, with $GH_CONFIG_DIR, the token in the home and the scope $scope; its login is kept"
+  elif ((gh_status == 0)) && token_in_home; then
+    echo "caf-login: the GitHub CLI is logged in, with $GH_CONFIG_DIR, but its token lacks the scope $scope; adding it (one browser step)"
+    "$CAF_GH" "${refresh[@]}"
+  else
+    echo "caf-login: logging the GitHub CLI in, with $GH_CONFIG_DIR"
+    # gh's own default is the OS keyring (macOS's Keychain), outside the home.
+    "$CAF_GH" auth login -h github.com --insecure-storage -s "$scope"
   fi
-  echo "caf-login: the token is in the home: a file, $hosts"
-  echo "caf-login: to check it, run: bin/caf-login --check --gh $home"
-  exit 0
+  echo
+  exec "$BASH" "$self" --check --gh "$home"
 fi
 
 if [[ $mode == git ]]; then
   file="$home/git/$key"
+  gh_read
+  if ((gh_status != 0)); then
+    printf '%s\n' "$gh_out" >&2
+    echo "caf-login: the GitHub CLI is not logged in with $GH_CONFIG_DIR; run bin/caf-login --gh $home first" >&2
+    exit 1
+  fi
+  if ! has_scope; then
+    echo "caf-login: the gh token lacks the scope $scope, which adding a signing key needs. Add it with:" >&2
+    echo "  GH_CONFIG_DIR=$GH_CONFIG_DIR gh ${refresh[*]}" >&2
+    echo "caf-login: (bin/caf-login --gh $home runs that same command)" >&2
+    exit 1
+  fi
   "$CAF_MKDIR" -p "$home/git"
   if [[ -e "$file" || -e "$file.pub" ]]; then
     echo "caf-login: $file is there already; it is kept as it is."
@@ -151,13 +304,28 @@ if [[ $mode == git ]]; then
   [[ -r "$file.pub" ]] || fail "$file.pub is missing"
   echo "caf-login: its public key:"
   "$CAF_CAT" "$file.pub"
-  echo
-  read -r -p "Add it to your GitHub account as a signing key, with the home's gh? [y/N] " answer
-  if [[ "$answer" == [yY]* ]]; then
+  read -r kind blob _ <"$file.pub"
+  # The account's signing keys, as GitHub lists them: "<type> <base64>" each.
+  on_github() {
+    local listed
+    listed=$("$CAF_GH" api --paginate user/ssh_signing_keys --jq '.[].key') || return 2
+    [[ $'\n'"$listed"$'\n' == *$'\n'"$kind $blob"$'\n'* ]]
+  }
+  found=0
+  on_github || found=$?
+  if ((found == 0)); then
+    echo "caf-login: GitHub lists it already as a signing key of the account; it is not added again"
+  elif ((found == 1)); then
+    echo "caf-login: adding it to your GitHub account as a signing key, with the home's gh"
     "$CAF_GH" ssh-key add "$file.pub" --type signing --title "${title:-caf $key}"
-  else
-    echo "caf-login: to add it later: GH_CONFIG_DIR=$GH_CONFIG_DIR gh ssh-key add $file.pub --type signing"
+    found=0
+    on_github || found=$?
   fi
+  case $found in
+    0) echo "caf-login: check: GitHub lists $file.pub as a signing key of the account" ;;
+    1) echo "caf-login: check: GitHub does not list $file.pub as a signing key; run bin/caf-login --git $home again" >&2; exit 1 ;;
+    *) echo "caf-login: check: GitHub's list of signing keys could not be read (gh api user/ssh_signing_keys)" >&2; exit 1 ;;
+  esac
   exit 0
 fi
 
@@ -170,6 +338,11 @@ export CLAUDE_CONFIG_DIR="$dir" DISABLE_AUTOUPDATER=1
 
 # Whether Claude Code's first-run onboarding was passed on the account.
 onboarded() { grep -Eqs '"hasCompletedOnboarding": *true' "$dir/.claude.json"; }
+# Whether Claude Code reads a login on the account: it exits 0 and says loggedIn when so.
+logged_in() {
+  local out
+  out=$("$CAF_CLAUDE" auth status --json 2>/dev/null) && [[ "$out" =~ \"loggedIn\":\ *true ]]
+}
 
 if ((check)); then
   echo "caf-login: account $account, $dir:"
@@ -185,9 +358,13 @@ if ((check)); then
 fi
 
 "$CAF_MKDIR" -p "$dir"
-echo "caf-login: logging account $account in, with $dir"
-"$CAF_CLAUDE" auth login
-echo
+if logged_in; then
+  echo "caf-login: account $account is logged in already (claude auth status), with $dir; its login is kept"
+else
+  echo "caf-login: logging account $account in, with $dir"
+  "$CAF_CLAUDE" auth login
+  echo
+fi
 
 if onboarded; then
   echo "caf-login: Claude Code's first-run onboarding was passed on $account before"
@@ -195,17 +372,15 @@ else
   scratch="$("$CAF_MKTEMP" -d "${TMPDIR:-/tmp}/caf-login.XXXXXX")"
   echo "caf-login: now Claude Code's first run on $account, in a scratch folder, $scratch."
   echo "caf-login: pass its onboarding (the theme, then each screen after it) and the folder's"
-  echo "caf-login: trust dialog, then type /exit."
-  (cd "$scratch" && "$CAF_CLAUDE") || true
+  echo "caf-login: trust dialog; then it runs /exit and ends by itself."
+  (cd "$scratch" && "$CAF_CLAUDE" /exit) || true
   "$CAF_RM" -rf -- "$scratch"
   echo
-  if onboarded; then
-    echo "caf-login: Claude Code's first-run onboarding: passed"
-  else
+  if ! onboarded; then
     echo "caf-login: Claude Code's first-run onboarding: not passed; run bin/caf-login $home $account again" >&2
     exit 1
   fi
 fi
 
-echo "caf-login: to check it, run: bin/caf-login --check $home $account"
-echo "caf-login: the first session the framework starts on $account is the real check."
+echo
+exec "$BASH" "$self" --check "$home" "$account"

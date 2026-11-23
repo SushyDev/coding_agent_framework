@@ -10,7 +10,8 @@
 # docs/e2e.md is the end-to-end run that uses it.
 #
 # It runs in devenv's environment: outside it, it runs itself again through `devenv shell`, so
-# every program is the lock's, by its CAF_* path. Mix compiles in MIX_ENV (dev unless set).
+# every program is the lock's, by its CAF_* path. Mix compiles in MIX_ENV (dev unless set). When
+# deps/ does not match mix.lock, it runs `mix deps.get` first and says so.
 # Quitting the shell stops the framework; the agents it holds run on, under dtach, and the next
 # start adopts them.
 set -euo pipefail
@@ -39,5 +40,13 @@ fi
 # Nothing of a session this was typed in reaches the framework's node.
 unset TMUX TMUX_PANE CLAUDECODE
 cd "$root"
+
+# A checkout whose deps/ holds other versions than mix.lock (an older pull, say) stops mix with
+# "lock mismatch"; deps.loadpaths finds that without compiling, and deps.get fetches the lock's.
+if ! mix deps.loadpaths --no-compile >/dev/null 2>&1; then
+  echo "caf-example: the deps do not match mix.lock; running mix deps.get"
+  mix deps.get || fail "mix deps.get failed"
+fi
+
 export CAF_EXAMPLE_CONFIG="$config"
 exec iex --dot-iex "$root/apps/caf_example/console.iex.exs" -S mix run
