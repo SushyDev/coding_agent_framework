@@ -10,7 +10,10 @@ defmodule CodingAgentFramework.Mains.Checkout do
   sibling repository's file by relative path (`@../other_repo/CLAUDE.md`) finds it among the
   checkouts as it did among the person's own clones. Its clone is made at
   `<home>/checkouts/.<dir>.clone` and renamed into place once whole, so a checkout at its path
-  is always a whole one (`Checkout.tla`'s `WholeCheckout`). A checkout an earlier build made
+  is always a whole one (`Checkout.tla`'s `WholeCheckout`). A directory has one owner on a
+  home (F-229, `Checkout.tla`'s `OwnCheckout`): a path another project's row holds is refused
+  (`owner/3`), and a directory whose `origin` is not the project's is never taken
+  (`same_origin?/2`); `dir:` gives two origins of one name a directory each. A checkout an earlier build made
   under the project's name is renamed to its directory once (`Mains`, `Checkout.tla`'s
   `RenameOld`).
 
@@ -95,6 +98,39 @@ defmodule CodingAgentFramework.Mains.Checkout do
     |> Enum.find_value(fn {dir, names} -> if length(names) > 1, do: {dir, Enum.sort(names)} end)
   end
 
+  @doc """
+  The other project whose checkout row holds `path`, or nil (F-229): a directory has one owner
+  on a home, so a project of a later config whose directory an earlier one's row holds is
+  refused. `rows` are the host's checkout rows (`Mains.Table.rows/2`); the project's own row,
+  from an earlier start, is its own.
+
+      iex> rows = [%{project: "demo", path: "/h/checkouts/demo"}]
+      iex> CodingAgentFramework.Mains.Checkout.owner(rows, "new", "/h/checkouts/demo")
+      "demo"
+      iex> CodingAgentFramework.Mains.Checkout.owner(rows, "demo", "/h/checkouts/demo")
+      nil
+  """
+  @spec owner([map], String.t(), String.t()) :: String.t() | nil
+  def owner(rows, project, path),
+    do:
+      Enum.find_value(rows, fn r -> if r.path == path and r.project != project, do: r.project end)
+
+  @doc """
+  Whether the `origin` URL a checkout's git config names (`found`, git's output, or nil when it
+  names none) is the project's `origin` (F-229). git records a local origin as an absolute path,
+  and keeps a trailing `/` as given, so only that and the output's newline are trimmed.
+
+      iex> CodingAgentFramework.Mains.Checkout.same_origin?("/src/demo.git", "/src/demo.git/\\n")
+      true
+      iex> CodingAgentFramework.Mains.Checkout.same_origin?("/src/demo.git", "/old/demo.git\\n")
+      false
+  """
+  @spec same_origin?(String.t(), String.t() | nil) :: boolean
+  def same_origin?(_origin, nil), do: false
+  def same_origin?(origin, found), do: url(origin) == url(found)
+
+  defp url(s), do: s |> String.trim() |> String.trim_trailing("/")
+
   @doc "git's index lock in the checkout at `path`, which a cut git command may leave."
   @spec lock_path(String.t()) :: String.t()
   def lock_path(path), do: Path.join([path, ".git", "index.lock"])
@@ -105,7 +141,7 @@ defmodule CodingAgentFramework.Mains.Checkout do
 
   @doc """
   git's arguments for each step: `{:clone, origin, trunk, to}`, `{:head, path, trunk}`,
-  `{:branch, path}`, `{:status, path}` (`--no-optional-locks`: a read writes nothing back, so
+  `{:branch, path}`, `{:origin, path}`, `{:status, path}` (`--no-optional-locks`: a read writes nothing back, so
   it never holds the index lock a person's git in the checkout needs), `{:counts, path, trunk}`,
   `{:fetch, path, trunk}` and `{:merge, path, trunk}` (`--ff-only`: a local commit refuses it,
   and an edit it would overwrite; any other edit is carried, never lost).
@@ -123,6 +159,8 @@ defmodule CodingAgentFramework.Mains.Checkout do
     do: ["-C", path, "rev-parse", "--verify", "--quiet", "refs/heads/" <> trunk]
 
   def git({:branch, path}), do: ["-C", path, "symbolic-ref", "--quiet", "--short", "HEAD"]
+  # The URL as written, not as `url.<base>.insteadOf` rewrites it: the one a clone recorded.
+  def git({:origin, path}), do: ["-C", path, "config", "--get", "remote.origin.url"]
   # A plain `status` takes the index lock to write back the file times it refreshed, so a
   # person's commit in the checkout during a read failed on the lock (F-145).
   def git({:status, path}),

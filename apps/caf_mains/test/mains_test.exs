@@ -748,10 +748,97 @@ defmodule CodingAgentFramework.MainsTest do
              Mains.start_link(Keyword.put(ctx.mains_opts, :projects, projects))
   end
 
+  # F-229: two origins of one name, each a repository with its own trunk.
+  defp other_origin(ctx) do
+    other = Path.join([ctx.dir, "elsewhere", "origin"])
+    git!(ctx, ["init", "-q", "-b", "main", other])
+    commit!(ctx, other, "elsewhere")
+    other
+  end
+
+  # F-229: in one config, two origins of one name default to one directory, which is refused;
+  # `dir:` gives each its own.
+  test "two projects whose origins share a name are refused, and dir: gives each its own", ctx do
+    web = %{ctx.project | origin: other_origin(ctx)}
+    projects = Map.put(ctx.mains_opts[:projects], "web", web)
+    Process.flag(:trap_exit, true)
+
+    assert {:error, {:same_dir, "origin", ["app", "web"]}} =
+             Mains.start_link(Keyword.put(ctx.mains_opts, :projects, projects))
+
+    projects = Map.put(projects, "web", Map.put(web, :dir, "web_origin"))
+    mains = mains(%{ctx | mains_opts: Keyword.put(ctx.mains_opts, :projects, projects)})
+    assert {:ok, _} = level(ctx, mains)
+    assert {:ok, %{path: path}} = await(fn -> ready(mains, "web") end, 15_000)
+    assert path == Checkout.path(ctx.dir, "web_origin")
+    assert head(ctx, path) == head(ctx, web.origin)
+  end
+
+  # F-229 (`Checkout.tla`'s `OwnCheckout`, `Break_Checkout_NoOwner`): a later config on the same
+  # home names a new project whose origin has the name of an earlier project's; the earlier
+  # one's row holds the directory, so `Mains` is refused, and the earlier clone is untouched.
+  test "a project whose path another project's row holds is refused by Mains", ctx do
+    mains = mains(ctx)
+    assert {:ok, _} = level(ctx, mains)
+    GenServer.stop(mains)
+    before = head(ctx, ctx.checkout)
+
+    fresh = %{ctx.project | origin: other_origin(ctx)}
+    opts = Keyword.merge(ctx.mains_opts, projects: %{"fresh" => fresh}, mains: %{})
+    Process.flag(:trap_exit, true)
+
+    assert {:error, {:checkout_taken, path, "app"}} = Mains.start_link(opts)
+    assert path == ctx.checkout
+    assert head(ctx, ctx.checkout) == before
+
+    # Its own directory, by `dir:`, is its own; the earlier project's row stays its own too.
+    opts = Keyword.put(opts, :projects, %{"fresh" => Map.put(fresh, :dir, "fresh_origin")})
+    mains = mains(%{ctx | mains_opts: opts})
+    assert {:ok, %{path: path}} = await(fn -> ready(mains, "fresh") end, 15_000)
+    assert path == Checkout.path(ctx.dir, "fresh_origin")
+    assert head(ctx, path) == head(ctx, fresh.origin)
+    GenServer.stop(mains)
+    assert {:ok, _} = level(ctx, mains(ctx))
+  end
+
+  # F-229 (`Checkout.tla`'s `OriginOK`, `Break_Checkout_NoOriginCheck`): a directory at the
+  # project's path whose `origin` is another repository is never taken: it reads `failed`,
+  # refuses a start, and is neither pulled nor changed.
+  test "a directory whose origin is another repository reads failed, origin_mismatch", ctx do
+    other = other_origin(ctx)
+    git!(ctx, ["clone", "-q", "--branch", "main", "--origin", "origin", other, ctx.checkout])
+    before = head(ctx, ctx.checkout)
+    mains = mains(ctx)
+
+    assert {:ok, %{reason: reason}} = await(fn -> state(mains, "failed") end)
+    assert reason =~ "origin_mismatch" and reason =~ other
+
+    assert {:refused, {:origin_mismatch, path, ^other}} =
+             Mains.start_main(mains, "app", "app-epic", "Go.")
+
+    assert path == ctx.checkout
+
+    # A landing owes a pull; the read it starts reads the origin first, and goes no further.
+    commit!(ctx, ctx.origin, "landed")
+    {:ok, %{updated_at: at}} = Mains.checkout(mains, "app")
+    assert :ok = Mains.landed(mains, "app")
+
+    assert {:ok, _} =
+             await(fn ->
+               case state(mains, "failed") do
+                 {:ok, %{updated_at: now}} = ok when now > at -> ok
+                 other -> {:not_yet, other}
+               end
+             end)
+
+    assert head(ctx, ctx.checkout) == before
+    assert File.exists?(Path.join(ctx.checkout, ".git"))
+  end
+
   defp ready(mains, project) do
     case Mains.checkout(mains, project) do
       {:ok, %{state: "ready"} = row} -> {:ok, row}
-      other -> other
+      other -> {:not_ready, other}
     end
   end
 

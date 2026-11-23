@@ -94,7 +94,11 @@ Each word below names one thing, and the design, the code and the views use it o
   `<home>/checkouts/<dir>`, `dir` being the project's `dir:` or by default its repository's
   name (F-156), so a `CLAUDE.md` that imports a sibling repository's file by relative path
   finds it among the checkouts as among the person's own clones; made once from the project's
-  repository. Two projects never name one directory. A project's
+  repository. Two projects never name one directory, and a directory has one owner on a home
+  (F-229): a project whose path a checkout row of another project holds, from an earlier
+  config, is refused, and a directory there whose `origin` is not the project's is never taken,
+  but reads `failed` for a person to decide. `dir:` is how two origins of one name get a
+  directory each. A project's
   repository is the remote its stacks land on (its `origin`), never the person's own clone, so
   the pull after a landing pulls what landed. The main session runs
   there on trunk, and every worktree of the project is made from it. The framework never runs
