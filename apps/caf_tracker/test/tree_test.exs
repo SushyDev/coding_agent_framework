@@ -31,6 +31,24 @@ defmodule CodingAgentFramework.Tracker.TreeTest do
     assert s == %{"stream:h" => :unread}
   end
 
+  test "the tree names each session's transcript, nil before it has one, and each subagent's id" do
+    m = Map.merge(@main, %{status: "running", session_id: "s0"})
+    s = %{id: 2, host: "h", name: "n", kind: "main", parent: nil, project: "b", account: "w"}
+    s = Map.merge(s, %{status: "running", session_id: nil})
+    sub = %{agent_id: "g1", tool_use_id: "t1", type: "x", state: :ended, tokens: 3}
+    t = %{account: "w", session_id: "s0", path: "/p/s0.jsonl", subagents: %{"t1" => sub}}
+
+    view = %{
+      {"h", "agents"} => %{agents: [%{key: 1, row: m}, %{key: 2, row: s}]},
+      {"h", "transcripts"} => %{transcripts: [%{key: 1, row: t}]}
+    }
+
+    assert %{agents: [%{name: "m"} = a, %{name: "n"} = b]} = Tree.agents(view)
+    assert a.transcript == "/p/s0.jsonl"
+    assert [%{agent_id: "g1", type: "x"}] = a.subagents
+    assert b.transcript == nil
+  end
+
   test "a delegate that ended keeps its place, as ended; a starting one says so" do
     m = Map.merge(@main, %{status: "declared", session_id: nil})
 

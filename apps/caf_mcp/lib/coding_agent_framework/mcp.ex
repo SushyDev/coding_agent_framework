@@ -345,8 +345,8 @@ defmodule CodingAgentFramework.MCP do
     %{
       name: "agents",
       description:
-        "The tree: each agent's name, kind, project, parent, account, state, waits and " <>
-          "subagents. A delegate that ended shows only with all: true.",
+        "The tree: each agent's name, kind, project, parent, account, state, waits, " <>
+          "transcript path (nil before it has one) and subagents (each with its agent_id). A delegate that ended shows only with all: true.",
       inputSchema: %{type: "object", properties: %{all: %{type: "boolean"}}}
     },
     %{
