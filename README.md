@@ -346,7 +346,9 @@ Built, each from a checked model in `model/tla/`:
 - a move's resume has a deadline (F-211, against `Move.tla`'s `ResumeEnds`): a flag check that
   stays unknown is asked again until `resume_wait` (5 min), then taken as a refusal, so every
   move's resume ends moved, back or left down; and every other unknown of that resume (the
-  app's launch, the word, the first line) under the same deadline (F-212).
+  app's launch, the word, the first line) under the same deadline (F-212);
+- the agents' instructions say to compile with `--force` in both environments after merging
+  `main`, since a stale struct type in `_build` fails the gates (F-213).
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

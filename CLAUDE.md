@@ -43,6 +43,9 @@ recommendation.
   `MIX_ENV=test mix caf.deps` (each app declares, directly,
   every umbrella app it uses, and uses every one it declares), and `bin/check-model` for the
   fast configurations.
+- **After merging or rebasing `main`**, run `mix compile --force` and `MIX_ENV=test mix compile
+  --force` before the gates. `_build` can keep a struct's old type, and the warning it gives is
+  fatal under `--warnings-as-errors`.
 - **Never** kill a process by pattern, use `git stash`, push, or touch a tmux server, dtach socket
   or Claude config directory that is not your own test's.
 
