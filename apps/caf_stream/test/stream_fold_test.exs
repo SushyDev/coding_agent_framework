@@ -281,7 +281,7 @@ defmodule CodingAgentFramework.StreamFoldTest do
       map(id, &%{"type" => "control_cancel_request", "request_id" => &1}),
       map(
         id,
-        &%{"type" => "control_response", "isReplay" => true, "response" => %{"request_id" => &1}}
+        &%{"type" => "control_response", "response" => %{"request_id" => &1}}
       ),
       constant(%{
         "type" => "assistant",

@@ -184,7 +184,9 @@ defmodule CodingAgentFramework.ClaudeCLI do
   @doc """
   The argv and environment of a headless delegate on `account`: `-p` with stream-json in and
   out, `--verbose` (without it `-p` with stream-json output exits at once),
-  `--replay-user-messages` and `--permission-prompts host`, then `--session-id <id>` for a start
+  `--replay-user-messages`, `--permission-prompts host` and `--permission-prompt-tool stdio`
+  (without it the pinned Claude Code denies what would prompt, `permission_denied`, and sends
+  no `can_use_tool`, F-221), then `--session-id <id>` for a start
   or `--resume <id>` in its place. No prompt: the first message is a line on stdin.
 
   Options: `:claude`, `:model`, `:env`, `:tool_timeout`, `:mcp` and `:effort` as for `session/3`,
@@ -195,9 +197,10 @@ defmodule CodingAgentFramework.ClaudeCLI do
       iex> {:ok, %{argv: argv}} = CodingAgentFramework.ClaudeCLI.headless(account,
       ...>   claude: "/run/bin/claude", model: "opus", resume: "s1", env: env,
       ...>   tool_timeout: 3_600_000)
-      iex> Enum.take(argv, -9)
+      iex> Enum.take(argv, -11)
       ["--input-format", "stream-json", "--output-format", "stream-json",
-       "--replay-user-messages", "--permission-prompts", "host", "--resume", "s1"]
+       "--replay-user-messages", "--permission-prompts", "host",
+       "--permission-prompt-tool", "stdio", "--resume", "s1"]
   """
   @spec headless(Account.t() | term, keyword) :: {:ok, launch} | {:refused, term}
   def headless(%Account{config_dir: "/" <> _} = account, opts) do
@@ -220,7 +223,8 @@ defmodule CodingAgentFramework.ClaudeCLI do
             "--output-format",
             "stream-json"
           ] ++
-          ["--replay-user-messages", "--permission-prompts", "host" | id]
+          ["--replay-user-messages", "--permission-prompts", "host"] ++
+          ["--permission-prompt-tool", "stdio" | id]
 
       {:ok, %{argv: argv, env: env}}
     end

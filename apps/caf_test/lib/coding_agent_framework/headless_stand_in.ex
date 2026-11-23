@@ -9,7 +9,7 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     (`:at_start`, only for a test that needs it so and says why), or never (`:never`);
   - for a user line: its replay (`isReplay` and its uuid), then `assistant`, a
     `rate_limit_event` and a `result` naming the uuid, whose text is `done <uuid>`. A message
-    whose text starts with `ask` (after a `From <name> (<kind>): ` sender line, F-170) first asks a `can_use_tool` permission (`request_id`
+    whose text starts with `ask` (after a `From <name> (<kind>): ` sender line, F-170) first asks a `can_use_tool` permission when launched with `--permission-prompt-tool stdio`, and is denied at once (`permission_denied`, no request) without it, as the real one is (F-221) (`request_id`
     `req-<uuid>`), and ends its turn when the answer comes; so does every message while a file
     `<dir>/hold` exists; the answer is replayed. While a file `<dir>/limit` exists (its text a
     reset in Unix seconds), every message hits a usage limit as Claude Code 2.1.322 does
@@ -88,9 +88,13 @@ defmodule CodingAgentFramework.HeadlessStandIn do
     if [ "$1 $2" = "auth status" ]; then
       printf '{"loggedIn": true, "authMethod": "stand_in", "loginExpiresAt": null}\n'; exit 0
     fi
-    sid='' args=("$@")
+    sid='' args=("$@") prompt_tool=''
     while [ $# -gt 0 ]; do
-      case $1 in --session-id|--resume) sid=$2; shift 2 ;; *) shift ;; esac
+      case $1 in
+        --session-id|--resume) sid=$2; shift 2 ;;
+        --permission-prompt-tool) prompt_tool=$2; shift 2 ;;
+        *) shift ;;
+      esac
     done
     : 2>/dev/null > "DIR/pids/$$" || exit 0
     [ -n "$sid" ] && printf '%s\n' "${args[@]}" > "DIR/argv/$sid"
@@ -128,6 +132,12 @@ defmodule CodingAgentFramework.HeadlessStandIn do
           [ -e "DIR/hold" ] && line='"content":"ask'
           case $line in
             *'"content":"ask'*|*'"content":"From '*'): ask'*)
+              # As the pinned Claude Code does: with no stdio prompt tool, what would prompt is
+              # denied at once, and no can_use_tool is sent (F-221).
+              if [ "$prompt_tool" != stdio ]; then
+                ev '{"type":"system","subtype":"permission_denied","tool_name":"Bash","tool_use_id":"tu-'"$u"'","message":"Claude requested permissions to use Bash, but you have not granted it yet.","session_id":"'"$sid"'"}'
+                turn_end "$u"; continue
+              fi
               pending="req-$u" asker=$u
               ev '{"type":"control_request","request_id":"'"$pending"'","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"true"},"tool_use_id":"tu-'"$u"'"}}' ;;
             *'"content":"self'*|*'"content":"From '*'): self'*)
@@ -159,7 +169,7 @@ defmodule CodingAgentFramework.HeadlessStandIn do
         *'"type":"control_response"'*)
           id=$(field request_id); rec "answer $id"
           if [ "$id" = "$pending" ]; then
-            ev '{"type":"control_response","isReplay":true,"response":{"subtype":"success","request_id":"'"$id"'"}}'
+            ev '{"type":"control_response","response":{"subtype":"success","request_id":"'"$id"'"}}'
             pending=''; turn_end "$asker"
           fi ;;
         *'"subtype":"interrupt"'*)

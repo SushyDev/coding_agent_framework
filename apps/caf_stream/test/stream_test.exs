@@ -95,6 +95,25 @@ defmodule CodingAgentFramework.StreamTest do
     assert HeadlessStandIn.taken(ctx.dir) == ["message #{u1}", "message u-marked"]
   end
 
+  # F-221: without `--permission-prompt-tool stdio`, the pinned Claude Code denies what would
+  # prompt and sends no `can_use_tool`, so nothing reaches the inbox. The stand-in does the same,
+  # so a launch that loses the flag fails here.
+  test "without the stdio prompt tool, a permission is denied and none is held", ctx do
+    %{argv: argv} = launch = stand_in(ctx, session_id: "d9")
+
+    assert ["--permission-prompt-tool", "stdio"] ==
+             argv -- (argv -- ["--permission-prompt-tool", "stdio"])
+
+    s = hold!(ctx, "d9", %{launch | argv: argv -- ["--permission-prompt-tool", "stdio"]})
+    {:ok, %{uuid: u}} = Stream.write(s, "d9", {:message, "ask once"})
+    row = row!(ctx, s, &(&1.idle and &1.messages[u] != nil))
+    assert row.requests == %{}
+
+    {:ok, %{bytes: bytes}} = Stream.log(s, "d9", 0)
+    assert bytes =~ ~s("subtype":"permission_denied")
+    refute bytes =~ "can_use_tool"
+  end
+
   test "a permission request is answered once, by its id; an interrupt cancels one", ctx do
     s = hold!(ctx, "d5")
     {:ok, %{uuid: u}} = Stream.write(s, "d5", {:message, "ask once"})
