@@ -382,7 +382,10 @@ Built, each from a checked model in `model/tla/`:
   in with the signing-key scope and adds the home's key. Every step checks first and skips what is
   done, so no device login or key is repeated, and `bin/caf-example` fetches stale deps itself;
 - the store's bound tests allow 500 ms past the 2 s bound, which holds on a loaded host (F-224);
-- a headless session's viewer, `tail -F` of its log, ends with the session (F-225).
+- a headless session's viewer, `tail -F` of its log, ends with the session (F-225);
+- a restart no longer takes the tree down when an interactive delegate's report was taken
+  (F-222): `Delegates` read the turns after the report with a clause that matched only an
+  unchanged state, and a restart's first read changes it.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
