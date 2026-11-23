@@ -29,6 +29,15 @@ defmodule CodingAgentFramework.Mains do
   is a state a view shows; the read after a person cleans the checkout pulls. A clone that
   failed is made again only at the next `landed/2` or start.
 
+  **A checkout's directory has one owner on a home** (F-229; `Checkout.tla`'s `OwnCheckout`).
+  A start of `Mains` is refused `{:checkout_taken, path, other_project}` when a row of
+  `Mains.Table` of another project, from an earlier config on this home, holds a project's
+  path; the project's own row is its own. A directory at the path is taken as the checkout only
+  when its `origin` is the project's: each read, and each start in it, reads it first, and
+  another one reads `failed` with reason `{:origin_mismatch, path, found}`, refuses a start so,
+  and is never cloned over, pulled or changed. A person decides. A project's `dir:` gives two
+  origins of one name a directory each.
+
   **Main sessions** are agent rows of kind `main` in `Sessions`. The ones the app names
   (`mains:`, name to project) are declared there before `start_link/1` returns, so the tree
   holds them and each can start its first delegate. `start_main/5` starts one.
@@ -158,7 +167,8 @@ defmodule CodingAgentFramework.Mains do
   caller waits,
   default 300 000 ms; the start goes on past it). Answers `{:ok, %{name, account,
   session_id}}`; `{:refused, reason}`: `{:running, name}`, `{:unknown_project, project}`,
-  `{:checkout, state}` while the checkout is not made, `{:lease, why}`, or `Sessions`' refusal
+  `{:checkout, state}` while the checkout is not made, `{:origin_mismatch, path, found}` when
+  the directory there is a clone of another origin (F-229), `{:lease, why}`, or `Sessions`' refusal
   (a brief longer than a launch's argument carries goes as a pointer to its file,
   `Mailbox.launch/4`, F-155); or `{:unknown, reason}` while its row
   waits, as on a startup dialog (`{:dialog, kind}`). Every usable account limited, it answers
@@ -325,8 +335,8 @@ defmodule CodingAgentFramework.Mains do
 
     with {:ok, run} <- Programs.take(s.programs, [:git, :env]),
          {:ok, intake} <- Intake.reader(opts),
-         {:ok, projects} <- projects(s.home, s.projects),
          {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)),
+         {:ok, projects} <- projects(s.home, s.projects, Table.rows(db, s.host)),
          {:ok, starts} <- Starts.open(Keyword.fetch!(opts, :db)),
          {:ok, agents} <- Agents.open(Keyword.fetch!(opts, :sessions_db), s.host) do
       s =
@@ -381,7 +391,7 @@ defmodule CodingAgentFramework.Mains do
     end
   end
 
-  defp projects(home, projects) do
+  defp projects(home, projects, rows) do
     checked =
       Enum.reduce_while(projects, {:ok, %{}}, fn {name, data}, {:ok, acc} ->
         p = project(home, name, data)
@@ -395,13 +405,21 @@ defmodule CodingAgentFramework.Mains do
         end
       end)
 
-    # Two projects in one directory would share a checkout (F-156).
-    with {:ok, projects} <- checked do
-      case Checkout.same_dir(projects) do
-        nil -> {:ok, projects}
-        {dir, names} -> {:refused, {:same_dir, dir, names}}
-      end
+    # Two projects in one directory would share a checkout (F-156), and so would a project and
+    # the one of an earlier config on this home whose row holds its path (F-229).
+    with {:ok, projects} <- checked,
+         nil <- Checkout.same_dir(projects) |> same_dir(),
+         nil <- Enum.find_value(Enum.sort(projects), &taken(rows, &1)) do
+      {:ok, projects}
     end
+  end
+
+  defp same_dir(nil), do: nil
+  defp same_dir({dir, names}), do: {:refused, {:same_dir, dir, names}}
+
+  defp taken(rows, {name, p}) do
+    if other = Checkout.owner(rows, name, p.repo),
+      do: {:refused, {:checkout_taken, p.repo, other}}
   end
 
   defp declare(s, mains) do
@@ -1066,8 +1084,10 @@ defmodule CodingAgentFramework.Mains do
   # A read, and when a pull is owed (Fetch, Check, Merge): only from a clean checkout on trunk
   # that is not ahead, read before the fetch and again after it; git's `--ff-only` refuses a
   # local commit, and an edit made since that it would overwrite, and carries any other.
+  # First of all, its origin: a directory of another origin is never repaired, read or pulled.
   defp read(s, p, owed?) do
-    with :ok <- repair(s, p) |> failed(:repair),
+    with :ok <- origin(s, p) |> failed_as_is(),
+         :ok <- repair(s, p) |> failed(:repair),
          {:ok, first} <- reading(s, p) do
       cond do
         not owed? ->
@@ -1090,6 +1110,32 @@ defmodule CodingAgentFramework.Mains do
 
   defp failed(:ok, _what), do: :ok
   defp failed({_, reason}, what), do: {:failed, {what, reason}}
+
+  defp failed_as_is(:ok), do: :ok
+  defp failed_as_is({_, reason}), do: {:failed, reason}
+
+  # F-229 (`Checkout.tla`'s OriginOK): the directory at the project's path is taken as its
+  # checkout only when its `origin` is the project's. Another is a person's to decide: the
+  # framework never clones over it or changes it. `{:origin_mismatch, path, found}`, `found`
+  # nil when it names no origin.
+  defp origin(s, p) do
+    found =
+      case git(s, p, {:origin, p.repo}, @git) do
+        {:ok, out} -> {:ok, String.trim(out)}
+        {:refused, {:git, 1, _}} -> {:ok, nil}
+        other -> other
+      end
+
+    case found do
+      {:ok, url} ->
+        if Checkout.same_origin?(p.origin, url),
+          do: :ok,
+          else: {:refused, {:origin_mismatch, p.repo, url}}
+
+      {_, reason} ->
+        {:refused, {:origin, reason}}
+    end
+  end
 
   defp merge(_s, _p, %{state: "ready"} = r), do: {:ok, {:read, r, :pulled}}
 
@@ -1165,10 +1211,14 @@ defmodule CodingAgentFramework.Mains do
   defp known(:error, project), do: {:refused, {:unknown_project, project}}
   defp known(ok, _project), do: ok
 
-  # Only the rename puts a checkout at its path, so one there is whole (`WholeCheckout`).
+  # Only the rename puts a checkout at its path, so one there is whole (`WholeCheckout`); and
+  # it is the project's own only when its origin is (F-229), read now, not from the last read,
+  # so a start right after Mains' own start never runs in another origin's clone.
   defp made(s, project) do
+    p = s.projects[project]
+
     cond do
-      File.dir?(s.projects[project].repo) -> :ok
+      File.dir?(p.repo) -> origin(s, p)
       row = Table.get(s.db, s.host, project) -> {:refused, {:checkout, row.state}}
       true -> {:refused, {:checkout, "absent"}}
     end

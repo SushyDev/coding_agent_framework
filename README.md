@@ -392,7 +392,9 @@ Built, each from a checked model in `model/tla/`:
   interactive delegate, `manual` for a headless one, whatever the account's own default;
 - a permission dialog no reading names reaches a person as a menu (F-228);
 - the end-to-end run's steps 1, 2, 3, 5 and 14 run as a suite against the real Claude Code,
-  `mix test.real`, outside the gates (F-223); it found a project taking another's checkout.
+  `mix test.real`, outside the gates (F-223); it found a project taking another's checkout;
+- a project never takes another project's checkout (F-229): a path another project's row holds
+  is refused, and a directory whose `origin` is another repository reads `failed`.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
