@@ -20,6 +20,9 @@ defmodule CodingAgentFramework.Screen.Reading.V2_1_322 do
   A menu no rule names (F-198's capture of "Teach auto mode about your environment?") is drawn
   under a rule of `─`, above the box's named rule: its title two columns in, a line under it,
   its numbered options with the marker two columns in, and "Enter to confirm · Esc to cancel".
+  A permission dialog no reading names (F-228's "Allow this read outside the working
+  directories?") is drawn the same way in the box's place, its tool and input between rules of
+  `╌`, its footer "Esc to cancel · Tab to amend", with the box's named rule under it.
   The box under it may hold a prompt suggestion, drawn dim (`ESC[2m` up to `ESC[0m`) after the
   prompt mark and its no-break space, as the placeholder is.
   """
@@ -37,7 +40,8 @@ defmodule CodingAgentFramework.Screen.Reading.V2_1_322 do
       wait: ~r/\AContinuing automatically at (.+) · Esc to cancel\z/u,
       exited: "Resume this session with:",
       resume: "claude --resume ",
-      menu: %{footer: "Enter to confirm · Esc to cancel"},
+      # A menu's footer: most dialogs', and a permission dialog's that offers to amend (F-228).
+      menu: %{footers: ["Enter to confirm · Esc to cancel", "Esc to cancel · Tab to amend"]},
       dialogs: [
         %{
           kind: :trust,

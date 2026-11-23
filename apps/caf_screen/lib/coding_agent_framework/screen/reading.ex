@@ -46,7 +46,7 @@ defmodule CodingAgentFramework.Screen.Reading do
           wait: Regex.t(),
           exited: String.t(),
           resume: String.t(),
-          menu: %{footer: String.t()},
+          menu: %{footers: [String.t()]},
           dialogs: [dialog]
         }
 

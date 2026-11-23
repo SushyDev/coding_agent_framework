@@ -81,6 +81,32 @@ defmodule CodingAgentFramework.ScreenTest do
     # A menu no rule names, above the box (F-198), with the marker on 1 and, after Down, on 2.
     "menu" => Map.put(@teach, :selected, "Yes"),
     "menu-down" => Map.put(@teach, :selected, "Not now"),
+    # A permission dialog no reading names, drawn in the box's place (F-228): a menu to a person,
+    # its tool and its question in the detail, the `╌` rules around the tool left out.
+    "permission-read-outside" => %{
+      state: :dialog,
+      kind: :menu,
+      title: "Read outside the working directories",
+      detail: [
+        "Read(/home/user/notes/hand-off.md)",
+        "Auto mode and the sandbox read outside the working directories without asking. Yes or No " <>
+          "answers for this read; the rest is for later reads. Block: the file tools",
+        "refuse reads outside the working directories in every project. The sandbox doesn't " <>
+          "enforce it on this machine (off, filesystem rules relaxed, managed read-path lock",
+        "on, or working directory name has glob characters). Auto mode asks before each shell " <>
+          "command it can't check. To undo, remove",
+        "permissions.blockReadsOutsideWorkingDirectories from your user settings; file tools " <>
+          "follow next session, sandboxed commands at once.",
+        "Allow this read outside the working directories?"
+      ],
+      options: [
+        "Yes, and keep allowing any reads outside the working directories",
+        "No, and block reads outside the working directories from now on",
+        "No, and ask again next time",
+        "Yes, but ask again next time"
+      ],
+      selected: "Yes, and keep allowing any reads outside the working directories"
+    },
     # A dim prompt suggestion is no typed text; without its colors nothing says it is one.
     "suggestion" => %{state: :idle, box: :empty},
     "suggestion-plain" => %{state: :idle, box: {:text, "yes, run the end-to-end rerun"}}
@@ -170,9 +196,12 @@ defmodule CodingAgentFramework.ScreenTest do
   end
 
   describe "a fixture with one change" do
-    test "a dialog with an unknown question is unrecognized" do
+    # F-228: a permission dialog whose question no reading names is a menu to a person, not an
+    # unrecognized screen that leaves the agent reading as idle.
+    test "a permission dialog with an unknown question is a menu to a person" do
       screen = edit("permission-dialog.txt", "Do you want to proceed?", "Do you want to edit?")
-      assert Screen.read(screen, @release) == {:unknown, {:unrecognized, @release}}
+      assert {:ok, %{state: :dialog, kind: :menu, detail: detail}} = Screen.read(screen, @release)
+      assert List.last(detail) == "Do you want to edit?"
     end
 
     test "a dialog with an unknown footer is unrecognized" do
