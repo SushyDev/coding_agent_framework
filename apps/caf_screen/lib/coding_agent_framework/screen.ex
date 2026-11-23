@@ -248,15 +248,15 @@ defmodule CodingAgentFramework.Screen do
   # nothing but blank lines under it before the box's upper rule or the screen's end. The footer
   # makes it a menu, so a numbered list in the agent's own output is never one; with the footer
   # and anything else in that shape, the screen is unrecognized.
-  defp menu(lines, %{menu: %{footer: footer}} = reading) do
+  defp menu(lines, %{menu: %{footers: footers}} = reading) do
     top = box_top(lines, reading)
 
     at =
       lines
       |> Enum.with_index()
-      |> Enum.filter(fn {line, _} -> String.starts_with?(String.trim_leading(line), footer) end)
+      |> Enum.filter(fn {line, _} -> footer?(line, footers) end)
       |> Enum.map(&elem(&1, 1))
-      |> Enum.filter(&closed?(lines, &1, top))
+      |> Enum.filter(&closed?(lines, &1, top, reading))
       |> List.last()
 
     with at when is_integer(at) <- at || :none,
@@ -268,14 +268,20 @@ defmodule CodingAgentFramework.Screen do
     end
   end
 
-  # Under a menu's footer: blank lines, then the box's own upper rule or the screen's end. A
-  # rule the agent's output prints (a capture of a menu, say) is not the box's.
-  defp closed?(lines, at, top) do
+  defp footer?(line, footers),
+    do: Enum.any?(footers, &String.starts_with?(String.trim_leading(line), &1))
+
+  # Under a menu's footer: blank lines, then the box's own upper rule or the screen's end, or the
+  # box's named rule as the screen's last line: a dialog drawn in the box's place, with no box
+  # under it (F-228's capture of "Allow this read outside the working directories?"). A rule the
+  # agent's output prints (a capture of a menu, say) is not the box's.
+  defp closed?(lines, at, top, reading) do
     case lines
          |> Enum.with_index()
          |> Enum.drop(at + 1)
          |> Enum.drop_while(&(elem(&1, 0) == "")) do
       [] -> true
+      [{line, i}] -> i == top or Regex.match?(reading.named_rule, line)
       [{_, i} | _] -> i == top
     end
   end
@@ -313,7 +319,8 @@ defmodule CodingAgentFramework.Screen do
          state: :dialog,
          kind: :menu,
          title: String.trim(title),
-         detail: for(line <- detail, line != "", do: String.trim(line)),
+         # A dialog's inner rules of `╌` (around the tool and its input) are no text of it.
+         detail: for(line <- detail, line != "", not rule?(line, "╌"), do: String.trim(line)),
          options: labels,
          selected: selected
        }}

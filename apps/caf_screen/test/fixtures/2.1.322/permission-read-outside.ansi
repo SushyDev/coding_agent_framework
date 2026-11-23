@@ -1,0 +1,18 @@
+[38;5;153m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m [1m[38;5;153mRead outside the working directories[0m
+[38;5;239m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[39m Read(/home/user/notes/hand-off.md)
+[38;5;239m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[39m [38;5;246mAuto mode and the sandbox read outside the working directories without asking. Yes or No answers for this read; the rest is for later reads. Block: the file tools [39m
+ [38;5;246mrefuse reads outside the working directories in every project. The sandbox doesn't enforce it on this machine (off, filesystem rules relaxed, managed read-path lock [39m
+ [38;5;246mon, or working directory name has glob characters). Auto mode asks before each shell command it can't check. To undo, remove [39m
+ [38;5;246mpermissions.blockReadsOutsideWorkingDirectories from your user settings; file tools follow next session, sandboxed commands at once.[39m
+
+ Allow this read outside the working directories?
+ [38;5;153m❯[39m [38;5;246m1. [38;5;153mYes, and keep allowing any reads outside the working directories[39m
+   [38;5;246m2. [39mNo, and block reads outside the working directories from now on
+   [38;5;246m3. [39mNo, and ask again next time
+   [38;5;246m4. [39mYes, but ask again next time
+
+ [38;5;246mEsc to cancel · Tab to amend[39m
+[38;5;244m─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── app-main ─

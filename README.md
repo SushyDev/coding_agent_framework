@@ -389,7 +389,8 @@ Built, each from a checked model in `model/tla/`:
 - `--setup` refuses when it has no terminal, and the example console sets the run's aliases
   itself (F-226);
 - each role's permission mode is pinned by the config (F-227): `auto` for a main session and an
-  interactive delegate, `manual` for a headless one, whatever the account's own default.
+  interactive delegate, `manual` for a headless one, whatever the account's own default;
+- a permission dialog no reading names reaches a person as a menu (F-228).
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

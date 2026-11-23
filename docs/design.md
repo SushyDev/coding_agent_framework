@@ -2159,10 +2159,14 @@ reading for delegates:
 A main session stays interactive. `Screen` reads only a main session's screen: its dialogs by
 label, a typed command's result line, and whether its input box is empty before a typed write.
 A dialog no rule names is still read when it is a numbered menu (F-198): two or more options
-numbered from 1 in a row, the marker on one, under a title and a rule, and Claude Code's footer
-"Enter to confirm · Esc to cancel", drawn in place of the box or above it. Only with that
-footer is it a menu, so a numbered list in the agent's own output never reads as one; a dialog
-a rule names (trust, imports, the usage limit's menu) keeps its rule. A run drawn dim on the
+numbered from 1 in a row, the marker on one, under a title and a rule, and one of Claude Code's
+menu footers, "Enter to confirm · Esc to cancel" or a permission dialog's "Esc to cancel · Tab
+to amend" (F-228), drawn in place of the box or above it; drawn in its place, the box's named rule
+may be all that follows it, and the `╌` rules inside it are no text. So a permission dialog no
+reading names (a read outside the working directories, F-228) reaches a person as a menu, not an
+unread screen that leaves the agent idle. Only with such a footer is it a menu, so a
+numbered list in the agent's own output never reads as one; a dialog a rule names (trust,
+imports, the usage limit's menu) keeps its rule. A run drawn dim on the
 input box's line (`ESC[2m` up to the reset) is a prompt suggestion, never typed text: a box
 holding only a suggestion is empty, so the pane is captured with its escapes
 (`capture-pane -e`). Only the screen sees a suggestion; what a person types and sends reaches

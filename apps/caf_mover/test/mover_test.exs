@@ -488,7 +488,15 @@ defmodule CodingAgentFramework.MoverTest do
 
       assert {:ok, %{act: act, to: "spare"}} = move(ctx, "d1")
       assert {:ok, _} = row_when(ctx, "d1", &(&1.move == "resuming"))
-      assert {:ok, _} = some(fn -> MailboxGate.answered(gate) end)
+      # Asked again on each cue before the deadline: wait for the asks the end counts, so passing
+      # the deadline cannot race them (it came first under load, F-227 and F-228).
+      assert {:ok, _} =
+               await(fn ->
+                 Mover.cue(mover(), %{topic: "sessions"})
+                 n = length(MailboxGate.answered(gate))
+                 if n >= 3, do: {:ok, n}, else: {:not_yet, n}
+               end)
+
       past_deadline(ctx)
 
       assert {:ok, %{status: "stopped", account: "work"}} =
