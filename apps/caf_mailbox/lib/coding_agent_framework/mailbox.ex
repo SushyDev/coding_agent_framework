@@ -117,6 +117,8 @@ defmodule CodingAgentFramework.Mailbox do
   @take_bound 10_000
   # The Inlet's typed write: its reads, the keys, and the box seen before the Enter.
   @inlet 10_000
+  # A typed command's: its reads, its keys, and its result line (F-233).
+  @reload 15_000
   # The sender of a notice and of the words to go on; no agent has this name, as an agent's
   # name holds its project's.
   @framework "framework"
@@ -474,6 +476,24 @@ defmodule CodingAgentFramework.Mailbox do
   defp transcript?(topic), do: String.ends_with?(topic, ":waiters")
 
   defp store(mailbox, row), do: call(mailbox, {:store, row}, [])
+
+  @doc """
+  Types `/reload-plugins` into interactive agent `name`'s session and reads its result line
+  (F-233, `Inlet.reload_plugins/3`): the operator's act, which reloads a changed plugin into a
+  running session. It is checked as a typed message is: the turn is read in the write's own
+  step, from the agent's row, its session file and its waiter, so it goes only where a message
+  could be typed, and never twice. The `Inlet` works in a task, so this process waits on no
+  pane. Answers `{:ok, :reloaded}`, or refused `:headless` (a headless delegate has no screen,
+  and loads its plugins at its next start), `{:no_agent, name}`, `:no_inlet` (no typed
+  transport), or as the `Inlet` answers. Option `timeout:` (ms, 20 000 by default).
+
+      Mailbox.reload_plugins(mailbox, "app-main")
+      #=> {:ok, :reloaded}
+  """
+  def reload_plugins(mailbox, name, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, @reload + @step)
+    call(mailbox, {:reload_plugins, name, timeout - @step}, timeout: timeout)
+  end
 
   defp call(mailbox, request, opts) do
     timeout = Keyword.get(opts, :timeout, @step)
@@ -836,6 +856,35 @@ defmodule CodingAgentFramework.Mailbox do
   def handle_call({:answer_to, key}, _from, s),
     do: {:reply, shown(Table.answer(s.db, key) || {:refused, :no_answer}), s}
 
+  # The reload's checks read here, its write in a task that answers the caller itself: the
+  # turn read again in the Inlet's step, as a typed row's is (`type_line/4`).
+  def handle_call({:reload_plugins, name, timeout}, from, s) do
+    row = s.agents |> Agents.get(name) |> Agents.unheld(div(now(), 1000))
+
+    cond do
+      row == nil ->
+        {:reply, {:refused, {:no_agent, name}}, s}
+
+      Agents.headless?(row) ->
+        {:reply, {:refused, :headless}, s}
+
+      s.typed == nil ->
+        {:reply, {:refused, :no_inlet}, s}
+
+      true ->
+        reads = Map.take(s, [:agents, :typed, :waiter])
+        turn = fn -> turn_now(reads, name, row.pid) end
+        opts = [release: row.release, turn: turn, timeout: timeout]
+        inlet = s.typed.inlet
+
+        Task.start(fn ->
+          GenServer.reply(from, guarded(fn -> Inlet.reload_plugins(inlet, name, opts) end))
+        end)
+
+        {:noreply, s}
+    end
+  end
+
   def handle_call({:reply, id}, _from, s) do
     case Table.get(s.db, id) do
       %{uuid: uuid} ->
@@ -1085,18 +1134,17 @@ defmodule CodingAgentFramework.Mailbox do
   # restart policy. `hand_on` answers its part's outcome; a raise, throw or exit in it is an
   # unknown answer, since the write may have gone in.
   defp hand_on(s, m, hand_on, after_hand) do
-    task =
-      Task.async(fn ->
-        try do
-          hand_on.()
-        rescue
-          e -> {:unknown, {:raised, e.__struct__}}
-        catch
-          kind, _ -> {:unknown, {kind, :hand_on}}
-        end
-      end)
-
+    task = Task.async(fn -> guarded(hand_on) end)
     put_in(s.hands[task.ref], {m, after_hand})
+  end
+
+  # A write that raised may have gone in: unknown, never refused.
+  defp guarded(write) do
+    write.()
+  rescue
+    e -> {:unknown, {:raised, e.__struct__}}
+  catch
+    kind, _ -> {:unknown, {kind, :hand_on}}
   end
 
   defp settled(_s, _m, :keep), do: :ok

@@ -156,6 +156,20 @@ defmodule CodingAgentFramework.MailboxTypedTest do
     assert {:ok, %{status: "delivered"}} = until(ctx, one, &(&1.status == "delivered"))
   end
 
+  # F-233: the operator's reload goes in as a typed row does, its turn read in the write's step;
+  # a headless delegate, or a name with no row, takes nothing.
+  test "reloads an idle main session's plugins, and refuses a headless delegate", ctx do
+    main(ctx)
+    assert {:ok, :reloaded} = Mailbox.reload_plugins(ctx.mailbox, "main")
+    assert ScreenStandIn.submitted(ctx.dir) == ["/reload-plugins"]
+
+    d1 = %{host: "test", name: "d1", socket: "d1", account: "work", cwd: ctx.dir}
+    Sessions.Table.starting(ctx.table, Map.merge(d1, %{role: "delegate", resume: nil}))
+    assert {:refused, :headless} = Mailbox.reload_plugins(ctx.mailbox, "d1")
+    assert {:refused, {:no_agent, "d9"}} = Mailbox.reload_plugins(ctx.mailbox, "d9")
+    assert ScreenStandIn.submitted(ctx.dir) == ["/reload-plugins"]
+  end
+
   defp main(ctx) do
     launch =
       Keyword.put(SessionsSetup.launch(ctx, :at_start), :claude, ScreenStandIn.write!(ctx.dir))

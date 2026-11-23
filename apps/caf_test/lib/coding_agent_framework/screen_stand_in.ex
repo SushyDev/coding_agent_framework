@@ -37,6 +37,10 @@ defmodule CodingAgentFramework.ScreenStandIn do
     turn, past its startup dialogs and not before: the session's title, agent name and modes,
     a file-history snapshot, then the user line whose `content` is the prompt, with
     `promptSource` `typed` (from the first end-to-end run's transcript, F-153);
+  - at an Enter with `/reload-plugins` in the box, it draws the command's echo and, under it,
+    a result line above the box, as `Screen.result/3` reads 2.1.322's (modeled, not captured:
+    F-233's new-1), one pair per reload; written with `reloaded: false`, the echo alone, a
+    reload that never draws its result;
   - with `--name`, the rule above the box carries the name, as 2.1.322 draws a session started
     with `--name` (`──── name ─`, F-153's capture).
 
@@ -126,15 +130,17 @@ defmodule CodingAgentFramework.ScreenStandIn do
 
     dialogs = Keyword.get(opts, :dialogs, if(opts[:trust], do: [:trust], else: []))
     transcript = if opts[:transcript], do: "1", else: ""
+    reloaded = if Keyword.get(opts, :reloaded, true), do: "1", else: ""
     first = if opts[:menu], do: "menu", else: "idle"
     suffix = Enum.map_join(dialogs, &"-#{&1}") <> if(opts[:transcript], do: "-tx", else: "")
     suffix = suffix <> if(opts[:menu], do: "-menu", else: "")
+    suffix = suffix <> if(reloaded == "", do: "-silent", else: "")
     path = Path.join(dir, "claude-screen#{suffix}-#{release}")
     tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
 
     File.write!(
       tmp,
-      script(dir, screens, release, idle, Enum.join(dialogs, " "), transcript, first)
+      script(dir, screens, release, idle, Enum.join(dialogs, " "), {transcript, reloaded}, first)
     )
 
     File.chmod!(tmp, 0o755)
@@ -248,10 +254,11 @@ defmodule CodingAgentFramework.ScreenStandIn do
   defp width(screens),
     do: screens |> Path.join("rule") |> File.read!() |> String.trim() |> String.length()
 
-  defp script(dir, screens, release, idle, dialogs, transcript, first) do
+  defp script(dir, screens, release, idle, dialogs, {transcript, reloaded}, first) do
     ~s"""
     #!#{program!(:bash)}
     name='' resume='' screen=#{first} sel=1 prompt='' dialogs='#{dialogs}' choice=no transcript='#{transcript}'
+    reloaded='#{reloaded}' shown=''
     given=$(printf '%s\\n' "$@")
     while [ $# -gt 0 ]; do
       case $1 in
@@ -317,6 +324,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
         #{program!(:cat)} "#{screens}/$screen-$sel"
       else
         #{program!(:cat)} "#{screens}/top"
+        printf '%s' "$shown"
         rule
         printf '❯ %s\\n' "$box"
         #{program!(:cat)} "#{screens}/bottom"
@@ -393,6 +401,10 @@ defmodule CodingAgentFramework.ScreenStandIn do
       elif [ "$key" = $'\\n' ] || [ "$key" = $'\\r' ]; then
         [ $screen = running ] && continue
         printf '%s\\n' "$box" >> "#{dir}/submitted"
+        if [ "$box" = /reload-plugins ]; then
+          shown="$shown❯ /reload-plugins"$'\\n'
+          [ -n "$reloaded" ] && shown="$shown  ⎿  Reloaded: 1 plugin · 0 skills · 0 agents · 0 hooks"$'\\n'
+        fi
         box=''
         announce busy
         announce idle

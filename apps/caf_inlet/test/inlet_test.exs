@@ -241,6 +241,74 @@ defmodule CodingAgentFramework.InletTest do
     refute_received {:write, ^inlet, _}
   end
 
+  # F-233: `/reload-plugins` goes as a typed text goes, then its result line is read under its
+  # echo. A second reload is told from the first by the lines above the box.
+  test "reloads plugins into an idle session with an empty box, by its result line", ctx do
+    open(ctx, "alpha")
+    inlet = ctx.inlet
+    ok = fn -> :ok end
+
+    for n <- 1..2 do
+      assert {:ok, :reloaded} =
+               Inlet.reload_plugins(inlet, "alpha", release: @release, turn: ok)
+
+      assert_received {:write, ^inlet, {:text, "/reload-plugins"}}
+      assert_received {:write, ^inlet, {:keys, ["Enter"]}}
+      assert length(ScreenStandIn.submitted(ctx.dir)) == n
+    end
+  end
+
+  test "reloads nothing into a turn running, a dialog shown or a box not empty", ctx do
+    inlet = ctx.inlet
+    ok = fn -> :ok end
+    # The session file reads a dialog: refused before the screen is read.
+    open(ctx, "alpha")
+    dialog = fn -> {:refused, :dialog} end
+
+    assert {:refused, {:turn, :dialog}} =
+             Inlet.reload_plugins(inlet, "alpha", release: @release, turn: dialog)
+
+    open(ctx, "busy", ["--screen", "running"])
+
+    assert {:refused, {:screen, %{state: :running}}} =
+             Inlet.reload_plugins(inlet, "busy", release: @release, turn: ok)
+
+    open(ctx, "menu", ["--screen", "menu"], :dialog)
+
+    assert {:refused, {:screen, %{state: :dialog, kind: :menu}}} =
+             Inlet.reload_plugins(inlet, "menu", release: @release, turn: ok)
+
+    open(ctx, "draft")
+    {:ok, pane} = pane(ctx, "draft")
+    assert {:ok, :sent} = Tmux.write(ctx.server, pane, "draft", {:text, "draft"})
+    {:ok, _} = screen(ctx, "draft", &match?(%{box: {:text, "draft"}}, &1))
+    # The test's own write above went past the probe; the reloads below write nothing.
+    assert {:refused, {:screen, %{box: {:text, "draft"}}}} =
+             Inlet.reload_plugins(inlet, "draft", release: @release, turn: ok)
+
+    refute_received {:write, _, _}
+    assert ScreenStandIn.submitted(ctx.dir) == []
+  end
+
+  test "a reload whose result line never comes is unknown, and not typed again", ctx do
+    script = ScreenStandIn.write!(ctx.dir, @release, stand_in_idle(), reloaded: false)
+    {:ok, _} = Tmux.new_session(ctx.server, "alpha", [script], size: {120, 40})
+    {:ok, _} = screen(ctx, "alpha", &(&1.state == :idle))
+    inlet = ctx.inlet
+
+    assert {:unknown, {:no_result, {:ok, %{result: nil}}}} =
+             Inlet.reload_plugins(inlet, "alpha",
+               release: @release,
+               turn: fn -> :ok end,
+               result: 300
+             )
+
+    assert_received {:write, ^inlet, {:text, "/reload-plugins"}}
+    assert_received {:write, ^inlet, {:keys, ["Enter"]}}
+    refute_received {:write, ^inlet, _}
+    assert ScreenStandIn.submitted(ctx.dir) == ["/reload-plugins"]
+  end
+
   defp open(ctx, name, args \\ [], state \\ nil) do
     script = ScreenStandIn.write!(ctx.dir)
     {:ok, _} = Tmux.new_session(ctx.server, name, [script | args], size: {120, 40})

@@ -56,6 +56,9 @@ defmodule CodingAgentFramework.Screen.Reading.V2_1_322 do
         ],
         ask: %{header: ~r/\A *☐ [^☐☒✔←→]+\z/u, free_text: "Type something."}
       },
+      # Not captured (F-233's new-1): modeled on the result line a captured prompt shows under
+      # its echo, `  ⎿  ` and the text (the usage limit's notice).
+      commands: %{"/reload-plugins" => ~r/\A  ⎿  Reloaded\b/u},
       dialogs: [
         %{
           kind: :trust,

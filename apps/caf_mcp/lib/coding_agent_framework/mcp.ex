@@ -106,6 +106,13 @@ defmodule CodingAgentFramework.MCP do
     the row before its checked press and never presses it twice. Answers `Sessions`' answer,
     or `{:refused, :settled}` for a dialog answered or gone, `{:refused, :no_prompt}` for one
     the agent never showed.
+  - `reload_plugins(agent)`: the operator's alone (F-233); any other caller is refused
+    `:operator_only`. A row in `Acts` with no state (a reload moves none, and may be made
+    again), then the mailbox's `reload_plugins/3`: `/reload-plugins` typed into an interactive
+    agent's idle session as a typed message is, and its result line read. Answers `%{done:
+    :reloaded, act: id}`, or refused `:headless` (a headless delegate has no screen, and loads
+    its plugins at its next start), a session not idle, a dialog shown or a box not empty, and
+    unknown with no result line within its bound. The row is settled by that answer.
   - `end_main(name)`: the operator's alone (F-143); any other caller is refused
     `:operator_only`. The mains' `end_main/3`: refused while a delegate of it has not ended
     (`{:delegates, names}`), else the session stopped once idle and its agent row `ended`, so
@@ -122,7 +129,7 @@ defmodule CodingAgentFramework.MCP do
 
   **The operator** calls the same tools through `operate/3`, which writes its row under the
   operator's name, so each act it makes names it as the actor; `issue/2` never makes it a
-  token. The operator's own tools (`answer_startup`, `end_main`, `withdraw`) are refused
+  token. The operator's own tools (`answer_startup`, `end_main`, `withdraw`, `reload_plugins`) are refused
   `:operator_only` to any other caller, and no agent's list names them (`tools/2`). The
   design's other tools come in later parts (`docs/build-notes/F-86.md`).
 
@@ -187,7 +194,7 @@ defmodule CodingAgentFramework.MCP do
   }
 
   # The operator's alone: each is refused `:operator_only` to an agent, and listed to none.
-  @operator ~w(answer_startup end_main withdraw)
+  @operator ~w(answer_startup end_main withdraw reload_plugins)
 
   @tools [
     %{
@@ -475,6 +482,13 @@ defmodule CodingAgentFramework.MCP do
       }
     },
     %{
+      name: "reload_plugins",
+      description:
+        "The operator's: types /reload-plugins into an interactive agent's idle session, " <>
+          "checked as a typed message is, and reads its result line.",
+      inputSchema: %{type: "object", properties: %{agent: @str}, required: ["agent"]}
+    },
+    %{
       name: "reload",
       description: "Reloads your own tools.",
       inputSchema: %{type: "object", properties: %{}}
@@ -533,7 +547,7 @@ defmodule CodingAgentFramework.MCP do
 
   @doc """
   The tools `agent` sees, as its `tools/list` answers them: the framework's but the operator's
-  own (`answer_startup`, `end_main`, `withdraw`, which only the operator sees), then the app's
+  own (`answer_startup`, `end_main`, `withdraw`, `reload_plugins`, which only the operator sees), then the app's
   that its scope holds (`Grants.may_call?/3`), in the order the app gave them. An agent the tree
   does not hold sees none of the app's.
 
@@ -769,6 +783,20 @@ defmodule CodingAgentFramework.MCP do
          true <- ctx.prompts != nil or {:refused, :no_prompts} do
       {mod, server} = ctx.prompts
       mod.answer(server, "ask:#{ask}", {:withdraw, reason}, caller)
+    end
+  end
+
+  # F-233: the operator's reload of an interactive session's plugins, through `Mailbox`, which
+  # checks it as a typed message. A reload moves no state of the agent's and may be made again,
+  # so it claims none: the act is a row in `Acts` before it acts, each call an act of its own (as
+  # a forced end's), settled by its answer.
+  defp act(ctx, caller, _id, "reload_plugins", %{"agent" => agent}) when is_binary(agent) do
+    with true <- caller == Grants.operator(ctx.grants) or {:refused, :operator_only},
+         {:ok, act} <- Acts.claim(ctx.acts, caller, agent, nil, "reload_plugins") do
+      {mod, server} = ctx.mailbox
+      outcome = mod.reload_plugins(server, agent, [])
+      Acts.answered(ctx.acts, act, outcome)
+      with {:ok, done} <- outcome, do: {:ok, %{done: done, act: act}}
     end
   end
 

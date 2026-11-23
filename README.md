@@ -399,6 +399,9 @@ Built, each from a checked model in `model/tla/`:
 - an end reaches a start that waits on its dialog (F-231): `end_main` and a stop press the trust
   dialog's `No, exit`, or send SIGTERM, and end it; a fix refused before it acted frees its
   state in `Acts`, so the next fix of that state is taken.
+- the operator reloads an interactive agent's plugins (F-233): `Operator.reload_plugins/2`
+  types `/reload-plugins` through the `Inlet`, checked as a typed message is, and reads its
+  result line; each reload is an act in `Acts`, and a headless delegate is refused.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
