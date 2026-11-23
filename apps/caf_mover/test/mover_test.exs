@@ -368,6 +368,15 @@ defmodule CodingAgentFramework.MoverTest do
       Mover.cue(mover(), %{topic: "sessions"})
     end
 
+    # Asked again on a cue before the deadline: wait for that second ask, so passing the deadline
+    # cannot race it (it once came first under load, F-227).
+    assert {:ok, _} =
+             await(fn ->
+               Mover.cue(mover(), %{topic: "sessions"})
+               {_, asked} = Agent.get(untold, & &1)
+               if length(asked) >= 2, do: {:ok, asked}, else: {:not_yet, asked}
+             end)
+
     past_deadline.()
     assert {:ok, back} = row_when(ctx, "d1", &(moved?(&1, "work") and &1.pid != pid))
     assert back.session_id == sid

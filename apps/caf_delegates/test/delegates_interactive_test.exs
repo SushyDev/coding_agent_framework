@@ -224,6 +224,8 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     assert %{effort: "max"} = Table.get(ctx.dtable, id)
     assert {:ok, [argv]} = await(fn -> nonempty(ScreenStandIn.argvs(ctx.dir)) end)
     assert ["--model", "opus", "--name", name, "--effort", "max"] == Enum.slice(argv, 0, 6)
+    # F-227: an interactive delegate's mode is pinned, `auto` unless the config says otherwise.
+    assert ["--permission-mode", "auto"] == Enum.slice(argv, 6, 2)
     assert "--remote-control" in argv
 
     file = argv |> Enum.drop_while(&(&1 != "--settings")) |> Enum.at(1)

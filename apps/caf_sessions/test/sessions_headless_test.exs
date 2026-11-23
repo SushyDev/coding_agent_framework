@@ -23,6 +23,9 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
              Sessions.start(ctx.sessions, "d1", ctx.account, headless(ctx, :on_message))
 
     assert File.ls!(Path.join(ctx.dir, "pids")) == [Integer.to_string(pid)]
+    # F-227: a headless delegate is pinned to `manual`, so its requests reach the inbox.
+    argv = HeadlessStandIn.argv(ctx.dir, id)
+    assert ["--permission-mode", "manual"] == argv -- (argv -- ["--permission-mode", "manual"])
 
     assert %{status: "running", role: "delegate", session_id: ^id, pid: ^pid, viewer: "open"} =
              row = Table.get(ctx.table, "test", "d1")

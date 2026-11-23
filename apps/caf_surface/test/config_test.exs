@@ -90,6 +90,18 @@ defmodule CodingAgentFramework.ConfigTest do
         do: assert(new(dialogs: bad) == {:refused, {:bad, :dialogs}})
   end
 
+  # F-227: each role's permission mode, any of the pinned release's; a role left out keeps its
+  # default (which `Sessions` holds).
+  test "permission_modes names roles and the modes the pinned Claude Code takes" do
+    assert {:ok, %Config{permission_modes: %{}}} = new([])
+
+    assert {:ok, %Config{permission_modes: %{headless: "auto"}}} =
+             new(permission_modes: %{headless: "auto"})
+
+    for bad <- [[], %{headless: "default"}, %{builder: "auto"}, %{main: :auto}],
+        do: assert(new(permission_modes: bad) == {:refused, {:bad, :permission_modes}})
+  end
+
   test "secret_file: an absolute path, by default in the home" do
     assert {:ok, %Config{secret_file: "/run/caf/secret"}} = new(secret_file: "/run/caf/secret")
     assert {:ok, %Config{secret_file: "/srv/caf/intake.secret"}} = new([])

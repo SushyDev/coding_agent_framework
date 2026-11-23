@@ -213,6 +213,12 @@ defmodule CodingAgentFramework.Sessions do
   # What every delegate's settings say unless the account's file or its own options do (F-200).
   @delegate_settings %{"includeGitInstructions" => false}
 
+  # Each role's `--permission-mode` (F-227): pinned, not the account's own default, so a run
+  # reads the same whatever the account was set to. As 2.1.322 ran before: a main and an
+  # interactive delegate in `auto` (the classifier decides), a headless delegate in `manual`
+  # (its requests reach the inbox). The `permission_modes:` option replaces any of them.
+  @permission_modes %{main: "auto", interactive: "auto", headless: "manual"}
+
   @type outcome(ok) :: {:ok, ok} | {:refused, term} | {:unknown, term}
 
   @doc """
@@ -226,6 +232,8 @@ defmodule CodingAgentFramework.Sessions do
   (the app's callback for a startup dialog, `fn kind, options -> {:answer, label} | :ask end`,
   by default `Sessions.Dialog.ask/2`: ask a person), `look:` (ms between reads of a pane that
   waits on a person, and of each running interactive row's for a menu, default 5 000),
+  `permission_modes:` (each role's `--permission-mode`, `%{main:, interactive:, headless:}`,
+  over the default `auto`, `auto`, `manual`, F-227),
   `notify:`, `size:`
   (the viewer's `{columns, rows}`, default `{200, 50}`), `poll:` (ms between reads while a call
   waits, default 200), `clock:` (a function answering wall-clock ms, for the deadlines), and,
@@ -682,6 +690,7 @@ defmodule CodingAgentFramework.Sessions do
         notify: Keyword.get(opts, :notify, fn _ -> :ok end),
         size: Keyword.get(opts, :size, {200, 50}),
         poll: Keyword.get(opts, :poll, 200),
+        permission_modes: Map.merge(@permission_modes, Keyword.get(opts, :permission_modes, %{})),
         clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end),
         reaper: Keyword.get(opts, :reaper),
         open_to: Keyword.get(opts, :open_to),
@@ -2395,7 +2404,8 @@ defmodule CodingAgentFramework.Sessions do
   defp release(_state, _role, _launch), do: nil
 
   defp cli(role, account, name, resume, launch, own) do
-    opts = Keyword.take(launch, [:claude, :model, :effort, :env, :tool_timeout, :prompt, :mcp])
+    keys = [:claude, :model, :effort, :permission_mode, :env, :tool_timeout, :prompt, :mcp]
+    opts = Keyword.take(launch, keys)
     opts = opts ++ [name: name] ++ own
     opts = if resume, do: opts ++ [resume: resume], else: opts
     ClaudeCLI.session(role, account, opts)
@@ -2459,7 +2469,8 @@ defmodule CodingAgentFramework.Sessions do
   defp way(state, :delegate, account, name, cwd, resume, launch) do
     id = resume || Stream.uuid()
     start = if resume, do: [resume: id], else: [session_id: id]
-    keys = [:claude, :model, :effort, :env, :tool_timeout, :mcp]
+    keys = [:claude, :model, :effort, :permission_mode, :env, :tool_timeout, :mcp]
+    launch = Keyword.put_new(launch, :permission_mode, state.permission_modes.headless)
 
     # The id names the delegate's directory, so a resume's is a plain id, never a path.
     with {:ok, stream} <- if(state.stream && state.home, do: {:ok, state.stream}, else: :error),
@@ -2479,6 +2490,10 @@ defmodule CodingAgentFramework.Sessions do
   # An interactive session's first prompt (Delivery's launch transport) is not in its argv: the
   # hold's wrapper reads it from a file into the last argument (`ClaudeCLI.prompted/5`).
   defp way(state, role, account, name, _cwd, resume, launch) do
+    row = Table.get(state.db, state.host.name, name)
+    who = if kind(row, role, launch, resume) == :delegate, do: :interactive, else: :main
+    launch = Keyword.put_new(launch, :permission_mode, state.permission_modes[who])
+
     with {:ok, prompt} <- prompt(state, launch[:prompt]),
          {:ok, hooks} <- waiter_hooks(state, account),
          {:ok, options, own} <- own(state, role, account, name, resume, launch, hooks),
