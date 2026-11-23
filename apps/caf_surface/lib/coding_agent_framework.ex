@@ -1184,6 +1184,7 @@ defmodule CodingAgentFramework do
               place: &Sessions.Agents.place(w.agents, &1),
               tool_timeout: c.tool_timeout,
               margin: c.margin,
+              efforts: ClaudeCLI.efforts(),
               acts: pid.(:acts),
               mover: {Mover, pid.(:mover)},
               prompts: {Prompts, pid.(:prompts)},

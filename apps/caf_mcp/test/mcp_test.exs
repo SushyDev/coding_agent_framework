@@ -6,11 +6,15 @@ defmodule CodingAgentFramework.MCPTest do
 
   doctest CodingAgentFramework.MCP.Table
   doctest CodingAgentFramework.MCP.Plug
-  doctest CodingAgentFramework.MCP, only: [extensions: 3]
+  doctest CodingAgentFramework.MCP, only: [extensions: 3, tools: 1]
 
   import CodingAgentFramework.TestHost, only: [test_dir: 0]
 
   alias CodingAgentFramework.{Acts, Grants, MCP, Operator}
+
+  # This app does not use `caf_cli`: the levels here are the test's own, as the surface's are
+  # `ClaudeCLI.efforts/0` (its test checks that).
+  @efforts ~w(low medium high xhigh max)
 
   defmodule StandIn do
     @moduledoc false
@@ -120,7 +124,8 @@ defmodule CodingAgentFramework.MCPTest do
          transcripts: nil,
          place: place,
          tool_timeout: 600_000,
-         margin: 60_000}
+         margin: 60_000,
+         efforts: @efforts}
       )
 
     tokens = for a <- ~w(app-main app-fix stray), into: %{}, do: {a, token(mcp, a)}
@@ -178,11 +183,53 @@ defmodule CodingAgentFramework.MCPTest do
     assert %{"serverInfo" => %{"name" => "caf"}, "capabilities" => %{"tools" => _}} =
              rpc.("initialize")
 
-    assert rpc.("tools/list")["tools"] |> Enum.map(& &1["name"]) ==
+    listed = rpc.("tools/list")["tools"]
+
+    assert Enum.map(listed, & &1["name"]) ==
              ~w(message start_delegate run_delegate start_main) ++
                ~w(service_start services service_logs service_send service_wait) ++
                ~w(service_restart service_stop service_hand agents look transcript) ++
                ~w(interrupt answer resume stop move ask reload)
+
+    # F-219: the client reads the levels as an `enum`, in the JSON it is sent.
+    for %{"name" => name} = tool <- listed, name in ~w(start_delegate run_delegate) do
+      assert %{"type" => "string", "enum" => @efforts} =
+               tool["inputSchema"]["properties"]["effort"]
+    end
+  end
+
+  # F-219, from F-200's new-4: the app hands the levels, and each `effort` offers them whole.
+  test "every effort property offers the levels the app gave as an enum" do
+    levels = ["brisk", "slow"]
+
+    mcp =
+      start_supervised!({MCP, Keyword.merge(mcp_opts("levels"), efforts: levels)}, id: "levels")
+
+    for agent <- ~w(app-main app-fix) do
+      efforts =
+        for %{name: name, inputSchema: %{properties: %{effort: effort}}} <- MCP.tools(mcp, agent),
+            do: {name, effort}
+
+      assert Enum.map(efforts, &elem(&1, 0)) == ~w(start_delegate run_delegate)
+
+      for {_name, effort} <- efforts do
+        assert %{type: "string", enum: ^levels, description: description} = effort
+        # The description says what an effort is; the levels are the `enum`'s alone.
+        for level <- @efforts, do: refute(description =~ level)
+      end
+    end
+  end
+
+  test "efforts: is required, a list of strings and never empty" do
+    bad = [[], "low", ["low", :high], [1], nil, ["low" | "high"]]
+
+    for {efforts, i} <- Enum.with_index(bad) do
+      opts = Keyword.put(mcp_opts("bad-#{i}"), :efforts, efforts)
+      assert {:error, {{:bad, :efforts}, _}} = start_supervised({MCP, opts}, id: "bad-#{i}")
+    end
+
+    opts = Keyword.delete(mcp_opts("none"), :efforts)
+    assert {:error, {{:bad, :efforts}, _}} = start_supervised({MCP, opts}, id: "none")
   end
 
   test "a call is the agent's whose token it carries, whatever its arguments say",
@@ -268,7 +315,8 @@ defmodule CodingAgentFramework.MCPTest do
       transcripts: nil,
       place: place,
       tool_timeout: 600_000,
-      margin: 60_000
+      margin: 60_000,
+      efforts: @efforts
     ]
   end
 
@@ -493,7 +541,7 @@ defmodule CodingAgentFramework.MCPTest do
       [dir: dir, port: 4793, grants: Grants.new(tree, operator: "op"), acts: acts] ++
         Enum.map(~w(mailbox delegates services tracker stream mains prompts)a, &{&1, stand_in}) ++
         [workstation: "ws", transcripts: nil, place: fn _ -> {:refused, :no_worktree} end] ++
-        [tool_timeout: 600_000, margin: 60_000]
+        [tool_timeout: 600_000, margin: 60_000, efforts: @efforts]
 
     start_supervised!(Supervisor.child_spec({MCP, opts}, id: :operating))
   end
@@ -510,7 +558,7 @@ defmodule CodingAgentFramework.MCPTest do
       [dir: test_dir(), port: 4792, grants: Grants.new(fn -> tree end), acts: :unused] ++
         Enum.map(~w(mailbox delegates services tracker stream mover)a, &{&1, stand_in}) ++
         [workstation: "ws", transcripts: nil, place: fn _ -> {:refused, :no_worktree} end] ++
-        [tool_timeout: 600_000, margin: 60_000]
+        [tool_timeout: 600_000, margin: 60_000, efforts: @efforts]
 
     moving = start_supervised!(Supervisor.child_spec({MCP, opts}, id: :moving))
     [main, fix] = for a <- ~w(app-main app-fix), do: token(elem(MCP.issue(moving, a), 1))

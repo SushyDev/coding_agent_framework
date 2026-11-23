@@ -10,7 +10,7 @@ defmodule CodingAgentFramework.SurfaceTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, Cues, HeadlessStandIn, Jobs, Mailbox, MCP}
+  alias CodingAgentFramework.{Accounts, ClaudeCLI, Cues, HeadlessStandIn, Jobs, Mailbox, MCP}
   alias CodingAgentFramework.{Mains, Services, Shell}
   alias CodingAgentFramework.{Delegates, Operator, Scheduler, Tmux, Tracker}
   alias CodingAgentFramework.Acts
@@ -105,6 +105,24 @@ defmodule CodingAgentFramework.SurfaceTest do
       end,
       20_000
     )
+  end
+
+  # F-219, from F-200's new-4: `caf_mcp` does not use `caf_cli`, so the surface, which has both,
+  # hands it the one list, and this is where the two are checked as one.
+  test "the MCP tools offer ClaudeCLI's efforts as the enum of their effort", ctx do
+    parts = start(ctx.config)
+
+    efforts =
+      for %{name: name, inputSchema: %{properties: %{effort: effort}}} <-
+            MCP.tools(parts.mcp, "app-main"),
+          do: {name, effort}
+
+    assert Enum.map(efforts, &elem(&1, 0)) == ~w(start_delegate run_delegate)
+
+    for {_name, effort} <- efforts do
+      assert %{type: "string", enum: enum} = effort
+      assert enum == ClaudeCLI.efforts()
+    end
   end
 
   test "a declared main session starts its first delegate through MCP; a restart settles",

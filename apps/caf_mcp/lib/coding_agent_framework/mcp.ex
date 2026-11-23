@@ -19,8 +19,9 @@ defmodule CodingAgentFramework.MCP do
     as `parent`); answers `%{delegate: name}`, with `already: true` when the branch's delegate
     was running already and is answered in place of a new one, or the start's refusal. The
     report comes later as a message. Both take optional `options` and `effort` (how hard the
-    model thinks: `low`, `medium`, `high`, `xhigh` or `max`, launched as `--effort`, kept on the
-    delegate's row for its resumes, and refused `{:effort, value}` for any other, F-200). With
+    model thinks, launched as `--effort`, kept on the delegate's row for its resumes, and
+    refused `{:effort, value}` for a level `Delegates` does not know, F-200). The tool's schema
+    offers the levels as an `enum`, the list the app gave as `efforts:` (F-219). With
     `wait: false`, the default for an agent (it keeps working), a start whose lease is queued
     answers `%{delegate: name, queued: position}` at once, and its outcome comes later as a
     notice from `framework`, once (F-170); the operator's start waits for the lease unless it
@@ -128,7 +129,7 @@ defmodule CodingAgentFramework.MCP do
         mailbox: {Mailbox, mailbox}, delegates: {Delegates, delegates},
         services: {Services, services}, workstation: "ws", tracker: {Tracker, tracker},
         stream: {Stream, stream}, transcripts: {Transcripts, t}, place: &place/1,
-        tool_timeout: 3_600_000, margin: 60_000)
+        tool_timeout: 3_600_000, margin: 60_000, efforts: ClaudeCLI.efforts())
       {:ok, config} = MCP.issue(mcp, "app-fix")
       MCP.call(mcp, "app-fix", "message", %{"to" => "app-main", "text" => "Done."})
       #=> {:ok, {:queued, 3}}
@@ -151,12 +152,12 @@ defmodule CodingAgentFramework.MCP do
   @start_wait 300_000
   @options %{type: "object", description: "the delegate's own launch options (ClaudeCLI.Options)"}
   # `Delegates` checks the level against `ClaudeCLI.efforts/0`; this part, which does not use
-  # `caf_cli`, only names them for the client.
+  # `caf_cli`, is handed that list as `efforts:` and `tools/1` adds it as the schema's `enum`, so
+  # the levels are not copied here and the client can check one before the call.
   @effort %{
     type: "string",
     description:
-      "how hard the model thinks, as `claude --effort` takes it: low, medium, high, xhigh or " <>
-        "max; by default no flag goes in"
+      "how hard the model thinks, as `claude --effort` takes it; by default no flag goes in"
   }
   @wait %{
     type: "boolean",
@@ -500,7 +501,11 @@ defmodule CodingAgentFramework.MCP do
   or a `service_wait`'s `timeout` may be.
   `:tool_timeout` (ms) is the MCP tool timeout `CodingAgentFramework.ClaudeCLI` sets for every
   agent at launch, and `:margin` (ms, under it) how far under it a `run_delegate`'s `timeout`
-  must stay: both required, positive integers. `:extensions` (optional, F-154) is the app's
+  must stay: both required, positive integers. `:efforts` (F-219) is the levels a delegate's
+  `effort` may be, a list of strings, never empty, required: any other (or none) stops the
+  start `{:bad, :efforts}`. The embedding app hands it `CodingAgentFramework.ClaudeCLI.efforts/0`,
+  since this part does not use `caf_cli`, and every tool's `effort` offers it as an `enum`
+  (`tools/1`); `Delegates` still checks the value. `:extensions` (optional, F-154) is the app's
   bundles (`CodingAgentFramework.Extension`), checked whole at start, which stops with the
   first refusal: their tools are served beside the framework's, each listed and called only
   where its scope holds the caller (`Grants.may_call?/3`), and called as `Extension.run/4`
@@ -509,9 +514,21 @@ defmodule CodingAgentFramework.MCP do
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
-  @doc "The framework's own tools, as `tools/list` answers them."
-  @spec tools() :: [map]
-  def tools, do: @tools
+  @doc """
+  The framework's own tools, as `tools/list` answers them, each `effort` property offering
+  `efforts` as its `enum`.
+
+      iex> tools = CodingAgentFramework.MCP.tools(["low", "high"])
+      iex> Enum.find(tools, &(&1.name == "start_delegate")).inputSchema.properties.effort.enum
+      ["low", "high"]
+  """
+  @spec tools([String.t()]) :: [map]
+  def tools(efforts) when is_list(efforts), do: Enum.map(@tools, &offer(&1, efforts))
+
+  defp offer(%{inputSchema: %{properties: %{effort: _}}} = tool, efforts),
+    do: put_in(tool, [:inputSchema, :properties, :effort, :enum], efforts)
+
+  defp offer(tool, _efforts), do: tool
 
   @doc """
   The tools `agent` sees, as its `tools/list` answers them: the framework's but the operator's
@@ -530,8 +547,8 @@ defmodule CodingAgentFramework.MCP do
   defp listed(ctx, agent) do
     own =
       if agent == Grants.operator(ctx.grants),
-        do: @tools,
-        else: Enum.reject(@tools, &(&1.name in @operator))
+        do: ctx.tools,
+        else: Enum.reject(ctx.tools, &(&1.name in @operator))
 
     own ++ app_tools(ctx, agent)
   end
@@ -1199,6 +1216,14 @@ defmodule CodingAgentFramework.MCP do
 
   defp now, do: System.monotonic_time(:millisecond)
 
+  # A list with a string in it and nothing else; a tail that is no list is not one either.
+  defp efforts?([_ | _] = list), do: strings?(list)
+  defp efforts?(_), do: false
+
+  defp strings?([]), do: true
+  defp strings?([s | rest]) when is_binary(s), do: strings?(rest)
+  defp strings?(_), do: false
+
   defp ask(mcp, request) do
     GenServer.call(mcp, request, @step)
   catch
@@ -1213,9 +1238,12 @@ defmodule CodingAgentFramework.MCP do
     tool_timeout = Keyword.fetch!(opts, :tool_timeout)
     margin = Keyword.fetch!(opts, :margin)
 
+    efforts = Keyword.get(opts, :efforts)
+
     with true <-
            (is_integer(margin) and is_integer(tool_timeout) and margin > 0 and
               margin < tool_timeout) or {:refused, {:bad, :tool_timeout}},
+         true <- efforts?(efforts) or {:refused, {:bad, :efforts}},
          ext = Keyword.get(opts, :extensions, []),
          {:ok, app} <- extensions(ext, tool_timeout, margin),
          :ok <- File.mkdir_p(Path.join(dir, "agents")),
@@ -1229,6 +1257,7 @@ defmodule CodingAgentFramework.MCP do
 
       cap = Keyword.get(opts, :cap, @day)
       ctx = Map.merge(ctx, %{cap: cap, tool_timeout: tool_timeout, margin: margin})
+      ctx = Map.put(ctx, :tools, tools(efforts))
       ctx = Map.put(ctx, :mover, Keyword.get(opts, :mover))
       ctx = Map.put(ctx, :prompts, Keyword.get(opts, :prompts))
       ctx = Map.put(ctx, :mains, Keyword.get(opts, :mains))

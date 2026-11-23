@@ -1830,7 +1830,12 @@ is told at most once per idle state across restarts.
   does `Operator.start_delegate`; any other value is refused `{:effort, value}` before any
   row. It goes to the launch as `--effort <level>` and is kept on `Delegates`' row (a column
   added to a file made before it), and a resume, its own or a move's (`Delegates.launch/2`),
-  launches with the row's again. With none there is no flag, and Claude Code uses its own.
+  launches with the row's again. With none there is no flag, and Claude Code uses its own. The
+  tools' schema offers the levels as an `enum`, so a client picks and checks one before the call
+  (F-219): `caf_mcp` does not use `caf_cli`, so `MCP.start_link/1` takes `efforts:` (a required
+  list of strings, refused `{:bad, :efforts}` when missing, empty or not all strings) and the
+  surface hands it `ClaudeCLI.efforts/0`; no other part copies the list, and `Delegates` still
+  checks the value.
 - A delegate starts without Claude Code's built-in git instructions, which a main session
   keeps. Claude Code reads the setting as `includeGitInstructions ?? true`, so every delegate's
   settings overlay (`Accounts.overlay/5`, written by `Sessions` at each start and resume, an

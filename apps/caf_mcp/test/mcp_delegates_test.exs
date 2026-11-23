@@ -14,6 +14,9 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
   alias CodingAgentFramework.Acts
   alias CodingAgentFramework.{HeadlessStandIn, Operator}
 
+  # This app does not use `caf_cli`, so the list is the test's own.
+  @efforts ~w(low medium high xhigh max)
+
   setup {SessionsSetup, :sessions}
 
   setup ctx do
@@ -103,7 +106,8 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
          transcripts: {Transcripts, transcripts},
          place: fn _ -> {:refused, :none} end,
          tool_timeout: 600_000,
-         margin: 60_000}
+         margin: 60_000,
+         efforts: @efforts}
       )
 
     tokens =
@@ -158,8 +162,9 @@ defmodule CodingAgentFramework.MCPDelegatesTest do
       [%{inputSchema: %{properties: properties, required: required}}] =
         Enum.filter(MCP.tools(ctx.mcp, "main"), &(&1.name == tool))
 
-      assert %{type: "string"} = properties.effort
-      assert properties.effort.description =~ "low, medium, high, xhigh or max"
+      # The levels are the `enum`'s: the app's list, which `ClaudeCLI.efforts/0` is in the
+      # surface (its test checks that), and the real `Delegates` refuses any other below.
+      assert %{type: "string", enum: @efforts} = properties.effort
       refute "effort" in required
     end
 
