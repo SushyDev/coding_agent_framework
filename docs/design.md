@@ -2037,7 +2037,9 @@ carries goes as a pointer to its file (F-155, "The launch").
 ## Headless delegates
 
 A delegate runs `claude -p --verbose --input-format stream-json --output-format stream-json
---replay-user-messages --permission-prompts host --session-id <id>`, and a resume names
+--replay-user-messages --permission-prompts host --permission-prompt-tool stdio --session-id <id>`
+(without the prompt tool the pinned Claude Code denies what would prompt, `permission_denied`,
+and sends no `can_use_tool`, F-221), and a resume names
 `--resume <id>` in place of `--session-id`, which Claude Code refuses beside it (Claude Code
 2.1.322; each flag checked against each pinned release; without `--verbose` it exits at once;
 sources in `docs/build-notes/F-31.md`). `Stream.tla` models this section. This removes screen

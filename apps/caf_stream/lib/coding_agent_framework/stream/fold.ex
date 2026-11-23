@@ -179,8 +179,9 @@ defmodule CodingAgentFramework.Stream.Fold do
   end
 
   # The replay of an answer that settled a pending request (F-31: `--replay-user-messages`
-  # passes it on); its shape is the release check's to confirm.
-  def event(fold, %{"type" => "control_response", "isReplay" => true, "response" => r})
+  # passes it on). Measured on 2.1.322 (F-221): the answer comes back as written, with no
+  # `isReplay`, so any `control_response` on its stdout settles it.
+  def event(fold, %{"type" => "control_response", "response" => r})
       when is_map(r),
       do: settle(fold, :requests, r["request_id"], :answering, :answered)
 

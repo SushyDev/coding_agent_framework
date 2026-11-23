@@ -372,7 +372,11 @@ Built, each from a checked model in `model/tla/`:
 - the tools offer a delegate's effort levels as an `enum` (F-219): `MCP.start_link/1` takes
   `efforts:`, a required list of strings, and the surface hands it `ClaudeCLI.efforts/0`, so a
   client sees and checks the levels of `start_delegate`'s and `run_delegate`'s `effort` before
-  the call; `Delegates` still refuses any other.
+  the call; `Delegates` still refuses any other;
+- a headless delegate's permission requests reach the inbox (F-221): its launch passes
+  `--permission-prompt-tool stdio`, without which the real Claude Code denies the tool at once
+  and sends no `can_use_tool`, and the stand-in now does the same, so a test catches a launch
+  that loses the flag, and an answered request settles on the answer Claude Code echoes back.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
