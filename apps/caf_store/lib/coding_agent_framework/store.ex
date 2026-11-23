@@ -1,6 +1,6 @@
 defmodule CodingAgentFramework.Store do
   @moduledoc """
-  The table code every writer shares, over SQLite: open a file with WAL and a busy timeout,
+  The table code every writer shares, over SQLite: open a file with WAL and a bounded busy wait,
   create its schema, add the columns a later version added, run a statement, read rows as maps,
   write rows, and load a stored map with the fields a newer build added.
 
@@ -11,6 +11,17 @@ defmodule CodingAgentFramework.Store do
   A statement's error is a bug or a broken file, so `query/3` and the functions on it raise,
   and the writer's supervisor restarts the writer, which reads its rows again from the file.
   Only `open/3` answers `{:refused, reason}`.
+
+  **A busy file is waited for by the clock** (F-216). When another connection holds the file's
+  write lock, a statement tries again, sleeping 1 ms and then twice as long each time up to
+  5 ms, until `busy_bound/0` (2 s) has passed on the monotonic clock since its first try. Then
+  it is busy: `open/3`, `write/3`, `read_only/4` and `snapshot/2` answer `{:refused, {:sqlite,
+  :busy}}`, and `query/3`, `transaction/2` and the functions on them raise `Store.Busy`, as any
+  statement's error raises. A busy answer comes no later than the bound and 100 ms: the last
+  sleep ends at the deadline, one try follows it, and the sleeps are short because a longer
+  sleep wakes later on a loaded host. `open/3` and `write/3` run several statements under one
+  deadline. SQLite's own busy wait is off, because exqlite's handler waits about four times its
+  bound (F-215's new-2).
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "doc.db")
       iex> alias CodingAgentFramework.Store
@@ -24,13 +35,43 @@ defmodule CodingAgentFramework.Store do
 
   alias Exqlite.Sqlite3
 
-  @busy_timeout 5_000
+  defmodule Busy do
+    @moduledoc """
+    Raised by a statement that found the file's write lock held by another connection for
+    all of `CodingAgentFramework.Store.busy_bound/0`. `waited` is how long it waited, in ms by
+    the monotonic clock.
+    """
+    defexception waited: 0
+
+    @impl true
+    def message(%{waited: ms}), do: "database is busy: its write lock was held for #{ms} ms"
+  end
+
+  # Every part's call timeout over a write is at least 5 s, and a call may run two writes, so
+  # the bound and its slack fit twice under it (F-216).
+  @busy_bound 2_000
+  # A sleep of 25 ms woke up to 70 ms late on a loaded macOS host, one of 5 ms up to 33 ms.
+  @busy_poll 5
+  # What each kind of statement answers when SQLite refuses it busy.
+  @busy ["database is locked", "Database busy"]
 
   @type db :: Sqlite3.db()
   @type row :: %{atom => term}
 
   @doc """
-  Opens (and creates) the file at `path` with WAL and a busy timeout, and runs `schema`.
+  How long, in ms by the monotonic clock, a statement waits for a write lock another connection
+  holds before it is busy. A busy answer comes no later than this and 100 ms.
+
+      iex> CodingAgentFramework.Store.busy_bound()
+      2000
+  """
+  @spec busy_bound() :: pos_integer
+  def busy_bound, do: @busy_bound
+
+  @doc """
+  Opens (and creates) the file at `path` with WAL and a bounded busy wait, and runs `schema`.
+  Answers `{:refused, {:sqlite, :busy}}` when another connection holds the file's write lock for
+  all of `busy_bound/0`, over every statement it runs.
 
   Options:
 
@@ -40,13 +81,15 @@ defmodule CodingAgentFramework.Store do
     * `:then`: a statement run after the columns are added, such as an index on one of them.
   """
   @spec open(String.t(), String.t(), keyword) :: {:ok, db} | {:refused, {:sqlite, term}}
-  def open(path, schema, opts \\ []) do
+  def open(path, schema, opts \\ []), do: open(path, schema, opts, deadline())
+
+  defp open(path, schema, opts, deadline) do
     with {:ok, db} <- Sqlite3.open(path) do
-      with :ok <- Sqlite3.set_busy_timeout(db, @busy_timeout),
-           :ok <- Sqlite3.execute(db, "PRAGMA journal_mode = WAL;"),
-           :ok <- Sqlite3.execute(db, schema),
-           :ok <- add_columns(db, Keyword.get(opts, :added, [])),
-           :ok <- after_added(db, opts[:then]) do
+      with :ok <- Sqlite3.set_busy_timeout(db, 0),
+           :ok <- execute(db, "PRAGMA journal_mode = WAL;", deadline),
+           :ok <- execute(db, schema, deadline),
+           :ok <- add_columns(db, Keyword.get(opts, :added, []), deadline),
+           :ok <- after_added(db, opts[:then], deadline) do
         {:ok, db}
       else
         {:error, reason} ->
@@ -82,12 +125,14 @@ defmodule CodingAgentFramework.Store do
     case Sqlite3.open(path, mode: :readonly) do
       {:ok, db} ->
         try do
-          :ok = Sqlite3.set_busy_timeout(db, @busy_timeout)
+          :ok = Sqlite3.set_busy_timeout(db, 0)
 
           tables =
             query(db, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1", [table])
 
           if tables == [], do: {:ok, empty}, else: {:ok, fun.(db)}
+        rescue
+          Busy -> {:refused, {:sqlite, :busy}}
         after
           Sqlite3.close(db)
         end
@@ -116,9 +161,13 @@ defmodule CodingAgentFramework.Store do
           {:ok, result} | {:refused, {:sqlite, term}}
         when result: term
   def write(path, schema, fun) do
-    with {:ok, db} <- open(path, schema) do
+    deadline = deadline()
+
+    with {:ok, db} <- open(path, schema, [], deadline) do
       try do
-        {:ok, transaction(db, fn -> fun.(db) end)}
+        {:ok, transaction(db, fn -> fun.(db) end, deadline)}
+      rescue
+        Busy -> {:refused, {:sqlite, :busy}}
       after
         Sqlite3.close(db)
       end
@@ -146,11 +195,13 @@ defmodule CodingAgentFramework.Store do
     case Sqlite3.open(path, mode: :readonly) do
       {:ok, db} ->
         try do
-          :ok = Sqlite3.set_busy_timeout(db, @busy_timeout)
+          :ok = Sqlite3.set_busy_timeout(db, 0)
           # A deferred transaction takes its snapshot at its first read, and ends with the close.
           :ok = Sqlite3.execute(db, "BEGIN")
           names = query(db, "SELECT name FROM sqlite_master WHERE type = 'table'", [])
           {:ok, fun.(db, MapSet.new(names, &hd/1))}
+        rescue
+          Busy -> {:refused, {:sqlite, :busy}}
         after
           Sqlite3.close(db)
         end
@@ -212,13 +263,13 @@ defmodule CodingAgentFramework.Store do
     :ok
   end
 
-  defp add_columns(db, added) do
+  defp add_columns(db, added, deadline) do
     added
     |> Enum.flat_map(fn {table, columns} ->
       Enum.map(columns, &"ALTER TABLE #{table} ADD COLUMN #{&1}")
     end)
     |> Enum.reduce_while(:ok, fn sql, :ok ->
-      case Sqlite3.execute(db, sql) do
+      case execute(db, sql, deadline) do
         :ok -> {:cont, :ok}
         {:error, "duplicate column name" <> _} -> {:cont, :ok}
         error -> {:halt, error}
@@ -226,17 +277,54 @@ defmodule CodingAgentFramework.Store do
     end)
   end
 
-  defp after_added(_db, nil), do: :ok
-  defp after_added(db, sql), do: Sqlite3.execute(db, sql)
+  defp after_added(_db, nil, _deadline), do: :ok
+  defp after_added(db, sql, deadline), do: execute(db, sql, deadline)
 
-  @doc "Runs `sql` with `args` bound to `?1`, `?2`, … and answers its rows as lists."
+  defp deadline, do: now() + @busy_bound
+  defp now, do: System.monotonic_time(:millisecond)
+
+  # `{:error, :busy}` once the deadline has passed with the lock still held.
+  defp execute(db, sql, deadline) do
+    case until_free(fn -> Sqlite3.execute(db, sql) end, deadline) do
+      :busy -> {:error, :busy}
+      answer -> answer
+    end
+  end
+
+  # Tries `try` again while SQLite answers it busy, until `deadline`: the one wait in this
+  # module, bounded by the monotonic clock. The last sleep ends at the deadline.
+  defp until_free(try, deadline, sleep \\ 1) do
+    case try.() do
+      {:error, reason} when reason in @busy ->
+        case deadline - now() do
+          left when left > 0 ->
+            Process.sleep(min(sleep, left))
+            until_free(try, deadline, min(2 * sleep, @busy_poll))
+
+          _ ->
+            :busy
+        end
+
+      answer ->
+        answer
+    end
+  end
+
+  defp busy!(:busy, deadline), do: raise(Busy, waited: now() - deadline + @busy_bound)
+  defp busy!(answer, _deadline), do: answer
+
+  @doc """
+  Runs `sql` with `args` bound to `?1`, `?2`, … and answers its rows as lists. Raises
+  `Store.Busy` when the file's write lock stays held for all of `busy_bound/0`.
+  """
   @spec query(db, String.t(), [term]) :: [[term]]
   def query(db, sql, args) do
-    {:ok, stmt} = Sqlite3.prepare(db, sql)
+    deadline = deadline()
+    {:ok, stmt} = busy!(until_free(fn -> Sqlite3.prepare(db, sql) end, deadline), deadline)
 
     try do
       :ok = Sqlite3.bind(stmt, args)
-      {:ok, rows} = Sqlite3.fetch_all(db, stmt)
+      {:ok, rows} = busy!(until_free(fn -> Sqlite3.fetch_all(db, stmt) end, deadline), deadline)
       rows
     after
       Sqlite3.release(db, stmt)
@@ -247,11 +335,14 @@ defmodule CodingAgentFramework.Store do
   Runs `fun` in one immediate transaction and answers what it answers: what it writes is saved
   together or not at all. When `fun` raises, throws or exits, the transaction is rolled back
   and the same error goes on to the caller, so the connection is never left inside an open
-  transaction that the next write would join.
+  transaction that the next write would join. Raises `Store.Busy` when another connection holds
+  the write lock for all of `busy_bound/0`; then nothing has begun.
   """
   @spec transaction(db, (-> result)) :: result when result: term
-  def transaction(db, fun) do
-    :ok = Sqlite3.execute(db, "BEGIN IMMEDIATE")
+  def transaction(db, fun), do: transaction(db, fun, deadline())
+
+  defp transaction(db, fun, deadline) do
+    :ok = busy!(until_free(fn -> Sqlite3.execute(db, "BEGIN IMMEDIATE") end, deadline), deadline)
 
     try do
       result = fun.()

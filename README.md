@@ -356,7 +356,10 @@ Built, each from a checked model in `model/tla/`:
 - a home belongs to one tree at a time (F-215): a tree takes the home's lock before it opens
   anything in it and holds it for its life, a second start on a held home, from this VM or
   another, is refused `{:home_held, holder}` at once, and a holder's death gives the lock back
-  with no person's step.
+  with no person's step;
+- a busy store answers by the clock (F-216): a statement that meets another connection's write
+  lock waits at most 2 s by the monotonic clock, then `open`, `write` and the reads answer
+  `{:refused, {:sqlite, :busy}}` and a statement raises `Store.Busy`, within 100 ms of the bound.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
