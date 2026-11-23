@@ -1235,7 +1235,8 @@ defmodule CodingAgentFramework.Delegates do
          do: {:ok, bytes}
   end
 
-  defp tell_turns(s, row, agent, {turns, s}) do
+  # The state is the read's own, which a transcript read may have changed (its marks, F-222).
+  defp tell_turns(_before, row, agent, {turns, s}) do
     told =
       Enum.reduce(turns, Map.get(s.turns, row.id, MapSet.new()), fn t, told ->
         if t.text == "" or MapSet.member?(told, t.uuid) or not tell_turn(s, row, agent, t),

@@ -277,6 +277,18 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     Delegates.cue(ctx.delegates, %{topic: "transcripts:test:work"})
     :sys.get_state(ctx.delegates)
     assert [_] = turn_notices(ctx)
+
+    # F-222: after a restart its marks are new, so reading the report's turn changes the state;
+    # the end-to-end run's restart crashed here on every tick and took the tree down.
+    ref = Process.monitor(ctx.delegates)
+    Process.exit(ctx.delegates, :kill)
+    assert_receive {:DOWN, ^ref, _, _, _}
+    child = Supervisor.child_spec({Delegates, ctx.dopts}, id: make_ref(), restart: :temporary)
+    delegates = start_supervised!(child)
+    Delegates.cue(delegates, %{topic: "transcripts:test:work"})
+    :sys.get_state(delegates)
+    assert Process.alive?(delegates)
+    assert [_] = turn_notices(ctx)
   end
 
   # TurnEndsBare and IdleTold, by an interactive delegate's rule: the brief's turn ended with no
