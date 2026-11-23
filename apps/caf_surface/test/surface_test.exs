@@ -67,7 +67,7 @@ defmodule CodingAgentFramework.SurfaceTest do
 
   defp start(config) do
     parts = CodingAgentFramework.parts(start_supervised!({CodingAgentFramework, config}))
-    keys = ~w(reaper names cues inlet usage stream intake intake_http sampler sessions acts)a
+    keys = ~w(home reaper names cues inlet usage stream intake intake_http sampler sessions acts)a
     keys = keys ++ ~w(watch recoveries tracker scheduler delegates mover mailbox copies jobs)a
     keys = keys ++ ~w(services logins)a
 
@@ -209,7 +209,7 @@ defmodule CodingAgentFramework.SurfaceTest do
     fields = [home: ctx.home, instance: "t", programs: programs, env: %{path: "/nonexistent"}]
     {:ok, config} = Config.new(fields ++ [agents: false])
     parts = CodingAgentFramework.parts(start_supervised!({CodingAgentFramework, config}))
-    assert Enum.sort(Map.keys(parts)) == Enum.sort(Config.agentless())
+    assert Enum.sort(Map.keys(parts)) == Enum.sort([:home | Config.agentless()])
 
     {:ok, units} = CodingAgentFramework.job_units(config, :heavy, "app")
     where = %{host: "ws", project: "app", name: "app-heavy"}

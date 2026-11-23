@@ -15,12 +15,15 @@ defmodule CodingAgentFramework.Home do
       writes those: it is marked `agents`, whatever kind of tree starts on it.
     * A tree of the other kind than the mark is refused, `{:refused, {:home_kind, recorded}}`.
 
+  The kind is judged by rows, not by the tables an agentful tree made, because a lease follows
+  its owner's row: a home whose tables hold no row has no lease an agentless tree would leave
+  unasked (F-214's new-3).
+
   A pure module: it starts no process and keeps no connection. The read and the write of the
-  mark are one immediate transaction (`Store.write/3`), so two trees that start at once on a new
-  home are told apart by SQLite's own write lock: the second one reads what the first wrote. This
-  is no lock of the home. Nothing keeps two trees of one kind from starting on one home at once
-  (`CodingAgentFramework.start_link/1` refuses only an instance name that runs in the same
-  VM); the mark only keeps their kind the same.
+  mark are one immediate transaction (`Store.write/3`). A start marks the home only once it
+  holds it (`CodingAgentFramework.Home.Lock`, F-215), so no two trees mark one home at once;
+  the transaction still keeps the read and the write together for any other writer of
+  `caf.db`.
 
       iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a",
       ...>   programs: %{}, env: %{path: "/bin"}, agents: false)

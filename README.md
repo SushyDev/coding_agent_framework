@@ -352,7 +352,11 @@ Built, each from a checked model in `model/tla/`:
 - a home keeps its kind (F-214): the first start on a home records in its database whether the
   tree runs agents, a tree of the other kind is refused `{:home_kind, recorded}` before any part
   starts, a home that ran before the mark and holds agent rows is marked `agents`, and
-  `home_kind/1` reads the kind without starting a tree.
+  `home_kind/1` reads the kind without starting a tree;
+- a home belongs to one tree at a time (F-215): a tree takes the home's lock before it opens
+  anything in it and holds it for its life, a second start on a held home, from this VM or
+  another, is refused `{:home_held, holder}` at once, and a holder's death gives the lock back
+  with no person's step.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

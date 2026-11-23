@@ -160,6 +160,58 @@ defmodule CodingAgentFramework.Store do
     end
   end
 
+  @doc """
+  Takes the file at `path` as a lock, for as long as the caller keeps the answer (F-215): opens
+  (and creates) it, empty, and begins an immediate transaction that is never committed, so the
+  file's write lock stays with this connection. SQLite takes that lock from the operating
+  system, which gives it back when the process that holds it dies, and keeps it apart between
+  two connections in one process as between two processes. The take is one try with no busy
+  wait: `{:ok, held}`, or `{:refused, :held}` when another connection holds it now, or
+  `{:refused, {:sqlite, reason}}` for a file it cannot open or lock. It writes nothing to the
+  file, which stays empty, and runs no statement that would.
+
+  `let_go/1` gives the lock back. A connection no process refers to is closed when it is
+  collected, so the lock outlives its holder's process only until then: a holder keeps the
+  answer in one process only, and lets go of it before it ends.
+
+      iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "hold.lock")
+      iex> alias CodingAgentFramework.Store
+      iex> {:ok, held} = Store.hold(path)
+      iex> Store.hold(path)
+      {:refused, :held}
+      iex> Store.let_go(held)
+      :ok
+      iex> {:ok, again} = Store.hold(path)
+      iex> Store.let_go(again)
+      :ok
+  """
+  @spec hold(String.t()) :: {:ok, db} | {:refused, :held | {:sqlite, term}}
+  def hold(path) do
+    with {:ok, db} <- Sqlite3.open(path) do
+      # No busy wait: a held file is refused now (SQLite's wait overshoots its bound, F-215).
+      with :ok <- Sqlite3.set_busy_timeout(db, 0),
+           :ok <- Sqlite3.execute(db, "BEGIN IMMEDIATE") do
+        {:ok, db}
+      else
+        {:error, reason} ->
+          Sqlite3.close(db)
+          # SQLITE_BUSY's text: another connection holds the write lock.
+          if reason == "database is locked",
+            do: {:refused, :held},
+            else: {:refused, {:sqlite, reason}}
+      end
+    else
+      {:error, reason} -> {:refused, {:sqlite, reason}}
+    end
+  end
+
+  @doc "Gives back a lock `hold/1` took, closing its connection. Answers `:ok`."
+  @spec let_go(db) :: :ok
+  def let_go(db) do
+    Sqlite3.close(db)
+    :ok
+  end
+
   defp add_columns(db, added) do
     added
     |> Enum.flat_map(fn {table, columns} ->

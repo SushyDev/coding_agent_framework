@@ -859,6 +859,13 @@ One config and one supervisor in; a few calls and one stream of cues out.
   with no control character, as `Config.new/1` checks it (F-174's new-3). A start while a tree
   of that name still exits (its parent's restart of a tree just killed) waits for its named
   `Registry` to end, up to `restart_wait`, so the restart is not refused (F-195).
+  A home belongs to one tree at a time (F-215, `HomeLock.tla`): two trees on one home would
+  share its `caf.db`, its tmux and dtach sockets, its leases and its tool home. A tree takes the
+  home before it opens anything in it and holds it for its whole life; a start on a home
+  another tree holds, in this VM or another, is refused `{:home_held, holder}` at once and
+  touches nothing. The take is one try that gets the lock or is refused, and the lock is one
+  the operating system gives back when its holder dies, so a death leaves nothing a person
+  must clear, and the next start takes the home.
 - **Calls.** `operate(caf, actor, verb, args)`: the seven verbs as the operator, and the
   operator's own: `end_main`, a main session's `move` and `resume`, a remedy's `approve` and
   `revoke`, a symptom's `clear`. `answer(caf, prompt, choice)` answers any prompt, in place of
@@ -909,10 +916,20 @@ on it, one with such rows (it ran before the mark) is marked `agents`, and `star
 the other kind than the mark answers `{:refused, {:home_kind, recorded}}` with nothing
 started and no row of the tree's own written. `home_kind/1` reads the kind (`:agents`,
 `:agentless` or `:new`) with no process started, since `agent_rows/1` answers no rows for an
-agentless home and for a new one alike. No spec describes a tree's start on a home, and no
-lock keeps two trees from starting on one home at once, so the mark is one read and one write
-in a single SQLite transaction, which tells two first starts of different kinds apart and
-nothing else. The other calls are B3's rest.
+agentless home and for a new one alike. The kind is judged by rows, not by the tables an
+agentful tree made, because a lease follows its owner's row: a delegate's lease names its row
+in `delegates`, written before the lease is asked for, and a main's names its start over the
+main's agent row, so a home whose tables hold no row has no lease an agentless tree would leave
+unasked (F-214's new-3). F-215 made a home one tree's at a time (`HomeLock.tla`):
+`CodingAgentFramework.Home.Lock`, the tree's first child and so its last to stop, takes
+SQLite's write lock on `<home>/home.lock`, an empty file of its own, by an immediate
+transaction it never commits (`Store.hold/1`, one try with no busy wait), before `Home.mark/1`
+or any other open under the home, and keeps it for the tree's life. The OS gives that lock
+back when the VM dies, and the holder's connection is closed when it ends; the tree ends when
+its holder does. A refusal names the holder's record, `<home>/home.holder` (its instance, its
+VM's OS pid, its node and when it took the home), which a normal stop removes. A start of the
+same name waits for the old holder to end within `restart_wait`, as it waits for the old
+`Registry`. `home_kind/1` takes no lock. The other calls are B3's rest.
 The config answers the room the home leaves for an agent's name (`Config.name_room/1`, F-172), and the tree hands it to `Delegates` and
 `Mains`, which refuse a longer name `{:bad, :name, {:longer_than, n}}` before any row;
 sockets stay in the home. A service's socket is named by the first 16 hex digits of the SHA-256
