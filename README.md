@@ -385,7 +385,9 @@ Built, each from a checked model in `model/tla/`:
 - a headless session's viewer, `tail -F` of its log, ends with the session (F-225);
 - a restart no longer takes the tree down when an interactive delegate's report was taken
   (F-222): `Delegates` read the turns after the report with a clause that matched only an
-  unchanged state, and a restart's first read changes it.
+  unchanged state, and a restart's first read changes it;
+- `--setup` refuses when it has no terminal, and the example console sets the run's aliases
+  itself (F-226).
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

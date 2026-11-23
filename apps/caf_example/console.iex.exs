@@ -9,3 +9,8 @@ caf =
     {:ok, caf} -> caf
     _refused -> System.halt(2)
   end
+
+# The readers the end-to-end run uses beside the console's calls (`docs/e2e.md`). They are set
+# here, so a console started again after a restart has them too (F-226).
+alias CodingAgentFramework.{Logins, Sessions.Agents}
+alias CodingAgentFramework.Example.Run
