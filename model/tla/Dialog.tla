@@ -86,6 +86,22 @@
 (* the agent process's; the agent's own restart differs in what runs on:   *)
 (* Prompts, whose answer on its way may reach the new process, and the     *)
 (* Scheduler and Recoveries, which never stop.                             *)
+(*                                                                         *)
+(* An end asked mid-start (F-231; with Ends): the operator's end of a main *)
+(* session, or a stop of a delegate, asked while the row waits on a        *)
+(* dialog. It answers the dialog shown by its exit option, the trust       *)
+(* dialog's "No, exit", as a person's answer is: a prompt's answer, its    *)
+(* press checked (AskEnd, EndPress). A dialog with no exit option (the     *)
+(* imports dialog, a start's menu), one whose answer is marked, or a       *)
+(* process still live after the press, gets SIGTERM to its held program's  *)
+(* record (EndTerm), as a person's Stop. Once the process is gone the row  *)
+(* is ended (EndDone), and the start that waited is refused, `ended`. From *)
+(* the ask on the row is never confirmed running: a session asked to end   *)
+(* runs no later turn (NoTurnAfterEnd), and an asked end ends (EndEnds),   *)
+(* or answers unknown: its process outlived the TERM (EndOutlived), or a   *)
+(* restart cut the call, which a person may ask again. Models              *)
+(* `Sessions.end_main/3` and `stop/3` of a row on a dialog, and            *)
+(* `Mains.end_main/3`, which asks it of a start that waits on a dialog.    *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -94,6 +110,7 @@ CONSTANTS
                   \* start's menu ("menu") may show more than once
     Auto,         \* the kinds the app's callback answers ("yes"); {} by default: it asks
     MaxRestarts,  \* restarts of Sessions and of the agent's own process
+    Ends,         \* whether an end may be asked of the row on a dialog (F-231)
     Break         \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -106,13 +123,17 @@ Breaks == {
     "NoRead",        \* the pane is read only while the start's call waits, not after an answer
     "ClearTwice",    \* a press a restart cut may be cleared again after its second try
     "PromptInMemory", \* an open prompt is kept in memory, so a whole restart loses it
-    "ByKind"         \* answers are kept by kind (F-203): a read whose kind has a prompt opens none
+    "ByKind",        \* answers are kept by kind (F-203): a read whose kind has a prompt opens none
+    "EndRefused"     \* an end asked while the start waits on a dialog is refused, as before F-231
 }
 
 ASSUME Break \in Breaks
 
 \* The order 2.1.322 shows them in (F-140's captures), for the configurations.
 TrustThenImports == <<"trust", "imports">>
+
+\* The trust dialog alone: an end's exit press and a restart that cuts it, in a fast check.
+TrustOnly == <<"trust">>
 
 \* A new account's onboarding: the trust dialog, then two menus no rule names (F-206).
 TrustThenMenus == <<"trust", "menu", "menu">>
@@ -121,7 +142,12 @@ N == Len(Dialogs)
 Reads == 1..N
 Kinds == {Dialogs[i] : i \in Reads}
 Labels == {"yes", "no"}
-Statuses == {"starting", "dialog", "running", "orphan", "stopped"}
+Statuses == {"starting", "dialog", "running", "orphan", "stopped", "ended"}
+
+\* The end's own steps: asked, its exit press under way, its TERM owed or sent; then ended,
+\* refused (EndRefused only), unknown (the process outlived the TERM) or cut (a restart).
+Ending == {"asked", "pressed", "term", "termed"}
+EndStates == {"none", "ended", "refused", "unknown", "cut"} \cup Ending
 
 ASSUME Auto \subseteq Kinds
 
@@ -150,12 +176,15 @@ VARIABLES
     asked,     \* ghost: the reads a person or the app's callback asked to answer
     wrong,     \* ghost: reads whose press landed on another screen
     unasked,   \* ghost: reads pressed that no one asked to answer
-    killedOn   \* ghost: the read the screen showed when Recoveries ended the process, 0 none
+    killedOn,  \* ghost: the read the screen showed when Recoveries ended the process, 0 none
+    ending,    \* the end asked of the row (F-231): one of EndStates
+    endRead    \* the read the end's exit press answers, 0 for none
 
 pRow == <<pst, pep, pclaims, pending, pdone, pacted, ptwice, pcut, pwrong>>
+endVars == <<ending, endRead>>
 
 vars == <<at, live, status, shown, up, restarts, call, pRow, results, cleared, lease,
-          sent, asked, wrong, unasked, killedOn>>
+          sent, asked, wrong, unasked, killedOn, endVars>>
 
 \* The prompt of each read: a person answers it, or the app's callback for a kind it chose.
 \* Its owner is this spec: the press, and the evidence a restart settles it by.
@@ -313,9 +342,11 @@ Stop ==
                    asked, wrong, unasked, killedOn>>
 
 \* Past the dialogs the session file names the process: the start goes on, as before.
+\* A row whose end is under way is never confirmed: its call holds the row (F-231).
 Confirm ==
     /\ up /\ live /\ at = N + 1
     /\ status \in {"starting", "dialog"}
+    /\ ending \notin Ending
     /\ status' = "running" /\ shown' = 0
     /\ UNCHANGED <<at, live, up, restarts, call, pRow, results, cleared, lease, sent, asked, wrong,
                    unasked, killedOn>>
@@ -341,7 +372,7 @@ Kill ==
 
 \* The process gone (its socket dead): stopped, so its name is free.
 Settle ==
-    /\ up /\ ~live /\ status # "stopped"
+    /\ up /\ ~live /\ status \notin {"stopped", "ended"}
     /\ status' = "stopped" /\ shown' = 0
     /\ UNCHANGED <<at, live, up, restarts, call, pRow, results, cleared, lease, sent, asked, wrong,
                    unasked, killedOn>>
@@ -350,10 +381,16 @@ Settle ==
 \* Under DialogFree a row on a dialog counts as free.
 Release ==
     /\ lease = "held"
-    /\ status = "stopped" \/ (Break = "DialogFree" /\ status = "dialog")
+    /\ status \in {"stopped", "ended"} \/ (Break = "DialogFree" /\ status = "dialog")
     /\ lease' = "released"
     /\ UNCHANGED <<at, live, status, shown, up, restarts, call, pRow, results, cleared, sent,
                    asked, wrong, unasked, killedOn>>
+
+\* An end under way is the call's, in memory: a restart cuts it, and its caller is told
+\* unknown. A person may ask it again.
+CutEnd ==
+    /\ ending' = IF ending \in Ending THEN "cut" ELSE ending
+    /\ UNCHANGED endRead
 
 \* A restart: the call under way, the answers not pressed (their claims, Prompt's Cut) and
 \* the tasks' answers not taken are lost (a task ends with Sessions); the row stays.
@@ -362,6 +399,7 @@ Restart ==
     /\ up' = FALSE /\ restarts' = restarts + 1
     /\ call' = {} /\ results' = {}
     /\ P!Cut
+    /\ CutEnd
     /\ UNCHANGED <<at, live, status, shown, cleared, lease, sent, asked, wrong, unasked,
                    killedOn>>
 
@@ -393,8 +431,70 @@ RestartAgent ==
     /\ call' \in {call, {}}
     /\ results' = {}
     /\ P!CutAndReadopt(Readopted)
+    /\ CutEnd
     /\ UNCHANGED <<at, live, status, shown, up, cleared, lease, sent, asked, wrong, unasked,
                    killedOn>>
+
+-----------------------------------------------------------------------------
+(* An end asked mid-start (F-231) *)
+
+Others == <<at, live, status, shown, up, restarts, call, pRow, results, cleared, lease, sent,
+            asked, wrong, unasked, killedOn>>
+
+\* The operator's end of the main session, or a stop, asked of the row on a dialog; again
+\* after a restart cut one. One whose process outlived its TERM is left, as a stop's
+\* `no_exit` is, to a person: asked again and again it would TERM a process that ignores it.
+AskEnd ==
+    /\ Ends /\ status = "dialog" /\ ending \in {"none", "cut"}
+    /\ ending' = "asked" /\ endRead' = 0
+    /\ UNCHANGED Others
+
+\* The trust dialog shown, its answer open: its exit option, as a person's answer, marked and
+\* its press checked as any. Anything else gets SIGTERM. Under EndRefused it is refused, as
+\* `{:starting, name}` was.
+HasExit(i) == i # 0 /\ Dialogs[i] = "trust" /\ P!Answerable(i)
+
+EndPress ==
+    /\ up /\ ending = "asked" /\ status = "dialog"
+    /\ IF Break = "EndRefused"
+       THEN ending' = "refused" /\ UNCHANGED <<endRead, Others>>
+       ELSE IF HasExit(shown)
+       THEN /\ P!Answer(shown, "person", "no")
+            /\ asked' = asked \cup {shown}
+            /\ ending' = "pressed" /\ endRead' = shown
+            /\ UNCHANGED <<at, live, status, shown, up, restarts, call, results, cleared, lease,
+                           sent, wrong, unasked, killedOn>>
+       ELSE ending' = "term" /\ UNCHANGED <<endRead, Others>>
+
+\* The press answered, and the process still lives: it pressed nothing, or not in time.
+EndAfterPress ==
+    /\ up /\ ending = "pressed" /\ pst[endRead] # "answering" /\ live
+    /\ ending' = "term"
+    /\ UNCHANGED <<endRead, Others>>
+
+\* SIGTERM to the held program's record: the process exits, or outlives it.
+EndTerm ==
+    /\ up /\ ending = "term"
+    /\ ending' = "termed" /\ live' \in {FALSE, live}
+    /\ UNCHANGED <<endRead, at, status, shown, up, restarts, call, pRow, results, cleared,
+                   lease, sent, asked, wrong, unasked, killedOn>>
+
+\* The stop's deadline with the process alive: the end answers unknown, and the row waits on
+\* its dialog as before.
+EndOutlived ==
+    /\ up /\ ending = "termed" /\ live
+    /\ ending' = "unknown"
+    /\ UNCHANGED <<endRead, Others>>
+
+\* The process gone, its press answered: the row is ended, its name never starts again.
+EndDone ==
+    /\ up /\ ending \in Ending /\ status = "stopped"
+    /\ ending = "pressed" => pst[endRead] # "answering"
+    /\ status' = "ended" /\ ending' = "ended"
+    /\ UNCHANGED <<endRead, at, live, shown, up, restarts, call, pRow, results, cleared, lease,
+                   sent, asked, wrong, unasked, killedOn>>
+
+EndSteps == EndPress \/ EndAfterPress \/ EndTerm \/ EndOutlived \/ EndDone
 
 -----------------------------------------------------------------------------
 
@@ -410,21 +510,33 @@ Init ==
     /\ lease = "held"
     /\ sent = [i \in Reads |-> 0]
     /\ asked = {} /\ wrong = {} /\ unasked = {} /\ killedOn = {}
+    /\ ending = "none" /\ endRead = 0
 
-Next ==
+\* The steps before F-231 leave the end as it is; a restart cuts it.
+Kept ==
     \/ Draw \/ Read \/ Callback \/ Confirm \/ Deadline \/ Kill \/ Settle \/ Release
-    \/ Restart \/ Recover \/ RestartAgent \/ Stop
+    \/ Recover \/ Stop
     \/ \E l \in Labels : ViewerPress(l) \/ Answer(l)
     \/ \E p \in pending : Press(p)
     \/ \E r \in results : Pressed(r)
     \/ \E c \in call : Take(c)
     \/ \E i \in Reads : Clear(i)
 
+Next ==
+    \/ Kept /\ UNCHANGED endVars
+    \/ Restart \/ RestartAgent
+    \/ AskEnd \/ EndSteps
+
+\* A step before F-231, the end left as it is.
+K(A) == A /\ UNCHANGED endVars
+
 Fairness ==
-    /\ WF_vars(Draw) /\ WF_vars(Read) /\ WF_vars(Callback) /\ WF_vars(\E c \in call : Take(c))
-    /\ WF_vars(Confirm) /\ WF_vars(Kill) /\ WF_vars(Settle) /\ WF_vars(Release)
-    /\ WF_vars(Recover)
-    /\ WF_vars(\E p \in pending : Press(p)) /\ WF_vars(\E r \in results : Pressed(r))
+    /\ WF_vars(K(Draw)) /\ WF_vars(K(Read)) /\ WF_vars(K(Callback))
+    /\ WF_vars(K(\E c \in call : Take(c)))
+    /\ WF_vars(K(Confirm)) /\ WF_vars(K(Kill)) /\ WF_vars(K(Settle)) /\ WF_vars(K(Release))
+    /\ WF_vars(K(Recover))
+    /\ WF_vars(K(\E p \in pending : Press(p))) /\ WF_vars(K(\E r \in results : Pressed(r)))
+    /\ WF_vars(EndSteps)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -441,6 +553,7 @@ TypeOK ==
     /\ results \subseteq [read : Reads, mark : {"none", "sent", "unknown"}]
     /\ cleared \subseteq Reads
     /\ lease \in {"held", "released"}
+    /\ ending \in EndStates /\ endRead \in 0..N
 
 \* Nothing answers a dialog unless a person or the app's callback asked for that read.
 OnlyAsked == unasked = {}
@@ -474,5 +587,13 @@ DialogShown ==
 
 \* Past the dialogs, the start goes on: the row runs.
 GoesOn == (at = N + 1 /\ live) ~> (status = "running" \/ ~live)
+
+\* A session asked to end runs no later turn: from the ask until it is answered, the row is
+\* never confirmed running, and once ended it never runs again (F-231).
+NoTurnAfterEnd == ending \in Ending \cup {"ended"} => status # "running"
+
+\* An asked end ends: the row ended, or the end answered unknown (the process outlived its
+\* TERM, or a restart cut the call). Never refused (F-231).
+EndEnds == ending = "asked" ~> ending \in {"ended", "unknown", "cut"}
 
 =============================================================================

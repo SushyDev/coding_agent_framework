@@ -157,6 +157,42 @@ defmodule CodingAgentFramework.ActsTest do
     assert ids.(actor: "r", reason: "repeating", cleared_at: nil) == []
   end
 
+  # Claim.tla's Free (F-231's new-6): a stop refused before it acted, settled not_verified with
+  # `free: true`, leaves its state free, and the next claim of that state is taken; the refused
+  # row stays a fault, its state in its detail. A refusal not freed, and a row that acted, keep
+  # their state.
+  test "a claim refused before it acted frees its state; one that acted keeps it", %{acts: acts} do
+    state = %{report: "queued"}
+    {:ok, refused} = Acts.claim(acts, "operator", "app-api", state, :stop, detail: %{why: 1})
+    reason = {:report, "queued"}
+
+    assert {:ok, :not_verified} =
+             Acts.settle(acts, refused, :not_verified, answer: {:refused, reason}, free: true)
+
+    assert {:ok, again} = Acts.claim(acts, "operator", "app-api", state, :stop)
+    assert again != refused
+
+    assert {:ok, %{state: nil, outcome: "not_verified", detail: detail} = old} =
+             Acts.get(acts, refused)
+
+    assert Acts.fault?(old)
+    assert %{"why" => 1, "state" => text} = JSON.decode!(detail)
+    assert text == Store.text(state)
+
+    # An act that ran keeps its state, even asked to free it.
+    assert {:ok, :not_verified} = Acts.settle(acts, again, :not_verified, acted: true, free: true)
+
+    assert {:refused, {:already_claimed, "operator"}} =
+             Acts.claim(acts, "operator", "app-api", state, :stop)
+
+    # A refusal not freed, one a person must look at first, keeps it too.
+    {:ok, kept} = Acts.claim(acts, "recoveries", "app-api", %{lost: 3}, :reopen)
+    assert {:ok, :failed} = Acts.settle(acts, kept, :failed, reason: :repeating)
+
+    assert {:refused, {:already_claimed, "recoveries"}} =
+             Acts.claim(acts, "recoveries", "app-api", %{lost: 3}, :reopen)
+  end
+
   test "an answer that does not come is unknown, and a missing Acts refused", %{acts: acts} do
     :sys.suspend(acts)
     assert {:unknown, {:timeout, 50}} = Acts.rows(acts, [], timeout: 50)

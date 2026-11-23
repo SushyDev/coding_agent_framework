@@ -1555,7 +1555,10 @@ its state unclaimed. A person may answer the dialog on its screen first.
 
 **Its end** (F-143, `Team.tla`'s `MainEnds`) is the operator's act alone: `end_main(name)`, the
 operator's tool, `Mains.end_main/3`, which `Sessions.end_main/3` does. It is refused while a
-start of the name is under way, and while any delegate of it has not ended (`{:delegates,
+start of the name is under way, but for a start whose call answered and whose agent row waits
+on a startup dialog (F-231, `Dialog.tla`'s AskEnd): that one is ended as a stop of a row on a
+dialog ends it (below), and the start is refused, `ended`. It is refused while any delegate of
+it has not ended (`{:delegates,
 names}`), so no delegate is left with no parent; `Sessions` checks that and moves the row in one
 step, and refuses a delegate's start under an ended main session (`{:parent_ended, name}`). A
 running session is stopped by SIGTERM once idle, as any stop; a row with no process is ended at
@@ -1717,9 +1720,14 @@ show that dialog with its first option selected clears a cut press once
 `unknown`. While the row waits its pane is read again on an interval and at each cue, so the
 next dialog becomes the row's; past the dialogs the session file names the process and the row
 runs, as a start's confirm makes it. "No, exit" ends the process, and the row is `stopped`. A
-person may give up a start without answering: `Sessions.stop/3` of a row on a dialog sends
-SIGTERM to its held program's record (`Holder.Process`), and the row is `stopped` once its
-process is gone (F-144).
+person may give up a start without answering: `Sessions.stop/3` of a row on a dialog, or the
+operator's `end_main` of a main session on one, presses the trust dialog's exit option, `No,
+exit`, as a person's answer, checked, an act in `Acts` (F-231, `Dialog.tla`'s EndPress). A
+dialog with no exit option (the imports dialog, a start's menu), one whose answer is marked, or
+a press that did not end the process, gets SIGTERM to its held program's record
+(`Holder.Process`, F-144; EndTerm). The row is `stopped` once its process is gone, or `ended`
+for an end, and from the ask on it is never confirmed running: a session asked to end runs no
+later turn (NoTurnAfterEnd), and an asked end ends or answers unknown (EndEnds).
 
 A numbered menu no rule names that a start meets before its session file (an onboarding menu
 on a new account, F-203) is a startup dialog too, kind `start_menu`, which no callback answers.
@@ -2310,10 +2318,14 @@ framework's tools, which are strict in how they act and narrow in whom they reac
   cut off. A claim a restart of the framework cut off is closed as interrupted, never
   retried. A state once claimed stays claimed, whatever the claim's end: a second claim of it
   is refused (`{:already_claimed, by}`), so a fix acts once per state; a unique index on the
-  target's state keeps it so, with no scan. A caller whose claim was answered unknown reads the
+  target's state keeps it so, with no scan. One end frees it (F-231, `Claim.tla`'s Free): a fix
+  refused when it acts acted on nothing, so the MCP settles its claim with `free: true` and the
+  state takes the next fix. A refusal that waits on a person keeps its state. A caller whose
+  claim was answered unknown reads the
   act's row before it decides anything (F-75). What a fix's arguments name is checked against
-  the state read before the claim, never after it, since a claim refused later still keeps its
-  state: an answer's label, and the request id it names, which the state must hold (`Team.tla`'s
+  the state read before the claim, never after it, since a claim refused later keeps its state
+  unless its fix was refused when it acted: an answer's label, and the request id it names,
+  which the state must hold (`Team.tla`'s
   `AnswerClaimed`, F-148); an id it does not hold is refused `{:not_held, id}` and takes no claim,
   so the next answer, with the right id, is taken. So is what each fix needs of the state it
   claims, by the part that acts (`Delegates.fix_check/2`, `Mains.fix_check/2`; `Team.tla`'s
@@ -2863,7 +2875,13 @@ the row's after an answer) and `GoesOn`. Each has a `Break_Dialog_*` configurati
 keys each answer by its read, not its kind, so `Dialog_Menus` (the trust dialog, then two
 menus one after another; with restarts in `slow/Dialog_MenusRestarts`) asks a person each menu
 and presses each at most once, and `Break_Dialog_ByKind` (answers kept by kind, F-203's)
-breaks `KeptAcrossRestart`: the second menu has no prompt waiting.
+breaks `KeptAcrossRestart`: the second menu has no prompt waiting. F-231's `Dialog_Ends` (the
+trust dialog, a restart), `Dialog_EndsTerm` (both dialogs, none) and `slow/Dialog_EndsLarge`
+(both, a restart) add an end asked while the row waits (`Ends`): the exit press, or SIGTERM,
+then the row ended, with the
+invariant `NoTurnAfterEnd` and the liveness `EndEnds`, which `Break_Dialog_EndRefused` (the end
+refused, as before) breaks. `Claim.tla`'s `Free` lets a claim let go with no act free its state,
+and `Break_Claim_FreeActed` (a row that acted freed too) breaks `OneActPerState`.
 
 `Menu.tla` (F-198) models a numbered menu no rule names on a running interactive session's
 screen: the pane read into the row's menu, a person's answer by a label or `esc` marked before

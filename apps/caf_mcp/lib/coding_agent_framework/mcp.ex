@@ -92,8 +92,9 @@ defmodule CodingAgentFramework.MCP do
     name), then `Delegates.fix/5` acts only while that state is still the delegate's, and the claim
     is settled `verified` when the fix answered `ok` and the state read after has moved, else
     `not_verified`. A second fix of a state is refused `{:claimed, by}` or
-    `{:already_claimed, by}`. Answers `%{done: value, claim: id, settled: settle's answer}`,
-    or the fix's refusal or unknown.
+    `{:already_claimed, by}`, but for a state whose fix was refused when it acted: that fix
+    acted on nothing, so its claim leaves the state free for the next (F-231). Answers
+    `%{done: value, claim: id, settled: settle's answer}`, or the fix's refusal or unknown.
   - `move(agent, to)`: `Grants.may_fix?/3`, then the mover's `move/4` (`to` optional: by default
     the usable account with the most room), which claims the act `move` in `Acts` and settles
     it when the move ends. Answers `%{act: id, from: account, to: account}` once the drain began.
@@ -916,9 +917,11 @@ defmodule CodingAgentFramework.MCP do
           _ -> :not_verified
         end
 
-      # A fix refused when it acts let its claim go with no act (`Claim.tla`'s LetGo).
+      # A fix refused when it acts let its claim go with no act (`Claim.tla`'s LetGo), and its
+      # state is free for the next fix (Free, F-231's new-6): it has nothing to repeat or guard.
       acted = not match?({:refused, _}, outcome)
-      settled = Acts.settle(ctx.acts, claim, verdict, answer: outcome, acted: acted)
+      fields = [answer: outcome, acted: acted, free: not acted]
+      settled = Acts.settle(ctx.acts, claim, verdict, fields)
 
       case outcome do
         {:ok, done} when fix == {:stop, :force} ->

@@ -65,7 +65,9 @@ defmodule CodingAgentFramework.Sessions do
   row before it goes, checked by the `Inlet` (`Inlet.choose/5`) in a task whose answer comes
   back as a message, and never made twice: a press a restart cut is `cut`, and only a person's
   clear (`clear_dialog/4`) lets it be made once more. A person gives up a start on a dialog by
-  `stop/3`, SIGTERM to its held program's record. While a row waits, its pane is read
+  `stop/3`, and the operator ends a main session waiting on one by `end_main/3` (F-231): the
+  trust dialog's exit option is pressed, as a person's answer is, else SIGTERM goes to its held
+  program's record. While a row waits, its pane is read
   every `look:` ms and at each cue: the next dialog becomes the row's, and once the session
   file names the process the row is `running`, as a start's confirm makes it. A start whose
   process exits on a dialog ("No, exit") is `stopped`.
@@ -307,8 +309,11 @@ defmodule CodingAgentFramework.Sessions do
 
   @doc """
   Ends running session `name` and waits for its process to exit. A row on a startup dialog
-  (F-144) gets SIGTERM to its held program's record, since it has no session file to read idle
-  from; it is `stopped` once its process is gone. Its row is `stopping` first,
+  (F-144) has no session file to read idle from: its dialog's exit option, the trust dialog's
+  `No, exit`, is pressed as a person's answer is, an act in `Acts` by `"person"`, checked by
+  the `Inlet` (F-231, `Dialog.tla`'s EndPress); a dialog with no exit option, one whose answer
+  is marked, or a press that did not end the process, gets SIGTERM to its held program's
+  record. It is `stopped` once its process is gone. Its row is `stopping` first,
   so `Mailbox` marks no row to it from then on. An interactive session gets SIGTERM once its
   session file says `idle` and, read in the same step through `open_to:`, no `Mailbox` row to it
   is `sending`: a row marked before the stop is waited for until the stop's deadline, then
@@ -345,8 +350,10 @@ defmodule CodingAgentFramework.Sessions do
   ended, so none is left with no parent; checked in the same step that moves the row, and a
   delegate's start under an ended main session is refused `{:parent_ended, name}`. A running
   session is stopped first, as `stop/3` stops it (SIGTERM once idle, `{:not_idle, status}`
-  otherwise), and its row is then `ended`; a row with no process (declared, stopped, refused)
-  is `ended` at once. An ended main session never starts again (`{:ended, name}`), and what it
+  otherwise), and its row is then `ended`; a row on a startup dialog is stopped as `stop/3`
+  stops one (its exit option, actor `"operator"`, or SIGTERM; F-231) and then `ended`; a row
+  with no process (declared, stopped, refused) is `ended` at once. An ended main session never
+  starts again (`{:ended, name}`), and what it
   owns ends with it (`Sessions.Agents.ended?/1`). Answers `{:ok, :ended}` (also for a row
   already ended); refused `:no_session`, `{:not_main, kind}`, `{:moving, phase}`, `{:not_free,
   status}`, or a stop's refusal; or the stop's unknown, which leaves the row `stopping` as
@@ -1169,24 +1176,32 @@ defmodule CodingAgentFramework.Sessions do
         pending = %{kind: :ask, from: from, row: row, deadline: deadline, how: how}
         {:noreply, ask(state, name, Map.put(pending, :force, force))}
 
-      # Dialog.tla's Stop (F-144): a row on a dialog has no session file to read idle from, so
-      # its held program's record takes the SIGTERM. The row waits as before until its process
-      # is gone; then it is stopped, as "No, exit" leaves it.
-      %{status: "dialog"} = row when how == :end and not is_map_key(state.pending, name) ->
-        case held(state, row) do
-          {:ok, %{process: process, record: %{pid: _} = record}} ->
-            sent =
-              if process == :live,
-                do: Holder.Process.signal(state.procs, record, "TERM"),
-                else: {:ok, :gone}
+      # Dialog.tla's AskEnd and EndPress (F-231): a row on a dialog has no session file to read
+      # idle from. Its dialog's exit option is pressed, as a person's answer, checked; a dialog
+      # with none, or whose answer is marked, gets SIGTERM to its held program's record (Stop,
+      # EndTerm). The row waits until its process is gone; then it is stopped, as "No, exit"
+      # leaves it, or ended for a main session's end.
+      %{status: "dialog"} = row
+      when how in [:end, :end_main] and not is_map_key(state.pending, name) ->
+        pending = %{kind: :stop, from: from, row: row, deadline: deadline, how: how}
 
-            row = %{row | pid: record.pid, proc_start: record.start}
-            pending = %{kind: :stop, from: from, row: row, deadline: deadline, how: how}
-            send(self(), {:check, name})
-            {:noreply, put_in(state.pending[name], Map.put(pending, :sent, sent))}
+        with {:ok, _process, record} <- held_record(state, row),
+             {:ok, label} <- Dialog.exit_option(row),
+             :ok <- press(state, row, :trust, label, ender(how), nil, true) do
+          row = %{row | pid: record.pid, proc_start: record.start}
+          {:noreply, put_in(state.pending[name], %{pending | kind: :end_press, row: row})}
+        else
+          {:refused, {why, _}} when why in [:no_exit, :answered] ->
+            case term_dialog(state, name, pending) do
+              {:ok, state} -> {:noreply, state}
+              unread -> {:reply, {:refused, unread}, state}
+            end
 
-          other ->
-            {:reply, {:refused, {:unread, other}}, state}
+          {:refused, _} = refused ->
+            {:reply, refused, state}
+
+          unread ->
+            {:reply, {:refused, unread}, state}
         end
 
       # F-152: a delegate's start never confirmed (its init never came) has no turn to read
@@ -1255,6 +1270,8 @@ defmodule CodingAgentFramework.Sessions do
       Map.has_key?(state.pending, row.name) -> {:refused, {:not_free, "calling"}}
       Agents.free?(row) -> :free
       row.status == "running" and is_integer(row.pid) -> :running
+      # A start that waits on its dialog is ended as a stop of it ends it (F-231).
+      row.status == "dialog" -> :running
       true -> {:refused, {:not_free, row.status}}
     end
   end
@@ -1687,6 +1704,9 @@ defmodule CodingAgentFramework.Sessions do
 
   defp check(state, name, %{kind: :ask} = pending), do: ask(state, name, pending)
 
+  # An end's exit press under way: its answer moves the end on (`end_pressed/3`), not a check.
+  defp check(state, _name, %{kind: :end_press}), do: state
+
   # The start's deadline with no session file: a row on a dialog waits on a person.
   defp late(state, row) do
     look_at(state, row)
@@ -1781,9 +1801,12 @@ defmodule CodingAgentFramework.Sessions do
   # so each is answered once), then the answer marked pressing on the row, then the Inlet's checked press in a task
   # linked to this process, so other calls go on meanwhile (F-144) and a restart ends it. Its
   # answer comes back as a message (`pressed/3`). `from` is the caller to answer, or nil.
-  defp press(%{inlet: nil}, _row, _kind, _label, _by, _from), do: {:refused, :no_inlet}
+  # `ending` marks an end's exit press (F-231): its answer goes on with the end (`end_pressed/3`).
+  defp press(state, row, kind, label, by, from, ending \\ false)
 
-  defp press(state, row, kind, label, by, from) do
+  defp press(%{inlet: nil}, _row, _kind, _label, _by, _from, _ending), do: {:refused, :no_inlet}
+
+  defp press(state, row, kind, label, by, from, ending) do
     taken = %{start: row.started_at, dialog: kind, mark: Dialog.from_mark(row, kind)}
     # Each menu of one start is its own read, and its own claim (F-206).
     taken = if kind == :start_menu, do: Map.put(taken, :read, Dialog.shown(row).at), else: taken
@@ -1801,7 +1824,8 @@ defmodule CodingAgentFramework.Sessions do
             how, _ -> {:unknown, {how, :press}}
           end
 
-        {:pressed, %{name: name, kind: kind, label: label, act: act, from: from}, answer}
+        press = %{name: name, kind: kind, label: label, act: act, from: from, ending: ending}
+        {:pressed, press, answer}
       end)
 
       :ok
@@ -1843,9 +1867,68 @@ defmodule CodingAgentFramework.Sessions do
     if row, do: write(state, row, answers: Dialog.mark(row, kind, label, mark))
     if press.act, do: Acts.answered(state.acts, press.act, answer)
     if press.from, do: GenServer.reply(press.from, answer)
-    if row, do: look_at(state, Table.get(state.db, row.host, name))
-    look_later(state)
+
+    if press[:ending] do
+      end_pressed(state, name, answer)
+    else
+      if row, do: look_at(state, Table.get(state.db, row.host, name))
+      look_later(state)
+    end
   end
+
+  # Dialog.tla's EndAfterPress (F-231): an end's exit press answered. Sent, the process exits
+  # on its own, and the end waits for it as a stop does; anything else pressed nothing, or may
+  # not have, so the held program's record gets SIGTERM (EndTerm). The pane is not read for a
+  # next dialog: nothing of this start is answered any more.
+  defp end_pressed(state, name, answer) do
+    case Map.pop(state.pending, name) do
+      {%{kind: :end_press} = pending, rest} ->
+        state = %{state | pending: rest}
+        pending = %{pending | kind: :stop}
+
+        case answer do
+          {:ok, :sent} ->
+            send(self(), {:check, name})
+            put_in(state.pending[name], Map.put(pending, :sent, {:ok, :exit}))
+
+          _ ->
+            case term_dialog(state, name, pending) do
+              {:ok, state} -> state
+              unread -> done(state, name, pending, {:unknown, unread})
+            end
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  # Dialog.tla's EndTerm, and a person's Stop: SIGTERM to the held program's record, by its pid
+  # and start time, unless that process is gone; then the stop waits for it (`check/3`).
+  defp term_dialog(state, name, pending) do
+    with {:ok, process, record} <- held_record(state, pending.row) do
+      sent =
+        if process == :live,
+          do: Holder.Process.signal(state.procs, record, "TERM"),
+          else: {:ok, :gone}
+
+      row = %{pending.row | pid: record.pid, proc_start: record.start}
+      send(self(), {:check, name})
+      {:ok, put_in(state.pending[name], Map.merge(pending, %{row: row, sent: sent}))}
+    end
+  end
+
+  defp held_record(state, row) do
+    case held(state, row) do
+      {:ok, %{process: process, record: %{pid: _} = record}} -> {:ok, process, record}
+      other -> {:unread, other}
+    end
+  end
+
+  # Who presses an end's exit option, in `Acts`: the operator, whose act a main session's end
+  # is alone, or the person who stopped the row.
+  defp ender(:end_main), do: "operator"
+  defp ender(_how), do: "person"
 
   # The pane shows `kind` with its first option selected, as the dialog is drawn before a key.
   defp unmoved(%{inlet: nil}, _row, _kind), do: {:refused, :no_inlet}
