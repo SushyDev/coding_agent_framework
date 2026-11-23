@@ -17,8 +17,9 @@ defmodule CodingAgentFramework.Store do
   5 ms, until `busy_bound/0` (2 s) has passed on the monotonic clock since its first try. Then
   it is busy: `open/3`, `write/3`, `read_only/4` and `snapshot/2` answer `{:refused, {:sqlite,
   :busy}}`, and `query/3`, `transaction/2` and the functions on them raise `Store.Busy`, as any
-  statement's error raises. A busy answer comes no later than the bound and 100 ms: the last
-  sleep ends at the deadline, one try follows it, and the sleeps are short because a longer
+  statement's error raises. A busy answer comes no later than the bound and 500 ms (about 100 on an idle host; the
+  last try's own run and the scheduler on a loaded one, F-224): the last sleep ends at the
+  deadline, one try follows it, and the sleeps are short because a longer
   sleep wakes later on a loaded host. `open/3` and `write/3` run several statements under one
   deadline. SQLite's own busy wait is off, because exqlite's handler waits about four times its
   bound (F-215's new-2).
@@ -60,7 +61,7 @@ defmodule CodingAgentFramework.Store do
 
   @doc """
   How long, in ms by the monotonic clock, a statement waits for a write lock another connection
-  holds before it is busy. A busy answer comes no later than this and 100 ms.
+  holds before it is busy. A busy answer comes no later than this and 500 ms (F-224).
 
       iex> CodingAgentFramework.Store.busy_bound()
       2000

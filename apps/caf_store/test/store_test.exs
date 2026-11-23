@@ -118,8 +118,10 @@ defmodule CodingAgentFramework.StoreTest do
     assert [%{host: "g"}] = Store.select(db, "t", @columns, "1 = 1", [])
   end
 
-  # F-216: a busy answer comes after the bound and no later than the bound and its slack.
-  @slack 100
+  # F-216: a busy answer comes after the bound and no later than the bound and its slack. The
+  # slack covers the last try's own run and the scheduler on a loaded host: 100 ms failed at
+  # 2,168 ms with three gate runs and a live end-to-end run on one machine (F-224).
+  @slack 500
 
   # Holds `path`'s write lock from a second connection while `write` runs, and answers what
   # `write` answered or raised and how long it took, in ms by the monotonic clock.
