@@ -132,6 +132,9 @@ ASSUME Break \in Breaks
 \* The order 2.1.322 shows them in (F-140's captures), for the configurations.
 TrustThenImports == <<"trust", "imports">>
 
+\* The trust dialog alone: an end's exit press and a restart that cuts it, in a fast check.
+TrustOnly == <<"trust">>
+
 \* A new account's onboarding: the trust dialog, then two menus no rule names (F-206).
 TrustThenMenus == <<"trust", "menu", "menu">>
 

@@ -2875,8 +2875,10 @@ the row's after an answer) and `GoesOn`. Each has a `Break_Dialog_*` configurati
 keys each answer by its read, not its kind, so `Dialog_Menus` (the trust dialog, then two
 menus one after another; with restarts in `slow/Dialog_MenusRestarts`) asks a person each menu
 and presses each at most once, and `Break_Dialog_ByKind` (answers kept by kind, F-203's)
-breaks `KeptAcrossRestart`: the second menu has no prompt waiting. F-231's `Dialog_Ends` adds an
-end asked while the row waits (`Ends`): the exit press, or SIGTERM, then the row ended, with the
+breaks `KeptAcrossRestart`: the second menu has no prompt waiting. F-231's `Dialog_Ends` (the
+trust dialog, a restart), `Dialog_EndsTerm` (both dialogs, none) and `slow/Dialog_EndsLarge`
+(both, a restart) add an end asked while the row waits (`Ends`): the exit press, or SIGTERM,
+then the row ended, with the
 invariant `NoTurnAfterEnd` and the liveness `EndEnds`, which `Break_Dialog_EndRefused` (the end
 refused, as before) breaks. `Claim.tla`'s `Free` lets a claim let go with no act free its state,
 and `Break_Claim_FreeActed` (a row that acted freed too) breaks `OneActPerState`.
