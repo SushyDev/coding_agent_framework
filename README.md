@@ -348,7 +348,11 @@ Built, each from a checked model in `model/tla/`:
   move's resume ends moved, back or left down; and every other unknown of that resume (the
   app's launch, the word, the first line) under the same deadline (F-212);
 - the agents' instructions say to compile with `--force` in both environments after merging
-  `main`, since a stale struct type in `_build` fails the gates (F-213).
+  `main`, since a stale struct type in `_build` fails the gates (F-213);
+- a home keeps its kind (F-214): the first start on a home records in its database whether the
+  tree runs agents, a tree of the other kind is refused `{:home_kind, recorded}` before any part
+  starts, a home that ran before the mark and holds agent rows is marked `agents`, and
+  `home_kind/1` reads the kind without starting a tree.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

@@ -899,7 +899,20 @@ a config with `agents: false` needs only the keys that tree reads (the table bel
 no tool home; `agent_rows/1` also takes the instance's name, read from the config its running
 tree keeps in its `Registry`, since a hook's `opts` are plain data and a struct there, the
 config among them, is refused by name (`{:not_data, module, {:struct, struct}}`); and
-`post_tool_use/3` may answer `{:context, text}`. The other calls are B3's rest.
+`post_tool_use/3` may answer `{:context, text}`. F-214 made the rule F-195's new-2 asked for
+a check: a home is agentful or agentless for its whole life, since an agentless tree asks no
+owner of a delegate's, main's or run's lease and would leave an agentful tree's unreclaimed.
+`CodingAgentFramework.Home` keeps one row in the home's own database (`home`, in `caf.db`),
+written by the first start on the home before any part starts and read by every later one: a
+home with no mark and no agent, delegate or main rows takes the kind of the tree that starts
+on it, one with such rows (it ran before the mark) is marked `agents`, and `start_link/1` of
+the other kind than the mark answers `{:refused, {:home_kind, recorded}}` with nothing
+started and no row of the tree's own written. `home_kind/1` reads the kind (`:agents`,
+`:agentless` or `:new`) with no process started, since `agent_rows/1` answers no rows for an
+agentless home and for a new one alike. No spec describes a tree's start on a home, and no
+lock keeps two trees from starting on one home at once, so the mark is one read and one write
+in a single SQLite transaction, which tells two first starts of different kinds apart and
+nothing else. The other calls are B3's rest.
 The config answers the room the home leaves for an agent's name (`Config.name_room/1`, F-172), and the tree hands it to `Delegates` and
 `Mains`, which refuse a longer name `{:bad, :name, {:longer_than, n}}` before any row;
 sockets stay in the home. A service's socket is named by the first 16 hex digits of the SHA-256
@@ -942,7 +955,7 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 | `remedies`, `remedy_bound` | the healer's allow-list and its caps' window | the healer's acts, 1 h |
 | `viewer` | every viewer's `{columns, rows}`, handed to `Sessions` and `Recoveries` alike (F-190) | `{200, 50}` |
 | `undeclared_cues` | `:route` or `:raise` a cue on a topic no part declares | `:route` |
-| `agents` | `false` starts only the parts a lease needs (`Config.agentless/0`), none that runs or reads an agent (F-195), and no tool home, so its config needs only `home`, `instance`, `programs` and `env`'s `path` (F-201), and refuses `usable`, `tool_hooks`, `extensions` and `dialogs`, which no part of it reads, `{:bad, key}` (F-209) | `true` |
+| `agents` | `false` starts only the parts a lease needs (`Config.agentless/0`), none that runs or reads an agent (F-195), and no tool home, so its config needs only `home`, `instance`, `programs` and `env`'s `path` (F-201), and refuses `usable`, `tool_hooks`, `extensions` and `dialogs`, which no part of it reads, `{:bad, key}` (F-209); a home keeps its kind for its life, the first start records it and `start_link/1` of the other kind is refused `{:home_kind, recorded}` (F-214) | `true` |
 | `restart_wait` | ms a start waits for an instance of its name still exiting, before it is refused `{:instance_running, name}` (F-195) | 5 s |
 
 An app like a development loop's (views, builders, gates, landings) needs nothing more: a
