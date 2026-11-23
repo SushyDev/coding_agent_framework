@@ -179,6 +179,9 @@ defmodule CodingAgentFramework.Jobs do
          :ok <- fence(jobs, ctx, id, lease) do
       now = now()
       deadline = now + start + timeout
+      # The call's own reads wait on the monotonic clock; the row keeps `deadline` on OS time,
+      # which outlives a restart (F-218).
+      bound = mono() + start + timeout
       secs = :erlang.float_to_binary(timeout / 1000, decimals: 3)
       %{kill: k, sleep: s, mkdir: m} = ctx.programs.paths
       args = ["caf-job", ctx.path, ctx.log, ctx.exit, secs, k, s, m, lease_id(lease)]
@@ -188,7 +191,7 @@ defmodule CodingAgentFramework.Jobs do
       # dtach's held reply: the job is live. Its reply cut: the host is read until the deadline.
       read = fn
         :reply -> {:ok, :live}
-        :cut -> retry(deadline, interval, fn -> cut_read(ctx, lease, @call) end)
+        :cut -> retry(bound, interval, fn -> cut_read(ctx, lease, @call) end)
       end
 
       # The row leaves `asked` only while it is still `asked`: a restart, or the end of this
@@ -198,7 +201,7 @@ defmodule CodingAgentFramework.Jobs do
       with :ok <- advance(jobs, ctx, id, starting),
            held = Held.hold(ctx, @wrapper, args, argv, Keyword.get(opts, :env, [])),
            {:ok, :running} <- Held.settle(ctx, held, now + start, read, &started(put, &1)),
-           {:ok, value} <- wait_end(ctx, deadline, Keyword.get(opts, :interval, 200)),
+           {:ok, value} <- wait_end(ctx, bound, Keyword.get(opts, :interval, 200)),
            :ok <- put.(ended(value)) do
         fetch = fn -> fetch(ctx, worktree, record, opts) end
         answer(ctx, ended(value), fetch, Keyword.get(opts, :log_bytes, 16_384))
@@ -459,9 +462,10 @@ defmodule CodingAgentFramework.Jobs do
   end
 
   # One read waits on the host while the job lives, until the call's deadline and a grace for
-  # the host's own end of it. A read that fails is tried again until the deadline.
+  # the host's own end of it. A read that fails is tried again until the deadline. The deadline
+  # is on the monotonic clock, as it lives in this call only.
   defp wait_end(ctx, deadline, interval) do
-    retry(deadline, interval, fn -> read(ctx, :wait, max(deadline - now(), 0) + @grace) end)
+    retry(deadline, interval, fn -> read(ctx, :wait, max(deadline - mono(), 0) + @grace) end)
     |> case do
       {:ok, {:end, value}} -> {:ok, value}
       {:ok, :live} -> {:unknown, :dropped}
@@ -475,10 +479,10 @@ defmodule CodingAgentFramework.Jobs do
         ok
 
       _ ->
-        if now() >= deadline do
+        if mono() >= deadline do
           {:unknown, :dropped}
         else
-          pause(min(interval, deadline - now()))
+          pause(min(interval, deadline - mono()))
           retry(deadline, interval, read)
         end
     end
@@ -578,6 +582,8 @@ defmodule CodingAgentFramework.Jobs do
   defp pause(_), do: :ok
 
   defp now, do: System.os_time(:millisecond)
+
+  defp mono, do: System.monotonic_time(:millisecond)
 
   defp row(id, where, worktree) do
     %{

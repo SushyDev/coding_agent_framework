@@ -187,7 +187,9 @@ Every part follows these, and a unit that cannot is a finding, not an exception.
    a finite timeout. No hidden retry, wait or fallback. A stated bound is a bound by the clock:
    a wait takes its deadline once (`System.monotonic_time`, or one sleep of the whole bound in a
    host's shell) and checks it, and never counts tries or sleeps, which wake late under load
-   (F-216, F-217).
+   (F-216, F-217). A deadline that lives only inside one call is on `System.monotonic_time`, so
+   a step of the OS clock does not move it; one a row keeps (`start_until`, `deadline`,
+   `end_until`) is on OS time, or a part's `clock:`, since it must outlive a restart (F-218).
 6. **Nothing by guesswork.** Work is placed by a lease, acted on by a claim, ended by its pid and
    start time, and answered by its named decider or a person; never by a pattern, a timer alone
    or a screen read once.
@@ -363,8 +365,10 @@ framework's hooks deciding:
   released once on any end, a kill included, read by `ps` (`Schedule.tla`'s shape `Native`);
   a refusal prints one line with its reason and retry time and exits 75; with no answer it
   asks again once a second until 30 s by the clock have passed since its first ask with none
-  (F-217), then runs without a lease and says so, as a hook fails open. The `run` tool, its
-  late end and `MCP.caller/3` were removed in F-176 (F-171's new-3); the operator keeps no
+  (F-217), then runs without a lease and says so, as a hook fails open; one ask is bound by
+  curl's `--max-time`, the plug's `:wait` and 5 s, and an ask cut there is no answer (F-218).
+  The `run` tool, its late end and `MCP.caller/3` were removed in F-176 (F-171's new-3); the
+  operator keeps no
   `run`, since a landing is the app's own `Jobs.run/6`;
 - `run_in_background` and `Monitor` stay native; during a move's drain they are denied with a
   reason (as today). Claude Code gives a background command a stdin that never closes, so a

@@ -31,6 +31,15 @@ defmodule CodingAgentFramework.Runs do
   ask with none (`prepare/5`'s `:unanswered`), then runs the command without a lease and says
   so in one line: a lease is soft work, and fails open as the hooks do.
 
+  **Each ask is bounded too** (F-218). A connection the intake accepts and then stalls without
+  closing would hold the wrapper, and so the agent's command. The ask's `--max-time` is the
+  plug's `:wait` plus 5 s (`prepare/5`'s `:wait`, `wait/0` by default, as the plug's): a queued
+  ask is answered `unknown no_answer` at `:wait`, so only a stalled one passes it. An ask cut
+  at its bound is no answer, the path above: it counts as the first with none, and the wrapper
+  asks while the no-answer bound lasts. So however the intake fails, the wrapper runs its
+  command within the first ask's bound, the no-answer bound, the bound of the last ask begun
+  within it and a second's pause: 1 241 s with the defaults.
+
   **The end.** The lease's owner is the process itself (`state/2`, for the `Scheduler`'s
   `holders:`): live while that pid runs with that start time, ended once it does not, read by
   `ps` (`Holder.Process.liveness/3`) on the `Scheduler`'s interval and after its restart. So
@@ -57,17 +66,24 @@ defmodule CodingAgentFramework.Runs do
   @agent ~r/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z/
   # How long the owner's `ps` may take.
   @ps_timeout 5_000
+  # The plug's `:wait` by default, and how long past it one ask may run (F-218): the slack is for
+  # the plug's own end of a queued wait to reach the wrapper.
+  @wait 600_000
+  @ask_slack 5_000
 
-  # $0 caf-run; the paths, the curl config, the URL and the no-answer bound in seconds are set
-  # above it by `prepare/5`. The body goes as form fields curl encodes. A queued line is printed
-  # as it comes; the last line is the answer. `exec` keeps the pid, so the process that asked is
-  # the command.
+  # $0 caf-run; the paths, the curl config, the URL, the no-answer bound and one ask's bound in
+  # seconds are set above it by `prepare/5`. The body goes as form fields curl encodes. A queued
+  # line is printed as it comes; the last line is the answer. `exec` keeps the pid, so the
+  # process that asked is the command.
   #
   # The no-answer bound is by the clock, not a count of asks (F-217): the first ask with no
   # answer starts one sleep of the whole bound beside the asks, and the wrapper asks again only
   # while it lives. A count of one-second sleeps overshoots, since each wakes late under load.
   # The timer is this shell's own child, so its pid is no other program's until this shell
   # reaps it; it is ended only while `kill -0` finds it, before the command runs.
+  #
+  # One ask's bound is curl's `--max-time` (F-218). A cut ask prints no answer, so it takes the
+  # path of an ask nobody answered.
   @wrapper ~S"""
   [ "$#" -eq 5 ] && [ "$4" = -- ] || {
     echo 'caf-run: usage: caf-run <class> <id> <agent> -- <command>' >&2; exit 64; }
@@ -77,8 +93,8 @@ defmodule CodingAgentFramework.Runs do
   timer() { [ -n "$d" ] && kill -0 "$d" 2>/dev/null; }
   run() { ! timer || kill "$d" 2>/dev/null; exec "$sh" -c "$cmd"; }
   while :; do
-    last=$("$curl" -sN -K "$cfg" --data-urlencode "class=$class" --data-urlencode "id=$id" \
-        --data-urlencode "agent=$agent" --data-urlencode "pid=$$" \
+    last=$("$curl" -sN --max-time "$asked" -K "$cfg" --data-urlencode "class=$class" \
+        --data-urlencode "id=$id" --data-urlencode "agent=$agent" --data-urlencode "pid=$$" \
         --data-urlencode "start=$start" --data-urlencode "again=$again" "$url" 2>/dev/null |
       while IFS= read -r line; do
         case $line in
@@ -162,6 +178,13 @@ defmodule CodingAgentFramework.Runs do
 
   defp entry(_), do: :bad
 
+  @doc """
+  How long, in ms, `Runs.Plug` holds a queued ask by default (`:wait`), and so the default of
+  `prepare/5`'s `:wait`: 600 000, past every class's `max_wait`.
+  """
+  @spec wait() :: pos_integer
+  def wait, do: @wait
+
   @doc "The wrapper's path: `<home>/bin/caf-run`."
   @spec wrapper(t) :: String.t()
   def wrapper(%__MODULE__{home: home}), do: Path.join([home, "bin", "caf-run"])
@@ -180,24 +203,37 @@ defmodule CodingAgentFramework.Runs do
   `ps` and `sleep` from `programs` and the intake's `port`, and the curl config that carries
   the secret, `<home>/runs.curl` (mode 0600), so no secret is in a command line. Option
   `:unanswered` (ms, default 30 s): how long, from its first ask with no answer, the wrapper
-  asks again before it runs the command without a lease. Answers `:ok`, `{:refused, reason}`
-  for a program missing, a secret out of shape or a bound that is not a positive integer, or
-  `{:unknown, reason}` when a write fails.
+  asks again before it runs the command without a lease. Option `:wait` (ms, `wait/0` by
+  default): the `:wait` of the app's `Runs.Plug`, which one ask may run 5 s past (curl's
+  `--max-time`); an ask cut there is no answer. An app that sets the plug's `:wait` sets it here
+  too. Answers `:ok`, `{:refused, reason}` for a program missing, a secret out of shape, or a
+  bound that is not a positive integer (`:bad_unanswered`, `:bad_wait`), or `{:unknown, reason}`
+  when a write fails.
   """
   @spec prepare(t, Programs.t(), :inet.port_number(), String.t(), keyword) ::
           :ok | {:refused, term} | {:unknown, term}
   def prepare(%__MODULE__{home: home} = runs, programs, port, secret, opts \\ []) do
     cfg = Path.join(home, "runs.curl")
     unanswered = Keyword.get(opts, :unanswered, 30_000)
+    wait = Keyword.get(opts, :wait, @wait)
 
     with true <- secret =~ ~r/\A[A-Za-z0-9._~+\/=-]{1,256}\z/ or {:refused, :bad_secret},
          true <- (is_integer(unanswered) and unanswered > 0) or {:refused, :bad_unanswered},
+         true <- (is_integer(wait) and wait > 0) or {:refused, :bad_wait},
          {:ok, p} <- Programs.take(programs, [:sh, :curl, :ps, :sleep]),
          :ok <- write(cfg, ~s(header = "x-caf-secret: #{secret}"\n), 0o600) do
-      secs = :erlang.float_to_binary(unanswered / 1000, decimals: 3)
+      secs = &:erlang.float_to_binary(&1 / 1000, decimals: 3)
 
       vars =
-        [sh: p.sh, curl: p.curl, ps: p.ps, sleep: p.sleep, cfg: cfg, unanswered: secs]
+        [
+          sh: p.sh,
+          curl: p.curl,
+          ps: p.ps,
+          sleep: p.sleep,
+          cfg: cfg,
+          unanswered: secs.(unanswered),
+          asked: secs.(wait + @ask_slack)
+        ]
         |> Enum.map_join("", fn {k, v} -> "#{k}=#{sh_quote(v)}\n" end)
 
       script =

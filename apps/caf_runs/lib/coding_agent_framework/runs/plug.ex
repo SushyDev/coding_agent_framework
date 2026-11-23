@@ -21,7 +21,8 @@ defmodule CodingAgentFramework.Runs.Plug do
   Queued, the response is chunked: `queued (position n)` first (unless the wrapper asks again
   after a cut, `again=1`), then a newline every `beat:` ms (5 000 by default), whose failed
   write is how a wrapper gone is found, then the answer. A wait longer than `wait:` ms
-  (600 000 by default, past every class's `max_wait`) ends `unknown no_answer`.
+  (`Runs.wait/0`, 600 000 by default, past every class's `max_wait`) ends `unknown no_answer`.
+  The wrapper's own bound for one ask is this `:wait` and 5 s (`Runs.prepare/5`'s `:wait`).
 
       iex> plug = CodingAgentFramework.Runs.Plug
       iex> opts = plug.init(scheduler: fn -> nil end, units: fn _, _ -> {:ok, %{}} end, secret: "s")
@@ -39,7 +40,6 @@ defmodule CodingAgentFramework.Runs.Plug do
   @header "x-caf-secret"
   @max_body 8_192
   @beat 5_000
-  @wait 600_000
 
   @impl true
   def init(opts) do
@@ -51,7 +51,7 @@ defmodule CodingAgentFramework.Runs.Plug do
       # Kept behind a function, so a crash report or `inspect` of the options never shows it.
       secret: fn -> secret end,
       beat: Keyword.get(opts, :beat, @beat),
-      wait: Keyword.get(opts, :wait, @wait)
+      wait: Keyword.get(opts, :wait, Runs.wait())
     }
   end
 

@@ -137,7 +137,8 @@ defmodule CodingAgentFramework.Holder.Process do
   """
   # The wait between reads while an end waits for the program to be dead.
   @round 100
-  # How long, after KILL, an end waits for the socket to read dead.
+  # How long, after KILL, an end waits for the socket to read dead. Like the grace, it is a
+  # deadline that lives in one call, so it is taken from the monotonic clock (F-218).
   @kill_wait 2_000
 
   @doc """
@@ -346,8 +347,9 @@ defmodule CodingAgentFramework.Holder.Process do
   end
 
   @doc """
-  Waits until `name`'s program reads dead, reading again every 100 ms until `deadline` (OS time
-  in ms). Answers `{:ok, :ended}`, or `{:unknown, {:not_dead, last}}` at the deadline, where
+  Waits until `name`'s program reads dead, reading again every 100 ms until `deadline`
+  (`System.monotonic_time(:millisecond)`, F-218: a deadline that lives in one call is not moved
+  by a step of the OS clock). Answers `{:ok, :ended}`, or `{:unknown, {:not_dead, last}}` at the deadline, where
   `last` is the last reading or the read that failed.
   """
   @spec dead_by(t, String.t(), integer) :: {:ok, :ended} | {:unknown, term}
@@ -450,5 +452,5 @@ defmodule CodingAgentFramework.Holder.Process do
 
   defp pause(_), do: :ok
 
-  defp now, do: System.os_time(:millisecond)
+  defp now, do: System.monotonic_time(:millisecond)
 end

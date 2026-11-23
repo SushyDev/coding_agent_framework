@@ -24,10 +24,18 @@ defmodule CodingAgentFramework.WaiterStandIn do
 
   import CodingAgentFramework.TestHost, only: [program!: 1, test_dir: 0]
 
+  alias CodingAgentFramework.Shell
+
+  # How long the hook may run: a test's own await bound (`Task.await/2`'s 5 s), so a hook that
+  # never exits is ended, not left running after the test failed.
+  @bound 5_000
+
   @doc """
   Runs the waiter hooks of `settings` (a path) for session `session_id` in a task, and answers
   it. The task answers `{status, text}` once the hook exits, after it wrote `shape`'s lines to
-  `transcript`; `{:no_hook, settings}` when the file names no waiter.
+  `transcript`; `{:no_hook, settings}` when the file names no waiter; `{:timeout, 5_000}` when
+  the hook did not exit within 5 s, after its process group was ended and nothing was written.
+  A test awaits the task for longer than that, as the ending takes a moment.
   """
   def turn_end(settings, session_id, transcript, shape)
       when shape in [:idle, :busy, :enqueued, :lost] do
@@ -76,14 +84,38 @@ defmodule CodingAgentFramework.WaiterStandIn do
         args: ["-c", ~S(eval "$1" < "$2" 2> "$3"), "sh", command, in_file, err]
       ])
 
-    status =
+    result =
       receive do
-        {^port, {:exit_status, status}} -> status
+        {^port, {:exit_status, status}} -> {status, File.read!(err)}
+      after
+        @bound ->
+          end_hook(port)
+          {:timeout, @bound}
       end
 
-    text = File.read!(err)
     File.rm_rf!(dir)
-    {status, text}
+    result
+  end
+
+  # OTP starts a port program with `setsid` (see `Shell`), so the hook's pid leads its group:
+  # KILL to the group while the port is open and its exit not taken, when the pid is still the
+  # hook's. The exit is awaited for a moment, then the port closed.
+  defp end_hook(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, pgid} -> Shell.signal(program!(:kill), "KILL", pgid)
+      nil -> :ok
+    end
+
+    receive do
+      {^port, {:exit_status, _}} -> :ok
+    after
+      1_000 ->
+        try do
+          Port.close(port)
+        catch
+          :error, :badarg -> :ok
+        end
+    end
   end
 
   defp write(transcript, session_id, text, shape) do

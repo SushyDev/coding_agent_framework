@@ -414,7 +414,7 @@ defmodule CodingAgentFramework.Services do
   @spec wait(GenServer.server(), String.t(), term, pos_integer) ::
           {:ok, term} | {:refused, term} | {:unknown, term}
   def wait(services, name, until, timeout) do
-    deadline = now() + timeout
+    deadline = mono() + timeout
 
     with {:ok, until} <- until_ok(until),
          {:ok, row} <- row_of(services, name),
@@ -453,7 +453,7 @@ defmodule CodingAgentFramework.Services do
   # `last` is how the wait ends at its deadline: dropped while the last round's reads failed.
   # A read the deadline itself cut keeps the round before's.
   defp wait_round(ctx, until, deadline, last) do
-    timeout = max(min(deadline - now(), @call), 1)
+    timeout = max(min(deadline - mono(), @call), 1)
     state = Holder.state(%{ctx.holder | timeout: timeout}, ctx.name)
 
     case {met(ctx, until, timeout), state} do
@@ -469,14 +469,14 @@ defmodule CodingAgentFramework.Services do
         last =
           cond do
             read == :no and match?({:ok, _}, state) -> :timeout
-            cut and now() >= deadline -> last
+            cut and mono() >= deadline -> last
             true -> :dropped
           end
 
-        if now() >= deadline do
+        if mono() >= deadline do
           {:unknown, last}
         else
-          pause(min(@round, deadline - now()))
+          pause(min(@round, deadline - mono()))
           wait_round(ctx, until, deadline, last)
         end
     end
@@ -951,6 +951,10 @@ defmodule CodingAgentFramework.Services do
 
   defp now, do: System.os_time(:millisecond)
 
+  # A deadline that lives in one call (`wait/4`'s) is on the monotonic clock; one a row keeps
+  # (`start_until`, `end_until`) is on `now/0`, which outlives a restart (F-218).
+  defp mono, do: System.monotonic_time(:millisecond)
+
   defp grants(services),
     do: with({:ok, config} <- call(services, :config), do: {:ok, config.grants})
 
@@ -1107,7 +1111,7 @@ defmodule CodingAgentFramework.Services do
 
     with :ok <- end_forward_of(ctx, row),
          :ok <- send_end(ctx, row, signal),
-         :ok <- ended(Holder.Process.dead_by(ctx.procs, ctx.name, now())),
+         :ok <- ended(Holder.Process.dead_by(ctx.procs, ctx.name, mono())),
          do: put_row(s, row.name, @ended, %{state: row.state})
   end
 
