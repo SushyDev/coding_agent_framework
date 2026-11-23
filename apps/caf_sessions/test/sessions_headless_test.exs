@@ -12,7 +12,7 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
   import CodingAgentFramework.SessionsSetup
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{HeadlessStandIn, Holder, Sessions, SessionsSetup, Stream}
+  alias CodingAgentFramework.{HeadlessStandIn, Holder, Sessions, SessionsSetup, Stream, Tmux}
   alias CodingAgentFramework.Sessions.Table
 
   setup {SessionsSetup, :sessions}
@@ -118,9 +118,12 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
 
     assert {:ok, _} = Stream.write(ctx.stream, id, {:answer, "req-" <> u, :allow})
     stream_row(ctx, id, & &1.idle)
+    assert "d3" in viewer_names(ctx)
     assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "d3")
     refute alive?(pid)
     assert %{status: "stopped"} = Table.get(ctx.table, "test", "d3")
+    # F-224's e2e-15: the viewer's `tail -F` would outlive the process; its session ends with it.
+    refute "d3" in viewer_names(ctx)
     taken = ["message #{launch[:first].uuid}", "message #{u}", "answer req-#{u}", "end"]
     assert HeadlessStandIn.taken(ctx.dir) == taken
   end
@@ -275,6 +278,20 @@ defmodule CodingAgentFramework.SessionsHeadlessTest do
   end
 
   defp advance(ctx), do: Agent.update(ctx.clock, &(&1 + 60_000))
+
+  # The tmux sessions on the test's own server: each viewer is one, named as its agent.
+  defp viewers(ctx) do
+    with {:ok, panes} <- Tmux.list_panes(ctx.server),
+         do: {:ok, %{sessions: for(%{session: s} <- panes, do: s)}}
+  end
+
+  # After the last session ends the server goes too: no server is no viewer.
+  defp viewer_names(ctx) do
+    case viewers(ctx) do
+      {:ok, %{sessions: names}} -> names
+      {:refused, :no_server} -> []
+    end
+  end
 
   # Kills this test's Sessions mid-call, then starts another on the same table and Stream.
   defp restart(ctx, call) do
