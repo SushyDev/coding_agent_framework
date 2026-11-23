@@ -155,14 +155,9 @@ real reading, and `three` is never picked.
 
 - **Type** in a terminal: `bin/caf-example /Users/me/caf-e2e.json`. The first run compiles;
   when `deps/` does not match `mix.lock`, it runs `mix deps.get` first and says so (F-220).
-  Then at the console: `checkout(caf)`, again until it is ready. Then the two readers no console
-  call makes (an agent row's record, steps 12 and 13; the login check, step 11), and the inbox:
-
-  ```elixir
-  alias CodingAgentFramework.{Logins, Sessions.Agents}
-  alias CodingAgentFramework.Example.Run
-  prompts(caf)
-  ```
+  Then at the console: `checkout(caf)`, again until it is ready, and the inbox, `prompts(caf)`.
+  The console sets the aliases of the two readers no console call makes, `Logins` and `Agents`
+  (an agent row's record, steps 12 and 13; the login check, step 11), and `Run` (F-226).
 
 - **Watch** the banner: the home, the three accounts' directories, the two ports.
 - **Passed when** `checkout(caf)` reads `demo: ready, on main, clean true, ahead 0, behind 0`
@@ -319,8 +314,7 @@ real reading, and `three` is never picked.
 
   and allow its `Bash` request from the inbox, as in step 3. When `agents(caf)` shows
   `demo-unit-slow` `working`, type `System.halt()`: the framework's node ends at once. Wait
-  half a minute; then start it again, `bin/caf-example /Users/me/caf-e2e.json`, and type step
-  1's two aliases again.
+  half a minute; then start it again, `bin/caf-example /Users/me/caf-e2e.json`; its aliases come back with it.
 - **Watch** `attach(caf, "demo-unit-slow")`, opened before the halt: the viewer and the
   delegate run on while the framework is down, since tmux and dtach hold them, not the node.
 - **Passed when** after the restart `agents(caf)` shows `demo-unit-slow` still `working`, the

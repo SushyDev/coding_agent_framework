@@ -187,6 +187,14 @@ if [[ $mode == setup ]]; then
     ((${#accounts[@]} > 0)) || accounts=("${listed[@]}")
   fi
 
+  # A browser login and Claude Code's onboarding need a person at a terminal; without one they
+  # wait forever, so refuse before the first step (F-220's new-2). The tests set
+  # CAF_LOGIN_NO_TTY_CHECK, since their stand-ins need none.
+  if [[ -z "${CAF_LOGIN_NO_TTY_CHECK:-}" ]] && ! [[ -t 0 && -t 1 ]]; then
+    echo "caf-login: --setup needs a terminal for its logins and Claude Code's screens; run it in one" >&2
+    exit 2
+  fi
+
   steps=()
   for account in "${accounts[@]}"; do steps+=("account $account"); done
   if ((git)); then steps+=("gh" "git"); fi

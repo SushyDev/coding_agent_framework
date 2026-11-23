@@ -81,7 +81,8 @@ defmodule CodingAgentFramework.Example.LoginTest do
       {"CAF_CLAUDE", Path.join(dir, "claude-stand-in")},
       {"CAF_GH", Path.join(dir, "gh-stand-in")},
       {"CAF_STAND_IN_STATE", state},
-      {"TMPDIR", dir}
+      {"TMPDIR", dir},
+      {"CAF_LOGIN_NO_TTY_CHECK", "1"}
     ]
 
     login = fn args -> System.cmd(@login, args, env: env, stderr_to_stdout: true) end
@@ -100,6 +101,19 @@ defmodule CodingAgentFramework.Example.LoginTest do
     File.write!(Path.join(ctx.state, "gh-login"), scopes <> "\n")
     File.mkdir_p!(Path.join(ctx.home, "gh"))
     File.write!(Path.join(ctx.home, "gh/hosts.yml"), "github.com:\n    oauth_token: t\n")
+  end
+
+  # F-220's new-2: with no terminal, a login or onboarding would wait forever; it refuses first.
+  test "--setup with no terminal refuses before any step", ctx do
+    env = [{"CAF_LOGIN_NO_TTY_CHECK", ""}]
+
+    run = fn ->
+      System.cmd(@login, ["--setup", ctx.home, "one"], env: env, stderr_to_stdout: true)
+    end
+
+    assert {out, 2} = run.()
+    assert out =~ "--setup needs a terminal"
+    refute out =~ "step 1"
   end
 
   test "--setup <home> runs each step once, with its check, and skips each step done", ctx do
