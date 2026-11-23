@@ -68,7 +68,8 @@ defmodule CodingAgentFramework do
   use Supervisor
 
   alias CodingAgentFramework.{AbsentMains, Accounts, Acts, ClaudeCLI, Copies, Delegates, Grants}
-  alias CodingAgentFramework.{Holder, HooksSilent, Host, Inlet, Interventions, Limits, Logins}
+  alias CodingAgentFramework.{Holder, HooksSilent, Home, Host, Inlet, Interventions, Limits}
+  alias CodingAgentFramework.Logins
 
   alias CodingAgentFramework.{
     Cues,
@@ -142,11 +143,20 @@ defmodule CodingAgentFramework do
   needs, `Config.agentless/0`'s: no tmux server, no account's settings, no hooks' secret, no
   endpoint and no tool home (so no `gh` or `ssh-keygen` is needed, F-201). `parts/1` then
   names only those.
+
+  **A home keeps its kind** (F-214, `CodingAgentFramework.Home`). The first start on a home
+  records whether its tree runs agents, in the home's own database and before any part starts;
+  every later start reads it, and a tree of the other kind is refused `{:refused, {:home_kind,
+  recorded}}` (`:agents` or `:agentless`), having written nothing. A home that ran before the
+  mark and holds agent or delegate rows is marked `:agents`. `home_kind/1` reads the kind
+  without starting a tree.
   """
   @spec start_link(Config.t()) :: Supervisor.on_start() | {:refused, term} | {:unknown, term}
   def start_link(%Config{} = c) do
     with :ok <- unique(c),
          :ok <- mkdirs(c),
+         # Before anything else is written under the home, a refused kind included.
+         :ok <- Home.mark(c),
          {:ok, programs} <- programs(c),
          {:ok, c} <- tools(c, programs),
          {:ok, jobs_work} <- Jobs.Work.open(Config.path(c, "parts/jobs")),
@@ -211,7 +221,7 @@ defmodule CodingAgentFramework do
   delegate (`Delegates.Table`), each oldest first; both are empty before the tree made its
   tables, or for a tree with `agents: false`. Answers `{:ok, %{agents: rows, delegates:
   rows}}`, or `{:refused, {:sqlite, reason}}` when the store cannot be opened (no tree ever
-  started on the home, say).
+  started on the home, say). No rows says nothing of the home's kind: `home_kind/1` does.
 
   It also takes the instance's name, as `subscribe/2` does (F-201): the config the running
   tree of that name started with is read from its `Registry`, and the rows as above; so a tool
@@ -243,6 +253,28 @@ defmodule CodingAgentFramework do
          {:ok, delegates} <- Delegates.Table.read_only(path, c.workstation),
          do: {:ok, %{agents: agents, delegates: delegates}}
   end
+
+  @doc """
+  The kind of the home `config` names, read now (F-214): `{:ok, :agents}` or `{:ok,
+  :agentless}` for a home whose first tree recorded it, `{:ok, :new}` for a home no tree
+  started on, and `{:refused, reason}` when its database cannot be read. Only `home` of the
+  config is read. It opens the store read-only and closes it, makes no file and starts no
+  process, so an app checks a home's kind before it starts a tree on it, whether or not one
+  runs. `agent_rows/1` answers no rows for an agentless home and for a new one alike; this
+  tells them apart. A home that ran before the mark, with agent or delegate rows, answers
+  `{:ok, :agents}`, as the next start marks it.
+
+      iex> {:ok, c} = CodingAgentFramework.Config.new(home: "/nonexistent/caf", instance: "a",
+      ...>   programs: %{}, env: %{path: "/bin"}, agents: false)
+      iex> CodingAgentFramework.home_kind(c)
+      {:ok, :new}
+
+  After a tree with `agents: false` started on it, the same home answers `{:ok, :agentless}`,
+  and `start_link/1` of a config with `agents: true` there is `{:refused, {:home_kind,
+  :agentless}}`.
+  """
+  @spec home_kind(Config.t()) :: {:ok, :agents | :agentless | :new} | {:refused, term}
+  def home_kind(%Config{} = c), do: Home.kind(c)
 
   @doc """
   The metrics of the instance `config` names, on its workstation, within `since:` and `until:`
@@ -1158,8 +1190,8 @@ defmodule CodingAgentFramework do
   end
 
   # Who the `Scheduler` asks whether a lease's work ended, by the holder's kind. A tree that
-  # runs no agent has only jobs: a delegate's, a main's or a run's lease a home kept from an
-  # earlier tree is asked of no one, so its answer stays unknown and nothing is reclaimed.
+  # runs no agent has only jobs. A home an agentful tree used is never given to it (`Home`,
+  # F-214), so no delegate's, main's or run's lease is left that nobody asks about.
   defp holders(%{c: %Config{agents: false}} = w),
     do: %{"job" => &Jobs.Work.state(w.jobs_work, &1)}
 

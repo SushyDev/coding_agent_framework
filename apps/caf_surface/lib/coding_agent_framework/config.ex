@@ -231,7 +231,10 @@ defmodule CodingAgentFramework.Config do
     `Scheduler`, the `Tracker`, `Copies` and `Jobs`, and none that runs or reads an agent: no
     tmux server, no account's settings, no hooks, no endpoints, and no tool home
     (`ToolHome.prepare/2` is not run, so its jobs run with `env`'s `path` alone). Its
-    `Scheduler` asks only a job's owner, `Jobs`, about a lease. `true` by default. Such a config
+    `Scheduler` asks only a job's owner, `Jobs`, about a lease. A home keeps this kind for its
+    life (F-214): the first start records it, and `start_link/1` of the other kind on that home
+    answers `{:refused, {:home_kind, recorded}}` (`CodingAgentFramework.home_kind/1` reads it).
+    `true` by default. Such a config
     needs only what that tree reads (F-201): `home`, `instance`, `programs` and `env` with its
     `path`, which `Jobs` reads (`{:bad, :env}` without it). `accounts`, `ports`, `claude` and
     `user`, which only the agents' parts read, may be left out there, on macOS too. A key only

@@ -98,6 +98,34 @@ defmodule CodingAgentFramework.Store do
   end
 
   @doc """
+  Opens (and creates) the file at `path` as `open/3` does, runs `fun.(db)` in one immediate
+  transaction as `transaction/2` does, and closes the file (F-214): for a writer that is no
+  process, which reads and writes once and keeps no connection. Answers `{:ok, fun.(db)}`, or
+  `{:refused, {:sqlite, reason}}` for a file it cannot open. What `fun` writes is saved together
+  or not at all, and a statement's error raises, as it does everywhere else in this module.
+
+      iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "write.db")
+      iex> alias CodingAgentFramework.Store
+      iex> schema = "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, a TEXT);"
+      iex> Store.write(path, schema, &Store.insert(&1, "t", [a: "x"], "RETURNING id"))
+      {:ok, [[1]]}
+      iex> Store.read_only(path, "t", [], &Store.query(&1, "SELECT a FROM t", []))
+      {:ok, [["x"]]}
+  """
+  @spec write(String.t(), String.t(), (db -> result)) ::
+          {:ok, result} | {:refused, {:sqlite, term}}
+        when result: term
+  def write(path, schema, fun) do
+    with {:ok, db} <- open(path, schema) do
+      try do
+        {:ok, transaction(db, fn -> fun.(db) end)}
+      after
+        Sqlite3.close(db)
+      end
+    end
+  end
+
+  @doc """
   Reads the existing file at `path` read-only, as `read_only/4` does, in one read transaction,
   so every table `fun` reads is of one instant (F-199). `fun.(db, tables)` gets the names of the
   file's tables, so it reads only the ones made. Answers `{:ok, fun.(db, tables)}`, or
