@@ -20,15 +20,16 @@ defmodule CodingAgentFramework.Runs do
   the call runs without Claude Code's permission prompt: the app lists only commands its agents
   may run. A command already under the wrapper is not wrapped again.
 
-  **The wrapper** (`prepare/4` writes it, `<home>/bin/caf-run`) asks for the lease over the
+  **The wrapper** (`prepare/5` writes it, `<home>/bin/caf-run`) asks for the lease over the
   intake's port (`CodingAgentFramework.Runs.Plug`), the tool call's id as the request id, so a
   retry takes no second slot. While queued it prints one line, `caf-run: queued (position n)`.
   Granted, it `exec`s the command in `sh -c`: the process that asked becomes the command, so
   its output is the command's, its exit code is the command's, and the lease's holder is that
   process, `{"run", "<pid> <start time>"}`. Refused, it prints one line with the reason and
   the retry time and exits 75, and nothing ran. With no answer (the framework down) it asks
-  again under the same id, once a second, at most 30 times, then runs the command without a
-  lease and says so in one line: a lease is soft work, and fails open as the hooks do.
+  again under the same id, once a second, until 30 s have passed by the clock since the first
+  ask with none (`prepare/5`'s `:unanswered`), then runs the command without a lease and says
+  so in one line: a lease is soft work, and fails open as the hooks do.
 
   **The end.** The lease's owner is the process itself (`state/2`, for the `Scheduler`'s
   `holders:`): live while that pid runs with that start time, ended once it does not, read by
@@ -57,15 +58,24 @@ defmodule CodingAgentFramework.Runs do
   # How long the owner's `ps` may take.
   @ps_timeout 5_000
 
-  # $0 caf-run; the paths, the curl config and the URL are set above it by `prepare/4`. The
-  # body goes as form fields curl encodes. A queued line is printed as it comes; the last line
-  # is the answer. `exec` keeps the pid, so the process that asked is the command.
+  # $0 caf-run; the paths, the curl config, the URL and the no-answer bound in seconds are set
+  # above it by `prepare/5`. The body goes as form fields curl encodes. A queued line is printed
+  # as it comes; the last line is the answer. `exec` keeps the pid, so the process that asked is
+  # the command.
+  #
+  # The no-answer bound is by the clock, not a count of asks (F-217): the first ask with no
+  # answer starts one sleep of the whole bound beside the asks, and the wrapper asks again only
+  # while it lives. A count of one-second sleeps overshoots, since each wakes late under load.
+  # The timer is this shell's own child, so its pid is no other program's until this shell
+  # reaps it; it is ended only while `kill -0` finds it, before the command runs.
   @wrapper ~S"""
   [ "$#" -eq 5 ] && [ "$4" = -- ] || {
     echo 'caf-run: usage: caf-run <class> <id> <agent> -- <command>' >&2; exit 64; }
   class=$1 id=$2 agent=$3 cmd=$5
   start=$(LC_ALL=C TZ=UTC "$ps" -o lstart= -p $$) || start=
-  again=0 tries=0
+  again=0 d=
+  timer() { [ -n "$d" ] && kill -0 "$d" 2>/dev/null; }
+  run() { ! timer || kill "$d" 2>/dev/null; exec "$sh" -c "$cmd"; }
   while :; do
     last=$("$curl" -sN -K "$cfg" --data-urlencode "class=$class" --data-urlencode "id=$id" \
         --data-urlencode "agent=$agent" --data-urlencode "pid=$$" \
@@ -77,19 +87,20 @@ defmodule CodingAgentFramework.Runs do
         esac
       done)
     case $last in
-      granted*) exec "$sh" -c "$cmd" ;;
+      granted*) run ;;
       refused*)
+        ! timer || kill "$d" 2>/dev/null
         set -- $last
         printf 'caf-run: not run: the lease was refused (%s); try again after %s\n' "$2" "$3" >&2
         exit 75 ;;
       unknown*)
         printf 'caf-run: no lease (%s); the command runs without one\n' "${last#unknown }" >&2
-        exec "$sh" -c "$cmd" ;;
+        run ;;
     esac
-    tries=$((tries + 1))
-    if [ "$tries" -ge 30 ]; then
+    [ -n "$d" ] || { "$sleep" "$unanswered" </dev/null >/dev/null 2>&1 & d=$!; }
+    if ! timer; then
       echo 'caf-run: no lease (the framework did not answer); the command runs without one' >&2
-      exec "$sh" -c "$cmd"
+      run
     fi
     again=1
     "$sleep" 1
@@ -97,7 +108,7 @@ defmodule CodingAgentFramework.Runs do
   """
 
   @doc """
-  The policy's data: the home (where `prepare/4` writes the wrapper), the app's heavy
+  The policy's data: the home (where `prepare/5` writes the wrapper), the app's heavy
   commands, and the workstation's `ps` and `env` (`programs`) for `state/2`. Answers
   `{:ok, runs}`, or `{:refused, {:bad, :heavy}}` for a list out of shape.
 
@@ -167,20 +178,26 @@ defmodule CodingAgentFramework.Runs do
   @doc """
   Writes the wrapper, `<home>/bin/caf-run` (mode 0700), with the workstation's `sh`, `curl`,
   `ps` and `sleep` from `programs` and the intake's `port`, and the curl config that carries
-  the secret, `<home>/runs.curl` (mode 0600), so no secret is in a command line. Answers `:ok`,
-  `{:refused, reason}` for a program missing or a secret out of shape, or `{:unknown, reason}`
-  when a write fails.
+  the secret, `<home>/runs.curl` (mode 0600), so no secret is in a command line. Option
+  `:unanswered` (ms, default 30 s): how long, from its first ask with no answer, the wrapper
+  asks again before it runs the command without a lease. Answers `:ok`, `{:refused, reason}`
+  for a program missing, a secret out of shape or a bound that is not a positive integer, or
+  `{:unknown, reason}` when a write fails.
   """
-  @spec prepare(t, Programs.t(), :inet.port_number(), String.t()) ::
+  @spec prepare(t, Programs.t(), :inet.port_number(), String.t(), keyword) ::
           :ok | {:refused, term} | {:unknown, term}
-  def prepare(%__MODULE__{home: home} = runs, programs, port, secret) do
+  def prepare(%__MODULE__{home: home} = runs, programs, port, secret, opts \\ []) do
     cfg = Path.join(home, "runs.curl")
+    unanswered = Keyword.get(opts, :unanswered, 30_000)
 
     with true <- secret =~ ~r/\A[A-Za-z0-9._~+\/=-]{1,256}\z/ or {:refused, :bad_secret},
+         true <- (is_integer(unanswered) and unanswered > 0) or {:refused, :bad_unanswered},
          {:ok, p} <- Programs.take(programs, [:sh, :curl, :ps, :sleep]),
          :ok <- write(cfg, ~s(header = "x-caf-secret: #{secret}"\n), 0o600) do
+      secs = :erlang.float_to_binary(unanswered / 1000, decimals: 3)
+
       vars =
-        [sh: p.sh, curl: p.curl, ps: p.ps, sleep: p.sleep, cfg: cfg]
+        [sh: p.sh, curl: p.curl, ps: p.ps, sleep: p.sleep, cfg: cfg, unanswered: secs]
         |> Enum.map_join("", fn {k, v} -> "#{k}=#{sh_quote(v)}\n" end)
 
       script =
