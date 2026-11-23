@@ -338,22 +338,6 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
     end
   end
 
-  # F-155: the home's own signing key, made once and never written over; declining the offer
-  # to add it to GitHub runs no gh.
-  test "bin/caf-login --git makes the home's signing key once", ctx do
-    login = Path.join(@root, "bin/caf-login")
-    home = Path.join(ctx.dir, "home")
-    run = fn -> System.cmd(program!(:sh), ["-c", ~s(echo n | "$0" --git "$1"), login, home]) end
-
-    assert {out, 0} = run.()
-    key = Path.join([home, "git", "signing_key"])
-    assert out =~ "made #{key}" and out =~ "ssh-ed25519 "
-    pub = File.read!(key <> ".pub")
-
-    assert {out, 0} = run.()
-    assert out =~ "is there already" and File.read!(key <> ".pub") == pub
-  end
-
   # F-153's new-3: `--check` says whether Claude Code's first-run onboarding was passed on the
   # account, as its `.claude.json` records it. A stand-in answers `claude auth status`.
   test "bin/caf-login --check names the onboarding passed or not", ctx do

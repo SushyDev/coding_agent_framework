@@ -99,46 +99,51 @@ The framework home must be short: macOS cuts a socket path at 104 bytes.
    lives). `three` is an account never logged in: step 11 checks that the login check refuses
    it, and no start goes to it.
 
-3. **Log two accounts in**, each with its own config directory under the home, and leave the
-   third logged out:
+3. **Set up the logins**, with one command (F-220): two accounts, the GitHub CLI and the
+   home's commit signing key. `three` is not named, so it stays logged out:
 
    ```sh
-   bin/caf-login /Users/me/caf-e2e one
-   bin/caf-login /Users/me/caf-e2e two
-   bin/caf-login --check /Users/me/caf-e2e one
-   bin/caf-login --check /Users/me/caf-e2e two
-   mkdir -p /Users/me/caf-e2e/accounts/three/claude
+   bin/caf-login --setup /Users/me/caf-e2e.json one two
    ```
 
-   After each login, `bin/caf-login` runs Claude Code once on that account, in a scratch
-   folder it removes after: Claude Code's first run on a new account shows its onboarding (a
-   theme picker, then more screens) before anything else, and no session the framework starts
-   reads those screens. Pass each screen, then the scratch folder's trust dialog, then type
-   `/exit`. An account that passed it before is not run again.
+   It reads the home from the config and runs each step in order, each ending with its own
+   check: for `one`, then `two`, Claude Code's login and its first run; then the GitHub CLI's
+   login; then the signing key. What you do on screen, and nothing else:
 
-   Passed when each check names the account you logged in with and reads `Claude Code's
-   first-run onboarding: passed`. A check that reads `not passed` ends with status 1: run
-   `bin/caf-login` for that account again. Do not log `three` in.
+   - **Each account's login**: Claude Code's login opens your browser. Log in there with the
+     account you mean for it.
+   - **Each account's first run**: Claude Code's onboarding (a theme picker, then more
+     screens), then the scratch folder's trust dialog. Pass each; Claude Code then runs
+     `/exit`, its first prompt, and ends by itself. No session the framework starts reads those
+     screens, so they are passed here, once.
+   - **The GitHub CLI's login**: gh's own questions, then its browser login, which asks for
+     the scope `admin:ssh_signing_key` (the signing key needs it). A login that lacks only that
+     scope gets it with one browser step (`gh auth refresh`), not a new login.
 
-4. **Log the GitHub CLI in, and make the home's signing key.** Every tool's state lives in the
-   home (F-155): gh's login in `/Users/me/caf-e2e/gh`, git's config and the commit signing key
-   in `/Users/me/caf-e2e/git/`, ssh's config and known hosts in `/Users/me/caf-e2e/ssh/`.
-   Agents push with your own GitHub login and commit as the config's `git` author:
+   Everything else runs by itself: the checks, the key (made once in
+   `/Users/me/caf-e2e/git/signing_key`, the home's own, never one of yours) and adding it to
+   your GitHub account as a signing key. A step already done (an account logged in, an
+   onboarding passed, gh logged in with the scope, the key made and on GitHub) is checked, said
+   and skipped, so after a step fails, running the same command again goes on where it stopped.
 
-   ```sh
-   bin/caf-login --gh /Users/me/caf-e2e
-   bin/caf-login --check --gh /Users/me/caf-e2e
-   bin/caf-login --git /Users/me/caf-e2e --title "caf-e2e signing key"
-   ```
+   Every tool's state lives in the home (F-155): gh's login in `/Users/me/caf-e2e/gh`, git's
+   config and the key in `/Users/me/caf-e2e/git/`, ssh's config and known hosts in
+   `/Users/me/caf-e2e/ssh/`. Agents push with your own GitHub login and commit as the config's
+   `git` author. gh logs in with `--insecure-storage`, so its token is a file in the home
+   (`/Users/me/caf-e2e/gh/hosts.yml`, mode 600), not an entry in macOS's Keychain, gh's default.
 
-   `--git` makes `/Users/me/caf-e2e/git/signing_key`, the home's own key (never one of yours),
-   once, prints its public key, and offers to add it to your GitHub account as a signing key.
-   `--gh` logs in with `gh auth login --insecure-storage`, so the token is a file in the home
-   (`/Users/me/caf-e2e/gh/hosts.yml`, mode 600), not an entry in macOS's Keychain, which is gh's
-   default. Passed when `--check --gh` names your GitHub account and reads `the token is in the
-   home: a file`, and the key's `.pub` is beside it. A check that reads `the token is not in the
-   home` ends with status 1: run `bin/caf-login --gh` again. The app refuses to start with a
-   `git` author whose key is missing (`{:no_signing_key, path}`).
+   Passed when the setup ends with `setup of /Users/me/caf-e2e done: account one, account two,
+   gh, git, each checked`, and status 0. On the way, each account's check names the account
+   you logged in with and reads `Claude Code's first-run onboarding: passed`; gh's check names
+   your GitHub account and reads `the token is in the home: a file` and `the token has the
+   scope admin:ssh_signing_key` (gh's own line may label the token `(keyring)`: caf-login reads
+   the file, and its line is the one that counts); and the key's check reads `GitHub lists
+   /Users/me/caf-e2e/git/signing_key.pub as a signing key`. A step that fails stops the setup
+   with status 1 and says what to do. Each step also runs alone: `bin/caf-login /Users/me/caf-e2e
+   one`, `bin/caf-login --gh /Users/me/caf-e2e` and `bin/caf-login --git /Users/me/caf-e2e`;
+   `bin/caf-login --check /Users/me/caf-e2e one` and `bin/caf-login --check --gh
+   /Users/me/caf-e2e` read a check again. The app refuses to start with a `git` author whose key is missing
+   (`{:no_signing_key, path}`).
 
 No reading of any account's allowance is written by hand. New work goes to the usable account
 (prepared and logged in, by `claude auth status`) with the most room in the tighter of its two
@@ -148,7 +153,8 @@ real reading, and `three` is never picked.
 
 ## 1. The app starts, and the project is cloned
 
-- **Type** in a terminal: `bin/caf-example /Users/me/caf-e2e.json`. The first run compiles.
+- **Type** in a terminal: `bin/caf-example /Users/me/caf-e2e.json`. The first run compiles;
+  when `deps/` does not match `mix.lock`, it runs `mix deps.get` first and says so (F-220).
   Then at the console: `checkout(caf)`, again until it is ready. Then the two readers no console
   call makes (an agent row's record, steps 12 and 13; the login check, step 11), and the inbox:
 

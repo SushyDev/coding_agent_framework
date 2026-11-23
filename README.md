@@ -376,7 +376,11 @@ Built, each from a checked model in `model/tla/`:
 - a headless delegate's permission requests reach the inbox (F-221): its launch passes
   `--permission-prompt-tool stdio`, without which the real Claude Code denies the tool at once
   and sends no `can_use_tool`, and the stand-in now does the same, so a test catches a launch
-  that loses the flag, and an answered request settles on the answer Claude Code echoes back.
+  that loses the flag, and an answered request settles on the answer Claude Code echoes back;
+- one setup command (F-220): `bin/caf-login --setup <home|config.json> [account …]` logs each
+  account in, runs Claude Code's first run as `claude /exit` so it closes by itself, then logs gh
+  in with the signing-key scope and adds the home's key. Every step checks first and skips what is
+  done, so no device login or key is repeated, and `bin/caf-example` fetches stale deps itself.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
@@ -720,15 +724,21 @@ Code:
    two ports and the `Scheduler`'s capacities. `CodingAgentFramework.Example.ConfigFile`'s doc
    names every key and its default; the file is checked whole at start, and each refusal names
    its key, such as `{"projects.demo.cap", :missing}`.
-2. Log each account in, once, with `bin/caf-login <home> <account>`. It runs Claude Code's own
-   login (`claude auth login`) in your terminal with that account's config directory,
-   `<home>/accounts/<account>/claude`, and `bin/caf-login --check <home> <account>` asks Claude
-   Code whether it worked. Spell `<home>` as the config file does. The framework itself never
+2. Set up the logins with one command, `bin/caf-login --setup <config> [account …]` (or
+   `--setup <home> <account> …` for an app whose config is built in code). For each account
+   it runs Claude Code's own login (`claude auth login`) in your terminal with that account's
+   config directory, `<home>/accounts/<account>/claude`, then Claude Code's first run, which
+   ends by itself once you pass its onboarding; then the GitHub CLI's login and the home's
+   commit signing key (`--no-git` leaves those out). You do only the browser logins and the
+   onboarding screens. Each step ends with its own check, and a step already done is checked
+   and skipped; `bin/caf-login --check <home> <account>` asks Claude Code again at any time.
+   Spell `<home>` as the config file does. The framework itself never
    reads a credential: the first session it starts on an account is the real check. No reading
    of an account's allowance is needed first: one with none counts as 0 % used until its first
    session's status line gives one.
 3. Start it with `bin/caf-example <config>`. It runs in devenv's environment (running itself
-   through `devenv shell` when it is not), starts the app, and opens an IEx shell with the
+   through `devenv shell` when it is not), runs `mix deps.get` when `deps/` does not match
+   `mix.lock`, starts the app, and opens an IEx shell with the
    operator's console imported and the app named `caf`: `agents(caf)`, `dialogs(caf)`,
    `answer_dialog(caf, …)`, `start_main(caf, …)`, `start_delegate(caf, …)`,
    `run_delegate(caf, …)`, `message(caf, …)` and `status(caf, id)` (with the reply's text),
