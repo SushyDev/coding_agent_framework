@@ -3580,7 +3580,8 @@ command the framework writes into each account's settings (`rate_limits.seven_da
   dead.
 - A test of a cleanup cleans only a directory of its own: one that swept the real tmux socket
   directory with fake liveness ended every other suite's servers.
-- No test reaches the real Claude Code.
+- No test the gates run reaches the real Claude Code. `caf_real`'s tests do, only under
+  `mix test.real` with `CAF_REAL_SETUP` set: the end-to-end run's steps as tests (F-223).
 - A fake is a test aid: it lives in the app's `test/support/` or in `caf_test`, never in a
   library's `lib/`, where it compiles into the package (`Tmux.Fake`, F-115's new-12, moves in R1
   or R2).

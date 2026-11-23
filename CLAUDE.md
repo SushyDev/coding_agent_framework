@@ -37,7 +37,8 @@ recommendation.
   should change). A builder never builds a mechanism a finding suggests: it reports it.
 - **Tests**: contract tests run on a real tmux server and real dtach sockets per test VM, under
   the VM's own temporary directory. Tests wait on announced events, never on fixed sleeps. No
-  test starts the real Claude Code; a stand-in plays it.
+  test the gates run starts the real Claude Code; a stand-in plays it. Only `caf_real`'s tests,
+  tagged `:real` and run by `mix test.real` against a logged-in setup, do (F-223).
 - **Gates** before a unit is done: `mix format --check-formatted`, `mix compile
   --warnings-as-errors` (and the same with `MIX_ENV=test`), `mix test --warnings-as-errors`,
   `MIX_ENV=test mix caf.deps` (each app declares, directly,

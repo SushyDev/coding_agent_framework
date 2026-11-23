@@ -390,7 +390,9 @@ Built, each from a checked model in `model/tla/`:
   itself (F-226);
 - each role's permission mode is pinned by the config (F-227): `auto` for a main session and an
   interactive delegate, `manual` for a headless one, whatever the account's own default;
-- a permission dialog no reading names reaches a person as a menu (F-228).
+- a permission dialog no reading names reaches a person as a menu (F-228);
+- the end-to-end run's steps 1, 2, 3, 5 and 14 run as a suite against the real Claude Code,
+  `mix test.real`, outside the gates (F-223); it found a project taking another's checkout.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
