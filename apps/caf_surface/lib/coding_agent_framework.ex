@@ -17,9 +17,10 @@ defmodule CodingAgentFramework do
   `model/tla/` (`bin/check-model`). Two instances, each with its own home, ports and instance
   name, run in one app: nothing in it is named globally.
 
-  **Order.** The tree is `:rest_for_one`, and the host's `Shell.Reaper` is its first child, so
-  every process that runs commands with it starts after it and is restarted with it (the
-  reaper's death ends every group it held). Each part starts after the parts it is given. The
+  **Order.** The tree is `:rest_for_one`. Its first child is the home's holder
+  (`CodingAgentFramework.Home.Lock`), so it stops last, and the tree ends when it does. The
+  host's `Shell.Reaper` comes next, so every process that runs commands with it starts after it
+  and is restarted with it (the reaper's death ends every group it held). Each part starts after the parts it is given. The
   two HTTP endpoints start after the part they serve, on 127.0.0.1.
 
   **Cues.** It routes no cue itself. One `CodingAgentFramework.Cues` starts after the reaper,
@@ -128,8 +129,9 @@ defmodule CodingAgentFramework do
 
   @doc """
   Starts the tree from a config `Config.new/1` checked. Answers `{:ok, pid}`, `{:refused,
-  reason}` when the config's programs, accounts or home cannot be used or an instance of its
-  name already runs in this app (`{:instance_running, name}`), or `{:unknown,
+  reason}` when the config's programs, accounts or home cannot be used, another tree holds its
+  home (`{:home_held, holder}`), or an instance of its name already runs in this app
+  (`{:instance_running, name}`), or `{:unknown,
   reason}` when a write under the home fails.
 
   **A restart at once.** An instance of the same name that is still exiting (a tree its
@@ -150,11 +152,33 @@ defmodule CodingAgentFramework do
   recorded}}` (`:agents` or `:agentless`), having written nothing. A home that ran before the
   mark and holds agent or delegate rows is marked `:agents`. `home_kind/1` reads the kind
   without starting a tree.
+
+  **A home belongs to one tree at a time** (F-215, `CodingAgentFramework.Home.Lock`). The start
+  takes the home first, before the mark is read or anything is opened under the home, and the
+  tree holds it until it stops. A start on a home another tree holds, in this VM or another, is
+  refused `{:refused, {:home_held, holder}}` at once, `holder` the holder's record (its
+  instance, OS pid, node and `taken_at`) or `:unknown`, having started and written nothing. A
+  start that took the home and is then refused gives it back. A start of the same name waits
+  for that instance's old holder to end, as for its `Registry`, within `restart_wait`.
   """
   @spec start_link(Config.t()) :: Supervisor.on_start() | {:refused, term} | {:unknown, term}
   def start_link(%Config{} = c) do
     with :ok <- unique(c),
-         :ok <- mkdirs(c),
+         # Before anything is opened or written under the home (F-215).
+         {:ok, lock} <- Home.Lock.take(c) do
+      case start_tree(c, lock) do
+        {:ok, sup} ->
+          {:ok, sup}
+
+        other ->
+          Home.Lock.release(lock)
+          other
+      end
+    end
+  end
+
+  defp start_tree(c, lock) do
+    with :ok <- mkdirs(c),
          # Before anything else is written under the home, a refused kind included.
          :ok <- Home.mark(c),
          {:ok, programs} <- programs(c),
@@ -162,7 +186,8 @@ defmodule CodingAgentFramework do
          {:ok, jobs_work} <- Jobs.Work.open(Config.path(c, "parts/jobs")),
          {:ok, w} <- agents_wiring(c, programs) do
       w = Map.merge(w, %{c: c, programs: programs, jobs_work: jobs_work, start_id: token()})
-      Supervisor.start_link(__MODULE__, Map.put(w, :db, Config.path(c, "caf.db")))
+      w = Map.merge(w, %{db: Config.path(c, "caf.db"), lock: lock})
+      Supervisor.start_link(__MODULE__, w)
     end
   end
 
@@ -258,9 +283,9 @@ defmodule CodingAgentFramework do
   The kind of the home `config` names, read now (F-214): `{:ok, :agents}` or `{:ok,
   :agentless}` for a home whose first tree recorded it, `{:ok, :new}` for a home no tree
   started on, and `{:refused, reason}` when its database cannot be read. Only `home` of the
-  config is read. It opens the store read-only and closes it, makes no file and starts no
-  process, so an app checks a home's kind before it starts a tree on it, whether or not one
-  runs. `agent_rows/1` answers no rows for an agentless home and for a new one alike; this
+  config is read. It opens the store read-only and closes it, makes no file, starts no process
+  and takes no lock of the home, so an app checks a home's kind before it starts a tree on it,
+  whether or not one runs. `agent_rows/1` answers no rows for an agentless home and for a new one alike; this
   tells them apart. A home that ran before the mark, with agent or delegate rows, answers
   `{:ok, :agents}`, as the next start marks it.
 
@@ -549,24 +574,33 @@ defmodule CodingAgentFramework do
   # Two instances of one name in one app would share a name to find them by. A tree just killed
   # still holds its name while its `Registry` exits, so a parent's restart at once would be
   # refused and spend its budget (F-195): the start waits for that `Registry` to end, up to the
-  # config's `restart_wait`.
+  # config's `restart_wait`. Its home's holder (`Home.Lock`) is waited for the same way, within
+  # the same bound: a tree killed whole gives its home back only as that holder ends (F-215).
   defp unique(c) do
-    with {:ok, name} <- registry(c.instance),
-         pid when is_pid(pid) <- Process.whereis(name) do
-      ref = Process.monitor(pid)
+    until = System.monotonic_time(:millisecond) + c.restart_wait
+    registry = with {:ok, name} <- registry(c.instance), do: Process.whereis(name)
 
-      receive do
-        {:DOWN, ^ref, :process, _, _} -> :ok
-      after
-        c.restart_wait ->
-          Process.demonitor(ref, [:flush])
-          {:refused, {:instance_running, c.instance}}
-      end
+    with :ok <- ended(registry, until),
+         :ok <- ended(Home.Lock.whereis(c.instance), until) do
+      :ok
     else
-      {:refused, :no_instance} -> :ok
-      nil -> :ok
+      :running -> {:refused, {:instance_running, c.instance}}
     end
   end
+
+  defp ended(pid, until) when is_pid(pid) do
+    ref = Process.monitor(pid)
+
+    receive do
+      {:DOWN, ^ref, :process, _, _} -> :ok
+    after
+      max(until - System.monotonic_time(:millisecond), 0) ->
+        Process.demonitor(ref, [:flush])
+        :running
+    end
+  end
+
+  defp ended(_none, _until), do: :ok
 
   @doc """
   What each part it starts reads, as the part declares it: the declarations it hands `Cues`,
@@ -637,8 +671,23 @@ defmodule CodingAgentFramework do
           started.(key),
           do: %{id: key, start: {__MODULE__, :start_part, [tab, key, build, w.c]}}
 
+    # The home's holder, which took the home before this tree started: first, so it stops last,
+    # and the tree ends when it does, since the home is no longer held (F-215).
+    home = %{
+      id: :home,
+      start: {Home.Lock, :adopt, [w.lock]},
+      restart: :temporary,
+      significant: true
+    }
+
     %{max_restarts: n, max_seconds: s} = w.c.restarts
-    Supervisor.init(children, strategy: :rest_for_one, max_restarts: n, max_seconds: s)
+
+    Supervisor.init([home | children],
+      strategy: :rest_for_one,
+      max_restarts: n,
+      max_seconds: s,
+      auto_shutdown: :any_significant
+    )
   end
 
   @doc false
