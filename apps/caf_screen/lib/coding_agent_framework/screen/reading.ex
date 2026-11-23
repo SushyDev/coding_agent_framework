@@ -46,7 +46,11 @@ defmodule CodingAgentFramework.Screen.Reading do
           wait: Regex.t(),
           exited: String.t(),
           resume: String.t(),
-          menu: %{footers: [String.t()]},
+          # `ask`: Claude Code's own question (F-230), its header line and its free-text option.
+          menu: %{
+            required(:footers) => [String.t()],
+            optional(:ask) => %{header: Regex.t(), free_text: String.t()}
+          },
           dialogs: [dialog]
         }
 

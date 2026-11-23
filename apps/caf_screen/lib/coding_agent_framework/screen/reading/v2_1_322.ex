@@ -23,7 +23,12 @@ defmodule CodingAgentFramework.Screen.Reading.V2_1_322 do
   A permission dialog no reading names (F-228's "Allow this read outside the working
   directories?") is drawn the same way in the box's place, its tool and input between rules of
   `╌`, its footer "Esc to cancel · Tab to amend", with the box's named rule under it.
-  The box under it may hold a prompt suggestion, drawn dim (`ESC[2m` up to `ESC[0m`) after the
+  Claude Code's own question (`AskUserQuestion`, F-230's stand-in from F-223's run) is drawn
+  in the box's place: under a rule of `─`, its header (`☐ <header>`) one column in, the question,
+  numbered options with the marker in the first column and each one's description five columns
+  in, "Type something." last, a rule of `─` inside the dialog, "Chat about this" after it, the
+  footer "Enter to select · ↑/↓ to navigate · Esc to cancel", and the box's named rule.
+  The box under a menu may hold a prompt suggestion, drawn dim (`ESC[2m` up to `ESC[0m`) after the
   prompt mark and its no-break space, as the placeholder is.
   """
 
@@ -40,8 +45,17 @@ defmodule CodingAgentFramework.Screen.Reading.V2_1_322 do
       wait: ~r/\AContinuing automatically at (.+) · Esc to cancel\z/u,
       exited: "Resume this session with:",
       resume: "claude --resume ",
-      # A menu's footer: most dialogs', and a permission dialog's that offers to amend (F-228).
-      menu: %{footers: ["Enter to confirm · Esc to cancel", "Esc to cancel · Tab to amend"]},
+      # A menu's footer: most dialogs', a permission dialog's that offers to amend (F-228), and
+      # Claude Code's own question's (F-230). That question has one header, `☐ <header>`; a form
+      # of several draws more, a `✔` or arrows on that line, and is not read.
+      menu: %{
+        footers: [
+          "Enter to confirm · Esc to cancel",
+          "Esc to cancel · Tab to amend",
+          "Enter to select · ↑/↓ to navigate · Esc to cancel"
+        ],
+        ask: %{header: ~r/\A *☐ [^☐☒✔←→]+\z/u, free_text: "Type something."}
+      },
       dialogs: [
         %{
           kind: :trust,
