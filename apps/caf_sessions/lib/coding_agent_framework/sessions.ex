@@ -2814,8 +2814,20 @@ defmodule CodingAgentFramework.Sessions do
 
   defp write(state, row, fields) do
     Table.update(state.db, row.id, fields)
+    close_viewer(state, row, fields[:status])
     announce(state, row)
   end
+
+  # A headless session's viewer is `tail -F` of its log, which outlives the process it shows
+  # (an interactive one's `dtach -a` ends with it), so its tmux session is ended with the row
+  # (F-224, the end-to-end run's e2e-15). It is a person's window only: an answer other than
+  # killed (already gone, or the server down) changes nothing, and a resume opens a new one.
+  defp close_viewer(state, row, status) when status in ["stopped", "ended"] do
+    if Agents.headless?(row), do: Tmux.kill_session(state.tmux, row.name)
+    :ok
+  end
+
+  defp close_viewer(_state, _row, _status), do: :ok
 
   defp announce(state, row), do: state.notify.(%{topic: topic(state), ids: [row.id]})
 
