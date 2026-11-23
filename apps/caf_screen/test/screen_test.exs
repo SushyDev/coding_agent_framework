@@ -24,6 +24,15 @@ defmodule CodingAgentFramework.ScreenTest do
     "Wait here, then continue automatically at Nov 22 at 11:58pm",
     "Upgrade your plan"
   ]
+  @ask %{
+    state: :dialog,
+    kind: :menu,
+    title: "Go on, yes or no?",
+    detail: ["Yes: Continue the session.", "No: Stop here and wait."],
+    options: ["Yes", "No", "Chat about this"],
+    selected: "Yes",
+    numbers: %{"Yes" => 1, "No" => 2, "Type something." => 3, "Chat about this" => 4}
+  }
   @teach %{
     state: :dialog,
     kind: :menu,
@@ -107,6 +116,9 @@ defmodule CodingAgentFramework.ScreenTest do
       ],
       selected: "Yes, and keep allowing any reads outside the working directories"
     },
+    # Claude Code's own question (F-230): a menu of its labels, the descriptions in the detail,
+    # "Type something." left out (no press answers it) and each option's number as drawn.
+    "ask-question" => @ask,
     # A dim prompt suggestion is no typed text; without its colors nothing says it is one.
     "suggestion" => %{state: :idle, box: :empty},
     "suggestion-plain" => %{state: :idle, box: {:text, "yes, run the end-to-end rerun"}}
@@ -382,6 +394,34 @@ defmodule CodingAgentFramework.ScreenTest do
       assert Screen.read(screen, @release) == {:ok, %{state: :idle, box: {:text, @suggested}}}
     end
 
+    test "Claude Code's own question with the marker on the option left out still reads" do
+      screen =
+        "ask-question.txt"
+        |> edit("❯ 1. Yes", "  1. Yes")
+        |> String.replace("  3. Type something.", "❯ 3. Type something.")
+
+      assert Screen.read(screen, @release) ==
+               {:ok, %{@ask | selected: "Type something."}}
+    end
+
+    test "Claude Code's own question reads only in its own shape" do
+      for {from, to} <- [
+            # A form of several questions, one tab at a time.
+            {" ☐ Go on", " ☐ Go on  ☐ Scope  ✔ Submit"},
+            # A question that takes more than one answer.
+            {"❯ 1. Yes", "❯ 1. [ ] Yes"},
+            {"  2. No", "  5. No"},
+            {"     Stop here and wait.", " Stop here and wait."},
+            {"Go on, yes or no?\n", ""},
+            {"  4. Chat about this\n", ""}
+          ] do
+        screen = edit("ask-question.txt", from, to)
+
+        assert Screen.read(screen, @release) == {:unknown, {:unrecognized, @release}},
+               "#{inspect(from)} -> #{inspect(to)}"
+      end
+    end
+
     test "a dim run only on the box's line is dropped, up to its reset" do
       dim = "\e[39m❯ \e[2myes, run the end-to-end rerun\e[0m"
       typed = "\e[39m❯ ye\e[2ms, run the end-to-end rerun\e[22m"
@@ -454,6 +494,18 @@ defmodule CodingAgentFramework.ScreenTest do
       {:ok, screen} = Screen.read(fixture("menu-down.ansi"), @release)
       assert Screen.option_keys(screen, "Yes") == {:ok, ["Up"]}
       assert Screen.option_keys(screen, "Don't show again") == {:ok, ["Down"]}
+    end
+
+    test "counts the option Claude Code's own question leaves out, and refuses it" do
+      {:ok, screen} = Screen.read(fixture("ask-question.ansi"), @release)
+      assert Screen.option_keys(screen, "No") == {:ok, ["Down"]}
+      assert Screen.option_keys(screen, "Chat about this") == {:ok, ["Down", "Down", "Down"]}
+
+      assert Screen.option_keys(screen, "Type something.") ==
+               {:refused, {:no_option, "Type something."}}
+
+      assert Screen.option_keys(%{screen | selected: "Chat about this"}, "Yes") ==
+               {:ok, ["Up", "Up", "Up"]}
     end
 
     test "refuses a label the dialog does not show, and a screen with no dialog" do

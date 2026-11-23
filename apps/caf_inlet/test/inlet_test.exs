@@ -205,6 +205,25 @@ defmodule CodingAgentFramework.InletTest do
     refute_received {:write, ^inlet, _}
   end
 
+  # F-230: Claude Code's own question is answered as a menu; the marker crosses the free-text
+  # option the menu leaves out, so "Chat about this" is three Downs away, the fourth drawn.
+  test "answers Claude Code's own question across the option it leaves out", ctx do
+    menu = {:menu, "Go on, yes or no?", ["Yes", "No", "Chat about this"]}
+    inlet = ctx.inlet
+
+    open(ctx, "alpha", ["--screen", "ask"], :dialog)
+
+    assert {:refused, {:no_option, "Type something."}} =
+             Inlet.choose(inlet, "alpha", menu, "Type something.", release: @release)
+
+    refute_received {:write, ^inlet, _}
+
+    assert {:ok, :sent} = Inlet.choose(inlet, "alpha", menu, "Chat about this", release: @release)
+    assert_received {:write, ^inlet, {:keys, ["Down", "Down", "Down"]}}
+    assert_received {:write, ^inlet, {:keys, ["Enter"]}}
+    assert File.read!(Path.join(ctx.dir, "menu")) == "4"
+  end
+
   # F-142, item 4: an interactive delegate's interrupt. Checked: a turn runs, the Escape lands,
   # the turn ends; an idle screen takes no key.
   test "interrupts a running turn by Escape, and nothing when no turn runs", ctx do

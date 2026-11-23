@@ -390,7 +390,8 @@ Built, each from a checked model in `model/tla/`:
   itself (F-226);
 - each role's permission mode is pinned by the config (F-227): `auto` for a main session and an
   interactive delegate, `manual` for a headless one, whatever the account's own default;
-- a permission dialog no reading names reaches a person as a menu (F-228);
+- a permission dialog no reading names reaches a person as a menu (F-228), and so does Claude
+  Code's own question until B10 intercepts it (F-230);
 - the end-to-end run's steps 1, 2, 3, 5 and 14 run as a suite against the real Claude Code,
   `mix test.real`, outside the gates (F-223); it found a project taking another's checkout;
 - a project never takes another project's checkout (F-229): a path another project's row holds

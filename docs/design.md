@@ -384,7 +384,11 @@ framework's hooks deciding:
   still meets the prompt (both measured on 2.1.322 in the default permission mode; F-182);
 - Claude Code's own question tool (`AskUserQuestion`), in a session no person attends, opens a
   prompt as `ask` does and is denied with a reason that says the answer comes as a message, so
-  the agent asks with its natural tool;
+  the agent asks with its natural tool. Until B10 builds this, its dialog is read off the screen
+  as a menu (F-230, below): the stopgap that keeps a main session's question from waiting
+  unseen while a delegate's report queues behind it (F-223's new-5). It stays right after B10:
+  where a person attends, or runs a session by hand, the dialog is drawn and nothing intercepts
+  it, and the screen is then the only place it shows;
 - Claude Code's `Agent` tool stays native, its subagents read and counted; for subagent types
   the app names, the hook denies with a reason that names the `delegate` call to make, since
   `updatedInput` can change a call's input but not the tool (F-162's new-4);
@@ -2176,7 +2180,15 @@ menu footers, "Enter to confirm · Esc to cancel" or a permission dialog's "Esc 
 to amend" (F-228), drawn in place of the box or above it; drawn in its place, the box's named rule
 may be all that follows it, and the `╌` rules inside it are no text. So a permission dialog no
 reading names (a read outside the working directories, F-228) reaches a person as a menu, not an
-unread screen that leaves the agent idle. Only with such a footer is it a menu, so a
+unread screen that leaves the agent idle. Claude Code's own question (`AskUserQuestion`,
+F-230) is one too, by its footer "Enter to select · ↑/↓ to navigate · Esc to cancel": under
+its rule a header (`☐ <header>`), the question, its numbered options each with a description
+line, a rule inside the dialog and "Chat about this" after it. The inbox shows the question and
+the labels; the descriptions go in the detail. Its free-text option, "Type something.", is left
+out, since Enter on it opens a field in the same dialog and no press answers it; a person who
+wants their own words picks "Chat about this" or `esc` and sends a message. A press counts the
+rows as drawn, the one left out too. A form of several questions, or one that takes more than
+one answer, is not read. Only with such a footer is it a menu, so a
 numbered list in the agent's own output never reads as one; a dialog a rule names (trust,
 imports, the usage limit's menu) keeps its rule. A run drawn dim on the
 input box's line (`ESC[2m` up to the reset) is a prompt suggestion, never typed text: a box

@@ -17,6 +17,9 @@ defmodule CodingAgentFramework.ScreenStandIn do
     names above the box, its marker on its first option, its session file `idle`. Down and Up
     move the marker; Enter answers its option and a lone Escape `esc`, each written to
     `<dir>/menu` (`menu_answer/1`), and the idle screen is drawn after;
+  - started with `--screen ask`, it draws the `ask-question` fixture's screen (F-230), Claude
+    Code's own question in the box's place, its marker on its first of four options, and takes
+    keys as the menu does: Enter writes its option's number as drawn to `<dir>/menu`;
   - `--version` prints the release as Claude Code does (`2.1.322 (Claude Code)`) and exits;
   - the argument after `--` is the start's prompt, run as its first turn: written to
     `<dir>/prompts/<pid>` (`prompts/1`), its session file `busy`, then `idle`;
@@ -109,6 +112,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
 
     menu!(screens, release, "menu", @title)
     menu!(screens, release, "menu2", @title2)
+    ask!(screens, release)
     dialog!(screens, release, "trust", " ", "No, exit", "Yes, I trust this folder")
 
     dialog!(
@@ -204,6 +208,33 @@ defmodule CodingAgentFramework.ScreenStandIn do
           )
   end
 
+  # Claude Code's own question (F-230) with the marker on each of its four options: `ask-1` to
+  # `ask-4`. Its rules, 200 columns in the fixture, are redrawn at the stand-in's width, so the
+  # pane wraps none of them.
+  defp ask!(screens, release) do
+    w = width(screens)
+    rule = String.duplicate("─", w)
+
+    shown =
+      Path.join(fixtures(release), "ask-question.txt")
+      |> File.read!()
+      |> String.trim_trailing("\n")
+      |> String.replace(~r/^─+$/mu, rule)
+      |> String.replace(
+        ~r/^─+ capture-main ─$/mu,
+        String.duplicate("─", w - 15) <> " capture-main ─"
+      )
+
+    plain = String.replace(shown, "❯ 1. ", "  1. ")
+
+    for n <- 1..4,
+        do:
+          File.write!(
+            Path.join(screens, "ask-#{n}"),
+            String.replace(plain, "  #{n}. ", "❯ #{n}. ")
+          )
+  end
+
   # The lines above the box's line, and those below it, the last with no newline: a newline
   # after the last row would scroll the screen by one.
   defp split_at_box(text) do
@@ -282,7 +313,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
         #{program!(:cat)} "#{screens}/$screen"
       elif [ $screen = trust ] || [ $screen = imports ]; then
         #{program!(:cat)} "#{screens}/$screen-$choice"
-      elif [ $screen = menu ] || [ $screen = menu2 ]; then
+      elif [ $screen = menu ] || [ $screen = menu2 ] || [ $screen = ask ]; then
         #{program!(:cat)} "#{screens}/$screen-$sel"
       else
         #{program!(:cat)} "#{screens}/top"
@@ -311,18 +342,20 @@ defmodule CodingAgentFramework.ScreenStandIn do
     [ $screen = limit_wait ] && announce busy
     # A menu among the startup dialogs is shown before the session file; a running one after it.
     [ $screen = menu ] && [ $# -eq 0 ] && announce idle
+    [ $screen = ask ] && announce idle
+    last=3; [ $screen = ask ] && last=4
     draw
     while IFS= read -r -N1 -t #{idle} key; do
       if [ $screen = limit_wait ]; then
         continue
-      elif [ $screen = menu ] || [ $screen = menu2 ]; then
+      elif [ $screen = menu ] || [ $screen = menu2 ] || [ $screen = ask ]; then
         # The marker moves; Enter answers its option, a lone Escape esc: the idle screen after,
         # or for a startup menu the next dialog, then the session as past the others.
         answer=''
         case $key in
           $'\\e') seq=''; IFS= read -r -N2 -t 0.2 seq
                  case $seq in
-                   '[B') [ $sel -lt 3 ] && sel=$((sel + 1)) ;;
+                   '[B') [ $sel -lt $last ] && sel=$((sel + 1)) ;;
                    '[A') [ $sel -gt 1 ] && sel=$((sel - 1)) ;;
                    '') answer=esc ;;
                  esac ;;

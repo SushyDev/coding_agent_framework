@@ -44,7 +44,11 @@ defmodule CodingAgentFramework.Screen do
       a rule, its title (its first line), the lines under it (`detail`), two or more numbered
       options in a row, numbered from 1 at one indent with the `❯` on one, and the footer
       "Enter to confirm · Esc to cancel", drawn in place of the box or above it. Only with that
-      footer is it a menu, so a numbered list in the agent's own output never reads as one;
+      footer is it a menu, so a numbered list in the agent's own output never reads as one.
+      Claude Code's own question (`AskUserQuestion`, F-230) is one too: its question is the
+      title, each option's description a `detail` line (`"<label>: <description>"`), its
+      free-text option ("Type something.") left out of `options`, which no press answers, and
+      `numbers:` each option's number as drawn, so `option_keys/2` counts the one left out;
     * `%{state: :exited}`: Claude Code has exited.
 
   A screen the release's reading cannot place, or places only by a guess, is unrecognized: a
@@ -71,6 +75,7 @@ defmodule CodingAgentFramework.Screen do
               optional(:title) => String.t(),
               optional(:detail) => [String.t()],
               optional(:paths) => [String.t()],
+              optional(:numbers) => %{String.t() => pos_integer},
               optional(:shortened) => [String.t()]
             }
           | %{state: :usage_limit_wait, at: String.t()}
@@ -109,6 +114,20 @@ defmodule CodingAgentFramework.Screen do
   """
   @spec option_keys(t, String.t()) ::
           {:ok, [String.t()]} | {:refused, {:no_option, String.t()} | :no_dialog}
+  # A dialog that leaves an option out (Claude Code's own question, F-230) counts by the numbers
+  # drawn, since the marker crosses the option left out.
+  def option_keys(
+        %{state: :dialog, options: options, selected: selected, numbers: numbers},
+        label
+      ) do
+    case {label in options && numbers[label], numbers[selected]} do
+      {to, _} when not is_integer(to) -> {:refused, {:no_option, label}}
+      {_, nil} -> {:refused, {:no_option, selected}}
+      {to, from} when to >= from -> {:ok, List.duplicate("Down", to - from)}
+      {to, from} -> {:ok, List.duplicate("Up", from - to)}
+    end
+  end
+
   def option_keys(%{state: :dialog, options: options, selected: selected}, label) do
     case {Enum.find_index(options, &(&1 == label)), Enum.find_index(options, &(&1 == selected))} do
       {nil, _} -> {:refused, {:no_option, label}}
@@ -261,7 +280,10 @@ defmodule CodingAgentFramework.Screen do
 
     with at when is_integer(at) <- at || :none,
          {:ok, _, region} <- split_at_last_rule(Enum.take(lines, at)) do
-      menu_options(region)
+      case ask(Enum.take(lines, at), reading) do
+        :none -> menu_options(region)
+        read -> read
+      end
     else
       :none -> :none
       :error -> :none
@@ -325,6 +347,79 @@ defmodule CodingAgentFramework.Screen do
          selected: selected
        }}
     else
+      _ -> :error
+    end
+  end
+
+  # Claude Code's own question (`AskUserQuestion`, F-230), above its footer: under a rule, one
+  # header (`☐ <header>`; a form of several questions shows more than one, and is not read), the
+  # question, numbered options each with any description lines under it, then a rule inside the
+  # dialog and the options after it. With the header and anything else, it is unrecognized,
+  # never read as another menu. The free-text option is left out: Enter on it opens a field in
+  # the same dialog, so no press answers it. `numbers` keeps each option's number as drawn, the
+  # one left out too, so the keys count the rows the marker crosses.
+  defp ask(lines, %{menu: %{ask: ask}}) do
+    with {:ok, above, tail} <- split_at_last_rule(lines),
+         {:ok, _, region} <- split_at_last_rule(above),
+         [header | body] <- Enum.drop_while(region, &(&1 == "")),
+         true <- Regex.match?(ask.header, header) do
+      ask_menu(Enum.reject(body, &(&1 == "")), Enum.reject(tail, &(&1 == "")), ask)
+    else
+      _ -> :none
+    end
+  end
+
+  defp ask(_lines, _reading), do: :none
+
+  defp ask_menu(body, tail, ask) do
+    {question, listed} = Enum.split_while(body, &(not Regex.match?(@option, &1)))
+
+    with true <- question != [] and tail != [],
+         {:ok, above} <- described(listed),
+         {:ok, below} <- described(tail),
+         all = above ++ below,
+         true <- all |> Enum.map(&elem(&1, 0)) |> Enum.uniq() |> length() == 1,
+         true <- Enum.map(all, &elem(&1, 2)) == Enum.map(1..length(all), &to_string/1),
+         labels = Enum.map(all, &elem(&1, 3)),
+         true <- Enum.uniq(labels) == labels,
+         # A question that takes more than one answer draws a box before each label.
+         false <- Enum.any?(labels, &String.starts_with?(&1, "[")),
+         [selected] <- for({_, "❯", _, label, _} <- all, do: label) do
+      kept = Enum.reject(all, &(elem(&1, 3) == ask.free_text))
+
+      {:ok,
+       %{
+         state: :dialog,
+         kind: :menu,
+         title: Enum.map_join(question, " ", &String.trim/1),
+         detail: for({_, _, _, label, [_ | _] = d} <- kept, do: "#{label}: #{Enum.join(d, " ")}"),
+         options: Enum.map(kept, &elem(&1, 3)),
+         selected: selected,
+         numbers: Map.new(all, fn {_, _, n, label, _} -> {label, String.to_integer(n)} end)
+       }}
+    else
+      _ -> :error
+    end
+  end
+
+  # Numbered options, each with the lines under it indented past its label's number.
+  defp described(lines) do
+    Enum.reduce_while(lines, {:ok, []}, fn line, {:ok, acc} ->
+      case {Regex.run(@option, line), acc} do
+        {[_, pad, mark, n, label], _} ->
+          {:cont, {:ok, [{pad, mark, n, label, []} | acc]}}
+
+        {nil, [{pad, mark, n, label, d} | rest]} ->
+          if indent(line) > String.length(pad) + 2,
+            do: {:cont, {:ok, [{pad, mark, n, label, d ++ [String.trim(line)]} | rest]}},
+            else: {:halt, :error}
+
+        {nil, []} ->
+          {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, [_ | _] = acc} -> {:ok, Enum.reverse(acc)}
       _ -> :error
     end
   end
