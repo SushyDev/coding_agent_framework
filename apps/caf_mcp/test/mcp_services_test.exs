@@ -64,7 +64,8 @@ defmodule CodingAgentFramework.MCPServicesTest do
          place: fn agent -> {:ok, %{project: "app", name: agent, worktree: wt}} end,
          cap: 60_000,
          tool_timeout: 600_000,
-         margin: 60_000}
+         margin: 60_000,
+         efforts: ~w(low medium high xhigh max)}
       )
 
     tokens =

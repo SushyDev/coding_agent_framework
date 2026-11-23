@@ -368,7 +368,11 @@ Built, each from a checked model in `model/tla/`:
   `:wait` and 5 s, and counts as no answer; the waiter stand-in's hook run ends, with its
   group, after 5 s; and a deadline that lives in one call (`Holder.Process`'s end,
   `Services.wait/4`, `Jobs`' read retries) is on the monotonic clock, while a row's stays on
-  OS time to outlive a restart.
+  OS time to outlive a restart;
+- the tools offer a delegate's effort levels as an `enum` (F-219): `MCP.start_link/1` takes
+  `efforts:`, a required list of strings, and the surface hands it `ClaudeCLI.efforts/0`, so a
+  client sees and checks the levels of `start_delegate`'s and `run_delegate`'s `effort` before
+  the call; `Delegates` still refuses any other.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

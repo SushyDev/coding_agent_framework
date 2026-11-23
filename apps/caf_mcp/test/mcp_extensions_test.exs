@@ -90,7 +90,8 @@ defmodule CodingAgentFramework.MCPExtensionsTest do
       transcripts: nil,
       place: fn _ -> {:refused, :no_worktree} end,
       tool_timeout: 600_000,
-      margin: 60_000
+      margin: 60_000,
+      efforts: ~w(low medium high xhigh max)
     ]
   end
 
