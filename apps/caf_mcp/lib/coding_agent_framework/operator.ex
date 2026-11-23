@@ -106,6 +106,20 @@ defmodule CodingAgentFramework.Operator do
   def interrupt(mcp, agent), do: fix(mcp, "interrupt", agent)
 
   @doc """
+  Reloads interactive `agent`'s plugins (F-233): `/reload-plugins` typed into its idle session
+  with an empty box, checked as a typed message is, and its result line read. The act is a row
+  in `Acts`, actor the operator, settled by the answer; a reload claims no state, so it may be
+  made again. Refused `:headless` for a headless delegate, which has no screen and loads its
+  plugins at its next start; refused as the `Inlet` refuses a typed write for a session not
+  idle, a dialog shown or a box not empty; unknown with no result line within its bound.
+
+      Operator.reload_plugins(mcp, "app-main")
+      #=> {:ok, %{done: :reloaded, act: 9}}
+  """
+  @spec reload_plugins(GenServer.server(), String.t()) :: answer
+  def reload_plugins(mcp, agent), do: fix(mcp, "reload_plugins", agent)
+
+  @doc """
   Answers `agent`'s open request `dialog` with `label`, `"allow"` or `"deny"`, under a claim:
   a delegate's through `Delegates`, as its parent would, and a main session's held
   `PermissionRequest` (`dialog` its row's id) through `Mains.answer/5` (F-147).

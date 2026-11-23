@@ -81,6 +81,18 @@ defmodule CodingAgentFramework.MCPTest do
       if is_list(questions), do: {:ok, {:asked, 12}}, else: {:refused, {:bad, :questions}}
     end
 
+    # A `Mailbox` whose reload of an interactive session's plugins (F-233) answers as the
+    # `Inlet` would: `app-fix` is a headless delegate, `app-busy` runs a turn.
+    def reload_plugins(test, agent, _opts) do
+      send(test, {:reload_plugins, agent})
+
+      case agent do
+        "app-fix" -> {:refused, :headless}
+        "app-busy" -> {:refused, {:screen, %{state: :running}}}
+        _ -> {:ok, :reloaded}
+      end
+    end
+
     # A `Mover` that begins every move at once.
     def move(test, actor, agent, opts) do
       send(test, {:move, actor, agent, opts})
@@ -514,13 +526,44 @@ defmodule CodingAgentFramework.MCPTest do
     assert_received {:answer_startup, "app-main", "trust", "Yes", "op"}
 
     # The operator's own tools are in its list alone (F-172's new-5).
-    own = ~w(answer_startup end_main withdraw)
+    own = ~w(answer_startup end_main withdraw reload_plugins)
     assert own -- Enum.map(MCP.tools(operator, "op"), & &1.name) == []
     assert own -- Enum.map(MCP.tools(operator, "app-main"), & &1.name) == own
 
     # An agent's stop is never forced.
     assert tool(ctx.mcp, t["app-main"], "stop", %{"agent" => "app-fix", "force" => true}) ==
              %{"refused" => ["operator_only", "force"]}
+  end
+
+  # F-233: the operator's reload is a row in `Acts` with no state, settled by the mailbox's
+  # answer; a second reload of the same session is its own act. No agent may reload.
+  test "the operator reloads a session's plugins, each reload an act of its own", ctx do
+    operator = operating(ctx)
+    acts = Process.get(:acts)
+
+    assert tool(ctx.mcp, ctx.tokens["app-main"], "reload_plugins", %{"agent" => "app-fix"}) ==
+             %{"refused" => "operator_only"}
+
+    refute_received {:reload_plugins, _}
+
+    assert {:ok, %{done: :reloaded, act: one}} = Operator.reload_plugins(operator, "app-main")
+    assert {:ok, %{done: :reloaded, act: two}} = Operator.reload_plugins(operator, "app-main")
+    assert one != two
+    assert_received {:reload_plugins, "app-main"}
+
+    assert {:ok, %{actor: "op", target: "app-main", act: "reload_plugins", outcome: "verified"}} =
+             Acts.get(acts, one)
+
+    # Refused by the mailbox: the act is settled failed, with the reason.
+    assert {:refused, :headless} = Operator.reload_plugins(operator, "app-fix")
+
+    assert {:refused, {:screen, %{state: :running}}} =
+             Operator.reload_plugins(operator, "app-busy")
+
+    {:ok, rows} = Acts.rows(acts, act: "reload_plugins")
+
+    assert [{"app-fix", "failed", "headless"}] =
+             for(r <- rows, r.target == "app-fix", do: {r.target, r.outcome, r.reason})
   end
 
   # An `MCP` with an operator, real `Acts` and the stand-in `Mains`, beside the setup's.

@@ -102,6 +102,68 @@ defmodule CodingAgentFramework.Screen do
     end
   end
 
+  @doc ~S"""
+  What `capture` shows of typed command `command`, one the release's reading names (F-233,
+  `"/reload-plugins"`), for the caller that typed it. Only an idle screen with an empty box is
+  read: the command was sent. `above` is every line above the box, so the caller tells a
+  result drawn after its Enter from one drawn before. `result` is the command's result line,
+  its `⎿` dropped, when the last prompt echoed above the box is that command and the line under
+  the echo is its result; else nil.
+
+      iex> rule = String.duplicate("─", 20)
+      iex> capture = "❯ /reload-plugins\n  ⎿  Reloaded: 1 plugin\n#{rule}\n❯ \n#{rule}\n"
+      iex> CodingAgentFramework.Screen.result(capture, "2.1.322", "/reload-plugins")
+      {:ok, %{result: "Reloaded: 1 plugin", above: ["❯ /reload-plugins", "  ⎿  Reloaded: 1 plugin"]}}
+      iex> CodingAgentFramework.Screen.result(capture, "2.1.322", "/compact")
+      {:refused, {:unknown_command, "/compact"}}
+
+  Refused `{:screen, reading}` for any other screen, and as `read/2`.
+  """
+  @spec result(String.t(), String.t(), String.t()) ::
+          {:ok, %{result: String.t() | nil, above: [String.t()]}}
+          | {:refused, term}
+          | {:unknown, {:unrecognized, String.t()}}
+  def result(capture, release, command) when is_binary(capture) do
+    with {:ok, reading} <- reading(release),
+         {:ok, pattern} <- command(reading, command),
+         {:ok, %{state: :idle, box: :empty}} <- read(capture, release) do
+      # An idle box sits between two rules, so both splits find one.
+      {lines, _} = lines(capture)
+      {:ok, above, _} = split_at_last_rule(lines)
+      {:ok, before, _} = split_at_last_rule(above, &upper?(&1, reading))
+      {:ok, %{result: command_result(before, command, pattern), above: before}}
+    else
+      :no_reading -> {:refused, {:unknown_release, release}}
+      {:ok, screen} -> {:refused, {:screen, screen}}
+      other -> other
+    end
+  end
+
+  defp command(reading, command) do
+    case Map.fetch(Map.get(reading, :commands, %{}), command) do
+      {:ok, c} -> {:ok, c}
+      :error -> {:refused, {:unknown_command, command}}
+    end
+  end
+
+  # The line under the last echoed prompt, when that prompt is `typed` and the line is a result.
+  defp command_result(before, typed, pattern) do
+    at =
+      before
+      |> Enum.with_index()
+      |> Enum.filter(fn {line, _} -> String.starts_with?(line, "❯ ") end)
+      |> List.last()
+
+    with {echo, i} <- at,
+         true <- echo == "❯ " <> typed,
+         line when is_binary(line) <- Enum.at(before, i + 1),
+         true <- Regex.match?(pattern, line) do
+      line |> String.trim_leading() |> String.replace_prefix("⎿", "") |> String.trim_leading()
+    else
+      _ -> nil
+    end
+  end
+
   @doc """
   The keys that move a dialog's selection from its selected option to the one labeled `label`:
   a list of `"Down"` or of `"Up"`, empty when that option is already selected.

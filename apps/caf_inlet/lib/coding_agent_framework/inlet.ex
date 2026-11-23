@@ -48,6 +48,8 @@ defmodule CodingAgentFramework.Inlet do
 
   @timeout 15_000
   @see 2_000
+  # How long a typed command's result line may take to be drawn: not measured (F-233's new-1).
+  @result 10_000
   # Between two captures while the box is drawn; only spaces the reads.
   @look 20
   # The prompt, its space, and two columns to spare.
@@ -141,6 +143,65 @@ defmodule CodingAgentFramework.Inlet do
   end
 
   @doc """
+  Types `/reload-plugins` into `session` and reads its result line (F-233): a person's way to
+  load a changed plugin into a running session, which the framework types for them since it
+  owns every write. It goes as `type/4`'s text goes, with the same checks in one step of this
+  process: the turn by `turn:`, an idle screen with an empty box, the command typed and seen in
+  the box (`see:` ms), then Enter. Then the screen is read, one capture a call of its own, so
+  this process writes for other sessions meanwhile, until `Screen.result/3` shows the command's
+  result line under its echo, above a box that is empty again, and the lines above the box
+  differ from those read before the command was typed, so a result an earlier reload left is
+  never read as this one's (`result:` ms, 10 000 by default). Options `release:` and `turn:`
+  (required), `see:`, `result:` and `timeout:` (ms a call, 15 000 by default).
+
+  Answers `{:ok, :reloaded}`; refused as `type/4` is, when nothing was typed (`{:turn,
+  reason}`, `{:screen, reading}` for a turn running, a dialog shown or a box not empty); unknown
+  as `type/4` is once something may have been typed, and `{:no_result, reading}` when the
+  bound passed with no result line. An unknown reload is never typed again here.
+
+      iex> {:ok, fake} = CodingAgentFramework.Tmux.Fake.start_link(key: {"laptop", "fake"})
+      iex> server = CodingAgentFramework.Tmux.Fake.new(fake, {"laptop", "fake"})
+      iex> {:ok, inlet} = CodingAgentFramework.Inlet.start_link(tmux: server)
+      iex> CodingAgentFramework.Inlet.reload_plugins(inlet, "alpha", release: nil, turn: fn -> :ok end)
+      {:refused, :no_release}
+  """
+  @spec reload_plugins(GenServer.server(), String.t(), keyword) ::
+          {:ok, :reloaded} | {:refused, term} | {:unknown, term}
+  def reload_plugins(inlet, session, opts) do
+    text = "/reload-plugins"
+    release = Keyword.fetch!(opts, :release)
+    request = {:command, session, text, {release, Keyword.fetch!(opts, :turn)}}
+
+    with {:ok, before} <- call(inlet, request, Keyword.get(opts, :see, @see), opts) do
+      deadline = now() + Keyword.get(opts, :result, @result)
+      result(inlet, {:result, session, release, text}, before, deadline, opts)
+    end
+  end
+
+  # The result is read by one capture a call, not in the write's step: this process writes for
+  # every session on its host, and a command may take seconds to draw its result.
+  defp result(inlet, request, before, deadline, opts) do
+    reading = call(inlet, request, 0, opts)
+
+    cond do
+      match?(
+        {:ok, %{result: line, above: above}} when is_binary(line) and above != before,
+        reading
+      ) ->
+        {:ok, :reloaded}
+
+      now() >= deadline ->
+        {:unknown, {:no_result, reading}}
+
+      true ->
+        receive do
+        after
+          @look -> result(inlet, request, before, deadline, opts)
+        end
+    end
+  end
+
+  @doc """
   Reads `session`'s screen as `release` draws it (`Screen.read/2`), for a caller that writes
   nothing: `Sessions` reads a starting session's pane for a dialog. Answers `{:ok, screen}`,
   `{:unknown, {:unrecognized, release}}`, or a refusal (`:no_release`, `{:unknown_release,
@@ -198,6 +259,30 @@ defmodule CodingAgentFramework.Inlet do
         {:not_seen, reading} -> {:unknown, {:not_seen, reading}}
       end
     end
+  end
+
+  # A typed command: `type`'s checks and writes. It answers the lines above the box read before
+  # the command was typed, which its result is told from.
+  defp act({:command, session, text, {release, turn}}, see, tmux) do
+    with :ok <- if(is_binary(release), do: :ok, else: {:refused, :no_release}),
+         {:ok, pane} <- pane(tmux, session),
+         :ok <- turn(turn),
+         {:ok, width} <- empty_box(tmux, pane, session, release),
+         :ok <- fits(text, width),
+         {:ok, %{above: before}} <- read_result(tmux, pane, session, release, text),
+         {:ok, :sent} <- Tmux.write(tmux, pane, session, {:text, text}),
+         :seen <- seen(tmux, pane, session, release, text, now() + see),
+         {:ok, :sent} <- enter(tmux, pane, session) do
+      {:ok, before}
+    else
+      {:not_seen, reading} -> {:unknown, {:not_seen, reading}}
+      other -> other
+    end
+  end
+
+  defp act({:result, session, release, text}, _see, tmux) do
+    with {:ok, pane} <- pane(tmux, session),
+         do: read_result(tmux, pane, session, release, text)
   end
 
   # Checked: a turn runs, the press lands, the turn ends.
@@ -436,6 +521,13 @@ defmodule CodingAgentFramework.Inlet do
         end
     end
   end
+
+  defp read_result(tmux, pane, session, release, text) do
+    with {:ok, %{text: screen}} <- Tmux.capture(tmux, pane, session),
+         do: Screen.result(screen, release, text)
+  end
+
+  defp now, do: System.monotonic_time(:millisecond)
 
   defp enter(tmux, pane, session) do
     case Tmux.write(tmux, pane, session, {:keys, ["Enter"]}) do

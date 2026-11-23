@@ -448,6 +448,37 @@ defmodule CodingAgentFramework.ScreenTest do
     end
   end
 
+  # F-233: a typed command's result line is read only under its own echo, the last prompt above
+  # an empty box; nothing is read off another screen.
+  describe "result/3" do
+    @reloaded "  ⎿  Reloaded: 1 plugin · 0 skills"
+
+    test "reads the result under the last echo, and none under another prompt" do
+      above = ["❯ /reload-plugins", @reloaded]
+
+      assert {:ok, %{result: "Reloaded: 1 plugin · 0 skills", above: ^above}} =
+               Screen.result(boxed(above), @release, "/reload-plugins")
+
+      later = above ++ ["", "❯ say hi", "  ⎿  hi"]
+
+      assert {:ok, %{result: nil}} = Screen.result(boxed(later), @release, "/reload-plugins")
+
+      echo = ["❯ /reload-plugins", "", "  ⎿  Reloaded"]
+      assert {:ok, %{result: nil}} = Screen.result(boxed(echo), @release, "/reload-plugins")
+    end
+
+    test "refuses a screen that is not idle with an empty box" do
+      assert {:refused, {:screen, %{state: :running}}} =
+               Screen.result(fixture("turn-running.txt"), @release, "/reload-plugins")
+
+      assert {:refused, {:screen, %{state: :idle, box: {:text, _}}}} =
+               Screen.result(fixture("text-typed.txt"), @release, "/reload-plugins")
+
+      assert {:refused, {:unknown_release, "0.0.1"}} =
+               Screen.result(fixture("idle-empty.txt"), "0.0.1", "/reload-plugins")
+    end
+  end
+
   describe "option_keys/2" do
     test "moves from the trust dialog's selected option to each one" do
       {:ok, screen} = Screen.read(fixture("trust-dialog.txt"), @release)
@@ -515,4 +546,9 @@ defmodule CodingAgentFramework.ScreenTest do
       assert Screen.option_keys(idle, "Yes") == {:refused, :no_dialog}
     end
   end
+
+  @rule String.duplicate("─", 20)
+
+  # An idle screen with an empty box under the lines `above`.
+  defp boxed(above), do: Enum.join(above ++ [@rule, "❯\u00a0", @rule, ""], "\n")
 end

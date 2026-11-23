@@ -25,6 +25,9 @@ defmodule CodingAgentFramework.Screen.Reading do
       (the spaces before the selection mark), and, for a dialog that lists paths, the heading
       above them (`paths`), and the character of its rule (`rule`) when it is not `─`. Two
       kinds that share a footer differ by their title or their rule.
+    * `commands`: each typed command `Screen.result/3` reads, by the text typed, which is
+      echoed above the box after `❯` and a plain space once it is sent: the pattern of its
+      result line, the first line under that echo, matched with its indent.
   """
 
   @type dialog :: %{
@@ -51,7 +54,8 @@ defmodule CodingAgentFramework.Screen.Reading do
             required(:footers) => [String.t()],
             optional(:ask) => %{header: Regex.t(), free_text: String.t()}
           },
-          dialogs: [dialog]
+          dialogs: [dialog],
+          commands: %{String.t() => Regex.t()}
         }
 
   @doc "The release's reading."
