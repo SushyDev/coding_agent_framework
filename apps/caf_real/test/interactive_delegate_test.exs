@@ -41,7 +41,7 @@ defmodule CodingAgentFramework.Real.InteractiveDelegateTest do
              ) do
           [%{id: id, parent: parent, options: options}] ->
             assert parent == ctx.main
-            assert {:ok, _} = answer(ctx, id, Enum.find(options, &(&1 =~ ~r/trust/i)))
+            press!(ctx, name, id, Enum.find(options, &(&1 =~ ~r/trust/i)))
             [id]
 
           [] ->

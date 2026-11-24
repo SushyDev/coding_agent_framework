@@ -6,11 +6,12 @@ and a main session (the agent that supervises the run) follow these steps togeth
 types into the console and answers what only a person may answer; the main session reads each
 reading against "Passed when" and writes down what it saw.
 
-Steps 1, 2, 3, 4, 5 and 14 run as tests against the real Claude Code, beside a reload of a
-main session's plugins (F-233) and Claude Code's own question as a menu (F-230), F-239:
-`CAF_REAL_SETUP=<home> mix test.real`, where `<home>` is one `bin/caf-login --setup <home> one
-two` set up (F-223, `apps/caf_real`). It needs no person. The screens those tests meet go to
-`<home>/records/`. The other steps stay here until they are tests too.
+Steps 1, 2, 3, 4, 5, 12, 13 and 14 run as tests against the real Claude Code, beside a reload
+of a main session's plugins (F-233) and Claude Code's own question as a menu (F-230), F-239 and
+F-243: `CAF_REAL_SETUP=<home> mix test.real`, where `<home>` is one `bin/caf-login --setup
+<home> one two` set up (F-223, `apps/caf_real`). It needs no person. The screens those tests
+meet go to `<home>/records/`, and every dialog or menu press its own folder there,
+`<project>-press-<n>-<label>/` (F-243). The other steps stay here until they are tests too.
 
 Each step says what to **type** at the console, what to **watch**, what counts as **passed**,
 and what to **record**: a reading only a real run can give, kept as a file under the records
@@ -427,7 +428,8 @@ The restart cut `demo-main`'s waiter, so until a turn of it ends, a row for it i
 - **Passed when** the request's command, as its event log shows it, begins `exec </dev/null; `
   (the framework's correction of a background command's stdin, F-180); the report reaches
   `demo-main` within seconds, while the command still runs, once; when the command ends, `demo-main` gets one `notice` that begins
-  `From demo-unit-bg on <bg.account> (notice): Delegate demo-unit-bg, in a turn of its own after its report:`,
+  `From framework (notice): Delegate demo-unit-bg, in a turn of its own after its report:` (the
+  framework tells it, not the delegate; F-243's new-5),
   and no second report. While Claude Code's own turn runs, `agents(caf)` reads the delegate
   working, not idle. The event log, `/Users/me/caf-e2e/streams/<bg.session_id>/events.jsonl`,
   holds `system`/`init` twice and `result` twice: one of each per turn.
@@ -441,6 +443,14 @@ The restart cut `demo-main`'s waiter, so until a turn of it ends, a row for it i
 
   and `usage(caf)`'s reading of `bg.account` after the report (a headless session's windows come
   from its stream: `source` `stream`, if no status line read is newer).
+- **As a test** (F-243, `background_command_test.exs`): a 30 s command, its request allowed
+  from the inbox and the parent told of it once (recorded as `<project>-permission.txt`), one
+  report read before the command's end, one notice naming the output, one init and one result
+  per turn, the
+  `exec </dev/null; ` correction in the log, and the wake gap (the command's end to the next
+  init, as the log's lines are first read) under `Stream`'s `wake:`, 30 s; it records the log's
+  events and the gap as `<project>-background.txt`. It does not check the state while Claude
+  Code's own turn runs, nor `usage`.
 
 ## 13. An absent main, resumed once
 
@@ -476,6 +486,11 @@ The restart cut `demo-main`'s waiter, so until a turn of it ends, a row for it i
   operator`. No third row comes.
 - **Record** `absent-main`: both reads of the row, the two `ps` lines, the session file, the
   `Acts` rows, the symptoms and the prompt, whole, with the times.
+- **As a test** (F-243, `absent_main_test.exs`): the first absence only, resumed once by the
+  operator's `resume` (the test's tree has `absent_main` off the allow-list, so the healer only
+  asks), under the same session, idle, one message answered, then the end. The healer's own
+  resume, the bound and the remedy prompt stay here. It records the rows, the `ps` line, the
+  answer, the `Acts` rows, the symptoms and the prompts as `<project>-absent-main.txt`.
 
 ## 14. The main session's end
 
