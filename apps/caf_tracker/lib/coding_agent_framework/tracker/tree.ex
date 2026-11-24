@@ -32,7 +32,10 @@ defmodule CodingAgentFramework.Tracker.Tree do
   - **What it does now** (F-235): `tool`, the call it runs now (`%{name, id, started_at}`),
     the newest call its transcript started and has not ended while it is `working`, else nil;
     and `last_event_at`, the newer of its transcript's last entry and its newest `Intake` row
-    (ms), or nil. `tool_calls/3` answers its recent calls.
+    (ms), or nil. `tool_calls/3` answers its recent calls. `partial` is true when its
+    transcript's first read took only the file's last part (F-244): calls and subagents started
+    before that part are absent, and a subagent the fold knows only from its file's meta has its
+    `type` and `description` from the meta and no `started_at`.
 
   A delegate that ended keeps its place in the tree, but `agents/2` leaves it out unless asked
   (`all: true`): a busy day ends many (F-129's new-5).
@@ -125,7 +128,8 @@ defmodule CodingAgentFramework.Tracker.Tree do
 
     %{
       tool: if(state == "working", do: open_call(t[:tools])),
-      last_event_at: newer(int(t[:last_event_at]), ev.hooks[key(row)])
+      last_event_at: newer(int(t[:last_event_at]), ev.hooks[key(row)]),
+      partial: t[:partial] == true
     }
   end
 

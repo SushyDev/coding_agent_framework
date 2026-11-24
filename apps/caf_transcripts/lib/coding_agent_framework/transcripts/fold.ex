@@ -79,6 +79,13 @@ defmodule CodingAgentFramework.Transcripts.Fold do
   `tool_use_id` and `problem`), and `file_meta/3` reads its `agent-<agent id>.meta.json`, whose
   `toolUseId` gives the parent's call its `agent_id` while the subagent runs.
 
+  **A bounded first read** (F-244): `take_from/2` folds a main file read from inside it, as
+  `Transcripts` reads a long one the first time: from its first whole line, with `partial:
+  true`. Such a fold does not know what was before that line: the session's first entries and
+  prompts, its usage before it, and the calls and subagents started before it. A subagent whose
+  meta names a call the fold does not hold still gets its row, from the meta (`file_meta/3`).
+  A partial fold's `usage` counts from the cut and is never the session's total.
+
   A fold an earlier build stored has other keys, so it is read again from the file's start
   (`Transcripts.Table.load_fold/1`), and its interrupts with it.
 
@@ -124,6 +131,7 @@ defmodule CodingAgentFramework.Transcripts.Fold do
           agent_tools: %{String.t() => [map]},
           last_event_at: integer | nil,
           files: %{String.t() => map},
+          partial: boolean,
           problems: [map],
           problem_count: non_neg_integer
         }
@@ -147,6 +155,7 @@ defmodule CodingAgentFramework.Transcripts.Fold do
       agent_tools: %{},
       last_event_at: nil,
       files: %{},
+      partial: false,
       problems: [],
       problem_count: 0
     }
@@ -170,6 +179,39 @@ defmodule CodingAgentFramework.Transcripts.Fold do
 
       _ ->
         :rewritten
+    end
+  end
+
+  @doc """
+  Folds the first read of a main file when it starts at byte `at`, not at the file's start: a
+  read bounded to the file's last bytes (`Transcripts`' `first_read:`). The first line, cut by
+  the bound, is skipped, so the fold starts at a whole line and says `partial: true`; its seam
+  is the cut line's last bytes, so the next read checks them as `take/2` does. At 0 it is
+  `take/2` on a new fold, not partial. Bytes with no whole line leave it a fold that has read
+  nothing.
+
+      iex> alias CodingAgentFramework.Transcripts.Fold
+      iex> use = ~s({"type":"assistant","message":) <>
+      ...>   ~s({"id":"m1","content":[{"type":"tool_use","id":"tu-2","name":"Read"}]}}\\n)
+      iex> {:ok, fold} = Fold.take_from(900, ~s(ut-line"}\\n) <> use)
+      iex> {fold.partial, fold.offset - 910 == byte_size(use), hd(fold.tools).id}
+      {true, true, "tu-2"}
+      iex> {:ok, fold} = Fold.take_from(0, use)
+      iex> fold.partial
+      false
+  """
+  @spec take_from(non_neg_integer, binary) :: {:ok, t}
+  def take_from(0, bytes), do: take(new(), bytes)
+
+  def take_from(at, bytes) do
+    case :binary.split(bytes, "\n") do
+      [_no_whole_line] ->
+        {:ok, new()}
+
+      [cut, rest] ->
+        read = cut <> "\n"
+        seam = binary_part(read, byte_size(read), -min(byte_size(read), @seam))
+        {:ok, lines(%{new() | offset: at + byte_size(read), seam: seam, partial: true}, rest)}
     end
   end
 
@@ -865,7 +907,11 @@ defmodule CodingAgentFramework.Transcripts.Fold do
   subagent starts (F-237's measurement): its `toolUseId` is the parent's `Agent` call that
   started it, so that call's row in `subagents` has the subagent's `agent_id` while it runs,
   before its result names it, and its `finished` (true once the subagent ended) is kept in the
-  file's entry. `:unreadable` for bytes without one, such as a file not yet whole.
+  file's entry. A call the fold does not hold, one a bounded first read began after (F-244),
+  gets a row from the meta alone: its ids, `type` and `description` from its `agentType` and
+  `description`, `state` `:ended` if the meta says `finished` and `:open` if not, and
+  `started_at` nil. `:unreadable` for bytes
+  without one, such as a file not yet whole.
 
       iex> alias CodingAgentFramework.Transcripts.Fold
       iex> call = ~s({"type":"assistant","message":{"id":"m1","content":) <>
@@ -884,6 +930,7 @@ defmodule CodingAgentFramework.Transcripts.Fold do
 
         case fold.subagents[id] do
           %{agent_id: nil} = a -> {:ok, put_agent(fold, id, %{a | agent_id: agent})}
+          nil -> {:ok, put_agent(fold, id, unseen(id, agent, meta))}
           _ -> {:ok, fold}
         end
 
@@ -891,6 +938,25 @@ defmodule CodingAgentFramework.Transcripts.Fold do
         :unreadable
     end
   end
+
+  # The row of a subagent whose `Agent` call the fold does not hold, a bounded first read
+  # having started after it (F-244): only what its meta says is known, not when it started.
+  defp unseen(id, agent, meta) do
+    %{
+      tool_use_id: id,
+      agent_id: agent,
+      type: text(meta["agentType"]),
+      description: text(meta["description"]),
+      state: if(meta["finished"] == true, do: :ended, else: :open),
+      status: nil,
+      tokens: nil,
+      started_at: nil,
+      ended_at: nil
+    }
+  end
+
+  defp text(t) when is_binary(t), do: t
+  defp text(_), do: nil
 
   defp file(fold, agent), do: Map.get(fold.files, agent, new_file())
 

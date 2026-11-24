@@ -10,7 +10,9 @@ defmodule CodingAgentFramework.Transcripts do
   `transcript_path` names it too. Each read runs the host's `tail -c +<byte>` (with `head -c` when
   it takes a bounded part) through
   `CodingAgentFramework.Shell`, so a host over ssh is read the same way and a restart never reads
-  a whole log again: the offset is in the table. What a read answers per session is in
+  a whole log again: the offset is in the table. A session with no stored fold is read the first
+  time from at most its last `first_read:` bytes, from a whole line, and its fold says
+  `partial: true` (F-244): a long-running session is not folded from its first byte. What a read answers per session is in
   `CodingAgentFramework.Transcripts.Fold`.
 
       iex> dir = CodingAgentFramework.TestHost.test_dir()
@@ -64,6 +66,17 @@ defmodule CodingAgentFramework.Transcripts do
   printf 'file'
   if [ -n "$4" ]; then "$2" -c "+$3" "$1" 2>/dev/null | "$5" -c "$4"; else exec "$2" -c "+$3" "$1"; fi
   """
+  # A main file's first read: its size from the host's wc (`$3`), then from one byte before its
+  # last `$4` bytes, so a line that starts at the bound is kept whole, to its end; the byte it
+  # starts at is printed first. A file that grows between the two runs only gives more bytes.
+  @last ~S"""
+  [ -f "$1" ] || { printf 'nofile'; exit 0; }
+  [ -r "$1" ] || exit 1
+  s=$("$3" -c < "$1") || exit 1
+  f=$(($s > $4 ? $s - $4 - 1 : 0))
+  printf 'file%s\n' "$f"
+  exec "$2" -c "+$((f + 1))" "$1"
+  """
   # `$1` is a session's `subagents/` directory, `$2` the host's wc. Each subagent's file with its
   # size, in one run however many there are. A file removed between the glob and wc is left out
   # (its complaint goes to /dev/null), so the reader sees it gone, as on its next read.
@@ -80,8 +93,8 @@ defmodule CodingAgentFramework.Transcripts do
   Starts a `Transcripts`. Options: `programs:` (the host's, naming sh, tail, head and wc),
   `accounts:` (the names of the accounts it reads), `db:` (this instance's SQLite path), and
   optionally `notify:` (a function of one cue), `timeout:` (ms per shell run, default 10 s),
-  `first_read:` (the bytes a subagent file's first read takes at most, from its end; default
-  1 MB) and `interval:` (ms between reads of every known session; without it, reads happen
+  `first_read:` (the bytes the first read of a main transcript or a subagent's file takes at
+  most, from its end; default 1 MB) and `interval:` (ms between reads of every known session; without it, reads happen
   only on `read/3`). It fails to start with `{:no_program, names}`.
   """
   @spec start_link(keyword) :: GenServer.on_start()
@@ -315,12 +328,12 @@ defmodule CodingAgentFramework.Transcripts do
   end
 
   defp read_one(state, s) do
-    case tail(state, s.path, Fold.read_from(s.fold)) do
-      {:ok, bytes} ->
-        case Fold.take(s.fold, bytes) do
-          {:ok, fold} -> subagent_files(state, %{s | fold: fold, problem: nil})
-          :rewritten -> with {:ok, s} <- again(state, s), do: subagent_files(state, s)
-        end
+    case main(state, s.path, s.fold) do
+      {:ok, fold} ->
+        subagent_files(state, %{s | fold: fold, problem: nil})
+
+      :rewritten ->
+        with {:ok, s} <- again(state, s), do: subagent_files(state, s)
 
       :no_file when s.fold.offset == 0 ->
         {:ok, %{s | problem: "no_file"}}
@@ -333,13 +346,26 @@ defmodule CodingAgentFramework.Transcripts do
     end
   end
 
+  # A fold that has read nothing, with no stored fold or after the file was rewritten or gone,
+  # takes at most the file's last `first_read` bytes (F-244); one with an offset goes on from it.
+  defp main(state, path, %{offset: 0}) do
+    with {:ok, from, bytes} <- last(state, path), do: Fold.take_from(from, bytes)
+  end
+
+  defp main(state, path, fold) do
+    with {:ok, bytes} <- tail(state, path, Fold.read_from(fold)), do: Fold.take(fold, bytes)
+  end
+
   defp again(state, s) do
-    with {:ok, bytes} <- tail(state, s.path, 0),
-         {:ok, fold} <- Fold.take(Fold.new(), bytes) do
-      {:ok, %{s | fold: fold, rewrites: s.rewrites + 1, problem: "rewritten"}}
-    else
-      :no_file -> {:ok, %{s | fold: Fold.new(), rewrites: s.rewrites + 1, problem: "no_file"}}
-      other -> other
+    case main(state, s.path, Fold.new()) do
+      {:ok, fold} ->
+        {:ok, %{s | fold: fold, rewrites: s.rewrites + 1, problem: "rewritten"}}
+
+      :no_file ->
+        {:ok, %{s | fold: Fold.new(), rewrites: s.rewrites + 1, problem: "no_file"}}
+
+      other ->
+        other
     end
   end
 
@@ -478,6 +504,37 @@ defmodule CodingAgentFramework.Transcripts do
               do: {agent, n}
 
         {:ok, sizes}
+
+      {:ok, %{status: status, output: out}} ->
+        {:unknown, {:sh, status, String.slice(out, 0, 200)}}
+
+      other ->
+        other
+    end
+  end
+
+  defp last(state, path) do
+    args = [
+      "-c",
+      @last,
+      "sh",
+      path,
+      state.programs.tail,
+      state.programs.wc,
+      Integer.to_string(state.first_read)
+    ]
+
+    case Shell.run(state.host, state.programs.sh, args, timeout: state.timeout) do
+      {:ok, %{status: 0, output: "nofile"}} ->
+        :no_file
+
+      {:ok, %{status: 0, output: "file" <> out} = result} ->
+        with [at, bytes] <- :binary.split(out, "\n"),
+             {from, ""} <- Integer.parse(at) do
+          {:ok, from, bytes}
+        else
+          _ -> {:unknown, {:sh, result.status, String.slice(out, 0, 200)}}
+        end
 
       {:ok, %{status: status, output: out}} ->
         {:unknown, {:sh, status, String.slice(out, 0, 200)}}

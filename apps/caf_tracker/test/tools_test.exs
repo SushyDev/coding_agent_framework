@@ -210,6 +210,29 @@ defmodule CodingAgentFramework.Tracker.ToolsTest do
     assert {:refused, {:not_read, :finished}} = Tree.tool_calls(view, "ag-1")
   end
 
+  test "a partial first read shows the call it runs now, and a subagent started before the cut (F-244)" do
+    # The `Agent` call is before the cut; only the last call and its subagent's file are read.
+    before = use_line("tu-a", "Agent", @t0) <> use_line("tu-1", "Bash", @t1)
+    file = before <> result_line("tu-1", @t2) <> use_line("tu-2", "Read", @t3)
+    at = byte_size(before) + 3
+    {:ok, fold} = Fold.take_from(at, binary_part(file, at, byte_size(file) - at))
+    meta = ~s({"toolUseId":"tu-a","agentType":"Explore","description":"look"})
+    {:ok, fold} = Fold.file_meta(fold, "ag-1", meta)
+    fold = more(fold, "ag-1", use_line("tu-7", "Grep", @t3, sub("ag-1")))
+
+    assert %{agents: [row]} = Tree.agents(view(fold))
+    assert %{partial: true, tool: %{id: "tu-2", name: "Read"}} = row
+
+    assert [%{agent_id: "ag-1", type: "Explore", description: "look", tool: %{id: "tu-7"}}] =
+             row.subagents
+
+    assert %{"tu-a" => %{started_at: nil}} = fold.subagents
+    assert {:ok, [%{id: "tu-2"}]} = Tree.tool_calls(view(fold), "a-x")
+
+    # A whole read is not partial.
+    assert %{agents: [%{partial: false}]} = Tree.agents(view(fold(file)))
+  end
+
   test "the bound holds: at most 200 calls per agent, and limit: answers fewer" do
     bytes =
       for i <- 1..250, into: "" do
