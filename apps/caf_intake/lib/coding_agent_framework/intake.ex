@@ -98,7 +98,8 @@ defmodule CodingAgentFramework.Intake do
     still held is answered empty at once (its program exits 0 and wakes nothing). A waiter
     whose text is in flight is not replaced: a newer one waits behind it and takes its place
     once its hold ends. The plug writes a heartbeat chunk every `beat:` ms, and a failed write
-    ends the hold. At `waiter_deadline:`, under the hook's `timeout`, the response ends empty.
+    ends the hold. At `waiter_deadline:`, under the hook's `timeout`, the response ends empty,
+    as it does when its decider passes it (`pass_waiter/4`, F-241).
 
   After each write it calls `notify` with `%{topic: "intake:<host>:<account>", ids: ids}`, a
   cue and never the data. `CodingAgentFramework.Tracker.IntakeSource` reads the rows. A
@@ -548,6 +549,18 @@ defmodule CodingAgentFramework.Intake do
   def deliver(intake, account, session_id, text, opts \\ []),
     do: call(intake, {:deliver, account, session_id, text}, opts)
 
+  @doc """
+  Ends the hold of `account`'s session `session_id`'s waiter with a pass, for a decider with no
+  text for it (F-241, `Reload.tla`'s `Asks`, `Hold.tla`'s `Passed`): its response ends empty,
+  its program exits 0 and wakes nothing, and the session has no waiter until a turn of it ends,
+  unless a newer one waited behind it. Returns `{:ok, :passed}`; `{:refused, :no_waiter}` with
+  none held; `{:refused, :in_flight}` while the waiter's text is in flight, which goes on.
+  """
+  @spec pass_waiter(GenServer.server(), String.t(), String.t(), keyword) ::
+          {:ok, :passed} | {:refused, term} | {:unknown, term}
+  def pass_waiter(intake, account, session_id, opts \\ []),
+    do: call(intake, {:pass_waiter, account, session_id}, opts)
+
   @doc "Whether `account`'s session `session_id` has a waiter held now: `{:ok, boolean}`."
   @spec waiter?(GenServer.server(), String.t(), String.t(), keyword) ::
           {:ok, boolean} | {:refused, term} | {:unknown, term}
@@ -755,6 +768,16 @@ defmodule CodingAgentFramework.Intake do
       true ->
         {:ok, state} = decide(state, key, text, nil)
         {:noreply, put_in(state.holds[key][:from], from)}
+    end
+  end
+
+  def handle_call({:pass_waiter, account, session}, _from, state) do
+    key = state.waiters[{account, session}]
+
+    case key && state.holds[key] do
+      nil -> {:reply, {:refused, :no_waiter}, state}
+      %{deciding: _} -> {:reply, {:refused, :in_flight}, state}
+      hold -> {:reply, {:ok, :passed}, release(state, key, hold, "passed")}
     end
   end
 
