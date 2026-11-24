@@ -219,7 +219,7 @@ D == INSTANCE Delivery WITH
        idle <- [a \in {Dg} |-> idle],
        stopping <- [a \in {Dg} |-> ending # "none"],
        over <- [a \in {Dg} |-> FALSE],
-       turned <- [a \in {Dg} |-> TRUE], Long <- {}, Launched <- {},
+       turned <- [a \in {Dg} |-> TRUE], Long <- {}, Wide <- {}, Launched <- {},
        row <- row, hand <- hand, wrong <- dwrong,
        claimed <- {}, wire <- [m \in Msgs |-> 0], waiter <- [a \in {Dg} |-> 0],
        call <- [m \in Msgs |-> "none"], tx <- [a \in {Dg} |-> <<>>],

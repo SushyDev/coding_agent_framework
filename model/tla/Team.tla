@@ -338,7 +338,7 @@ D == INSTANCE Delivery WITH
        idle <- [a \in Agents |-> proc[a] = "idle"],
        stopping <- [a \in Agents |-> a \in ending],
        over <- [a \in Agents |-> Over(a)],
-       turned <- turned, Long <- Ids, Launched <- {},
+       turned <- turned, Long <- Ids, Wide <- {}, Launched <- {},
        call <- dcall, lost <- dlost, wrong <- dwrong,
        restarts <- 0, lives <- 0, ends <- 0, prompts <- 0, stops <- 0, readAt <- 0,
        forced <- forcedEnd, fcall <- {}

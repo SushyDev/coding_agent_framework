@@ -2268,8 +2268,14 @@ you is in <path>; read it.", with the row's uuid at its end. Each interactive st
 agent passes that directory by `--add-dir`, so reading the file never asks permission, and it
 holds only the agent's due texts. The file stays after its row is delivered: the line is taken before the agent reads the file, in the turn it starts, and the framework keeps its data. The transcript's
 user line settles it as any typed row, and its turn's end brings the next waiter, so no row
-waits for a person's prompt. A pointer line the box still cannot hold is refused, and its row
-waits for a waiter. `Intake` cues a
+waits for a person's prompt. A pointer line the box still cannot hold (a long home: the line
+names the whole path) is refused, and its row waits for a waiter, for a bound only (F-240,
+`Delivery.tla`'s `WaitBound` and `Break_Delivery_WaitForever`): an idle session with no waiter
+starts none until a turn of it ends, and a restart cuts the one it had. Past `Mailbox`'s
+`wait_bound:` (10 minutes from the refusal, not measured), with the turn still ended and no
+waiter held, the row is answered `unknown`, `attempt` `["wait_bound", refusal]`, and never
+sent. Rows go in order per sender and addressee, and `Mailbox` keeps one queue per addressee
+with one row in flight, so the rows behind it wait as long and no longer. `Intake` cues a
 session's waiter coming and going on a topic of its own (`intake:<host>:<account>:waiters`, with
 the session ids), and `Mailbox` tries a due row on that cue, not on a timer (F-123's new-3).
 The cue also settles a row `sending` by the last waiter: a turn's end starts the next waiter,

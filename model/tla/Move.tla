@@ -288,7 +288,7 @@ D == INSTANCE Delivery WITH
        idle <- [a \in {Main} |-> turn = 0],
        stopping <- [a \in {Main} |-> (record.status = "stopping" /\ Current # 0) \/ Held],
        over <- [a \in {Main} |-> FALSE],
-       turned <- [a \in {Main} |-> turned], Long <- Ids, Launched <- {},
+       turned <- [a \in {Main} |-> turned], Long <- Ids, Wide <- {}, Launched <- {},
        lost <- dlost,
        restarts <- 0, lives <- 0, ends <- 0, prompts <- 0, stops <- 0, readAt <- 0,
        forced <- {}, fcall <- {}

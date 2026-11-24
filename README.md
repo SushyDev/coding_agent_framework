@@ -419,6 +419,9 @@ Built, each from a checked model in `model/tla/`:
   as a menu, and an interactive delegate (step 4), each a test of its own that records the
   screens it meets; run on a logged-in setup, it found the reload refused under a waiter (F-241)
   and a trust press read back too soon under load (F-242).
+- a message to an idle interactive delegate whose typed line the box cannot hold no longer
+  waits for ever after a restart (F-240): it waits for a waiter for a bound, is then answered
+  `unknown`, and the rows behind it go in.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

@@ -32,7 +32,13 @@
 (*           may read, and the line typed names it (F-142); which line is  *)
 (*           typed is left abstract. Refused when the check fails; unknown *)
 (*           keeps the mark, and is never typed again; settled as waiter,  *)
-(*           once the turn that took it has ended.                         *)
+(*           once the turn that took it has ended. A row in Wide has a     *)
+(*           pointer line the box still cannot hold (a long home, F-240):  *)
+(*           it is never typed, and waits for a waiter for a bound only.   *)
+(*           Past it, with no waiter, it is answered unknown (WaitBound):  *)
+(*           an idle session with no waiter starts none until a turn of it *)
+(*           ends, and a restart cuts the one it had. The rows behind it   *)
+(*           wait no longer than that.                                     *)
 (*                                                                         *)
 (* A waiter connects only once a turn of its process has ended (`turned`): *)
 (* each turn's end starts the next one, and nothing starts one before the  *)
@@ -177,6 +183,7 @@ CONSTANTS
     MaxPrompts,    \* alone: a person's prompts
     MaxStops,      \* alone: stops by SIGTERM
     Long,          \* rows too long for the typed write
+    Wide,          \* the Long rows whose pointer line is wider than the box (F-240)
     Launched,      \* alone: sessions with no process at first, started with their first row
     Break          \* "none", or the guard removed (see Breaks)
 
@@ -208,11 +215,13 @@ Breaks == {
     "LaunchBound",           \* a launch with no line is due again while its process lives (F-153)
     "AgentCutUndoes",        \* a hand its addressee's agent process's crash cut is due again
     "ForceEnded",            \* a row a forced end left sending is settled ended, not unknown
-    "SettleInCall"           \* a forced end's rows settle only in the operator's call, which a restart cuts
+    "SettleInCall",          \* a forced end's rows settle only in the operator's call, which a restart cuts
+    "WaitForever"            \* a row too wide to type waits for a waiter with no bound (F-240)
 }
 
 ASSUME Break \in Breaks
 ASSUME Headless \subseteq Addrs /\ Awaited \subseteq Ids /\ Long \subseteq Ids
+ASSUME Wide \subseteq Long
 ASSUME Launched \subseteq Addrs
 ASSUME ClientLeaves \in BOOLEAN /\ SelfTurns \in BOOLEAN
 
@@ -301,7 +310,7 @@ Reaches(i, t) ==
     CASE t = "stream" -> a \in Headless
       [] t = "waiter" -> a \notin Headless /\ waiter[a] = pr[a]
       [] t = "typed"  -> a \notin Headless /\ waiter[a] # pr[a]
-                         /\ (i \notin Long \/ Break # "NoPointer")
+                         /\ (i \notin Long \/ Break # "NoPointer") /\ i \notin Wide
       [] t = "launch" -> a \notin Headless
       [] t = "call"   -> /\ i \in Awaited
                          /\ \/ call[i] = "waiting"
@@ -474,6 +483,19 @@ SettleSeen(i, has) ==
           /\ row' = [row EXCEPT ![i] = DueAgain(i)]
     /\ wire' = IF gone THEN [wire EXCEPT ![i] = 0] ELSE wire
     /\ UNCHANGED <<hand, claimed, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
+
+\* The wait bound (F-240): a row in Wide, first to its interactive addressee,
+\* whose process runs idle with no waiter, was refused by the typed write
+\* and waits for a waiter. Time is abstract: the bound passes at any such
+\* step. The row is answered unknown, never due again, and the rows behind
+\* it go on. A waiter that connects first takes it, as any row. Under
+\* WaitForever it waits with no bound.
+WaitBound(i) ==
+    LET a == row[i].to IN
+    /\ up /\ i \in Wide /\ First(i) /\ a \notin Headless /\ Break # "WaitForever"
+    /\ pr[a] # 0 /\ idle[a] /\ waiter[a] # pr[a]
+    /\ row' = [row EXCEPT ![i].st = "unknown"]
+    /\ UNCHANGED <<hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
 
 -----------------------------------------------------------------------------
 (* The call transport: a run_delegate that waits on a row *)
@@ -859,6 +881,7 @@ Next ==
                                  \/ CallerSeen(i) \/ SettleCut(i))
                       \/ Mailbox(EndedFirst(i)) \/ Mailbox(ForceSettled(i))
                       \/ Mailbox(ReplyStored(i) \/ NoticeStored(i) \/ GoOn(i))
+                      \/ Mailbox(WaitBound(i))
 
 \* One row's steps after its mark and hand-on, but the take: each is the
 \* next one the row can take, so one fairness for them all is enough, and
@@ -867,7 +890,7 @@ Next ==
 RowSteps(i) ==
     Mailbox(\/ Refused(i) \/ Reclaim(i) \/ Settle(i) \/ Deadline(i) \/ Written(i) \/ Told(i)
                \/ CallerSeen(i) \/ SettleCut(i) \/ EndedFirst(i) \/ ReplyStored(i)
-               \/ NoticeStored(i) \/ GoOn(i) \/ ForceSettled(i))
+               \/ NoticeStored(i) \/ GoOn(i) \/ ForceSettled(i) \/ WaitBound(i))
 
 Fairness ==
     /\ WF_vars(FrameworkStarts)
@@ -941,7 +964,8 @@ AnswersTheBrief ==
     \A j \in Ids : row[j].kind \in {"reply", "notice"} => row[row[j].re].kind \in {"msg", "brief"}
 
 \* A row a forced end settled unknown stays so: it is never due again, so
-\* never sent twice, and never counted delivered (F-170).
+\* never sent twice, and never counted delivered (F-170). So does one the
+\* wait bound answered (F-240).
 UnknownStays == [][\A i \in Ids : row[i].st = "unknown" => row'[i].st = "unknown"]_row
 
 \* A row in flight to a session whose end the operator forced settles, once
@@ -956,11 +980,17 @@ SendingSettles == \A i \in Ids : row[i].st = "sending" ~> row[i].st # "sending"
 \* A due row is delivered, or marked ended once its session ended. None
 \* waits for a person's prompt: a long row is typed as a pointer (F-142).
 \* NoPointer breaks it. A row in flight at the operator's forced end of its
-\* session is settled unknown instead, and only then (F-170).
+\* session is settled unknown instead (F-170), and a row too wide to type
+\* that no waiter took within the wait bound (F-240), and only then.
+\* WaitForever breaks it: that row, and every row behind it, waits for ever.
 Arrives ==
     \A i \in Ids : row[i].st = "due"
                      ~> (row[i].st \in {"delivered", "ended"}
-                         \/ (row[i].st = "unknown" /\ row[i].to \in forced))
+                         \/ (row[i].st = "unknown" /\ (row[i].to \in forced \/ i \in Wide)))
+
+\* A row is answered unknown only by a forced end or by the wait bound.
+UnknownWhy ==
+    \A i \in Ids : row[i].st = "unknown" => row[i].to \in forced \/ i \in Wide
 
 \* A delivered row whose turn ends, with a result or with its process's
 \* end, is answered under its key, unless its session ended for good.

@@ -303,7 +303,7 @@ D == INSTANCE Delivery WITH
        idle <- [a \in {Parent} |-> ~turn],
        stopping <- [a \in {Parent} |-> FALSE],
        over <- [a \in {Parent} |-> FALSE],
-       turned <- [a \in {Parent} |-> parentTurned], Long <- Delegates, Launched <- {},
+       turned <- [a \in {Parent} |-> parentTurned], Long <- Delegates, Wide <- {}, Launched <- {},
        call <- dcall,
        restarts <- 0, lives <- 0, ends <- 0, prompts <- 0, stops <- 0, readAt <- 0,
        forced <- {}, fcall <- {}

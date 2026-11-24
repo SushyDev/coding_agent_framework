@@ -54,7 +54,10 @@ defmodule CodingAgentFramework.Mailbox do
     row's sender (`Transport.pointer_line/2`, `Transport.Typed.pointer/2`, F-172);
     the file goes once the row is delivered. A row whose line the `Inlet` refused anyway (the
     box narrower than the line), or one too long with no `home:`, is not typed again: it waits
-    for a waiter.
+    for a waiter, for `wait_bound:` ms (10 minutes by default) from that refusal, its last write.
+    Past it, with the session idle and no waiter held, it is answered `unknown`, `attempt`
+    `["wait_bound", refusal]`, and never sent (F-240, `Delivery.tla`'s `WaitBound`). Rows go in
+    order per addressee, one in flight, so the rows behind it wait as long and no longer.
 
   - `launch` (F-137), for the first row to an interactive session's new process: marked by
     `launch/4` before the start that carries it as its prompt, told the start's answer by
@@ -117,6 +120,9 @@ defmodule CodingAgentFramework.Mailbox do
   @take_bound 10_000
   # The Inlet's typed write: its reads, the keys, and the box seen before the Enter.
   @inlet 10_000
+  # How long a row the Inlet refused waits for a waiter (F-240): long enough for a person's turn
+  # under way to end and start one. Not measured.
+  @wait_bound 600_000
   # A typed command's: its reads, its keys, and its result line (F-233).
   @reload 15_000
   # The sender of a notice and of the words to go on; no agent has this name, as an agent's
@@ -130,7 +136,9 @@ defmodule CodingAgentFramework.Mailbox do
   waiter transport, `intake:` with `transcripts:` and `accounts:` (an `Accounts`), and
   `take_bound:` (ms, 10 000 by default); for the typed transport, `inlet:` with `registry:` (the
   host's `Registry`), `transcripts:` and `accounts:`, and `home:`, the framework home `Sessions`
-  was given, whose due directories carry a row too long to type or to launch with; `os:`, the
+  was given, whose due directories carry a row too long to type or to launch with, and
+  `wait_bound:` (ms, 600 000 by default: how long a row the `Inlet` refused waits for a
+  waiter); `os:`, the
   workstation's operating system (`Programs.os/1`, this VM's own by default), whose argument
   limit (`ClaudeCLI.prompt_max/1`) bounds a launch's prompt; `frame:`, a function that frames a
   row's text with its sender (`frame/1` by default, F-170); `acts:`, the instance's `Acts`,
@@ -523,7 +531,11 @@ defmodule CodingAgentFramework.Mailbox do
 
       typed =
         if opts[:inlet],
-          do: %{inlet: opts[:inlet], registry: Keyword.fetch!(opts, :registry)}
+          do: %{
+            inlet: opts[:inlet],
+            registry: Keyword.fetch!(opts, :registry),
+            wait_bound: Keyword.get(opts, :wait_bound, @wait_bound)
+          }
 
       # `calls`: row id to the call that took it; `waits`: key to the call waiting for it;
       # `hands`: a hand-on's task ref to the row it hands on and what its answer writes.
@@ -554,6 +566,11 @@ defmodule CodingAgentFramework.Mailbox do
         via in ["waiter", "typed", "stream"],
         is_integer(at),
         do: bound(s, at)
+
+    # A row the Inlet refused waits for its wait bound, which runs from that refusal (F-240).
+    for %{status: "queued"} = m <- Table.open_rows(s.db),
+        Transport.Typed.text_refused?(m.attempt),
+        do: wait_timer(s, m)
 
     {:noreply, settle(s, true)}
   end
@@ -1318,6 +1335,15 @@ defmodule CodingAgentFramework.Mailbox do
       held == {:ok, false} and s.typed != nil and not refused ->
         type(s, m, srow)
 
+      # WaitBound (F-240): refused, it waits for a waiter; past its bound, with the turn still
+      # ended and no waiter, none is coming. Answered, never sent, so the rows behind it go on.
+      refused and held == {:ok, false} and s.typed != nil and waited?(s, m) and
+          turn_now(s, srow.name, srow.pid) == :ok ->
+        write(s, m, status: "unknown", attempt: {:wait_bound, JSON.decode!(m.attempt)})
+        # The next row to the session goes now, not at the next cue, which may never come.
+        send(self(), :bound)
+        s
+
       m.attempt != "no_waiter" and not refused ->
         write(s, m, attempt: :no_waiter)
         s
@@ -1373,8 +1399,10 @@ defmodule CodingAgentFramework.Mailbox do
     bound(s, now())
   end
 
-  defp sent(s, m, {:refused, why}),
-    do: write(s, m, status: "queued", via: nil, at: nil, sent_at: nil, attempt: why)
+  defp sent(s, m, {:refused, why}) do
+    write(s, m, status: "queued", via: nil, at: nil, sent_at: nil, attempt: why)
+    refused(s, m)
+  end
 
   defp sent(s, m, {:unknown, why}) do
     write(s, m, sent_at: now(), attempt: why)
@@ -1501,6 +1529,7 @@ defmodule CodingAgentFramework.Mailbox do
 
   defp type_line(s, m, _srow, {:refused, why}) do
     write(s, m, attempt: why)
+    refused(s, m)
     s
   end
 
@@ -1562,6 +1591,21 @@ defmodule CodingAgentFramework.Mailbox do
 
   defp bound(s, sent_at),
     do: Process.send_after(self(), :bound, max(sent_at + s.waiter.bound - now(), 0) + 1)
+
+  # A text the Inlet, or the pointer's file, refused starts its row's wait bound.
+  defp refused(s, m) do
+    m = Table.get(s.db, m.id)
+    if Transport.Typed.text_refused?(m.attempt), do: wait_timer(s, m)
+  end
+
+  # A refused row's wait bound runs from the refusal, its last write (`updated_at`): nothing
+  # writes the row again while it waits, and a restart reads the same time.
+  defp waited?(s, m), do: now() >= m.updated_at + s.typed.wait_bound
+
+  defp wait_timer(%{typed: nil}, _m), do: :ok
+
+  defp wait_timer(s, m),
+    do: Process.send_after(self(), :bound, max(m.updated_at + s.typed.wait_bound - now(), 0) + 1)
 
   defp now, do: System.os_time(:millisecond)
 
