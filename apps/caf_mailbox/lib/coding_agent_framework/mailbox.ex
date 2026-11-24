@@ -132,6 +132,11 @@ defmodule CodingAgentFramework.Mailbox do
   @wake "[framework] a message is waiting for you."
   # A typed command's: its reads, its keys, and its result line (F-233).
   @reload 15_000
+  # How long a reload waits, once it passed a waiter, for the turn and the screen to read idle
+  # (F-241). The pass ends the hold at once and the turn had already ended, so this is a margin.
+  @hold 5_000
+  # How often that wait reads them again.
+  @look 100
   # The sender of a notice and of the words to go on; no agent has this name, as an agent's
   # name holds its project's.
   @framework "framework"
@@ -500,14 +505,26 @@ defmodule CodingAgentFramework.Mailbox do
   could be typed, and never twice. The `Inlet` works in a task, so this process waits on no
   pane. Answers `{:ok, :reloaded}`, or refused `:headless` (a headless delegate has no screen,
   and loads its plugins at its next start), `{:no_agent, name}`, `:no_inlet` (no typed
-  transport), or as the `Inlet` answers. Option `timeout:` (ms, 20 000 by default).
+  transport), or as the `Inlet` answers.
+
+  An idle session the framework delivers to by the waiter has one holding its turn (F-241,
+  `Reload.tla`). With a row to it open (queued or sending), the row goes first by that waiter,
+  and the reload is refused `:message_due`: the operator tries again. Else the waiter's hold
+  ends with a pass (`Intake.pass_waiter/4`: its program exits 0 and wakes nothing), so no
+  waiter holds until a turn of the session ends, and the reload is typed once the turn reads
+  idle with no waiter and the screen idle with an empty box, read again every 100 ms for
+  `hold:` ms (5 000 by default). Past it with nothing typed it is `{:unknown, {:held,
+  refusal}}`, the `Inlet`'s last refusal: the pass changed the session. A row that comes
+  meanwhile has no waiter, so it is typed, in a step of the `Inlet` of its own. Option
+  `timeout:` (ms, `hold:` and 20 000 by default).
 
       Mailbox.reload_plugins(mailbox, "app-main")
       #=> {:ok, :reloaded}
   """
   def reload_plugins(mailbox, name, opts \\ []) do
-    timeout = Keyword.get(opts, :timeout, @reload + @step)
-    call(mailbox, {:reload_plugins, name, timeout - @step}, timeout: timeout)
+    hold = Keyword.get(opts, :hold, @hold)
+    timeout = Keyword.get(opts, :timeout, hold + @reload + @step)
+    call(mailbox, {:reload_plugins, name, hold, timeout - hold - @step}, timeout: timeout)
   end
 
   defp call(mailbox, request, opts) do
@@ -882,7 +899,7 @@ defmodule CodingAgentFramework.Mailbox do
 
   # The reload's checks read here, its write in a task that answers the caller itself: the
   # turn read again in the Inlet's step, as a typed row's is (`type_line/4`).
-  def handle_call({:reload_plugins, name, timeout}, from, s) do
+  def handle_call({:reload_plugins, name, hold, timeout}, from, s) do
     row = s.agents |> Agents.get(name) |> Agents.unheld(div(now(), 1000))
 
     cond do
@@ -896,16 +913,24 @@ defmodule CodingAgentFramework.Mailbox do
         {:reply, {:refused, :no_inlet}, s}
 
       true ->
-        reads = Map.take(s, [:agents, :typed, :waiter])
-        turn = fn -> turn_now(reads, name, row.pid) end
-        opts = [release: row.release, turn: turn, timeout: timeout]
-        inlet = s.typed.inlet
+        case pass(s, name, row) do
+          {_, _} = answer ->
+            {:reply, answer, s}
 
-        Task.start(fn ->
-          GenServer.reply(from, guarded(fn -> Inlet.reload_plugins(inlet, name, opts) end))
-        end)
+          passed ->
+            reads = Map.take(s, [:agents, :typed, :waiter])
+            turn = fn -> turn_now(reads, name, row.pid) end
+            opts = [release: row.release, turn: turn, timeout: timeout]
+            inlet = s.typed.inlet
+            # Only a pass is waited on: any other refusal is the answer, as before F-241.
+            deadline = if passed == :passed, do: now() + hold
 
-        {:noreply, s}
+            Task.start(fn ->
+              GenServer.reply(from, guarded(fn -> reload(inlet, name, opts, deadline) end))
+            end)
+
+            {:noreply, s}
+        end
     end
   end
 
@@ -1617,6 +1642,48 @@ defmodule CodingAgentFramework.Mailbox do
     with {:ok, _} <- Registry.read(s.typed.registry, timeout: @step),
          {:ok, %{rows: files}} <- Registry.rows(s.typed.registry, row.account, timeout: @step),
          do: {:ok, files}
+  end
+
+  # A reload into an idle session whose waiter holds its turn (F-241, `Reload.tla`'s `Asks`), in
+  # this process's step, so no row is handed to that waiter meanwhile: a row open to the session
+  # goes first by it, and the reload is refused; else the hold ends with a pass. `:as_is` for
+  # any other turn, which the Inlet reads again in its step.
+  defp pass(s, name, row) do
+    with {:refused, :waiter} <- turn_now(s, name, row.pid),
+         false <- Enum.any?(Table.open_rows(s.db), &(&1.to_agent == name)) do
+      case Intake.pass_waiter(s.waiter.intake, row.account, row.session_id, timeout: @step) do
+        {:ok, :passed} -> :passed
+        # Its hold ended in between, by its deadline or a cut: nothing left to pass.
+        {:refused, :no_waiter} -> :passed
+        {:refused, :in_flight} -> {:refused, :message_due}
+        other -> other
+      end
+    else
+      true -> {:refused, :message_due}
+      _ -> :as_is
+    end
+  end
+
+  # The reload's write. With no pass, the Inlet's answer. After one, until `deadline`, a refusal
+  # of the turn or of the screen is read again (`ReloadKeys`): the passed waiter's hold is
+  # ending. Past it, unknown with nothing typed (`ReloadBound`).
+  defp reload(inlet, name, opts, nil), do: Inlet.reload_plugins(inlet, name, opts)
+
+  defp reload(inlet, name, opts, deadline) do
+    case Inlet.reload_plugins(inlet, name, opts) do
+      {:refused, {kind, _}} = refused when kind in [:turn, :screen] ->
+        if now() >= deadline do
+          {:unknown, {:held, elem(refused, 1)}}
+        else
+          receive do
+          after
+            @look -> reload(inlet, name, opts, deadline)
+          end
+        end
+
+      answer ->
+        answer
+    end
   end
 
   # A typed row's evidence: the waiter's, and whether the turn reads ended now.

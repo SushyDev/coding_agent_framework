@@ -61,6 +61,29 @@ defmodule CodingAgentFramework.IntakeWaiterTest do
     assert {:ok, false} = Intake.waiter?(intake, "work", "s2")
   end
 
+  # F-241: a decider with no text ends the hold with a pass, an empty response; a waiter with
+  # text in flight is not passed, and its text goes on.
+  test "a pass ends the waiter's hold with no text, but not a hold whose text is in flight",
+       %{start: start} do
+    intake = start.([])
+    assert {:refused, :no_waiter} = Intake.pass_waiter(intake, "work", "s1")
+    task = Task.async(fn -> post(intake, @stop, path: "/hooks/work/waiter") end)
+    assert {:ok, true} = await_waiter(intake, true)
+    assert {:ok, :passed} = Intake.pass_waiter(intake, "work", "s1")
+    conn = Task.await(task)
+    assert {conn.status, String.trim(conn.resp_body)} == {200, ""}
+    assert {:ok, false} = waiter?(intake)
+    assert {:refused, :no_waiter} = Intake.pass_waiter(intake, "work", "s1")
+
+    {first, key, ref} = stand_in(intake)
+    task = Task.async(fn -> Intake.deliver(intake, "work", "s1", "one") end)
+    assert_receive {:got, ^first, {^ref, {:decision, "one"}}}, 5_000
+    assert {:refused, :in_flight} = Intake.pass_waiter(intake, "work", "s1")
+    Intake.written(intake, key, ref)
+    assert {:ok, :sent} = Task.await(task)
+    refute_received {:got, ^first, {_, :release}}
+  end
+
   test "at its deadline the response ends with no text", %{start: start} do
     intake = start.(waiter_deadline: 50)
     conn = post(intake, @stop, path: "/hooks/work/waiter")

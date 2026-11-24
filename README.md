@@ -403,6 +403,8 @@ Built, each from a checked model in `model/tla/`:
 - the operator reloads an interactive agent's plugins (F-233): `Operator.reload_plugins/2`
   types `/reload-plugins` through the `Inlet`, checked as a typed message is, and reads its
   result line; each reload is an act in `Acts`, and a headless delegate is refused.
+- a reload reaches an idle session whose waiter holds its turn (F-241): the waiter is passed
+  and the reload typed once, or it is refused `message_due` while a row to it is open.
 - the tree shows each agent's tool calls, and the one it runs now (F-235): read from its
   transcript, with no hook post per call; `Tracker.tool_calls/3` answers the recent ones.
 - the interactive stand-in makes its own `sessions/`, answers `auth status` and writes 2.1.322's

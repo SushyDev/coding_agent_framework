@@ -2247,8 +2247,10 @@ blocked `Stop`s left nine live waiters, F-157), so a session has several live co
 newest is the session's waiter, and each older one still held is answered empty at once: its
 program exits 0 and wakes nothing. A waiter whose text is in flight is not replaced: a newer
 one waits behind it and takes its place once its hold ends. A waiter is answered empty only at
-its deadline or once a newer one is live. `Intake.tla` models the waiter as `Hold`'s third
-instance (F-123), and the newest kept as `Superseded` (F-157).
+its deadline or once a newer one is live, or when its decider passes it
+(`Intake.pass_waiter/4`, F-241): a reload does, so no waiter's text can wake the session
+between the reload's keys and its Enter. `Intake.tla` models the waiter as `Hold`'s third
+instance (F-123), and the newest kept as `Superseded` (F-157); `Reload.tla` models the pass.
 
 A session with no waiter (before its first turn ends, after a waiter's deadline, or after a
 restart cut the waiter's connection) gets nothing that way, and `Intake` knows it
@@ -2397,7 +2399,7 @@ mechanism below unchanged; the operator's tools move to the app's surface:
 | `service_hand(name, to)` | owner | hands a service to its parent or one of its children |
 | `ask(questions)` | any agent | asks a person one to four questions, each with a header, its text and two to four options (a label and a description each, and whether several may be chosen), so an app can show it as a dialog; answers the ask's id at once and never waits. The person's answer comes later as a message from the operator, one line per question (F-138) |
 | `reload()` | any agent | reloads the caller's own tools |
-| `reload_plugins(agent)` | the operator | types `/reload-plugins` into an interactive agent's idle session with an empty box, checked as a typed message is, and reads its result line (F-233); each call is an act in `Acts` with no state claimed, since a reload moves none and may be made again. A headless delegate is refused `headless`: it has no screen, and loads its plugins at its next start |
+| `reload_plugins(agent)` | the operator | types `/reload-plugins` into an interactive agent's idle session with an empty box, checked as a typed message is, and reads its result line (F-233); each call is an act in `Acts` with no state claimed, since a reload moves none and may be made again. A headless delegate is refused `headless`: it has no screen, and loads its plugins at its next start. An idle session the framework delivers to by the waiter has one holding its turn (F-241, `Reload.tla`): with a row to it open the row goes first by that waiter and the reload is refused `message_due`, else the waiter is passed (it exits 0 and wakes nothing) and the reload is typed once the turn reads idle with no waiter, within 5 s, else it is `unknown` with nothing typed. No waiter holds after it until a turn ends, so the next row is typed |
 
 **Who calls.** The tools are served over MCP's HTTP transport from the framework's node, at
 `http://127.0.0.1:<port>/mcp`, with no program between. `MCP` makes each agent a token and
