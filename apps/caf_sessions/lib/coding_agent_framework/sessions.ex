@@ -208,8 +208,6 @@ defmodule CodingAgentFramework.Sessions do
   @version 5_000
   # The held program starts in the session's directory; `$0` is the directory.
   @cd ~S(cd -- "$0" && exec "$@")
-  # A checked press of a dialog's option: the Inlet's keys, its two screen reads and Enter.
-  @press 20_000
   # The actor of an answer the app's `dialog:` callback gives, in `Acts`.
   @app "app"
   # What every delegate's settings say unless the account's file or its own options do (F-200).
@@ -230,7 +228,9 @@ defmodule CodingAgentFramework.Sessions do
   and `home:` (the host's `Stream` and the framework home, for delegates and worktrees),
   `reaper:` (the host's `Shell.Reaper`, for worktrees; `programs:` then names git and mkdir),
   `inlet:` (the host's `Inlet`, which reads an interactive start's pane and presses an answer
-  to its startup dialog; `programs:` names cat for an interactive start's prompt), `dialog:`
+  to its startup dialog; `programs:` names cat for an interactive start's prompt),
+  `press_see:` (ms each read of a press waits for the screen to show its keys, the `Inlet`'s
+  `see:`, `Inlet.see/0` by default; the press's bound is `Inlet.press_bound/1` of it), `dialog:`
   (the app's callback for a startup dialog, `fn kind, options -> {:answer, label} | :ask end`,
   by default `Sessions.Dialog.ask/2`: ask a person), `look:` (ms between reads of a pane that
   waits on a person, and of each running interactive row's for a menu, default 5 000),
@@ -254,6 +254,21 @@ defmodule CodingAgentFramework.Sessions do
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+  @doc """
+  The bound of a call that waits on one press (`answer_dialog/5`, `answer_menu/5`,
+  `press_limit/4`) at the press's `see` ms (F-242): the `Inlet`'s press bound at that `see`
+  (`Inlet.press_bound/1`), and the wait for this process's calls ahead of it. A caller of an
+  instance started with `press_see:` passes this of it as `timeout:`; the default is this of
+  `Inlet.see/0`.
+
+      iex> CodingAgentFramework.Sessions.press_call(2_000)
+      25000
+      iex> CodingAgentFramework.Sessions.press_call(10_000)
+      41000
+  """
+  @spec press_call(pos_integer) :: pos_integer
+  def press_call(see \\ Inlet.see()), do: Inlet.press_bound(see) + @read
 
   @doc """
   The topics of the cues it writes, each as its whole shape, `*` for a word it fills in
@@ -370,6 +385,8 @@ defmodule CodingAgentFramework.Sessions do
 
   defp force(opts), do: Keyword.get(opts, :force, false) == true
 
+  defp press_opts(see), do: [see: see, timeout: Inlet.press_bound(see)]
+
   @doc """
   Answers the startup dialog agent `name`'s start waits on (its row `dialog`) by the option
   labeled `label`: a person's answer, from the app's view or the operator's tool. `kind` is the
@@ -389,7 +406,8 @@ defmodule CodingAgentFramework.Sessions do
   dialog was already marked: never pressed twice, but for a cut one a person cleared,
   `clear_dialog/4`), `:no_inlet`, `{:acts, answer}`, or the `Inlet`'s refusal. Unknown: the
   `Inlet`'s, once a key may have gone; that answer is never pressed again. Options: `by:`,
-  `at:` (a start's menu's read; nil for the one shown), `:timeout` (ms, default 25 000).
+  `at:` (a start's menu's read; nil for the one shown), `:timeout` (ms, `press_call/1` of
+  `Inlet.see/0` by default; pass `press_call/1` of the instance's `press_see:`).
 
       Sessions.answer_dialog(sessions, "app-main", :trust, "Yes, I trust this folder")
       #=> {:ok, :sent}
@@ -398,7 +416,7 @@ defmodule CodingAgentFramework.Sessions do
   @spec answer_dialog(GenServer.server(), String.t(), atom | String.t(), String.t(), keyword) ::
           outcome(:sent)
   def answer_dialog(sessions, name, kind, label, opts \\ []) do
-    timeout = Keyword.get(opts, :timeout, @press + @read)
+    timeout = Keyword.get(opts, :timeout, press_call())
     by = Keyword.get(opts, :by, "person")
 
     case Dialog.kind(kind) do
@@ -422,7 +440,7 @@ defmodule CodingAgentFramework.Sessions do
   `:no_session`, `{:not_running, status}`, `:settled` (the row shows no menu now, or another
   one), `{:answered, mark}`, `{:no_option, choice}`, `:no_inlet`, `{:acts, answer}`, or the
   `Inlet`'s refusal. Unknown: the `Inlet`'s, once a key may have gone. Options: `by:`,
-  `:timeout` (ms, default 25 000).
+  `:timeout` (ms, `press_call/1` of `Inlet.see/0` by default).
 
       Sessions.answer_menu(sessions, "app-main", 1_795_254_036_000, "Not now", by: "sam")
       #=> {:ok, :sent}
@@ -436,7 +454,7 @@ defmodule CodingAgentFramework.Sessions do
     call(
       sessions,
       {:answer_menu, name, at, choice, by},
-      Keyword.get(opts, :timeout, @press + @read)
+      Keyword.get(opts, :timeout, press_call())
     )
   end
 
@@ -581,7 +599,7 @@ defmodule CodingAgentFramework.Sessions do
   """
   @spec press_limit(GenServer.server(), String.t(), String.t(), keyword) :: outcome(:sent)
   def press_limit(sessions, name, label, opts \\ []),
-    do: call(sessions, {:press_limit, name, label}, Keyword.get(opts, :timeout, @press + @read))
+    do: call(sessions, {:press_limit, name, label}, Keyword.get(opts, :timeout, press_call()))
 
   @doc """
   Delegate `name` is done for good: its report went in and no process of it may live. Its row
@@ -708,6 +726,9 @@ defmodule CodingAgentFramework.Sessions do
         prompt_max: ClaudeCLI.prompt_max(Programs.os(programs)),
         inlet: Keyword.get(opts, :inlet),
         dialog: Keyword.get(opts, :dialog, &Dialog.ask/2),
+        # A press reads its marker and the dialog's leaving each up to `see`, under the bound that
+        # covers both (F-242).
+        press: press_opts(Keyword.get(opts, :press_see, Inlet.see())),
         look: Keyword.get(opts, :look, 5_000),
         looking: false,
         peeking: %{},
@@ -860,14 +881,14 @@ defmodule CodingAgentFramework.Sessions do
          {:ok, act} <- menu_act(state, by, row, at) do
       fields = %{"label" => choice, "by" => by, "act" => act}
       write(state, row, menu: Store.text(Menu.mark(field, "pressing", fields)))
-      {inlet, release} = {state.inlet, row.release}
+      {inlet, release, press} = {state.inlet, row.release, state.press}
       menu = {:menu, field["title"], field["options"]}
       key = if choice == "esc", do: :esc, else: choice
 
       Task.async(fn ->
         answer =
           try do
-            Inlet.choose(inlet, name, menu, key, release: release, timeout: @press)
+            Inlet.choose(inlet, name, menu, key, [release: release] ++ press)
           catch
             how, _ -> {:unknown, {how, :press}}
           end
@@ -1009,12 +1030,12 @@ defmodule CodingAgentFramework.Sessions do
          "press" <- Limit.step(limit) || {:refused, {:step, nil}},
          true <- label in (limit["options"] || []) or {:refused, {:no_option, label}},
          true <- state.inlet != nil or {:refused, :no_inlet} do
-      {inlet, release} = {state.inlet, row.release}
+      {inlet, release, press} = {state.inlet, row.release, state.press}
 
       Task.async(fn ->
         answer =
           try do
-            Inlet.choose(inlet, name, :usage_limit_menu, label, release: release, timeout: @press)
+            Inlet.choose(inlet, name, :usage_limit_menu, label, [release: release] ++ press)
           catch
             how, _ -> {:unknown, {how, :press}}
           end
@@ -1813,13 +1834,13 @@ defmodule CodingAgentFramework.Sessions do
 
     with {:ok, act} <- answer_act(state, by, row.name, taken) do
       write(state, row, answers: Dialog.mark(row, kind, label, "pressing", act: act))
-      inlet = state.inlet
+      {inlet, press} = {state.inlet, state.press}
       {name, release, as} = {row.name, row.release, Dialog.press_kind(row, kind)}
 
       Task.async(fn ->
         answer =
           try do
-            Inlet.choose(inlet, name, as, label, release: release, timeout: @press)
+            Inlet.choose(inlet, name, as, label, [release: release] ++ press)
           catch
             how, _ -> {:unknown, {how, :press}}
           end

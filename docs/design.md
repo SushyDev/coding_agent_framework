@@ -990,6 +990,7 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 | `parts` | each part's own bounds and deadlines, by its key (`Config.parts/0`) | each part's |
 | `remedies`, `remedy_bound` | the healer's allow-list and its caps' window | the healer's acts, 1 h |
 | `viewer` | every viewer's `{columns, rows}`, handed to `Sessions` and `Recoveries` alike (F-190) | `{200, 50}` |
+| `press_see` | ms each read of a dialog press or a typed write waits for the screen to show its keys: the tree's `Inlet`'s `see:`, and what `Sessions` and the inbox derive a press's bound from (F-242) | 10 s |
 | `undeclared_cues` | `:route` or `:raise` a cue on a topic no part declares | `:route` |
 | `agents` | `false` starts only the parts a lease needs (`Config.agentless/0`), none that runs or reads an agent (F-195), and no tool home, so its config needs only `home`, `instance`, `programs` and `env`'s `path` (F-201), and refuses `usable`, `tool_hooks`, `extensions` and `dialogs`, which no part of it reads, `{:bad, key}` (F-209); a home keeps its kind for its life, the first start records it and `start_link/1` of the other kind is refused `{:home_kind, recorded}` (F-214) | `true` |
 | `restart_wait` | ms a start waits for an instance of its name still exiting, before it is refused `{:instance_running, name}` (F-195) | 5 s |
@@ -1713,7 +1714,11 @@ The answer comes from outside, by the option's label: `Sessions.answer_dialog/5`
 calls and the operator's tool `answer_startup` calls (the operator's alone). It is marked on
 the row before its press, and the `Inlet` presses it checked: the pane still shows that dialog,
 the press lands on the chosen option, and the dialog leaves; otherwise refused (nothing went)
-or unknown. The press runs in a task whose answer comes back as a message, as `Mailbox`'s
+or unknown. Each of its two reads, the marker on the option before Enter and the dialog's
+leaving after it, waits up to the config's `press_see` (F-242), and the press's bound is
+derived from it (`Inlet.press_bound/1`: two reads and the tmux commands around them), as is
+each caller's (`Sessions.press_call/1`), so no fixed bound cuts a longer read. A pane gone
+after the Enter, as "No, exit" leaves it, is the dialog left, answered at once. The press runs in a task whose answer comes back as a message, as `Mailbox`'s
 hand-on does, so `Sessions` answers other calls meanwhile, the mark `pressing`; a row whose
 press is under way is not read again until it answers (F-144). Each answer is an act in `Acts`
 (F-144): actor the person (the operator's tool names the operator) or the app (its callback,

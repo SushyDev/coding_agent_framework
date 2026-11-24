@@ -48,6 +48,10 @@ defmodule CodingAgentFramework.Inlet do
 
   @timeout 15_000
   @see 2_000
+  # The tmux commands of one press outside its two reads: the pane's list, the dialog's
+  # capture, the keys, Enter and the capture that ends each read. The part of F-140's 20 s
+  # bound that two 2 s reads left, kept, so the library's default press bound is unchanged.
+  @commands 16_000
   # How long a typed command's result line may take to be drawn: not measured (F-233's new-1).
   @result 10_000
   # Between two captures while the box is drawn; only spaces the reads.
@@ -68,6 +72,29 @@ defmodule CodingAgentFramework.Inlet do
     see = Keyword.get(opts, :see, @see)
     GenServer.start_link(__MODULE__, %{tmux: Keyword.fetch!(opts, :tmux), see: see})
   end
+
+  @doc """
+  The `see:` an instance takes when it is given none, in ms: 2 000.
+
+      iex> CodingAgentFramework.Inlet.see()
+      2000
+  """
+  @spec see() :: pos_integer
+  def see, do: @see
+
+  @doc """
+  The bound of one `choose/5` at `see` ms (F-242): its two reads, the marker's before Enter and
+  the dialog's leaving after it, each up to `see`, and the tmux commands around them. A caller
+  that waits on a press (`Sessions`) takes its bound from here, so a longer `see:` is never cut
+  by a shorter fixed bound.
+
+      iex> CodingAgentFramework.Inlet.press_bound(2_000)
+      20000
+      iex> CodingAgentFramework.Inlet.press_bound(10_000)
+      36000
+  """
+  @spec press_bound(pos_integer) :: pos_integer
+  def press_bound(see) when is_integer(see) and see > 0, do: 2 * see + @commands
 
   @doc """
   Types `text` into `session` and then Enter, checked as the module doc says. Options:
@@ -94,7 +121,11 @@ defmodule CodingAgentFramework.Inlet do
   session's release draws it, and must show that dialog; the keys that move its selection
   there (`Screen.option_keys/2`) go as one tmux command; the screen is read again until that
   option is selected (`see:` ms); then Enter, as its own command; then the screen again, until
-  that dialog has left (`see:` ms). Options `release:` (required), `see:` and `timeout:`.
+  that dialog has left (`see:` ms). A pane gone after the Enter or the Escape (`Tmux` refuses
+  its capture `:no_pane`, or `:no_server` once its server went with it) is the dialog left, and
+  answers at once: "No, exit" ends the program and its pane (F-242, from F-238's new-2).
+  Options `release:` (required), `see:` and `timeout:`; `press_bound/1` is the `timeout:` that
+  covers a press at a `see:`.
 
   Answers `{:ok, :sent}` once the dialog has left; `{:refused, reason}` when no key went:
   `:no_release`, `{:screen, reading}` (another screen, or another dialog), `{:no_option,
@@ -356,7 +387,9 @@ defmodule CodingAgentFramework.Inlet do
   end
 
   # After the Enter, the dialog of `kind` leaves: the pane is read, and shows another screen,
-  # another dialog, or one being drawn (unrecognized). A capture that fails says nothing.
+  # another dialog, or one being drawn (unrecognized), or is gone: tmux never gives a pane's id
+  # to another, so a pane gone is not one that may still show the dialog. Any other failed
+  # capture says nothing.
   defp left(tmux, pane, session, release, kind, deadline) do
     reading =
       with {:ok, %{text: screen}} <- Tmux.capture(tmux, pane, session),
@@ -366,6 +399,7 @@ defmodule CodingAgentFramework.Inlet do
       case reading do
         {:ok, screen} -> not shows?(screen, kind)
         {:unknown, {:unrecognized, _}} -> true
+        {:refused, why} when why in [:no_pane, :no_server] -> true
         _ -> false
       end
 

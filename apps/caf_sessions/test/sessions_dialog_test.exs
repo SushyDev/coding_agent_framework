@@ -20,7 +20,9 @@ defmodule CodingAgentFramework.SessionsDialogTest do
   setup ctx do
     # A press reads back the stand-in's redraw within `see:`. A loaded host redraws late, and
     # a late read back is an unknown press that leaves the start on its dialog (F-238).
-    inlet = start_supervised!({Inlet, tmux: ctx.server, see: scaled(2_000)})
+    # `Sessions` presses with its own `press_see:`, the same bound.
+    see = scaled(2_000)
+    inlet = start_supervised!({Inlet, tmux: ctx.server, see: see})
 
     claude =
       ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), dialogs: [:trust, :imports])
@@ -29,7 +31,10 @@ defmodule CodingAgentFramework.SessionsDialogTest do
     {:ok, agents} = Agents.open(Path.join(ctx.dir, "caf.db"), "test")
 
     {:ok,
-     inlet: inlet, launch: launch, agents: agents, opts: ctx.opts ++ [inlet: inlet, look: 50]}
+     inlet: inlet,
+     launch: launch,
+     agents: agents,
+     opts: ctx.opts ++ [inlet: inlet, look: 50, press_see: see]}
   end
 
   defp sessions(ctx, extra \\ []) do
@@ -181,13 +186,13 @@ defmodule CodingAgentFramework.SessionsDialogTest do
     refute File.exists?(Path.join(ctx.dir, "trusted"))
     assert ScreenStandIn.prompts(ctx.dir) == []
 
-    # The press of "No, exit" is the operator's act: it went, though its read back may not come
-    # once the process exits.
+    # The press of "No, exit" is the operator's act: it went, and the pane gone with the
+    # process is the dialog left (F-242).
     assert {:ok, [%{actor: "operator", target: "alpha", status: "settled"} = press]} =
              Acts.rows(acts, act: "answer_startup")
 
-    assert press.outcome in ~w(verified unknown)
-    assert %{trust: %{label: "No, exit"}} = Dialog.answers(row)
+    assert press.outcome == "verified"
+    assert %{trust: %{label: "No, exit", mark: "sent"}} = Dialog.answers(row)
     assert {:refused, {:ended, "alpha"}} = Sessions.start(sessions, "alpha", ctx.account, launch)
   end
 
@@ -306,7 +311,14 @@ defmodule CodingAgentFramework.SessionsDialogTest do
     assert {:unknown, {:dialog, :trust}} =
              Sessions.start(sessions, "alpha", ctx.account, ctx.launch)
 
-    assert {_, _} = Sessions.answer_dialog(sessions, "alpha", :trust, "No, exit")
+    # The pane closes with the process: answered then, not at the end of its read (F-242).
+    {took, answer} =
+      :timer.tc(
+        fn -> Sessions.answer_dialog(sessions, "alpha", :trust, "No, exit") end,
+        :millisecond
+      )
+
+    assert {{:ok, :sent}, true} = {answer, took < scaled(2_000)}
 
     assert {:ok, "stopped"} =
              await(fn ->
@@ -315,6 +327,34 @@ defmodule CodingAgentFramework.SessionsDialogTest do
                  other -> other
                end
              end)
+  end
+
+  # F-242: `Sessions` presses with its own `press_see:`, and bounds the press by it
+  # (`Inlet.press_bound/1`), over an `Inlet` whose own `see:` is the library's 2 s. The held
+  # program stopped (SIGSTOP) for 3 s as the press goes redraws past 2 s, and is answered.
+  test "a press reads back at the instance's press_see, past the Inlet's own see", ctx do
+    inlet = start_supervised!({Inlet, tmux: ctx.server}, id: :two_seconds)
+    sessions = sessions(ctx, inlet: inlet, press_see: 10_000)
+
+    assert {:unknown, {:dialog, :trust}} =
+             Sessions.start(sessions, "alpha", ctx.account, ctx.launch)
+
+    [pid] = File.ls!(Path.join(ctx.dir, "pids"))
+    {:ok, %{status: 0}} = kill(pid, "-STOP")
+    spawn(fn -> receive after: (3_000 -> kill(pid, "-CONT")) end)
+
+    {took, answer} =
+      :timer.tc(
+        fn ->
+          Sessions.answer_dialog(sessions, "alpha", :trust, @trust,
+            timeout: Sessions.press_call(10_000)
+          )
+        end,
+        :millisecond
+      )
+
+    assert {{:ok, :sent}, true} = {answer, took >= 3_000}
+    assert File.exists?(Path.join(ctx.dir, "trusted"))
   end
 
   # Move.tla's IdleRead of a limited turn (F-191): Claude Code's own wait is a `limited` turn,

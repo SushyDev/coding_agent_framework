@@ -230,6 +230,21 @@ defmodule CodingAgentFramework.Config do
         ...>   user: "me", viewer: {0, 50})
         {:refused, {:bad, :viewer}}
 
+  - `press_see`: ms a press of a dialog's option, or a typed write, waits for the screen to
+    show its keys, each read of it (F-242, from F-238's new-1): the `see:` the tree's `Inlet`
+    starts with, and the one `Sessions` and the inbox size a press's bound from
+    (`Inlet.press_bound/1`, `Sessions.press_call/1`). The program redraws on the host's loaded
+    cores, and a press whose read back passes this is unknown, for a person to press again.
+    10 000 by default: five times the 2 s that the real program passed at load 30 on 15 cores,
+    and four times the longest whole press the stand-in took at load 50 (F-242's note). A read
+    ends as soon as the screen shows the keys, so the bound costs only a press that fails;
+
+        iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
+        ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
+        ...>   env: %{path: "/bin"},
+        ...>   user: "me", press_see: 0)
+        {:refused, {:bad, :press_see}}
+
   - `agents`: `false` for a tree that runs no agent (F-195): it starts only the parts a lease
     needs, `agentless/0`'s, the reaper, the instance's `Registry`, `Cues`, `Acts`, the
     `Scheduler`, the `Tracker`, `Copies` and `Jobs`, and none that runs or reads an agent: no
@@ -328,6 +343,7 @@ defmodule CodingAgentFramework.Config do
     remedies: Watch.default_remedies(),
     remedy_bound: 3_600_000,
     viewer: {200, 50},
+    press_see: 10_000,
     agents: true,
     restart_wait: 5_000,
     undeclared_cues: :route
@@ -455,6 +471,9 @@ defmodule CodingAgentFramework.Config do
         Map.get(fields, :viewer, {200, 50})
       ) ->
         {:refused, {:bad, :viewer}}
+
+      not match?(n when is_integer(n) and n > 0, Map.get(fields, :press_see, 1)) ->
+        {:refused, {:bad, :press_see}}
 
       not dialogs?(Map.get(fields, :dialogs, %{})) ->
         {:refused, {:bad, :dialogs}}
