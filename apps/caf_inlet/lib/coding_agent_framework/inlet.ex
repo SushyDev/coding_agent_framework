@@ -8,8 +8,8 @@ defmodule CodingAgentFramework.Inlet do
   names a session, which is also its viewer pane's tag (`Sessions` opens the viewers), and goes
   out only through `Tmux`'s one-command check of that tag (`model/tla/Agent.tla`, `WriteAsked`).
 
-  `type/4` types only into an ended turn, never on one read alone (F-113's new-2). In one step
-  of this process it reads both again, then writes:
+  `type/4` types only into an ended turn, never on one read alone (F-113's new-2). In one turn
+  of the queue, with no other call between, it reads both again, then writes:
 
   1. the turn, by the caller's `turn:` function (`Mailbox` reads `Sessions.Turn` there): it
      answers `:ok` or `{:refused, reason}`;
@@ -29,9 +29,16 @@ defmodule CodingAgentFramework.Inlet do
   unknown with the text in the box, for a person.
 
   Answers `{:ok, :sent}`; `{:refused, reason}` when nothing was typed; `{:unknown, reason}`
-  when something may have been typed: an unknown write is never typed again here. Every call has
-  a finite timeout (`:timeout`, 15 s by default); a request still queued when its time is up is
-  dropped untyped.
+  when something may have been typed: an unknown write is never typed again here.
+
+  **The queue** (F-249, `model/tla/Inlet.tla`). This process runs the calls on its host one at
+  a time, each in a task, so it answers the others while one runs. Every call has a finite
+  `timeout:` (15 s by default), and its deadline is that less 1 000, the reply's way back: the
+  caller waits the whole `timeout:`, so the `Inlet`'s answer always comes first. A call starts
+  only while its own bound still fits before its deadline. A call still queued when that stops
+  being so is answered `{:refused, :busy}` at once, and never starts: nothing touched the
+  screen. A press's bound is `press_bound/1`; the other calls' bounds are not counted, so each
+  starts while its deadline has not passed.
 
       iex> {:ok, fake} = CodingAgentFramework.Tmux.Fake.start_link(key: {"laptop", "fake"})
       iex> server = CodingAgentFramework.Tmux.Fake.new(fake, {"laptop", "fake"})
@@ -57,6 +64,12 @@ defmodule CodingAgentFramework.Inlet do
   # The press's own work between its commands, Screen's reading of each capture, and its
   # reply: not measured.
   @reply 1_000
+  # The caller waits its whole `timeout:`; the deadline it hands the queue is this much
+  # earlier, for the answer's way back to it. Not measured: a message within one VM.
+  @answer 1_000
+  # How long a press may wait in the queue behind other calls: a look, a typed line or a short
+  # press, each well under a second on a host that answers. Not measured.
+  @queue 10_000
   # How long a typed command's result line may take to be drawn: not measured (F-233's new-1).
   @result 10_000
   # Between two captures while the box is drawn; only spaces the reads.
@@ -109,8 +122,9 @@ defmodule CodingAgentFramework.Inlet do
   @doc """
   This instance's press bound: `press_bound_at/2` of its own `see:` and its server's
   `Tmux.bound/1`. `Sessions` asks it once, as it starts, so the reads and the bound come from
-  one number, the `Inlet`'s (F-245). Answers `{:ok, ms}`, or the call's refusal or unknown.
-  Option `timeout:` (15 000 by default).
+  one number, the `Inlet`'s (F-245). This process answers it at once, outside the queue, so
+  the ask never waits behind a press (F-249). Answers `{:ok, ms}`, or the call's refusal or
+  unknown. Option `timeout:` (15 000 by default).
 
       iex> {:ok, fake} = CodingAgentFramework.Tmux.Fake.start_link(key: {"laptop", "fake"})
       iex> server = CodingAgentFramework.Tmux.Fake.new(fake, {"laptop", "fake"})
@@ -121,6 +135,18 @@ defmodule CodingAgentFramework.Inlet do
   @spec press_bound(GenServer.server(), keyword) ::
           {:ok, pos_integer} | {:refused, term} | {:unknown, term}
   def press_bound(inlet, opts \\ []), do: call(inlet, :press_bound, nil, opts)
+
+  @doc """
+  The `timeout:` a caller of `choose/5` passes, from the press bound `press` (`press_bound/1`),
+  F-249: the press itself, up to 10 000 waiting in the queue behind other calls, and the 1 000
+  the call keeps for the answer's way back. Past the queue's 10 000 the press is answered
+  `{:refused, :busy}` and never made. Pure.
+
+      iex> CodingAgentFramework.Inlet.press_timeout(60_040)
+      71040
+  """
+  @spec press_timeout(pos_integer) :: pos_integer
+  def press_timeout(press) when is_integer(press) and press > 0, do: press + @queue + @answer
 
   @doc """
   Types `text` into `session` and then Enter, checked as the module doc says. Options:
@@ -143,18 +169,20 @@ defmodule CodingAgentFramework.Inlet do
   @doc """
   Answers a dialog of `kind` on `session`'s screen by the option labeled `label`: the checked
   press of a start's dialog (F-140, `model/tla/Dialog.tla`'s `Press`), which `Sessions` makes
-  for a person's answer or the app's. In one step of this process: the screen is read as the
-  session's release draws it, and must show that dialog; the keys that move its selection
-  there (`Screen.option_keys/2`) go as one tmux command; the screen is read again until that
-  option is selected (`see:` ms); then Enter, as its own command; then the screen again, until
-  that dialog has left (`see:` ms, the instance's own). A pane gone after the Enter or the Escape (`Tmux` refuses
-  its capture `:no_pane`, or `:no_server` once its server went with it) is the dialog left, and
-  answers at once: "No, exit" ends the program and its pane (F-242, from F-238's new-2).
-  Options `release:` and `timeout:` (required): `press_bound/1` is the `timeout:` that covers
-  a press. A press takes no `see:` of its own, so its reads and its bound come from the
+  for a person's answer or the app's. In one turn of the queue, with no other call between: the
+  screen is read as the session's release draws it, and must show that dialog; the keys that
+  move its selection there (`Screen.option_keys/2`) go as one tmux command; the screen is read
+  again until that option is selected (`see:` ms); then Enter, as its own command; then the
+  screen again, until that dialog has left (`see:` ms, the instance's own). A pane gone after
+  the Enter or the Escape (`Tmux` refuses its capture `:no_pane`, or `:no_server` once its
+  server went with it) is the dialog left, and answers at once: "No, exit" ends the program and
+  its pane (F-242, from F-238's new-2). Options `release:` and `timeout:` (required):
+  `press_timeout/1` of `press_bound/1` is the `timeout:` that covers a press and its wait in
+  the queue. A press takes no `see:` of its own, so its reads and its bound come from the
   instance's one `see:` (F-245).
 
   Answers `{:ok, :sent}` once the dialog has left; `{:refused, reason}` when no key went:
+  `:busy` (its bound no longer fits before its deadline, as the module doc says),
   `:no_release`, `{:screen, reading}` (another screen, or another dialog), `{:no_option,
   label}`, or `Tmux`'s; `{:unknown, reason}` once a key may have gone: `{:not_selected,
   reading}` (the keys went and the screen never showed the option selected; no Enter went),
@@ -170,7 +198,7 @@ defmodule CodingAgentFramework.Inlet do
       iex> {:ok, fake} = CodingAgentFramework.Tmux.Fake.start_link(key: {"laptop", "fake"})
       iex> server = CodingAgentFramework.Tmux.Fake.new(fake, {"laptop", "fake"})
       iex> {:ok, inlet} = CodingAgentFramework.Inlet.start_link(tmux: server)
-      iex> CodingAgentFramework.Inlet.choose(inlet, "alpha", :trust, "Yes", release: nil, timeout: 5_000)
+      iex> CodingAgentFramework.Inlet.choose(inlet, "alpha", :trust, "Yes", release: nil, timeout: 60_000)
       {:refused, :no_release}
   """
   @spec choose(
@@ -187,10 +215,10 @@ defmodule CodingAgentFramework.Inlet do
 
   @doc """
   Interrupts `session`'s running turn by Escape, as a person would (F-142, item 4: an
-  interactive delegate's interrupt, which no `Stream` carries). In one step of this process: the
-  screen is read as the session's release draws it, and must show a turn running; Escape goes as
-  its own tmux command; then the screen is read again until it no longer shows the turn running
-  (`see:` ms, 5 000 by default). Options `release:` (required), `see:` and `timeout:`.
+  interactive delegate's interrupt, which no `Stream` carries). In one turn of the queue, with
+  no other call between: the screen is read as the session's release draws it, and must show a
+  turn running; Escape goes as its own tmux command; then the screen is read again until it no
+  longer shows the turn running (`see:` ms, 5 000 by default). Options `release:` (required), `see:` and `timeout:`.
 
   Answers `{:ok, :sent}` once the turn has ended; `{:refused, reason}` when no key went:
   `:no_release`, `{:screen, reading}` (no turn runs), or `Tmux`'s; `{:unknown, reason}` once
@@ -211,8 +239,8 @@ defmodule CodingAgentFramework.Inlet do
   @doc """
   Types `/reload-plugins` into `session` and reads its result line (F-233): a person's way to
   load a changed plugin into a running session, which the framework types for them since it
-  owns every write. It goes as `type/4`'s text goes, with the same checks in one step of this
-  process: the turn by `turn:`, an idle screen with an empty box, the command typed and seen in
+  owns every write. It goes as `type/4`'s text goes, with the same checks in one turn of the
+  queue: the turn by `turn:`, an idle screen with an empty box, the command typed and seen in
   the box (`see:` ms), then Enter. Then the screen is read, one capture a call of its own, so
   this process writes for other sessions meanwhile, until `Screen.result/3` shows the command's
   result line under its echo, above a box that is empty again, and the lines above the box
@@ -286,7 +314,7 @@ defmodule CodingAgentFramework.Inlet do
 
   defp call(inlet, request, see, opts) do
     timeout = Keyword.get(opts, :timeout, @timeout)
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = now() + timeout - @answer
 
     try do
       GenServer.call(inlet, {request, see, deadline}, timeout)
@@ -299,15 +327,63 @@ defmodule CodingAgentFramework.Inlet do
   end
 
   @impl true
-  def init(state), do: {:ok, state}
+  def init(state), do: {:ok, Map.merge(state, %{queue: [], running: nil})}
 
   @impl true
-  def handle_call({request, see, deadline}, _from, state) do
-    # The caller has already answered itself unknown; acting now would act late.
-    if System.monotonic_time(:millisecond) >= deadline,
-      do: {:reply, {:refused, :expired}, state},
-      else: {:reply, act(request, see || state.see, state.tmux), state}
+  def handle_call({:press_bound, _see, _deadline}, _from, state),
+    do: {:reply, {:ok, press_bound_at(state.see, Tmux.bound(state.tmux))}, state}
+
+  # Queued, with a timer at the last time its bound fits before its deadline.
+  def handle_call({request, see, deadline}, from, state) do
+    id = make_ref()
+    bound = bound(request, state)
+    timer = Process.send_after(self(), {:late, id}, max(deadline - bound - now(), 0))
+    entry = %{id: id, from: from, request: request, see: see || state.see, timer: timer}
+    entry = Map.merge(entry, %{deadline: deadline, bound: bound})
+    {:noreply, next(%{state | queue: state.queue ++ [entry]})}
   end
+
+  @impl true
+  def handle_info({ref, answer}, %{running: %{ref: ref, from: from}} = state) do
+    Process.demonitor(ref, [:flush])
+    GenServer.reply(from, answer)
+    {:noreply, next(%{state | running: nil})}
+  end
+
+  def handle_info({:late, id}, state) do
+    case Enum.split_with(state.queue, &(&1.id == id)) do
+      {[entry], rest} ->
+        GenServer.reply(entry.from, {:refused, :busy})
+        {:noreply, %{state | queue: rest}}
+
+      {[], _} ->
+        {:noreply, state}
+    end
+  end
+
+  # The oldest call's turn. The task is linked, as a call run in this process was: a call that
+  # crashes ends the Inlet, and its caller's call answers the exit unknown.
+  defp next(%{running: nil, queue: [entry | rest]} = state) do
+    Process.cancel_timer(entry.timer)
+
+    if now() + entry.bound <= entry.deadline do
+      tmux = state.tmux
+      task = Task.async(fn -> act(entry.request, entry.see, tmux) end)
+      %{state | queue: rest, running: %{ref: task.ref, from: entry.from}}
+    else
+      GenServer.reply(entry.from, {:refused, :busy})
+      next(%{state | queue: rest})
+    end
+  end
+
+  defp next(state), do: state
+
+  # A call's own bound: a press's is counted (F-245); the others' are not, so they start
+  # while their deadline has not passed.
+  defp bound({:choose, _session, _kind, _label, _release}, state),
+    do: press_bound_at(state.see, Tmux.bound(state.tmux))
+
+  defp bound(_request, _state), do: 0
 
   defp act({:type, session, text, release, turn}, see, tmux) do
     with :ok <- text?(text),
@@ -318,7 +394,7 @@ defmodule CodingAgentFramework.Inlet do
          :ok <- fits(text, width),
          {:ok, :sent} <- Tmux.write(tmux, pane, session, {:text, text}) do
       expected = String.trim_trailing(text, " ")
-      deadline = System.monotonic_time(:millisecond) + see
+      deadline = now() + see
 
       case seen(tmux, pane, session, release, expected, deadline) do
         :seen -> enter(tmux, pane, session)
@@ -358,7 +434,7 @@ defmodule CodingAgentFramework.Inlet do
          :ok <- running(tmux, pane, session, release) do
       case Tmux.write(tmux, pane, session, {:keys, ["Escape"]}) do
         {:ok, :sent} ->
-          ended(tmux, pane, session, release, System.monotonic_time(:millisecond) + see)
+          ended(tmux, pane, session, release, now() + see)
 
         {:refused, _} = refused ->
           refused
@@ -386,7 +462,7 @@ defmodule CodingAgentFramework.Inlet do
          {:ok, _screen} <- dialog(tmux, pane, session, release, kind) do
       case Tmux.write(tmux, pane, session, {:keys, ["Escape"]}) do
         {:ok, :sent} ->
-          left(tmux, pane, session, release, kind, System.monotonic_time(:millisecond) + see)
+          left(tmux, pane, session, release, kind, now() + see)
 
         {:refused, _} = refused ->
           refused
@@ -403,11 +479,11 @@ defmodule CodingAgentFramework.Inlet do
          {:ok, screen} <- dialog(tmux, pane, session, release, kind),
          {:ok, keys} <- Screen.option_keys(screen, label),
          {:ok, :sent} <- move(tmux, pane, session, keys) do
-      deadline = System.monotonic_time(:millisecond) + see
+      deadline = now() + see
 
       with :selected <- selected(tmux, pane, session, release, kind, label, deadline),
            {:ok, :sent} <- enter(tmux, pane, session) do
-        left(tmux, pane, session, release, kind, System.monotonic_time(:millisecond) + see)
+        left(tmux, pane, session, release, kind, now() + see)
       else
         {:not_selected, reading} -> {:unknown, {:not_selected, reading}}
         unknown -> unknown
@@ -436,7 +512,7 @@ defmodule CodingAgentFramework.Inlet do
       gone? ->
         {:ok, :sent}
 
-      System.monotonic_time(:millisecond) >= deadline ->
+      now() >= deadline ->
         {:unknown, {:still_shown, reading}}
 
       true ->
@@ -468,7 +544,7 @@ defmodule CodingAgentFramework.Inlet do
       match?({:ok, %{state: state}} when state != :running, reading) ->
         {:ok, :sent}
 
-      System.monotonic_time(:millisecond) >= deadline ->
+      now() >= deadline ->
         {:unknown, {:still_running, reading}}
 
       true ->
@@ -518,7 +594,7 @@ defmodule CodingAgentFramework.Inlet do
       match?({:ok, %{selected: ^label}}, reading) and shows?(elem(reading, 1), kind) ->
         :selected
 
-      System.monotonic_time(:millisecond) >= deadline ->
+      now() >= deadline ->
         {:not_selected, reading}
 
       true ->
@@ -582,7 +658,7 @@ defmodule CodingAgentFramework.Inlet do
       match?({:ok, %{state: :idle, box: {:text, ^expected}}}, reading) ->
         :seen
 
-      System.monotonic_time(:millisecond) >= deadline ->
+      now() >= deadline ->
         {:not_seen, reading}
 
       true ->

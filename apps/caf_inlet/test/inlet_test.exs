@@ -1,5 +1,8 @@
 defmodule CodingAgentFramework.InletTest.Probe do
-  @moduledoc "A `Tmux` over another one that tells the test each write, from the process that made it."
+  @moduledoc """
+  A `Tmux` over another one that tells the test each write, and the process that made it: the
+  `Inlet` whose task runs the call (F-249), or the process itself.
+  """
   @behaviour CodingAgentFramework.Tmux
 
   alias CodingAgentFramework.Tmux
@@ -31,9 +34,12 @@ defmodule CodingAgentFramework.InletTest.Probe do
 
   @impl true
   def write(s, pane, session, input) do
-    send(s.test, {:write, self(), input})
+    send(s.test, {:write, writer(), input})
     Tmux.write(s.inner, pane, session, input)
   end
+
+  @doc "The process a call runs for: a task's starter, or the process itself."
+  def writer, do: List.first(Process.get(:"$callers", []), self())
 end
 
 defmodule CodingAgentFramework.InletTest do
@@ -72,7 +78,7 @@ defmodule CodingAgentFramework.InletTest do
     me = self()
 
     turn = fn ->
-      send(me, {:turn, self()})
+      send(me, {:turn, Probe.writer()})
       :ok
     end
 
@@ -413,10 +419,86 @@ defmodule CodingAgentFramework.InletTest do
     end
   end
 
-  # A press's options: the instance's own bound, asked of it (F-245).
+  # F-249, Inlet.tla's Busy: a press queued behind a long one, whose bound no longer fits before
+  # its deadline, is answered busy at its last start, while the long one still runs, and never
+  # starts. The long one runs to its end. The Inlet's bound is answered meanwhile, outside the
+  # queue: the ask `Sessions` makes as it starts.
+  test "a press queued behind a long press is busy at its deadline, and never runs", ctx do
+    probe = %Probe{inner: ctx.server, test: self()}
+    inlet = start_supervised!({Inlet, tmux: probe, see: 5_000}, id: :five_seconds)
+    long = dialog(ctx, "long")
+    short = dialog(ctx, "short")
+    {:ok, before} = screen(ctx, "short", &match?(%{state: :dialog, kind: :trust}, &1))
+    [pid] = File.ls!(Path.join(long, "pids"))
+    {:ok, %{status: 0}} = kill(pid, "-STOP")
+    spawn(fn -> receive after: (3_000 -> kill(pid, "-CONT")) end)
+    me = self()
+
+    spawn_link(fn ->
+      send(me, {:long, Inlet.choose(inlet, "long", :trust, @trust, press(inlet))})
+    end)
+
+    # The long press runs: its keys went, and wait in the stopped program's pane.
+    assert_receive {:write, _, {:keys, ["Down"]}}, 10_000
+    {:ok, bound} = Inlet.press_bound(inlet)
+    assert {:ok, ^bound} = Inlet.press_bound(inlet)
+
+    # A timeout that leaves 1 000 in the queue: its last start passes while the long one runs.
+    {took, answer} =
+      :timer.tc(
+        fn ->
+          Inlet.choose(inlet, "short", :trust, @trust, release: @release, timeout: bound + 2_000)
+        end,
+        :millisecond
+      )
+
+    assert {{:refused, :busy}, true} = {answer, took >= 1_000}
+    refute_received {:long, _}
+    assert_receive {:long, {:ok, :sent}}, 60_000
+    assert {:ok, _} = await(fn -> File.read(Path.join(long, "trusted")) end)
+
+    # The short press never ran: its dialog is as it was, and nothing was trusted.
+    assert {:ok, ^before} = screen(ctx, "short", &match?(%{state: :dialog}, &1))
+    refute File.exists?(Path.join(short, "trusted"))
+  end
+
+  # F-249: a write queued behind a short press waits for it and runs, inside its deadline.
+  test "a write queued behind a short press still runs", ctx do
+    dialog(ctx, "first")
+    open(ctx, "alpha")
+    inlet = ctx.inlet
+    me = self()
+
+    spawn_link(fn ->
+      send(me, {:press, Inlet.choose(inlet, "first", :trust, @trust, press(inlet))})
+    end)
+
+    # The press runs: its first key went.
+    assert_receive {:write, _, {:keys, _}}, 10_000
+
+    assert {:ok, :sent} =
+             Inlet.type(inlet, "alpha", "after", release: @release, turn: fn -> :ok end)
+
+    assert_receive {:press, {:ok, :sent}}, 10_000
+    assert {:ok, ["after"]} = submitted(ctx, 1)
+  end
+
+  # A press's options: the instance's own bound and its wait in the queue (F-245, F-249).
   defp press(inlet) do
     {:ok, bound} = Inlet.press_bound(inlet)
-    [release: @release, timeout: bound]
+    [release: @release, timeout: Inlet.press_timeout(bound)]
+  end
+
+  # A stand-in on its trust dialog in a directory of its own, under a shell of its own as in
+  # the test above; answers that directory.
+  defp dialog(ctx, name) do
+    dir = Path.join(ctx.dir, name)
+    File.mkdir_p!(dir)
+    script = ScreenStandIn.write!(dir, @release, stand_in_idle(), trust: true)
+    argv = [program!(:bash), "-c", ~s("$0"; :), script]
+    {:ok, _} = Tmux.new_session(ctx.server, name, argv, size: {120, 40})
+    {:ok, _} = screen(ctx, name, &match?(%{state: :dialog, kind: :trust}, &1))
+    dir
   end
 
   defp open(ctx, name, args \\ [], state \\ nil, opts \\ []) do
