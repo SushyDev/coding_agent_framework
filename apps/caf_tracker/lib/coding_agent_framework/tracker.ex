@@ -71,6 +71,28 @@ defmodule CodingAgentFramework.Tracker do
          do: {:ok, CodingAgentFramework.Tracker.Tree.agents(view, Keyword.take(opts, [:all]))}
   end
 
+  @doc """
+  The recent tool calls of `agent` (a tree agent's name, or a subagent's `agent_id`), newest
+  first, read from the view as `view/2` gives it (`CodingAgentFramework.Tracker.Tree.tool_calls/3`):
+  each `%{id, name, started_at, ended_at, ms}`. Options: `:timeout`, `limit:` (default 50) and
+  `host:`. Bounded: a transcript's fold keeps at most 200 calls per agent and 50 subagents per
+  session, so no call answers more.
+
+      Tracker.tool_calls(tracker, "app-fix", limit: 10)
+      #=> {:ok, [%{id: "toolu_…", name: "Bash", started_at: 1795…, ended_at: nil, ms: nil}, …]}
+  """
+  @spec tool_calls(GenServer.server(), String.t(), keyword) ::
+          {:ok, [map]} | {:refused, term} | {:unknown, term}
+  def tool_calls(tracker, agent, opts \\ []) do
+    with {:ok, view} <- view(tracker, opts),
+         do:
+           CodingAgentFramework.Tracker.Tree.tool_calls(
+             view,
+             agent,
+             Keyword.take(opts, [:limit, :host])
+           )
+  end
+
   @doc "The sources `:unread`, or whose newest read is older than `bound` ms (`Fold.behind/3`)."
   @spec behind(GenServer.server(), non_neg_integer, keyword) ::
           {:ok, list} | {:refused, term} | {:unknown, term}

@@ -25,6 +25,7 @@ defmodule CafTracker.MixProject do
       {:caf_sampler, in_umbrella: true, only: :test},
       {:caf_usage, in_umbrella: true, only: :test},
       {:caf_tmux, in_umbrella: true, only: :test},
+      {:caf_transcripts, in_umbrella: true, only: :test},
       {:caf_test, in_umbrella: true, only: :test},
       {:exqlite, "~> 0.43.0", only: :test},
       {:stream_data, "~> 1.4", only: :test}

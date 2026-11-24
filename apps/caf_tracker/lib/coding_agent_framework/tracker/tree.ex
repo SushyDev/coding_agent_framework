@@ -25,6 +25,10 @@ defmodule CodingAgentFramework.Tracker.Tree do
     (`Sessions.Turn.interactive/3`), and `waits_on` names the dialog's kind and options (F-180).
   - Each agent's `transcript` is the path its transcript row holds, nil while there is none, and
     its subagents (each with Claude Code's `agent_id`) are that transcript's.
+  - **What it does now** (F-235): `tool`, the call it runs now (`%{name, id, started_at}`),
+    the newest call its transcript started and has not ended while it is `working`, else nil;
+    and `last_event_at`, the newer of its transcript's last entry and its newest `Intake` row
+    (ms), or nil. `tool_calls/3` answers its recent calls.
 
   A delegate that ended keeps its place in the tree, but `agents/2` leaves it out unless asked
   (`all: true`): a busy day ends many (F-129's new-5).
@@ -74,6 +78,7 @@ defmodule CodingAgentFramework.Tracker.Tree do
 
     full = Map.new(good, &{{&1.row.host, &1.row.name}, &1.row})
     ev = %{streams: streams, transcripts: transcripts, files: files, full: full}
+    ev = Map.put(ev, :hooks, hooks(entries.(:events)))
     shown = if opts[:all], do: good, else: Enum.reject(good, &Agents.ended?(&1.row))
     rows = Enum.map(Agents.tree(Enum.map(shown, & &1.row)), &row(&1, ev))
 
@@ -104,11 +109,99 @@ defmodule CodingAgentFramework.Tracker.Tree do
       transcript: transcript(ev.transcripts[key(full)]),
       subagents: subagents(ev.transcripts[key(full)])
     })
+    |> Map.merge(activity(full, state, ev))
   end
 
   # The path the transcripts' source read, never one built from the cwd: nil until it has one.
   defp transcript(%{path: path}) when is_binary(path), do: path
   defp transcript(_), do: nil
+
+  defp activity(row, state, ev) do
+    t = ev.transcripts[key(row)] || %{}
+    calls = if is_list(t[:tools]), do: t.tools, else: []
+    running = Enum.find(calls, &(is_map(&1) and is_nil(&1[:ended_at])))
+
+    %{
+      tool: if(state == "working" and running, do: Map.take(running, [:name, :id, :started_at])),
+      last_event_at: newer(int(t[:last_event_at]), ev.hooks[key(row)])
+    }
+  end
+
+  # Each agent's newest `Intake` row, by `{account, session_id}`.
+  defp hooks(entries) do
+    for %{row: r} <- entries,
+        is_binary(r[:session_id]),
+        is_integer(r[:written_at]),
+        reduce: %{} do
+      acc -> Map.update(acc, key(r), r.written_at, &max(&1, r.written_at))
+    end
+  end
+
+  defp newer(nil, b), do: b
+  defp newer(a, nil), do: a
+  defp newer(a, b), do: max(a, b)
+
+  defp int(n) when is_integer(n), do: n
+  defp int(_), do: nil
+
+  @doc """
+  The recent tool calls of `agent` in `view`, newest first, each `%{id, name, started_at,
+  ended_at, ms}` (`ended_at` and `ms` nil while it runs): an agent of the tree by name, or a
+  subagent by its `agent_id`. Options: `limit:` (default 50; the transcript keeps at most 200
+  per agent, `Transcripts.Fold`) and `host:` to choose among agents of one name on two hosts.
+  An agent with no transcript read yet has none. `{:refused, :unknown_agent}` for a name no
+  agent or subagent has, `{:refused, :ambiguous}` for one on two hosts with no `host:`.
+
+      iex> alias CodingAgentFramework.Tracker.Tree
+      iex> m = %{id: 1, host: "h", name: "main", kind: "main", parent: nil, project: "app",
+      ...>   account: "work", session_id: "s0", status: "running"}
+      iex> call = %{id: "tu-1", name: "Bash", started_at: 1, ended_at: nil, ms: nil}
+      iex> t = %{account: "work", session_id: "s0", tools: [call], agent_tools: %{}}
+      iex> view = %{{"h", "agents"} => %{agents: [%{key: 1, row: m}]},
+      ...>   {"h", "work"} => %{transcripts: [%{key: 1, row: t}]}}
+      iex> Tree.tool_calls(view, "main")
+      {:ok, [call]}
+      iex> Tree.tool_calls(view, "other")
+      {:refused, :unknown_agent}
+  """
+  @spec tool_calls(map, String.t(), keyword) :: {:ok, [map]} | {:refused, term}
+  def tool_calls(view, agent, opts \\ []) when is_map(view) do
+    limit = Keyword.get(opts, :limit, 50)
+    parts = Enum.filter(Map.values(view), &is_map/1)
+    entries = fn kind -> for p <- parts, %{row: %{}} = e <- List.wrap(p[kind]), do: e.row end
+    transcripts = for r <- entries.(:transcripts), into: %{}, do: {key(r), r}
+
+    named =
+      for r <- entries.(:agents),
+          agent?(r),
+          r.name == agent,
+          opts[:host] in [nil, r[:host]],
+          do: r
+
+    case named do
+      [row] ->
+        {:ok, take(transcripts[key(row)][:tools], limit)}
+
+      [_ | _] ->
+        {:refused, :ambiguous}
+
+      [] ->
+        case for(
+               t <- Map.values(transcripts),
+               is_map(t[:agent_tools]),
+               c = t.agent_tools[agent],
+               do: c
+             ) do
+          [calls | _] -> {:ok, take(calls, limit)}
+          [] -> {:refused, :unknown_agent}
+        end
+    end
+  end
+
+  defp take(calls, limit) when is_list(calls),
+    do: calls |> Enum.filter(&is_map/1) |> Enum.take(limit)
+
+  defp take(_, _), do: []
 
   defp state(row, ev) do
     cond do
