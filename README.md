@@ -396,6 +396,7 @@ Built, each from a checked model in `model/tla/`:
   `mix test.real`, outside the gates (F-223); it found a project taking another's checkout;
 - a project never takes another project's checkout (F-229): a path another project's row holds
   is refused, and a directory whose `origin` is another repository reads `failed`.
+- the tree names each session's transcript and each subagent's `agent_id` (F-234);
 - an end reaches a start that waits on its dialog (F-231): `end_main` and a stop press the trust
   dialog's `No, exit`, or send SIGTERM, and end it; a fix refused before it acted frees its
   state in `Acts`, so the next fix of that state is taken.

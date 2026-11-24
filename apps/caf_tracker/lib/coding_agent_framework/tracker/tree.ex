@@ -23,7 +23,8 @@ defmodule CodingAgentFramework.Tracker.Tree do
     file's, as a main session's is (F-153's new-6).
   - **A session on a startup dialog** (its row `dialog`, F-140) is `dialog`, never `idle`
     (`Sessions.Turn.interactive/3`), and `waits_on` names the dialog's kind and options (F-180).
-  - Each agent's subagents are its transcript's.
+  - Each agent's `transcript` is the path its transcript row holds, nil while there is none, and
+    its subagents (each with Claude Code's `agent_id`) are that transcript's.
 
   A delegate that ended keeps its place in the tree, but `agents/2` leaves it out unless asked
   (`all: true`): a busy day ends many (F-129's new-5).
@@ -48,7 +49,7 @@ defmodule CodingAgentFramework.Tracker.Tree do
   alias CodingAgentFramework.Sessions.{Agents, Turn}
 
   @read ["sessions:", "registry:", "stream:", "transcripts:"]
-  @subagent [:type, :description, :state, :status, :tokens]
+  @subagent [:agent_id, :type, :description, :state, :status, :tokens]
 
   @doc """
   The tree in `view`: `%{agents: rows, sources: ages, problems: problems}`. Option `all:`
@@ -100,9 +101,14 @@ defmodule CodingAgentFramework.Tracker.Tree do
     Map.merge(Map.take(entry, [:name, :kind, :project, :parent, :account, :session_id, :host]), %{
       state: state,
       waits_on: waits,
+      transcript: transcript(ev.transcripts[key(full)]),
       subagents: subagents(ev.transcripts[key(full)])
     })
   end
+
+  # The path the transcripts' source read, never one built from the cwd: nil until it has one.
+  defp transcript(%{path: path}) when is_binary(path), do: path
+  defp transcript(_), do: nil
 
   defp state(row, ev) do
     cond do
