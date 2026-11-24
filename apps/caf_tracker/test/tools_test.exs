@@ -47,6 +47,13 @@ defmodule CodingAgentFramework.Tracker.ToolsTest do
 
   defp sub(agent), do: %{isSidechain: true, agentId: agent}
 
+  # Folds a subagent's whole `file` as a read from where its fold stopped gives it.
+  defp more(fold, agent, file) do
+    from = Fold.file_read_from(fold, agent)
+    {:ok, fold} = Fold.take_file(fold, agent, binary_part(file, from, byte_size(file) - from))
+    fold
+  end
+
   defp fold(bytes) do
     {:ok, fold} = Fold.take(Fold.new(), bytes)
     fold
@@ -139,6 +146,68 @@ defmodule CodingAgentFramework.Tracker.ToolsTest do
     assert {:ok, [%{name: "Agent"}]} = Tree.tool_calls(view, "a-x")
     assert {:ok, [%{id: "tu-8"}, %{id: "tu-9"}]} = Tree.tool_calls(view, "ag-1")
     assert {:refused, :unknown_agent} = Tree.tool_calls(view, "nobody")
+  end
+
+  test "a running subagent from its own file: its agent id, its tool, and its calls (F-237)" do
+    # The parent's foreground `Agent` call, as 2.1.322 writes it, with no result yet.
+    agent_call =
+      JSON.encode!(%{
+        type: "assistant",
+        timestamp: @t0,
+        message: %{
+          id: "msg-a",
+          content: [
+            %{
+              type: "tool_use",
+              id: "tu-1",
+              name: "Agent",
+              input: %{subagent_type: "Explore", description: "look"}
+            }
+          ]
+        }
+      }) <> "\n"
+
+    own = use_line("tu-9", "Grep", @t1, sub("ag-1"))
+    {:ok, fold} = Fold.take_file(fold(agent_call), "ag-1", own)
+    {:ok, fold} = Fold.file_meta(fold, "ag-1", ~s({"toolUseId":"tu-1","agentType":"Explore"}))
+
+    view = view(fold)
+    assert %{agents: [%{tool: %{name: "Agent"}, subagents: [s]}]} = Tree.agents(view)
+
+    assert %{agent_id: "ag-1", type: "Explore", description: "look", state: :open} = s
+    assert s.tool == %{id: "tu-9", name: "Grep", started_at: ms(@t1)}
+    assert {:ok, [%{id: "tu-9"}]} = Tree.tool_calls(view, "ag-1")
+    assert {:ok, [%{id: "tu-1", name: "Agent"}]} = Tree.tool_calls(view, "a-x")
+
+    # Once its call ends it runs none; once the subagent ends, neither.
+    file = own <> result_line("tu-9", @t2, sub("ag-1"))
+    fold = more(fold, "ag-1", file)
+    assert %{agents: [%{subagents: [%{tool: nil}]}]} = Tree.agents(view(fold))
+
+    fold = more(fold, "ag-1", file <> use_line("tu-7", "Read", @t3, sub("ag-1")))
+    ended = put_in(fold, [:subagents, "tu-1", :state], :ended)
+    assert %{agents: [%{subagents: [%{tool: nil}]}]} = Tree.agents(view(ended))
+    assert %{agents: [%{subagents: [%{tool: %{id: "tu-7"}}]}]} = Tree.agents(view(fold))
+  end
+
+  test "a subagent whose file was not read, it having finished first, says so (F-237)" do
+    call =
+      JSON.encode!(%{
+        type: "assistant",
+        timestamp: @t0,
+        message: %{
+          id: "msg-a",
+          content: [%{type: "tool_use", id: "tu-1", name: "Agent", input: %{}}]
+        }
+      }) <> "\n"
+
+    {:ok, fold} = Fold.file_meta(fold(call), "ag-1", ~s({"toolUseId":"tu-1","finished":true}))
+    fold = Fold.skip_file(fold, "ag-1", 5_000_000)
+    view = view(fold)
+
+    assert %{agents: [%{subagents: [s]}]} = Tree.agents(view)
+    assert %{agent_id: "ag-1", not_read: :finished, partial: false, tool: nil} = s
+    assert {:refused, {:not_read, :finished}} = Tree.tool_calls(view, "ag-1")
   end
 
   test "the bound holds: at most 200 calls per agent, and limit: answers fewer" do

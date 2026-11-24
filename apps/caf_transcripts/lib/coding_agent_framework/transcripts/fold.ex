@@ -73,6 +73,12 @@ defmodule CodingAgentFramework.Transcripts.Fold do
       iex> {hd(fold.tools).name, hd(fold.tools).ms}
       {"Bash", 2500}
 
+  **A subagent's own file** (F-237): 2.1.322 writes a subagent's entries to
+  `<session id>/subagents/agent-<agent id>.jsonl`, not the main file. `take_file/3` folds it
+  into the same fold, with its own offset and seam in `files` (by agent id, with its
+  `tool_use_id` and `problem`), and `file_meta/3` reads its `agent-<agent id>.meta.json`, whose
+  `toolUseId` gives the parent's call its `agent_id` while the subagent runs.
+
   A fold an earlier build stored has other keys, so it is read again from the file's start
   (`Transcripts.Table.load_fold/1`), and its interrupts with it.
 
@@ -117,6 +123,7 @@ defmodule CodingAgentFramework.Transcripts.Fold do
           tools: [map],
           agent_tools: %{String.t() => [map]},
           last_event_at: integer | nil,
+          files: %{String.t() => map},
           problems: [map],
           problem_count: non_neg_integer
         }
@@ -139,6 +146,7 @@ defmodule CodingAgentFramework.Transcripts.Fold do
       tools: [],
       agent_tools: %{},
       last_event_at: nil,
+      files: %{},
       problems: [],
       problem_count: 0
     }
@@ -372,7 +380,8 @@ defmodule CodingAgentFramework.Transcripts.Fold do
 
   defp texts(_), do: []
 
-  defp lines(fold, rest) do
+  # `agent` is nil for the main file, or the subagent whose own file the bytes are.
+  defp lines(fold, rest, agent \\ nil) do
     case :binary.split(rest, "\n") do
       [_partial] ->
         fold
@@ -382,25 +391,38 @@ defmodule CodingAgentFramework.Transcripts.Fold do
         read = fold.seam <> line <> "\n"
         seam = binary_part(read, byte_size(read), -min(byte_size(read), @seam))
         fold = %{fold | offset: end_at, seam: seam, entries: fold.entries + 1}
-        lines(entry(fold, line, end_at), rest)
+        lines(entry(fold, line, end_at, agent), rest, agent)
     end
   end
 
-  defp entry(fold, "", _at), do: fold
+  defp entry(fold, "", _at, _agent), do: fold
 
-  defp entry(fold, line, at) do
+  defp entry(fold, line, at, agent) do
     case JSON.decode(line) do
-      {:ok, %{"type" => type} = e} when type in @read -> fold |> seen(e) |> read(type, e, at)
-      {:ok, %{"type" => type}} when type in @skipped -> fold
-      {:ok, %{"type" => type}} -> problem(fold, at, {:unknown_type, inspect(type)})
-      {:ok, %{}} -> problem(fold, at, :no_type)
-      {:ok, _} -> problem(fold, at, :not_an_object)
-      {:error, _} -> problem(fold, at, :not_json)
+      {:ok, %{"type" => type} = e} when type in @read ->
+        e = if agent, do: Map.merge(e, %{"isSidechain" => true, "agentId" => agent}), else: e
+        fold |> seen(e) |> read(type, e, at)
+
+      {:ok, %{"type" => type}} when type in @skipped ->
+        fold
+
+      {:ok, %{"type" => type}} ->
+        problem(fold, at, {:unknown_type, inspect(type)})
+
+      {:ok, %{}} ->
+        problem(fold, at, :no_type)
+
+      {:ok, _} ->
+        problem(fold, at, :not_an_object)
+
+      {:error, _} ->
+        problem(fold, at, :not_json)
     end
   end
 
-  # A sidechain entry inside the main file (older releases wrote subagents there) is a
-  # subagent's, not the session's: only its tool calls are kept, under its agent id.
+  # A sidechain entry is a subagent's, not the session's: only its tool calls are kept, under its
+  # agent id. On 2.1.322 these come from the subagent's own file (`take_file/3`); older releases
+  # wrote them into the main file.
   defp read(fold, _type, %{"isSidechain" => true} = e, _at), do: side(fold, e)
 
   # The usage limit's line: the account's record, and no reply (F-181).
@@ -559,7 +581,7 @@ defmodule CodingAgentFramework.Transcripts.Fold do
         {id,
          %{
            tool_use_id: id,
-           agent_id: nil,
+           agent_id: file_agent(fold, id),
            type: input["subagent_type"],
            description: input["description"],
            state: :open,
@@ -706,6 +728,187 @@ defmodule CodingAgentFramework.Transcripts.Fold do
       _block, calls ->
         calls
     end)
+  end
+
+  @doc """
+  The byte a read of subagent `agent`'s own file starts at, as `read_from/1` is the main
+  file's: 0 for a file the fold has not read.
+  """
+  @spec file_read_from(t, String.t()) :: non_neg_integer
+  def file_read_from(fold, agent) do
+    file = file(fold, agent)
+    file.offset - byte_size(file.seam)
+  end
+
+  @doc """
+  The whole lines read so far of subagent `agent`'s own file, `agent-<agent>.jsonl` (F-237):
+  its offset, 0 for a file the fold has not read.
+  """
+  @spec file_offset(t, String.t()) :: non_neg_integer
+  def file_offset(fold, agent), do: file(fold, agent).offset
+
+  @doc """
+  Folds `bytes` of subagent `agent`'s own file, read from `file_read_from/2`, into the same
+  fold, as `take/2` does the main file's: with that file's own offset and seam in `files`.
+  Every entry of the file is the subagent's, so only its tool calls are kept, under `agent`,
+  whatever its own `isSidechain` and `agentId` say. A line it cannot read is a problem with
+  `file:` the file's name. `:rewritten` when the bytes do not start with the file's seam.
+
+      iex> alias CodingAgentFramework.Transcripts.Fold
+      iex> use = ~s({"type":"assistant","isSidechain":true,"agentId":"a1","message":) <>
+      ...>   ~s({"id":"m1","content":[{"type":"tool_use","id":"tu-1","name":"Grep"}]}}\\n)
+      iex> {:ok, fold} = Fold.take_file(Fold.new(), "a1", use <> "nope\\n")
+      iex> {hd(fold.agent_tools["a1"]).name, fold.tools, hd(fold.problems).file}
+      {"Grep", [], "agent-a1.jsonl"}
+  """
+  @spec take_file(t, String.t(), binary) :: {:ok, t} | :rewritten
+  def take_file(fold, agent, bytes) do
+    file = file(fold, agent)
+    size = byte_size(file.seam)
+
+    case bytes do
+      <<seam::binary-size(^size), rest::binary>> when seam == file.seam ->
+        inner = %{fold | offset: file.offset, seam: file.seam, problems: [], problem_count: 0}
+        inner = lines(inner, rest, agent)
+        name = "agent-#{agent}.jsonl"
+        problems = Enum.map(inner.problems, &Map.put(&1, :file, name))
+        file = %{file | offset: inner.offset, seam: inner.seam, problem: nil}
+
+        {:ok,
+         %{
+           inner
+           | offset: fold.offset,
+             seam: fold.seam,
+             entries: fold.entries,
+             problems: Enum.take(fold.problems ++ problems, -@kept_problems),
+             problem_count: fold.problem_count + inner.problem_count,
+             files: Map.put(fold.files, agent, file)
+         }}
+
+      _ ->
+        :rewritten
+    end
+  end
+
+  @doc """
+  Folds the first read of subagent `agent`'s file when it starts at byte `at`, not at the
+  file's start: a read bounded to the file's last bytes (`Transcripts`' `first_read:`). The
+  first line, cut by the bound, is skipped, so the fold starts at a whole line, and the file's
+  entry says `partial: true`; calls before it are not known. At 0 it is `take_file/3` on a file
+  read from its start. Bytes with no whole line leave the file unread.
+
+      iex> alias CodingAgentFramework.Transcripts.Fold
+      iex> use = ~s({"type":"assistant","message":) <>
+      ...>   ~s({"id":"m1","content":[{"type":"tool_use","id":"tu-2","name":"Read"}]}}\\n)
+      iex> {:ok, fold} = Fold.take_file_from(Fold.new(), "a1", 900, ~s(ut-line"}\\n) <> use)
+      iex> {fold.files["a1"].partial, fold.files["a1"].offset - 910 == byte_size(use)}
+      {true, true}
+      iex> hd(fold.agent_tools["a1"]).id
+      "tu-2"
+  """
+  @spec take_file_from(t, String.t(), non_neg_integer, binary) :: {:ok, t}
+  def take_file_from(fold, agent, at, bytes) do
+    old = file(fold, agent)
+    keep = %{new_file() | tool_use_id: old.tool_use_id, finished: old.finished}
+    fold = %{fold | agent_tools: Map.delete(fold.agent_tools, agent)}
+
+    case {at, :binary.split(bytes, "\n")} do
+      {0, _} ->
+        take_file(%{fold | files: Map.put(fold.files, agent, keep)}, agent, bytes)
+
+      {_, [_no_whole_line]} ->
+        {:ok, fold}
+
+      {_, [cut, rest]} ->
+        file = %{keep | offset: at + byte_size(cut) + 1, partial: true}
+        take_file(%{fold | files: Map.put(fold.files, agent, file)}, agent, rest)
+    end
+  end
+
+  @doc """
+  Marks subagent `agent`'s file not read (`not_read: :finished`): a file the fold never read
+  whose meta says the subagent finished. Its calls are absent; its `agent_id` is the meta's.
+  `size` is the file's size then, so a file that grows after is looked at again.
+  """
+  @spec skip_file(t, String.t(), non_neg_integer) :: t
+  def skip_file(fold, agent, size) do
+    file = %{file(fold, agent) | not_read: :finished, size: size}
+    %{fold | files: Map.put(fold.files, agent, file)}
+  end
+
+  @doc """
+  Forgets what the fold read of subagent `agent`'s file, its calls with it, so the file is read
+  again from its start; the call that started it stays known.
+  """
+  @spec restart_file(t, String.t()) :: t
+  def restart_file(fold, agent) do
+    old = file(fold, agent)
+    file = %{new_file() | tool_use_id: old.tool_use_id, finished: old.finished}
+
+    %{
+      fold
+      | files: Map.put(fold.files, agent, file),
+        agent_tools: Map.delete(fold.agent_tools, agent)
+    }
+  end
+
+  @doc """
+  Names a problem of subagent `agent`'s file in its `files` entry (`"no_file"` once it is gone,
+  `"rewritten"`), or nil once it reads cleanly again, keeping what was read of it.
+  """
+  @spec file_problem(t, String.t(), String.t() | nil) :: t
+  def file_problem(fold, agent, problem),
+    do: %{fold | files: Map.put(fold.files, agent, %{file(fold, agent) | problem: problem})}
+
+  @doc """
+  Reads subagent `agent`'s `agent-<agent>.meta.json`, which Claude Code 2.1.322 writes when the
+  subagent starts (F-237's measurement): its `toolUseId` is the parent's `Agent` call that
+  started it, so that call's row in `subagents` has the subagent's `agent_id` while it runs,
+  before its result names it, and its `finished` (true once the subagent ended) is kept in the
+  file's entry. `:unreadable` for bytes without one, such as a file not yet whole.
+
+      iex> alias CodingAgentFramework.Transcripts.Fold
+      iex> call = ~s({"type":"assistant","message":{"id":"m1","content":) <>
+      ...>   ~s([{"type":"tool_use","id":"tu-1","name":"Agent","input":{"description":"look"}}]}}\\n)
+      iex> {:ok, fold} = Fold.take(Fold.new(), call)
+      iex> {:ok, fold} = Fold.file_meta(fold, "a1", ~s({"toolUseId":"tu-1"}))
+      iex> fold.subagents["tu-1"].agent_id
+      "a1"
+  """
+  @spec file_meta(t, String.t(), binary) :: {:ok, t} | :unreadable
+  def file_meta(fold, agent, bytes) do
+    case JSON.decode(bytes) do
+      {:ok, %{"toolUseId" => id} = meta} when is_binary(id) ->
+        file = %{file(fold, agent) | tool_use_id: id, finished: meta["finished"] == true}
+        fold = %{fold | files: Map.put(fold.files, agent, file)}
+
+        case fold.subagents[id] do
+          %{agent_id: nil} = a -> {:ok, put_agent(fold, id, %{a | agent_id: agent})}
+          _ -> {:ok, fold}
+        end
+
+      _ ->
+        :unreadable
+    end
+  end
+
+  defp file(fold, agent), do: Map.get(fold.files, agent, new_file())
+
+  defp new_file,
+    do: %{
+      offset: 0,
+      seam: "",
+      tool_use_id: nil,
+      problem: nil,
+      finished: false,
+      not_read: nil,
+      partial: false,
+      size: nil
+    }
+
+  # The subagent whose meta names the call `id`, for a call folded after its file was read.
+  defp file_agent(fold, id) do
+    Enum.find_value(fold.files, fn {agent, f} -> if f.tool_use_id == id, do: agent end)
   end
 
   defp zero, do: Map.new(@usage, &{&1, 0})

@@ -32,7 +32,10 @@ defmodule CodingAgentFramework.Transcripts.Table do
   The table as `Reader` reads and writes it; a `Tracker` source is made from it. A row as read
   holds its fold's fields beside its own: `offset`, `last_reply`, `ends_with_reply`, `prompts`,
   `subagents`, `usage`, `problems`, `problem_count` and `entries`, and the tool calls,
-  `tools`, `agent_tools` and `last_event_at` (F-235).
+  `tools`, `agent_tools` and `last_event_at` (F-235), and `files`, each subagent file read by
+  its agent id: `offset`, `size` (set when it was not read), `tool_use_id` (its parent's
+  `Agent` call), `finished` (its meta's), `not_read` (`:finished` for one not read), `partial`
+  and `problem` (F-237).
   """
   @spec meta() :: Reader.meta()
   def meta do
@@ -119,6 +122,7 @@ defmodule CodingAgentFramework.Transcripts.Table do
 
   defp to_row(row) do
     fold = load_fold(row.fold)
-    Map.merge(Map.delete(row, :fold), Map.drop(fold, [:seam, :message]))
+    files = Map.new(fold.files, fn {agent, f} -> {agent, Map.delete(f, :seam)} end)
+    Map.merge(Map.delete(row, :fold), %{Map.drop(fold, [:seam, :message]) | files: files})
   end
 end
