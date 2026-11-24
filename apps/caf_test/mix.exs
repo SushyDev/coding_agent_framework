@@ -2,10 +2,9 @@ defmodule CafTest.MixProject do
   use Mix.Project
 
   # The shared test aids: the per-VM directory, the programs from devenv and the stand-ins.
-  # Other apps use it `only: :test`. It also holds the model test, which runs bin/check-model,
-  # and the tests of caf_shell: TestHost uses Host, Programs and Shell, so caf_shell's own tests
-  # may not use caf_test. They stay here; splitting TestHost into a part with no host and a host
-  # part would let them move, and is not worth it. And `mix caf.deps`, the gate that each app
+  # Other apps use it `only: :test`. It also holds the tests of caf_shell: TestHost uses Host,
+  # Programs and Shell, so caf_shell's own tests may not use caf_test. They stay here; splitting
+  # TestHost into a part with no host and a host part would let them move, and is not worth it. And `mix caf.deps`, the gate that each app
   # declares the umbrella apps it uses: a test-only aid like the others, so it lives here.
   def project do
     [

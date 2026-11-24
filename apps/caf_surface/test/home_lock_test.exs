@@ -116,15 +116,16 @@ defmodule CodingAgentFramework.HomeLockTest do
   end
 
   # A second VM on this host holds the home by the same take as a start's first step, then dies
-  # with no cleanup. Its VM boots slowly on a loaded machine: its wait is 45 s, not :peer's 15.
-  @tag timeout: 90_000
+  # with no cleanup. A cold VM's boot and its first eval are work a loaded host lengthens, so
+  # their bounds are scaled by the load the suite read (F-238).
+  @tag timeout: scaled(90_000)
   test "a home held by another VM refuses a start, and is taken once that VM dies", ctx do
     home = Path.join(ctx.dir, "home")
     {a, b} = {config(home), config(home)}
     paths = Enum.flat_map(:code.get_path(), &[~c"-pa", &1])
 
     {:ok, peer, _node} =
-      :peer.start(%{connection: :standard_io, args: paths, wait_boot: 45_000})
+      :peer.start(%{connection: :standard_io, args: paths, wait_boot: scaled(45_000)})
 
     on_exit(fn ->
       try do
@@ -134,18 +135,28 @@ defmodule CodingAgentFramework.HomeLockTest do
       end
     end)
 
-    vm = List.to_string(:peer.call(peer, :os, :getpid, [], 10_000))
-    announce = Path.join(ctx.dir, "held")
+    vm = List.to_string(:peer.call(peer, :os, :getpid, [], scaled(10_000)))
 
+    # The holder is spawned in the peer and lives on; the call answers once it holds the home,
+    # so the test waits on that answer, not on a file it polls for 5 s (F-238).
     code = """
-    {:ok, _lock} = CodingAgentFramework.Home.Lock.take(config)
-    File.write!(announce, "held\\n")
-    receive do: (:never -> :ok)
+    me = self()
+
+    spawn(fn ->
+      send(me, {:taken, CodingAgentFramework.Home.Lock.take(config)})
+      receive do: (:never -> :ok)
+    end)
+
+    receive do
+      {:taken, taken} -> taken
+    after
+      bound -> :late
+    end
     """
 
-    args = [code, [config: a, announce: announce]]
-    :peer.call(peer, :erlang, :spawn, [Code, :eval_string, args], 10_000)
-    assert {:ok, _} = read_when(announce, "held\n")
+    bound = scaled(10_000)
+    args = [code, [config: a, bound: bound]]
+    assert {{:ok, _}, _} = :peer.call(peer, Code, :eval_string, args, bound + 5_000)
 
     assert {:refused, {:home_held, %{instance: instance, os_pid: ^vm}}} =
              CodingAgentFramework.start_link(b)
