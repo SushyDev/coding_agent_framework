@@ -442,6 +442,8 @@ Built, each from a checked model in `model/tla/`:
   background command waking it in a turn of its own, with the wake gap checked and recorded; an
   absent main resumed once by the operator; and, for every dialog or menu press, the screens
   before, during and after it, with its label and answer.
+- a test's helper process is defined before the test that starts it (F-247), so a loaded host
+  cannot start the test before its helper exists.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
