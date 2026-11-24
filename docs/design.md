@@ -1720,15 +1720,21 @@ leaving after it, waits up to the `Inlet`'s `see:`, the config's `press_see` (F-
 below it plus a stated margin: a tmux command's (`Shell.bound/1` of the server's timeout:
 the timeout, the wait between TERM and KILL, and the wait for the exit), the `Inlet`'s
 (`Inlet.press_bound/1`: two reads, the six tmux commands a press runs, and 1 s), which
-`Sessions` asks once as it starts, and `Sessions`' call (`Sessions.press_call/2`, and 5 s),
-which each caller asks first and names no bound of its own. The inbox, the app's
-`CodingAgentFramework.answer/4` and the operator's `answer_startup` run in the caller's
-process and add none, so a press past every bound answers the `Inlet`'s unknown. A stop's exit press
-(F-231) is bounded the same way (F-248): the stop's own steps plus `Sessions.press_call/2`
-(`Sessions.stop_bound/2`), so no caller of a stop names a number shorter than that; a caller's
-own deadline (`within:`, the operator's end of a main session, a move's stop) wins, and a press
-it cuts answers `{:unknown, {:cut, :end_press}}`. A pane gone
-after the Enter, as "No, exit" leaves it, is the dialog left, answered at once. The press runs in a task whose answer comes back as a message, as `Mailbox`'s
+`Sessions` asks once as it starts and the `Inlet` answers outside its queue, the press's
+`timeout:` (`Inlet.press_timeout/1`, and 10 s in the `Inlet`'s queue and 1 s for the answer),
+and `Sessions`' call (`Sessions.press_call/2`, and 5 s), which each caller asks first and
+names no bound of its own. The inbox, the app's `CodingAgentFramework.answer/4` and the
+operator's `answer_startup` run in the caller's process and add none, so a press past every
+bound answers the `Inlet`'s unknown. A stop's exit press (F-231) is bounded the same way
+(F-248): the stop's own steps plus `Sessions.press_call/2` (`Sessions.stop_bound/2`), so no
+caller of a stop names a number shorter than that; a caller's own deadline (`within:`, the
+operator's end of a main session, a move's stop) wins, and a press it cuts answers
+`{:unknown, {:cut, :end_press}}`. The `Inlet` runs one call at a time, each in a task, so it
+answers the others meanwhile (F-249, `Inlet.tla`). Each call carries its deadline, the
+caller's timeout less the 1 s for the answer. A press starts only while its bound fits before
+its deadline; one still queued past that is answered `{:refused, :busy}` at once and never
+made. A pane gone after the Enter, as "No, exit" leaves it, is the dialog left, answered at
+once. The press runs in a task whose answer comes back as a message, as `Mailbox`'s
 hand-on does, so `Sessions` answers other calls meanwhile, the mark `pressing`; a row whose
 press is under way is not read again until it answers (F-144). Each answer is an act in `Acts`
 (F-144): actor the person (the operator's tool names the operator) or the app (its callback,
@@ -3087,6 +3093,11 @@ configuration sets `Headless = FALSE` and keeps its state space.
 `Boxes.tla` composes its contracts (`MaxLimits` above 0 only in `Boxes_Limit`): the
 `Scheduler`'s gate and `Mailbox`'s mark against a `limited` turn, with a dialog, a stop and the
 restarts, as `NoStartOnLimited` and `NoRowIntoLimit`.
+`Inlet.tla` (F-249) models the `Inlet`'s queue: two callers, each call with its deadline and
+its own bound. A call starts only while its bound fits before its deadline
+(`StartsInTime`, `Break_Inlet_StartLate`), and one still queued at its last start is answered
+busy while another runs, so every caller has its answer by its deadline
+(`AnsweredByDeadline`, `Break_Inlet_InProcess`).
 
 **The remodel's model** (F-115). Each mechanism is written once, and the specs above are
 reshaped around three new ones, in R4 and R6, before the code they describe:

@@ -165,9 +165,15 @@ defmodule CodingAgentFramework.SessionsDialogTest do
   end
 
   # F-248: a stop's bound is its steps plus the exit press's wait, derived from the `Inlet`'s
-  # `see:` (F-245's table), never a number set apart from it.
+  # `see:` (F-245's table, with F-249's queue), never a number set apart from it.
   test "a stop's bound is its steps and the exit press's wait" do
-    for {press, bound} <- [{65_040, 95_040}, {49_040, 79_040}] do
+    for {see, bound} <- [{10_000, 106_040}, {2_000, 90_040}] do
+      press =
+        see
+        |> Inlet.press_bound_at(Shell.bound(5_000))
+        |> Inlet.press_timeout()
+        |> Sessions.press_wait()
+
       assert Sessions.stop_bound(30_000, press) == bound
     end
   end
@@ -378,23 +384,30 @@ defmodule CodingAgentFramework.SessionsDialogTest do
 
   # F-245: each bound that waits on a press derives from the one below it, plus a stated
   # margin: a tmux command's (`Shell.bound/1` of the server's timeout), the `Inlet`'s (two reads
-  # and six commands, and 1 000), and `Sessions`' call (and 5 000). A `Sessions` asks its
+  # and six commands, and 1 000), the press's timeout (and the queue's 10 000 and the answer's
+  # 1 000, F-249), and `Sessions`' call (and 5 000). A `Sessions` asks its
   # `Inlet`, which owns `see:`, and a caller asks the `Sessions`.
   test "the bounds that wait on a press derive from the Inlet's see, up to the caller", ctx do
     command = Shell.bound(5_000)
     assert command == 5_000 + 1_500
     assert Tmux.bound(ctx.server) == command
 
-    for {see, inlet, call} <- [{10_000, 60_040, 65_040}, {2_000, 44_040, 49_040}] do
+    for {see, inlet, press, call} <- [
+          {10_000, 60_040, 71_040, 76_040},
+          {2_000, 44_040, 55_040, 60_040}
+        ] do
       assert Inlet.press_bound_at(see, command) == 2 * (see + 20) + 6 * command + 1_000
       assert Inlet.press_bound_at(see, command) == inlet
-      assert Sessions.press_wait(inlet) == inlet + 5_000
-      assert Sessions.press_wait(inlet) == call
+      # F-249: up to 10 000 in the Inlet's queue, and 1 000 for the answer's way back.
+      assert Inlet.press_timeout(inlet) == inlet + 10_000 + 1_000
+      assert Inlet.press_timeout(inlet) == press
+      assert Sessions.press_wait(press) == press + 5_000
+      assert Sessions.press_wait(press) == call
     end
 
     inlet = start_supervised!({Inlet, tmux: ctx.server, see: 10_000}, id: :ten_seconds)
     assert {:ok, 60_040} = Inlet.press_bound(inlet)
-    assert {:ok, 65_040} = Sessions.press_call(sessions(ctx, inlet: inlet))
+    assert {:ok, 76_040} = Sessions.press_call(sessions(ctx, inlet: inlet))
     # With no `Inlet` no press goes: a press call waits as a read does.
     assert {:ok, 5_000} = Sessions.press_call(sessions(ctx, inlet: nil))
   end

@@ -433,6 +433,10 @@ Built, each from a checked model in `model/tla/`:
   and each caller of a press asks `Sessions` its call's, so none is a second fixed number.
 - a stop's exit press is bounded by the press chain (F-248): a stop waits its steps plus the
   press's wait, derived, and a caller's own deadline cuts the press and answers unknown.
+- a press's wait in the `Inlet`'s queue is bounded (F-249, `Inlet.tla`): each call carries its
+  deadline, a press starts only while its bound fits before it and is otherwise answered
+  `{:refused, :busy}` untouched, the `Inlet` runs each call in a task so it answers meanwhile,
+  and `Sessions`' ask for the press bound never waits in the queue.
 - a subagent's own transcript is read, so its tool calls show (F-237): `Transcripts` lists each
   session's `subagents/` directory on every read and folds each file that changed; a running
   subagent has its `agent_id` from its file's meta, and its own `tool` in the tree; a file

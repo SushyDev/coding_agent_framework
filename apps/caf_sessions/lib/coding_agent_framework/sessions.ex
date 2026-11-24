@@ -229,8 +229,8 @@ defmodule CodingAgentFramework.Sessions do
   `reaper:` (the host's `Shell.Reaper`, for worktrees; `programs:` then names git and mkdir),
   `inlet:` (the host's `Inlet`, which reads an interactive start's pane and presses an answer
   to its startup dialog; `programs:` names cat for an interactive start's prompt; a start asks
-  it its press bound once, `Inlet.press_bound/1`, and stops `{:inlet, reason}` when it cannot
-  read it, F-245), `dialog:`
+  it its press bound once, `Inlet.press_bound/1`, which the `Inlet` answers outside its queue
+  (F-249), and stops `{:inlet, reason}` when it cannot read it, F-245), `dialog:`
   (the app's callback for a startup dialog, `fn kind, options -> {:answer, label} | :ask end`,
   by default `Sessions.Dialog.ask/2`: ask a person), `look:` (ms between reads of a pane that
   waits on a person, and of each running interactive row's for a menu, default 5 000),
@@ -257,11 +257,12 @@ defmodule CodingAgentFramework.Sessions do
 
   @doc """
   The bound of a call that waits on one press (`answer_dialog/5`, `answer_menu/5`,
-  `press_limit/3`), from the `Inlet`'s press bound `press` (`Inlet.press_bound/1`), F-245: that
-  bound, and a margin of 5 000 for this process's calls ahead of it and its reply. Pure.
+  `press_limit/3`), from the `timeout:` the press goes with (`Inlet.press_timeout/1` of
+  `Inlet.press_bound/1`, F-249): that timeout, and a margin of 5 000 for this process's calls
+  ahead of it and its reply (F-245). Pure.
 
-      iex> CodingAgentFramework.Sessions.press_wait(60_040)
-      65040
+      iex> CodingAgentFramework.Sessions.press_wait(71_040)
+      76040
   """
   @spec press_wait(pos_integer) :: pos_integer
   def press_wait(press) when is_integer(press) and press > 0, do: press + @read
@@ -273,7 +274,7 @@ defmodule CodingAgentFramework.Sessions do
   Answers `{:ok, ms}`, or the call's refusal or unknown. Option `:timeout` (ms, default 5 000).
 
       Sessions.press_call(sessions)
-      #=> {:ok, 65040}
+      #=> {:ok, 76040}
   """
   @spec press_call(GenServer.server(), keyword) :: outcome(pos_integer)
   def press_call(sessions, opts \\ []),
@@ -681,8 +682,8 @@ defmodule CodingAgentFramework.Sessions do
   What a stop waits at most, derived (F-248): its own steps, `steps`, plus the exit press's
   `press_wait/1` when it meets a dialog. No caller of a stop names a number shorter than this.
 
-      iex> CodingAgentFramework.Sessions.stop_bound(30_000, 65_040)
-      95_040
+      iex> CodingAgentFramework.Sessions.stop_bound(30_000, 76_040)
+      106_040
   """
   @spec stop_bound(pos_integer, pos_integer) :: pos_integer
   def stop_bound(steps, press_wait) when steps > 0 and press_wait > 0, do: steps + press_wait
@@ -783,7 +784,7 @@ defmodule CodingAgentFramework.Sessions do
 
   defp press_bound(inlet) do
     case Inlet.press_bound(inlet) do
-      {:ok, bound} -> {:ok, [timeout: bound]}
+      {:ok, bound} -> {:ok, [timeout: Inlet.press_timeout(bound)]}
       failed -> {:refused, {:inlet, failed}}
     end
   end
@@ -1326,7 +1327,7 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   # What a press waits, as `press_call/2` answers it.
-  defp press_allowance(%{press: [timeout: bound]}), do: press_wait(bound)
+  defp press_allowance(%{press: [timeout: timeout]}), do: press_wait(timeout)
   defp press_allowance(_state), do: @read
 
   defp stoppable(nil), do: :ok
