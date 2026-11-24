@@ -371,7 +371,7 @@ defmodule CodingAgentFramework.Sessions do
   """
   @spec stop(GenServer.server(), String.t(), keyword) :: outcome(:stopped)
   def stop(sessions, name, opts \\ []),
-    do: request(sessions, {:stop, name, Keyword.get(opts, :for, :end), force(opts)}, opts)
+    do: stop_request(sessions, {:stop, name, Keyword.get(opts, :for, :end), force(opts)}, opts)
 
   @doc """
   Ends main session `name` for good (F-143, `Team.tla`'s `MainEnds`): `Mains.end_main/3`'s
@@ -395,7 +395,7 @@ defmodule CodingAgentFramework.Sessions do
   """
   @spec end_main(GenServer.server(), String.t(), keyword) :: outcome(:ended)
   def end_main(sessions, name, opts \\ []),
-    do: request(sessions, {:end_main, name, force(opts)}, opts)
+    do: stop_request(sessions, {:end_main, name, force(opts)}, opts)
 
   defp force(opts), do: Keyword.get(opts, :force, false) == true
 
@@ -677,6 +677,32 @@ defmodule CodingAgentFramework.Sessions do
     call(sessions, {:viewer_argv, name}, timeout)
   end
 
+  @doc """
+  What a stop waits at most, derived (F-248): its own steps, `steps`, plus the exit press's
+  `press_wait/1` when it meets a dialog. No caller of a stop names a number shorter than this.
+
+      iex> CodingAgentFramework.Sessions.stop_bound(30_000, 65_040)
+      95_040
+  """
+  @spec stop_bound(pos_integer, pos_integer) :: pos_integer
+  def stop_bound(steps, press_wait) when steps > 0 and press_wait > 0, do: steps + press_wait
+
+  # A stop's call (F-248): `:timeout` is the stop's own steps (default 30 s); a row on a dialog
+  # adds its exit press's wait, which this asks first (`press_call/2`) and the server adds to
+  # the row's deadline. `:within` (ms from the call's arrival, on this `Sessions`' `clock:`) is
+  # a caller's own deadline, which wins: a press it cuts answers `{:unknown, {:cut,
+  # :end_press}}`. The call waits the derived bound and the slack, so the caller never exits
+  # on the stop.
+  defp stop_request(sessions, request, opts) do
+    steps = Keyword.get(opts, :timeout, @timeout)
+
+    with {:ok, press} <- press_call(sessions) do
+      within = Keyword.get(opts, :within)
+      message = Tuple.insert_at(request, tuple_size(request), within)
+      call(sessions, {message, steps}, stop_bound(steps, press) + @slack)
+    end
+  end
+
   defp request(sessions, request, opts) do
     timeout = Keyword.get(opts, :timeout, @timeout)
 
@@ -875,10 +901,7 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
-  def handle_call(:press_call, _from, %{press: nil} = state), do: {:reply, {:ok, @read}, state}
-
-  def handle_call(:press_call, _from, %{press: [timeout: bound]} = state),
-    do: {:reply, {:ok, press_wait(bound)}, state}
+  def handle_call(:press_call, _from, state), do: {:reply, {:ok, press_allowance(state)}, state}
 
   # The press goes in a task: its answer replies to the caller once it comes back.
   def handle_call({:answer_dialog, name, kind, label, by, at}, from, state) do
@@ -1184,7 +1207,7 @@ defmodule CodingAgentFramework.Sessions do
 
   # Team.tla's MainEnds: the delegates checked and the row moved in one step of this process,
   # so no delegate starts under it after the check (`agent/6` refuses an ended parent).
-  def handle_call({{:end_main, name, force}, timeout}, from, state) do
+  def handle_call({{:end_main, name, force, within}, timeout}, from, state) do
     row = Table.get(state.db, state.host.name, name)
 
     case row && end_check(state, row) do
@@ -1199,15 +1222,18 @@ defmodule CodingAgentFramework.Sessions do
         {:reply, {:ok, :ended}, state}
 
       :running ->
-        handle_call({{:stop, name, :end_main, force}, timeout}, from, state)
+        handle_call({{:stop, name, :end_main, force, within}, timeout}, from, state)
 
       refused ->
         {:reply, refused, state}
     end
   end
 
-  def handle_call({{:stop, name, how, force}, timeout}, from, state) do
-    deadline = state.clock.() + timeout
+  def handle_call({{:stop, name, how, force, within}, timeout}, from, state) do
+    now = state.clock.()
+    cap = within && now + within
+    steps_end = now + timeout
+    deadline = if cap, do: min(cap, steps_end), else: steps_end
 
     case Table.get(state.db, state.host.name, name) do
       %{status: "running", pid: pid} = row when is_integer(pid) ->
@@ -1227,12 +1253,19 @@ defmodule CodingAgentFramework.Sessions do
       # leaves it, or ended for a main session's end.
       %{status: "dialog"} = row
       when how in [:end, :end_main] and not is_map_key(state.pending, name) ->
+        # F-248: the exit press has its own bound, past the stop's steps; a caller's `cap` wins.
+        allowed = steps_end + press_allowance(state)
+        deadline = if cap, do: min(cap, allowed), else: allowed
         pending = %{kind: :stop, from: from, row: row, deadline: deadline, how: how}
 
         with {:ok, _process, record} <- held_record(state, row),
              {:ok, label} <- Dialog.exit_option(row),
              :ok <- press(state, row, :trust, label, ender(how), nil, true) do
           row = %{row | pid: record.pid, proc_start: record.start}
+
+          if cap && cap < allowed,
+            do: Process.send_after(self(), {:press_cut, name, deadline}, max(cap - now, 0))
+
           {:noreply, put_in(state.pending[name], %{pending | kind: :end_press, row: row})}
         else
           {:refused, {why, _}} when why in [:no_exit, :answered] ->
@@ -1291,6 +1324,10 @@ defmodule CodingAgentFramework.Sessions do
       other -> {:reply, {:refused, {:unread, other}}, state}
     end
   end
+
+  # What a press waits, as `press_call/2` answers it.
+  defp press_allowance(%{press: [timeout: bound]}), do: press_wait(bound)
+  defp press_allowance(_state), do: @read
 
   defp stoppable(nil), do: :ok
   defp stoppable(%{kind: :start, stop: _}), do: {:refused, :stopping}
@@ -1495,6 +1532,18 @@ defmodule CodingAgentFramework.Sessions do
     do: call(sessions, :ends_owed, Keyword.get(opts, :timeout, @read))
 
   @impl true
+  # F-248: a caller's own deadline cut an exit press that was still under way. The press may
+  # have gone; the row stays `stopping`, and a later stop or the settle finds the truth.
+  def handle_info({:press_cut, name, deadline}, state) do
+    case state.pending[name] do
+      %{kind: :end_press, deadline: ^deadline} = pending ->
+        {:noreply, done(state, name, pending, {:unknown, {:cut, :end_press}})}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info({:check, name}, state) do
     case state.pending[name] do
       nil -> {:noreply, state}
