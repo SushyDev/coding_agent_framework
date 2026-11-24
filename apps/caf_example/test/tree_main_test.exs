@@ -80,7 +80,10 @@ defmodule CodingAgentFramework.Example.TreeMainTest do
 
     # The stand-in's own session file, which `Mains`' start waited for.
     sessions = Path.join(ctx.config.home, "accounts/one/claude/sessions")
-    assert {:ok, [file]} = File.ls(sessions)
+    # Only `.json`: the stand-in writes each change through a `.tmp` file it then renames, so a
+    # listing can catch both while its status changes.
+    assert [path] = Path.wildcard(Path.join(sessions, "*.json"))
+    file = Path.basename(path)
     assert %{"sessionId" => ^sid, "kind" => "interactive"} = sessions |> Path.join(file) |> json()
 
     assert {:ok, [prompt]} = await(fn -> nonempty(ScreenStandIn.prompts(ctx.dir)) end)

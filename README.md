@@ -449,6 +449,8 @@ Built, each from a checked model in `model/tla/`:
   before, during and after it, with its label and answer.
 - a test's helper process is defined before the test that starts it (F-247), so a loaded host
   cannot start the test before its helper exists.
+- a test lists only the stand-in's session files (F-251), not the `.tmp` file the stand-in
+  renames into one.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
