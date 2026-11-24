@@ -6,9 +6,11 @@ and a main session (the agent that supervises the run) follow these steps togeth
 types into the console and answers what only a person may answer; the main session reads each
 reading against "Passed when" and writes down what it saw.
 
-Steps 1, 2, 3, 5 and 14 run as a test against the real Claude Code: `CAF_REAL_SETUP=<home>
-mix test.real`, where `<home>` is one `bin/caf-login --setup <home> one two` set up (F-223,
-`apps/caf_real`). It needs no person. The other steps stay here until they are tests too.
+Steps 1, 2, 3, 4, 5 and 14 run as tests against the real Claude Code, beside a reload of a
+main session's plugins (F-233) and Claude Code's own question as a menu (F-230), F-239:
+`CAF_REAL_SETUP=<home> mix test.real`, where `<home>` is one `bin/caf-login --setup <home> one
+two` set up (F-223, `apps/caf_real`). It needs no person. The screens those tests meet go to
+`<home>/records/`. The other steps stay here until they are tests too.
 
 Each step says what to **type** at the console, what to **watch**, what counts as **passed**,
 and what to **record**: a reading only a real run can give, kept as a file under the records

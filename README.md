@@ -415,6 +415,10 @@ Built, each from a checked model in `model/tla/`:
   by the load its suite read at its start, the `Inlet`'s read back of a press takes `see:` per
   instance, `bin/check-model` prints the load beside each time and judges the 30 s rule only
   under a load below the core count, and TLC runs in `gate-model` alone.
+- the real suite checks what F-230 and F-233 modeled (F-239): a reload, Claude Code's own question
+  as a menu, and an interactive delegate (step 4), each a test of its own that records the
+  screens it meets; run on a logged-in setup, it found the reload refused under a waiter (F-241)
+  and a trust press read back too soon under load (F-242).
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
