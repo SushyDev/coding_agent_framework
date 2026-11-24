@@ -164,6 +164,55 @@ defmodule CodingAgentFramework.SessionsDialogTest do
     refute File.exists?(Path.join(ctx.dir, "trusted"))
   end
 
+  # F-248: a stop's bound is its steps plus the exit press's wait, derived from the `Inlet`'s
+  # `see:` (F-245's table), never a number set apart from it.
+  test "a stop's bound is its steps and the exit press's wait" do
+    for {press, bound} <- [{65_040, 95_040}, {49_040, 79_040}] do
+      assert Sessions.stop_bound(30_000, press) == bound
+    end
+  end
+
+  # The program stopped (SIGSTOP) as the stop's exit press goes, as a loaded host stops it. Its
+  # keys wait in the pane and it redraws once it runs again.
+  defp hold_program(ctx) do
+    [pid] = File.ls!(Path.join(ctx.dir, "pids"))
+    {_, 0} = System.cmd("kill", ["-STOP", pid])
+    fn -> System.cmd("kill", ["-CONT", pid]) end
+  end
+
+  test "a stop whose exit press redraws late, within the press bound, is answered ok", ctx do
+    sessions = sessions(ctx)
+
+    assert {:unknown, {:dialog, :trust}} =
+             Sessions.start(sessions, "alpha", ctx.account, ctx.launch)
+
+    release = hold_program(ctx)
+    spawn(fn -> receive after: (1_500 -> release.()) end)
+
+    # The stop's own steps, 300 ms, are shorter than the redraw: the press, not the steps,
+    # bounds the exit.
+    assert {:ok, :stopped} = Sessions.stop(sessions, "alpha", timeout: 300)
+    assert %{status: "stopped"} = Agents.get(ctx.agents, "alpha")
+  end
+
+  test "a stop given a shorter deadline answers unknown at it, never a caller exit", ctx do
+    sessions = sessions(ctx)
+
+    assert {:unknown, {:dialog, :trust}} =
+             Sessions.start(sessions, "alpha", ctx.account, ctx.launch)
+
+    release = hold_program(ctx)
+    on_exit(fn -> release.() end)
+
+    {took, answer} =
+      :timer.tc(fn -> Sessions.stop(sessions, "alpha", timeout: 300, within: 300) end)
+
+    assert {:unknown, {:cut, :end_press}} = answer
+    assert div(took, 1_000) < 5_000
+    # The row is not settled by a guess: it stays on its dialog until its process is seen gone.
+    assert %{status: "dialog"} = Agents.get(ctx.agents, "alpha")
+  end
+
   # Dialog.tla's AskEnd, EndPress and EndDone (F-231's new-3): the operator's end of a main
   # session waiting on its trust dialog presses the dialog's exit option, an act in Acts by the
   # operator, and the row is ended once its process is gone; it never ran a turn.

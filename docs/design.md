@@ -1723,7 +1723,11 @@ the timeout, the wait between TERM and KILL, and the wait for the exit), the `In
 `Sessions` asks once as it starts, and `Sessions`' call (`Sessions.press_call/2`, and 5 s),
 which each caller asks first and names no bound of its own. The inbox, the app's
 `CodingAgentFramework.answer/4` and the operator's `answer_startup` run in the caller's
-process and add none, so a press past every bound answers the `Inlet`'s unknown. A pane gone
+process and add none, so a press past every bound answers the `Inlet`'s unknown. A stop's exit press
+(F-231) is bounded the same way (F-248): the stop's own steps plus `Sessions.press_call/2`
+(`Sessions.stop_bound/2`), so no caller of a stop names a number shorter than that; a caller's
+own deadline (`within:`, the operator's end of a main session, a move's stop) wins, and a press
+it cuts answers `{:unknown, {:cut, :end_press}}`. A pane gone
 after the Enter, as "No, exit" leaves it, is the dialog left, answered at once. The press runs in a task whose answer comes back as a message, as `Mailbox`'s
 hand-on does, so `Sessions` answers other calls meanwhile, the mark `pressing`; a row whose
 press is under way is not read again until it answers (F-144). Each answer is an act in `Acts`

@@ -99,6 +99,8 @@ defmodule CodingAgentFramework.Mains do
   @call 30_000
   @slack 60_000
   @step 5_000
+  # What the end's answer needs to get back through `Mains`, inside a caller's own deadline.
+  @reply 1_000
   @git 10_000
   @fetch 120_000
   @framework "framework"
@@ -290,13 +292,19 @@ defmodule CodingAgentFramework.Mains do
       #=> {:refused, {:delegates, ["app-epic-api"]}}
   """
   @spec end_main(GenServer.server(), String.t(), keyword) :: outcome(:ended)
-  def end_main(mains, name, opts \\ []),
-    do:
-      call(
-        mains,
-        {:end_main, name, Keyword.get(opts, :force, false)},
-        Keyword.get(opts, :timeout, @call + @slack)
-      )
+  def end_main(mains, name, opts \\ []) do
+    force = Keyword.get(opts, :force, false)
+
+    case Keyword.fetch(opts, :timeout) do
+      # The caller's own deadline wins: the stop is cut at it, and answers unknown.
+      {:ok, timeout} ->
+        call(mains, {:end_main, name, force, max(timeout - @reply, 1)}, timeout)
+
+      :error ->
+        with {:ok, wait} <- call(mains, :end_wait, @step),
+             do: call(mains, {:end_main, name, force, nil}, wait)
+    end
+  end
 
   @doc """
   Something landed in `project`'s trunk: a pull of its checkout is owed, and goes as soon as no
@@ -599,7 +607,16 @@ defmodule CodingAgentFramework.Mains do
   # A start of the name under way would run a second process; Sessions refuses the rest. A
   # start whose call answered and whose agent row waits on a dialog is ended through it
   # (`Dialog.tla`'s AskEnd, F-231): its row then settles refused, `ended`.
-  def handle_call({:end_main, name, force}, from, s) do
+  # F-248: the end's own wait, derived from `Sessions`' stop (its steps and, on a dialog, its
+  # exit press) and the slack, so no caller waits a number set apart from it.
+  def handle_call(:end_wait, _from, s) do
+    case Sessions.press_call(s.sessions) do
+      {:ok, press} -> {:reply, {:ok, Sessions.stop_bound(@call, press) + @slack}, s}
+      other -> {:reply, other, s}
+    end
+  end
+
+  def handle_call({:end_main, name, force, within}, from, s) do
     cond do
       Enum.any?(Starts.starting_rows(s.starts, s.host), &(&1.name == name)) and
           not on_dialog?(s, name) ->
@@ -612,7 +629,9 @@ defmodule CodingAgentFramework.Mains do
         sessions = s.sessions
 
         task =
-          Task.async(fn -> Sessions.end_main(sessions, name, timeout: @call, force: force) end)
+          Task.async(fn ->
+            Sessions.end_main(sessions, name, timeout: @call, within: within, force: force)
+          end)
 
         {:noreply, put_in(s.ends[task.ref], from)}
     end

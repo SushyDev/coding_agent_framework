@@ -407,7 +407,7 @@ defmodule CodingAgentFramework.Mover do
   defp stop(s, row),
     do:
       async(s, row, :stop, fn ->
-        Sessions.stop(s.sessions, row.name, for: :move, timeout: s.stop)
+        Sessions.stop(s.sessions, row.name, for: :move, timeout: s.stop, within: s.stop)
       end)
 
   # Copied: the old process is gone, so its transcript is final.
