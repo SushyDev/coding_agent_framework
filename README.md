@@ -403,6 +403,8 @@ Built, each from a checked model in `model/tla/`:
 - the operator reloads an interactive agent's plugins (F-233): `Operator.reload_plugins/2`
   types `/reload-plugins` through the `Inlet`, checked as a typed message is, and reads its
   result line; each reload is an act in `Acts`, and a headless delegate is refused.
+- the tree shows each agent's tool calls, and the one it runs now (F-235): read from its
+  transcript, with no hook post per call; `Tracker.tool_calls/3` answers the recent ones.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

@@ -52,6 +52,27 @@ defmodule CodingAgentFramework.Transcripts.Fold do
       iex> at - turn_at
       5000
 
+  **Tool calls** (F-235): each `tool_use` block of an assistant entry starts a call and the
+  user entry whose `tool_result` names its id ends it. `tools` keeps the session's own calls,
+  newest first, each `%{id, name, started_at, ended_at, ms}` (ms of the entries' timestamps;
+  `ended_at` and `ms` nil while it runs), at most 200 of them. A sidechain entry's calls are
+  its subagent's, kept in `agent_tools` under its `agentId`, never the session's: at most
+  200 per subagent and 50 subagents. `last_event_at` is the time of the session's last
+  entry. On 2.1.322 the `tool_use` line is in the file when the tool starts, its timestamp a
+  second or two before (F-235's measurement).
+
+      iex> alias CodingAgentFramework.Transcripts.Fold
+      iex> use = ~s({"type":"assistant","timestamp":"2026-11-21T09:00:00.000Z","message":) <>
+      ...>   ~s({"id":"m1","content":[{"type":"tool_use","id":"tu-1","name":"Bash"}]}}\\n)
+      iex> done = ~s({"type":"user","timestamp":"2026-11-21T09:00:02.500Z","message":) <>
+      ...>   ~s({"content":[{"type":"tool_result","tool_use_id":"tu-1"}]}}\\n)
+      iex> {:ok, fold} = Fold.take(Fold.new(), use)
+      iex> hd(fold.tools).ended_at
+      nil
+      iex> {:ok, fold} = Fold.take(Fold.new(), use <> done)
+      iex> {hd(fold.tools).name, hd(fold.tools).ms}
+      {"Bash", 2500}
+
   A fold an earlier build stored has other keys, so it is read again from the file's start
   (`Transcripts.Table.load_fold/1`), and its interrupts with it.
 
@@ -64,6 +85,8 @@ defmodule CodingAgentFramework.Transcripts.Fold do
   @seam 64
   @kept_problems 20
   @preview 500
+  @kept_tools 200
+  @kept_agents 50
 
   # Entry types Claude Code 2.1.322 writes (its table of types and how a resume treats each).
   # The fold reads the first five; the rest are known and skipped by name.
@@ -91,6 +114,9 @@ defmodule CodingAgentFramework.Transcripts.Fold do
           usage: %{String.t() => non_neg_integer},
           limit: map | nil,
           interrupts: [map],
+          tools: [map],
+          agent_tools: %{String.t() => [map]},
+          last_event_at: integer | nil,
           problems: [map],
           problem_count: non_neg_integer
         }
@@ -110,6 +136,9 @@ defmodule CodingAgentFramework.Transcripts.Fold do
       usage: zero(),
       limit: nil,
       interrupts: [],
+      tools: [],
+      agent_tools: %{},
+      last_event_at: nil,
       problems: [],
       problem_count: 0
     }
@@ -361,7 +390,7 @@ defmodule CodingAgentFramework.Transcripts.Fold do
 
   defp entry(fold, line, at) do
     case JSON.decode(line) do
-      {:ok, %{"type" => type} = e} when type in @read -> read(fold, type, e, at)
+      {:ok, %{"type" => type} = e} when type in @read -> fold |> seen(e) |> read(type, e, at)
       {:ok, %{"type" => type}} when type in @skipped -> fold
       {:ok, %{"type" => type}} -> problem(fold, at, {:unknown_type, inspect(type)})
       {:ok, %{}} -> problem(fold, at, :no_type)
@@ -371,8 +400,8 @@ defmodule CodingAgentFramework.Transcripts.Fold do
   end
 
   # A sidechain entry inside the main file (older releases wrote subagents there) is a
-  # subagent's, not the session's: it is skipped by name, as is any line not of this session.
-  defp read(fold, _type, %{"isSidechain" => true}, _at), do: fold
+  # subagent's, not the session's: only its tool calls are kept, under its agent id.
+  defp read(fold, _type, %{"isSidechain" => true} = e, _at), do: side(fold, e)
 
   # The usage limit's line: the account's record, and no reply (F-181).
   defp read(fold, "assistant", %{"apiError" => "usage_limit_reached"} = e, at) do
@@ -408,6 +437,7 @@ defmodule CodingAgentFramework.Transcripts.Fold do
     usage = Map.new(@usage, &{&1, fold.usage[&1] - prev.usage[&1] + counts[&1]})
     msg = %{id: id, texts: prev.texts ++ texts, usage: counts}
     fold = started(%{fold | message: msg, usage: usage, ends_with_reply: false}, content, e)
+    fold = %{fold | tools: calls(fold.tools, content, e)}
 
     if m["stop_reason"] == "end_turn" and msg.texts != [] do
       reply = %{message_id: id, uuid: e["uuid"], at: e["timestamp"], offset: at}
@@ -429,7 +459,7 @@ defmodule CodingAgentFramework.Transcripts.Fold do
     results = for %{"type" => "tool_result"} = b <- blocks, do: b
 
     cond do
-      results != [] -> Enum.reduce(results, fold, &result(&2, &1, e))
+      results != [] -> Enum.reduce(results, ends(fold, results, e), &result(&2, &1, e))
       notification(content) -> ended(fold, content, e)
       e["isMeta"] == true -> fold
       true -> fold |> interrupt(content, e, at) |> prompt(content, e, at)
@@ -611,6 +641,72 @@ defmodule CodingAgentFramework.Transcripts.Fold do
   end
 
   defp put_agent(fold, id, agent), do: %{fold | subagents: Map.put(fold.subagents, id, agent)}
+
+  # The session's own entries alone say when it last did anything.
+  defp seen(fold, %{"isSidechain" => true}), do: fold
+
+  defp seen(fold, e) do
+    case ms(e["timestamp"]) do
+      nil -> fold
+      at -> %{fold | last_event_at: at}
+    end
+  end
+
+  defp side(fold, %{"agentId" => agent, "message" => %{"content" => c}} = e)
+       when is_binary(agent) and is_list(c) do
+    old = Map.get(fold.agent_tools, agent, [])
+    new = c |> Enum.filter(&match?(%{"type" => "tool_result"}, &1)) |> end_calls(old, e)
+    new = if e["type"] == "assistant", do: calls(new, c, e), else: new
+    agents = Map.put(fold.agent_tools, agent, new)
+
+    agents =
+      if map_size(agents) > @kept_agents,
+        do: Map.delete(agents, stalest(Map.delete(agents, agent))),
+        else: agents
+
+    %{fold | agent_tools: agents}
+  end
+
+  defp side(fold, _e), do: fold
+
+  defp stalest(agents),
+    do: agents |> Enum.min_by(fn {_, calls} -> newest_at(calls) end) |> elem(0)
+
+  defp newest_at([%{started_at: at} | _]) when is_integer(at), do: at
+  defp newest_at(_), do: 0
+
+  # Each `tool_use` block starts a call; a block seen before (a line written twice) does not.
+  defp calls(calls, content, e) do
+    for %{"type" => "tool_use", "id" => id, "name" => name} <- content,
+        is_binary(id),
+        not Enum.any?(calls, &(&1.id == id)),
+        reduce: calls do
+      acc ->
+        call = %{id: id, name: name, started_at: ms(e["timestamp"]), ended_at: nil, ms: nil}
+        Enum.take([call | acc], @kept_tools)
+    end
+  end
+
+  defp ends(fold, results, e), do: %{fold | tools: end_calls(results, fold.tools, e)}
+
+  # A result ends its call; one whose call the bound dropped, or never started here, ends none.
+  defp end_calls(results, calls, e) do
+    at = ms(e["timestamp"])
+
+    Enum.reduce(results, calls, fn
+      %{"tool_use_id" => id}, calls when is_binary(id) ->
+        Enum.map(calls, fn
+          %{id: ^id, ended_at: nil, started_at: s} = c ->
+            %{c | ended_at: at, ms: if(is_integer(at) and is_integer(s), do: max(at - s, 0))}
+
+          c ->
+            c
+        end)
+
+      _block, calls ->
+        calls
+    end)
+  end
 
   defp zero, do: Map.new(@usage, &{&1, 0})
 

@@ -31,7 +31,8 @@ defmodule CodingAgentFramework.Transcripts.Table do
   @doc """
   The table as `Reader` reads and writes it; a `Tracker` source is made from it. A row as read
   holds its fold's fields beside its own: `offset`, `last_reply`, `ends_with_reply`, `prompts`,
-  `subagents`, `usage`, `problems`, `problem_count` and `entries`.
+  `subagents`, `usage`, `problems`, `problem_count` and `entries`, and the tool calls,
+  `tools`, `agent_tools` and `last_event_at` (F-235).
   """
   @spec meta() :: Reader.meta()
   def meta do
