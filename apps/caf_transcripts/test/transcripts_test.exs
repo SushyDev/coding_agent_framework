@@ -78,6 +78,58 @@ defmodule CodingAgentFramework.TranscriptsTest do
         }
       })
 
+  # A subagent's own file and meta, of the shapes 2.1.322 writes (F-237's measurement, with
+  # most fields cut): each line with `isSidechain: true` and the `agentId` its file name holds,
+  # and the meta's `toolUseId` naming the parent's `Agent` call.
+  defp agent_call(msg, id), do: assistant(msg, [agent_use(id)], "tool_use", 1)
+
+  defp meta(tool_use, finished \\ false),
+    do:
+      line(
+        Map.merge(
+          %{
+            agentType: "Explore",
+            isBuiltIn: true,
+            description: "look",
+            toolUseId: tool_use,
+            spawnDepth: 1,
+            requestShape: "foreground"
+          },
+          if(finished, do: %{finished: true}, else: %{})
+        )
+      )
+
+  defp side(agent, map),
+    do: line(Map.merge(%{isSidechain: true, agentId: agent, sessionId: "s1"}, map))
+
+  defp side_lines(agent, call) do
+    side(agent, %{
+      type: "user",
+      parentUuid: nil,
+      promptId: "p-side",
+      timestamp: "2026-11-24T03:53:28.292Z",
+      message: %{role: "user", content: "look around"}
+    }) <>
+      "\n" <>
+      side(agent, %{
+        type: "assistant",
+        timestamp: "2026-11-24T03:53:29.000Z",
+        message: %{
+          id: "m-#{call}",
+          content: [%{type: "tool_use", id: call, name: "Bash", input: %{}}],
+          stop_reason: "tool_use"
+        }
+      }) <> "\n"
+  end
+
+  defp side_result(agent, call),
+    do:
+      side(agent, %{
+        type: "user",
+        timestamp: "2026-11-24T03:53:30.000Z",
+        message: %{content: [%{type: "tool_result", tool_use_id: call, content: "ok"}]}
+      })
+
   defp good_line do
     one_of([
       map(string(:alphanumeric, max_length: 12), &prompt("p-#{&1}", &1)),
@@ -312,6 +364,88 @@ defmodule CodingAgentFramework.TranscriptsTest do
 
       assert {:ok, %{problem: "rewritten", rewrites: 1, prompts: [_], last_reply: nil}} =
                Transcripts.session(t, "a", "s1")
+    end
+
+    test "a subagent's own file is found by listing, gives its agent id while it runs, and keeps its calls",
+         ctx do
+      dir = Path.join([ctx.dir, "s1", "subagents"])
+      File.mkdir_p!(dir)
+      # The parent's foreground `Agent` call, with no result yet: the fold knows no agent id.
+      File.write!(ctx.path, prompt("p1", "go") <> "\n" <> agent_call("m1", "t1") <> "\n")
+      File.write!(Path.join(dir, "agent-g1.meta.json"), meta("t1"))
+      File.write!(Path.join(dir, "agent-g1.jsonl"), side_lines("g1", "c1"))
+      {:ok, t} = Transcripts.start_link(ctx.opts)
+
+      assert {:ok, %{failed: []}} = Transcripts.read(t, [{"a", "s1", ctx.path}])
+      assert {:ok, row} = Transcripts.session(t, "a", "s1")
+      assert %{agent_id: "g1", state: :open, description: "look"} = row.subagents["t1"]
+      assert [%{id: "c1", name: "Bash", ended_at: nil}] = row.agent_tools["g1"]
+      assert [%{name: "Agent"}] = row.tools
+      assert %{"g1" => %{tool_use_id: "t1", problem: nil}} = row.files
+      refute Map.has_key?(row.files["g1"], :seam)
+
+      # The call ends; a second subagent's file appears after the first read, one bad line in it.
+      File.write!(Path.join(dir, "agent-g1.jsonl"), side_result("g1", "c1") <> "\n", [:append])
+      File.write!(ctx.path, agent_call("m2", "t2") <> "\n", [:append])
+      File.write!(Path.join(dir, "agent-g2.meta.json"), meta("t2"))
+      File.write!(Path.join(dir, "agent-g2.jsonl"), side_lines("g2", "c2") <> "{cut\n")
+      assert {:ok, %{failed: []}} = Transcripts.read(t)
+      assert {:ok, row} = Transcripts.session(t, "a", "s1")
+      assert [%{id: "c1", ms: 1000}] = row.agent_tools["g1"]
+      assert %{agent_id: "g2"} = row.subagents["t2"]
+      assert [%{id: "c2"}] = row.agent_tools["g2"]
+      assert [%{file: "agent-g2.jsonl", reason: :not_json}] = row.problems
+
+      # A removed file is named gone; what was read of it stays, and the read goes on.
+      File.rm!(Path.join(dir, "agent-g1.jsonl"))
+      assert {:ok, %{failed: []}} = Transcripts.read(t)
+      assert {:ok, row} = Transcripts.session(t, "a", "s1")
+      assert %{"g1" => %{problem: "no_file"}, "g2" => %{problem: nil}} = row.files
+      assert [%{id: "c1"}] = row.agent_tools["g1"]
+
+      # One that comes back shorter is read again from its start.
+      File.write!(Path.join(dir, "agent-g1.jsonl"), side_lines("g1", "c9"))
+      assert {:ok, %{failed: []}} = Transcripts.read(t)
+      assert {:ok, row} = Transcripts.session(t, "a", "s1")
+      assert %{"g1" => %{problem: "rewritten"}} = row.files
+      assert [%{id: "c9"}] = row.agent_tools["g1"]
+    end
+
+    test "a subagent that finished before the first read is not read; a running one's first read is bounded",
+         ctx do
+      dir = Path.join([ctx.dir, "s1", "subagents"])
+      File.mkdir_p!(dir)
+      File.write!(ctx.path, agent_call("m1", "t1") <> "\n" <> agent_call("m2", "t2") <> "\n")
+      File.write!(Path.join(dir, "agent-g1.meta.json"), meta("t1", true))
+      File.write!(Path.join(dir, "agent-g1.jsonl"), side_lines("g1", "c1"))
+
+      # A running one with three calls, more than the bound: only the last part is read.
+      long = Enum.map_join(1..3, &side_lines("g2", "k#{&1}"))
+      File.write!(Path.join(dir, "agent-g2.meta.json"), meta("t2"))
+      File.write!(Path.join(dir, "agent-g2.jsonl"), long)
+      bound = byte_size(side_lines("g2", "k3")) + 10
+      {:ok, t} = Transcripts.start_link(Keyword.put(ctx.opts, :first_read, bound))
+
+      assert {:ok, %{failed: []}} = Transcripts.read(t, [{"a", "s1", ctx.path}])
+      assert {:ok, row} = Transcripts.session(t, "a", "s1")
+      assert %{agent_id: "g1"} = row.subagents["t1"]
+      assert %{"g1" => %{not_read: :finished, finished: true, offset: 0}} = row.files
+      refute Map.has_key?(row.agent_tools, "g1")
+
+      assert %{agent_id: "g2"} = row.subagents["t2"]
+      assert %{"g2" => %{partial: true, not_read: nil}} = row.files
+      assert row.files["g2"].offset == byte_size(long)
+      assert [%{id: "k3"}] = row.agent_tools["g2"]
+      assert row.problems == []
+
+      # The running one goes on from its offset; the finished one, grown, is still not read.
+      File.write!(Path.join(dir, "agent-g2.jsonl"), side_result("g2", "k3") <> "\n", [:append])
+      File.write!(Path.join(dir, "agent-g1.jsonl"), side_result("g1", "c1") <> "\n", [:append])
+      assert {:ok, %{failed: []}} = Transcripts.read(t)
+      assert {:ok, row} = Transcripts.session(t, "a", "s1")
+      assert [%{id: "k3", ms: 1000}] = row.agent_tools["g2"]
+      assert %{"g1" => %{not_read: :finished}} = row.files
+      refute Map.has_key?(row.agent_tools, "g1")
     end
 
     test "a text read from an offset takes at most the bound, and a read with none runs to the end",

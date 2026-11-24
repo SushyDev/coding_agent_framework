@@ -24,7 +24,11 @@ defmodule CodingAgentFramework.Tracker.Tree do
   - **A session on a startup dialog** (its row `dialog`, F-140) is `dialog`, never `idle`
     (`Sessions.Turn.interactive/3`), and `waits_on` names the dialog's kind and options (F-180).
   - Each agent's `transcript` is the path its transcript row holds, nil while there is none, and
-    its subagents (each with Claude Code's `agent_id`) are that transcript's.
+    its subagents (each with Claude Code's `agent_id`) are that transcript's. A subagent has its
+    `agent_id` from its start, from its own file's meta (F-237), and its `tool`, the newest
+    call of its own file not yet ended while it runs (`state` `:open` or `:background`);
+    `not_read` is `:finished` for one whose file was not read, it having ended before the
+    first read, and `partial` is true when the first read took only the file's last part.
   - **What it does now** (F-235): `tool`, the call it runs now (`%{name, id, started_at}`),
     the newest call its transcript started and has not ended while it is `working`, else nil;
     and `last_event_at`, the newer of its transcript's last entry and its newest `Intake` row
@@ -118,14 +122,28 @@ defmodule CodingAgentFramework.Tracker.Tree do
 
   defp activity(row, state, ev) do
     t = ev.transcripts[key(row)] || %{}
-    calls = if is_list(t[:tools]), do: t.tools, else: []
-    running = Enum.find(calls, &(is_map(&1) and is_nil(&1[:ended_at])))
 
     %{
-      tool: if(state == "working" and running, do: Map.take(running, [:name, :id, :started_at])),
+      tool: if(state == "working", do: open_call(t[:tools])),
       last_event_at: newer(int(t[:last_event_at]), ev.hooks[key(row)])
     }
   end
+
+  # A subagent runs a call while it has not ended, as an agent row does while it is `working`.
+  defp running(%{state: state, agent_id: agent}, tools)
+       when state in [:open, :background] and is_binary(agent),
+       do: open_call(tools[agent])
+
+  defp running(_subagent, _tools), do: nil
+
+  defp open_call(calls) when is_list(calls) do
+    case Enum.find(calls, &(is_map(&1) and is_nil(&1[:ended_at]))) do
+      nil -> nil
+      call -> Map.take(call, [:name, :id, :started_at])
+    end
+  end
+
+  defp open_call(_), do: nil
 
   # Each agent's newest `Intake` row, by `{account, session_id}`.
   defp hooks(entries) do
@@ -149,8 +167,9 @@ defmodule CodingAgentFramework.Tracker.Tree do
   ended_at, ms}` (`ended_at` and `ms` nil while it runs): an agent of the tree by name, or a
   subagent by its `agent_id`. Options: `limit:` (default 50; the transcript keeps at most 200
   per agent, `Transcripts.Fold`) and `host:` to choose among agents of one name on two hosts.
-  An agent with no transcript read yet has none. `{:refused, :unknown_agent}` for a name no
-  agent or subagent has, `{:refused, :ambiguous}` for one on two hosts with no `host:`.
+  An agent with no transcript read yet has none. `{:refused, {:not_read, :finished}}` for a
+  subagent whose file was not read because it had finished before its first read (F-237),
+  `{:refused, :unknown_agent}` for a name no agent or subagent has, `{:refused, :ambiguous}` for one on two hosts with no `host:`.
 
       iex> alias CodingAgentFramework.Tracker.Tree
       iex> m = %{id: 1, host: "h", name: "main", kind: "main", parent: nil, project: "app",
@@ -186,14 +205,22 @@ defmodule CodingAgentFramework.Tracker.Tree do
         {:refused, :ambiguous}
 
       [] ->
-        case for(
-               t <- Map.values(transcripts),
-               is_map(t[:agent_tools]),
-               c = t.agent_tools[agent],
-               do: c
-             ) do
-          [calls | _] -> {:ok, take(calls, limit)}
-          [] -> {:refused, :unknown_agent}
+        found =
+          for t <- Map.values(transcripts),
+              is_map(t[:agent_tools]),
+              c = t.agent_tools[agent],
+              do: c
+
+        skipped =
+          for t <- Map.values(transcripts),
+              is_map(t[:files]),
+              %{not_read: reason} when not is_nil(reason) <- [t.files[agent]],
+              do: reason
+
+        case {found, skipped} do
+          {[calls | _], _} -> {:ok, take(calls, limit)}
+          {[], [reason | _]} -> {:refused, {:not_read, reason}}
+          {[], []} -> {:refused, :unknown_agent}
         end
     end
   end
@@ -254,10 +281,21 @@ defmodule CodingAgentFramework.Tracker.Tree do
   defp word(:unread), do: "unread"
   defp word(_ended_idle_or_ending), do: "idle"
 
-  defp subagents(%{subagents: %{} = agents}) do
+  defp subagents(%{subagents: %{} = agents} = t) do
+    tools = if is_map(t[:agent_tools]), do: t.agent_tools, else: %{}
+    files = if is_map(t[:files]), do: t.files, else: %{}
+
     for(%{} = a <- Map.values(agents), do: a)
     |> Enum.sort_by(&{to_string(&1[:started_at]), to_string(&1[:tool_use_id])})
-    |> Enum.map(&Map.take(&1, @subagent))
+    |> Enum.map(fn a ->
+      file = if is_map(files[a[:agent_id]]), do: files[a[:agent_id]], else: %{}
+
+      Map.merge(Map.take(a, @subagent), %{
+        tool: running(a, tools),
+        not_read: file[:not_read],
+        partial: file[:partial] == true
+      })
+    end)
   end
 
   defp subagents(_), do: []

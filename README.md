@@ -428,6 +428,11 @@ Built, each from a checked model in `model/tla/`:
 - a dialog press holds on a loaded host (F-242): the tree's `Inlet` reads back at the config's
   `press_see` (10 s by default), each bound that waits on a press is derived from it, and a
   press whose pane closes ("No, exit") is answered as soon as the pane is gone.
+- a subagent's own transcript is read, so its tool calls show (F-237): `Transcripts` lists each
+  session's `subagents/` directory on every read and folds each file that changed; a running
+  subagent has its `agent_id` from its file's meta, and its own `tool` in the tree; a file
+  whose subagent finished before its first read is not read, and a first read takes at most
+  a file's last 1 MB.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

@@ -29,6 +29,17 @@ defmodule CodingAgentFramework.Transcripts do
       iex> {row.offset, hd(row.prompts).prompt_id}
       {59, "p1"}
 
+  **A subagent's own file** (F-237): Claude Code 2.1.322 writes each subagent's entries to
+  `<session id>/subagents/agent-<agent id>.jsonl` beside the transcript, and its
+  `agent-<agent id>.meta.json` with the parent's `Agent` call's id, both when it starts. Each
+  read lists that directory (one `wc -c` over its files), reads each file that changed from its
+  own stored offset, and folds it into the session's fold (`Fold.take_file/3`), so its calls are
+  in `agent_tools` under its agent id; a new file's meta gives the subagent's `agent_id` while
+  it runs. A file never read whose meta says `finished: true` is not read: its calls are absent
+  and its entry says `not_read: :finished`. The first read of a running one takes at most its
+  last `first_read:` bytes, from a whole line, and its entry says `partial: true`. A file that disappears keeps what was read of it, and its `files` entry says
+  `no_file`; a line of it the fold cannot read is a problem naming the file.
+
   A read whose shell fails leaves that session as it was and names it in `failed`. A file
   that shrank or was replaced is folded again from its start, and its row says `rewritten` and
   counts it in `rewrites`. After a write that changed an account's rows, or its first read,
@@ -42,6 +53,7 @@ defmodule CodingAgentFramework.Transcripts do
   alias CodingAgentFramework.Transcripts.{Fold, Table}
 
   @timeout 10_000
+  @first_read 1_048_576
   # `$2` is the host's tail, by its path from `Programs`; `-c +N` prints from byte N (POSIX).
   # With a bound (`$4`, bytes, and `$5`, the host's head) only that many bytes are read; a pipe
   # hides the tail's own status, so a file that cannot be read is refused before it; the tail's
@@ -52,13 +64,25 @@ defmodule CodingAgentFramework.Transcripts do
   printf 'file'
   if [ -n "$4" ]; then "$2" -c "+$3" "$1" 2>/dev/null | "$5" -c "$4"; else exec "$2" -c "+$3" "$1"; fi
   """
+  # `$1` is a session's `subagents/` directory, `$2` the host's wc. Each subagent's file with its
+  # size, in one run however many there are. A file removed between the glob and wc is left out
+  # (its complaint goes to /dev/null), so the reader sees it gone, as on its next read.
+  @list ~S"""
+  d="$1"; w="$2"
+  set -- "$d"/agent-*.jsonl
+  [ -f "$1" ] || { printf 'none'; exit 0; }
+  printf 'list\n'
+  "$w" -c -- "$@" 2>/dev/null
+  exit 0
+  """
 
   @doc """
-  Starts a `Transcripts`. Options: `programs:` (the host's, naming sh, tail and head),
+  Starts a `Transcripts`. Options: `programs:` (the host's, naming sh, tail, head and wc),
   `accounts:` (the names of the accounts it reads), `db:` (this instance's SQLite path), and
-  optionally `notify:` (a function of one cue), `timeout:` (ms per shell run, default 10 s) and
-  `interval:` (ms between reads of every known session; without it, reads happen only on
-  `read/3`). It fails to start with `{:no_program, names}`.
+  optionally `notify:` (a function of one cue), `timeout:` (ms per shell run, default 10 s),
+  `first_read:` (the bytes a subagent file's first read takes at most, from its end; default
+  1 MB) and `interval:` (ms between reads of every known session; without it, reads happen
+  only on `read/3`). It fails to start with `{:no_program, names}`.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -175,7 +199,7 @@ defmodule CodingAgentFramework.Transcripts do
   def init(opts) do
     %Programs{host: host} = programs = Keyword.fetch!(opts, :programs)
 
-    with {:ok, paths} <- Programs.take(programs, [:sh, :tail, :head]),
+    with {:ok, paths} <- Programs.take(programs, [:sh, :tail, :head, :wc]),
          {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)) do
       state = %{
         host: host,
@@ -183,7 +207,8 @@ defmodule CodingAgentFramework.Transcripts do
         db: db,
         folds: Table.folds(db, host.name),
         programs: paths,
-        timeout: Keyword.get(opts, :timeout, @timeout)
+        timeout: Keyword.get(opts, :timeout, @timeout),
+        first_read: Keyword.get(opts, :first_read, @first_read)
       }
 
       {:ok, Map.merge(state, Reader.loop(opts))}
@@ -293,8 +318,8 @@ defmodule CodingAgentFramework.Transcripts do
     case tail(state, s.path, Fold.read_from(s.fold)) do
       {:ok, bytes} ->
         case Fold.take(s.fold, bytes) do
-          {:ok, fold} -> {:ok, %{s | fold: fold, problem: nil}}
-          :rewritten -> again(state, s)
+          {:ok, fold} -> subagent_files(state, %{s | fold: fold, problem: nil})
+          :rewritten -> with {:ok, s} <- again(state, s), do: subagent_files(state, s)
         end
 
       :no_file when s.fold.offset == 0 ->
@@ -315,6 +340,150 @@ defmodule CodingAgentFramework.Transcripts do
     else
       :no_file -> {:ok, %{s | fold: Fold.new(), rewrites: s.rewrites + 1, problem: "no_file"}}
       other -> other
+    end
+  end
+
+  defp subagent_files(_state, %{problem: "no_file"} = s), do: {:ok, s}
+
+  defp subagent_files(state, s) do
+    dir = Path.join(Path.rootname(s.path), "subagents")
+
+    with {:ok, listed} <- list(state, dir),
+         {:ok, fold} <- read_files(state, dir, s.fold, listed) do
+      gone =
+        for {agent, f} <- fold.files,
+            f.problem != "no_file",
+            not is_map_key(listed, agent),
+            do: agent
+
+      {:ok, %{s | fold: Enum.reduce(gone, fold, &Fold.file_problem(&2, &1, "no_file"))}}
+    end
+  end
+
+  defp read_files(state, dir, fold, listed) do
+    Enum.reduce_while(Enum.sort(listed), {:ok, fold}, fn {agent, size}, {:ok, fold} ->
+      case read_file(state, dir, fold, agent, size) do
+        {:ok, fold} -> {:cont, {:ok, fold}}
+        other -> {:halt, other}
+      end
+    end)
+  end
+
+  # A new file's meta is read first, so a subagent that finished before the fold read its file
+  # is not read; one marked so is looked at again only once it grows. A file whose size is its
+  # offset has nothing new; a running one's meta is read again while it grows and names no
+  # call yet, so a meta not yet whole is tried again.
+  defp read_file(state, dir, fold, agent, size) do
+    path = Path.join(dir, "agent-#{agent}.jsonl")
+    meta = Path.join(dir, "agent-#{agent}.meta.json")
+
+    case fold.files[agent] do
+      %{not_read: :finished, size: ^size} ->
+        {:ok, fold}
+
+      known when known == nil or known.not_read == :finished ->
+        with {:ok, fold} <- meta(state, meta, fold, agent),
+             do: first(state, path, fold, agent, size)
+
+      known ->
+        with {:ok, fold} <- grow(state, path, fold, agent, size) do
+          if size != known.offset and fold.files[agent].tool_use_id == nil,
+            do: meta(state, meta, fold, agent),
+            else: {:ok, fold}
+        end
+    end
+  end
+
+  defp first(state, path, fold, agent, size) do
+    if match?(%{finished: true}, fold.files[agent]),
+      do: {:ok, Fold.skip_file(fold, agent, size)},
+      else: bounded(state, path, fold, agent, size)
+  end
+
+  # At most the file's last `first_read` bytes, as `text/5`'s `{:last, n}` reads the main file's
+  # last part; from one byte before them, so a line that starts at the bound is kept whole.
+  defp bounded(state, path, fold, agent, size) do
+    from = max(size - state.first_read - 1, 0)
+
+    case tail(state, path, from) do
+      {:ok, bytes} -> Fold.take_file_from(fold, agent, from, bytes)
+      :no_file -> {:ok, Fold.file_problem(fold, agent, "no_file")}
+      other -> other
+    end
+  end
+
+  defp grow(state, path, fold, agent, size) do
+    case fold.files[agent] do
+      # One that was gone is read through its seam, so a file made again at the same size is
+      # still found to be another.
+      %{offset: ^size, problem: problem} when problem != "no_file" ->
+        {:ok, fold}
+
+      _ ->
+        case tail(state, path, Fold.file_read_from(fold, agent)) do
+          {:ok, bytes} ->
+            case Fold.take_file(fold, agent, bytes) do
+              {:ok, fold} -> {:ok, fold}
+              :rewritten -> grow_again(state, path, fold, agent, size)
+            end
+
+          :no_file ->
+            {:ok, Fold.file_problem(fold, agent, "no_file")}
+
+          other ->
+            other
+        end
+    end
+  end
+
+  defp grow_again(state, path, fold, agent, size) do
+    with {:ok, fold} <- bounded(state, path, Fold.restart_file(fold, agent), agent, size) do
+      if fold.files[agent].problem == "no_file",
+        do: {:ok, fold},
+        else: {:ok, Fold.file_problem(fold, agent, "rewritten")}
+    end
+  end
+
+  defp meta(state, path, fold, agent) do
+    case tail(state, path, 0) do
+      {:ok, bytes} ->
+        case Fold.file_meta(fold, agent, bytes) do
+          {:ok, fold} -> {:ok, fold}
+          :unreadable -> {:ok, fold}
+        end
+
+      :no_file ->
+        {:ok, fold}
+
+      other ->
+        other
+    end
+  end
+
+  # `%{agent_id => bytes}` of each `agent-<id>.jsonl` in `dir`; none without the directory.
+  defp list(state, dir) do
+    case Shell.run(state.host, state.programs.sh, ["-c", @list, "sh", dir, state.programs.wc],
+           timeout: state.timeout
+         ) do
+      {:ok, %{status: 0, output: "none"}} ->
+        {:ok, %{}}
+
+      {:ok, %{status: 0, output: "list\n" <> out}} ->
+        sizes =
+          for line <- String.split(out, "\n", trim: true),
+              [size, file] <- [String.split(String.trim_leading(line), " ", parts: 2)],
+              [_, agent] <- [Regex.run(~r/^agent-(.+)\.jsonl$/, Path.basename(file))],
+              {n, ""} <- [Integer.parse(size)],
+              into: %{},
+              do: {agent, n}
+
+        {:ok, sizes}
+
+      {:ok, %{status: status, output: out}} ->
+        {:unknown, {:sh, status, String.slice(out, 0, 200)}}
+
+      other ->
+        other
     end
   end
 
