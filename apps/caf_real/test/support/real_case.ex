@@ -14,6 +14,7 @@ defmodule CodingAgentFramework.RealCase do
   """
 
   use ExUnit.CaseTemplate
+  require ExUnit.Assertions
 
   alias CodingAgentFramework.Example.{ConfigFile, Run}
   alias CodingAgentFramework.{Operator, TestHost}
@@ -263,6 +264,136 @@ defmodule CodingAgentFramework.RealCase do
       ms,
       name
     )
+  end
+
+  @doc """
+  Agent `name`'s whole pane as `capture-pane` reads it, plain or with its escapes (`escapes:
+  true`), blank lines kept: the shape a `caf_screen` fixture's `.txt` and `.ansi` have.
+  """
+  def capture(ctx, name, escapes \\ false) do
+    flags = if escapes, do: ["-p", "-e"], else: ["-p"]
+    {out, _} = tmux(ctx, ["capture-pane" | flags] ++ ["-t", "=#{name}:"])
+    out
+  end
+
+  defp tmux(ctx, args) do
+    args = ["-S", Path.join(ctx.home, "tmux.sock") | args]
+    System.cmd(TestHost.program!(:tmux), args, stderr_to_stdout: true)
+  end
+
+  @doc """
+  The suite's records folder (F-239): `records` in the setup's home, as `docs/e2e.md`'s step 0
+  keeps a run's readings in a folder of their own. Made when first written.
+  """
+  def records_dir, do: Path.join(setup_dir(), "records")
+
+  @doc """
+  Writes agent `name`'s pane into the records folder as `<project>-<what>.txt` (plain) and
+  `<project>-<what>.ansi` (with escapes), and `note` with the pane's width as
+  `<project>-<what>.meta`. Answers the plain file's path. A real screen no fixture had yet
+  becomes one from these.
+
+      record_screen!(ctx, ctx.main, "reload-1", "answer: {:ok, %{done: :reloaded}}")
+  """
+  def record_screen!(ctx, name, what, note \\ "") do
+    dir = records_dir()
+    File.mkdir_p!(dir)
+    base = Path.join(dir, "#{ctx.project}-#{what}")
+    {width, _} = tmux(ctx, ["display-message", "-p", "-t", "=#{name}:", "\#{pane_width}"])
+    File.write!(base <> ".txt", capture(ctx, name))
+    File.write!(base <> ".ansi", capture(ctx, name, true))
+    File.write!(base <> ".meta", "agent: #{name}\nwidth: #{String.trim(width)}\n#{note}\n")
+    base <> ".txt"
+  end
+
+  @doc """
+  Runs `fun`, one step of a test, and answers its value. An assertion that fails in it names
+  the step first, so a failed real run says where it stopped.
+
+      step("4, the trust dialog", fn -> answer_trust(ctx, name) end)
+  """
+  def step(name, fun) do
+    fun.()
+  rescue
+    e in ExUnit.AssertionError ->
+      reraise %{e | message: "step #{name}: #{e.message}"}, __STACKTRACE__
+  end
+
+  @doc """
+  Answers the startup dialog agent `name`'s start waits on (the trust dialog, in a folder the
+  account has not seen) from the inbox with its trusting label. None may come, as the account
+  may trust the folder already. Answers the prompt's id, or `:none`.
+  """
+  def answer_trust(ctx, name) do
+    case await_some(fn -> prompts(ctx, agent: name, kind: "dialog") end, 20_000) do
+      [%{id: id, options: options}] ->
+        label = Enum.find(options, &(&1 =~ ~r/trust/i))
+        ExUnit.Assertions.assert({:ok, _} = answer(ctx, id, label))
+        id
+
+      [] ->
+        :none
+    end
+  end
+
+  @doc """
+  `docs/e2e.md`'s steps 1 and 2: waits until the project's checkout is ready on `main` (a
+  start is refused `{:checkout, "cloning"}` before), then starts the run's main session on
+  `model` with `brief`, answers its trust dialog from the inbox, and waits until it is idle
+  with `reply` (a pattern) on its screen. Each wait has its own bound, and a failure names
+  the step.
+  """
+  def start_main!(ctx, brief, model, reply) do
+    # A start refuses a checkout still cloning, so step 1's ready comes first, bounded.
+    step("1, the checkout is ready", fn ->
+      await!(
+        ctx,
+        "the checkout",
+        fn ->
+          case CodingAgentFramework.Mains.checkout(Run.parts(ctx.run).mains, ctx.project) do
+            {:ok, %{branch: "main"} = r} -> {:ok, r}
+            other -> {:not_yet, other}
+          end
+        end,
+        120_000
+      )
+    end)
+
+    step("2, the main session starts", fn ->
+      main = ctx.main
+
+      ExUnit.Assertions.assert(
+        op(ctx, :start_main, [ctx.project, main, brief, model]) in [
+          {:ok, %{main: main}},
+          {:unknown, {:dialog, :trust}}
+        ]
+      )
+
+      answer_trust(ctx, main)
+      await_state!(ctx, main, "idle", 180_000)
+      await_screen!(ctx, main, reply, 60_000)
+    end)
+  end
+
+  @doc """
+  `docs/e2e.md`'s step 14 for a run with no delegate left: the main session ends, and reads
+  `ended`. The exit hook ends what a failed run left; a passed run ends it here.
+  """
+  def end_main!(ctx) do
+    step("14, the main session ends", fn ->
+      ExUnit.Assertions.assert({:ok, _} = op(ctx, :end_main, [ctx.main]))
+      ExUnit.Assertions.assert(%{state: "ended"} = agent(ctx, ctx.main, true))
+    end)
+  end
+
+  @doc """
+  Allows every permission request of agent `name` open now, from the inbox. Answers the ids it
+  answered, so a test can check its parent was told of each.
+  """
+  def allow_all(ctx, name) do
+    for %{id: id, status: "open"} <- prompts(ctx, agent: name, kind: "permission"),
+        match?({:ok, _}, answer(ctx, id, "allow")),
+        do: id
   end
 
   @doc "The prompts open now, narrowed as `CodingAgentFramework.prompts/2` narrows them."

@@ -116,19 +116,6 @@ defmodule CodingAgentFramework.Real.MainAndDelegateTest do
     assert %{state: "ended"} = agent(ctx, ctx.main, true)
   end
 
-  # A startup dialog the start meets (the trust dialog, in a folder the account has not seen):
-  # answered from the inbox with its trusting label; none may come.
-  defp answer_trust(ctx, agent) do
-    case await_some(fn -> prompts(ctx, agent: agent, kind: "dialog") end, 20_000) do
-      [%{id: id, options: options}] ->
-        label = Enum.find(options, &(&1 =~ ~r/trust/i))
-        assert {:ok, _} = answer(ctx, id, label)
-
-      [] ->
-        :none
-    end
-  end
-
   # An ask's options are its questions; the first question's own options carry the labels.
   defp labels(%{options: [%{"options" => options} | _]}), do: Enum.map(options, & &1["label"])
 end
