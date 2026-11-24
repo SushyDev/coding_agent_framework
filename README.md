@@ -405,6 +405,9 @@ Built, each from a checked model in `model/tla/`:
   result line; each reload is an act in `Acts`, and a headless delegate is refused.
 - the tree shows each agent's tool calls, and the one it runs now (F-235): read from its
   transcript, with no hook post per call; `Tracker.tool_calls/3` answers the recent ones.
+- the interactive stand-in makes its own `sessions/`, answers `auth status` and writes 2.1.322's
+  session file as its screen changes, so a test runs a main session on the whole example tree
+  (F-232).
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

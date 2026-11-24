@@ -8,18 +8,23 @@ defmodule CodingAgentFramework.ScreenStandIn do
     Enter (an empty box is `❯` and a no-break space);
   - at Enter it appends the box's text, as one line, to `<dir>/submitted` (`submitted/2`), and
     runs a turn that ends at once: its session file says `busy`, then `idle`;
-  - started with `--screen running`, it draws `turn-running`'s screen until Escape, which ends
-    the turn: it writes `<dir>/interrupted` and draws the idle screen;
+  - started with `--screen running`, it draws `turn-running`'s screen, its session file `busy`,
+    until Escape, which ends the turn: it writes `<dir>/interrupted`, says `idle` and draws the
+    idle screen;
   - started with `--screen limit_wait`, it draws `usage-limit-wait`'s screen, Claude Code's own
     wait at a usage limit, and takes no key; its session file says `busy`, since what 2.1.322's
     says during the wait was never measured (F-191), so only the screen tells the wait;
   - started with `--screen menu`, or written with `menu: true`, it draws the `menu` fixture's screen (F-198), a menu no rule
-    names above the box, its marker on its first option, its session file `idle`. Down and Up
-    move the marker; Enter answers its option and a lone Escape `esc`, each written to
-    `<dir>/menu` (`menu_answer/1`), and the idle screen is drawn after;
+    names above the box, its marker on its first option, its session file `waiting` with
+    `waitingFor` `dialog open`, as 2.1.322's says while its exit dialog is open (F-232). Down
+    and Up move the marker; Enter answers its option and a lone Escape `esc`, each written to
+    `<dir>/menu` (`menu_answer/1`), and the idle screen is drawn after, the file `idle`;
   - started with `--screen ask`, it draws the `ask-question` fixture's screen (F-230), Claude
-    Code's own question in the box's place, its marker on its first of four options, and takes
-    keys as the menu does: Enter writes its option's number as drawn to `<dir>/menu`;
+    Code's own question in the box's place, its marker on its first of four options, its
+    session file `waiting` as the menu's, and takes keys as the menu does: Enter writes its
+    option's number as drawn to `<dir>/menu`;
+  - `auth status` answers a logged-in login, as `HeadlessStandIn` does, so a whole tree's login
+    check passes before a start;
   - `--version` prints the release as Claude Code does (`2.1.322 (Claude Code)`) and exits;
   - the argument after `--` is the start's prompt, run as its first turn: written to
     `<dir>/prompts/<pid>` (`prompts/1`), its session file `busy`, then `idle`;
@@ -47,10 +52,13 @@ defmodule CodingAgentFramework.ScreenStandIn do
   - its arguments, one to a line, go to `<dir>/argv/<pid>` (`argvs/1`), so a test reads the
     launch line a start gave it, as `HeadlessStandIn.argv/2` does for a headless delegate.
 
-  Started by `Sessions` (`CLAUDE_CONFIG_DIR` set), it writes its session file as
-  `CodingAgentFramework.ClaudeStandIn` does, once its startup dialogs are answered (2.1.322
-  writes none while one is shown, F-140), and records its pid in `<dir>/pids/`. It exits after
-  `idle` seconds with no key.
+  Started by `Sessions` (`CLAUDE_CONFIG_DIR` set), it writes its session file,
+  `<CLAUDE_CONFIG_DIR>/sessions/<pid>.json`, once its startup dialogs are answered (2.1.322
+  writes none while one is shown, F-140), making `sessions/` as Claude Code does, and removes
+  it when it exits. The file has 2.1.322's shape in the fields the framework reads (`pid`,
+  `sessionId`, `cwd`, `startedAt`, `procStart`, `kind`, `name`, `status`, `updatedAt`, and
+  `waitingFor` while a dialog is drawn) plus `version`. Written with `session_file: false`, it
+  writes none. It records its pid in `<dir>/pids/`, and exits after `idle` seconds with no key.
   """
 
   import CodingAgentFramework.TestHost, only: [program!: 1, stand_in_idle: 0]
@@ -135,12 +143,15 @@ defmodule CodingAgentFramework.ScreenStandIn do
     suffix = Enum.map_join(dialogs, &"-#{&1}") <> if(opts[:transcript], do: "-tx", else: "")
     suffix = suffix <> if(opts[:menu], do: "-menu", else: "")
     suffix = suffix <> if(reloaded == "", do: "-silent", else: "")
+    session_file = if Keyword.get(opts, :session_file, true), do: "1", else: ""
+    suffix = suffix <> if(session_file == "", do: "-nofile", else: "")
     path = Path.join(dir, "claude-screen#{suffix}-#{release}")
     tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
+    dialogs = Enum.join(dialogs, " ")
 
     File.write!(
       tmp,
-      script(dir, screens, release, idle, Enum.join(dialogs, " "), {transcript, reloaded}, first)
+      script(dir, screens, {release, idle, dialogs, transcript, first, session_file, reloaded})
     )
 
     File.chmod!(tmp, 0o755)
@@ -254,9 +265,13 @@ defmodule CodingAgentFramework.ScreenStandIn do
   defp width(screens),
     do: screens |> Path.join("rule") |> File.read!() |> String.trim() |> String.length()
 
-  defp script(dir, screens, release, idle, dialogs, {transcript, reloaded}, first) do
+  defp script(dir, screens, {release, idle, dialogs, transcript, first, session_file, reloaded}) do
     ~s"""
     #!#{program!(:bash)}
+    # The login check a whole tree runs before a start, answered as `HeadlessStandIn` does.
+    if [ "$1 $2" = "auth status" ]; then
+      printf '{"loggedIn": true, "authMethod": "stand_in", "loginExpiresAt": null}\\n'; exit 0
+    fi
     name='' resume='' screen=#{first} sel=1 prompt='' dialogs='#{dialogs}' choice=no transcript='#{transcript}'
     reloaded='#{reloaded}' shown=''
     given=$(printf '%s\\n' "$@")
@@ -275,14 +290,24 @@ defmodule CodingAgentFramework.ScreenStandIn do
     [ $# -gt 0 ] && screen=$1
     : 2>/dev/null > "#{dir}/pids/$$" || exit 0
     printf '%s\\n' "$given" 2>/dev/null > "#{dir}/argv/$$"
-    file="${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/sessions/$$.json}"
+    file=''
+    [ -n "#{session_file}" ] && file="${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/sessions/$$.json}"
+    # Epoch milliseconds, as the real file's `startedAt` and `updatedAt` are.
+    ms() { local t=${EPOCHREALTIME/./}; printf '%s' "${t:0:13}"; }
+    started=$(ms)
+    # The session file in 2.1.322's shape, the fields the framework reads and `version`;
+    # `waitingFor` only with status `waiting`, as the real one writes it while a dialog is open.
+    # Its directory is made here, as Claude Code makes it: no one else does in a whole tree.
     announce() {
       [ -n "$file" ] || return 0
       start=$(LC_ALL=C TZ=UTC #{program!(:ps)} -o lstart= -p $$)
       start=${start#"${start%%[![:space:]]*}"}
       start=${start%"${start##*[![:space:]]}"}
-      printf '{"pid": %d, "sessionId": "%s", "name": "%s", "cwd": "%s", "procStart": "%s", "status": "%s"}' \\
-        $$ "${resume:-stand-in-$$}" "$name" "$PWD" "$start" "$1" > "$file.tmp"
+      waiting=''
+      [ "$1" = waiting ] && waiting=', "waitingFor": "dialog open"'
+      #{program!(:mkdir)} -p "${file%/*}"
+      printf '{"pid": %d, "sessionId": "%s", "cwd": "%s", "startedAt": %s, "procStart": "%s", "version": "%s", "kind": "interactive", "name": "%s", "status": "%s", "updatedAt": %s%s}' \\
+        $$ "${resume:-stand-in-$$}" "$(json "$PWD")" "$started" "$start" '#{release}' "$(json "$name")" "$1" "$(ms)" "$waiting" > "$file.tmp"
       #{program!(:mv)} -f "$file.tmp" "$file"
     }
     # The rule above the box: the fixture's, or with --name the name in it, as 2.1.322 draws it.
@@ -336,21 +361,24 @@ defmodule CodingAgentFramework.ScreenStandIn do
     # stand-in, in its box, as Claude Code draws it, and the terminal shows nothing else.
     #{program!(:stty)} -echo -icanon min 1
     # Past the startup dialogs: the session file, then the start's prompt as the first turn.
+    # `busy` comes before the prompt's file, so a test that has seen the prompt knows the file's
+    # next `idle` is the turn's end, not the one before it.
     first() {
       announce idle
       [ -n "$prompt" ] || return 0
+      announce busy
       printf '%s' "$prompt" > "#{dir}/prompts/$$"
       tx
-      announce busy
       announce idle
     }
     box=''
     [ $screen = idle ] && first
-    [ $screen = running ] && announce idle
+    [ $screen = running ] && announce busy
     [ $screen = limit_wait ] && announce busy
-    # A menu among the startup dialogs is shown before the session file; a running one after it.
-    [ $screen = menu ] && [ $# -eq 0 ] && announce idle
-    [ $screen = ask ] && announce idle
+    # A menu among the startup dialogs is shown before the session file; a running one after it,
+    # which says `waiting` while it is drawn, as Claude Code's own question does.
+    [ $screen = menu ] && [ $# -eq 0 ] && announce waiting
+    [ $screen = ask ] && announce waiting
     last=3; [ $screen = ask ] && last=4
     draw
     while IFS= read -r -N1 -t #{idle} key; do
@@ -377,6 +405,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
             if [ $# -gt 0 ]; then screen=$1; else screen=idle; first; fi
           else
             screen=idle
+            announce idle
           fi
         fi
       elif [ $screen = trust ] || [ $screen = imports ]; then

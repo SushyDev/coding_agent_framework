@@ -309,10 +309,74 @@ defmodule CodingAgentFramework.InletTest do
     assert ScreenStandIn.submitted(ctx.dir) == ["/reload-plugins"]
   end
 
-  defp open(ctx, name, args \\ [], state \\ nil) do
-    script = ScreenStandIn.write!(ctx.dir)
+  # F-232: the stand-in's session file, in 2.1.322's shape, follows its screen, and goes when it
+  # exits; written with `session_file: false` it writes none.
+  test "the stand-in's session file says what its screen shows, and goes when it exits", ctx do
+    config = Path.join(ctx.dir, "config")
+    sessions = Path.join(config, "sessions")
+    started = System.system_time(:millisecond)
+
+    file = fn ->
+      with {:ok, [f]} <- File.ls(sessions),
+           {:ok, bytes} <- File.read(Path.join(sessions, f)),
+           {:ok, json} <- JSON.decode(bytes),
+           do: {:ok, json}
+    end
+
+    status = fn s ->
+      await(fn ->
+        case file.() do
+          {:ok, %{"status" => ^s}} = ok -> ok
+          other -> {:not_yet, other}
+        end
+      end)
+    end
+
+    open(ctx, "alpha", ["--screen", "menu"], :dialog, config: config)
+    assert {:ok, json} = status.("waiting")
+
+    assert %{"pid" => pid, "sessionId" => "stand-in-" <> _, "kind" => "interactive"} = json
+    assert %{"version" => @release, "waitingFor" => "dialog open", "procStart" => _} = json
+    assert %{"cwd" => _, "startedAt" => at, "updatedAt" => up} = json
+    assert at >= started and up >= at
+
+    {:ok, pane} = pane(ctx, "alpha")
+    assert {:ok, :sent} = Tmux.write(ctx.server, pane, "alpha", {:keys, ["Enter"]})
+    assert {:ok, json} = status.("idle")
+    refute Map.has_key?(json, "waitingFor")
+
+    kill(pid)
+    assert {:ok, []} = await(fn -> if File.ls(sessions) == {:ok, []}, do: {:ok, []} end)
+
+    open(ctx, "beta", ["--screen", "running"], nil, config: config, session_file: false)
+    assert File.ls(sessions) == {:ok, []}
+  end
+
+  defp open(ctx, name, args \\ [], state \\ nil, opts \\ []) do
+    script =
+      ScreenStandIn.write!(
+        ctx.dir,
+        @release,
+        stand_in_idle(),
+        Keyword.take(opts, [:session_file])
+      )
+
+    script = if config = opts[:config], do: with_config(script, config), else: script
     {:ok, _} = Tmux.new_session(ctx.server, name, [script | args], size: {120, 40})
     {:ok, _} = screen(ctx, name, &(&1.state in if(state, do: [state], else: [:idle, :running])))
+  end
+
+  # The stand-in run with `CLAUDE_CONFIG_DIR` set, as `Sessions` starts it.
+  defp with_config(script, config) do
+    path = "#{script}-#{System.unique_integer([:positive])}"
+
+    File.write!(
+      path,
+      "#!#{program!(:bash)}\nCLAUDE_CONFIG_DIR='#{config}' exec '#{script}' \"$@\"\n"
+    )
+
+    File.chmod!(path, 0o755)
+    path
   end
 
   defp pane(ctx, name) do
