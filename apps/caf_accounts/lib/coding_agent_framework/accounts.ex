@@ -98,7 +98,9 @@ defmodule CodingAgentFramework.Accounts do
   `:mcp_servers` (a map of server name to its config) and `:programs` (the host's `Programs`,
   for the status line command, which needs its sh and cat) and `:intake` (`%{port: port, secret:
   secret}`, and `tools:`, the tool callbacks the app gives `Intake`: the http hooks of
-  `CodingAgentFramework.Intake.hooks/4`, after any `:hooks` of the same event), each optional. A file is written whole to a temporary name and renamed, so a
+  `CodingAgentFramework.Intake.hooks/4`, after any `:hooks` of the same event, and with
+  `:session_start` the command hook of `CodingAgentFramework.Intake.start_hook/4`, which needs
+  `:programs`' sh and curl), each optional. A file is written whole to a temporary name and renamed, so a
   launch never reads half of one.
 
   Returns `{:ok, account}` (see `ready/2`), or `{:refused, reason}` for an unknown account or
@@ -107,10 +109,10 @@ defmodule CodingAgentFramework.Accounts do
   @spec prepare(t, String.t(), map) :: {:ok, Account.t()} | {:refused, term} | {:unknown, term}
   def prepare(%__MODULE__{} = accounts, name, data) when is_map(data) do
     settings = Map.get(data, :settings, %{})
-    hooks = intake_hooks(Map.get(data, :hooks), name, Map.get(data, :intake))
-    settings = if hooks, do: Map.put(settings, "hooks", hooks), else: settings
 
-    with {:ok, dir} <- config_dir(accounts, name),
+    with {:ok, hooks} <- intake_hooks(data, name),
+         settings = if(hooks, do: Map.put(settings, "hooks", hooks), else: settings),
+         {:ok, dir} <- config_dir(accounts, name),
          account = Account.at(name, dir),
          {:ok, line} <- status_line(accounts, name, dir, Map.get(data, :programs)),
          settings = Map.merge(settings, line.settings),
@@ -228,12 +230,37 @@ defmodule CodingAgentFramework.Accounts do
     end
   end
 
-  # Intake's http hooks go after any the caller gives for the same event.
-  defp intake_hooks(hooks, _name, nil), do: hooks
+  # Intake's hooks go after any the caller gives for the same event.
+  defp intake_hooks(data, name) do
+    hooks = Map.get(data, :hooks)
 
-  defp intake_hooks(hooks, name, %{port: port, secret: secret} = intake) do
-    ours = Intake.hooks(port, name, secret, Map.get(intake, :tools, []))
-    Map.merge(hooks || %{}, ours, fn _, own, ours -> own ++ ours end)
+    case Map.get(data, :intake) do
+      nil ->
+        {:ok, hooks}
+
+      %{port: port, secret: secret} = intake ->
+        tools = Map.get(intake, :tools, [])
+
+        with {:ok, start} <- start_hook(port, name, secret, tools, Map.get(data, :programs)) do
+          ours = Map.merge(Intake.hooks(port, name, secret, tools), start)
+          {:ok, Map.merge(hooks || %{}, ours, fn _, own, ours -> own ++ ours end)}
+        end
+    end
+  end
+
+  # Only an app that takes a session's start has the start's command hook (F-236).
+  defp start_hook(port, name, secret, tools, programs) do
+    cond do
+      :session_start not in tools ->
+        {:ok, %{}}
+
+      programs == nil ->
+        {:refused, {:no_program, [:sh, :curl]}}
+
+      true ->
+        with {:ok, paths} <- Programs.take(programs, [:sh, :curl]),
+             do: Intake.start_hook(port, name, secret, paths)
+    end
   end
 
   defp status_line(_accounts, _name, _dir, nil), do: {:ok, %{settings: %{}, dirs: [], files: []}}

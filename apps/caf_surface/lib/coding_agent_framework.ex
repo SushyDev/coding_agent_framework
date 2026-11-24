@@ -829,7 +829,8 @@ defmodule CodingAgentFramework do
          heavy = Runs.pre_tool_use(w.runs, hooks[:pre_tool_use])
          pre = Mover.pre_tool_use(w.agents, Intake.Background.pre_tool_use(heavy))
 
-         tools = [pre_tool_use: pre] ++ Map.to_list(Map.take(hooks, [:post_tool_use, :stop]))
+         others = Map.take(hooks, [:post_tool_use, :stop, :session_start])
+         tools = [pre_tool_use: pre] ++ Map.to_list(others)
 
          agent = &Sessions.Agents.by_session(w.agents, &1, &2)
          # A pause per project reads the agent row's project.

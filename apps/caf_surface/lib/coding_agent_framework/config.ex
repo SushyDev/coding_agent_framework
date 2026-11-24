@@ -710,7 +710,7 @@ defmodule CodingAgentFramework.Config do
       iex> CodingAgentFramework.Config.hooks(c)
       []
   """
-  @spec hooks(t) :: [:pre_tool_use | :post_tool_use | :stop]
+  @spec hooks(t) :: [:pre_tool_use | :post_tool_use | :stop | :session_start]
   def hooks(%__MODULE__{tool_hooks: nil}), do: []
   def hooks(%__MODULE__{tool_hooks: {module, _opts}}), do: ToolHooks.implemented(module)
 

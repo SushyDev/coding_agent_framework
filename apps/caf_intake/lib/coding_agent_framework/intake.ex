@@ -16,7 +16,7 @@ defmodule CodingAgentFramework.Intake do
 
   and `CodingAgentFramework.Accounts.prepare/3` with `intake: %{port: 4790, secret: secret}`
   writes the hooks that post there (`hooks/4`), with `tools: [:pre_tool_use]` for each tool
-  callback the app gives. The secret is the home's, kept across starts (`secret/1`), so a
+  callback the app gives, and with `:session_start` the start's command hook (`start_hook/4`). The secret is the home's, kept across starts (`secret/1`), so a
   session held across a restart still posts with the one the plug takes.
 
   - An event's row is written, then the plug answers 200 with an empty body. A second post of
@@ -66,6 +66,17 @@ defmodule CodingAgentFramework.Intake do
     no callback a `PostToolUse` has no row.
   - A tool call's row keeps `data` empty until a decision is taken: `Transcripts` holds the
     tool's input and output.
+  - `SessionStart` (F-236), with the app's `session_start:` callback: each start is held and the
+    callback asked, in a process of its own, with `tool_deadline:` as a tool call's. `{:context,
+    text}` answers `hookSpecificOutput.additionalContext`, at most 10,000 characters as
+    `PreToolUse`'s, and the model reads it with the session's first prompt; `:pass`, anything
+    else, a crash or the deadline is an empty body. A context out of shape is a pass whose row's
+    `problem` names it, as `PreToolUse`'s does. Claude Code 2.1.322 runs no `http` hook on
+    `SessionStart`, so the post comes from a `command` hook (`start_hook/4`) that prints the
+    response, and without the callback there is none. Each start is a hold of its own (a session
+    starts again at each resume, clear and compact). Measured on 2.1.322 with a command hook:
+    the model reads the context headless and in an interactive start in a trusted folder, but
+    not when the start waited on the trust dialog.
   - `Stop` (`model/tla/Intake.tla`'s HS), with the app's `stop:` callback: each turn's end is
     held and the callback decides it, `:pass` (the turn ends) or `{:block, reason}` (the agent
     goes on, told the reason; a reason that is not UTF-8 is a pass whose row's `problem` is
@@ -111,7 +122,14 @@ defmodule CodingAgentFramework.Intake do
   @beat 5_000
   # How long past a kind's deadline the plug waits, if the `Intake` stops answering: a
   # PreToolUse's deadline is at most 8 s under the hook's 10 s timeout.
-  @margins %{permission: 5_000, tool: 1_500, post_tool: 1_500, waiter: 5_000, stop: 5_000}
+  @margins %{
+    permission: 5_000,
+    tool: 1_500,
+    post_tool: 1_500,
+    start: 1_500,
+    waiter: 5_000,
+    stop: 5_000
+  }
   # A secret goes into a curl config file between double quotes, so it keeps to these.
   @secret_chars ~r/\A[A-Za-z0-9._~+\/=-]{1,256}\z/
   @timeout 5_000
@@ -152,6 +170,20 @@ defmodule CodingAgentFramework.Intake do
           input: map
         }
 
+  @typedoc """
+  A session's start, as the `session_start:` callback gets it: the agent (`nil` when the
+  `agent:` lookup knows none), its account and session, `cwd` (the input's, or `nil`, as a tool
+  event's) and `source`, why the session started: `"startup"`, `"resume"`, `"clear"` or
+  `"compact"`, as Claude Code posted it.
+  """
+  @type start_event :: %{
+          agent: String.t() | nil,
+          account: String.t(),
+          session_id: String.t(),
+          cwd: String.t() | nil,
+          source: String.t()
+        }
+
   @typedoc "What a pause does to a held `Stop`: hold it until lifted, or answer it at once."
   @type pause_how :: :hold | :pass | {:block, String.t()}
 
@@ -164,7 +196,8 @@ defmodule CodingAgentFramework.Intake do
   `{:deny, reason, additional_context: text}`),
   `post_tool_use:` (`fun(tool_event) -> :pass | {:replace, response} | {:context, text} |
   {:replace, response, context: text}`, `response` a map of the tool's response shape),
-  `tool_deadline:` (ms each of the two is waited for, under 8.5 s),
+  `session_start:` (`fun(start_event) -> :pass | {:context, text}`),
+  `tool_deadline:` (ms each of the three is waited for, under 8.5 s),
   `waiter_deadline:` (ms a waiter is held, under the waiter hook's
   `timeout`; 7,080,000 by default, under `waiter_hook/5`'s 7,200 s), `beat:` (ms between a
   waiter's heartbeats, 5,000 by default), `agent:` (`fun(account, session_id) -> name | nil`,
@@ -186,7 +219,8 @@ defmodule CodingAgentFramework.Intake do
 
   @doc """
   The settings' `hooks` for `account`: an `http` hook per event of `Event.names/0`, and one for
-  each tool callback named in `tools` (`:pre_tool_use`, `:post_tool_use`), posting to this
+  each tool callback named in `tools` (`:pre_tool_use`, `:post_tool_use`; `:session_start`'s is
+  `start_hook/4`'s command, not one of these), posting to this
   host's port with the secret in the `x-caf-secret` header. PermissionRequest waits 600 s and
   the rest 10 s, which also raises SessionEnd's shared 1.5 s budget: `PreToolUse` and
   `PostToolUse` wait 10 s, over `tool_deadline:` and the plug's margin. With `:stop` (the
@@ -207,12 +241,13 @@ defmodule CodingAgentFramework.Intake do
       600
   """
   @spec hooks(:inet.port_number(), String.t(), String.t(), [
-          :pre_tool_use | :post_tool_use | :stop
+          :pre_tool_use | :post_tool_use | :stop | :session_start
         ]) :: map
   def hooks(port, account, secret, tools \\ []) do
     long = ["PermissionRequest" | if(:stop in tools, do: ["Stop"], else: [])]
+    http = Enum.map(tools -- [:session_start], &Map.fetch!(@tools, &1))
 
-    Map.new(Event.names() ++ Enum.map(tools, &Map.fetch!(@tools, &1)), fn name ->
+    Map.new(Event.names() ++ http, fn name ->
       hook = %{
         "type" => "http",
         "url" => "http://127.0.0.1:#{port}/hooks/#{account}",
@@ -266,13 +301,9 @@ defmodule CodingAgentFramework.Intake do
         exit 2
         """
 
-      command =
-        "exec #{sh_quote(sh)} -c #{sh_quote(script)} caf-waiter #{sh_quote(curl)} #{sh_quote(url)} " <>
-          "3<<'CAF_SECRET'\nheader = \"x-caf-secret: #{secret}\"\nCAF_SECRET\n"
-
       hook = %{
         "type" => "command",
-        "command" => command,
+        "command" => curl_command(sh, curl, url, secret, "caf-waiter", script),
         "asyncRewake" => true,
         "timeout" => Keyword.get(opts, :timeout, @waiter_timeout)
       }
@@ -375,6 +406,61 @@ defmodule CodingAgentFramework.Intake do
       File.close(file)
       error
     end
+  end
+
+  @doc """
+  The settings' `hooks` fragment that posts a session's start (F-236): a `command` SessionStart
+  hook, since Claude Code 2.1.322 runs no `http` hook there, with a `timeout` of 10 s, over
+  `tool_deadline:` and the plug's margin. It is written only when the app gives the
+  `session_start:` callback. `paths` has the absolute paths of `:sh` and `:curl`, as
+  `waiter_hook/5`'s does.
+
+  The command is `sh -c` around `curl`, as the waiter's is, the secret on file descriptor 3. It
+  posts the hook's input to `/hooks/<account>` and prints the response, the hook's JSON, on
+  stdout. A pass, the deadline, a refusal or a failed post prints nothing; it always exits 0, so
+  a framework that is down never keeps a session from starting.
+
+      iex> paths = %{sh: "/bin/sh", curl: "/usr/bin/curl"}
+      iex> {:ok, hooks} = CodingAgentFramework.Intake.start_hook(4790, "work", "s3", paths)
+      iex> [%{"hooks" => [hook]}] = hooks["SessionStart"]
+      iex> {hook["type"], hook["timeout"], hook["command"] =~ "caf-start"}
+      {"command", 10, true}
+      iex> CodingAgentFramework.Intake.start_hook(4790, "work", "s'3", paths)
+      {:refused, :bad_secret}
+  """
+  @spec start_hook(:inet.port_number(), String.t(), String.t(), map) ::
+          {:ok, map} | {:refused, term}
+  def start_hook(port, account, secret, paths) do
+    with {:secret, true} <- {:secret, is_binary(secret) and secret =~ @secret_chars},
+         %{sh: "/" <> _ = sh, curl: "/" <> _ = curl} <- paths do
+      url = "http://127.0.0.1:#{port}/hooks/#{account}"
+
+      # `-f`: a refusal's status is a failed post, which prints nothing.
+      script =
+        ~S"""
+        out=$("$1" -sf -K /dev/fd/3 -H "content-type: application/json" --data-binary @- "$2") \
+          || exit 0
+        printf "%s" "$out"
+        """
+
+      hook = %{
+        "type" => "command",
+        "command" => curl_command(sh, curl, url, secret, "caf-start", script),
+        "timeout" => 10
+      }
+
+      {:ok, %{"SessionStart" => [%{"hooks" => [hook]}]}}
+    else
+      {:secret, false} -> {:refused, :bad_secret}
+      _ -> {:refused, {:bad_paths, paths}}
+    end
+  end
+
+  # The outer shell reads the here-document onto fd 3 and execs the inner one, whose arguments
+  # hold no secret.
+  defp curl_command(sh, curl, url, secret, name, script) do
+    "exec #{sh_quote(sh)} -c #{sh_quote(script)} #{name} #{sh_quote(curl)} #{sh_quote(url)} " <>
+      "3<<'CAF_SECRET'\nheader = \"x-caf-secret: #{secret}\"\nCAF_SECRET\n"
   end
 
   defp sh_quote(text), do: "'" <> String.replace(text, "'", ~S('\'')) <> "'"
@@ -502,6 +588,7 @@ defmodule CodingAgentFramework.Intake do
             permission: Keyword.get(opts, :deadline, @deadline),
             tool: Keyword.get(opts, :tool_deadline, @tool_deadline),
             post_tool: Keyword.get(opts, :tool_deadline, @tool_deadline),
+            start: Keyword.get(opts, :tool_deadline, @tool_deadline),
             waiter: Keyword.get(opts, :waiter_deadline, @waiter_deadline),
             stop: Keyword.get(opts, :stop_deadline, @stop_deadline)
           },
@@ -510,6 +597,7 @@ defmodule CodingAgentFramework.Intake do
           waiters: %{},
           pre_tool_use: Keyword.get(opts, :pre_tool_use),
           post_tool_use: Keyword.get(opts, :post_tool_use),
+          session_start: Keyword.get(opts, :session_start),
           stop: Keyword.get(opts, :stop),
           stop_cap: Keyword.get(opts, :stop_cap, @stop_cap),
           agent: Keyword.get(opts, :agent, fn _, _ -> nil end),
@@ -546,6 +634,11 @@ defmodule CodingAgentFramework.Intake do
         if state.post_tool_use,
           do: store(%{row | hold: true}, account, from, state),
           else: {:reply, {:ok, :not_read}, state}
+
+      # A session starts again at each resume, clear and compact, with the same session and
+      # often the same source: each start is a hold of its own, as a Stop is.
+      %{event: "SessionStart", problem: nil} = row when state.session_start != nil ->
+        store(%{row | hold: true, key: "#{row.key}:#{now()}:#{unique()}"}, account, from, state)
 
       %{event: "Stop", problem: nil} = row when state.stop != nil ->
         # Claude Code never posts one Stop twice, and two Stops may carry the same body: each
@@ -689,6 +782,19 @@ defmodule CodingAgentFramework.Intake do
       else: event
   end
 
+  # Built in the callback's own process, as a tool event is.
+  defp start_event(row, account, agent) do
+    data = JSON.decode!(row.data)
+
+    %{
+      agent: agent.(account, row.session_id),
+      account: account,
+      session_id: row.session_id,
+      cwd: cwd(data),
+      source: data["source"]
+    }
+  end
+
   # Where the call runs, as the hook posted it (F-201): a post without one, or with one that is
   # not text, carries nil, so an app never rewrites a command for a directory it guessed.
   defp cwd(%{"cwd" => cwd}) when is_binary(cwd), do: cwd
@@ -699,7 +805,14 @@ defmodule CodingAgentFramework.Intake do
     # the output.
     tool? = row.event in ["PreToolUse", "PostToolUse"]
     stored = if tool?, do: %{row | data: nil}, else: row
-    kinds = %{"PreToolUse" => :tool, "PostToolUse" => :post_tool, "Stop" => :stop}
+
+    kinds = %{
+      "PreToolUse" => :tool,
+      "PostToolUse" => :post_tool,
+      "SessionStart" => :start,
+      "Stop" => :stop
+    }
+
     kind = Map.get(kinds, row.event, :permission)
     # A hold's row keeps when it ends with no decision, for the inbox (F-179).
     stored =
@@ -731,8 +844,9 @@ defmodule CodingAgentFramework.Intake do
 
         hold =
           case kind do
-            :tool -> ask(state, id, hold, row, state.pre_tool_use)
-            :post_tool -> ask(state, id, hold, row, state.post_tool_use)
+            :tool -> ask(state, id, hold, state.pre_tool_use, &tool_event(row, &1, &2))
+            :post_tool -> ask(state, id, hold, state.post_tool_use, &tool_event(row, &1, &2))
+            :start -> ask(state, id, hold, state.session_start, &start_event(row, &1, &2))
             :stop -> who(state, id, hold, row)
             :permission -> hold
           end
@@ -759,10 +873,11 @@ defmodule CodingAgentFramework.Intake do
 
   defp hold_data(_kind, _row), do: nil
 
-  # Spec action ToolHeld: the app's callback is asked in a process of its own.
-  defp ask(state, id, hold, row, callback) do
+  # Spec action ToolHeld: the app's callback is asked in a process of its own, with the event
+  # `event` builds there from the account and the `agent` lookup.
+  defp ask(state, id, hold, callback, event) do
     {me, %{agent: agent}} = {self(), state}
-    ask = fn -> send(me, {:tool_answer, id, callback.(tool_event(row, hold.account, agent))}) end
+    ask = fn -> send(me, {:tool_answer, id, callback.(event.(hold.account, agent))}) end
     {_, wmon} = spawn_monitor(ask)
     Map.put(hold, :wmon, wmon)
   end
@@ -1123,7 +1238,11 @@ defmodule CodingAgentFramework.Intake do
   # An answer that raises while it is made is no decision (F-201): each key is checked first, so
   # this is only the last guard that the `Intake`, which every hold shares, never crashes on one.
   defp tool_answer(kind, answer) do
-    if kind == :tool, do: tool_response(answer), else: post_response(answer)
+    case kind do
+      :tool -> tool_response(answer)
+      :post_tool -> post_response(answer)
+      :start -> start_response(answer)
+    end
   rescue
     _ -> {:refused, {:bad_answer, :not_json}}
   end
@@ -1149,6 +1268,17 @@ defmodule CodingAgentFramework.Intake do
       {:decision, JSON.encode!(%{"hookSpecificOutput" => output})}
     end
   end
+
+  # The SessionStart output Claude Code 2.1.322 reads from a command hook's stdout (measured,
+  # F-236): `additionalContext`, which the model reads with the session's first prompt.
+  defp start_response({:context, text}) do
+    with {:ok, fields} <- corrections([context: text], [:context]) do
+      output = Map.put(fields, "hookEventName", "SessionStart")
+      {:decision, JSON.encode!(%{"hookSpecificOutput" => output})}
+    end
+  end
+
+  defp start_response(_answer), do: :pass
 
   # A deny's reason is text Claude Code shows: valid UTF-8, or the answer is out of shape.
   defp reason(text),
