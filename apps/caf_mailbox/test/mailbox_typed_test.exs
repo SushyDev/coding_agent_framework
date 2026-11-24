@@ -124,7 +124,7 @@ defmodule CodingAgentFramework.MailboxTypedTest do
   end
 
   # With no framework home there is nowhere to write the file: the row is not typed, and waits
-  # for a waiter.
+  # for a waiter, which the wake line, typed once in its place, may bring (F-240).
   test "a row too long to type, with no home, waits", ctx do
     main(ctx)
     stop_supervised!(Mailbox)
@@ -139,7 +139,8 @@ defmodule CodingAgentFramework.MailboxTypedTest do
                if row.attempt, do: {:ok, row}, else: row
              end)
 
-    assert ScreenStandIn.submitted(ctx.dir) == []
+    assert {:ok, ["[framework] a message is waiting for you."]} = submitted(ctx, 1)
+    assert %{status: "queued"} = Table.get(ctx.mtable, long)
   end
 
   # Break_Delivery_SettleEarly's guard (the take bound): with no user line past it, the row is
