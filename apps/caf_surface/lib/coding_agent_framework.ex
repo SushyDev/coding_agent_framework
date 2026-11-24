@@ -795,7 +795,8 @@ defmodule CodingAgentFramework do
           notify: notify,
           claims: Config.path(c, "claims.db")}
        end},
-      {:inlet, fn _ -> {Inlet, tmux: w.tmux} end},
+      # Its reads wait the config's `press_see`, as `Sessions` and the inbox size a press by it.
+      {:inlet, fn _ -> {Inlet, tmux: w.tmux, see: c.press_see} end},
       {:stream,
        fn _ ->
          {Stream, [programs: p, holder: w.holder, home: c.home, db: db] ++ notify_every}
@@ -883,6 +884,7 @@ defmodule CodingAgentFramework do
              notify: notify,
              inlet: pid.(:inlet),
              dialog: &Config.dialog(c, &1, &2),
+             press_see: c.press_see,
              permission_modes: c.permission_modes,
              open_to: &Mailbox.open_to(pid.(:mailbox), &1, status: &2),
              waiter: %{port: c.ports.intake, secret: w.secret},
@@ -1055,6 +1057,7 @@ defmodule CodingAgentFramework do
              mains_db: db,
              acts: pid.(:acts),
              acts_db: db,
+             press_see: c.press_see,
              notify: notify,
              name: {:via, Elixir.Registry, {names(c.instance), :prompts}}
            }
@@ -1082,13 +1085,16 @@ defmodule CodingAgentFramework do
            {inlet, mailbox, mains} = {pid.(:inlet), pid.(:mailbox), pid.(:mains)}
            {delegates, mover} = {pid.(:delegates), pid.(:mover)}
            {transcripts, stream} = {pid.(:transcripts), pid.(:stream)}
+           # A press waits on its reads at the config's `press_see` (F-242).
+           {sessions, press} = {pid.(:sessions), Sessions.press_call(c.press_see)}
 
            {Limits,
             agents: w.agents,
-            sessions: pid.(:sessions),
+            sessions: sessions,
             acts: pid.(:acts),
             watch: pid.(:watch),
             host: host,
+            press: &Sessions.press_limit(sessions, &1, &2, timeout: press),
             transcripts: &Transcripts.rows(transcripts, &1),
             folds: fn -> Stream.rows(stream) end,
             look: &Inlet.look(inlet, &1.name, &1.release),

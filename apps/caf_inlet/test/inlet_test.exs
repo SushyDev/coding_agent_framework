@@ -52,6 +52,7 @@ defmodule CodingAgentFramework.InletTest do
   doctest Inlet
 
   @release "2.1.322"
+  @trust "Yes, I trust this folder"
 
   setup do
     dir = test_dir()
@@ -350,6 +351,60 @@ defmodule CodingAgentFramework.InletTest do
 
     open(ctx, "beta", ["--screen", "running"], nil, config: config, session_file: false)
     assert File.ls(sessions) == {:ok, []}
+  end
+
+  # F-242, from F-238's new-1: the stand-in stopped (SIGSTOP) for 3 s as the press goes, as a
+  # loaded host stops the real program. Its keys wait in the pane, and it redraws once it runs
+  # again. At the library's 2 s `see:` that press is unknown and no Enter goes; at the tree's
+  # 10 s (`Config`'s `press_see`) the same press is answered, inside `press_bound/1` of it.
+  test "a press whose redraw comes past 2 s is answered within the tree's see", ctx do
+    late = fn name, see ->
+      dir = Path.join(ctx.dir, name)
+      File.mkdir_p!(dir)
+      script = ScreenStandIn.write!(dir, @release, stand_in_idle(), trust: true)
+      # Under a shell of its own: tmux sends SIGCONT to a pane's own process that stops, as
+      # Sessions' dtach holds the program a step away from tmux.
+      argv = [program!(:bash), "-c", ~s("$0"; :), script]
+      {:ok, _} = Tmux.new_session(ctx.server, name, argv, size: {120, 40})
+      {:ok, _} = screen(ctx, name, &match?(%{state: :dialog, kind: :trust}, &1))
+      [pid] = File.ls!(Path.join(dir, "pids"))
+      {:ok, %{status: 0}} = kill(pid, "-STOP")
+      spawn(fn -> receive after: (3_000 -> kill(pid, "-CONT")) end)
+      opts = [release: @release, see: see, timeout: Inlet.press_bound(see)]
+      {took, answer} = :timer.tc(fn -> Inlet.choose(ctx.inlet, name, :trust, @trust, opts) end)
+      {div(took, 1_000), answer, dir}
+    end
+
+    {_, answer, dir} = late.("early", 2_000)
+    assert {:unknown, {:not_selected, {:ok, %{selected: "No, exit"}}}} = answer
+    refute_received {:write, _, {:keys, ["Enter"]}}
+    {:ok, _} = screen(ctx, "early", &match?(%{state: :dialog, selected: @trust}, &1))
+    refute File.exists?(Path.join(dir, "trusted"))
+
+    {took, answer, dir} = late.("late", 10_000)
+    assert {{:ok, :sent}, true} = {answer, took >= 3_000}
+    assert_received {:write, _, {:keys, ["Enter"]}}
+    assert {:ok, _} = await(fn -> File.read(Path.join(dir, "trusted")) end)
+  end
+
+  # F-242, from F-238's new-2: "No, exit" ends the stand-in, and its pane goes with it. The
+  # pane gone is the dialog left: the press is answered then, not at the end of its `see:`.
+  test "a press whose pane closes is answered as soon as the pane is gone", ctx do
+    script = ScreenStandIn.write!(ctx.dir, @release, stand_in_idle(), trust: true)
+    {:ok, _} = Tmux.new_session(ctx.server, "alpha", [script], size: {120, 40})
+    {:ok, _} = screen(ctx, "alpha", &match?(%{state: :dialog, kind: :trust}, &1))
+    opts = [release: @release, see: 30_000, timeout: Inlet.press_bound(30_000)]
+
+    {took, answer} =
+      :timer.tc(fn -> Inlet.choose(ctx.inlet, "alpha", :trust, "No, exit", opts) end)
+
+    assert {{:ok, :sent}, true} = {answer, div(took, 1_000) < 30_000}
+
+    # Its session was the server's only one, so the server may have gone with it.
+    case Tmux.list_panes(ctx.server) do
+      {:ok, panes} -> refute Enum.any?(panes, &(&1.tag == "alpha"))
+      {:refused, :no_server} -> :ok
+    end
   end
 
   defp open(ctx, name, args \\ [], state \\ nil, opts \\ []) do

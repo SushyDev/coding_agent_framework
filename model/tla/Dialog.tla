@@ -289,6 +289,12 @@ Take(c) ==
     /\ UNCHANGED <<at, live, status, shown, up, restarts, results, cleared, lease, sent, asked,
                    wrong, unasked, killedOn>>
 
+\* A press "sent" is one that landed (Lands). The Inlet reads the dialog left after its Enter,
+\* and reads a pane gone as left (F-242): only a landed press ends the process while one is
+\* under way, since an end's SIGTERM waits for the press's answer (EndAfterPress), so a pane
+\* gone then is the trust dialog's "no" landed, Lands' live' = FALSE. A person's own "no" at
+\* the viewer (ViewerPress) between the Enter and the read looks the same to the Inlet; the
+\* row is stopped either way, and a press sent is never pressed again, as an unknown one.
 \* The task's checked press, in one step: the pane must show the dialog the answer names (its
 \* kind; a menu's title and options), or nothing goes (the claim let go). A press that goes is
 \* the claim's act: it lands on what the pane shows; its outcome is known (sent) or not
