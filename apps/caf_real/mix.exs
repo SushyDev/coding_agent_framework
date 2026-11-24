@@ -29,6 +29,8 @@ defmodule CafReal.MixProject do
       {:caf_mcp, in_umbrella: true, only: :test},
       {:caf_mains, in_umbrella: true, only: :test},
       {:caf_sessions, in_umbrella: true, only: :test},
+      {:caf_acts, in_umbrella: true, only: :test},
+      {:caf_stream, in_umbrella: true, only: :test},
       {:caf_test, in_umbrella: true, only: :test}
     ]
   end

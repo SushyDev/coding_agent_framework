@@ -53,8 +53,10 @@ defmodule CodingAgentFramework.RealCase do
   Starts the example app's tree in a new home: accounts `one` and `two` linked from the setup,
   project `demo` cloned from a new bare origin, main session `demo-main` declared. Answers the
   context the helpers below take; the tree is stopped and its tmux server ended at the test's end.
+  `adjust` takes the parsed config and answers the one the tree starts on, for a test that needs
+  a field the config file does not name.
   """
-  def start_tree!(name) do
+  def start_tree!(name, adjust \\ & &1) do
     # The setup's home is the suite's own. A login is kept by its config directory's path
     # (macOS's Keychain names the path), so another home's link to it is logged out: the trees
     # start on the setup's home itself, one at a time (F-215 holds the home). Each run has its
@@ -82,6 +84,7 @@ defmodule CodingAgentFramework.RealCase do
     }
 
     {:ok, c} = ConfigFile.parse(JSON.encode!(config), System.get_env())
+    c = adjust.(c)
     {:ok, run} = Run.start(c)
     # `on_exit` runs after the test's process has exited: unlinked, the tree outlives it, so the
     # exit hook can end the run's agents through it before stopping it.
@@ -119,7 +122,7 @@ defmodule CodingAgentFramework.RealCase do
       # is answered with its exit first (F-223's new-3).
       for %{id: id, kind: "dialog", options: options} <- prompts(ctx, agent: ctx.main),
           no = Enum.find(options, &(&1 =~ ~r/exit/i)),
-          do: answer(ctx, id, no)
+          do: press(ctx, ctx.main, id, no)
 
       Operator.end_main(ctx.mcp, ctx.main, force: true)
       Run.stop(ctx.run)
@@ -241,6 +244,78 @@ defmodule CodingAgentFramework.RealCase do
 
   defp find(rows, name), do: Enum.find(rows, &(&1.name == name))
 
+  @doc """
+  Agent `name`'s row as `Sessions.Agents` holds it (its `status`, `reason`, `pid`,
+  `proc_start`, `session_id`, `account`), or nil.
+  """
+  def row(ctx, name),
+    do: ctx.run |> Run.info() |> Map.fetch!(:agents) |> Agents.rows() |> find(name)
+
+  @doc """
+  Follows the file at `path` (a headless session's event log, which has no times of its own)
+  from a process of its own, reading it about every 100 ms, and stamps each new line with the
+  monotonic ms it was first read. `lines/1` answers them so far, in order, as
+  `{ms, line}`; a line that is not yet whole waits for its newline.
+  """
+  def follow(path), do: spawn_link(fn -> follow(path, 0, "", []) end)
+
+  defp follow(path, offset, part, lines) do
+    {offset, part, lines} =
+      case File.open(path, [:read, :binary], &read_from(&1, offset)) do
+        {:ok, data} when data != "" ->
+          now = System.monotonic_time(:millisecond)
+          [part | whole] = (part <> data) |> String.split("\n") |> Enum.reverse()
+          new = whole |> Enum.reverse() |> Enum.map(&{now, &1})
+          {offset + byte_size(data), part, Enum.reverse(new, lines)}
+
+        _ ->
+          {offset, part, lines}
+      end
+
+    receive do
+      {:lines, from} ->
+        send(from, {:lines, self(), Enum.reverse(lines)})
+        follow(path, offset, part, lines)
+    after
+      100 -> follow(path, offset, part, lines)
+    end
+  end
+
+  defp read_from(file, offset) do
+    {:ok, _} = :file.position(file, offset)
+
+    case IO.binread(file, :eof) do
+      data when is_binary(data) -> data
+      _ -> ""
+    end
+  end
+
+  @doc "The lines `follow/1`'s follower has read so far, each `{ms, line}`."
+  def lines(follower) do
+    send(follower, {:lines, self()})
+    receive do: ({:lines, ^follower, lines} -> lines)
+  end
+
+  @doc """
+  The framework's deliveries in agent `name`'s transcript, each once, in order: `%{from:, kind:,
+  text:, delivery:}`. A delivery is `From <sender>[ on <account>] (<kind>): <text>` ended by
+  `[delivery <id>]`; the JSONL holds each two or three times (the hook's feedback, the turn's
+  message), and as JSON, so `text`'s newlines are read back from their escapes. A notice of a
+  delegate's own turn comes from `framework`, not from the delegate.
+
+      [%{from: "framework", kind: "notice", text: "Delegate demo-unit-bg, in a turn …"}] =
+        deliveries(ctx, ctx.main) |> Enum.filter(&(&1.kind == "notice"))
+  """
+  def deliveries(ctx, name) do
+    ~r/From (\S+?)(?: on \S+)? \((\w+)\):(.{0,4000}?)\[delivery ([0-9a-f-]+)\]/s
+    |> Regex.scan(transcript(ctx, name), capture: :all_but_first)
+    |> Enum.uniq_by(&List.last/1)
+    |> Enum.map(fn [from, kind, text, id] ->
+      text = text |> String.replace("\\n", "\n") |> String.replace("\\\"", "\"") |> String.trim()
+      %{from: from, kind: kind, text: text, delivery: id}
+    end)
+  end
+
   @doc "Waits until agent `name`'s transcript holds `text`."
   def await_transcript!(ctx, name, text, ms) do
     await!(
@@ -307,6 +382,17 @@ defmodule CodingAgentFramework.RealCase do
   end
 
   @doc """
+  Writes `text`, a test's readings, into the records folder as `<project>-<what>.txt`, and
+  answers its path.
+  """
+  def record(ctx, what, text) do
+    File.mkdir_p!(records_dir())
+    path = Path.join(records_dir(), "#{ctx.project}-#{what}.txt")
+    File.write!(path, text)
+    path
+  end
+
+  @doc """
   Runs `fun`, one step of a test, and answers its value. An assertion that fails in it names
   the step first, so a failed real run says where it stopped.
 
@@ -320,15 +406,133 @@ defmodule CodingAgentFramework.RealCase do
   end
 
   @doc """
+  Presses `label` on prompt `id` (a dialog or a menu on agent `name`'s pane) from the inbox,
+  and records the press (F-243): its folder in the records folder,
+  `<project>-press-<n>-<label>`, holds the pane before the keys (`before`), every distinct
+  pane read while the press ran (`frames/<i>-<ms>ms`, ms from the answer's call), the last of
+  them that showed the marker on the label (`marker`) and the first after it that did not
+  (`enter`), and the pane after the answer (`after`), each `.txt` (plain) and `.ansi` (with
+  escapes); and `press.txt`: the label, the answer, the time it was called and how long it
+  took, and which frames those were. Answers `{answer, folder}`.
+
+  The press runs in one call of the tree's `Inlet`, which a test cannot see into, so the
+  frames are read beside it, about every 50 ms: `marker` and `enter` are the nearest reads to
+  the `Inlet`'s own, not its reads.
+
+      {answer, dir} = press(ctx, ctx.main, "dialog:main:trust", "Yes, I trust this folder")
+  """
+  def press(ctx, name, id, label) do
+    prefix = Path.join(records_dir(), "#{ctx.project}-press-")
+    dir = "#{prefix}#{length(Path.wildcard(prefix <> "*")) + 1}-#{slug(label)}"
+    File.mkdir_p!(Path.join(dir, "frames"))
+    write_pane!(ctx, name, Path.join(dir, "before"))
+    at = DateTime.utc_now()
+    t0 = System.monotonic_time(:millisecond)
+    sampler = spawn_link(fn -> sample(ctx, name, t0, nil, []) end)
+    answer = answer(ctx, id, label)
+    ms = System.monotonic_time(:millisecond) - t0
+    send(sampler, {:stop, self()})
+    frames = receive do: ({:frames, ^sampler, f} -> Enum.reverse(f))
+    write_pane!(ctx, name, Path.join(dir, "after"))
+
+    frames
+    |> Enum.with_index()
+    |> Enum.each(fn {{at_ms, plain, ansi}, i} ->
+      base = Path.join([dir, "frames", "#{pad(i)}-#{at_ms}ms"])
+      File.write!(base <> ".txt", plain)
+      File.write!(base <> ".ansi", ansi)
+    end)
+
+    marked = Enum.map(frames, fn {_, plain, _} -> marked?(plain, label) end)
+    marker = marked |> Enum.with_index() |> Enum.filter(&elem(&1, 0)) |> List.last()
+    marker = marker && elem(marker, 1)
+    enter = marker && Enum.find(marker..(length(frames) - 1)//1, &(not Enum.at(marked, &1)))
+
+    for {what, i} <- [marker: marker, enter: enter], i do
+      {_, plain, ansi} = Enum.at(frames, i)
+      File.write!(Path.join(dir, "#{what}.txt"), plain)
+      File.write!(Path.join(dir, "#{what}.ansi"), ansi)
+    end
+
+    File.write!(Path.join(dir, "press.txt"), """
+    agent: #{name}
+    prompt: #{id}
+    label: #{label}
+    answer: #{inspect(answer, limit: :infinity)}
+    called: #{DateTime.to_iso8601(at)}
+    ms: #{ms}
+    frames: #{length(frames)}
+    marker: #{frame_name(frames, marker)}
+    enter: #{frame_name(frames, enter)}
+    """)
+
+    {answer, dir}
+  end
+
+  @doc """
+  `press/4`, asserted `{:ok, _}`: a failure names the press's folder. Answers the answer.
+  """
+  def press!(ctx, name, id, label) do
+    {answer, dir} = press(ctx, name, id, label)
+
+    ExUnit.Assertions.assert(
+      match?({:ok, _}, answer),
+      "the press of #{inspect(label)} on #{name} answered #{inspect(answer)}; " <>
+        "its screens are in #{dir} (press.txt names them)"
+    )
+
+    answer
+  end
+
+  # The pane is read until the press's caller says stop; a read the same as the one before is
+  # not kept, so the frames are the pane's changes.
+  defp sample(ctx, name, t0, last, frames) do
+    plain = capture(ctx, name)
+
+    frames =
+      if plain == last,
+        do: frames,
+        else: [
+          {System.monotonic_time(:millisecond) - t0, plain, capture(ctx, name, true)} | frames
+        ]
+
+    receive do
+      {:stop, from} -> send(from, {:frames, self(), frames})
+    after
+      50 -> sample(ctx, name, t0, plain, frames)
+    end
+  end
+
+  # Claude Code draws its selection marker, `❯`, before the selected option's number and label.
+  defp marked?(plain, label),
+    do: plain =~ ~r/❯\s*(\d+\.\s*)?#{Regex.escape(label)}/u
+
+  defp frame_name(_frames, nil), do: "none read"
+
+  defp frame_name(frames, i) do
+    {at_ms, _, _} = Enum.at(frames, i)
+    "frames/#{pad(i)}-#{at_ms}ms"
+  end
+
+  defp pad(i), do: i |> Integer.to_string() |> String.pad_leading(3, "0")
+
+  defp slug(label),
+    do: label |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "-") |> String.trim("-")
+
+  defp write_pane!(ctx, name, base) do
+    File.write!(base <> ".txt", capture(ctx, name))
+    File.write!(base <> ".ansi", capture(ctx, name, true))
+  end
+
+  @doc """
   Answers the startup dialog agent `name`'s start waits on (the trust dialog, in a folder the
-  account has not seen) from the inbox with its trusting label. None may come, as the account
-  may trust the folder already. Answers the prompt's id, or `:none`.
+  account has not seen) from the inbox with its trusting label, by `press!/4`. None may come, as
+  the account may trust the folder already. Answers the prompt's id, or `:none`.
   """
   def answer_trust(ctx, name) do
     case await_some(fn -> prompts(ctx, agent: name, kind: "dialog") end, 20_000) do
       [%{id: id, options: options}] ->
-        label = Enum.find(options, &(&1 =~ ~r/trust/i))
-        ExUnit.Assertions.assert({:ok, _} = answer(ctx, id, label))
+        press!(ctx, name, id, Enum.find(options, &(&1 =~ ~r/trust/i)))
         id
 
       [] ->

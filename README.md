@@ -438,6 +438,10 @@ Built, each from a checked model in `model/tla/`:
   `partial`; a subagent started before that part keeps its row, its type and description from
   its file's meta. A rewritten or returned main file is read the same way. Landing it refolds
   each stored fold once, bounded, so a long session's old history is not kept.
+- the real suite runs steps 12 and 13 and records each press (F-243): a headless delegate's
+  background command waking it in a turn of its own, with the wake gap checked and recorded; an
+  absent main resumed once by the operator; and, for every dialog or menu press, the screens
+  before, during and after it, with its label and answer.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

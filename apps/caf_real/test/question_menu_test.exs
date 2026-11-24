@@ -82,7 +82,7 @@ defmodule CodingAgentFramework.Real.QuestionMenuTest do
     end)
 
     step("the first label's press settles the menu", fn ->
-      assert {:ok, _} = answer(ctx, menu.id, hd(@labels))
+      press!(ctx, ctx.main, menu.id, hd(@labels))
       assert {:refused, :settled} = answer(ctx, menu.id, hd(@labels))
 
       await!(
