@@ -3636,6 +3636,10 @@ command the framework writes into each account's settings (`rate_limits.seven_da
 - A file a started process may read (a script, a config, a fixture) is written whole and
   renamed into place, never rewritten in place: a stand-in rewritten while a start ran it was
   read empty, and the start exited at once.
+- A stand-in does what the real program does that the framework reads, with nothing a test
+  setup does for it: the interactive one makes its own `sessions/`, answers `auth status`, and
+  writes 2.1.322's session file as its screen changes (F-232). Its tests' setups had made the
+  directory, so no whole tree with it ever reached running.
 - A test of what a viewer runs reads the pane's start command from its own tmux server: the
   `Tmux` contract answers what a pane is, not what it runs.
 
