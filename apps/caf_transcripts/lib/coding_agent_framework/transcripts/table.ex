@@ -35,7 +35,8 @@ defmodule CodingAgentFramework.Transcripts.Table do
   `tools`, `agent_tools` and `last_event_at` (F-235), and `files`, each subagent file read by
   its agent id: `offset`, `size` (set when it was not read), `tool_use_id` (its parent's
   `Agent` call), `finished` (its meta's), `not_read` (`:finished` for one not read), `partial`
-  and `problem` (F-237).
+  and `problem` (F-237), and `partial`, true when the first read took only the file's last part
+  (F-244).
   """
   @spec meta() :: Reader.meta()
   def meta do

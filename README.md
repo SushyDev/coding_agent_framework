@@ -433,6 +433,11 @@ Built, each from a checked model in `model/tla/`:
   subagent has its `agent_id` from its file's meta, and its own `tool` in the tree; a file
   whose subagent finished before its first read is not read, and a first read takes at most
   a file's last 1 MB.
+- a transcript's first read is bounded (F-244): a session with no stored fold is read from at
+  most its main file's last 1 MB, from a whole line, and its fold and its tree row say
+  `partial`; a subagent started before that part keeps its row, its type and description from
+  its file's meta. A rewritten or returned main file is read the same way. Landing it refolds
+  each stored fold once, bounded, so a long session's old history is not kept.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

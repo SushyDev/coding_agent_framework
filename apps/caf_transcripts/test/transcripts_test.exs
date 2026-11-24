@@ -448,6 +448,56 @@ defmodule CodingAgentFramework.TranscriptsTest do
       refute Map.has_key?(row.agent_tools, "g1")
     end
 
+    test "a long main file's first read takes its last part; a short one is read whole (F-244)",
+         ctx do
+      dir = Path.join([ctx.dir, "s1", "subagents"])
+      File.mkdir_p!(dir)
+      # The `Agent` call that started g1 is far before the bound; the last call is inside it.
+      start = prompt("p1", "go") <> "\n" <> agent_call("m1", "t1") <> "\n"
+      filler = Enum.map_join(1..50, &(prompt("p-#{&1}", "more") <> "\n"))
+      last = assistant("m9", [%{type: "tool_use", id: "b9", name: "Bash"}], "tool_use", 1) <> "\n"
+      long = start <> filler <> last
+      File.write!(ctx.path, long)
+      File.write!(Path.join(dir, "agent-g1.meta.json"), meta("t1"))
+      File.write!(Path.join(dir, "agent-g1.jsonl"), side_lines("g1", "c1"))
+      short = Path.join(ctx.dir, "s2.jsonl")
+      File.write!(short, start)
+      bound = byte_size(last) + 200
+      {:ok, t} = Transcripts.start_link(Keyword.put(ctx.opts, :first_read, bound))
+
+      assert {:ok, %{failed: []}} =
+               Transcripts.read(t, [{"a", "s1", ctx.path}, {"a", "s2", short}])
+
+      assert {:ok, row} = Transcripts.session(t, "a", "s1")
+      assert %{partial: true, offset: offset, problems: []} = row
+      assert offset == byte_size(long)
+      assert [%{id: "b9", name: "Bash", ended_at: nil}] = row.tools
+      refute Enum.any?(row.prompts, &(&1.prompt_id == "p1"))
+
+      # g1's call is before the cut: its row stays, from its meta, with what the meta alone says.
+      assert %{"t1" => %{agent_id: "g1", state: :open, type: "Explore", description: "look"}} =
+               row.subagents
+
+      assert [%{id: "c1"}] = row.agent_tools["g1"]
+
+      assert {:ok, %{partial: false, prompts: [%{prompt_id: "p1"}]} = whole} =
+               Transcripts.session(t, "a", "s2")
+
+      assert %{"t1" => %{description: "look"}} = whole.subagents
+
+      # The partial fold goes on from its offset, as a stored fold does.
+      done =
+        line(%{type: "user", message: %{content: [%{type: "tool_result", tool_use_id: "b9"}]}})
+
+      File.write!(ctx.path, done <> "\n", [:append])
+      assert {:ok, %{failed: []}} = Transcripts.read(t)
+
+      assert {:ok, %{partial: true, tools: [%{id: "b9"}], offset: offset}} =
+               Transcripts.session(t, "a", "s1")
+
+      assert offset == byte_size(long) + byte_size(done) + 1
+    end
+
     test "a text read from an offset takes at most the bound, and a read with none runs to the end",
          ctx do
       whole = Enum.map_join(1..3_000, &(prompt("p#{&1}", "go") <> "\n"))
