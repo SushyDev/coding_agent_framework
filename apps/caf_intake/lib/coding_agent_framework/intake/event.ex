@@ -15,10 +15,11 @@ defmodule CodingAgentFramework.Intake.Event do
       :not_json
   """
 
-  @names ~w(SessionStart SessionEnd Stop StopFailure SubagentStart SubagentStop Notification
+  @names ~w(SessionEnd Stop StopFailure SubagentStart SubagentStop Notification
             UserPromptSubmit PermissionRequest PermissionDenied)
-  # Posted only when the app gives `Intake` a callback for them.
-  @tools ~w(PreToolUse PostToolUse)
+  # Posted only when the app gives `Intake` a callback for them. Claude Code 2.1.322 runs no
+  # `http` hook on SessionStart (F-236), so its post comes from `Intake.start_hook/4`'s command.
+  @tools ~w(PreToolUse PostToolUse SessionStart)
   # The events whose request `Intake` holds open: each is a kind of its one hold.
   @held ~w(PermissionRequest PreToolUse)
   @ids %{
@@ -37,9 +38,9 @@ defmodule CodingAgentFramework.Intake.Event do
   def names, do: @names
 
   @doc """
-  The tool events, posted only when the app gives `Intake` a callback for them. Each one's row
-  is its hold's; `Intake` holds a PostToolUse only when it has the `post_tool_use:` callback,
-  since the `Stop` hold's settings post it too.
+  The events posted only when the app gives `Intake` a callback for them: the tool events and a
+  session's start (F-236). Each one's row is its hold's; `Intake` holds a PostToolUse only when
+  it has the `post_tool_use:` callback, since the `Stop` hold's settings post it too.
   """
   @spec tool_names() :: [String.t()]
   def tool_names, do: @tools

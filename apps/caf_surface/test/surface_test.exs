@@ -607,6 +607,8 @@ defmodule CodingAgentFramework.SurfaceTest do
     hooks = JSON.decode!(File.read!(account.settings[:delegate]))["hooks"]
     [%{"hooks" => [%{"url" => url, "headers" => headers}]}] = hooks["PreToolUse"]
     assert [%{"hooks" => [%{"url" => ^url}]}] = hooks["PostToolUse"]
+    # A module without `session_start/3` has no SessionStart hook at all (F-236).
+    refute Map.has_key?(hooks, "SessionStart")
 
     Mix.ensure_application!(:inets)
     {:ok, _} = Application.ensure_all_started(:inets)
@@ -645,6 +647,39 @@ defmodule CodingAgentFramework.SurfaceTest do
     # The hook reached the live `Mailbox` through its lookup.
     mailbox = parts.mailbox
     assert_receive {:after, %{tool_name: "Read", agent: nil}, ^mailbox}, 5_000
+  end
+
+  # A session's start through the app's hook (F-236).
+  defmodule StartHooks do
+    @behaviour CodingAgentFramework.ToolHooks
+
+    @impl true
+    def session_start(%{source: source}, opts, part),
+      do: {:context, "#{opts[:rules]} (#{source}, mailbox #{is_pid(part.(:mailbox))})"}
+  end
+
+  test "the app's session_start callback answers the account's SessionStart command", ctx do
+    {:ok, config} = Config.new(ctx.fields ++ [tool_hooks: {StartHooks, rules: "Land with land."}])
+    start(config)
+
+    {:ok, accounts} = Accounts.new(ctx.home, ["work"])
+    {:ok, account} = Accounts.ready(accounts, "work")
+    hooks = JSON.decode!(File.read!(account.settings[:parent]))["hooks"]
+    [%{"hooks" => [%{"type" => "command", "command" => command}]}] = hooks["SessionStart"]
+
+    input = Path.join(ctx.home, "start.json")
+    body = %{"hook_event_name" => "SessionStart", "session_id" => "s1", "source" => "startup"}
+    File.write!(input, JSON.encode!(body))
+
+    assert {:ok, %{status: 0, output: out}} =
+             Shell.run(host(), program!(:sh), ["-c", ~s(eval "$1" < "$2"), "sh", command, input],
+               timeout: 20_000
+             )
+
+    assert JSON.decode!(out)["hookSpecificOutput"] == %{
+             "hookEventName" => "SessionStart",
+             "additionalContext" => "Land with land. (startup, mailbox true)"
+           }
   end
 
   test "a heavy command's wrapper takes its lease from the tree's Scheduler on the intake's port",

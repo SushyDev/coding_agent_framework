@@ -31,7 +31,17 @@ defmodule CodingAgentFramework.ToolHooks do
     on 2.1.322 with `Bash`, from a command hook and from an `http` hook alike, the model reads it
     on that call as "PostToolUse:Bash hook additional context: <text>", and the tool's output
     is unchanged. `{:replace, response, context: text}` does both;
-  - `stop/3`: `:pass` (the turn ends) or `{:block, reason}` (the agent goes on, told the reason).
+  - `stop/3`: `:pass` (the turn ends) or `{:block, reason}` (the agent goes on, told the reason);
+  - `session_start/3` (F-236): `:pass`, or `{:context, text}`, the session's own rules, within
+    the same tool deadline, else a pass. The text goes out as `SessionStart`'s
+    `additionalContext` (at most 10,000 characters, as the others; a longer one is a pass whose
+    row says `context_too_long`), and the model reads it with the session's first prompt. The
+    event has `agent`, `account`, `session_id`, `cwd` and `source` (`"startup"`, `"resume"`,
+    `"clear"` or `"compact"`). Claude Code 2.1.322 runs no `http` hook on `SessionStart`, so a
+    module that implements it gets a `command` hook in the accounts' settings
+    (`Intake.start_hook/4`) that posts to `Intake` and prints its answer. Measured on 2.1.322:
+    the model reads the context headless and in an interactive start in a trusted folder, but
+    not when the start waited on the trust dialog: that session starts without it.
 
   The framework's own `PreToolUse` callback (a move's drain) decides first, and a heavy
   command's wrapper and a background command's closed stdin apply to what this one answers.
@@ -61,18 +71,21 @@ defmodule CodingAgentFramework.ToolHooks do
               :pass | {:replace, map} | {:context, String.t()} | {:replace, map, keyword}
   @callback stop(event :: Intake.stop_event(), opts :: term, part) ::
               :pass | {:block, String.t()}
+  @callback session_start(event :: Intake.start_event(), opts :: term, part) ::
+              :pass | {:context, String.t()}
 
-  @optional_callbacks pre_tool_use: 3, post_tool_use: 3, stop: 3
+  @optional_callbacks pre_tool_use: 3, post_tool_use: 3, stop: 3, session_start: 3
 
-  @hooks [:pre_tool_use, :post_tool_use, :stop]
+  @hooks [:pre_tool_use, :post_tool_use, :stop, :session_start]
 
   @doc """
-  The hooks a module implements, in `[:pre_tool_use, :post_tool_use, :stop]`'s order.
+  The hooks a module implements, in `[:pre_tool_use, :post_tool_use, :stop, :session_start]`'s
+  order.
 
       iex> CodingAgentFramework.ToolHooks.implemented(Enum)
       []
   """
-  @spec implemented(module) :: [:pre_tool_use | :post_tool_use | :stop]
+  @spec implemented(module) :: [:pre_tool_use | :post_tool_use | :stop | :session_start]
   def implemented(module) when is_atom(module) do
     if Code.ensure_loaded?(module),
       do: Enum.filter(@hooks, &function_exported?(module, &1, 3)),

@@ -136,7 +136,7 @@ Each word below names one thing, and the design, the code and the views use it o
   write, the prompt argument of an interactive session's start (`launch`), or the answer of a
   waiting `run_delegate`.
 - **Hold**: a request held open with a deadline, answered exactly once by a named decider, and
-  settled when its holder dies. `Intake` keeps five kinds.
+  settled when its holder dies. `Intake` keeps six kinds.
 
 **Boxes and verbs** (F-162)
 
@@ -922,7 +922,9 @@ a config with `agents: false` needs only the keys that tree reads (the table bel
 no tool home; `agent_rows/1` also takes the instance's name, read from the config its running
 tree keeps in its `Registry`, since a hook's `opts` are plain data and a struct there, the
 config among them, is refused by name (`{:not_data, module, {:struct, struct}}`); and
-`post_tool_use/3` may answer `{:context, text}`. F-214 made the rule F-195's new-2 asked for
+`post_tool_use/3` may answer `{:context, text}`. F-236 added `session_start/3`, answering
+`{:context, text}` for a session's start, carried by a `command` hook since Claude Code runs no
+`http` hook there ("A held `SessionStart`"). F-214 made the rule F-195's new-2 asked for
 a check: a home is agentful or agentless for its whole life, since an agentless tree asks no
 owner of a delegate's, main's or run's lease and would leave an agentful tree's unreclaimed.
 `CodingAgentFramework.Home` keeps one row in the home's own database (`home`, in `caf.db`),
@@ -978,7 +980,7 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 | `interval` | ms between the timed readers' reads | 2 s |
 | `resources`, `lease`, `job_lease` | the `Scheduler`'s capacities and the units each start asks for | seat 4, slot 2 |
 | `pressure` | how the host's pressure is read | the host's own |
-| `tool_hooks` | the app's `pre_tool_use`, `post_tool_use` and `stop` callbacks, as `{module, opts}` (`ToolHooks`, F-195) | none |
+| `tool_hooks` | the app's `pre_tool_use`, `post_tool_use`, `stop` and `session_start` (F-236) callbacks, as `{module, opts}` (`ToolHooks`, F-195) | none |
 | `usable` | which accounts the app lets a start or a resume use, as `{module, opts}`: `usable?(account, opts, part)` answers `true` or `{false, reason}`, and the tree hands it to `Mains`, `Delegates` and the `Mover` beside `Logins.usable/3`, an account usable only if both say so (`Usable`, F-207) | none: the framework's check alone |
 | `heavy` | the app's heavy commands, run under a lease | none |
 | `extensions` | the app's bundles, each `{module, opts}`, made by the module's `bundle/2` | none |
@@ -1063,7 +1065,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Screen` | a pure reading of a main session's screen and dialogs, per Claude Code release, from real fixtures captured with a script: the startup dialogs (trust, and external imports with the paths it lists), any numbered menu by its shape (F-198), typed commands and their result lines, the box before a typed write, a dim prompt suggestion in it read as no text | — |
 | `Inlet` | the checked typed write into an interactive session with no waiter: `Screen`'s box check, then `Tmux`'s one-command check, one per host; and the typed commands a session's start or a tool needs (a startup dialog's checked press, `/mcp reconnect`, the interrupt key, and the operator's `/reload-plugins`, whose result line it reads outside its write's step, F-233), and a read of a pane for `Sessions`. It is one transport of `Mailbox` | no table |
 | `Stream` | a headless session's transport: a FIFO per process, a spool removed as the line's claim, the event log read from an offset, and its `can_use_tool` requests. Its fold of the log (each message's replay, each result) is evidence `Mailbox` and `Sessions` read; it keeps no delivery state of its own | `stream_delegates` |
-| `Intake` | hook events in; one hold, of five kinds: `permission` (a person's or an agent's `answer`), `tool` (`PreToolUse`, the app's callback), `post_tool` (`PostToolUse`, the app's callback), `stop` (`Stop` held for the app's callback) and `waiter` (a main session's waiting Stop hook, answered with `Mailbox`'s due text) | `intake_events` |
+| `Intake` | hook events in; one hold, of six kinds: `permission` (a person's or an agent's `answer`), `tool` (`PreToolUse`, the app's callback), `post_tool` (`PostToolUse`, the app's callback), `start` (`SessionStart`, the app's callback, from a command hook), `stop` (`Stop` held for the app's callback) and `waiter` (a main session's waiting Stop hook, answered with `Mailbox`'s due text) | `intake_events` |
 | `Sessions` | the agent row: one row per agent, main session or delegate, with its kind, parent, project, account, launch options and model, held process and status; start, resume, and stop by SIGTERM once idle; the tree as one function of its rows; each session's turn state as one function per kind of session, from its evidence. Other parts read its rows only through `Sessions.Agents`, a pure module over a reader's own connection, which answers what each status means | `agents` |
 | `Mover` | drains a session, a main session or a delegate, and moves it between accounts; its phase is a field of the agent row (`move`, with the accounts, its act and its deadline), which `Sessions` writes for it | — |
 | `Mains` | each project's main sessions, as agent rows of kind `main` it declares in `Sessions`; the project's checkout, made once, and the pull after a landing; the start of one (`start_main`), through the `Scheduler` and the startup dialogs (F-141, `Checkout.tla`); its resume under a lease of its own, and its end, the operator's (`end_main`, F-143, `Team.tla`) | `checkouts`: each checkout's reading, for a view; `main_starts`: each start, the holder of its lease |
@@ -1174,7 +1176,7 @@ any reply does (new-4).
 - **A hook.** `Intake` writes the event, then answers, as before. A hook that waits is a hold:
   a key, a deadline under the hook's timeout, a named decider, exactly one response, and a
   settle when the holder or its connection dies (`lost` or `unknown` for a hold with a row,
-  nothing for the others). The five kinds differ only in their decider, deadline and response.
+  nothing for the others). The six kinds differ only in their decider, deadline and response.
 - **An act.** Every fix, recovery, kill, resume, start and raised error is a row in `Acts`,
   `{actor, target, state, act, start_id, status, outcome}`, written before it acts, refused for
   a state already acted on, and `interrupted` when a restart cut it. A start or a resume by
@@ -2604,8 +2606,10 @@ event (Claude Code 2.1.322; sources in `docs/build-notes/F-24.md`). `Intake.tla`
 section.
 
 - **Transport.** Each account's settings name an `http` hook for each event the framework
-  reads: SessionStart, SessionEnd, Stop, StopFailure, SubagentStart, SubagentStop, Notification,
-  UserPromptSubmit, PermissionRequest and PermissionDenied. Each hook posts to
+  reads: SessionEnd, Stop, StopFailure, SubagentStart, SubagentStop, Notification,
+  UserPromptSubmit, PermissionRequest and PermissionDenied. Claude Code 2.1.322 runs no `http`
+  hook on `SessionStart` (or `Setup`): it skips it and logs "HTTP hooks are not supported for
+  SessionStart" (F-236), so the framework writes none, and a start is known by its session file. Each hook posts to
   `http://127.0.0.1:<port>/hooks/<account>` on the framework's node, with the home's secret
   (kept per home, so it outlives a restart) in a header, and sets its own `timeout`. No program
   on the host takes part, so a held hook is one open request. PreToolUse and PostToolUse are
@@ -2613,7 +2617,7 @@ section.
   `Stop` hold's count), and are not stored as they come: they carry every tool input and
   output, and `Transcripts` reads those. A main session's waiter is the one `command` hook: it
   posts to `/hooks/<account>/waiter` ("Delivery into a main session").
-- **One hold, five kinds** (F-115, R5). A hook that waits is a hold: a key, a deadline under
+- **One hold, six kinds** (F-115, R5). A hook that waits is a hold: a key, a deadline under
   the hook's `timeout`, a named decider, exactly one response, a late answer dropped, and a
   settle when the holder or its connection dies (`lost` or `unknown` for a hold with a row,
   nothing for the others). `Intake` keeps one structure of holds, one `:DOWN` lookup and one
@@ -2624,6 +2628,7 @@ section.
   | `permission` | `PermissionRequest` | a person, or an agent's or the operator's `answer` | 570 s of 600 s | yes |
   | `tool` | `PreToolUse` | the app's callback | 5 s of 10 s | yes |
 | `post_tool` | `PostToolUse` | the app's callback (F-197) | 5 s of 10 s, the same `tool_deadline` | yes |
+  | `start` | `SessionStart`, a command hook | the app's callback (F-236) | 5 s of 10 s, the same `tool_deadline` | yes |
   | `stop` | `Stop` | the app's callback (item 14), a pause's word, or a person at the cap | 570 s of 600 s | yes |
   | `waiter` | the `asyncRewake` Stop hook | `Mailbox`'s due row, by `deliver` | 7,080 s of 7,200 s, with a heartbeat every 5 s | the delivery's, in `Mailbox` |
 
@@ -2668,6 +2673,22 @@ section.
   context: <text>", and the tool's result was unchanged. Without the
   callback a `PostToolUse` post (the `Stop` hold's settings add it, for the count of blocks)
   is answered at once, with no row. `Intake.tla`'s `HT` models both tool kinds.
+- **A held `SessionStart`** (F-236). With the app's `session_start` callback, each account's
+  settings have a `command` `SessionStart` hook (`Intake.start_hook/4`), the waiter's shape:
+  `sh -c` around `curl`, the secret on file descriptor 3, a `timeout` of 10 s. It posts the
+  hook's input to `/hooks/<account>` and prints the response on stdout; it always exits 0.
+  `Intake` holds the start as a `PostToolUse` is held, under the same `tool_deadline`, and the
+  callback gets the agent, account, session, `cwd` and `source` (`startup`, `resume`, `clear`
+  or `compact`). `{:context, text}` goes out as `hookSpecificOutput.additionalContext`, under
+  `PreToolUse`'s bound of 10,000 characters; `:pass`, any other value, a crash and the deadline
+  are an empty body, which prints nothing. A session starts again at each resume, clear and
+  compact under one session id, so each start is a hold of its own key. Without the callback
+  there is no `SessionStart` hook. Measured by the main session on Claude Code 2.1.322, a
+  command hook whose context named a code word: headless (`-p`) and in an interactive start in
+  a trusted folder the model answered the code word; in an interactive first start that showed
+  the trust dialog it did not. A session whose start waited on the trust dialog starts without
+  the context. `Intake.tla`'s `HT` models this hold too: a post, a callback's answer or a pass,
+  one response.
 - **A held `Stop`** (F-157, decision 10). With the app's `stop:` callback, the `Stop` hook
   waits 600 s and each turn's end is a hold whose row is written "held". The callback gets the
   agent, its project, the session, its count of blocks and the hook's input, and answers
@@ -2695,7 +2716,8 @@ section.
   duplicate is harmless.
 - **Lost events.** A post while the framework is down is refused and lost. Each event a part
   needs has a reader that stands in: a Stop by the transcript's last reply, a SessionEnd by the
-  pid, a SessionStart by the session file.
+  pid, a start by the session file, which is the only reader of a start (no `http` hook posts
+  one, F-236).
 - **A held `PermissionRequest`.** `Intake` writes its row "held", with the request's id, and
   keeps the request open. `answer(agent, dialog, label)` names that id. The row says
   "deciding" before the decision goes out as the response (`hookSpecificOutput.decision`:

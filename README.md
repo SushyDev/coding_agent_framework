@@ -408,6 +408,9 @@ Built, each from a checked model in `model/tla/`:
 - the interactive stand-in makes its own `sessions/`, answers `auth status` and writes 2.1.322's
   session file as its screen changes, so a test runs a main session on the whole example tree
   (F-232).
+- the app's tool hooks take a session's start (F-236): `session_start/3` answers a context the
+  model reads with the first prompt, through a `command` hook, since Claude Code runs no `http`
+  hook on `SessionStart`; the framework's own `http` one, which never posted, is gone.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
