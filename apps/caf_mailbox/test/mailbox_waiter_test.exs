@@ -1,3 +1,23 @@
+defmodule CodingAgentFramework.MailboxWaiterTest.HeldIntake do
+  @moduledoc false
+  # Plays `Intake` for one test: every session has a waiter, and a delivery's answer waits for
+  # the test, which gets the caller to answer it.
+  use GenServer
+
+  def start_link(test), do: GenServer.start_link(__MODULE__, test)
+
+  @impl true
+  def init(test), do: {:ok, test}
+
+  @impl true
+  def handle_call({:waiter?, _account, _session}, _from, test), do: {:reply, {:ok, true}, test}
+
+  def handle_call({:deliver, _account, _session, text}, from, test) do
+    send(test, {:held, from, text})
+    {:noreply, test}
+  end
+end
+
 defmodule CodingAgentFramework.MailboxWaiterTest do
   @moduledoc """
   The `waiter` transport over a real `Sessions`, `Intake` behind Bandit, `Transcripts`, real
@@ -336,25 +356,5 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
     cue(ctx)
     row = Table.get(ctx.mtable, id)
     if ready?.(row), do: {:ok, row}, else: row
-  end
-end
-
-defmodule CodingAgentFramework.MailboxWaiterTest.HeldIntake do
-  @moduledoc false
-  # Plays `Intake` for one test: every session has a waiter, and a delivery's answer waits for
-  # the test, which gets the caller to answer it.
-  use GenServer
-
-  def start_link(test), do: GenServer.start_link(__MODULE__, test)
-
-  @impl true
-  def init(test), do: {:ok, test}
-
-  @impl true
-  def handle_call({:waiter?, _account, _session}, _from, test), do: {:reply, {:ok, true}, test}
-
-  def handle_call({:deliver, _account, _session, text}, from, test) do
-    send(test, {:held, from, text})
-    {:noreply, test}
   end
 end

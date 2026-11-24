@@ -1,3 +1,17 @@
+defmodule CodingAgentFramework.DelegatesInteractiveTest.NoWaiter do
+  @moduledoc false
+  # Plays `Intake` with no waiter held: the brief goes by launch, and the report waits.
+  use GenServer
+
+  def start_link(_), do: GenServer.start_link(__MODULE__, nil)
+
+  @impl true
+  def init(nil), do: {:ok, nil}
+
+  @impl true
+  def handle_call({:waiter?, _account, _session}, _from, s), do: {:reply, {:ok, false}, s}
+end
+
 defmodule CodingAgentFramework.DelegatesInteractiveTest do
   @moduledoc """
   An interactive delegate (`interactive: true`, F-137) over a real `Sessions`, `Inlet`,
@@ -519,18 +533,4 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     if status != 0, do: raise("git #{inspect(args)}: #{out}")
     out
   end
-end
-
-defmodule CodingAgentFramework.DelegatesInteractiveTest.NoWaiter do
-  @moduledoc false
-  # Plays `Intake` with no waiter held: the brief goes by launch, and the report waits.
-  use GenServer
-
-  def start_link(_), do: GenServer.start_link(__MODULE__, nil)
-
-  @impl true
-  def init(nil), do: {:ok, nil}
-
-  @impl true
-  def handle_call({:waiter?, _account, _session}, _from, s), do: {:reply, {:ok, false}, s}
 end

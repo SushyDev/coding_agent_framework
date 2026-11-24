@@ -1,3 +1,17 @@
+defmodule CodingAgentFramework.MainsTest.NoWaiter do
+  @moduledoc false
+  # Plays `Intake` with no waiter held: the brief goes by launch.
+  use GenServer
+
+  def start_link(_), do: GenServer.start_link(__MODULE__, nil)
+
+  @impl true
+  def init(nil), do: {:ok, nil}
+
+  @impl true
+  def handle_call({:waiter?, _account, _session}, _from, s), do: {:reply, {:ok, false}, s}
+end
+
 defmodule CodingAgentFramework.MainsTest do
   @moduledoc """
   `Mains` over a real `Sessions`, `Inlet`, `Registry`, `Mailbox` and `Scheduler`, real dtach,
@@ -1011,18 +1025,4 @@ defmodule CodingAgentFramework.MainsTest do
     if status != 0, do: raise("git #{inspect(args)}: #{out}")
     out
   end
-end
-
-defmodule CodingAgentFramework.MainsTest.NoWaiter do
-  @moduledoc false
-  # Plays `Intake` with no waiter held: the brief goes by launch.
-  use GenServer
-
-  def start_link(_), do: GenServer.start_link(__MODULE__, nil)
-
-  @impl true
-  def init(nil), do: {:ok, nil}
-
-  @impl true
-  def handle_call({:waiter?, _account, _session}, _from, s), do: {:reply, {:ok, false}, s}
 end

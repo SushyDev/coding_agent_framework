@@ -1,3 +1,17 @@
+defmodule CodingAgentFramework.MailboxLaunchTest.NoWaiter do
+  @moduledoc false
+  # Plays `Intake` with no waiter held: a launch needs none.
+  use GenServer
+
+  def start_link(_), do: GenServer.start_link(__MODULE__, nil)
+
+  @impl true
+  def init(nil), do: {:ok, nil}
+
+  @impl true
+  def handle_call({:waiter?, _account, _session}, _from, s), do: {:reply, {:ok, false}, s}
+end
+
 defmodule CodingAgentFramework.MailboxLaunchTest do
   @moduledoc """
   The `launch` transport (F-137) over a real `Sessions`, `Transcripts`, real dtach and tmux in
@@ -223,18 +237,4 @@ defmodule CodingAgentFramework.MailboxLaunchTest do
       10_000
     )
   end
-end
-
-defmodule CodingAgentFramework.MailboxLaunchTest.NoWaiter do
-  @moduledoc false
-  # Plays `Intake` with no waiter held: a launch needs none.
-  use GenServer
-
-  def start_link(_), do: GenServer.start_link(__MODULE__, nil)
-
-  @impl true
-  def init(nil), do: {:ok, nil}
-
-  @impl true
-  def handle_call({:waiter?, _account, _session}, _from, s), do: {:reply, {:ok, false}, s}
 end
