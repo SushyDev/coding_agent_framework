@@ -96,6 +96,66 @@ defmodule CodingAgentFramework.SessionsDialogTest do
     assert Agents.dialog(Agents.get(ctx.agents, "alpha")) == nil
   end
 
+  # F-246's new-5, seen on Linux: Claude Code 2.1.322 there writes `procStart` as a bare
+  # integer, the process's start in clock ticks (`/proc/<pid>/stat` field 22), and a row on the
+  # trust dialog stayed `dialog` after its answer, its file judged `replaced`. The stand-in
+  # writes that form; this host has no `/proc`, so a stand-in `cat` answers a live pid's stat
+  # file, its name holding ") (", with the stand-in's ticks, and gives anything else to the
+  # real `cat`. The row runs once its trust dialog is answered.
+  test "a session file whose start is in clock ticks confirms the row past its dialog", ctx do
+    ticks = "653385178"
+    dir = Path.join(ctx.dir, "ticks")
+    File.mkdir_p!(dir)
+    cat = Path.join(dir, "cat")
+
+    File.write!(cat, """
+    #!#{program!(:bash)}
+    case "$1" in
+      /proc/*/stat) ;;
+      *) exec #{program!(:cat)} "$@" ;;
+    esac
+    s=0
+    for f in "$@"; do
+      p=${f#/proc/}; p=${p%/stat}
+      if #{program!(:kill)} -0 "$p" 2>/dev/null; then
+        printf '%s (a) (b c) S 1 %s %s 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 1 0 #{ticks} 1 2 3\\n' "$p" "$p" "$p"
+      else
+        printf 'cat: %s: No such file or directory\\n' "$f" >&2; s=1
+      fi
+    done
+    exit $s
+    """)
+
+    File.chmod!(cat, 0o755)
+    programs = programs(host(), %{cat: cat})
+    accounts = %{"work" => ctx.account.config_dir}
+    db = Path.join(dir, "registry.db")
+    spec = {Registry, programs: programs, accounts: accounts, db: db}
+    registry = start_supervised!(Supervisor.child_spec(spec, id: :ticks_registry))
+
+    claude =
+      ScreenStandIn.write!(dir, "2.1.322", stand_in_idle(), trust: true, proc_start: ticks)
+
+    sessions = sessions(ctx, programs: programs, registry: registry)
+    launch = Keyword.put(ctx.launch, :claude, claude)
+
+    assert {:unknown, {:dialog, :trust}} = Sessions.start(sessions, "alpha", ctx.account, launch)
+    assert {:ok, :sent} = Sessions.answer_dialog(sessions, "alpha", :trust, @trust)
+
+    running = fn ->
+      {:ok, _} = Registry.read(registry)
+      Sessions.cue(sessions, %{topic: "registry:test:work", ids: []})
+
+      case Agents.get(ctx.agents, "alpha") do
+        %{status: "running"} = row -> {:ok, row}
+        row -> row.status
+      end
+    end
+
+    assert {:ok, %{status: "running", proc_start: ^ticks}} = await(running)
+    assert {:ok, %{rows: [%{proc_start: ^ticks, alive: :live}]}} = Registry.rows(registry, "work")
+  end
+
   # NotEndedOnDialog and LeaseWhileLive: past the start's deadline the row still waits, not
   # free, so its name is not started again and nothing ends it as an orphan.
   test "the start's deadline does not end a row on a dialog", ctx do
@@ -167,7 +227,7 @@ defmodule CodingAgentFramework.SessionsDialogTest do
   # F-248: a stop's bound is its steps plus the exit press's wait, derived from the `Inlet`'s
   # `see:` (F-245's table, with F-249's queue), never a number set apart from it.
   test "a stop's bound is its steps and the exit press's wait" do
-    for {see, bound} <- [{10_000, 106_040}, {2_000, 90_040}] do
+    for {see, bound} <- [{10_000, 123_560}, {2_000, 99_560}] do
       press =
         see
         |> Inlet.press_bound_at(Shell.bound(5_000))
@@ -383,9 +443,10 @@ defmodule CodingAgentFramework.SessionsDialogTest do
   end
 
   # F-245: each bound that waits on a press derives from the one below it, plus a stated
-  # margin: a tmux command's (`Shell.bound/1` of the server's timeout), the `Inlet`'s (two reads
-  # and six commands, and 1 000), the press's timeout (and the queue's 10 000 and the answer's
-  # 1 000, F-249), and `Sessions`' call (and 5 000). A `Sessions` asks its
+  # margin: a tmux command's (`Shell.bound/1` of the server's timeout), the `Inlet`'s (three
+  # reads, the first past its settle, F-246; seven commands; and 1 000), the press's timeout
+  # (and the queue's 10 000 and the answer's 1 000, F-249), and `Sessions`' call (and 5 000).
+  # A `Sessions` asks its
   # `Inlet`, which owns `see:`, and a caller asks the `Sessions`.
   test "the bounds that wait on a press derive from the Inlet's see, up to the caller", ctx do
     command = Shell.bound(5_000)
@@ -393,10 +454,12 @@ defmodule CodingAgentFramework.SessionsDialogTest do
     assert Tmux.bound(ctx.server) == command
 
     for {see, inlet, press, call} <- [
-          {10_000, 60_040, 71_040, 76_040},
-          {2_000, 44_040, 55_040, 60_040}
+          {10_000, 77_560, 88_560, 93_560},
+          {2_000, 53_560, 64_560, 69_560}
         ] do
-      assert Inlet.press_bound_at(see, command) == 2 * (see + 20) + 6 * command + 1_000
+      assert Inlet.press_bound_at(see, command) ==
+               3 * (see + 20) + Inlet.settle() + 7 * command + 1_000
+
       assert Inlet.press_bound_at(see, command) == inlet
       # F-249: up to 10 000 in the Inlet's queue, and 1 000 for the answer's way back.
       assert Inlet.press_timeout(inlet) == inlet + 10_000 + 1_000
@@ -406,8 +469,8 @@ defmodule CodingAgentFramework.SessionsDialogTest do
     end
 
     inlet = start_supervised!({Inlet, tmux: ctx.server, see: 10_000}, id: :ten_seconds)
-    assert {:ok, 60_040} = Inlet.press_bound(inlet)
-    assert {:ok, 76_040} = Sessions.press_call(sessions(ctx, inlet: inlet))
+    assert {:ok, 77_560} = Inlet.press_bound(inlet)
+    assert {:ok, 93_560} = Sessions.press_call(sessions(ctx, inlet: inlet))
     # With no `Inlet` no press goes: a press call waits as a read does.
     assert {:ok, 5_000} = Sessions.press_call(sessions(ctx, inlet: nil))
   end

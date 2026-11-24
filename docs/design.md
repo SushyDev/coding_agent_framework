@@ -1061,7 +1061,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Holder` | dtach: hold a process in a clean environment, open a viewer, list sockets and whether each lives | — |
 | `Holder.Process` | a held program's record: pid, start time and socket, read in one batch; "dead" as the pid gone and the socket absent or stale; an end by TERM, then KILL, only by the record's pid and start time. Every part that holds a program keeps this record on its own row | no table |
 | `ClaudeCLI` | the command line and environment of a session, per role and account, and the paths of a headless session's stream directory | — |
-| `Registry` | one per host, over every account the framework holds: reads Claude Code's `<config>/sessions/*.json`, and so each held agent's pid and its session file's `status`; a `Reader` | `registry_sessions` |
+| `Registry` | one per host, over every account the framework holds: reads Claude Code's `<config>/sessions/*.json`, and so each held agent's pid and its session file's `status`, each file live by its pid and its `procStart` in the form the file holds it: `ps -o lstart=` in UTC (macOS), or a bare integer, the start in clock ticks from `/proc/<pid>/stat` (Linux, F-246); a `Reader` | `registry_sessions` |
 | `Transcripts` | one per host, over every account: a session's transcript tail, its chats, its subagents and its tool calls (a sidechain's under its agent id, F-235; on 2.1.322 read from each subagent's own file in `<session id>/subagents/`, found by listing it on each read; a file never read whose meta says the subagent finished is not read, and a running one's first read takes at most its last 1 MB, F-237; a main transcript with no stored fold is read the first time from its last 1 MB too, its fold `partial`, F-244), and whether a transcript holds a delivery's line; a `Reader` | `transcripts_sessions` |
 | `Screen` | a pure reading of a main session's screen and dialogs, per Claude Code release, from real fixtures captured with a script: the startup dialogs (trust, and external imports with the paths it lists), any numbered menu by its shape (F-198), typed commands and their result lines, the box before a typed write, a dim prompt suggestion in it read as no text | — |
 | `Inlet` | the checked typed write into an interactive session with no waiter: `Screen`'s box check, then `Tmux`'s one-command check, one per host; and the typed commands a session's start or a tool needs (a startup dialog's checked press, `/mcp reconnect`, the interrupt key, and the operator's `/reload-plugins`, whose result line it reads outside its write's step, F-233), and a read of a pane for `Sessions`. It is one transport of `Mailbox` | no table |
@@ -1714,12 +1714,17 @@ The answer comes from outside, by the option's label: `Sessions.answer_dialog/5`
 calls and the operator's tool `answer_startup` calls (the operator's alone). It is marked on
 the row before its press, and the `Inlet` presses it checked: the pane still shows that dialog,
 the press lands on the chosen option, and the dialog leaves; otherwise refused (nothing went)
-or unknown. Each of its two reads, the marker on the option before Enter and the dialog's
-leaving after it, waits up to the `Inlet`'s `see:`, the config's `press_see` (F-242). That
+or unknown. No key goes until the dialog has read the same for `Inlet.settle/0` (1 s, F-246,
+`Press.tla`): Claude Code draws a dialog again about 150 ms after its first draw and sets its
+selection back, which the screen does not show when no key came, and a press before then is
+lost and its Enter may confirm the first option. A dialog that never reads the same that long
+within `see:` past the settle is refused `unsettled`: no key went. Then each of its two reads,
+the marker on the option before Enter and the dialog's leaving after it, waits up to the
+`Inlet`'s `see:`, the config's `press_see` (F-242). That
 `see:` has one owner, the `Inlet` (F-245), and each bound that waits on a press is the one
 below it plus a stated margin: a tmux command's (`Shell.bound/1` of the server's timeout:
 the timeout, the wait between TERM and KILL, and the wait for the exit), the `Inlet`'s
-(`Inlet.press_bound/1`: two reads, the six tmux commands a press runs, and 1 s), which
+(`Inlet.press_bound/1`: the settle (F-246), three reads, the seven tmux commands a press runs, and 1 s), which
 `Sessions` asks once as it starts and the `Inlet` answers outside its queue, the press's
 `timeout:` (`Inlet.press_timeout/1`, and 10 s in the `Inlet`'s queue and 1 s for the answer),
 and `Sessions`' call (`Sessions.press_call/2`, and 5 s), which each caller asks first and

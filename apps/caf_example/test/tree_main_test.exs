@@ -99,6 +99,64 @@ defmodule CodingAgentFramework.Example.TreeMainTest do
     assert {:ok, []} = await(fn -> if File.ls(sessions) == {:ok, []}, do: {:ok, []} end)
   end
 
+  # F-246's second item: a main whose start meets the trust dialog, answered from the inbox
+  # after the start's own call answered unknown, as the real suite answers it. The row must
+  # leave `dialog` once the stand-in writes its session file: `agents` reads it idle.
+  test "a main session answered past its trust dialog reaches idle in agents", ctx do
+    claude =
+      ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), trust: true, transcript: true)
+
+    data = ctx.path |> File.read!() |> JSON.decode!() |> put_in(["launch", "claude"], claude)
+    File.write!(ctx.path, JSON.encode!(data))
+    {:ok, io} = StringIO.open("")
+    Process.group_leader(self(), io)
+    out = fn -> elem(StringIO.contents(io), 1) end
+    {:ok, caf} = Console.start(ctx.path, System.get_env())
+    on_exit(fn -> Console.stop(caf) end)
+
+    see = fn act, text, ms ->
+      case await(fn -> (act.() && out.() =~ text && {:ok, text}) || nil end, ms) do
+        {:ok, _} -> :ok
+        _ -> flunk("no #{inspect(text)} in:\n" <> out.())
+      end
+    end
+
+    see.(fn -> Console.checkout(caf) end, "app: ready, on main", 30_000)
+    mains = Run.parts(caf).mains
+
+    assert {:unknown, {:dialog, :trust}} =
+             Mains.start_main(mains, "app", "app-epic", "Plan the epic.")
+
+    instance = ctx.config.instance
+
+    assert {:ok, [%{id: id, options: options}]} =
+             await(fn ->
+               case CodingAgentFramework.prompts(instance, agent: "app-epic", kind: "dialog") do
+                 {:ok, [_] = ps} -> {:ok, ps}
+                 _ -> nil
+               end
+             end)
+
+    trust = Enum.find(options, &(&1 =~ ~r/trust/i))
+    assert {:ok, _} = CodingAgentFramework.answer(instance, id, trust, ctx.config.operator)
+    assert File.exists?(Path.join(ctx.dir, "trusted"))
+    see.(fn -> Console.agents(caf) end, "app-epic: main of app, on one, idle", 30_000)
+    # The brief goes once its turn shows in the transcript; the end waits for its delivery.
+    assert {:ok, [_]} = await(fn -> nonempty(ScreenStandIn.prompts(ctx.dir)) end)
+    sessions = Path.join(ctx.config.home, "accounts/one/claude/sessions")
+    assert {:ok, [file]} = File.ls(sessions)
+    assert {:ok, "idle"} = await(fn -> status(sessions, file, "idle") end)
+    assert {:ok, :ended} = await(fn -> ended(mains, "app-epic") end)
+  end
+
+  defp ended(mains, name) do
+    case Mains.end_main(mains, name) do
+      {:ok, :ended} = ok -> ok
+      {:refused, {:sending, _}} -> nil
+      other -> other
+    end
+  end
+
   defp json(path), do: path |> File.read!() |> JSON.decode!()
 
   # The session file's `status` once it is `want`; a file mid-write reads as not yet.

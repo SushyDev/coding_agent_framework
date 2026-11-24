@@ -57,10 +57,10 @@ defmodule CodingAgentFramework.Inlet do
   @see 2_000
   # The tmux commands of one press, counted in `act/3`'s choose (F-245): the pane's list
   # (`pane/2`), the dialog's capture (`dialog/5`), the keys (`move/4`) and Enter (`enter/3`)
-  # outside its reads, and the capture each of its two reads may start just before its
-  # deadline (`selected/7`, `left/6`). An Escape's press runs fewer: the list, the capture,
-  # Escape and one read.
-  @commands 6
+  # outside its reads, and the capture each of its three reads may start just before its
+  # deadline (`settling/7`, F-246; `selected/7`, `left/6`). An Escape's press runs fewer: the
+  # list, the capture, Escape and two reads.
+  @commands 7
   # The press's own work between its commands, Screen's reading of each capture, and its
   # reply: not measured.
   @reply 1_000
@@ -70,6 +70,12 @@ defmodule CodingAgentFramework.Inlet do
   # How long a press may wait in the queue behind other calls: a look, a typed line or a short
   # press, each well under a second on a host that answers. Not measured.
   @queue 10_000
+  # How long a dialog must read the same before a press's keys go (F-246). 2.1.322 draws a
+  # dialog again about 150 ms after its first draw (147 to 214 ms measured, at loads 20 to 47),
+  # setting its selection back; a key before then is lost and an Enter dropped, and with no key
+  # the second draw changes nothing on the screen. 1 s is over six times the common case and
+  # over F-238's x4 for a loaded host.
+  @settle 1_000
   # How long a typed command's result line may take to be drawn: not measured (F-233's new-1).
   @result 10_000
   # Between two captures while the box is drawn; only spaces the reads.
@@ -102,22 +108,36 @@ defmodule CodingAgentFramework.Inlet do
   def see, do: @see
 
   @doc """
+  How long a dialog must read the same before `choose/5` sends its keys, in ms: 1 000 (F-246,
+  `model/tla/Press.tla`). Claude Code 2.1.322 draws a dialog again about 150 ms after its first
+  draw and sets its selection back to its first option; a press before then is lost, and its
+  Enter may confirm that first option. The second draw cannot be read, so only time tells it
+  has passed.
+
+      iex> CodingAgentFramework.Inlet.settle()
+      1000
+  """
+  @spec settle() :: pos_integer
+  def settle, do: @settle
+
+  @doc """
   The bound of one `choose/5` by an `Inlet` whose `see:` is `see` ms, on a tmux server whose
-  one command takes at most `command` ms (`Tmux.bound/1`), F-245: its two reads, the marker's
-  before Enter and the dialog's leaving after it, each up to `see` and the pause between two
-  captures; the six tmux commands a press runs (the module's `@commands`), each up to `command`;
-  and a margin of 1 000 for the press's own work and its reply. The instance answers its own
-  (`press_bound/1`); a caller that waits on a press takes its bound from there.
+  one command takes at most `command` ms (`Tmux.bound/1`), F-245: its three reads, each up to
+  `see` and the pause between two captures (the settle's, F-246, also up to `settle/0` more;
+  then the marker's before Enter and the dialog's leaving after it); the seven tmux commands a
+  press runs (the module's `@commands`), each up to `command`; and a margin of 1 000 for the
+  press's own work and its reply. The instance answers its own (`press_bound/1`); a caller that
+  waits on a press takes its bound from there.
 
       iex> CodingAgentFramework.Inlet.press_bound_at(10_000, 6_500)
-      60040
+      77560
       iex> CodingAgentFramework.Inlet.press_bound_at(2_000, 6_500)
-      44040
+      53560
   """
   @spec press_bound_at(pos_integer, pos_integer) :: pos_integer
   def press_bound_at(see, command)
       when is_integer(see) and see > 0 and is_integer(command) and command > 0,
-      do: 2 * (see + @look) + @commands * command + @reply
+      do: 3 * (see + @look) + @settle + @commands * command + @reply
 
   @doc """
   This instance's press bound: `press_bound_at/2` of its own `see:` and its server's
@@ -130,7 +150,7 @@ defmodule CodingAgentFramework.Inlet do
       iex> server = CodingAgentFramework.Tmux.Fake.new(fake, {"laptop", "fake"})
       iex> {:ok, inlet} = CodingAgentFramework.Inlet.start_link(tmux: server, see: 10_000)
       iex> CodingAgentFramework.Inlet.press_bound(inlet)
-      {:ok, 51040}
+      {:ok, 67060}
   """
   @spec press_bound(GenServer.server(), keyword) ::
           {:ok, pos_integer} | {:refused, term} | {:unknown, term}
@@ -170,20 +190,23 @@ defmodule CodingAgentFramework.Inlet do
   Answers a dialog of `kind` on `session`'s screen by the option labeled `label`: the checked
   press of a start's dialog (F-140, `model/tla/Dialog.tla`'s `Press`), which `Sessions` makes
   for a person's answer or the app's. In one turn of the queue, with no other call between: the
-  screen is read as the session's release draws it, and must show that dialog; the keys that
-  move its selection there (`Screen.option_keys/2`) go as one tmux command; the screen is read
-  again until that option is selected (`see:` ms); then Enter, as its own command; then the
-  screen again, until that dialog has left (`see:` ms, the instance's own). A pane gone after
-  the Enter or the Escape (`Tmux` refuses its capture `:no_pane`, or `:no_server` once its
-  server went with it) is the dialog left, and answers at once: "No, exit" ends the program and
-  its pane (F-242, from F-238's new-2). Options `release:` and `timeout:` (required):
-  `press_timeout/1` of `press_bound/1` is the `timeout:` that covers a press and its wait in
-  the queue. A press takes no `see:` of its own, so its reads and its bound come from the
-  instance's one `see:` (F-245).
+  screen is read as the session's release draws it, and must show that dialog; it is read again
+  until its reading has stayed the same for `settle/0` (up to `see:` ms past it; a reading that
+  changes starts the wait again), so a press never goes before the program's second draw of the
+  dialog (F-246, `model/tla/Press.tla`); the keys that move its selection there
+  (`Screen.option_keys/2`) go as one tmux command; the screen is read again until that option is
+  selected (`see:` ms); then Enter, as its own command; then the screen again, until that dialog
+  has left (`see:` ms, the instance's own). A pane gone after the Enter or the Escape (`Tmux`
+  refuses its capture `:no_pane`, or `:no_server` once its server went with it) is the dialog
+  left, and answers at once: "No, exit" ends the program and its pane (F-242, from F-238's
+  new-2). Options `release:` and `timeout:` (required): `press_timeout/1` of `press_bound/1` is
+  the `timeout:` that covers a press and its wait in the queue. A press takes no `see:` of its
+  own, so its reads and its bound come from the instance's one `see:` (F-245).
 
   Answers `{:ok, :sent}` once the dialog has left; `{:refused, reason}` when no key went:
   `:busy` (its bound no longer fits before its deadline, as the module doc says),
-  `:no_release`, `{:screen, reading}` (another screen, or another dialog), `{:no_option,
+  `:no_release`, `{:screen, reading}` (another screen, or another dialog), `{:unsettled,
+  reading}` (the dialog never read the same for `settle/0` within the bound), `{:no_option,
   label}`, or `Tmux`'s; `{:unknown, reason}` once a key may have gone: `{:not_selected,
   reading}` (the keys went and the screen never showed the option selected; no Enter went),
   `{:enter, reason}`, or `{:still_shown, reading}` (Enter went and the dialog stayed). An
@@ -192,7 +215,7 @@ defmodule CodingAgentFramework.Inlet do
   A menu no rule names (`Screen`'s kind `:menu`, F-198, `model/tla/Menu.tla`) is named
   `{:menu, title, options}`: the pane must show a menu with that title and those options, and
   the option is read back, the marker on it, before Enter. `label` `:esc` presses Escape in
-  place of a choice, checked the same way: the pane shows that dialog, Escape goes as its own
+  place of a choice, checked the same way: the pane shows that dialog and settles, Escape goes as its own
   command, and the dialog leaves; unknown `{:escape, reason}` or `{:still_shown, reading}`.
 
       iex> {:ok, fake} = CodingAgentFramework.Tmux.Fake.start_link(key: {"laptop", "fake"})
@@ -459,7 +482,8 @@ defmodule CodingAgentFramework.Inlet do
   defp act({:choose, session, kind, :esc, release}, see, tmux) do
     with :ok <- if(is_binary(release), do: :ok, else: {:refused, :no_release}),
          {:ok, pane} <- pane(tmux, session),
-         {:ok, _screen} <- dialog(tmux, pane, session, release, kind) do
+         {:ok, screen} <- dialog(tmux, pane, session, release, kind),
+         {:ok, _screen} <- settled(tmux, pane, session, release, kind, screen, see) do
       case Tmux.write(tmux, pane, session, {:keys, ["Escape"]}) do
         {:ok, :sent} ->
           left(tmux, pane, session, release, kind, now() + see)
@@ -476,7 +500,8 @@ defmodule CodingAgentFramework.Inlet do
   defp act({:choose, session, kind, label, release}, see, tmux) do
     with :ok <- if(is_binary(release), do: :ok, else: {:refused, :no_release}),
          {:ok, pane} <- pane(tmux, session),
-         {:ok, screen} <- dialog(tmux, pane, session, release, kind),
+         {:ok, first} <- dialog(tmux, pane, session, release, kind),
+         {:ok, screen} <- settled(tmux, pane, session, release, kind, first, see),
          {:ok, keys} <- Screen.option_keys(screen, label),
          {:ok, :sent} <- move(tmux, pane, session, keys) do
       deadline = now() + see
@@ -520,6 +545,38 @@ defmodule CodingAgentFramework.Inlet do
         after
           @look -> left(tmux, pane, session, release, kind, deadline)
         end
+    end
+  end
+
+  # Before any key: the dialog read until its reading has stayed the same for @settle, so the
+  # program's second draw, which sets the selection back and cannot be read, has passed
+  # (`Press.tla`'s Keys). A changed reading starts the wait again, and so does a screen caught
+  # mid-draw (unrecognized); another screen refuses, as the first read does; past `see` beyond
+  # @settle nothing went, so it is refused too.
+  defp settled(tmux, pane, session, release, kind, reading, see) do
+    settling(tmux, pane, session, release, kind, {reading, now()}, now() + @settle + see)
+  end
+
+  defp settling(tmux, pane, session, release, kind, {reading, since}, deadline) do
+    receive do
+    after
+      @look -> :ok
+    end
+
+    next =
+      case dialog(tmux, pane, session, release, kind) do
+        {:ok, next} -> next
+        {:refused, {:screen, :unrecognized}} -> :unrecognized
+        refused -> refused
+      end
+
+    since = if next == reading, do: since, else: now()
+
+    cond do
+      match?({:refused, _}, next) -> next
+      next != :unrecognized and now() - since >= @settle -> {:ok, next}
+      now() >= deadline -> {:refused, {:unsettled, next}}
+      true -> settling(tmux, pane, session, release, kind, {next, since}, deadline)
     end
   end
 

@@ -36,7 +36,13 @@ defmodule CodingAgentFramework.ScreenStandIn do
     among them draws the `menu` screen as one more startup dialog (F-203), its answer written
     as a running menu's, and the start goes on; `:menu2` draws it with another title
     (`menu_titles/0`), a second onboarding step (F-206), and each menu's answer is appended
-    to `<dir>/menus` (`menu_answers/1`);
+    to `<dir>/menus` (`menu_answers/1`); each key the trust or imports dialog takes is
+    appended to `<dir>/dialog_keys` (`dialog_keys/1`): `down`, `up`, `enter`;
+  - written with `redraw: ms` too, it draws the trust dialog again once, `ms` after its first
+    draw, as 2.1.322 does about 150 ms after it (F-246): until then a key moves the marker on
+    the screen only and an Enter is dropped, and the second draw puts the marker and the
+    choice back on "No, exit". With `redraw: {:every, ms}` it draws it again every `ms`, the
+    marker on the other option each time, so it never reads the same for longer;
   - written with `transcript: true`, the start's prompt also goes into its transcript
     (`$CLAUDE_CONFIG_DIR/projects/<cwd>/<session>.jsonl`) as 2.1.322 writes a start's first
     turn, past its startup dialogs and not before: the session's title, agent name and modes,
@@ -55,7 +61,8 @@ defmodule CodingAgentFramework.ScreenStandIn do
   Started by `Sessions` (`CLAUDE_CONFIG_DIR` set), it writes its session file,
   `<CLAUDE_CONFIG_DIR>/sessions/<pid>.json`, once its startup dialogs are answered (2.1.322
   writes none while one is shown, F-140), making `sessions/` as Claude Code does, and removes
-  it when it exits. The file has 2.1.322's shape in the fields the framework reads (`pid`,
+  it when it exits. Its `procStart` is macOS's form, `ps -o lstart=` in UTC; written with
+  `proc_start: ticks` it is that string, Linux's form, a start in clock ticks (F-246). The file has 2.1.322's shape in the fields the framework reads (`pid`,
   `sessionId`, `cwd`, `startedAt`, `procStart`, `kind`, `name`, `status`, `updatedAt`, and
   `waitingFor` while a dialog is drawn) plus `version`. Written with `session_file: false`, it
   writes none. It records its pid in `<dir>/pids/`, and exits after `idle` seconds with no key.
@@ -94,6 +101,14 @@ defmodule CodingAgentFramework.ScreenStandIn do
 
       {:error, :enoent} ->
         []
+    end
+  end
+
+  @doc "The keys the trust and imports dialogs took in `dir`, oldest first: `down`, `up`, `enter`."
+  def dialog_keys(dir) do
+    case File.read(Path.join(dir, "dialog_keys")) do
+      {:ok, text} -> String.split(text, "\n", trim: true)
+      {:error, :enoent} -> []
     end
   end
 
@@ -145,14 +160,27 @@ defmodule CodingAgentFramework.ScreenStandIn do
     suffix = suffix <> if(reloaded == "", do: "-silent", else: "")
     session_file = if Keyword.get(opts, :session_file, true), do: "1", else: ""
     suffix = suffix <> if(session_file == "", do: "-nofile", else: "")
+
+    {redraw, every} =
+      case Keyword.get(opts, :redraw) do
+        nil -> {"", ""}
+        {:every, ms} when is_integer(ms) and ms > 0 -> {"", "#{ms}"}
+        ms when is_integer(ms) and ms > 0 -> {"#{ms}", ""}
+      end
+
+    suffix = suffix <> if(redraw != "", do: "-redraw#{redraw}", else: "")
+    suffix = suffix <> if(every != "", do: "-every#{every}", else: "")
+    dialogs = Enum.join(dialogs, " ")
+    proc_start = Keyword.get(opts, :proc_start, "")
+    suffix = suffix <> if(proc_start != "", do: "-ticks", else: "")
     path = Path.join(dir, "claude-screen#{suffix}-#{release}")
     tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
-    dialogs = Enum.join(dialogs, " ")
 
-    File.write!(
-      tmp,
-      script(dir, screens, {release, idle, dialogs, transcript, first, session_file, reloaded})
-    )
+    flags =
+      {release, idle, dialogs, transcript, first, session_file, reloaded,
+       {redraw, every, proc_start}}
+
+    File.write!(tmp, script(dir, screens, flags))
 
     File.chmod!(tmp, 0o755)
     # Renamed into place, as `ClaudeStandIn.write!/3` does: a start may be running the path.
@@ -265,7 +293,10 @@ defmodule CodingAgentFramework.ScreenStandIn do
   defp width(screens),
     do: screens |> Path.join("rule") |> File.read!() |> String.trim() |> String.length()
 
-  defp script(dir, screens, {release, idle, dialogs, transcript, first, session_file, reloaded}) do
+  defp script(dir, screens, flags) do
+    {release, idle, dialogs, transcript, first, session_file, reloaded,
+     {redraw, every, proc_start}} = flags
+
     ~s"""
     #!#{program!(:bash)}
     # The login check a whole tree runs before a start, answered as `HeadlessStandIn` does.
@@ -274,6 +305,9 @@ defmodule CodingAgentFramework.ScreenStandIn do
     fi
     name='' resume='' screen=#{first} sel=1 prompt='' dialogs='#{dialogs}' choice=no transcript='#{transcript}'
     reloaded='#{reloaded}' shown=''
+    # `choice` is the option the dialog holds, `drawn` the one its marker is drawn on. Until a
+    # pending second draw (`redraw`, once; `every`, always), only `drawn` moves.
+    drawn=no redraw='#{redraw}' every='#{every}' pending='' first_at=0
     given=$(printf '%s\\n' "$@")
     while [ $# -gt 0 ]; do
       case $1 in
@@ -303,6 +337,8 @@ defmodule CodingAgentFramework.ScreenStandIn do
       start=$(LC_ALL=C TZ=UTC #{program!(:ps)} -o lstart= -p $$)
       start=${start#"${start%%[![:space:]]*}"}
       start=${start%"${start##*[![:space:]]}"}
+      # Linux's form, a start in clock ticks, when the stand-in is written with one (F-246).
+      [ -n "#{proc_start}" ] && start='#{proc_start}'
       waiting=''
       [ "$1" = waiting ] && waiting=', "waitingFor": "dialog open"'
       #{program!(:mkdir)} -p "${file%/*}"
@@ -344,7 +380,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
       if [ $screen = running ] || [ $screen = limit_wait ]; then
         #{program!(:cat)} "#{screens}/$screen"
       elif [ $screen = trust ] || [ $screen = imports ]; then
-        #{program!(:cat)} "#{screens}/$screen-$choice"
+        #{program!(:cat)} "#{screens}/$screen-$drawn"
       elif [ $screen = menu ] || [ $screen = menu2 ] || [ $screen = ask ]; then
         #{program!(:cat)} "#{screens}/$screen-$sel"
       else
@@ -381,7 +417,31 @@ defmodule CodingAgentFramework.ScreenStandIn do
     [ $screen = ask ] && announce waiting
     last=3; [ $screen = ask ] && last=4
     draw
-    while IFS= read -r -N1 -t #{idle} key; do
+    # The trust dialog's second draw is pending from its first (F-246).
+    if [ $screen = trust ] && [ -n "$redraw$every" ]; then pending=1; first_at=$(ms); fi
+    # The second draw: the marker and the choice back on the first option; with `every`, the
+    # marker on the other option each time, and another draw pending.
+    again() {
+      choice=no
+      if [ -n "$every" ]; then
+        [ $drawn = no ] && drawn=yes || drawn=no
+        first_at=$(ms)
+      else
+        drawn=no; pending=''
+      fi
+      draw
+    }
+    while :; do
+      wait=#{idle}
+      if [ -n "$pending" ]; then
+        left=$((first_at + ${redraw:-$every} - $(ms)))
+        if [ $left -le 0 ]; then again; continue; fi
+        wait=$(printf '%d.%03d' $((left / 1000)) $((left % 1000)))
+      fi
+      IFS= read -r -N1 -t $wait key
+      got=$?
+      # A read that timed out on a pending draw draws it; any other end of input ends.
+      if [ $got -ne 0 ]; then [ -n "$pending" ] && [ $got -gt 128 ] && continue; break; fi
       if [ $screen = limit_wait ]; then
         continue
       elif [ $screen = menu ] || [ $screen = menu2 ] || [ $screen = ask ]; then
@@ -411,15 +471,22 @@ defmodule CodingAgentFramework.ScreenStandIn do
       elif [ $screen = trust ] || [ $screen = imports ]; then
         case $key in
           $'\\e') IFS= read -r -N2 -t 1 seq
-                 case $seq in '[B') choice=yes ;; '[A') choice=no ;; esac ;;
+                 case $seq in
+                   '[B') drawn=yes; printf 'down\\n' >> "#{dir}/dialog_keys" ;;
+                   '[A') drawn=no; printf 'up\\n' >> "#{dir}/dialog_keys" ;;
+                 esac
+                 [ -n "$pending" ] || choice=$drawn ;;
           $'\\n'|$'\\r')
+            printf 'enter\\n' >> "#{dir}/dialog_keys"
+            # Before the dialog's second draw an Enter is dropped, as 2.1.322 drops it.
+            [ -n "$pending" ] && continue
             if [ $screen = trust ]; then
               [ $choice = yes ] || exit 1
               : > "#{dir}/trusted"
             else
               printf '%s' $choice > "#{dir}/imports"
             fi
-            shift; choice=no
+            shift; choice=no drawn=no
             if [ $# -gt 0 ]; then screen=$1; else screen=idle; first; fi ;;
         esac
       elif [ $screen = running ] && [ "$key" = $'\\e' ]; then
