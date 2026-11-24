@@ -411,6 +411,10 @@ Built, each from a checked model in `model/tla/`:
 - the app's tool hooks take a session's start (F-236): `session_start/3` answers a context the
   model reads with the first prompt, through a `command` hook, since Claude Code runs no `http`
   hook on `SessionStart`; the framework's own `http` one, which never posted, is gone.
+- the gates hold on a loaded host (F-238): a test's bound on work that load lengthens is scaled
+  by the load its suite read at its start, the `Inlet`'s read back of a press takes `see:` per
+  instance, `bin/check-model` prints the load beside each time and judges the 30 s rule only
+  under a load below the core count, and TLC runs in `gate-model` alone.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
@@ -715,7 +719,7 @@ machine that has nix.
   every file, and then runs the gates.
 - Run one gate alone with `gate-format`, `gate-compile`, `gate-deps`, `gate-test` or
   `gate-model`. `gate-deps` checks that each app declares, directly, every app it uses.
-  `gate-test` leaves out the TLC test; `gate-model` runs it. `mix test` alone runs both.
+  `gate-model` runs TLC through `bin/check-model`; no test runs it (F-238).
 - Check the tools against the lock with `check-versions`.
 
 Run every command from the umbrella root; `mix test` there runs each app's tests.

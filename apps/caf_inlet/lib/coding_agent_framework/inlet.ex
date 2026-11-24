@@ -17,7 +17,7 @@ defmodule CodingAgentFramework.Inlet do
      turn ended and the input box empty. A release with no reading refuses the write, and so
      does a session with no recorded release;
   3. the text, typed with no Enter; then the screen again, until the box shows exactly that
-     text (`see:` ms, 2 000 by default);
+     text (`see:` ms, 2 000 by default, or the instance's own `see:`);
   4. Enter, as its own tmux command: text and Enter in one burst read as a paste, and the Enter
      as a newline in the box.
 
@@ -57,9 +57,17 @@ defmodule CodingAgentFramework.Inlet do
 
   @type outcome :: {:ok, :sent} | {:refused, term} | {:unknown, term}
 
-  @doc "Starts an `Inlet` for one host's tmux server. `opts`: `tmux:` the server (required)."
+  @doc """
+  Starts an `Inlet` for one host's tmux server. `opts`: `tmux:` the server (required), and
+  `see:`, the ms a `type/4` or `choose/5` that names no `see:` of its own waits for the screen
+  to show its keys (2 000 by default). A loaded host redraws late: a press whose read back
+  passes that bound is unknown, never made again (F-238).
+  """
   @spec start_link(keyword) :: GenServer.on_start()
-  def start_link(opts), do: GenServer.start_link(__MODULE__, Keyword.fetch!(opts, :tmux))
+  def start_link(opts) do
+    see = Keyword.get(opts, :see, @see)
+    GenServer.start_link(__MODULE__, %{tmux: Keyword.fetch!(opts, :tmux), see: see})
+  end
 
   @doc """
   Types `text` into `session` and then Enter, checked as the module doc says. Options:
@@ -76,7 +84,7 @@ defmodule CodingAgentFramework.Inlet do
   @spec type(GenServer.server(), String.t(), String.t(), keyword) :: outcome
   def type(inlet, session, text, opts) do
     request = {:type, session, text, Keyword.fetch!(opts, :release), Keyword.fetch!(opts, :turn)}
-    call(inlet, request, Keyword.get(opts, :see, @see), opts)
+    call(inlet, request, Keyword.get(opts, :see), opts)
   end
 
   @doc """
@@ -116,7 +124,7 @@ defmodule CodingAgentFramework.Inlet do
         ) :: outcome
   def choose(inlet, session, kind, label, opts) do
     request = {:choose, session, kind, label, Keyword.fetch!(opts, :release)}
-    call(inlet, request, Keyword.get(opts, :see, @see), opts)
+    call(inlet, request, Keyword.get(opts, :see), opts)
   end
 
   @doc """
@@ -233,14 +241,14 @@ defmodule CodingAgentFramework.Inlet do
   end
 
   @impl true
-  def init(tmux), do: {:ok, %{tmux: tmux}}
+  def init(state), do: {:ok, state}
 
   @impl true
   def handle_call({request, see, deadline}, _from, state) do
     # The caller has already answered itself unknown; acting now would act late.
     if System.monotonic_time(:millisecond) >= deadline,
       do: {:reply, {:refused, :expired}, state},
-      else: {:reply, act(request, see, state.tmux), state}
+      else: {:reply, act(request, see || state.see, state.tmux), state}
   end
 
   defp act({:type, session, text, release, turn}, see, tmux) do

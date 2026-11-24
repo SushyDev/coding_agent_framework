@@ -176,15 +176,14 @@ in
   # only checks that a module is somewhere in an app's dependency tree. The task lives in
   # caf_test, which compiles only for tests.
   scripts.gate-deps.exec = "MIX_ENV=test mix caf.deps";
-  # The model test runs TLC; gate-model runs it on its own, so it is left out here. The test VM
-  # works under /tmp/caf-<its pid>/ (TestHost.vm_dir/0), and the subshell execs mix, so its pid
-  # is the VM's. A process whose command line still names that directory after the run is one
+  # TLC runs in gate-model alone, not in a test (F-238). The test VM works under
+  # /tmp/caf-<its pid>/ (TestHost.vm_dir/0), and the subshell execs mix, so its pid is the VM's. A process whose command line still names that directory after the run is one
   # the run left: the gate names each and fails. It lists them; it never ends them. A dtach
   # master exits just after its child, so the list is read again for a few seconds first.
   scripts.gate-test.exec = ''
     vm_file=$(mktemp)
     status=0
-    ( echo "$BASHPID" > "$vm_file"; exec mix test --warnings-as-errors --exclude model ) || status=$?
+    ( echo "$BASHPID" > "$vm_file"; exec mix test --warnings-as-errors ) || status=$?
     vm=$(<"$vm_file")
     "$CAF_RM" -f "$vm_file"
     for ((try = 0; try < 50; try++)); do

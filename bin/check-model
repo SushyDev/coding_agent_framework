@@ -11,7 +11,13 @@
 # TLC uses every core unless TLC_WORKERS names a number: TLC_WORKERS=2 bin/check-model
 #
 # The fast configurations finish in under 30 s each and run in the test gate. The slow ones are
-# run by hand, and their times go in the build note. `all` also parses every slow configuration:
+# run by hand, and their times go in the build note. Each time is printed with the host's load,
+# the 1-minute average read as that configuration starts, beside the core count. A fast
+# configuration over 30 s fails when that load was under the core count; at or over it, the time
+# says nothing about the configuration, and it is printed as not judged (F-238). The average
+# also holds this run's own earlier TLC work, so it reads high rather than low: a slow
+# configuration can go unjudged, and the idle timing the design asks of a unit that changes a
+# spec still catches it; a loaded host never fails a configuration that is fast. `all` also parses every slow configuration:
 # TLC reads the spec and the configuration and takes the initial state alone (a simulation one
 # state deep), so a constant left unset or a name the spec lost fails here, not on the next run
 # by hand.
@@ -38,6 +44,21 @@ if [[ -z "${CAF_TLC:-}" || -z "${CAF_TOOLS_PATH:-}" ]]; then
 fi
 tlc="$CAF_TLC"
 export PATH="$CAF_TOOLS_PATH"
+cores=$(nproc)
+
+# The 1-minute load average: /proc/loadavg on Linux, `sysctl -n vm.loadavg` (`{ 1.2 3.4 5.6 }`)
+# on macOS, by devenv's sysctl.
+load() {
+  local one rest
+  if [[ -r /proc/loadavg ]]; then
+    read -r one rest </proc/loadavg
+  elif [[ -n "${CAF_SYSCTL:-}" ]]; then
+    read -r _ one rest <<<"$("$CAF_SYSCTL" -n vm.loadavg)"
+  else
+    one="?"
+  fi
+  echo "$one"
+}
 
 configs=()
 parsed=()
@@ -73,6 +94,7 @@ for cfg in "${configs[@]}"; do
   echo "== $name ($spec.tla)"
 
   status=0
+  under=$(load)
   started=$(date +%s)
   (cd "$specs" &&
     "$tlc" -workers "${TLC_WORKERS:-auto}" -cleanup -noGenerateSpecTE -metadir "$out/states-$name" \
@@ -84,7 +106,20 @@ for cfg in "${configs[@]}"; do
     tail -1 || true)
   depth=$(grep -Eo 'depth of the complete state graph search is [0-9]+' "$out/$name.out" |
     grep -Eo '[0-9]+$' || true)
-  echo "   ${states:-no state count}; depth ${depth:-?}; ${seconds} s"
+  echo "   ${states:-no state count}; depth ${depth:-?}; ${seconds} s at load $under on $cores cores"
+
+  # The 30 s rule, for a fast configuration, judged only under a load below the core count.
+  if [[ "$relative" != slow/* && $seconds -gt 30 ]]; then
+    if [[ "$under" == "?" ]]; then
+      echo "   FAILED: over 30 s, and the load is unknown, so it cannot be judged"
+      failed=1
+    elif ((${under%.*} < cores)); then
+      echo "   FAILED: over 30 s at load $under, under $cores cores; move it to slow/ or shrink it"
+      failed=1
+    else
+      echo "   over 30 s at load $under, not under $cores cores: not judged"
+    fi
+  fi
 
   if [[ "$name" == Break_* ]]; then
     # TLC's exit status: 12 an invariant or action property violated, 13 a temporal property

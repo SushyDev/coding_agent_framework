@@ -87,8 +87,7 @@ defmodule CodingAgentFramework.TestHost do
     :stty,
     :echo,
     :sleep,
-    true,
-    :tlc
+    true
   ]
 
   @doc """
@@ -196,6 +195,62 @@ defmodule CodingAgentFramework.TestHost do
     :ok
   catch
     :exit, {:timeout, _} -> :late
+  end
+
+  @doc """
+  Reads the host's load once, at the suite's start, and keeps the factor `scaled/1` multiplies
+  by: the largest of the 1, 5 and 15 minute load averages over the core count, rounded up, and
+  never under 1. On a host with 15 cores, load 8 gives 1, load 25 gives 2, load 45 gives 3. A
+  `test_helper.exs` whose tests call `scaled/1` calls this before `ExUnit.start/1`. Answers the
+  reading, which the helper prints, so a run's log says what its bounds were. The factor is the
+  VM's, as the host's load is: every instance in it runs on the same cores.
+
+      %{load: _, cores: _, scale: _} = CodingAgentFramework.TestHost.read_load!()
+  """
+  def read_load! do
+    cores = :erlang.system_info(:logical_processors)
+    load = Enum.max(load_averages!())
+    scale = max(1, ceil(load / cores))
+    :persistent_term.put({__MODULE__, :scale}, scale)
+    %{load: load, cores: cores, scale: scale}
+  end
+
+  @doc """
+  `ms`, the bound of work whose own length grows with the host's load (a cold VM's boot, a
+  stand-in's redraw), times the factor `read_load!/0` read at the suite's start. A wait on an
+  announced event still ends on the event; this only sizes the bound past which it gives up.
+  Raises when the suite never read the load, so no bound is silently left unscaled.
+  """
+  def scaled(ms) when is_integer(ms) and ms > 0 do
+    case :persistent_term.get({__MODULE__, :scale}, nil) do
+      nil -> raise "the load was never read; call TestHost.read_load!() in test_helper.exs"
+      scale -> ms * scale
+    end
+  end
+
+  # Linux keeps them in /proc/loadavg; macOS answers `sysctl -n vm.loadavg`, as `{ 1.2 3.4 5.6 }`.
+  defp load_averages! do
+    text =
+      case File.read("/proc/loadavg") do
+        {:ok, text} ->
+          text
+
+        {:error, _} ->
+          {:ok, %{status: 0, output: out}} =
+            Shell.run(host(), program!(:sysctl), ["-n", "vm.loadavg"], timeout: 5_000)
+
+          out
+      end
+
+    text
+    |> String.split([" ", "{", "}", "\n"], trim: true)
+    |> Enum.take(3)
+    |> Enum.map(&parse_load!/1)
+  end
+
+  defp parse_load!(word) do
+    {value, ""} = Float.parse(word)
+    value
   end
 
   @doc "Reads a file a stand-in writes, once it has `expected`'s length."

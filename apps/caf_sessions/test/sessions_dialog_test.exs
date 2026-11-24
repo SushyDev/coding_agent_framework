@@ -18,7 +18,9 @@ defmodule CodingAgentFramework.SessionsDialogTest do
   setup {SessionsSetup, :sessions}
 
   setup ctx do
-    inlet = start_supervised!({Inlet, tmux: ctx.server})
+    # A press reads back the stand-in's redraw within `see:`. A loaded host redraws late, and
+    # a late read back is an unknown press that leaves the start on its dialog (F-238).
+    inlet = start_supervised!({Inlet, tmux: ctx.server, see: scaled(2_000)})
 
     claude =
       ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), dialogs: [:trust, :imports])
