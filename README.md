@@ -420,8 +420,9 @@ Built, each from a checked model in `model/tla/`:
   screens it meets; run on a logged-in setup, it found the reload refused under a waiter (F-241)
   and a trust press read back too soon under load (F-242).
 - a message to an idle interactive delegate whose typed line the box cannot hold no longer
-  waits for ever after a restart (F-240): it waits for a waiter for a bound, is then answered
-  `unknown`, and the rows behind it go in.
+  waits for ever after a restart (F-240): a wake line, typed once, brings the waiter that
+  carries it; with none within a bound it is `undelivered`, its sender gets a notice, and the
+  rows behind it go in. `look` marks an interactive agent's events `not followed (interactive)`.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

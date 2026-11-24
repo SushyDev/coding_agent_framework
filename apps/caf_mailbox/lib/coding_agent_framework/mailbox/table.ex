@@ -12,6 +12,7 @@ defmodule CodingAgentFramework.Mailbox.Table do
   before it goes, with its transport `via`, `stream`, `waiter` or `call`, the `session_id` and
   the process `at` it is for), then `delivered` or `ended`, or `unknown` (still `sending` when
   the operator forced its addressee's end, F-170: never resent, never counted delivered), or
+  `undelivered` (never typed or read: no waiter came within the wait bound, F-240), or
   `queued` again if it did not go
   in, under the `uuid` it was stored with; `again` says it was made due again, so it goes first.
   A row to the operator (a reply, a notice or an ask) is `kept` from its store: it is no
@@ -19,7 +20,9 @@ defmodule CodingAgentFramework.Mailbox.Table do
   A `waiter` row keeps `sent_at`, the wall-clock ms its text was handed on (the take bound runs
   from it), and `from_byte`, how much of the session's transcript was read before its mark.
   `attempt` is why the last delivery did not go in. `delivered_at` is the wall-clock ms it was
-  delivered, written once with `delivered` (F-202); a row delivered before F-202 has none. A reply or a notice names the uuid of the
+  delivered, written once with `delivered` (F-202); a row delivered before F-202 has none.
+  `woke_at` is the wall-clock ms its wake line was marked, before its keys went (F-240): a row
+  has one wake line at most, across restarts. A reply or a notice names the uuid of the
   row it answers in `reply_to` (the report is the reply to the brief's uuid), with a result's
   `subtype` and `is_error`. `reply_to` and `uuid` are unique, so one row has one answer, and a
   row stored twice under one uuid is stored once.
@@ -34,7 +37,7 @@ defmodule CodingAgentFramework.Mailbox.Table do
 
   @columns ~w(id from_agent to_agent text uuid status session_id attempt reply_to subtype
               is_error kind via at again sent_at from_byte answer created_at updated_at
-              delivered_at)a
+              delivered_at woke_at)a
 
   @schema """
   CREATE TABLE IF NOT EXISTS messages (
@@ -43,7 +46,7 @@ defmodule CodingAgentFramework.Mailbox.Table do
     attempt TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
   """
 
-  # Added after a file's table may have been made (F-79, F-81, R7, F-142, F-202), so each is
+  # Added after a file's table may have been made (F-79, F-81, R7, F-142, F-202, F-240), so each is
   # added if missing.
   @added [
     "reply_to TEXT",
@@ -56,7 +59,8 @@ defmodule CodingAgentFramework.Mailbox.Table do
     "sent_at INTEGER",
     "from_byte INTEGER",
     "answer TEXT",
-    "delivered_at INTEGER"
+    "delivered_at INTEGER",
+    "woke_at INTEGER"
   ]
   @indexes """
   CREATE UNIQUE INDEX IF NOT EXISTS messages_reply_to ON messages (reply_to);

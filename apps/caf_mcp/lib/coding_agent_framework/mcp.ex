@@ -903,6 +903,10 @@ defmodule CodingAgentFramework.MCP do
       [events, transcript] =
         Enum.map([events, transcript], &with({:ok, l} <- lines(&1, true), do: l.text))
 
+      # Stream follows a headless session only: an interactive one has no event log (F-240).
+      events =
+        if events == {:refused, :not_followed}, do: "not followed (interactive)", else: events
+
       {:ok, %{state: a.state, requests: a.waits_on, events: events, transcript: transcript}}
     end
   end

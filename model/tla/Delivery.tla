@@ -34,11 +34,13 @@
 (*           keeps the mark, and is never typed again; settled as waiter,  *)
 (*           once the turn that took it has ended. A row in Wide has a     *)
 (*           pointer line the box still cannot hold (a long home, F-240):  *)
-(*           it is never typed, and waits for a waiter for a bound only.   *)
-(*           Past it, with no waiter, it is answered unknown (WaitBound):  *)
-(*           an idle session with no waiter starts none until a turn of it *)
-(*           ends, and a restart cuts the one it had. The rows behind it   *)
-(*           wait no longer than that.                                     *)
+(*           it is never typed. An idle session with no waiter starts none *)
+(*           until a turn of it ends, and a restart cuts the one it had,   *)
+(*           so the wake line, a short fixed line, is typed once in its    *)
+(*           place (Wake): its turn's end brings a waiter, which carries   *)
+(*           the row. It waits for a waiter for a bound only. Past it, the *)
+(*           row is undelivered and its sender gets a notice (WaitBound);  *)
+(*           the rows behind it wait no longer than that.                  *)
 (*                                                                         *)
 (* A waiter connects only once a turn of its process has ended (`turned`): *)
 (* each turn's end starts the next one, and nothing starts one before the  *)
@@ -216,7 +218,8 @@ Breaks == {
     "AgentCutUndoes",        \* a hand its addressee's agent process's crash cut is due again
     "ForceEnded",            \* a row a forced end left sending is settled ended, not unknown
     "SettleInCall",          \* a forced end's rows settle only in the operator's call, which a restart cuts
-    "WaitForever"            \* a row too wide to type waits for a waiter with no bound (F-240)
+    "WaitForever",           \* a row too wide to type waits for a waiter with no bound (F-240)
+    "WakeInMemory"           \* the wake line's mark is memory: a restart types it again (F-240)
 }
 
 ASSUME Break \in Breaks
@@ -231,7 +234,7 @@ OwnTurn == 0     \* a result that names no row: a turn a session started by itse
 NoResult == -1   \* no result since the last row went in
 Transports == {"stream", "waiter", "typed", "launch", "call"}
 NoRow == [from |-> Nobody, to |-> Nobody, kind |-> "none", re |-> 0, src |-> NoResult,
-          st |-> "none", via |-> "none", at |-> 0, again |-> FALSE]
+          st |-> "none", via |-> "none", at |-> 0, again |-> FALSE, woke |-> FALSE, wakes |-> 0]
 
 VARIABLES
     \* The addressee: an instancing spec gives its own state for these.
@@ -484,17 +487,42 @@ SettleSeen(i, has) ==
     /\ wire' = IF gone THEN [wire EXCEPT ![i] = 0] ELSE wire
     /\ UNCHANGED <<hand, claimed, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
 
-\* The wait bound (F-240): a row in Wide, first to its interactive addressee,
-\* whose process runs idle with no waiter, was refused by the typed write
-\* and waits for a waiter. Time is abstract: the bound passes at any such
-\* step. The row is answered unknown, never due again, and the rows behind
-\* it go on. A waiter that connects first takes it, as any row. Under
-\* WaitForever it waits with no bound.
-WaitBound(i) ==
+\* A row in Wide, first to its interactive addressee, whose process runs
+\* idle with no waiter, was refused by the typed write and waits for a
+\* waiter (F-240).
+Stuck(i) ==
     LET a == row[i].to IN
-    /\ up /\ i \in Wide /\ First(i) /\ a \notin Headless /\ Break # "WaitForever"
+    /\ up /\ i \in Wide /\ First(i) /\ a \notin Headless
     /\ pr[a] # 0 /\ idle[a] /\ waiter[a] # pr[a]
-    /\ row' = [row EXCEPT ![i].st = "unknown"]
+
+\* The wake line: a short fixed line typed in the row's place, once per row.
+\* Its mark (`woke`) is in the table, written before the keys go, so a
+\* restart never types it again; `wakes` counts the lines typed (a ghost).
+\* The instancing spec says whether the session took it: a turn starts, and
+\* its end brings a waiter, which carries the row as any row. Under
+\* WakeInMemory the mark is memory, and a restart forgets it.
+Wake(i) ==
+    /\ Stuck(i) /\ ~stopping[row[i].to] /\ ~row[i].woke
+    /\ row' = [row EXCEPT ![i].woke = TRUE, ![i].wakes = @ + 1]
+    /\ UNCHANGED <<hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
+
+\* The wait bound: time is abstract, so it passes at any step the row is
+\* still stuck. The row is undelivered, never due again: it was never typed
+\* or read. Its sender is told by a notice of its own, under the row's key,
+\* when the table has room for one, and the rows behind it go on. A waiter
+\* that connects first takes it, as any row. Under WaitForever it waits
+\* with no bound.
+WaitBound(i) ==
+    LET r == [row EXCEPT ![i].st = "undelivered"]
+        to == row[i].from
+    IN
+    /\ Stuck(i) /\ Break # "WaitForever"
+    /\ row' = IF NextId \in Ids
+                THEN [r EXCEPT ![NextId] =
+                        [NoRow EXCEPT !.from = Framework, !.to = to, !.kind = "notice",
+                                      !.re = row[i].re,
+                                      !.st = IF to \in Addrs THEN "due" ELSE "kept"]]
+                ELSE r
     /\ UNCHANGED <<hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
 
 -----------------------------------------------------------------------------
@@ -606,7 +634,8 @@ Exited(a, term) ==
 
 \* What a restart does to Mailbox: its memory goes, the waiters' and the
 \* calls' connections end with the node. Under RedeliverAfterRestart a row a
-\* restart left sending by waiter or typed is made due again, unread.
+\* restart left sending by waiter or typed is made due again, unread; under
+\* WakeInMemory a wake line's mark is forgotten.
 Restart ==
     /\ hand' = {}
     /\ waiter' = [a \in Addrs |-> 0]
@@ -618,6 +647,8 @@ Restart ==
                 THEN [i \in Ids |-> IF row[i].st = "sending"
                                          /\ row[i].via \in {"waiter", "typed", "launch"}
                                       THEN DueAgain(i) ELSE row[i]]
+                ELSE IF Break = "WakeInMemory"
+                THEN [i \in Ids |-> [row[i] EXCEPT !.woke = FALSE]]
                 ELSE row
     /\ UNCHANGED <<claimed, wire, tx, fold, last, lost, wrong>>
 
@@ -748,6 +779,12 @@ Sends(i, s, a) ==
     /\ UNCHANGED <<avars, alone>>
 
 \* A take starts a turn; a call's write goes into the turn that called.
+\* The wake line goes in, and the session takes it (a turn starts) or not.
+Woken(i, took) ==
+    /\ Wake(i)
+    /\ idle' = IF took THEN [idle EXCEPT ![row[i].to] = FALSE] ELSE idle
+    /\ UNCHANGED <<up, pr, stopping, over, turned, alone>>
+
 Takes(i) == Take(i) /\ idle' = [idle EXCEPT ![row[i].to] = FALSE]
             /\ UNCHANGED <<up, pr, stopping, over, turned, alone>>
 
@@ -881,7 +918,7 @@ Next ==
                                  \/ CallerSeen(i) \/ SettleCut(i))
                       \/ Mailbox(EndedFirst(i)) \/ Mailbox(ForceSettled(i))
                       \/ Mailbox(ReplyStored(i) \/ NoticeStored(i) \/ GoOn(i))
-                      \/ Mailbox(WaitBound(i))
+                      \/ Mailbox(WaitBound(i)) \/ \E took \in BOOLEAN : Woken(i, took)
 
 \* One row's steps after its mark and hand-on, but the take: each is the
 \* next one the row can take, so one fairness for them all is enough, and
@@ -908,7 +945,8 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 
 TypeOK ==
     /\ \A i \in Ids : /\ row[i].st \in {"none", "due", "sending", "delivered", "ended", "kept",
-                                       "unknown"}
+                                       "unknown", "undelivered"}
+                      /\ row[i].wakes \in 0..2
                       /\ row[i].via \in Transports \cup {"none"}
                       /\ row[i].kind \in {"none", "msg", "brief", "resume", "reply", "notice",
                                          "ask", "answer"}
@@ -964,9 +1002,10 @@ AnswersTheBrief ==
     \A j \in Ids : row[j].kind \in {"reply", "notice"} => row[row[j].re].kind \in {"msg", "brief"}
 
 \* A row a forced end settled unknown stays so: it is never due again, so
-\* never sent twice, and never counted delivered (F-170). So does one the
-\* wait bound answered (F-240).
-UnknownStays == [][\A i \in Ids : row[i].st = "unknown" => row'[i].st = "unknown"]_row
+\* never sent twice, and never counted delivered (F-170). So does a row the
+\* wait bound made undelivered (F-240).
+UnknownStays ==
+    [][\A i \in Ids : row[i].st \in {"unknown", "undelivered"} => row'[i].st = row[i].st]_row
 
 \* A row in flight to a session whose end the operator forced settles, once
 \* that session ended, whatever restart comes between (F-172).
@@ -981,16 +1020,30 @@ SendingSettles == \A i \in Ids : row[i].st = "sending" ~> row[i].st # "sending"
 \* waits for a person's prompt: a long row is typed as a pointer (F-142).
 \* NoPointer breaks it. A row in flight at the operator's forced end of its
 \* session is settled unknown instead (F-170), and a row too wide to type
-\* that no waiter took within the wait bound (F-240), and only then.
-\* WaitForever breaks it: that row, and every row behind it, waits for ever.
+\* that no waiter took within the wait bound is undelivered (F-240), and
+\* only then. WaitForever breaks it: that row, and every row behind it,
+\* waits for ever.
 Arrives ==
     \A i \in Ids : row[i].st = "due"
                      ~> (row[i].st \in {"delivered", "ended"}
-                         \/ (row[i].st = "unknown" /\ (row[i].to \in forced \/ i \in Wide)))
+                         \/ (row[i].st = "unknown" /\ row[i].to \in forced)
+                         \/ (row[i].st = "undelivered" /\ i \in Wide))
 
-\* A row is answered unknown only by a forced end or by the wait bound.
+\* A row is unknown only by a forced end, and undelivered only by the wait
+\* bound (F-240).
 UnknownWhy ==
-    \A i \in Ids : row[i].st = "unknown" => row[i].to \in forced \/ i \in Wide
+    \A i \in Ids : /\ row[i].st = "unknown" => row[i].to \in forced
+                   /\ row[i].st = "undelivered" => i \in Wide
+
+\* An undelivered row's sender is told, by a notice under its key (when the
+\* table had room for one).
+UndeliveredTold ==
+    \A i \in Ids : row[i].st = "undelivered" /\ Cardinality(Stored) < Cardinality(Ids)
+                     => \E j \in Answered(row[i].re) : row[j].kind = "notice"
+
+\* The wake line is typed at most once per row, whatever restarts come
+\* between (F-240). WakeInMemory breaks it.
+WakeOnce == \A i \in Ids : row[i].wakes <= 1
 
 \* A delivered row whose turn ends, with a result or with its process's
 \* end, is answered under its key, unless its session ended for good.

@@ -326,9 +326,9 @@ defmodule CodingAgentFramework.Mailbox.Transport.Typed do
 
   @doc """
   Whether a row's stored `attempt` says the `Inlet` refused its text itself (too long, or a
-  control character in it): such a row waits for a waiter, and is not typed again. Its wait is
-  bounded (`Mailbox`'s `wait_bound:`, F-240): past it with no waiter, the row is answered
-  `unknown`.
+  control character in it): such a row waits for a waiter, and is not typed again. `Mailbox`
+  types its wake line once in its place, and bounds the wait (`wait_bound:`, F-240): past it
+  with no waiter, the row is `undelivered`.
 
       iex> CodingAgentFramework.Mailbox.Transport.Typed.text_refused?(~s(["too_long",116]))
       true
