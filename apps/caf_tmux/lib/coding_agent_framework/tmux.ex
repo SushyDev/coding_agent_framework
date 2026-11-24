@@ -38,6 +38,12 @@ defmodule CodingAgentFramework.Tmux do
   @callback key(server) :: key
 
   @doc """
+  The longest one command on this server takes, in ms, refused or not (F-245): a caller that
+  waits on several commands bounds its wait by their count times this.
+  """
+  @callback bound(server) :: pos_integer
+
+  @doc """
   Opens a detached session named `session` whose one pane runs `argv` and is tagged with
   `session` in the same tmux command. Starts the server when none runs. Option: `size:
   {columns, rows}`, the window's size.
@@ -112,6 +118,10 @@ defmodule CodingAgentFramework.Tmux do
   @doc "The `{host, server}` of a server."
   @spec key(server) :: key
   def key(%mod{} = server), do: mod.key(server)
+
+  @doc "See the `c:bound/1` callback."
+  @spec bound(server) :: pos_integer
+  def bound(%mod{} = server), do: mod.bound(server)
 
   @doc "See the `c:new_session/4` callback."
   @spec new_session(server, session, [String.t()], keyword) ::

@@ -48,10 +48,15 @@ defmodule CodingAgentFramework.Inlet do
 
   @timeout 15_000
   @see 2_000
-  # The tmux commands of one press outside its two reads: the pane's list, the dialog's
-  # capture, the keys, Enter and the capture that ends each read. The part of F-140's 20 s
-  # bound that two 2 s reads left, kept, so the library's default press bound is unchanged.
-  @commands 16_000
+  # The tmux commands of one press, counted in `act/3`'s choose (F-245): the pane's list
+  # (`pane/2`), the dialog's capture (`dialog/5`), the keys (`move/4`) and Enter (`enter/3`)
+  # outside its reads, and the capture each of its two reads may start just before its
+  # deadline (`selected/7`, `left/6`). An Escape's press runs fewer: the list, the capture,
+  # Escape and one read.
+  @commands 6
+  # The press's own work between its commands, Screen's reading of each capture, and its
+  # reply: not measured.
+  @reply 1_000
   # How long a typed command's result line may take to be drawn: not measured (F-233's new-1).
   @result 10_000
   # Between two captures while the box is drawn; only spaces the reads.
@@ -63,9 +68,10 @@ defmodule CodingAgentFramework.Inlet do
 
   @doc """
   Starts an `Inlet` for one host's tmux server. `opts`: `tmux:` the server (required), and
-  `see:`, the ms a `type/4` or `choose/5` that names no `see:` of its own waits for the screen
-  to show its keys (2 000 by default). A loaded host redraws late: a press whose read back
-  passes that bound is unknown, never made again (F-238).
+  `see:`, the ms each read of a `choose/5`, and of a `type/4` that names no `see:` of its own,
+  waits for the screen to show its keys (2 000 by default). This is the one place a press's
+  `see` is set (F-245): `press_bound/1` answers the bound that covers it. A loaded host redraws
+  late: a press whose read back passes that bound is unknown, never made again (F-238).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts) do
@@ -83,18 +89,38 @@ defmodule CodingAgentFramework.Inlet do
   def see, do: @see
 
   @doc """
-  The bound of one `choose/5` at `see` ms (F-242): its two reads, the marker's before Enter and
-  the dialog's leaving after it, each up to `see`, and the tmux commands around them. A caller
-  that waits on a press (`Sessions`) takes its bound from here, so a longer `see:` is never cut
-  by a shorter fixed bound.
+  The bound of one `choose/5` by an `Inlet` whose `see:` is `see` ms, on a tmux server whose
+  one command takes at most `command` ms (`Tmux.bound/1`), F-245: its two reads, the marker's
+  before Enter and the dialog's leaving after it, each up to `see` and the pause between two
+  captures; the six tmux commands a press runs (the module's `@commands`), each up to `command`;
+  and a margin of 1 000 for the press's own work and its reply. The instance answers its own
+  (`press_bound/1`); a caller that waits on a press takes its bound from there.
 
-      iex> CodingAgentFramework.Inlet.press_bound(2_000)
-      20000
-      iex> CodingAgentFramework.Inlet.press_bound(10_000)
-      36000
+      iex> CodingAgentFramework.Inlet.press_bound_at(10_000, 6_500)
+      60040
+      iex> CodingAgentFramework.Inlet.press_bound_at(2_000, 6_500)
+      44040
   """
-  @spec press_bound(pos_integer) :: pos_integer
-  def press_bound(see) when is_integer(see) and see > 0, do: 2 * see + @commands
+  @spec press_bound_at(pos_integer, pos_integer) :: pos_integer
+  def press_bound_at(see, command)
+      when is_integer(see) and see > 0 and is_integer(command) and command > 0,
+      do: 2 * (see + @look) + @commands * command + @reply
+
+  @doc """
+  This instance's press bound: `press_bound_at/2` of its own `see:` and its server's
+  `Tmux.bound/1`. `Sessions` asks it once, as it starts, so the reads and the bound come from
+  one number, the `Inlet`'s (F-245). Answers `{:ok, ms}`, or the call's refusal or unknown.
+  Option `timeout:` (15 000 by default).
+
+      iex> {:ok, fake} = CodingAgentFramework.Tmux.Fake.start_link(key: {"laptop", "fake"})
+      iex> server = CodingAgentFramework.Tmux.Fake.new(fake, {"laptop", "fake"})
+      iex> {:ok, inlet} = CodingAgentFramework.Inlet.start_link(tmux: server, see: 10_000)
+      iex> CodingAgentFramework.Inlet.press_bound(inlet)
+      {:ok, 51040}
+  """
+  @spec press_bound(GenServer.server(), keyword) ::
+          {:ok, pos_integer} | {:refused, term} | {:unknown, term}
+  def press_bound(inlet, opts \\ []), do: call(inlet, :press_bound, nil, opts)
 
   @doc """
   Types `text` into `session` and then Enter, checked as the module doc says. Options:
@@ -121,11 +147,12 @@ defmodule CodingAgentFramework.Inlet do
   session's release draws it, and must show that dialog; the keys that move its selection
   there (`Screen.option_keys/2`) go as one tmux command; the screen is read again until that
   option is selected (`see:` ms); then Enter, as its own command; then the screen again, until
-  that dialog has left (`see:` ms). A pane gone after the Enter or the Escape (`Tmux` refuses
+  that dialog has left (`see:` ms, the instance's own). A pane gone after the Enter or the Escape (`Tmux` refuses
   its capture `:no_pane`, or `:no_server` once its server went with it) is the dialog left, and
   answers at once: "No, exit" ends the program and its pane (F-242, from F-238's new-2).
-  Options `release:` (required), `see:` and `timeout:`; `press_bound/1` is the `timeout:` that
-  covers a press at a `see:`.
+  Options `release:` and `timeout:` (required): `press_bound/1` is the `timeout:` that covers
+  a press. A press takes no `see:` of its own, so its reads and its bound come from the
+  instance's one `see:` (F-245).
 
   Answers `{:ok, :sent}` once the dialog has left; `{:refused, reason}` when no key went:
   `:no_release`, `{:screen, reading}` (another screen, or another dialog), `{:no_option,
@@ -143,7 +170,7 @@ defmodule CodingAgentFramework.Inlet do
       iex> {:ok, fake} = CodingAgentFramework.Tmux.Fake.start_link(key: {"laptop", "fake"})
       iex> server = CodingAgentFramework.Tmux.Fake.new(fake, {"laptop", "fake"})
       iex> {:ok, inlet} = CodingAgentFramework.Inlet.start_link(tmux: server)
-      iex> CodingAgentFramework.Inlet.choose(inlet, "alpha", :trust, "Yes", release: nil)
+      iex> CodingAgentFramework.Inlet.choose(inlet, "alpha", :trust, "Yes", release: nil, timeout: 5_000)
       {:refused, :no_release}
   """
   @spec choose(
@@ -155,7 +182,7 @@ defmodule CodingAgentFramework.Inlet do
         ) :: outcome
   def choose(inlet, session, kind, label, opts) do
     request = {:choose, session, kind, label, Keyword.fetch!(opts, :release)}
-    call(inlet, request, Keyword.get(opts, :see), opts)
+    call(inlet, request, nil, timeout: Keyword.fetch!(opts, :timeout))
   end
 
   @doc """
@@ -341,6 +368,8 @@ defmodule CodingAgentFramework.Inlet do
       end
     end
   end
+
+  defp act(:press_bound, see, tmux), do: {:ok, press_bound_at(see, Tmux.bound(tmux))}
 
   defp act({:look, session, release}, _see, tmux) do
     with :ok <- if(is_binary(release), do: :ok, else: {:refused, :no_release}),

@@ -54,6 +54,10 @@ defmodule CodingAgentFramework.Tmux.Fake do
   @impl true
   def key(%__MODULE__{key: key}), do: key
 
+  # Each command is one call to the fake's process at its `timeout`.
+  @impl true
+  def bound(%__MODULE__{timeout: timeout}), do: timeout
+
   @impl true
   def new_session(%__MODULE__{} = s, session, argv, opts) do
     call(s, fn st ->

@@ -232,8 +232,9 @@ defmodule CodingAgentFramework.Config do
 
   - `press_see`: ms a press of a dialog's option, or a typed write, waits for the screen to
     show its keys, each read of it (F-242, from F-238's new-1): the `see:` the tree's `Inlet`
-    starts with, and the one `Sessions` and the inbox size a press's bound from
-    (`Inlet.press_bound/1`, `Sessions.press_call/1`). The program redraws on the host's loaded
+    starts with, and only that: `Sessions` asks the `Inlet` its press bound, and each caller of
+    a press asks `Sessions` its own (`Inlet.press_bound/1`, `Sessions.press_call/2`, F-245).
+    The program redraws on the host's loaded
     cores, and a press whose read back passes this is unknown, for a person to press again.
     10 000 by default: five times the 2 s that the real program passed at load 30 on 15 cores,
     and four times the longest whole press the stand-in took at load 50 (F-242's note). A read
