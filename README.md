@@ -428,6 +428,9 @@ Built, each from a checked model in `model/tla/`:
 - a dialog press holds on a loaded host (F-242): the tree's `Inlet` reads back at the config's
   `press_see` (10 s by default), each bound that waits on a press is derived from it, and a
   press whose pane closes ("No, exit") is answered as soon as the pane is gone.
+- a press's bounds have one owner (F-245): the `Inlet` alone takes `see:`, its press bound
+  counts the six tmux commands a press runs at their own bound, `Sessions` asks it that bound,
+  and each caller of a press asks `Sessions` its call's, so none is a second fixed number.
 - a subagent's own transcript is read, so its tool calls show (F-237): `Transcripts` lists each
   session's `subagents/` directory on every read and folds each file that changed; a running
   subagent has its `agent_id` from its file's meta, and its own `tool` in the tree; a file

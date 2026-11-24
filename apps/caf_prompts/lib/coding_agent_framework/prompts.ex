@@ -119,8 +119,7 @@ defmodule CodingAgentFramework.Prompts do
   `Logins`) with `logins_db:` (its file), `stream:` (the host's `Stream`) with `stream_db:` (its
   file), `delegates:` and `delegates_db:`, `mains:` and `mains_db:` (the starts that wait at a
   usage limit, F-196), `acts_db:` (`acts:`'s file, where a remedy answered `act` is read),
-  `press_see:` (the `see:` the `Sessions` presses with, its `press_see:`: a dialog's answer
-  waits `Sessions.press_call/1` of it, F-242), `notify:` (a function of one cue) and `name:` (for the embedding app's tree; the library
+  `notify:` (a function of one cue) and `name:` (for the embedding app's tree; the library
   looks up no name).
   """
   @spec start_link(keyword) :: GenServer.on_start()
@@ -309,18 +308,8 @@ defmodule CodingAgentFramework.Prompts do
         ddb: ddb,
         mdb: mdb,
         adb: adb,
-        # A dialog's press reads the pane, presses and reads it again (`Sessions.answer_dialog/5`),
-        # each read up to the press's `see` (F-242).
-        owners:
-          Map.merge(owners, %{
-            logins: opts[:logins],
-            stream: opts[:stream],
-            press:
-              if(see = opts[:press_see],
-                do: Sessions.press_call(see),
-                else: Sessions.press_call()
-              )
-          }),
+        # A dialog's press waits `Sessions`' own bound, which it asks of `Sessions` (F-245).
+        owners: Map.merge(owners, %{logins: opts[:logins], stream: opts[:stream]}),
         notify: Keyword.get(opts, :notify, fn _ -> :ok end),
         # id -> status, as the last read found them: what the next cue says moved.
         shown: %{},
@@ -872,7 +861,7 @@ defmodule CodingAgentFramework.Prompts do
   defp hand(owners, %{kind: "dialog", agent: agent, id: "dialog:" <> key}, label, who)
        when binary_part(key, byte_size(key), -5) == ":menu" do
     [_, at, "menu"] = String.split(key, ":")
-    opts = [by: who, timeout: owners.press]
+    opts = [by: who]
 
     case Sessions.answer_menu(owners.sessions, agent, int(at), label, opts) do
       {:refused, why} when why in [:no_session, :settled] -> {:refused, :settled}
@@ -885,7 +874,7 @@ defmodule CodingAgentFramework.Prompts do
     [_, _, key, kind] = String.split(id, ":")
     # A start's menu's id names its read, which the answer must still be for (F-206).
     at = if kind == "start_menu", do: [at: int(key)], else: []
-    opts = [by: who, timeout: owners.press] ++ at
+    opts = [by: who] ++ at
 
     case Sessions.answer_dialog(owners.sessions, agent, kind, label, opts) do
       {:refused, why}

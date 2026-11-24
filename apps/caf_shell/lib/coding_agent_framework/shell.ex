@@ -40,6 +40,8 @@ defmodule CodingAgentFramework.Shell do
 
   # MuonTrap's default wait between TERM and KILL.
   @grace 500
+  # How long a killed program's exit status is awaited before its port is closed.
+  @close 1_000
 
   @type result :: %{status: non_neg_integer, output: binary}
   @type outcome :: {:ok, result} | {:refused, term} | {:unknown, term}
@@ -58,6 +60,18 @@ defmodule CodingAgentFramework.Shell do
       refused -> refused
     end
   end
+
+  @doc """
+  The longest `run/4` with `timeout:` `timeout` takes, in ms (F-245): the timeout, then the
+  wait between TERM and KILL, then the wait for the killed program's exit status. A caller that
+  waits on a run bounds its wait by this, not by the timeout alone. The local `kill` runs that
+  send TERM and KILL are not counted: they end at once (F-245's new-4).
+
+      iex> CodingAgentFramework.Shell.bound(5_000)
+      6500
+  """
+  @spec bound(pos_integer) :: pos_integer
+  def bound(timeout) when is_integer(timeout) and timeout > 0, do: timeout + @grace + @close
 
   @doc """
   The executable and its arguments that `run/4` would use. Pure. Over ssh, every word is quoted
@@ -169,7 +183,7 @@ defmodule CodingAgentFramework.Shell do
     receive do
       {^port, {:exit_status, _}} -> :ok
     after
-      1_000 -> Port.close(port)
+      @close -> Port.close(port)
     end
 
     drain(port)

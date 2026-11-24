@@ -9,6 +9,8 @@ defmodule CodingAgentFramework.InletTest.Probe do
   @impl true
   def key(s), do: Tmux.key(s.inner)
   @impl true
+  def bound(s), do: Tmux.bound(s.inner)
+  @impl true
   def new_session(s, session, argv, opts), do: Tmux.new_session(s.inner, session, argv, opts)
   @impl true
   def list_panes(s), do: Tmux.list_panes(s.inner)
@@ -157,7 +159,7 @@ defmodule CodingAgentFramework.InletTest do
     {:ok, %{kind: :trust}} = screen(ctx, "alpha", &(&1.state == :dialog))
     yes = "Yes, I trust this folder"
 
-    assert {:ok, :sent} = Inlet.choose(ctx.inlet, "alpha", :trust, yes, release: @release)
+    assert {:ok, :sent} = Inlet.choose(ctx.inlet, "alpha", :trust, yes, press(ctx.inlet))
     inlet = ctx.inlet
     assert_received {:write, ^inlet, {:keys, ["Down"]}}
     assert_received {:write, ^inlet, {:keys, ["Enter"]}}
@@ -171,7 +173,7 @@ defmodule CodingAgentFramework.InletTest do
              end)
 
     assert {:refused, {:screen, %{state: :idle}}} =
-             Inlet.choose(ctx.inlet, "alpha", :trust, yes, release: @release)
+             Inlet.choose(ctx.inlet, "alpha", :trust, yes, press(ctx.inlet))
 
     refute_received {:write, ^inlet, _}
   end
@@ -188,20 +190,20 @@ defmodule CodingAgentFramework.InletTest do
     other = {:menu, "Another menu?", options}
 
     assert {:refused, {:screen, %{kind: :menu}}} =
-             Inlet.choose(inlet, "alpha", other, not_now, release: @release)
+             Inlet.choose(inlet, "alpha", other, not_now, press(inlet))
 
     refute_received {:write, ^inlet, _}
 
-    assert {:ok, :sent} = Inlet.choose(inlet, "alpha", menu, not_now, release: @release)
+    assert {:ok, :sent} = Inlet.choose(inlet, "alpha", menu, not_now, press(inlet))
     assert_received {:write, ^inlet, {:keys, ["Down"]}}
     assert_received {:write, ^inlet, {:keys, ["Enter"]}}
     assert ScreenStandIn.menu_answer(ctx.dir) == not_now
 
     assert {:refused, {:screen, %{state: :idle}}} =
-             Inlet.choose(inlet, "alpha", menu, :esc, release: @release)
+             Inlet.choose(inlet, "alpha", menu, :esc, press(inlet))
 
     open(ctx, "beta", ["--screen", "menu"], :dialog)
-    assert {:ok, :sent} = Inlet.choose(inlet, "beta", menu, :esc, release: @release)
+    assert {:ok, :sent} = Inlet.choose(inlet, "beta", menu, :esc, press(inlet))
     assert_received {:write, ^inlet, {:keys, ["Escape"]}}
     refute_received {:write, ^inlet, _}
   end
@@ -215,11 +217,11 @@ defmodule CodingAgentFramework.InletTest do
     open(ctx, "alpha", ["--screen", "ask"], :dialog)
 
     assert {:refused, {:no_option, "Type something."}} =
-             Inlet.choose(inlet, "alpha", menu, "Type something.", release: @release)
+             Inlet.choose(inlet, "alpha", menu, "Type something.", press(inlet))
 
     refute_received {:write, ^inlet, _}
 
-    assert {:ok, :sent} = Inlet.choose(inlet, "alpha", menu, "Chat about this", release: @release)
+    assert {:ok, :sent} = Inlet.choose(inlet, "alpha", menu, "Chat about this", press(inlet))
     assert_received {:write, ^inlet, {:keys, ["Down", "Down", "Down"]}}
     assert_received {:write, ^inlet, {:keys, ["Enter"]}}
     assert File.read!(Path.join(ctx.dir, "menu")) == "4"
@@ -356,9 +358,11 @@ defmodule CodingAgentFramework.InletTest do
   # F-242, from F-238's new-1: the stand-in stopped (SIGSTOP) for 3 s as the press goes, as a
   # loaded host stops the real program. Its keys wait in the pane, and it redraws once it runs
   # again. At the library's 2 s `see:` that press is unknown and no Enter goes; at the tree's
-  # 10 s (`Config`'s `press_see`) the same press is answered, inside `press_bound/1` of it.
+  # 10 s (`Config`'s `press_see`) the same press is answered, inside its `press_bound/1`.
   test "a press whose redraw comes past 2 s is answered within the tree's see", ctx do
     late = fn name, see ->
+      probe = %Probe{inner: ctx.server, test: self()}
+      inlet = start_supervised!({Inlet, tmux: probe, see: see}, id: name)
       dir = Path.join(ctx.dir, name)
       File.mkdir_p!(dir)
       script = ScreenStandIn.write!(dir, @release, stand_in_idle(), trust: true)
@@ -370,8 +374,10 @@ defmodule CodingAgentFramework.InletTest do
       [pid] = File.ls!(Path.join(dir, "pids"))
       {:ok, %{status: 0}} = kill(pid, "-STOP")
       spawn(fn -> receive after: (3_000 -> kill(pid, "-CONT")) end)
-      opts = [release: @release, see: see, timeout: Inlet.press_bound(see)]
-      {took, answer} = :timer.tc(fn -> Inlet.choose(ctx.inlet, name, :trust, @trust, opts) end)
+
+      {took, answer} =
+        :timer.tc(fn -> Inlet.choose(inlet, name, :trust, @trust, press(inlet)) end)
+
       {div(took, 1_000), answer, dir}
     end
 
@@ -393,10 +399,10 @@ defmodule CodingAgentFramework.InletTest do
     script = ScreenStandIn.write!(ctx.dir, @release, stand_in_idle(), trust: true)
     {:ok, _} = Tmux.new_session(ctx.server, "alpha", [script], size: {120, 40})
     {:ok, _} = screen(ctx, "alpha", &match?(%{state: :dialog, kind: :trust}, &1))
-    opts = [release: @release, see: 30_000, timeout: Inlet.press_bound(30_000)]
+    inlet = start_supervised!({Inlet, tmux: ctx.server, see: 30_000}, id: :thirty)
 
     {took, answer} =
-      :timer.tc(fn -> Inlet.choose(ctx.inlet, "alpha", :trust, "No, exit", opts) end)
+      :timer.tc(fn -> Inlet.choose(inlet, "alpha", :trust, "No, exit", press(inlet)) end)
 
     assert {{:ok, :sent}, true} = {answer, div(took, 1_000) < 30_000}
 
@@ -405,6 +411,12 @@ defmodule CodingAgentFramework.InletTest do
       {:ok, panes} -> refute Enum.any?(panes, &(&1.tag == "alpha"))
       {:refused, :no_server} -> :ok
     end
+  end
+
+  # A press's options: the instance's own bound, asked of it (F-245).
+  defp press(inlet) do
+    {:ok, bound} = Inlet.press_bound(inlet)
+    [release: @release, timeout: bound]
   end
 
   defp open(ctx, name, args \\ [], state \\ nil, opts \\ []) do

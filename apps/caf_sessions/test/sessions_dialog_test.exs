@@ -10,6 +10,7 @@ defmodule CodingAgentFramework.SessionsDialogTest do
   import CodingAgentFramework.TestHost
 
   alias CodingAgentFramework.{Acts, Inlet, Registry, ScreenStandIn, Sessions, SessionsSetup}
+  alias CodingAgentFramework.{Shell, Tmux}
   alias CodingAgentFramework.Sessions.{Agents, Dialog, Table}
 
   @trust "Yes, I trust this folder"
@@ -20,7 +21,7 @@ defmodule CodingAgentFramework.SessionsDialogTest do
   setup ctx do
     # A press reads back the stand-in's redraw within `see:`. A loaded host redraws late, and
     # a late read back is an unknown press that leaves the start on its dialog (F-238).
-    # `Sessions` presses with its own `press_see:`, the same bound.
+    # `Sessions` asks the `Inlet` its press bound (F-245).
     see = scaled(2_000)
     inlet = start_supervised!({Inlet, tmux: ctx.server, see: see})
 
@@ -31,10 +32,7 @@ defmodule CodingAgentFramework.SessionsDialogTest do
     {:ok, agents} = Agents.open(Path.join(ctx.dir, "caf.db"), "test")
 
     {:ok,
-     inlet: inlet,
-     launch: launch,
-     agents: agents,
-     opts: ctx.opts ++ [inlet: inlet, look: 50, press_see: see]}
+     inlet: inlet, launch: launch, agents: agents, opts: ctx.opts ++ [inlet: inlet, look: 50]}
   end
 
   defp sessions(ctx, extra \\ []) do
@@ -329,32 +327,73 @@ defmodule CodingAgentFramework.SessionsDialogTest do
              end)
   end
 
-  # F-242: `Sessions` presses with its own `press_see:`, and bounds the press by it
-  # (`Inlet.press_bound/1`), over an `Inlet` whose own `see:` is the library's 2 s. The held
-  # program stopped (SIGSTOP) for 3 s as the press goes redraws past 2 s, and is answered.
-  test "a press reads back at the instance's press_see, past the Inlet's own see", ctx do
-    inlet = start_supervised!({Inlet, tmux: ctx.server}, id: :two_seconds)
-    sessions = sessions(ctx, inlet: inlet, press_see: 10_000)
+  # F-245: each bound that waits on a press derives from the one below it, plus a stated
+  # margin: a tmux command's (`Shell.bound/1` of the server's timeout), the `Inlet`'s (two reads
+  # and six commands, and 1 000), and `Sessions`' call (and 5 000). A `Sessions` asks its
+  # `Inlet`, which owns `see:`, and a caller asks the `Sessions`.
+  test "the bounds that wait on a press derive from the Inlet's see, up to the caller", ctx do
+    command = Shell.bound(5_000)
+    assert command == 5_000 + 1_500
+    assert Tmux.bound(ctx.server) == command
+
+    for {see, inlet, call} <- [{10_000, 60_040, 65_040}, {2_000, 44_040, 49_040}] do
+      assert Inlet.press_bound_at(see, command) == 2 * (see + 20) + 6 * command + 1_000
+      assert Inlet.press_bound_at(see, command) == inlet
+      assert Sessions.press_wait(inlet) == inlet + 5_000
+      assert Sessions.press_wait(inlet) == call
+    end
+
+    inlet = start_supervised!({Inlet, tmux: ctx.server, see: 10_000}, id: :ten_seconds)
+    assert {:ok, 60_040} = Inlet.press_bound(inlet)
+    assert {:ok, 65_040} = Sessions.press_call(sessions(ctx, inlet: inlet))
+    # With no `Inlet` no press goes: a press call waits as a read does.
+    assert {:ok, 5_000} = Sessions.press_call(sessions(ctx, inlet: nil))
+  end
+
+  # F-245, from F-242's new-3: an `Inlet` whose `see:` (30 s) is past the old fixed caller bound
+  # (25 s), the held program stopped (SIGSTOP) for 26 s as the press goes. Its redraw comes past
+  # the old bound but within the instance's, and the caller, which names no bound, takes `sent`.
+  test "a press past the old fixed caller bound is answered within the instance's", ctx do
+    inlet = start_supervised!({Inlet, tmux: ctx.server, see: 30_000}, id: :thirty_seconds)
+    sessions = sessions(ctx, inlet: inlet)
 
     assert {:unknown, {:dialog, :trust}} =
              Sessions.start(sessions, "alpha", ctx.account, ctx.launch)
 
-    [pid] = File.ls!(Path.join(ctx.dir, "pids"))
-    {:ok, %{status: 0}} = kill(pid, "-STOP")
-    spawn(fn -> receive after: (3_000 -> kill(pid, "-CONT")) end)
+    stopped(ctx, 26_000)
 
     {took, answer} =
-      :timer.tc(
-        fn ->
-          Sessions.answer_dialog(sessions, "alpha", :trust, @trust,
-            timeout: Sessions.press_call(10_000)
-          )
-        end,
-        :millisecond
-      )
+      :timer.tc(fn -> Sessions.answer_dialog(sessions, "alpha", :trust, @trust) end, :millisecond)
 
-    assert {{:ok, :sent}, true} = {answer, took >= 3_000}
+    assert {{:ok, :sent}, true} = {answer, took >= 26_000}
     assert File.exists?(Path.join(ctx.dir, "trusted"))
+  end
+
+  # F-245: the held program stopped past every bound of the press. The innermost, the `Inlet`'s
+  # read back, answers first: unknown, the keys gone and no Enter, never a caller's timeout.
+  test "a press past all its bounds is unknown from the Inlet's read, not a caller's", ctx do
+    inlet = start_supervised!({Inlet, tmux: ctx.server, see: 500}, id: :half_second)
+    sessions = sessions(ctx, inlet: inlet)
+
+    assert {:unknown, {:dialog, :trust}} =
+             Sessions.start(sessions, "alpha", ctx.account, ctx.launch)
+
+    stopped(ctx, 3_000)
+
+    assert {:unknown, {:not_selected, {:ok, %{selected: "No, exit"}}}} =
+             Sessions.answer_dialog(sessions, "alpha", :trust, @trust)
+
+    assert %{answers: %{trust: %{mark: "unknown"}}} =
+             Agents.dialog(Agents.get(ctx.agents, "alpha"))
+
+    refute File.exists?(Path.join(ctx.dir, "trusted"))
+  end
+
+  # The held program stops for `ms`, as a loaded host stops it, and then runs again.
+  defp stopped(ctx, ms) do
+    [pid] = File.ls!(Path.join(ctx.dir, "pids"))
+    {:ok, %{status: 0}} = kill(pid, "-STOP")
+    spawn(fn -> receive after: (ms -> kill(pid, "-CONT")) end)
   end
 
   # Move.tla's IdleRead of a limited turn (F-191): Claude Code's own wait is a `limited` turn,

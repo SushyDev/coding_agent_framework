@@ -27,7 +27,7 @@ defmodule CodingAgentFramework.Limits do
     turn, a gone process or a headless one is `idle`;
   - `own`: watched. The wait ended with no turn is `look` again (the menu's stop); the wait still
     shown at the reset plus the margin (`margin:` ms) is a `limit` prompt. Nothing is typed;
-  - `press` (`limit_menu`, remedy `press_stop`): claimed, then `Sessions.press_limit/4`, the
+  - `press` (`limit_menu`, remedy `press_stop`): claimed, then `Sessions.press_limit/3`, the
     `Inlet`'s checked press. Sent is `idle`; refused as the screen moved, `look`, and refused
     otherwise, a `limit` prompt; unknown, `unknown`, never pressed again, and the menu still
     shown after it is a `limit` prompt;
@@ -94,7 +94,7 @@ defmodule CodingAgentFramework.Limits do
   - `go_on:`, `(name, text, key, opts) ->` an outcome, a headless delegate's word in place of
     `word:` and `resume:` (`Delegates.go_on/5`; `resume: false` stores it with no resume, before
     a move; refused `:no_delegates` by default);
-  - `press:`, `(name, label) ->` an outcome, by default `Sessions.press_limit/4`;
+  - `press:`, `(name, label) ->` an outcome, by default `Sessions.press_limit/3`;
   - `room:`, agent row -> `{:ok, account}`, the account a move would go to now, or why none
     (`Mover.room/2`; refused `:no_mover` by default, so nothing moves);
   - `move:`, `(actor, name, to, act) ->` `Mover.move/4`'s answer, with the claim `act` made

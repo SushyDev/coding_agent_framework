@@ -990,7 +990,7 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 | `parts` | each part's own bounds and deadlines, by its key (`Config.parts/0`) | each part's |
 | `remedies`, `remedy_bound` | the healer's allow-list and its caps' window | the healer's acts, 1 h |
 | `viewer` | every viewer's `{columns, rows}`, handed to `Sessions` and `Recoveries` alike (F-190) | `{200, 50}` |
-| `press_see` | ms each read of a dialog press or a typed write waits for the screen to show its keys: the tree's `Inlet`'s `see:`, and what `Sessions` and the inbox derive a press's bound from (F-242) | 10 s |
+| `press_see` | ms each read of a dialog press or a typed write waits for the screen to show its keys: the tree's `Inlet`'s `see:`, set there alone: every bound that waits on a press is derived from the `Inlet`'s (F-242, F-245) | 10 s |
 | `undeclared_cues` | `:route` or `:raise` a cue on a topic no part declares | `:route` |
 | `agents` | `false` starts only the parts a lease needs (`Config.agentless/0`), none that runs or reads an agent (F-195), and no tool home, so its config needs only `home`, `instance`, `programs` and `env`'s `path` (F-201), and refuses `usable`, `tool_hooks`, `extensions` and `dialogs`, which no part of it reads, `{:bad, key}` (F-209); a home keeps its kind for its life, the first start records it and `start_link/1` of the other kind is refused `{:home_kind, recorded}` (F-214) | `true` |
 | `restart_wait` | ms a start waits for an instance of its name still exiting, before it is refused `{:instance_running, name}` (F-195) | 5 s |
@@ -1715,9 +1715,15 @@ calls and the operator's tool `answer_startup` calls (the operator's alone). It 
 the row before its press, and the `Inlet` presses it checked: the pane still shows that dialog,
 the press lands on the chosen option, and the dialog leaves; otherwise refused (nothing went)
 or unknown. Each of its two reads, the marker on the option before Enter and the dialog's
-leaving after it, waits up to the config's `press_see` (F-242), and the press's bound is
-derived from it (`Inlet.press_bound/1`: two reads and the tmux commands around them), as is
-each caller's (`Sessions.press_call/1`), so no fixed bound cuts a longer read. A pane gone
+leaving after it, waits up to the `Inlet`'s `see:`, the config's `press_see` (F-242). That
+`see:` has one owner, the `Inlet` (F-245), and each bound that waits on a press is the one
+below it plus a stated margin: a tmux command's (`Shell.bound/1` of the server's timeout:
+the timeout, the wait between TERM and KILL, and the wait for the exit), the `Inlet`'s
+(`Inlet.press_bound/1`: two reads, the six tmux commands a press runs, and 1 s), which
+`Sessions` asks once as it starts, and `Sessions`' call (`Sessions.press_call/2`, and 5 s),
+which each caller asks first and names no bound of its own. The inbox, the app's
+`CodingAgentFramework.answer/4` and the operator's `answer_startup` run in the caller's
+process and add none, so a press past every bound answers the `Inlet`'s unknown. A pane gone
 after the Enter, as "No, exit" leaves it, is the dialog left, answered at once. The press runs in a task whose answer comes back as a message, as `Mailbox`'s
 hand-on does, so `Sessions` answers other calls meanwhile, the mark `pressing`; a row whose
 press is under way is not read again until it answers (F-144). Each answer is an act in `Acts`
@@ -3322,7 +3328,7 @@ plus a margin (2 min) or the `usage_credits` prompt's deadline (10 min). Per age
 stream's limited result with its `rate_limit_event`), the limit cleared once a turn ran after
 it (`Continued`, its count of go-ons kept until a turn ends by itself, `Ended`), and each
 phase: the screen read (`look`), Claude Code's own wait watched (`own`), the menu's stop
-pressed (`press`, through `Sessions.press_limit/4`, the `Inlet`'s checked press of kind
+pressed (`press`, through `Sessions.press_limit/3`, the `Inlet`'s checked press of kind
 `usage_limit_menu`), a `usage_credits` prompt where the account can spend, and at the reset
 the word (`send`, `Mailbox.notify/4` kind `notice` under `limit:<agent>:<until>`), a gone
 main resumed with it through `Mains`. The row's field is `Sessions.Limit`'s; `Sessions` writes

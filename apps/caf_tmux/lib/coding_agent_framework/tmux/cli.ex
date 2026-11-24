@@ -59,6 +59,10 @@ defmodule CodingAgentFramework.Tmux.CLI do
   @impl true
   def key(%__MODULE__{host: host, server: {_, name}}), do: {host.name, name}
 
+  # Each command is one `Shell.run/4` at the server's `timeout`.
+  @impl true
+  def bound(%__MODULE__{timeout: timeout}), do: Shell.bound(timeout)
+
   @impl true
   def new_session(%__MODULE__{tag: tag} = s, session, argv, opts) do
     size =
