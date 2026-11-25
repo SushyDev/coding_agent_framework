@@ -733,7 +733,7 @@ defmodule CodingAgentFramework.Sessions do
 
     with {:ok, holder} <- Holder.new(programs, Keyword.fetch!(opts, :dir)),
          {:ok, procs} <- Holder.Process.new(programs, holder),
-         {:ok, ps} <- Programs.take(programs, [:env, :ps, :tail, :cat]),
+         {:ok, ps} <- Programs.take(programs, [:env, :ps, :tail]),
          {:ok, waiter} <- waiter(programs, Keyword.get(opts, :waiter)),
          {:ok, press} <- press_bound(Keyword.get(opts, :inlet)),
          {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)) do
@@ -2405,7 +2405,7 @@ defmodule CodingAgentFramework.Sessions do
   defp liveness(state, row), do: alive(state, [row])[{row.pid, row.proc_start}]
 
   defp alive(state, rows) do
-    opts = [env: state.ps.env, ps: state.ps.ps, cat: state.ps.cat, timeout: 5_000]
+    opts = [env: state.ps.env, ps: state.ps.ps, timeout: 5_000]
     Holder.Process.liveness(state.host, Enum.map(rows, &{&1.pid, &1.proc_start}), opts)
   end
 

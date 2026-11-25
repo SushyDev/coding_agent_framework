@@ -375,21 +375,14 @@ defmodule CodingAgentFramework.Holder.Process do
   end
 
   @doc """
-  Whether each `{pid, start}` still runs, by its pid and start time: `:live`, `:replaced` (the
-  pid runs with another start time: it was reused), `:gone` (a read that ran cleanly does not
-  find it), or `:unknown` (the read failed or answered something unreadable, or no start time is
-  known). A failed read under load never counts a live process as gone.
-
-  The start time is read in the form it is given (F-246). Claude Code 2.1.322 writes a session
-  file's `procStart` as `LC_ALL=C TZ=UTC ps -o lstart=` prints it on macOS (`pidDomain`
-  `darwin`), and on Linux as a bare integer: the process's start in clock ticks since boot,
-  field 22 of `/proc/<pid>/stat`. Starts in the `ps` form are judged by one `ps` on `host`;
-  those that are all digits, by one `cat` of their `/proc/<pid>/stat` files (`judge_stat/2`).
-  This module's own records are always in the `ps` form.
-
-  Options: `:env` and `:ps` (the host's programs; `ps` runs under `env LC_ALL=C TZ=UTC`) and
-  `:timeout` (ms), all required; `:cat`, required for a start in the integer form, else that
-  start is `:unknown`.
+  Whether each `{pid, start}` still runs, by its pid and start time, with one `ps` on `host`:
+  `:live`, `:replaced` (`ps` lists the pid with another start time: it was reused), `:gone` (a
+  `ps` that ran cleanly does not list it), or `:unknown` (`ps` failed or answered something
+  unreadable, or no start time is known). A failed `ps` under load never counts a live process
+  as gone. Every start is in this module's one form, as `ps -o lstart=` prints it: a session
+  file's start in clock ticks is turned into it when it is read (`from_ticks/3`). Options, all
+  required: `:env` and `:ps` (the host's programs; `ps` runs under `env LC_ALL=C TZ=UTC`) and
+  `:timeout` (ms).
   """
   @spec liveness(Host.t(), [{pos_integer, String.t() | nil}], keyword) :: %{
           {pos_integer, String.t() | nil} => :live | :replaced | :gone | :unknown
@@ -397,15 +390,6 @@ defmodule CodingAgentFramework.Holder.Process do
   def liveness(_host, [], _opts), do: %{}
 
   def liveness(%Host{} = host, procs, opts) do
-    {ticks, rest} = Enum.split_with(procs, fn {_, start} -> ticks?(start) end)
-    Map.merge(by_ps(host, rest, opts), by_stat(host, ticks, opts))
-  end
-
-  defp ticks?(start), do: is_binary(start) and start =~ ~r/\A\d+\z/
-
-  defp by_ps(_host, [], _opts), do: %{}
-
-  defp by_ps(host, procs, opts) do
     pids = procs |> Enum.map(&elem(&1, 0)) |> Enum.uniq() |> Enum.join(",")
     args = ["LC_ALL=C", "TZ=UTC", Keyword.fetch!(opts, :ps), "-o", "pid=,lstart=", "-p", pids]
 
@@ -414,96 +398,137 @@ defmodule CodingAgentFramework.Holder.Process do
     |> judge(procs)
   end
 
-  defp by_stat(_host, [], _opts), do: %{}
+  @doc """
+  Whether `start` is a start in clock ticks since boot, all digits, as Claude Code 2.1.322
+  writes a session file's `procStart` on Linux (F-246), and not the `ps` form.
 
-  defp by_stat(host, procs, opts) do
-    case Keyword.get(opts, :cat) do
-      nil ->
-        Map.new(procs, &{&1, :unknown})
+      iex> CodingAgentFramework.Holder.Process.ticks?("653385178")
+      true
+      iex> CodingAgentFramework.Holder.Process.ticks?("Sat Nov 7 09:00:00 2026")
+      false
+  """
+  @spec ticks?(term) :: boolean
+  def ticks?(start), do: is_binary(start) and start =~ ~r/\A\d+\z/
 
-      cat ->
-        files = procs |> Enum.map(&"/proc/#{elem(&1, 0)}/stat") |> Enum.uniq()
-        timeout = Keyword.fetch!(opts, :timeout)
+  # $1 ps, $2 the directory that stands for /proc; then the pids. Per pid, four lines: the pid,
+  # its stat line, what ps prints for it, and its stat line again. A stat file that is not there
+  # is `gone`; one that is there and cannot be read, `failed`. The two stat reads around the ps
+  # show that the ps read the process the ticks name, not one that took its pid between.
+  @from_ticks ~S"""
+  p=$1 d=$2; shift 2
+  st() {
+    if [ ! -e "$d/$1/stat" ]; then echo gone
+    elif { read -r l < "$d/$1/stat"; } 2>/dev/null; then printf 'stat %s\n' "$l"
+    else echo failed; fi
+  }
+  for q in "$@"; do
+    printf 'pid %s\n' "$q"
+    st "$q"
+    if t=$(LC_ALL=C TZ=UTC "$p" -o lstart= -p "$q" 2>&1); then printf 'ps %s\n' "$(echo $t)"
+    elif [ -z "$t" ]; then echo gone; else echo failed; fi
+    st "$q"
+  done
+  exit 0
+  """
 
-        host
-        |> Shell.run(Keyword.fetch!(opts, :env), ["LC_ALL=C", cat | files], timeout: timeout)
-        |> judge_stat(procs)
-    end
+  @doc """
+  Turns each `{pid, ticks}`, a start in clock ticks (`ticks?/1`), into this module's one form,
+  in one shell on `host`. For each pid it reads the start time in `<proc>/<pid>/stat`, then `ps
+  -o lstart=`, then the stat file again. When both stat reads hold `ticks`, the answer is
+  `{:live, start}`, the `ps` text with its runs of spaces made one (`normal/1`). Otherwise it is
+  `:replaced` (a stat read holds another start: the pid was reused), `:gone` (no stat file, or
+  `ps` lists nothing), or `:unknown` (a read failed). A start in ticks never leaves this
+  function: every check and signal compares the `ps` form, so it is turned once, where it is
+  read.
+
+  Options, all required: `:sh` and `:ps` (the host's programs), `:proc` (the directory that
+  stands for `/proc`, `"/proc"` on a Linux host) and `:timeout` (ms).
+  """
+  @spec from_ticks(Host.t(), [{pos_integer, String.t()}], keyword) :: %{
+          {pos_integer, String.t()} => {:live, String.t()} | :replaced | :gone | :unknown
+        }
+  def from_ticks(_host, [], _opts), do: %{}
+
+  def from_ticks(%Host{} = host, procs, opts) do
+    pids = procs |> Enum.map(&Integer.to_string(elem(&1, 0))) |> Enum.uniq()
+    script = [@from_ticks, "caf-ticks", Keyword.fetch!(opts, :ps), Keyword.fetch!(opts, :proc)]
+
+    host
+    |> Shell.run(Keyword.fetch!(opts, :sh), ["-c" | script] ++ pids,
+      timeout: Keyword.fetch!(opts, :timeout)
+    )
+    |> judge_ticks(procs)
   end
 
   @doc """
-  Judges each `{pid, start}`, `start` a Linux start time in clock ticks, from a `Shell` outcome
-  of `cat /proc/<pid>/stat …` (stderr merged), as `liveness/3` runs it. Pure. A stat line's
-  second field is the program's name in parentheses, which may itself hold spaces and
-  parentheses, so the fields are counted from after the line's last `)`: the start time is the
-  20th of them (field 22 of the line). A pid whose file `cat` reports missing is `:gone`; one
-  neither read nor reported missing, or any line read otherwise, is `:unknown`.
+  Judges each `{pid, ticks}` from a `Shell` outcome of `from_ticks/3`'s shell. Pure. A stat
+  line's second field is the program's name in parentheses, which may itself hold spaces and
+  parentheses, so its fields are counted from after the line's last `)`: the start time is the
+  20th of them (field 22 of the line).
 
-      iex> line = "7 (a) (b c) S 1 7 7 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 1 0 653385178 1 2 3\\n"
-      iex> missing = "cat: /proc/8/stat: No such file or directory\\n"
-      iex> CodingAgentFramework.Holder.Process.judge_stat({:ok, %{status: 1, output: line <> missing}},
-      ...>   [{7, "653385178"}, {7, "1"}, {8, "5"}, {9, "5"}])
-      %{{7, "653385178"} => :live, {7, "1"} => :replaced, {8, "5"} => :gone, {9, "5"} => :unknown}
+      iex> stat = fn start -> "stat 7 (a) (b c) S 1 7 7 0 -1 0 1 0 0 0 0 0 0 0 20 0 1 0 \#{start} 1\\n" end
+      iex> ps = "ps Sat Nov 7 09:00:00 2026\\n"
+      iex> out = "pid 7\\n" <> stat.(90) <> ps <> stat.(90) <> "pid 8\\n" <> stat.(90) <> ps <> stat.(91)
+      iex> CodingAgentFramework.Holder.Process.judge_ticks({:ok, %{status: 0, output: out}},
+      ...>   [{7, "90"}, {8, "90"}, {9, "90"}])
+      %{{7, "90"} => {:live, "Sat Nov 7 09:00:00 2026"}, {8, "90"} => :replaced, {9, "90"} => :unknown}
   """
-  @spec judge_stat(Shell.outcome(), [{pos_integer, String.t()}]) :: %{
-          {pos_integer, String.t()} => :live | :replaced | :gone | :unknown
+  @spec judge_ticks(Shell.outcome(), [{pos_integer, String.t()}]) :: %{
+          {pos_integer, String.t()} => {:live, String.t()} | :replaced | :gone | :unknown
         }
-  def judge_stat({:ok, %{status: status, output: out}}, procs) when status in [0, 1] do
-    case stats(out) do
-      {:ok, read} ->
-        Map.new(procs, fn {pid, start} ->
-          {{pid, start},
-           case Map.get(read, pid) do
-             :missing -> :gone
-             nil -> :unknown
-             ^start -> :live
-             _other -> :replaced
-           end}
-        end)
+  def judge_ticks({:ok, %{status: 0, output: out}}, procs) do
+    read = out |> String.split("\n", trim: true) |> by_pid(%{})
+    Map.new(procs, fn {pid, ticks} -> {{pid, ticks}, ticked(Map.get(read, pid), ticks)} end)
+  end
 
-      :unknown ->
-        Map.new(procs, &{&1, :unknown})
+  def judge_ticks(_outcome, procs), do: Map.new(procs, &{&1, :unknown})
+
+  defp by_pid(["pid " <> pid, first, ps, again | rest], acc) do
+    case Integer.parse(pid) do
+      {pid, ""} -> by_pid(rest, Map.put(acc, pid, {stat(first), ps(ps), stat(again)}))
+      _ -> acc
     end
   end
 
-  def judge_stat(_outcome, procs), do: Map.new(procs, &{&1, :unknown})
+  defp by_pid(_lines, acc), do: acc
 
-  defp stats(out) do
-    out
-    |> String.split("\n", trim: true)
-    |> Enum.reduce_while({:ok, %{}}, fn line, {:ok, acc} ->
-      case stat_line(line) do
-        {pid, value} -> {:cont, {:ok, Map.put(acc, pid, value)}}
-        :unreadable -> {:halt, :unknown}
-      end
-    end)
-  end
+  defp stat("stat " <> line), do: started(line)
+  defp stat("gone"), do: :gone
+  defp stat(_), do: :unknown
 
-  defp stat_line(line) do
-    case Regex.run(~r{^cat: /proc/(\d+)/stat: No such file or directory$}, line) do
-      [_, pid] -> {String.to_integer(pid), :missing}
-      nil -> started(line)
+  defp ps("ps " <> start), do: {:ok, normal(start)}
+  defp ps("gone"), do: :gone
+  defp ps(_), do: :unknown
+
+  defp ticked(nil, _ticks), do: :unknown
+
+  defp ticked({first, ps, again}, ticks) do
+    reads = [first, ps, again]
+
+    cond do
+      Enum.any?([first, again], &(is_binary(&1) and &1 != ticks)) -> :replaced
+      :gone in reads -> :gone
+      first == ticks and again == ticks and match?({:ok, _}, ps) -> {:live, elem(ps, 1)}
+      true -> :unknown
     end
   end
 
-  # `<pid> (<comm>) <state> …`: the fields after the last `)`, the start time the 20th.
+  # `<pid> (<comm>) <state> …`: the start time, the 20th field after the line's last `)`.
   defp started(line) do
-    with [head, tail] <- split_last(line, ")"),
-         [pid, _comm] <- String.split(head, " (", parts: 2),
-         {pid, ""} <- Integer.parse(pid),
+    with [_head, tail] <- split_last(line, ")"),
          fields when length(fields) >= 20 <- String.split(tail),
          start = Enum.at(fields, 19),
          true <- start =~ ~r/\A\d+\z/ do
-      {pid, start}
+      start
     else
-      _ -> :unreadable
+      _ -> :unknown
     end
   end
 
   defp split_last(line, sep) do
     case :binary.matches(line, sep) do
       [] -> [line]
-      matches -> [binary_part(line, 0, elem(List.last(matches), 0)) | [tail_after(line, matches)]]
+      matches -> [binary_part(line, 0, elem(List.last(matches), 0)), tail_after(line, matches)]
     end
   end
 

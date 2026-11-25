@@ -20,34 +20,63 @@ defmodule CodingAgentFramework.Holder.ProcessTest do
     {:ok, dir: dir, p: p}
   end
 
-  # F-246: Linux's start time, field 22 of `/proc/<pid>/stat`, counted from after the line's
+  # F-246 and F-252: Linux's start time, field 22 of a stat line, counted from after the line's
   # last `)`, since the program's name in field 2 may hold spaces and ") (".
-  test "a stat line's start time is read past a name holding \") (\"" do
+  test "a start in ticks is live only when both stat reads hold it around the ps" do
     stat = fn pid, comm, start ->
-      "#{pid} (#{comm}) S 1 #{pid} #{pid} 0 -1 4194560 7 0 0 0 3 1 0 0 20 0 9 0 #{start} 8 9\n"
+      "stat #{pid} (#{comm}) S 1 #{pid} #{pid} 0 -1 0 7 0 0 0 3 1 0 0 20 0 9 0 #{start} 8 9\n"
     end
+
+    ps = "ps Tue Nov 24 09:00:00 2026\n"
 
     out =
-      stat.(41, "claude) (x", "653385178") <>
-        stat.(42, ") (", "12") <> "cat: /proc/43/stat: No such file or directory\n"
+      Enum.join([
+        "pid 41\n" <> stat.(41, "claude) (x", 90) <> ps <> stat.(41, "claude) (x", 90),
+        "pid 42\n" <> stat.(42, ") (", 90) <> ps <> stat.(42, ") (", 91),
+        "pid 43\ngone\ngone\ngone\n",
+        "pid 44\n" <> stat.(44, "c", 90) <> "gone\ngone\n",
+        "pid 45\n" <> stat.(45, "c", 90) <> "failed\n" <> stat.(45, "c", 90),
+        "pid 46\nfailed\n" <> ps <> stat.(46, "c", 90)
+      ])
 
-    procs = [{41, "653385178"}, {42, "11"}, {43, "5"}, {44, "5"}]
+    procs = for pid <- 41..47, do: {pid, "90"}
 
-    assert Holder.Process.judge_stat({:ok, %{status: 1, output: out}}, procs) == %{
-             {41, "653385178"} => :live,
-             {42, "11"} => :replaced,
-             {43, "5"} => :gone,
-             {44, "5"} => :unknown
+    assert Holder.Process.judge_ticks({:ok, %{status: 0, output: out}}, procs) == %{
+             {41, "90"} => {:live, "Tue Nov 24 09:00:00 2026"},
+             {42, "90"} => :replaced,
+             {43, "90"} => :gone,
+             {44, "90"} => :gone,
+             {45, "90"} => :unknown,
+             {46, "90"} => :unknown,
+             {47, "90"} => :unknown
            }
 
-    # Anything unreadable, or a cat that did not run cleanly, decides nothing.
-    for outcome <- [
-          {:ok, %{status: 0, output: "41 (claude S 1\n"}},
-          {:ok, %{status: 2, output: ""}},
-          {:unknown, :timeout}
-        ] do
-      assert Holder.Process.judge_stat(outcome, [{41, "1"}]) == %{{41, "1"} => :unknown}
+    for outcome <- [{:ok, %{status: 2, output: out}}, {:unknown, :timeout}] do
+      assert Holder.Process.judge_ticks(outcome, [{41, "90"}]) == %{{41, "90"} => :unknown}
     end
+  end
+
+  # The stat files are read from the directory named, so a host with no `/proc` reads its own.
+  test "from_ticks reads a stat directory of its own and the pid's ps start", %{dir: dir} do
+    proc = Path.join(dir, "proc")
+    me = System.pid()
+    File.mkdir_p!(Path.join(proc, me))
+    line = "#{me} (beam) S 1 1 1 0 -1 0 1 0 0 0 0 0 0 0 20 0 1 0 777 1\n"
+    File.write!(Path.join([proc, me, "stat"]), line)
+    {:ok, paths} = CodingAgentFramework.Programs.take(programs(), [:sh, :ps])
+    opts = [sh: paths.sh, ps: paths.ps, proc: proc, timeout: 10_000]
+
+    {out, 0} =
+      System.cmd(program!(:env), ["LC_ALL=C", "TZ=UTC", paths.ps, "-o", "lstart=", "-p", me])
+
+    me = String.to_integer(me)
+
+    assert Holder.Process.from_ticks(host(), [{me, "777"}, {me, "778"}, {999_999, "1"}], opts) ==
+             %{
+               {me, "777"} => {:live, Holder.Process.normal(out)},
+               {me, "778"} => :replaced,
+               {999_999, "1"} => :gone
+             }
   end
 
   test "a hold writes the program's record; a reading names it live, and it is not dead",
