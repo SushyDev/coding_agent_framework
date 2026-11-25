@@ -975,7 +975,16 @@ back when the VM dies, and the holder's connection is closed when it ends; the t
 its holder does. A refusal names the holder's record, `<home>/home.holder` (its instance, its
 VM's OS pid, its node and when it took the home), which a normal stop removes. A start of the
 same name waits for the old holder to end within `restart_wait`, as it waits for the old
-`Registry`. `home_kind/1` takes no lock. The other calls are B3's rest.
+`Registry`. `home_kind/1` takes no lock. F-260 added `conversation/3`: an agent's
+conversation as entries (`prompt`, `assistant`, `tool_call`, `notice`, `interrupt`, `system`),
+each read by the fold's own rules (`Transcripts.Fold.entries/2`), a delivered message's entry
+with its row's uuid, an opaque cursor for what came since, and the rows still queued for the
+agent. The read runs in the host's `Transcripts` (`Transcripts.conversation/3`), through that
+host's shell, at most `limit` entries and `max_bytes` per file, so no call reads a whole
+transcript again; a cursor whose bytes changed, or of another file, starts that file again and
+says so (`reset`). The agent's row names its host; only the workstation has a `Transcripts`
+today, so a session on another host answers `{:unknown, {:host, {:no_reader, host}}}`. The
+other calls are B3's rest.
 The config answers the room the home leaves for an agent's name (`Config.name_room/1`, F-172), and the tree hands it to `Delegates` and
 `Mains`, which refuse a longer name `{:bad, :name, {:longer_than, n}}` before any row;
 sockets stay in the home. A service's socket is named by the first 16 hex digits of the SHA-256

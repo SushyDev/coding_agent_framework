@@ -260,15 +260,7 @@ defmodule CodingAgentFramework do
   @spec agent_rows(Config.t() | String.t()) ::
           {:ok, %{agents: [map], delegates: [map]}} | {:refused, term}
   def agent_rows(instance) when is_binary(instance) do
-    with {:ok, name} <- registry(instance) do
-      case Elixir.Registry.meta(name, :config) do
-        {:ok, %Config{} = c} -> agent_rows(c)
-        :error -> {:refused, :no_instance}
-      end
-    end
-  rescue
-    # The registry ended between the two looks.
-    ArgumentError -> {:refused, :no_instance}
+    with {:ok, c} <- config(instance), do: agent_rows(c)
   end
 
   def agent_rows(%Config{} = c) do
@@ -277,6 +269,124 @@ defmodule CodingAgentFramework do
     with {:ok, agents} <- Sessions.Agents.read_only(path, c.workstation),
          {:ok, delegates} <- Delegates.Table.read_only(path, c.workstation),
          do: {:ok, %{agents: agents, delegates: delegates}}
+  end
+
+  # The config the running tree of that name started with, kept in its `Registry`.
+  defp config(instance) do
+    with {:ok, name} <- registry(instance) do
+      case Elixir.Registry.meta(name, :config) do
+        {:ok, %Config{} = c} -> {:ok, c}
+        :error -> {:refused, :no_instance}
+      end
+    end
+  rescue
+    # The registry ended between the two looks.
+    ArgumentError -> {:refused, :no_instance}
+  end
+
+  @doc """
+  Agent `agent`'s conversation in the running instance named `instance` (F-260): its prompts,
+  its replies, its tool calls with their input and result, and the messages still queued for
+  it, as structured entries, so an app parses no transcript of its own.
+
+  The read runs where the transcript is: by the host's `Transcripts` (`Transcripts.conversation/3`,
+  whose doc gives each entry's fields), which reads the file through that host's shell, so only
+  the bytes read cross. The agent's row names its host, account, working directory and session.
+
+  Answers `{:ok, %{entries: entries, next: cursor, queued: rows, reset: reset}}`: `next` an
+  opaque cursor to pass as `from:` to read only what came since; `reset` nil, or why the read
+  began the transcript again (`:rewritten`, `:new_file` for a resumed session's); `queued` the
+  rows to the agent still `queued` or `sending`, oldest first, each `%{id, uuid, from, kind,
+  text, status, at}`. A delivered message's entry carries its row's `uuid` as `message`. The
+  queued rows are read before the transcript, so a row delivered between the two reads is in
+  both, never in neither.
+
+  Options: `from:` (a cursor), `limit:` (entries at most, default 100), `subagents:` (each
+  subagent's entries too, default false) and `max_bytes:` (each file's read at most, 1 MB).
+
+  `{:refused, :no_instance}`; `{:refused, :unknown_agent}` for a name with no agent row;
+  `{:refused, {:no_session, status}}` before its session is known; `{:refused, :no_file}`;
+  `{:refused, {:bad, key}}`; `{:unknown, {:host, reason}}` when the host's shell fails, or
+  `{:no_reader, host}` for a host the tree reads no transcript on; or the store's refusal.
+
+      {:ok, %{entries: [%{kind: "prompt", message: uuid} | _], next: next, queued: []}} =
+        CodingAgentFramework.conversation("a", "app-unit", limit: 50)
+      {:ok, %{entries: later}} = CodingAgentFramework.conversation("a", "app-unit", from: next)
+  """
+  @spec conversation(String.t(), String.t(), keyword) ::
+          {:ok, map} | {:refused, term} | {:unknown, term}
+  def conversation(instance, agent, opts \\ []) when is_binary(agent) do
+    with {:ok, c} <- config(instance),
+         {:ok, row} <- conversation_row(c, agent),
+         {:ok, path} <- transcript_path(c, row),
+         {:ok, reader} <- transcript_reader(instance, c, row.host),
+         {:ok, queued} <- queued(c, agent),
+         {:ok, read} <- Transcripts.conversation(reader, path, opts) do
+      {:ok, Map.put(read, :queued, queued)}
+    end
+  end
+
+  # The agent's row on any host of the config: a name is unique on its host.
+  defp conversation_row(c, agent) do
+    path = Config.path(c, "caf.db")
+
+    Enum.reduce_while([c.workstation | Map.keys(c.hosts)], {:refused, :unknown_agent}, fn host,
+                                                                                          none ->
+      case Sessions.Agents.read_only(path, host) do
+        {:ok, rows} ->
+          case Enum.find(rows, &(&1.name == agent)) do
+            nil -> {:cont, none}
+            row -> {:halt, {:ok, row}}
+          end
+
+        other ->
+          {:halt, other}
+      end
+    end)
+  end
+
+  defp transcript_path(_c, %{session_id: sid, status: status} = row)
+       when not is_binary(sid) or not is_binary(row.cwd) or not is_binary(row.account),
+       do: {:refused, {:no_session, status}}
+
+  defp transcript_path(c, row) do
+    with {:ok, accounts} <- Accounts.new(c.home, c.accounts),
+         {:ok, dir} <- Accounts.config_dir(accounts, row.account),
+         do: Transcripts.path(dir, row.cwd, row.session_id)
+  end
+
+  # Only the workstation's `Transcripts` runs in the tree today ("Hosts").
+  defp transcript_reader(instance, c, host) when host == c.workstation do
+    with {:ok, sup} <- tree(instance) do
+      case parts(sup) do
+        %{transcripts: pid} when is_pid(pid) -> {:ok, pid}
+        _ -> {:unknown, {:no_part, :transcripts}}
+      end
+    end
+  catch
+    # The tree ended between the look and the read of its children.
+    :exit, _ -> {:refused, :no_instance}
+  end
+
+  defp transcript_reader(_instance, _c, host), do: {:unknown, {:host, {:no_reader, host}}}
+
+  defp queued(c, agent) do
+    read = fn db -> for %{to_agent: ^agent} = m <- Mailbox.Table.open_rows(db), do: m end
+
+    with {:ok, rows} <- Store.read_only(Config.path(c, "caf.db"), "messages", [], read) do
+      {:ok,
+       for m <- Enum.sort_by(rows, & &1.id) do
+         %{
+           id: m.id,
+           uuid: m.uuid,
+           from: m.from_agent,
+           kind: m.kind,
+           text: m.text,
+           status: m.status,
+           at: m.created_at
+         }
+       end}
+    end
   end
 
   @doc """

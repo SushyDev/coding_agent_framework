@@ -490,6 +490,10 @@ Built, each from a checked model in `model/tla/`:
 - the inbox reads closed prompts and keeps a hidden mark (F-254): `answered/2` pages the prompts
   that closed, each with its choice or withdrawal reason, who answered and when, from the ledger;
   `hide/3` and `unhide/3` set an open prompt aside, still answerable, as a fact in `Acts`.
+- an app reads an agent's conversation through the facade (F-260):
+  `CodingAgentFramework.conversation/3` answers its prompts, replies, tool calls, notices,
+  interrupts and system lines as entries, a cursor for what comes next, and the rows queued for
+  it; the host's `Transcripts` reads the file, bounded, through that host's shell.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

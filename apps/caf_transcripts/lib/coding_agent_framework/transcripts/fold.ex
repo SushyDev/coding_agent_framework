@@ -390,6 +390,259 @@ defmodule CodingAgentFramework.Transcripts.Fold do
         do: %{id: id, name: name, at: ms(e["timestamp"])}
   end
 
+  @doc """
+  The conversation that whole lines of `bytes` hold, in file order (F-260): what an app shows
+  of a session. `bytes` start at a line's start; a partial last line is not read. Read by the
+  same rules as the fold: a user line is a tool's result, a task's notification, a meta line or
+  a prompt, as `take/2` reads it. Answers `%{entries: entries, used: bytes, open: open}`:
+  `used` the bytes of the lines read, so the next read starts there, and `open` the calls
+  started and not yet ended, by id, for the next read.
+
+  Each entry is `%{kind, at, uuid, offset, agent, …}`: `at` its line's time in ms (nil without
+  one), `offset` the byte its line starts at (`at:` below plus its place), and `agent` the
+  subagent whose file it is (nil for the session's own). By `kind`:
+
+  - `"prompt"`: `text`, `images` and `message`, the uuid of a delivered message's
+    `[delivery <uuid>]` mark (nil without one);
+  - `"assistant"`: `text`, one text block of a reply;
+  - `"tool_call"`: `id`, `name`, `input`, `result` (its text, at most 20,000 characters),
+    `is_error`, `duration_ms` and `done`. A call whose result is in a later read has `done:
+    false` and `result` nil; that read gives the call again under the same `id`, done, its
+    `input` nil, its `name` and `duration_ms` from `open:`;
+  - `"notice"`: `text`, a task's `<task-notification>`, with its `task_id` and `status`;
+  - `"interrupt"`: `tool_use`, true when the key ended a tool call;
+  - `"system"`: `subtype` and `text`: a `system` line, or an API error's reply line
+    (`subtype` `"api_error"`).
+
+  Thinking, meta lines, a subagent's lines in the main file (written there only before
+  2.1.322) and lines the fold skips have no entry.
+
+  Options: `limit:` (entries at most; a line's entries are never split, so a first line with
+  more than `limit` is answered whole), `open:` (from the last read), `at:` (the byte `bytes`
+  starts at) and `agent:`.
+
+      iex> alias CodingAgentFramework.Transcripts.Fold
+      iex> go = ~s({"type":"user","uuid":"u1","message":{"content":"Go. [delivery d-1]"}}\\n)
+      iex> use = ~s({"type":"assistant","uuid":"a1","message":{"id":"m1","content":) <>
+      ...>   ~s([{"type":"tool_use","id":"tu-1","name":"Bash","input":{"command":"ls"}}]}}\\n)
+      iex> %{entries: [prompt, call], open: open} = Fold.entries(go <> use, limit: 10)
+      iex> {prompt.message, call.name, call.done, Map.keys(open)}
+      {"d-1", "Bash", false, ["tu-1"]}
+      iex> done = ~s({"type":"user","uuid":"u2","message":{"content":) <>
+      ...>   ~s([{"type":"tool_result","tool_use_id":"tu-1","content":"a.txt"}]}}\\n)
+      iex> %{entries: [call]} = Fold.entries(done, limit: 10, open: open)
+      iex> {call.name, call.result, call.done}
+      {"Bash", "a.txt", true}
+  """
+  @spec entries(binary, keyword) :: %{entries: [map], used: non_neg_integer, open: map}
+  def entries(bytes, opts) do
+    acc = %{
+      entries: [],
+      count: 0,
+      used: 0,
+      open: Keyword.get(opts, :open, %{}),
+      limit: Keyword.fetch!(opts, :limit),
+      at: Keyword.get(opts, :at, 0),
+      agent: Keyword.get(opts, :agent)
+    }
+
+    acc = entry_lines(acc, bytes)
+    %{entries: Enum.reverse(acc.entries), used: acc.used, open: acc.open}
+  end
+
+  @result_max 20_000
+  @kept_open 100
+
+  defp entry_lines(acc, bytes) do
+    case :binary.split(bytes, "\n") do
+      [_partial] ->
+        acc
+
+      [line, rest] ->
+        base = %{at: nil, uuid: nil, offset: acc.at + acc.used, agent: acc.agent}
+        %{new: new, open: open, ended: ended} = line_entries(line, base, acc)
+
+        if acc.count > 0 and acc.count + length(new) > acc.limit do
+          acc
+        else
+          entries = Enum.map(acc.entries, &Map.get(ended, call_id(&1), &1))
+
+          acc = %{
+            acc
+            | entries: Enum.reverse(new, entries),
+              count: acc.count + length(new),
+              used: acc.used + byte_size(line) + 1,
+              open: open
+          }
+
+          if acc.count >= acc.limit, do: acc, else: entry_lines(acc, rest)
+        end
+    end
+  end
+
+  defp call_id(%{kind: "tool_call", id: id, done: false}), do: id
+  defp call_id(_entry), do: nil
+
+  defp line_entries(line, base, acc) do
+    none = %{new: [], open: acc.open, ended: %{}}
+
+    case JSON.decode(line) do
+      {:ok, %{"isSidechain" => true}} when acc.agent == nil ->
+        none
+
+      {:ok, %{"type" => type} = e} when type in ["user", "assistant", "attachment", "system"] ->
+        of_line(type, e, %{base | at: ms(e["timestamp"]), uuid: e["uuid"]}, none, acc)
+
+      _ ->
+        none
+    end
+  end
+
+  defp of_line("user", %{"message" => %{"content" => content}} = e, base, none, acc) do
+    case user_kind(e, content) do
+      {:results, results} ->
+        Enum.reduce(results, none, &ended_call(&1, &2, base, acc))
+
+      :notice ->
+        %{none | new: [notice(content, base)]}
+
+      :meta ->
+        none
+
+      :prompt ->
+        case Enum.find(prompt_texts(content), &(&1 in @interrupts)) do
+          nil ->
+            %{none | new: [prompt_entry(content, base)]}
+
+          text ->
+            %{none | new: [Map.merge(base, %{kind: "interrupt", tool_use: text == @tool_use})]}
+        end
+    end
+  end
+
+  defp of_line("attachment", %{"attachment" => %{"prompt" => p}}, base, none, _acc)
+       when is_binary(p) do
+    if notification(p),
+      do: %{none | new: [notice(p, base)]},
+      else: %{none | new: [prompt_entry(p, base)]}
+  end
+
+  defp of_line("assistant", %{"isApiErrorMessage" => true, "message" => m} = e, base, none, _acc)
+       when is_map(m) do
+    text = Enum.join(block_texts(m["content"]), "\n")
+    entry = Map.merge(base, %{kind: "system", subtype: "api_error", text: text})
+    %{none | new: [Map.put(entry, :error, e["apiError"])]}
+  end
+
+  defp of_line("assistant", %{"message" => %{"content" => content}}, base, none, _acc)
+       when is_list(content) do
+    Enum.reduce(content, none, fn
+      %{"type" => "text", "text" => t}, got when is_binary(t) ->
+        if String.trim(t) == "",
+          do: got,
+          else: %{got | new: got.new ++ [Map.merge(base, %{kind: "assistant", text: t})]}
+
+      %{"type" => "tool_use", "id" => id, "name" => name} = b, got when is_binary(id) ->
+        call =
+          Map.merge(base, %{
+            kind: "tool_call",
+            id: id,
+            name: name,
+            input: b["input"],
+            result: nil,
+            is_error: nil,
+            duration_ms: nil,
+            done: false
+          })
+
+        open = Map.put(got.open, id, %{name: name, started_at: base.at})
+        open = if map_size(open) > @kept_open, do: Map.delete(open, oldest(open)), else: open
+        %{got | new: got.new ++ [call], open: open}
+
+      _block, got ->
+        got
+    end)
+  end
+
+  defp of_line("system", e, base, none, _acc) do
+    text = if is_binary(e["content"]), do: e["content"], else: ""
+    %{none | new: [Map.merge(base, %{kind: "system", subtype: e["subtype"], text: text})]}
+  end
+
+  defp of_line(_type, _e, _base, none, _acc), do: none
+
+  defp oldest(open),
+    do: open |> Enum.min_by(fn {_, c} -> c.started_at || 0 end) |> elem(0)
+
+  # A result ends its call: the entry this read gave, changed in its place, or, for a call an
+  # earlier read gave, the call again under its id, its name and start from `open`.
+  defp ended_call(%{"tool_use_id" => id} = r, got, base, acc) when is_binary(id) do
+    text = String.slice(result_text(r["content"]), 0, @result_max)
+    is_error = r["is_error"] == true
+    open = Map.delete(got.open, id)
+
+    case Enum.find(acc.entries, &(call_id(&1) == id)) do
+      %{at: started} = call ->
+        ended = finish(call, started, text, is_error, base.at)
+        %{got | open: open, ended: Map.put(got.ended, id, ended)}
+
+      nil ->
+        started = Map.get(got.open, id, %{name: nil, started_at: nil})
+        call = Map.merge(base, %{kind: "tool_call", id: id, name: started.name, input: nil})
+
+        %{
+          got
+          | new: got.new ++ [finish(call, started.started_at, text, is_error, base.at)],
+            open: open
+        }
+    end
+  end
+
+  defp ended_call(_result, got, _base, _acc), do: got
+
+  defp finish(call, started, text, is_error, ended_at) do
+    duration = if is_integer(started) and is_integer(ended_at), do: max(ended_at - started, 0)
+    Map.merge(call, %{result: text, is_error: is_error, duration_ms: duration, done: true})
+  end
+
+  defp prompt_entry(content, base) do
+    texts = if is_binary(content), do: [content], else: block_texts(content)
+    text = Enum.join(texts, "\n")
+
+    images =
+      if is_list(content), do: Enum.count(content, &match?(%{"type" => "image"}, &1)), else: 0
+
+    message =
+      case Regex.run(~r/\[delivery ([^\]\s]+)\]/, text) do
+        [_, uuid] -> uuid
+        nil -> nil
+      end
+
+    Map.merge(base, %{kind: "prompt", text: text, images: images, message: message})
+  end
+
+  defp notice(content, base) do
+    text = if is_binary(content), do: content, else: Enum.join(block_texts(content), "\n")
+    status = %{task_id: tag(text, "task-id"), status: tag(text, "status")}
+    Map.merge(base, Map.merge(status, %{kind: "notice", text: text}))
+  end
+
+  defp block_texts(blocks) when is_list(blocks),
+    do: for(%{"type" => "text", "text" => t} <- blocks, is_binary(t), do: t)
+
+  defp block_texts(_), do: []
+
+  # A tool's result is a string, or blocks of text and images.
+  defp result_text(text) when is_binary(text), do: text
+
+  defp result_text(blocks) when is_list(blocks) do
+    images = Enum.count(blocks, &match?(%{"type" => "image"}, &1))
+    text = Enum.join(block_texts(blocks), "\n")
+    if images > 0, do: text <> "\n[#{images} image(s)]", else: text
+  end
+
+  defp result_text(_), do: ""
+
   defp ms(stamp) when is_binary(stamp) do
     case DateTime.from_iso8601(stamp) do
       {:ok, at, _} -> DateTime.to_unix(at, :millisecond)
@@ -539,14 +792,11 @@ defmodule CodingAgentFramework.Transcripts.Fold do
   defp read(fold, "assistant", _e, at), do: problem(fold, at, {:shape, "assistant"})
 
   defp read(fold, "user", %{"message" => %{"content" => content}} = e, at) do
-    blocks = if is_list(content), do: content, else: []
-    results = for %{"type" => "tool_result"} = b <- blocks, do: b
-
-    cond do
-      results != [] -> Enum.reduce(results, ends(fold, results, e), &result(&2, &1, e))
-      notification(content) -> ended(fold, content, e)
-      e["isMeta"] == true -> fold
-      true -> fold |> interrupt(content, e, at) |> prompt(content, e, at)
+    case user_kind(e, content) do
+      {:results, results} -> Enum.reduce(results, ends(fold, results, e), &result(&2, &1, e))
+      :notice -> ended(fold, content, e)
+      :meta -> fold
+      :prompt -> fold |> interrupt(content, e, at) |> prompt(content, e, at)
     end
   end
 
@@ -556,6 +806,21 @@ defmodule CodingAgentFramework.Transcripts.Fold do
     do: if(notification(p), do: ended(fold, p, e), else: fold)
 
   defp read(fold, _type, _e, _at), do: fold
+
+  # What a user line is, one reading for the fold and for `entries/2`: the results of tool
+  # calls, a task's notification, a meta line Claude Code adds, or a prompt (an interrupt's line
+  # among them).
+  defp user_kind(e, content) do
+    blocks = if is_list(content), do: content, else: []
+    results = for %{"type" => "tool_result"} = b <- blocks, do: b
+
+    cond do
+      results != [] -> {:results, results}
+      notification(content) -> :notice
+      e["isMeta"] == true -> :meta
+      true -> :prompt
+    end
+  end
 
   # Claude Code's line for a turn a key ended (F-194; the two texts checked by name in the
   # 2.1.322 binary): kept with the time of the prompt that opened the turn it ended. It stays a
