@@ -626,6 +626,23 @@ it in `unwoken` (`ReadsIdleAgain`, `Break_Remedies_NoBound`). The model takes th
 longer than the gap between an end and its init, so it passes only where no init comes; the
 release check records that gap with the background command.
 
+**An agent's background commands in the tree** (F-259, `Background.tla`). `Tracker.agents/2`
+gives each agent `background`: `%{count, since, source, groups}`, or `{:unknown, reason}` where
+no source can know, never a count of 0. A headless delegate's is its `Stream` fold's `tasks`, each
+stamped with the read that saw it start (`source` `stream`). An interactive session's comes from
+two sources, measured on Claude Code 2.1.322's bundle. The `Stop` input's `background_tasks`
+lists each task in flight; a command is one of type `shell`. The session file says `shell` while
+a `local_bash` task is not finished after the turn, and `idle` once none is, and stamps
+`statusUpdatedAt` at each write. No hook fires when a command ends between turns. So a file
+whose status was written after the newest `Stop` row says the count now (`session_file`):
+`idle` is 0, `shell` at least 1. Otherwise the newest `Stop` says it (`stop`). With no `Stop`
+row and no such file, it is `{:unknown, :no_stop}`. A `busy` file says nothing of commands
+from before its turn, and an older file never empties a newer `Stop`
+(`Break_Background_StaleFile`). An agent with no process has none (`process`). `groups` is a
+host's read of the process's groups (`StuckBackgrounds.Groups`), asked with `agents/2`'s
+`groups:` option: a count on Linux, `{:unknown, :no_proc}` on macOS, nil when not asked. It
+decides nothing, since a group may be an MCP server (F-259's new-1).
+
 Built in F-184: `stuck_background` (`StuckBackgrounds`, in `caf_recoveries`, one per host):
 a running headless delegate whose fold's turn ended with a result while Claude Code still
 lists a task (`Stream.Fold`'s `background`), and a process group its process started that has
@@ -2403,7 +2420,7 @@ mechanism below unchanged; the operator's tools move to the app's surface:
 
 | Tool | Who | What it does |
 |---|---|---|
-| `agents(all)` | any agent | the tree: each agent's name, kind, project, parent, account, state (working, waiting, idle, stuck, gone; `starting` while a start or resume is under way, `unread` while nothing has read its session yet; a main session's and an interactive delegate's from its session file alone, the one its pid and start time name, F-153's new-6), what it waits on, its transcript's path (nil until the transcripts' source has read one, never built from the cwd), its subagents (each with Claude Code's `agent_id` from its start, from its file's meta, and the call it runs now, F-237), the tool call it runs now (`tool`) and when it last did anything (`last_event_at`), both from its transcript, never a hook (F-235; `Tracker.tool_calls/3` answers its recent calls, a subagent's under its `agent_id`, each with two times: `ms`, the transcript's result less its call, which for calls sent in one batch is the batch's wait, and `duration_ms`, the call's own time from the `PostToolUse` or `PostToolUseFailure` hook's row (F-253), nil for a call with no row or one swept after 7 days, never filled from `ms`), read from the `Tracker`'s view, never a copy (F-99). A delegate that ended keeps its place but shows only with `all: true` (F-129's new-5) |
+| `agents(all)` | any agent | the tree: each agent's name, kind, project, parent, account, state (working, waiting, idle, stuck, gone; `starting` while a start or resume is under way, `unread` while nothing has read its session yet; a main session's and an interactive delegate's from its session file alone, the one its pid and start time name, F-153's new-6), what it waits on, its transcript's path (nil until the transcripts' source has read one, never built from the cwd), its subagents (each with Claude Code's `agent_id` from its start, from its file's meta, and the call it runs now, F-237), its background commands (`background`, a count with its `since` and `source`, or `{:unknown, reason}`, F-259), the tool call it runs now (`tool`) and when it last did anything (`last_event_at`), both from its transcript, never a hook (F-235; `Tracker.tool_calls/3` answers its recent calls, a subagent's under its `agent_id`, each with two times: `ms`, the transcript's result less its call, which for calls sent in one batch is the batch's wait, and `duration_ms`, the call's own time from the `PostToolUse` or `PostToolUseFailure` hook's row (F-253), nil for a call with no row or one swept after 7 days, never filled from `ms`), read from the `Tracker`'s view, never a copy (F-99). A delegate that ended keeps its place but shows only with `all: true` (F-129's new-5) |
 | `message(to, text, key)` | along an edge | stores a message and delivers it to the target when its turn has ended; answers `queued{id}`, then the sender learns `delivered`. With a `key`, a send again stores no second row and answers the first `queued{id}`; an `unknown` answer names the key. A key over 128 bytes, or empty, is refused `bad_key` |
 | `look(agent)` | parent, child, main sessions | a main session's screen as text, or a delegate's rendered event log; its open dialog or request; its last transcript lines |
 | `transcript(agent, from)` | parent, child, main sessions | the agent's transcript from an offset |

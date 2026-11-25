@@ -63,12 +63,30 @@ defmodule CodingAgentFramework.Tracker do
 
   @doc """
   The tree, read from the view as `view/2` gives it (`CodingAgentFramework.Tracker.Tree`).
-  Options: `:timeout`, and `all: true` to keep the delegates that ended.
+  Options: `:timeout`, `all: true` to keep the delegates that ended, and `groups:`, a map of
+  host to a function that reads a process's groups on that host (`&StuckBackgrounds.Groups.read(procs, &1)`).
+  Each running agent on such a host is read once, in the caller's process, and its
+  `background` shows how many groups it leads, or `{:unknown, :no_proc}` on macOS (F-259).
+
+      Tracker.agents(tracker, groups: %{"laptop" => &Groups.read(procs, &1)})
+      #=> {:ok, %{agents: [%{name: "main", background: %{count: 1, groups: 2, …}, …}], …}}
   """
   @spec agents(GenServer.server(), keyword) :: {:ok, map} | {:refused, term} | {:unknown, term}
   def agents(tracker, opts \\ []) do
-    with {:ok, view} <- view(tracker, opts),
-         do: {:ok, CodingAgentFramework.Tracker.Tree.agents(view, Keyword.take(opts, [:all]))}
+    alias CodingAgentFramework.Tracker.Tree
+
+    with {:ok, view} <- view(tracker, opts) do
+      readers = Keyword.get(opts, :groups, %{})
+
+      groups =
+        for {{host, _name} = key, record} <- Tree.records(view),
+            read = readers[host],
+            is_function(read, 1),
+            into: %{},
+            do: {key, read.(record)}
+
+      {:ok, Tree.agents(view, all: opts[:all], groups: groups)}
+    end
   end
 
   @doc """

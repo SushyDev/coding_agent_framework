@@ -456,21 +456,27 @@ defmodule CodingAgentFramework.Stream.Fold do
 
   @doc """
   Stamps each request with no `held_at` with `at` (wall-clock ms), the time of the read that
-  folded it: when `Prompts` shows it opened (F-189's new-2). A request stamped before keeps its
-  time, and so does a `waking` fold: the read that saw the command's end. Pure.
+  folded it: when `Prompts` shows it opened (F-189's new-2). Each background command with no
+  `at` is stamped the same way: when the tree shows it running since (F-259). A request or
+  command stamped before keeps its time, and so does a `waking` fold: the read that saw the
+  command's end. Pure.
 
       iex> alias CodingAgentFramework.Stream.Fold
-      iex> fold = %{Fold.new() | requests: %{"r1" => %{state: :held}}}
-      iex> Fold.stamp(Fold.stamp(fold, 5), 9).requests
-      %{"r1" => %{state: :held, held_at: 5}}
+      iex> fold = %{Fold.new() | requests: %{"r1" => %{state: :held}},
+      ...>   tasks: %{"b1" => %{state: :running}}}
+      iex> fold = Fold.stamp(Fold.stamp(fold, 5), 9)
+      iex> {fold.requests, fold.tasks}
+      {%{"r1" => %{state: :held, held_at: 5}}, %{"b1" => %{state: :running, at: 5}}}
   """
   @spec stamp(t, integer) :: t
   def stamp(fold, at) do
     requests = Map.new(fold.requests, fn {id, r} -> {id, Map.put_new(r, :held_at, at)} end)
+    tasks = Map.new(Map.get(fold, :tasks, %{}), fn {id, t} -> {id, Map.put_new(t, :at, at)} end)
+    fold = Map.put(%{fold | requests: requests}, :tasks, tasks)
 
     case fold do
-      %{waking: %{at: nil}} -> %{fold | requests: requests, waking: %{at: at}}
-      _ -> %{fold | requests: requests}
+      %{waking: %{at: nil}} -> %{fold | waking: %{at: at}}
+      _ -> fold
     end
   end
 
