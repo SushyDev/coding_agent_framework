@@ -108,6 +108,12 @@ defmodule CodingAgentFramework.InterventionsTest do
     })
 
     _framework = prompt(ctx, "s1", "p1", "Review it. [delivery u-1]")
+    # Claude Code's own turns (F-257): a background command's end, and the waiter's text.
+    _wake = prompt(ctx, "s1", "p4", "<task-notification>\n<status>completed</status>")
+
+    _waiter =
+      prompt(ctx, "s1", "p5", "<task-notification>\n<summary>Stop hook feedback</summary>")
+
     typed = prompt(ctx, "s1", "p2", "also look at the tests")
     # A headless delegate has no box a person types in.
     _headless = prompt(ctx, "s2", "p3", "never read")

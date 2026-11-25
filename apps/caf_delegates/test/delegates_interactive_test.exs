@@ -12,6 +12,26 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest.NoWaiter do
   def handle_call({:waiter?, _account, _session}, _from, s), do: {:reply, {:ok, false}, s}
 end
 
+defmodule CodingAgentFramework.DelegatesInteractiveTest.Held do
+  @moduledoc false
+  # Plays `Intake` with a waiter held: each text handed to it goes to the test, which writes the
+  # lines Claude Code 2.1.322 writes for it (`WaiterStandIn.take/4`).
+  use GenServer
+
+  def start_link(test), do: GenServer.start_link(__MODULE__, test)
+
+  @impl true
+  def init(test), do: {:ok, test}
+
+  @impl true
+  def handle_call({:waiter?, _account, _session}, _from, test), do: {:reply, {:ok, true}, test}
+
+  def handle_call({:deliver, _account, _session, text}, _from, test) do
+    send(test, {:waiter, text})
+    {:reply, {:ok, :sent}, test}
+  end
+end
+
 defmodule CodingAgentFramework.DelegatesInteractiveTest do
   @moduledoc """
   An interactive delegate (`interactive: true`, F-137) over a real `Sessions`, `Inlet`,
@@ -117,8 +137,11 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
      agents: agents,
      mailbox: mailbox,
      accounts: accounts,
-     intake: opts[:intake]}
+     intake: opts[:intake],
+     mopts: mopts}
   end
+
+  @wake "<task-notification>\n<status>completed</status>\n</task-notification>"
 
   # F-137's new-3: a parent's fixes reach an interactive delegate as they reach a main session.
   # Its permission request is the PermissionRequest Intake holds, and the answer goes there;
@@ -353,6 +376,64 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     assert [_, _] = turn_notices(ctx)
   end
 
+  # Reply.tla's orders (F-257): a parent's message handed to the waiter is answered once, by the
+  # reply of the turn it went into, under its key, and that turn is never told as its own.
+  # Into a turn of its own still running, the message is queued into that turn.
+  test "a message queued into a turn of its own is answered, and that turn is not told", ctx do
+    w = with_waiter(ctx)
+    lines(w.path, [user(@wake)])
+    m = message(w, "Is it green?", :busy)
+    lines(w.path, [Map.put(reply("m2", "Yes, green."), "uuid", "r-own"), user("Thanks.")])
+
+    assert {:ok, %{kind: "reply", from: from, to: "main", text: "Yes, green."}} =
+             answered(w, m)
+
+    assert from == w.name
+    assert turn_notices(ctx) == []
+  end
+
+  # Into an idle session just after its turn of its own ended: that turn is told, its own; the
+  # message's turn is its reply.
+  test "a message just after a turn of its own: the turn is told, and the message answered",
+       ctx do
+    w = with_waiter(ctx)
+    lines(w.path, [user(@wake), Map.put(reply("m2", "It passed."), "uuid", "r-own")])
+    m = message(w, "Is it green?", :idle)
+    lines(w.path, [Map.put(reply("m3", "Yes, green."), "uuid", "r-msg"), user("Thanks.")])
+
+    assert {:ok, %{kind: "reply", text: "Yes, green."}} = answered(w, m)
+    assert {:ok, [%{reply_to: "key:turn:test:r-own"}]} = told(ctx, w)
+  end
+
+  # After the parent was told of the turn of its own, as on the live tree: the message's turn is
+  # its reply, and the turn is told once.
+  test "a message after its parent was told of a turn of its own is answered", ctx do
+    w = with_waiter(ctx)
+    lines(w.path, [user(@wake), Map.put(reply("m2", "It passed."), "uuid", "r-own")])
+    lines(w.path, [user("Thanks.")])
+    assert {:ok, [_]} = told(ctx, w)
+    m = message(w, "Is it green?", :idle)
+    lines(w.path, [Map.put(reply("m3", "Yes, green."), "uuid", "r-msg"), user("Thanks.")])
+
+    assert {:ok, %{kind: "reply", text: "Yes, green."}} = answered(w, m)
+    assert [_] = turn_notices(ctx)
+    # Read again, nothing more is stored.
+    Delegates.cue(w.delegates, %{topic: "transcripts:test:work"})
+    :sys.get_state(w.delegates)
+    assert {:ok, %{text: "Yes, green."}} = Mailbox.reply(w.mailbox, m)
+    assert [_] = turn_notices(ctx)
+  end
+
+  # The process ends in the message's turn with no reply: the notice in its place, under its key.
+  test "a message whose turn the process's end cut is answered by a notice", ctx do
+    w = with_waiter(ctx)
+    m = message(w, "Is it green?", :idle)
+    assert {:ok, :stopped} = Sessions.stop(ctx.dopts[:sessions], w.name)
+
+    assert {:ok, %{kind: "notice", from: "framework", text: text}} = answered(w, m)
+    assert text =~ "its process ended before it answered"
+  end
+
   # TurnEndsBare and IdleTold, by an interactive delegate's rule: the brief's turn ended with no
   # reply, its session file reads idle, and nothing is due to it.
   test "an interactive delegate idle with no report is told to its parent once", ctx do
@@ -512,6 +593,73 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
 
     assert {:ok, %{text: "Done after the limit.", resumes: 0, resume_uuid: ^w}} =
              cue_until(ctx, id, &(&1.status == "finished"))
+  end
+
+  # A delegate whose Mailbox has a waiter held for it, its report taken.
+  defp with_waiter(ctx) do
+    Process.exit(ctx.delegates, :kill)
+    held = start_supervised!({CodingAgentFramework.DelegatesInteractiveTest.Held, self()})
+    mopts = Keyword.put(ctx.mopts, :intake, held)
+    mailbox = start_supervised!(Supervisor.child_spec({Mailbox, mopts}, id: make_ref()))
+    opts = Keyword.put(ctx.dopts, :mailbox, mailbox)
+    child = Supervisor.child_spec({Delegates, opts}, id: make_ref(), restart: :temporary)
+    delegates = start_supervised!(child)
+
+    assert {:ok, %{id: id, name: name, brief_uuid: u, session_id: sid}} =
+             Delegates.start_delegate(delegates, "main", "app", "unit/one", "opus", "Look.",
+               interactive: true
+             )
+
+    text = "Look.\n\n[delivery #{u}]"
+    assert {:ok, [^text]} = await(fn -> nonempty(ScreenStandIn.prompts(ctx.dir)) end)
+    {:ok, dir} = Accounts.config_dir(ctx.accounts, "work")
+    {:ok, path} = Transcripts.path(dir, Agents.get(ctx.agents, name).cwd, sid)
+    lines(path, [user(text), reply("m1", "Done.")])
+    w = %{id: id, name: name, sid: sid, path: path, mailbox: mailbox, delegates: delegates}
+
+    assert {:ok, %{report: "taken"}} =
+             cue_until(
+               %{ctx | delegates: delegates, mailbox: mailbox},
+               id,
+               &(&1.report == "taken")
+             )
+
+    w
+  end
+
+  # The parent's message, handed to the waiter, and Claude Code's take of it in `shape`.
+  defp message(w, text, shape) do
+    {:ok, {:queued, id}} = Mailbox.message(w.mailbox, "main", w.name, text)
+    Mailbox.cue(w.mailbox, %{topic: "transcripts:test:work", ids: []})
+    assert_receive {:waiter, handed}, 5_000
+    CodingAgentFramework.WaiterStandIn.take(w.path, w.sid, handed, shape)
+
+    {:ok, _} =
+      await(fn ->
+        Mailbox.cue(w.mailbox, %{topic: "transcripts:test:work", ids: []})
+        with {:ok, %{status: "delivered"}} = ok <- Mailbox.status(w.mailbox, id), do: ok
+      end)
+
+    id
+  end
+
+  defp answered(w, id) do
+    await(
+      fn ->
+        Delegates.cue(w.delegates, %{topic: "transcripts:test:work"})
+        :sys.get_state(w.delegates)
+        Mailbox.reply(w.mailbox, id)
+      end,
+      10_000
+    )
+  end
+
+  defp told(ctx, w) do
+    await(fn ->
+      Delegates.cue(w.delegates, %{topic: "transcripts:test:work"})
+      :sys.get_state(w.delegates)
+      nonempty(turn_notices(ctx))
+    end)
   end
 
   defp brief(ctx, u) do

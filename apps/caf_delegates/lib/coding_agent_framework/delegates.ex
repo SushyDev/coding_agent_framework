@@ -94,7 +94,12 @@ defmodule CodingAgentFramework.Delegates do
   a `notice` (`Mailbox.notify/4`) with its last reply, under `turn:<host>:<uuid>`, its
   result's uuid (a headless one's `Stream` fold keeps them in `own`) or its reply line's (an
   interactive one's, read from its transcript after the report's turn, the turn begun by a
-  `<task-notification>` that carries no delivery mark). Never as the report.
+  `<task-notification>` with no delivery mark in it). Never as the report.
+
+  **An interactive delegate's replies** (F-257, `Reply.tla`): its turns write no `result`, so
+  each turn from the report's on that has ended answers the messages whose marks are in it, its
+  opener's or a queued one's: `Mailbox.answered/4` stores its reply under the message's uuid,
+  or the notice in its place when its process ended in that turn with no reply.
 
   **The report** is handed to `Mailbox` (`Mailbox.report/5`) under the brief's uuid, to the
   agent row's parent, and the row's `report` is then `taken`; until `Mailbox` takes it, it is
@@ -430,9 +435,13 @@ defmodule CodingAgentFramework.Delegates do
           # The turns of a delegate's own told to its parent: row id to their keys. Mailbox
           # holds the keys; this only spares it a repeat at each cue.
           turns: %{},
-          # An interactive delegate's own turns after its report, as last read (F-261): row id
-          # to {its transcript reader's offset then, the turns}, read again once that moves.
-          own: %{}
+          # An interactive delegate's turns from its report's turn, as last read (F-261, F-257):
+          # row id to {its transcript reader's offset then, the turns}, read again once that
+          # moves.
+          own: %{},
+          # The messages an interactive delegate's turns answered, Mailbox settled: row id to
+          # their uuids. Mailbox holds the keys, as for `turns`.
+          answered: %{}
         })
 
       # A start waiting for its lease when the Scheduler ends is refused: its queue is gone.
@@ -1166,7 +1175,7 @@ defmodule CodingAgentFramework.Delegates do
   # its parent's cap, and no process of it runs again. Its report stays the parent's row.
   defp settle_row(s, %{status: status} = row, agent) when status in ~w(finished failed) do
     s = if row.report == "held", do: hand(s, row, answer(row)), else: s
-    s = own_turns(s, row, agent)
+    s = later_turns(s, row, agent)
 
     cond do
       Agents.ended?(agent) or not Agents.free?(agent) or Agents.moving?(agent) -> s
@@ -1202,44 +1211,52 @@ defmodule CodingAgentFramework.Delegates do
         :waiting -> s
       end
     else
-      :interactive -> settle_interactive(s, row, agent)
+      :interactive -> s |> settle_interactive(row, agent) |> later_turns(row, agent)
       _unread -> s
     end
   end
 
-  # A turn of the delegate's own after its report (F-155, `Delegate.tla`'s TurnTold): a
-  # background command of its own woke it, and the turn answers no message. Once its report is
-  # taken, each such turn that has ended is told to its parent as a notice, under its result's
-  # uuid, which Mailbox takes once, so no restart tells it twice; never as the report. A
-  # headless one's turns are its `Stream` fold's `own`; an interactive one's are read from its
-  # transcript after the report's turn, the last only once its session reads the turn ended or
-  # its process is gone. A turn with no reply text tells nothing. A read that fails decides
-  # nothing.
+  # The turns after the report's turn. A turn of the delegate's own (F-155, `Delegate.tla`'s
+  # TurnTold): a background command of its own woke it, and the turn answers no message. Once
+  # its report is taken, each such turn that has ended is told to its parent as a notice, under
+  # its result's uuid, which Mailbox takes once, so no restart tells it twice; never as the
+  # report. A headless one's turns are its `Stream` fold's `own`, and Mailbox stores its replies
+  # from that fold. An interactive one's are read from its transcript from the report's turn,
+  # the last only once its session reads the turn ended or its process is gone (F-257,
+  # `Reply.tla`): a turn a message's mark is in answers that message, by Mailbox under the
+  # message's key, and is never its own. A turn with no reply text tells nothing. A read that
+  # fails decides nothing.
+  defp later_turns(s, row, agent) do
+    cond do
+      Agents.ended?(agent) -> %{s | own: Map.delete(s.own, row.id)}
+      how(agent) == :interactive -> interactive_turns(s, row, agent)
+      true -> own_turns(s, row, agent)
+    end
+  end
+
   defp own_turns(s, %{status: "finished", report: "taken"} = row, agent) do
-    if Agents.ended?(agent),
-      do: %{s | own: Map.delete(s.own, row.id)},
-      else: tell_turns(s, row, agent, ended_own(s, row, agent))
+    case followed(s, agent) do
+      {:ok, fold} -> tell_turns(s, row, agent, Map.get(fold, :own, []))
+      _unread -> s
+    end
   end
 
   defp own_turns(s, _row, _agent), do: s
 
-  defp ended_own(s, row, agent) do
-    case how(agent) do
-      :headless ->
-        case followed(s, agent) do
-          {:ok, fold} -> {Map.get(fold, :own, []), s}
-          _unread -> {[], s}
-        end
+  defp interactive_turns(s, row, agent) do
+    case turns_read(s, row, agent, row.resume_uuid || row.brief_uuid) do
+      {:ok, turns, s} ->
+        turns = ended_turns(s, row, agent, turns)
+        s = answer_turns(s, row, agent, turns)
+        # The first is the report's turn, never its own.
+        own = for t <- Enum.drop(turns, 1), t.own and is_binary(t.uuid), do: t
 
-      :interactive ->
-        case own_read(s, row, agent, row.resume_uuid || row.brief_uuid) do
-          {:ok, turns, s} ->
-            ended? = Agents.free?(agent) or turn_ended?(s, agent)
-            {Enum.filter(turns, &(&1.closed or ended?)), s}
+        if row.status == "finished" and row.report == "taken",
+          do: tell_turns(s, row, agent, own),
+          else: s
 
-          {:unread, s} ->
-            {[], s}
-        end
+      {:unread, s} ->
+        s
     end
   end
 
@@ -1248,7 +1265,7 @@ defmodule CodingAgentFramework.Delegates do
   # are read again only once the transcript's reader has moved past where it was at the last
   # read; between, that read's turns stand. A turn written after the reader's last read is
   # read once the reader takes it, at its next read of the file.
-  defp own_read(s, row, agent, uuid) do
+  defp turns_read(s, row, agent, uuid) do
     at =
       case Transcripts.offset(s.transcripts, agent.account, agent.session_id, timeout: @step) do
         {:ok, offset} -> offset
@@ -1264,7 +1281,7 @@ defmodule CodingAgentFramework.Delegates do
 
         with {:ok, {:ok, %{}}} <- turn,
              {:ok, bytes} <- report_turn(s, agent, uuid) do
-          turns = Fold.own_turns(bytes, &Waiter.marked?/1)
+          turns = Fold.turns(bytes, &Waiter.marks/1)
           s = if is_integer(at), do: put_in(s.own[row.id], {at, turns}), else: s
           {:ok, turns, s}
         else
@@ -1272,6 +1289,60 @@ defmodule CodingAgentFramework.Delegates do
         end
     end
   end
+
+  # Only the last turn can be open: a later turn closes each before it. It has ended once its
+  # session reads idle or its process is gone. The session is read only while that turn still
+  # holds a message to answer or a turn of its own to tell.
+  defp ended_turns(s, row, agent, turns) do
+    {closed, open} = Enum.split_with(turns, & &1.closed)
+
+    if open != [] and Enum.any?(open, &pending?(s, row, &1)) and
+         (Agents.free?(agent) or turn_ended?(s, agent)),
+       do: turns,
+       else: closed
+  end
+
+  defp pending?(s, row, turn) do
+    done = Map.get(s.answered, row.id, MapSet.new())
+    told = Map.get(s.turns, row.id, MapSet.new())
+    reports = [row.brief_uuid, row.resume_uuid]
+
+    Enum.any?(turn.marks, &(&1 not in reports and not MapSet.member?(done, &1))) or
+      (turn.own and is_binary(turn.uuid) and not MapSet.member?(told, turn.uuid))
+  end
+
+  # Each message whose mark is in an ended turn: that turn's reply, or with its process gone in
+  # that turn and no reply, the notice in its place (`Mailbox.answered/4`). A turn that a later
+  # one closed with no reply answers nothing. The brief's and the word's marks are the report's.
+  defp answer_turns(s, row, agent, turns) do
+    reports = [row.brief_uuid, row.resume_uuid]
+    done = Map.get(s.answered, row.id, MapSet.new())
+
+    done =
+      for t <- turns,
+          answer <- [turn_answer(t, agent)],
+          answer != nil,
+          mark <- t.marks,
+          mark not in reports and not MapSet.member?(done, mark),
+          reduce: done do
+        done ->
+          if settled?(Mailbox.answered(s.mailbox, row.name, mark, answer)),
+            do: MapSet.put(done, mark),
+            else: done
+      end
+
+    put_in(s.answered[row.id], done)
+  end
+
+  defp turn_answer(%{text: text}, _agent) when is_binary(text), do: {:reply, text}
+  defp turn_answer(%{closed: false}, agent), do: if(Agents.free?(agent), do: :ended)
+  defp turn_answer(_turn, _agent), do: nil
+
+  # Mailbox stored it, or never will: a row no turn answers. A row not yet settled delivered,
+  # or an unknown answer, is tried again at the next cue.
+  defp settled?({:ok, _}), do: true
+  defp settled?({:refused, why}), do: why in [:no_message, :not_a_message, :no_sender]
+  defp settled?(_), do: false
 
   # The transcript from the report's turn's marked line, which `turn_of/3` found.
   defp report_turn(s, agent, uuid) do
@@ -1281,8 +1352,8 @@ defmodule CodingAgentFramework.Delegates do
          do: {:ok, bytes}
   end
 
-  # The state is the read's own, which a transcript read may have changed (its marks, F-222).
-  defp tell_turns(_before, row, agent, {turns, s}) do
+  # `s` is the read's own state, which a transcript read may have changed (its marks, F-222).
+  defp tell_turns(s, row, agent, turns) do
     told =
       Enum.reduce(turns, Map.get(s.turns, row.id, MapSet.new()), fn t, told ->
         if t.text == "" or MapSet.member?(told, t.uuid) or not tell_turn(s, row, agent, t),
