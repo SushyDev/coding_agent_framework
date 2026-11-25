@@ -462,7 +462,8 @@ defmodule CodingAgentFramework do
   The prompts open now in the instance the config named `instance`, oldest first: everything
   that waits on a person (`CodingAgentFramework.Prompts`, its module doc says each kind and
   field). `filter` narrows them: `agent:` (that agent's), `subtree:` (that agent's and its
-  delegates', at any depth), `kind:` (`"permission"`, `"stop_cap"`, `"dialog"`, `"ask"`). Each
+  delegates', at any depth), `kind:` (`"permission"`, `"stop_cap"`, `"dialog"`, `"ask"`),
+  `hidden:` (`false` leaves out the prompts a person set aside, `hide/3`). Each
   write that opens, moves or closes one is cued on `prompts` (`subscribe/2`). Answers `{:ok,
   prompts}`, `{:refused, :no_instance}`, `{:refused, {:bad, :filter}}`, or `{:unknown, reason}`.
 
@@ -493,6 +494,47 @@ defmodule CodingAgentFramework do
           {:ok, term} | {:refused, term} | {:unknown, term}
   def answer(instance, id, choice, who) do
     with {:ok, prompts} <- part(instance, :prompts), do: Prompts.answer(prompts, id, choice, who)
+  end
+
+  @doc """
+  The prompts that closed in the instance the config named `instance`, newest open first, one
+  page at a time (`Prompts.answered/3`): each one's question, its choice or its withdrawal's
+  reason, who answered and when, read from the ledger. `filter`: `limit:` (1 to 200, 50 by
+  default) and `before:` (the last page's `next`). Answers `{:ok, %{prompts: closed, next:
+  cursor}}`, `{:refused, :no_instance}`, or as `Prompts.answered/3` does.
+
+      {:ok, %{prompts: [%{id: "ask:12", status: "withdrawn", by: "sam", reason: r}], next: _}} =
+        CodingAgentFramework.answered("a", limit: 20)
+  """
+  @spec answered(String.t(), keyword) :: {:ok, map} | {:refused, term} | {:unknown, term}
+  def answered(instance, filter \\ []) do
+    with {:ok, prompts} <- part(instance, :prompts), do: Prompts.answered(prompts, filter)
+  end
+
+  @doc """
+  Sets open prompt `id` aside for `who`, a person, in the instance the config named
+  `instance` (`Prompts.hide/3`): it stays open and answerable, `prompts/2` shows it `hidden:
+  %{by, at}`, and `prompts(instance, hidden: false)` leaves it out. Cued on `prompts`. Answers
+  `{:ok, %{by, at}}`, `{:refused, :no_instance}`, or as `Prompts.hide/3` does.
+
+      {:ok, %{by: "sam"}} = CodingAgentFramework.hide("a", "ask:12", "sam")
+  """
+  @spec hide(String.t(), String.t(), String.t()) ::
+          {:ok, map} | {:refused, term} | {:unknown, term}
+  def hide(instance, id, who) do
+    with {:ok, prompts} <- part(instance, :prompts), do: Prompts.hide(prompts, id, who)
+  end
+
+  @doc """
+  Brings hidden prompt `id` back, for `who` (`Prompts.unhide/3`). Answers `{:ok, nil}`,
+  `{:refused, :not_hidden}`, `{:refused, :no_instance}`, or as `Prompts.unhide/3` does.
+
+      {:ok, nil} = CodingAgentFramework.unhide("a", "ask:12", "sam")
+  """
+  @spec unhide(String.t(), String.t(), String.t()) ::
+          {:ok, nil} | {:refused, term} | {:unknown, term}
+  def unhide(instance, id, who) do
+    with {:ok, prompts} <- part(instance, :prompts), do: Prompts.unhide(prompts, id, who)
   end
 
   @doc """
