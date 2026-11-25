@@ -329,7 +329,7 @@ defmodule CodingAgentFramework.IntakeToolsTest do
     # replaced, which `Transcripts` has.
     assert JSON.decode!(r1.data) == %{"tool_name" => "Bash", "tool_use_id" => "t1"}
     assert JSON.decode!(r1.decision)["hookSpecificOutput"]["updatedToolOutput"] == replaced
-    assert r2.data == nil
+    assert JSON.decode!(r2.data) == %{"tool_name" => "Bash", "tool_use_id" => "t2"}
   end
 
   test "a PostToolUse's replacement out of shape is a pass, and its row names why",
@@ -416,11 +416,81 @@ defmodule CodingAgentFramework.IntakeToolsTest do
     assert [%{actor: "app", hold: "answered"}] = rows(db)
   end
 
-  test "with no callback a tool event is answered empty and stored nowhere",
+  test "with no callback a PreToolUse is stored nowhere and a PostToolUse keeps its duration",
        %{db: db, start: start} do
     intake = start.([])
     assert %{status: 200, resp_body: ""} = post(intake, tool("PreToolUse", "t1"))
-    assert %{status: 200, resp_body: ""} = post(intake, tool("PostToolUse", "t1"))
-    assert rows(db) == []
+
+    ran =
+      body("PostToolUse", %{"tool_use_id" => "t1", "tool_name" => "Bash", "duration_ms" => 42})
+
+    assert %{status: 200, resp_body: ""} = post(intake, ran)
+    assert [%{event: "PostToolUse", data: data}] = rows(db)
+
+    assert JSON.decode!(data) == %{
+             "tool_use_id" => "t1",
+             "tool_name" => "Bash",
+             "duration_ms" => 42
+           }
+  end
+
+  test "a PostToolUseFailure keeps the call's id and duration", %{db: db, start: start} do
+    intake = start.([])
+
+    failed =
+      body("PostToolUseFailure", %{
+        "tool_use_id" => "t2",
+        "tool_name" => "Bash",
+        "error" => "exit 1",
+        "duration_ms" => 7
+      })
+
+    assert %{status: 200, resp_body: ""} = post(intake, failed)
+    assert [%{event: "PostToolUseFailure", data: data}] = rows(db)
+
+    assert JSON.decode!(data) == %{
+             "tool_use_id" => "t2",
+             "tool_name" => "Bash",
+             "duration_ms" => 7
+           }
+  end
+
+  test "a sweep deletes duration rows past tool_rows_keep and keeps recent ones and other events",
+       %{db: db, start: start} do
+    {:ok, handle} = CodingAgentFramework.Intake.Table.open(db)
+    old = System.os_time(:millisecond) - 8 * 24 * 60 * 60 * 1000
+
+    for {event, key} <- [
+          {"PostToolUse", "old-1"},
+          {"PostToolUseFailure", "old-2"},
+          {"Notification", "old-3"}
+        ] do
+      row = %{event: event, session_id: "s1", key: key, data: nil, problem: nil, hold: false}
+      assert {:new, _} = CodingAgentFramework.Intake.Table.insert(handle, "h", "work", row, old)
+    end
+
+    intake = start.([])
+
+    ran =
+      body("PostToolUse", %{"tool_use_id" => "new", "tool_name" => "Bash", "duration_ms" => 1})
+
+    assert %{status: 200} = post(intake, ran)
+
+    # The first post sweeps: the old duration rows go; the old other event and the new row stay.
+    assert Enum.sort(Enum.map(rows(db), & &1.key)) == ["PostToolUse:s1:new", "old-3"]
+
+    # A second sweep within a minute does not run, so a row that is old again stays.
+    late = %{
+      event: "PostToolUse",
+      session_id: "s1",
+      key: "old-4",
+      data: nil,
+      problem: nil,
+      hold: false
+    }
+
+    assert {:new, _} = CodingAgentFramework.Intake.Table.insert(handle, "h", "work", late, old)
+    assert %{status: 200} = post(intake, ran)
+    assert "old-4" in Enum.map(rows(db), & &1.key)
   end
 end

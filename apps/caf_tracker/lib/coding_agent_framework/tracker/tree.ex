@@ -168,7 +168,11 @@ defmodule CodingAgentFramework.Tracker.Tree do
 
   @doc """
   The recent tool calls of `agent` in `view`, newest first, each `%{id, name, started_at,
-  ended_at, ms}` (`ended_at` and `ms` nil while it runs): an agent of the tree by name, or a
+  ended_at, ms, duration_ms}` (`ended_at` and `ms` nil while it runs): `ms` is the call's result
+  less its call in the transcript, so calls sent in one batch each show the batch's wait, and
+  `duration_ms` is the call's own time, as Claude Code's `PostToolUse` or `PostToolUseFailure`
+  hook reported it to `Intake` (`Intake.Event`), nil for a call with no such row. The two stay
+  distinct: `ms` never stands in for `duration_ms`. An agent of the tree by name, or a
   subagent by its `agent_id`. Options: `limit:` (default 50; the transcript keeps at most 200
   per agent, `Transcripts.Fold`) and `host:` to choose among agents of one name on two hosts.
   An agent with no transcript read yet has none. `{:refused, {:not_read, :finished}}` for a
@@ -178,7 +182,7 @@ defmodule CodingAgentFramework.Tracker.Tree do
       iex> alias CodingAgentFramework.Tracker.Tree
       iex> m = %{id: 1, host: "h", name: "main", kind: "main", parent: nil, project: "app",
       ...>   account: "work", session_id: "s0", status: "running"}
-      iex> call = %{id: "tu-1", name: "Bash", started_at: 1, ended_at: nil, ms: nil}
+      iex> call = %{id: "tu-1", name: "Bash", started_at: 1, ended_at: nil, ms: nil, duration_ms: nil}
       iex> t = %{account: "work", session_id: "s0", tools: [call], agent_tools: %{}}
       iex> view = %{{"h", "agents"} => %{agents: [%{key: 1, row: m}]},
       ...>   {"h", "work"} => %{transcripts: [%{key: 1, row: t}]}}
@@ -193,6 +197,7 @@ defmodule CodingAgentFramework.Tracker.Tree do
     parts = Enum.filter(Map.values(view), &is_map/1)
     entries = fn kind -> for p <- parts, %{row: %{}} = e <- List.wrap(p[kind]), do: e.row end
     transcripts = for r <- entries.(:transcripts), into: %{}, do: {key(r), r}
+    durations = durations(entries.(:events))
 
     named =
       for r <- entries.(:agents),
@@ -203,7 +208,7 @@ defmodule CodingAgentFramework.Tracker.Tree do
 
     case named do
       [row] ->
-        {:ok, take(transcripts[key(row)][:tools], limit)}
+        {:ok, take(transcripts[key(row)][:tools], limit, durations)}
 
       [_ | _] ->
         {:refused, :ambiguous}
@@ -222,17 +227,33 @@ defmodule CodingAgentFramework.Tracker.Tree do
               do: reason
 
         case {found, skipped} do
-          {[calls | _], _} -> {:ok, take(calls, limit)}
+          {[calls | _], _} -> {:ok, take(calls, limit, durations)}
           {[], [reason | _]} -> {:refused, {:not_read, reason}}
           {[], []} -> {:refused, :unknown_agent}
         end
     end
   end
 
-  defp take(calls, limit) when is_list(calls),
-    do: calls |> Enum.filter(&is_map/1) |> Enum.take(limit)
+  defp take(calls, limit, durations) when is_list(calls) do
+    calls
+    |> Enum.filter(&is_map/1)
+    |> Enum.take(limit)
+    |> Enum.map(&Map.put(&1, :duration_ms, durations[&1[:id]]))
+  end
 
-  defp take(_, _), do: []
+  defp take(_, _, _), do: []
+
+  # Each call's own time by `tool_use_id`, from the `PostToolUse` and `PostToolUseFailure` rows
+  # `Intake` keeps. A row whose `data` is not that shape gives none.
+  defp durations(rows) do
+    for %{event: event, data: data} <- rows,
+        event in ["PostToolUse", "PostToolUseFailure"],
+        is_binary(data),
+        {:ok, %{"tool_use_id" => id, "duration_ms" => ms}} <- [JSON.decode(data)],
+        is_binary(id) and is_integer(ms) and ms >= 0,
+        into: %{},
+        do: {id, ms}
+  end
 
   defp state(row, ev) do
     cond do

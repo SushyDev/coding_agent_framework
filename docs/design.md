@@ -2403,7 +2403,7 @@ mechanism below unchanged; the operator's tools move to the app's surface:
 
 | Tool | Who | What it does |
 |---|---|---|
-| `agents(all)` | any agent | the tree: each agent's name, kind, project, parent, account, state (working, waiting, idle, stuck, gone; `starting` while a start or resume is under way, `unread` while nothing has read its session yet; a main session's and an interactive delegate's from its session file alone, the one its pid and start time name, F-153's new-6), what it waits on, its transcript's path (nil until the transcripts' source has read one, never built from the cwd), its subagents (each with Claude Code's `agent_id` from its start, from its file's meta, and the call it runs now, F-237), the tool call it runs now (`tool`) and when it last did anything (`last_event_at`), both from its transcript, never a hook (F-235; `Tracker.tool_calls/3` answers its recent calls, a subagent's under its `agent_id`), read from the `Tracker`'s view, never a copy (F-99). A delegate that ended keeps its place but shows only with `all: true` (F-129's new-5) |
+| `agents(all)` | any agent | the tree: each agent's name, kind, project, parent, account, state (working, waiting, idle, stuck, gone; `starting` while a start or resume is under way, `unread` while nothing has read its session yet; a main session's and an interactive delegate's from its session file alone, the one its pid and start time name, F-153's new-6), what it waits on, its transcript's path (nil until the transcripts' source has read one, never built from the cwd), its subagents (each with Claude Code's `agent_id` from its start, from its file's meta, and the call it runs now, F-237), the tool call it runs now (`tool`) and when it last did anything (`last_event_at`), both from its transcript, never a hook (F-235; `Tracker.tool_calls/3` answers its recent calls, a subagent's under its `agent_id`, each with two times: `ms`, the transcript's result less its call, which for calls sent in one batch is the batch's wait, and `duration_ms`, the call's own time from the `PostToolUse` or `PostToolUseFailure` hook's row (F-253), nil for a call with no row or one swept after 7 days, never filled from `ms`), read from the `Tracker`'s view, never a copy (F-99). A delegate that ended keeps its place but shows only with `all: true` (F-129's new-5) |
 | `message(to, text)` | along an edge | stores a message and delivers it to the target when its turn has ended; answers `queued{id}`, then the sender learns `delivered` |
 | `look(agent)` | parent, child, main sessions | a main session's screen as text, or a delegate's rendered event log; its open dialog or request; its last transcript lines |
 | `transcript(agent, from)` | parent, child, main sessions | the agent's transcript from an offset |
@@ -2655,9 +2655,10 @@ section.
   `http://127.0.0.1:<port>/hooks/<account>` on the framework's node, with the home's secret
   (kept per home, so it outlives a restart) in a header, and sets its own `timeout`. No program
   on the host takes part, so a held hook is one open request. PreToolUse and PostToolUse are
-  written only when the app gives `Intake` a callback for them (PostToolUse also for the
-  `Stop` hold's count), and are not stored as they come: they carry every tool input and
-  output, and `Transcripts` reads those. A main session's waiter is the one `command` hook: it
+  written only when the app gives `Intake` a callback for them, and are not stored as they come:
+  they carry every tool input and output, and `Transcripts` reads those. `PostToolUse` and
+  `PostToolUseFailure` are always written (F-253), and their rows keep only `tool_name`,
+  `tool_use_id` and `duration_ms`, the call's own time. They are kept `tool_rows_keep:` (7 days) and then swept, at a post and at most once a minute; an older call shows `duration_ms` nil. A main session's waiter is the one `command` hook: it
   posts to `/hooks/<account>/waiter` ("Delivery into a main session").
 - **One hold, six kinds** (F-115, R5). A hook that waits is a hold: a key, a deadline under
   the hook's `timeout`, a named decider, exactly one response, a late answer dropped, and a
@@ -2713,8 +2714,7 @@ section.
   model asked to quote any note with the result: from a command hook and from an `http` hook
   alike the model read the text on that call, shown as "PostToolUse:Bash hook additional
   context: <text>", and the tool's result was unchanged. Without the
-  callback a `PostToolUse` post (the `Stop` hold's settings add it, for the count of blocks)
-  is answered at once, with no row. `Intake.tla`'s `HT` models both tool kinds.
+  callback a `PostToolUse` post is answered at once and kept as a row, not held (F-253). `Intake.tla`'s `HT` models both tool kinds.
 - **A held `SessionStart`** (F-236). With the app's `session_start` callback, each account's
   settings have a `command` `SessionStart` hook (`Intake.start_hook/4`), the waiter's shape:
   `sh -c` around `curl`, the secret on file descriptor 3, a `timeout` of 10 s. It posts the

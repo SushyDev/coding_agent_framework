@@ -74,7 +74,7 @@ defmodule CodingAgentFramework.Tracker do
   @doc """
   The recent tool calls of `agent` (a tree agent's name, or a subagent's `agent_id`), newest
   first, read from the view as `view/2` gives it (`CodingAgentFramework.Tracker.Tree.tool_calls/3`):
-  each `%{id, name, started_at, ended_at, ms}`. Options: `:timeout`, `limit:` (default 50) and
+  each `%{id, name, started_at, ended_at, ms, duration_ms}` (`ms` is the transcript's result less its call, a batch's wait for calls sent together; `duration_ms` is the call's own time from its post-tool hook, nil with none). Options: `:timeout`, `limit:` (default 50) and
   `host:`. Bounded: a transcript's fold keeps at most 200 calls per agent and 50 subagents per
   session, so no call answers more.
 

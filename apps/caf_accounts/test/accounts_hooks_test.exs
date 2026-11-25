@@ -66,7 +66,7 @@ defmodule CodingAgentFramework.AccountsHooksTest do
       {:ok, account} = Accounts.prepare(accounts, "work", %{intake: intake})
       hooks = JSON.decode!(File.read!(account.settings[:parent]))["hooks"]
       named = Enum.map(tools, &%{pre_tool_use: "PreToolUse", post_tool_use: "PostToolUse"}[&1])
-      assert Map.keys(hooks) == Enum.sort(Event.names() ++ named)
+      assert Map.keys(hooks) == Enum.sort(Enum.uniq(Event.names() ++ named))
 
       for event <- named do
         assert [%{"hooks" => [%{"type" => "http", "timeout" => 10} = hook]}] = hooks[event]

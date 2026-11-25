@@ -147,15 +147,15 @@ defmodule CodingAgentFramework.IntakeStopTest do
     assert blocks(db) == 2
   end
 
-  test "the Stop hold's settings post PostToolUse for the reset alone: answered at once, no row",
+  test "the Stop hold's PostToolUse post with no callback is answered at once and kept as a row",
        %{db: db, start: start} do
     hooks = Intake.hooks(4790, "work", "s3", [:stop])
     assert [%{"hooks" => [%{"timeout" => 10}]}] = hooks["PostToolUse"]
     refute Map.has_key?(hooks, "PreToolUse")
 
     intake = start_with(start, fn _ -> :pass end)
-    assert {:ok, :not_read} = Intake.post(intake, "work", @tool)
-    assert rows(db) == []
+    assert {:ok, :stored} = Intake.post(intake, "work", @tool)
+    assert [%{event: "PostToolUse", hold: nil}] = rows(db)
   end
 
   test "a pause holds the turn's end until it is lifted, then the callback decides",
