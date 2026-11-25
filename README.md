@@ -467,6 +467,10 @@ Built, each from a checked model in `model/tla/`:
 - a start has one form (F-252): the `Registry` turns a session file's `procStart` in Linux's
   form, a start in clock ticks, into the `ps -o lstart=` text as it reads the file, so a Linux
   main is confirmed, and its stop and end signal it.
+- a fix answers on a busy host (F-261): cues queued while `Delegates` settles run one settle, a
+  finished delegate's own turns are read again only once its transcript has grown, and
+  `Interventions` and `HooksSilent` take one check for a burst of cues, so a stop's state read no
+  longer waits past its bound.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

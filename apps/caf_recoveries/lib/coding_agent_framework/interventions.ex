@@ -142,7 +142,20 @@ defmodule CodingAgentFramework.Interventions do
   end
 
   @impl true
-  def handle_info(:check, s), do: {:noreply, elem(check_now(s), 1)}
+  def handle_info(:check, s) do
+    drain_checks()
+    {:noreply, elem(check_now(s), 1)}
+  end
+
+  # F-261: on a busy host cues come faster than a read ends; one read answers every cue queued
+  # before it, since it reads afresh.
+  defp drain_checks do
+    receive do
+      :check -> drain_checks()
+    after
+      0 -> :ok
+    end
+  end
 
   defp check_now(s) do
     rows = Sessions.Agents.rows(s.agents)

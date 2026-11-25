@@ -429,7 +429,10 @@ defmodule CodingAgentFramework.Delegates do
           idle: %{},
           # The turns of a delegate's own told to its parent: row id to their keys. Mailbox
           # holds the keys; this only spares it a repeat at each cue.
-          turns: %{}
+          turns: %{},
+          # An interactive delegate's own turns after its report, as last read (F-261): row id
+          # to {its transcript reader's offset then, the turns}, read again once that moves.
+          own: %{}
         })
 
       # A start waiting for its lease when the Scheduler ends is refused: its queue is gone.
@@ -456,7 +459,21 @@ defmodule CodingAgentFramework.Delegates do
   end
 
   @impl true
-  def handle_cast(:cue, s), do: {:noreply, settle(s)}
+  def handle_cast(:cue, s) do
+    drain_cues()
+    {:noreply, settle(s)}
+  end
+
+  # F-261: on a busy host cues come faster than a settle ends, and each queued cue would run a
+  # whole settle of its own while a fix's call waits behind them all. A settle reads every row
+  # afresh, so one settle answers every cue queued before it.
+  defp drain_cues do
+    receive do
+      {:"$gen_cast", :cue} -> drain_cues()
+    after
+      0 -> :ok
+    end
+  end
 
   # The room the home leaves for the delegate's socket (`Config.name_room/1`, F-172), checked
   # before any row.
@@ -1199,7 +1216,9 @@ defmodule CodingAgentFramework.Delegates do
   # its process is gone. A turn with no reply text tells nothing. A read that fails decides
   # nothing.
   defp own_turns(s, %{status: "finished", report: "taken"} = row, agent) do
-    if Agents.ended?(agent), do: s, else: tell_turns(s, row, agent, ended_own(s, row, agent))
+    if Agents.ended?(agent),
+      do: %{s | own: Map.delete(s.own, row.id)},
+      else: tell_turns(s, row, agent, ended_own(s, row, agent))
   end
 
   defp own_turns(s, _row, _agent), do: s
@@ -1213,16 +1232,43 @@ defmodule CodingAgentFramework.Delegates do
         end
 
       :interactive ->
-        uuid = row.resume_uuid || row.brief_uuid
+        case own_read(s, row, agent, row.resume_uuid || row.brief_uuid) do
+          {:ok, turns, s} ->
+            ended? = Agents.free?(agent) or turn_ended?(s, agent)
+            {Enum.filter(turns, &(&1.closed or ended?)), s}
+
+          {:unread, s} ->
+            {[], s}
+        end
+    end
+  end
+
+  # F-261: each read here runs from the report's turn to the transcript's end, twice, which
+  # grows with every turn a delegate takes after its report, and ran at every cue. Its turns
+  # are read again only once the transcript's reader has moved past where it was at the last
+  # read; between, that read's turns stand. A turn written after the reader's last read is
+  # read once the reader takes it, at its next read of the file.
+  defp own_read(s, row, agent, uuid) do
+    at =
+      case Transcripts.offset(s.transcripts, agent.account, agent.session_id, timeout: @step) do
+        {:ok, offset} -> offset
+        _unread -> nil
+      end
+
+    case Map.get(s.own, row.id) do
+      {^at, turns} when is_integer(at) ->
+        {:ok, turns, s}
+
+      _ ->
         {turn, s} = turn_of(s, agent, uuid)
 
         with {:ok, {:ok, %{}}} <- turn,
              {:ok, bytes} <- report_turn(s, agent, uuid) do
           turns = Fold.own_turns(bytes, &Waiter.marked?/1)
-          ended? = Agents.free?(agent) or turn_ended?(s, agent)
-          {Enum.filter(turns, &(&1.closed or ended?)), s}
+          s = if is_integer(at), do: put_in(s.own[row.id], {at, turns}), else: s
+          {:ok, turns, s}
         else
-          _unread -> {[], s}
+          _unread -> {:unread, s}
         end
     end
   end

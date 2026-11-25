@@ -307,6 +307,52 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     assert [_] = turn_notices(ctx)
   end
 
+  # F-261: on a busy host a finished delegate's own turns were read from its report to the end of
+  # its transcript at every cue, and each queued cue ran a settle of its own, so a fix's call
+  # waited past its bound. Queued cues now settle once, and an unchanged transcript is not read.
+  test "queued cues settle once, and a finished delegate's unchanged transcript is not read",
+       ctx do
+    assert {:ok, %{id: id, name: name, brief_uuid: u, session_id: sid}} =
+             Delegates.start_delegate(ctx.delegates, "main", "app", "unit/one", "opus", "Look.",
+               interactive: true
+             )
+
+    text = "Look.\n\n[delivery #{u}]"
+    assert {:ok, [^text]} = await(fn -> nonempty(ScreenStandIn.prompts(ctx.dir)) end)
+    {:ok, dir} = Accounts.config_dir(ctx.accounts, "work")
+    {:ok, path} = Transcripts.path(dir, Agents.get(ctx.agents, name).cwd, sid)
+    wake = "<task-notification>\n<status>completed</status>\n</task-notification>"
+
+    lines(path, [user(text), reply("m1", "Done."), user(wake)])
+    lines(path, [Map.put(reply("m2", "It passed."), "uuid", "r-own")])
+
+    assert {:ok, %{report: "taken"}} =
+             cue_until(ctx, id, &(&1.status == "finished" and &1.report == "taken"))
+
+    assert {:ok, [_]} = told_after_read(ctx, path, 1)
+
+    # Settled, with the transcript read to its end: count what a burst of cues costs now.
+    :erlang.trace_pattern({CodingAgentFramework.Delegates, :settle, 1}, true, [:local])
+    :erlang.trace_pattern({Transcripts, :text, 5}, true, [:local])
+    :erlang.trace(ctx.delegates, true, [:call])
+    on_exit(fn -> :erlang.trace_pattern({:_, :_, :_}, false, [:local]) end)
+
+    :ok = :sys.suspend(ctx.delegates)
+    for _ <- 1..50, do: Delegates.cue(ctx.delegates, %{topic: "transcripts:test:work"})
+    :ok = :sys.resume(ctx.delegates)
+    :sys.get_state(ctx.delegates)
+    :erlang.trace(ctx.delegates, false, [:call])
+
+    calls = traced(ctx.delegates, [])
+    assert Enum.count(calls, &(&1 == :settle)) == 1
+    assert Enum.count(calls, &(&1 == :text)) == 0
+
+    # The transcript grows: the next own turn is read and told, once.
+    lines(path, [user(wake), Map.put(reply("m3", "Still green."), "uuid", "r-own-2")])
+    assert {:ok, [_, _]} = told_after_read(ctx, path, 2)
+    assert [_, _] = turn_notices(ctx)
+  end
+
   # TurnEndsBare and IdleTold, by an interactive delegate's rule: the brief's turn ended with no
   # reply, its session file reads idle, and nothing is due to it.
   test "an interactive delegate idle with no report is told to its parent once", ctx do
@@ -507,6 +553,34 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     {:ok, mtable} = Mailbox.Table.open(Path.join(ctx.dir, "caf.db"))
     rows = Enum.reject(Enum.map(1..20, &Mailbox.Table.get(mtable, &1)), &is_nil/1)
     Enum.filter(rows, &(&1.kind == "notice" and String.starts_with?(&1.reply_to, "key:turn:")))
+  end
+
+  # Cues until the transcript reader has read `path` to its end and `n` turn notices are told.
+  defp told_after_read(ctx, path, n) do
+    await(fn ->
+      size = File.stat!(path).size
+      Delegates.cue(ctx.delegates, %{topic: "transcripts:test:work"})
+      Transcripts.read(ctx.dopts[:transcripts])
+
+      with {:ok, ^size} <- offset_of(ctx, path),
+           notices when length(notices) == n <- turn_notices(ctx) do
+        {:ok, notices}
+      end
+    end)
+  end
+
+  defp offset_of(ctx, path) do
+    sid = Path.basename(path, ".jsonl")
+    Transcripts.offset(ctx.dopts[:transcripts], "work", sid)
+  end
+
+  defp traced(pid, acc) do
+    receive do
+      {:trace, ^pid, :call, {_, :settle, _}} -> traced(pid, [:settle | acc])
+      {:trace, ^pid, :call, {_, :text, _}} -> traced(pid, [:text | acc])
+    after
+      0 -> acc
+    end
   end
 
   defp nonempty([]), do: :empty
