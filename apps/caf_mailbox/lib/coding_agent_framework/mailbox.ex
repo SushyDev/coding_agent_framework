@@ -201,10 +201,16 @@ defmodule CodingAgentFramework.Mailbox do
 
   @doc """
   Sends `text` from agent `from` to agent `to`: `{:ok, {:queued, id}}` once its row is stored,
-  or `{:refused, reason}` with no row (`Grants`' reason, or `{:bad, :message}`).
+  or `{:refused, reason}` with no row (`Grants`' reason, or `{:bad, :message}`). Option `:key`: a
+  string the sender chose; a message sent again under the same key stores no second row and
+  answers `{:ok, {:queued, id}}` with the first row's id, so a sender that got `{:unknown, _}`
+  can send again safely. Keys are shared with `notify/4`: the caller scopes a key to its sender.
+
+      Mailbox.message(mailbox, "app-fix", "app-main", "Done.", key: "app-fix:done")
+      #=> {:ok, {:queued, 6}}
   """
   def message(mailbox, from, to, text, opts \\ []),
-    do: call(mailbox, {:message, from, to, text}, opts)
+    do: call(mailbox, {:message, from, to, text, Keyword.get(opts, :key)}, opts)
 
   @doc """
   Stores `text` as a message from `framework` to agent `to`, delivered as any message is: the
@@ -605,13 +611,22 @@ defmodule CodingAgentFramework.Mailbox do
   def handle_cast({:cue, transcript?}, s), do: {:noreply, settle(s, transcript?)}
 
   @impl true
-  def handle_call({:message, from, to, text}, _from, s) do
+  def handle_call({:message, from, to, text, key}, _from, s) do
     with true <-
-           Enum.all?([from, to, text], &(is_binary(&1) and &1 != "")) or
-             {:refused, {:bad, :message}},
+           (Enum.all?([from, to, text], &(is_binary(&1) and &1 != "")) and
+              (is_nil(key) or is_binary(key))) or {:refused, {:bad, :message}},
          :ok <- Grants.may_message?(s.grants, from, to) do
       row = %{from: from, to: to, text: text, uuid: Stream.uuid(), kind: "msg"}
-      stored(s, put(s, row))
+      row = if key, do: Map.put(row, :reply_to, "key:" <> key), else: row
+
+      case put(s, row) do
+        # A repeat answers as the first send did, so the sender need not tell the two apart.
+        nil when is_binary(key) ->
+          {:reply, {:ok, {:queued, Table.answer(s.db, "key:" <> key).id}}, s}
+
+        id ->
+          stored(s, id)
+      end
     else
       refused -> {:reply, refused, s}
     end

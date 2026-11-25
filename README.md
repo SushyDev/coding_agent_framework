@@ -428,6 +428,9 @@ Built, each from a checked model in `model/tla/`:
 - a dialog press holds on a loaded host (F-242): the tree's `Inlet` reads back at the config's
   `press_see` (10 s by default), each bound that waits on a press is derived from it, and a
   press whose pane closes ("No, exit") is answered as soon as the pane is gone.
+- a message can be sent again safely (F-250): `message` takes an optional `key`, scoped to its
+  sender; a second send under it stores no row and answers the first id, and an `unknown`
+  answer names the key. The MCP's step bound is its `:step` option, 5 s by default.
 - a press's bounds have one owner (F-245): the `Inlet` alone takes `see:`, its press bound
   counts the six tmux commands a press runs at their own bound, `Sessions` asks it that bound,
   and each caller of a press asks `Sessions` its call's, so none is a second fixed number.

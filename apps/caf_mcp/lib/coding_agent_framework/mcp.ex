@@ -199,10 +199,13 @@ defmodule CodingAgentFramework.MCP do
   @tools [
     %{
       name: "message",
-      description: "Sends a message to an agent along an edge of the tree.",
+      description:
+        "Sends a message to an agent along an edge of the tree. Set `key` (at most 128 bytes) " <>
+          "whenever you might send again after an `unknown` answer: a message sent again with " <>
+          "the same key is stored once and answers the first one's id.",
       inputSchema: %{
         type: "object",
-        properties: %{to: %{type: "string"}, text: %{type: "string"}},
+        properties: %{to: %{type: "string"}, text: %{type: "string"}, key: %{type: "string"}},
         required: ["to", "text"]
       }
     },
@@ -513,7 +516,9 @@ defmodule CodingAgentFramework.MCP do
   refused `:no_prompts`. `:mains` (optional) is
   `{CodingAgentFramework.Mains, pid}`, which `start_main` calls; without it that tool is refused
   `:no_mains`. `:cap` (ms, default a day) is the most a `run_delegate`'s, a `service_start`'s
-  or a `service_wait`'s `timeout` may be.
+  or a `service_wait`'s `timeout` may be. `:step` (ms, default 5 000) is how long one call a tool
+  makes into `Mailbox`, `Delegates` or another part waits: one table write behind that process's
+  queue. A host under load may give more; the library never scales it by load.
   `:tool_timeout` (ms) is the MCP tool timeout `CodingAgentFramework.ClaudeCLI` sets for every
   agent at launch, and `:margin` (ms, under it) how far under it a `run_delegate`'s `timeout`
   must stay: both required, positive integers. `:efforts` (F-219) is the levels a delegate's
@@ -684,12 +689,21 @@ defmodule CodingAgentFramework.MCP do
   def json(v) when is_map(v), do: Map.new(v, fn {k, x} -> {to_string(json(k)), json(x)} end)
   def json(v), do: inspect(v)
 
-  defp act(ctx, caller, _id, "message", %{"to" => to, "text" => text})
+  defp act(ctx, caller, _id, "message", %{"to" => to, "text" => text} = args)
        when is_binary(to) and is_binary(text) do
     {mod, server} = ctx.mailbox
 
-    with :ok <- Grants.may_message?(ctx.grants, caller, to),
-         do: mod.message(server, caller, to, text, timeout: @step)
+    with {:ok, key} <- message_key(args),
+         :ok <- Grants.may_message?(ctx.grants, caller, to) do
+      # Scoped to the sender, and prefixed so it never meets a framework key such as `job:<id>`.
+      opts = [timeout: ctx.step] ++ if(key, do: [key: "msg:#{caller}:#{key}"], else: [])
+
+      case mod.message(server, caller, to, text, opts) do
+        # Naming the key tells the agent that sending again with it stores no second copy.
+        {:unknown, reason} when is_binary(key) -> {:unknown, %{reason: reason, key: key}}
+        outcome -> outcome
+      end
+    end
   end
 
   defp act(ctx, caller, _id, "start_delegate", args) do
@@ -769,7 +783,7 @@ defmodule CodingAgentFramework.MCP do
   defp act(ctx, caller, _id, "ask", %{"questions" => questions}) do
     {mod, server} = ctx.mailbox
 
-    case mod.ask(server, caller, questions, timeout: @step) do
+    case mod.ask(server, caller, questions, timeout: ctx.step) do
       {:ok, {:asked, id}} -> {:ok, %{ask: id}}
       other -> other
     end
@@ -886,7 +900,7 @@ defmodule CodingAgentFramework.MCP do
     all = is_map(args) and args["all"] == true
 
     with :ok <- Grants.may_use?(ctx.grants, caller),
-         {:ok, tree} <- mod.agents(server, timeout: @step, all: all),
+         {:ok, tree} <- mod.agents(server, timeout: ctx.step, all: all),
          do: {:ok, %{tree | agents: Enum.map(tree.agents, &Map.drop(&1, [:session_id, :host]))}}
   end
 
@@ -895,10 +909,10 @@ defmodule CodingAgentFramework.MCP do
 
     with {:ok, a} <- close(ctx, caller, agent, :no_screen),
          {:ok, {tmod, t}} <- transcripts(ctx, a) do
-      events = mod.log(server, a.session_id, {:last, @window}, timeout: @step)
+      events = mod.log(server, a.session_id, {:last, @window}, timeout: ctx.step)
 
       transcript =
-        tmod.text(t, a.account, a.session_id, {:last, @window}, timeout: @step, max: @read_max)
+        tmod.text(t, a.account, a.session_id, {:last, @window}, timeout: ctx.step, max: @read_max)
 
       [events, transcript] =
         Enum.map([events, transcript], &with({:ok, l} <- lines(&1, true), do: l.text))
@@ -917,7 +931,7 @@ defmodule CodingAgentFramework.MCP do
          {:ok, {mod, t}} <- transcripts(ctx, a),
          do:
            lines(
-             mod.text(t, a.account, a.session_id, from, timeout: @step, max: @read_max),
+             mod.text(t, a.account, a.session_id, from, timeout: ctx.step, max: @read_max),
              false
            )
   end
@@ -1043,7 +1057,7 @@ defmodule CodingAgentFramework.MCP do
   defp unknown_rows(ctx, caller, agent) do
     {mod, server} = ctx.mailbox
 
-    with {:ok, ids} <- mod.ended_while_sending(server, agent, timeout: @step) do
+    with {:ok, ids} <- mod.ended_while_sending(server, agent, timeout: ctx.step) do
       for id <- ids do
         Acts.record(ctx.acts, caller, agent, "settle", :unknown,
           reason: :ended_while_sending,
@@ -1079,7 +1093,7 @@ defmodule CodingAgentFramework.MCP do
     {mod, server} = ctx.tracker
 
     with :ok <- Grants.may_read?(ctx.grants, caller, agent),
-         {:ok, tree} <- mod.agents(server, timeout: @step, all: true) do
+         {:ok, tree} <- mod.agents(server, timeout: ctx.step, all: true) do
       case Enum.find(tree.agents, &(&1.name == agent)) do
         nil -> {:unknown, {:not_in_tree, agent}}
         %{kind: "main"} -> {:refused, main}
@@ -1251,6 +1265,13 @@ defmodule CodingAgentFramework.MCP do
 
   defp now, do: System.monotonic_time(:millisecond)
 
+  @key_max 128
+  defp message_key(%{"key" => key}) when is_binary(key) and byte_size(key) in 1..@key_max,
+    do: {:ok, key}
+
+  defp message_key(%{"key" => _}), do: {:refused, :bad_key}
+  defp message_key(_), do: {:ok, nil}
+
   # A list with a string in it and nothing else; a tail that is no list is not one either.
   defp efforts?([_ | _] = list), do: strings?(list)
   defp efforts?(_), do: false
@@ -1291,7 +1312,8 @@ defmodule CodingAgentFramework.MCP do
         )
 
       cap = Keyword.get(opts, :cap, @day)
-      ctx = Map.merge(ctx, %{cap: cap, tool_timeout: tool_timeout, margin: margin})
+      step = Keyword.get(opts, :step, @step)
+      ctx = Map.merge(ctx, %{step: step, cap: cap, tool_timeout: tool_timeout, margin: margin})
       ctx = Map.put(ctx, :tools, tools(efforts))
       ctx = Map.put(ctx, :mover, Keyword.get(opts, :mover))
       ctx = Map.put(ctx, :prompts, Keyword.get(opts, :prompts))

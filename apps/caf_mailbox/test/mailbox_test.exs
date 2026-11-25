@@ -44,6 +44,29 @@ defmodule CodingAgentFramework.MailboxTest do
     assert {:ok, %{status: "queued", attempt: "no_delivery"}} = until(ctx, id, & &1.attempt)
   end
 
+  test "a message sent again under its key stores no second row and answers the first id", ctx do
+    m = ctx.mailbox
+    assert {:ok, {:queued, id}} = Mailbox.message(m, "d1", "main", "report", key: "msg:d1:done")
+    assert {:ok, {:queued, ^id}} = Mailbox.message(m, "d1", "main", "report", key: "msg:d1:done")
+
+    # Another sender's key is its own, and a send with no key is always stored.
+    assert {:ok, {:queued, other}} = Mailbox.message(m, "main", "d1", "go", key: "msg:main:done")
+    assert {:ok, {:queued, plain}} = Mailbox.message(m, "d1", "main", "report")
+    assert {:ok, {:queued, again}} = Mailbox.message(m, "d1", "main", "report")
+    assert length(Enum.uniq([id, other, plain, again])) == 4
+    assert {:refused, {:bad, :message}} = Mailbox.message(m, "d1", "main", "x", key: 5)
+  end
+
+  # An agent's key is `msg:<from>:<key>`, so an agent named `job` with key `x` never meets a
+  # notice keyed `job:x`.
+  test "an agent's key and a framework notice's key of like spelling each store a row", ctx do
+    m = ctx.mailbox
+    assert {:ok, {:queued, notice}} = Mailbox.notify(m, "main", "Job ended.", key: "job:x")
+    assert {:ok, {:queued, sent}} = Mailbox.message(m, "d1", "main", "hi", key: "msg:job:x")
+    assert notice != sent
+    assert {:ok, :stored_before} = Mailbox.notify(m, "main", "Job ended.", key: "job:x")
+  end
+
   # OnlyIntoEndedTurn, InOrder, AtMostOnce: the brief first, then each message once its turn
   # ended, in the order stored.
   test "stored before delivered, only into an ended turn, once, in order", ctx do
