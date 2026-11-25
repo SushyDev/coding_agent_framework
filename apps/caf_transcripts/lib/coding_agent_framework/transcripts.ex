@@ -213,6 +213,86 @@ defmodule CodingAgentFramework.Transcripts do
   def offset(transcripts, account, session_id, opts \\ []),
     do: call(transcripts, {:offset, {account, session_id}}, opts)
 
+  @doc """
+  A session's conversation from the transcript at `path`, read on this reader's host (F-260):
+  each read runs the host's tail and head through `Shell`, so over ssh for another host, and
+  only the bytes read cross. It changes no row and needs no read of the session before.
+
+  Answers `{:ok, %{entries: entries, next: cursor, reset: reset}}`: the entries as
+  `Fold.entries/2` gives them, and `next`, an opaque cursor that a later call passes as `from:`
+  to read only what came since. `reset` is nil, or why the read began the file again from its
+  start: `:rewritten` when the bytes before the cursor are not the ones it read (the file shrank
+  or was replaced), `:new_file` when the cursor was of another file (a resumed session's new
+  transcript).
+
+  Bounded: a call reads at most `max_bytes:` of each file (default 1 MB) and answers at most
+  `limit:` entries (default 100, at most 1000), never the whole file again. A line longer than
+  `max_bytes` is not read: it is one `system` entry, `subtype` `"unread_line"`, and the read
+  goes on after it. With `subagents: true` each subagent's own file
+  (`<session id>/subagents/agent-<id>.jsonl`) is read too, after the session's own and within
+  the same `limit`, each entry with its `agent`.
+
+  `{:refused, :no_file}` for a path with no file, `{:refused, {:bad, key}}` for an option or a
+  cursor out of shape, `{:unknown, {:host, reason}}` when the host's shell fails or cannot be
+  reached, `{:refused, {:host, reason}}` when it cannot be run.
+
+      {:ok, %{entries: [%{kind: "prompt"} | _], next: next}} =
+        Transcripts.conversation(t, path, limit: 50)
+      {:ok, %{entries: later, next: _}} = Transcripts.conversation(t, path, from: next)
+  """
+  @spec conversation(GenServer.server(), String.t(), keyword) ::
+          {:ok, map} | {:refused, term} | {:unknown, term}
+  def conversation(transcripts, path, opts \\ []) do
+    with {:ok, read} <- conversation_opts(opts),
+         {:ok, cursor} <- decode_cursor(read.from) do
+      call(transcripts, {:conversation, path, cursor, read}, opts)
+    end
+  end
+
+  @max_limit 1_000
+
+  defp conversation_opts(opts) do
+    read = %{
+      from: Keyword.get(opts, :from),
+      limit: Keyword.get(opts, :limit, 100),
+      max: Keyword.get(opts, :max_bytes, @first_read),
+      subagents: Keyword.get(opts, :subagents, false)
+    }
+
+    cond do
+      not (is_integer(read.limit) and read.limit in 1..@max_limit) -> {:refused, {:bad, :limit}}
+      not (is_integer(read.max) and read.max > 0) -> {:refused, {:bad, :max_bytes}}
+      not is_boolean(read.subagents) -> {:refused, {:bad, :subagents}}
+      true -> {:ok, read}
+    end
+  end
+
+  # The cursor is the reader's own term, so an app keeps it as a string and never reads it.
+  defp decode_cursor(nil), do: {:ok, nil}
+
+  defp decode_cursor(text) when is_binary(text) do
+    with {:ok, bytes} <- Base.url_decode64(text, padding: false),
+         %{path: path, main: main, files: files} = cursor when is_binary(path) and is_map(files) <-
+           :erlang.binary_to_term(bytes, [:safe]),
+         true <- Enum.all?([main | Map.values(files)], &position?/1) do
+      {:ok, cursor}
+    else
+      _ -> {:refused, {:bad, :from}}
+    end
+  rescue
+    ArgumentError -> {:refused, {:bad, :from}}
+  end
+
+  defp decode_cursor(_), do: {:refused, {:bad, :from}}
+
+  defp position?(%{offset: o, seam: s, skip: k, open: open}),
+    do: is_integer(o) and o >= 0 and is_binary(s) and is_boolean(k) and is_map(open)
+
+  defp position?(_), do: false
+
+  defp encode_cursor(cursor),
+    do: cursor |> :erlang.term_to_binary() |> Base.url_encode64(padding: false)
+
   defp call(transcripts, request, opts),
     do:
       Reader.call(
@@ -306,8 +386,128 @@ defmodule CodingAgentFramework.Transcripts do
     {:reply, reply, state}
   end
 
+  def handle_call({:conversation, path, cursor, read}, _from, state) do
+    {main, files, reset} =
+      cond do
+        cursor == nil -> {position(), %{}, nil}
+        cursor.path != path -> {position(), %{}, :new_file}
+        true -> {cursor.main, cursor.files, nil}
+      end
+
+    reply =
+      with {:ok, main, entries, reset} <- read_position(state, path, main, read, nil, reset),
+           {:ok, files, more} <- read_subagents(state, path, files, read, length(entries)) do
+        next = encode_cursor(%{path: path, main: main, files: files})
+        {:ok, %{entries: entries ++ more, next: next, reset: reset}}
+      else
+        :no_file -> {:refused, :no_file}
+        {:unknown, reason} -> {:unknown, {:host, reason}}
+        {:refused, reason} -> {:refused, {:host, reason}}
+      end
+
+    {:reply, reply, state}
+  end
+
   @impl true
   def handle_info(:tick, state), do: {:noreply, Reader.tick(state, &read_now(&1, :known))}
+
+  # A file's place in a conversation read: the whole lines read, the bytes before them as a
+  # fold's seam, whether a line too long to read is being passed over, and the calls open.
+  defp position, do: %{offset: 0, seam: "", skip: false, open: %{}}
+
+  defp read_position(state, path, pos, read, agent, reset) do
+    seam = byte_size(pos.seam)
+
+    case tail(state, path, pos.offset - seam, seam + read.max) do
+      {:ok, <<before::binary-size(^seam), chunk::binary>>} when before == pos.seam ->
+        {pos, entries} = advance(pos, chunk, read, agent)
+        {:ok, pos, entries, reset}
+
+      {:ok, _other} when pos.offset > 0 ->
+        read_position(state, path, position(), read, agent, :rewritten)
+
+      {:ok, chunk} ->
+        {pos, entries} = advance(pos, chunk, read, agent)
+        {:ok, pos, entries, reset}
+
+      other ->
+        other
+    end
+  end
+
+  defp advance(pos, chunk, read, agent) do
+    {skipped, rest} =
+      case {pos.skip, :binary.split(chunk, "\n")} do
+        {false, _} -> {0, chunk}
+        {true, [_no_end]} -> {byte_size(chunk), ""}
+        {true, [cut, rest]} -> {byte_size(cut) + 1, rest}
+      end
+
+    start = pos.offset + skipped
+    got = Fold.entries(rest, limit: read.limit, open: pos.open, at: start, agent: agent)
+
+    {used, entries, skip} =
+      cond do
+        pos.skip and skipped == byte_size(chunk) ->
+          {skipped, [], true}
+
+        # Only a line that begins the read and fills it is longer than the bound; one that
+        # begins after a passed-over line's end is read whole by the next call.
+        skipped == 0 and got.used == 0 and byte_size(chunk) >= read.max and
+            not String.contains?(rest, "\n") ->
+          unread = %{kind: "system", subtype: "unread_line", text: "", at: nil, uuid: nil}
+          {skipped + byte_size(rest), [Map.merge(unread, %{offset: start, agent: agent})], true}
+
+        true ->
+          {skipped + got.used, got.entries, false}
+      end
+
+    read_bytes = pos.seam <> binary_part(chunk, 0, used)
+    kept = min(byte_size(read_bytes), 64)
+
+    {%{
+       offset: pos.offset + used,
+       seam: binary_part(read_bytes, byte_size(read_bytes), -kept),
+       skip: skip,
+       open: got.open
+     }, entries}
+  end
+
+  # Each subagent's own file after the session's, in its id's order, within what is left of
+  # `limit`. A file listed with no more bytes than were read is not read; one gone keeps its
+  # place, and a rewritten one is read again from its start.
+  defp read_subagents(_state, _path, files, %{subagents: false}, _count), do: {:ok, files, []}
+
+  defp read_subagents(state, path, files, read, count) do
+    dir = Path.join(Path.rootname(path), "subagents")
+
+    with {:ok, listed} <- list(state, dir) do
+      Enum.reduce_while(Enum.sort(listed), {:ok, files, []}, fn {agent, size},
+                                                                {:ok, files, got} ->
+        left = read.limit - count - length(got)
+        pos = Map.get(files, agent, position())
+
+        cond do
+          left <= 0 or pos.offset == size ->
+            {:cont, {:ok, files, got}}
+
+          true ->
+            file = Path.join(dir, "agent-#{agent}.jsonl")
+
+            case read_position(state, file, pos, %{read | limit: left}, agent, nil) do
+              {:ok, pos, entries, _reset} ->
+                {:cont, {:ok, Map.put(files, agent, pos), got ++ entries}}
+
+              :no_file ->
+                {:cont, {:ok, files, got}}
+
+              other ->
+                {:halt, other}
+            end
+        end
+      end)
+    end
+  end
 
   # Reads each session, then writes, per account it read, the rows that changed and the read.
   defp read_now(state, :known) do
