@@ -62,7 +62,9 @@ defmodule CodingAgentFramework.ScreenStandIn do
   `<CLAUDE_CONFIG_DIR>/sessions/<pid>.json`, once its startup dialogs are answered (2.1.322
   writes none while one is shown, F-140), making `sessions/` as Claude Code does, and removes
   it when it exits. Its `procStart` is macOS's form, `ps -o lstart=` in UTC; written with
-  `proc_start: ticks` it is that string, Linux's form, a start in clock ticks (F-246). The file has 2.1.322's shape in the fields the framework reads (`pid`,
+  `proc_start: ticks` it is that string, Linux's form, a start in clock ticks (F-246); written
+  with `proc_start: {:stat, dir}` it is the start in ticks that `<dir>/<pid>/stat` holds as it
+  writes the file: `"/proc"` on Linux, or a test's own directory where it wrote that file. The file has 2.1.322's shape in the fields the framework reads (`pid`,
   `sessionId`, `cwd`, `startedAt`, `procStart`, `kind`, `name`, `status`, `updatedAt`, and
   `waitingFor` while a dialog is drawn) plus `version`. Written with `session_file: false`, it
   writes none. It records its pid in `<dir>/pids/`, and exits after `idle` seconds with no key.
@@ -171,14 +173,20 @@ defmodule CodingAgentFramework.ScreenStandIn do
     suffix = suffix <> if(redraw != "", do: "-redraw#{redraw}", else: "")
     suffix = suffix <> if(every != "", do: "-every#{every}", else: "")
     dialogs = Enum.join(dialogs, " ")
-    proc_start = Keyword.get(opts, :proc_start, "")
-    suffix = suffix <> if(proc_start != "", do: "-ticks", else: "")
+
+    {proc_start, stat_dir} =
+      case Keyword.get(opts, :proc_start, "") do
+        {:stat, dir} when is_binary(dir) -> {"", dir}
+        ticks when is_binary(ticks) -> {ticks, ""}
+      end
+
+    suffix = suffix <> if(proc_start <> stat_dir != "", do: "-ticks", else: "")
     path = Path.join(dir, "claude-screen#{suffix}-#{release}")
     tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
 
     flags =
       {release, idle, dialogs, transcript, first, session_file, reloaded,
-       {redraw, every, proc_start}}
+       {redraw, every, proc_start, stat_dir}}
 
     File.write!(tmp, script(dir, screens, flags))
 
@@ -295,7 +303,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
 
   defp script(dir, screens, flags) do
     {release, idle, dialogs, transcript, first, session_file, reloaded,
-     {redraw, every, proc_start}} = flags
+     {redraw, every, proc_start, stat_dir}} = flags
 
     ~s"""
     #!#{program!(:bash)}
@@ -339,6 +347,10 @@ defmodule CodingAgentFramework.ScreenStandIn do
       start=${start%"${start##*[![:space:]]}"}
       # Linux's form, a start in clock ticks, when the stand-in is written with one (F-246).
       [ -n "#{proc_start}" ] && start='#{proc_start}'
+      # Or the ticks of its own stat file: field 22, the 20th past the name's last `)`.
+      if [ -n "#{stat_dir}" ]; then
+        stat=$(<"#{stat_dir}/$$/stat"); stat=(${stat##*)}); start=${stat[19]}
+      fi
       waiting=''
       [ "$1" = waiting ] && waiting=', "waitingFor": "dialog open"'
       #{program!(:mkdir)} -p "${file%/*}"

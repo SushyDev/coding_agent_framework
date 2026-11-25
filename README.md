@@ -463,8 +463,10 @@ Built, each from a checked model in `model/tla/`:
   renames into one.
 - a trust press on a fresh start holds (F-246): Claude Code draws a dialog again about 150 ms
   after its first draw and sets its selection back, so the `Inlet` sends no key until the
-  dialog has read the same for 1 s (`Press.tla`); and a session file's `procStart` in Linux's
-  form, a start in clock ticks, is read from `/proc/<pid>/stat`, so a Linux main is confirmed.
+  dialog has read the same for 1 s (`Press.tla`).
+- a start has one form (F-252): the `Registry` turns a session file's `procStart` in Linux's
+  form, a start in clock ticks, into the `ps -o lstart=` text as it reads the file, so a Linux
+  main is confirmed, and its stop and end signal it.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

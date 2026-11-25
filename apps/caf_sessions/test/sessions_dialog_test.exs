@@ -10,7 +10,7 @@ defmodule CodingAgentFramework.SessionsDialogTest do
   import CodingAgentFramework.TestHost
 
   alias CodingAgentFramework.{Acts, Inlet, Registry, ScreenStandIn, Sessions, SessionsSetup}
-  alias CodingAgentFramework.{Shell, Tmux}
+  alias CodingAgentFramework.{Holder, Shell, Tmux}
   alias CodingAgentFramework.Sessions.{Agents, Dialog, Table}
 
   @trust "Yes, I trust this folder"
@@ -96,64 +96,120 @@ defmodule CodingAgentFramework.SessionsDialogTest do
     assert Agents.dialog(Agents.get(ctx.agents, "alpha")) == nil
   end
 
-  # F-246's new-5, seen on Linux: Claude Code 2.1.322 there writes `procStart` as a bare
-  # integer, the process's start in clock ticks (`/proc/<pid>/stat` field 22), and a row on the
-  # trust dialog stayed `dialog` after its answer, its file judged `replaced`. The stand-in
-  # writes that form; this host has no `/proc`, so a stand-in `cat` answers a live pid's stat
-  # file, its name holding ") (", with the stand-in's ticks, and gives anything else to the
-  # real `cat`. The row runs once its trust dialog is answered.
-  test "a session file whose start is in clock ticks confirms the row past its dialog", ctx do
-    ticks = "653385178"
-    dir = Path.join(ctx.dir, "ticks")
-    File.mkdir_p!(dir)
-    cat = Path.join(dir, "cat")
+  # F-246's new-5 and F-252: Claude Code 2.1.322 on Linux writes `procStart` as a bare integer,
+  # the process's start in clock ticks (`/proc/<pid>/stat` field 22). The `Registry` turns it
+  # into the `ps` form as it reads the file, so the row's start is the one every check and
+  # signal compares. The stand-in writes the ticks its stat file holds: the host's own `/proc`
+  # where it has one, else a directory of the test's own, where the test writes that file.
+  test "a session file whose start is in clock ticks confirms the row in the ps form", ctx do
+    %{registry: registry, pid: pid} = ticks = ticks_main(ctx)
+    assert {:ok, row} = await(fn -> running(ctx, ticks.sessions, registry, "alpha") end)
+    refute Holder.Process.ticks?(row.proc_start)
+    assert row.proc_start == lstart(pid)
 
-    File.write!(cat, """
+    assert {:ok, %{rows: [%{proc_start: start, alive: :live}]}} = Registry.rows(registry, "work")
+    assert start == row.proc_start
+  end
+
+  # F-252: before it, a Linux main's end found its start "gone" by `ps` and sent nothing, and
+  # the process ran on. The end now signals it, and the row ends.
+  test "an end of a main whose session file holds ticks signals it and ends it", ctx do
+    %{sessions: sessions, registry: registry, pid: pid} = ticks_main(ctx, kind: :main)
+    assert {:ok, _} = await(fn -> running(ctx, sessions, registry, "alpha") end)
+    assert {:ok, :ended} = Sessions.end_main(sessions, "alpha", timeout: 30_000)
+    assert %{status: "ended"} = Agents.get(ctx.agents, "alpha")
+    assert {:ok, %{status: 1}} = kill(pid, "-0")
+  end
+
+  test "a stop of a row whose session file holds ticks signals it and stops it", ctx do
+    %{sessions: sessions, registry: registry, pid: pid} = ticks_main(ctx)
+    assert {:ok, _} = await(fn -> running(ctx, sessions, registry, "alpha") end)
+    assert {:ok, :stopped} = Sessions.stop(sessions, "alpha")
+    assert %{status: "stopped"} = Agents.get(ctx.agents, "alpha")
+    assert {:ok, %{status: 1}} = kill(pid, "-0")
+  end
+
+  # F-252: a pid whose stat file holds other ticks after the `ps` was taken by another process
+  # between the reads. The file is `replaced` and its row has no start, so nothing signals by
+  # it, and the row is never confirmed by it. The `Registry`'s `ps` rewrites the stat file, as
+  # a process that took the pid would.
+  test "a pid whose start in ticks changed between the reads is replaced, never signaled",
+       ctx do
+    proc = Path.join(ctx.dir, "proc")
+    ps = Path.join(ctx.dir, "ps-replacing")
+
+    File.write!(ps, """
     #!#{program!(:bash)}
-    case "$1" in
-      /proc/*/stat) ;;
-      *) exec #{program!(:cat)} "$@" ;;
-    esac
-    s=0
-    for f in "$@"; do
-      p=${f#/proc/}; p=${p%/stat}
-      if #{program!(:kill)} -0 "$p" 2>/dev/null; then
-        printf '%s (a) (b c) S 1 %s %s 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 1 0 #{ticks} 1 2 3\\n' "$p" "$p" "$p"
-      else
-        printf 'cat: %s: No such file or directory\\n' "$f" >&2; s=1
-      fi
-    done
-    exit $s
+    for a in "$@"; do q=$a; done
+    f="#{proc}/$q/stat"
+    if [ -e "$f" ]; then
+      l=$(<"$f"); s=(${l##*)}); n=$((s[19] + 1))
+      printf '%s (claude) S 1 %s %s 0 -1 0 1 0 0 0 0 0 0 0 20 0 1 0 %s 1\\n' "$q" "$q" "$q" "$n" > "$f"
+    fi
+    exec #{program!(:ps)} "$@"
     """)
 
-    File.chmod!(cat, 0o755)
-    programs = programs(host(), %{cat: cat})
+    File.chmod!(ps, 0o755)
+    ticks = ticks_main(ctx, proc: proc, ps: ps)
+
+    assert {:ok, [file]} =
+             await(fn ->
+               {:ok, _} = Registry.read(ticks.registry)
+               nonempty(elem(Registry.rows(ticks.registry, "work"), 1).rows)
+             end)
+
+    assert %{alive: :replaced, proc_start: nil} = file
+    Sessions.cue(ticks.sessions, %{topic: "registry:test:work", ids: []})
+    refute Agents.get(ctx.agents, "alpha").status == "running"
+    assert {:ok, %{status: 0}} = kill(ticks.pid, "-0")
+  end
+
+  # A start past its trust dialog, with its own `Registry` that reads starts in ticks from
+  # `proc`: the host's `/proc`, or the test's own directory. Options: `kind:`, `proc:` (always
+  # the test's own directory) and `ps:` (the `Registry`'s ps).
+  defp ticks_main(ctx, opts \\ []) do
+    dir = Path.join(ctx.dir, "ticks")
+    File.mkdir_p!(dir)
+    own = File.exists?("/proc/self/stat") and not Keyword.has_key?(opts, :proc)
+    proc = if own, do: "/proc", else: Keyword.get(opts, :proc, Path.join(dir, "proc"))
+    host = host()
+    programs = programs(host, Map.new(Keyword.take(opts, [:ps])))
     accounts = %{"work" => ctx.account.config_dir}
-    db = Path.join(dir, "registry.db")
-    spec = {Registry, programs: programs, accounts: accounts, db: db}
+
+    spec =
+      {Registry, programs: programs, accounts: accounts, db: Path.join(dir, "r.db"), proc: proc}
+
     registry = start_supervised!(Supervisor.child_spec(spec, id: :ticks_registry))
 
     claude =
-      ScreenStandIn.write!(dir, "2.1.322", stand_in_idle(), trust: true, proc_start: ticks)
+      ScreenStandIn.write!(dir, "2.1.322", stand_in_idle(),
+        trust: true,
+        proc_start: {:stat, proc}
+      )
 
-    sessions = sessions(ctx, programs: programs, registry: registry)
+    sessions = sessions(ctx, registry: registry)
+
     launch = Keyword.put(ctx.launch, :claude, claude)
+    launch = if opts[:kind], do: Keyword.put(launch, :kind, opts[:kind]), else: launch
 
     assert {:unknown, {:dialog, :trust}} = Sessions.start(sessions, "alpha", ctx.account, launch)
-    assert {:ok, :sent} = Sessions.answer_dialog(sessions, "alpha", :trust, @trust)
+    [pid] = File.ls!(Path.join(dir, "pids"))
 
-    running = fn ->
-      {:ok, _} = Registry.read(registry)
-      Sessions.cue(sessions, %{topic: "registry:test:work", ids: []})
-
-      case Agents.get(ctx.agents, "alpha") do
-        %{status: "running"} = row -> {:ok, row}
-        row -> row.status
-      end
+    unless own do
+      File.mkdir_p!(Path.join(proc, pid))
+      line = "#{pid} (claude) (x) S 1 #{pid} #{pid} 0 -1 0 1 0 0 0 0 0 0 0 20 0 1 0 653385178 1\n"
+      File.write!(Path.join([proc, pid, "stat"]), line)
     end
 
-    assert {:ok, %{status: "running", proc_start: ^ticks}} = await(running)
-    assert {:ok, %{rows: [%{proc_start: ^ticks, alive: :live}]}} = Registry.rows(registry, "work")
+    assert {:ok, :sent} = Sessions.answer_dialog(sessions, "alpha", :trust, @trust)
+    %{sessions: sessions, registry: registry, pid: pid}
+  end
+
+  defp lstart(pid) do
+    {out, 0} =
+      System.cmd(program!(:env), ["LC_ALL=C", "TZ=UTC", program!(:ps), "-o", "lstart=", "-p", pid])
+
+    Holder.Process.normal(out)
   end
 
   # NotEndedOnDialog and LeaseWhileLive: past the start's deadline the row still waits, not
@@ -640,8 +696,10 @@ defmodule CodingAgentFramework.SessionsDialogTest do
   end
 
   # The session file is read on the Registry's cue, as the app's Cues hands it.
-  defp running(ctx, sessions, name) do
-    {:ok, _} = Registry.read(ctx.registry)
+  defp running(ctx, sessions, name), do: running(ctx, sessions, ctx.registry, name)
+
+  defp running(ctx, sessions, registry, name) do
+    {:ok, _} = Registry.read(registry)
     Sessions.cue(sessions, %{topic: "registry:test:work", ids: []})
 
     case Agents.get(ctx.agents, name) do

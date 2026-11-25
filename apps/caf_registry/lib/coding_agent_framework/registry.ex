@@ -25,7 +25,15 @@ defmodule CodingAgentFramework.Registry do
 
   Each read lists every account's files and reads them in one shell command, checks every pid
   with one `ps` (`CodingAgentFramework.Holder.Process.liveness/3`), and writes only the rows that
-  changed, in one transaction. A file that is gone has its row deleted. A file that cannot be
+  changed, in one transaction.
+
+  A row's `proc_start` is always in `Holder.Process`' one form, `LC_ALL=C TZ=UTC ps -o lstart=`
+  with its runs of spaces made one, the form every check and signal of a start compares. Claude
+  Code 2.1.322 writes that form on macOS, and on Linux a start in clock ticks since boot (F-246).
+  A start in ticks is turned into the `ps` form here, as it is read (`Holder.Process.from_ticks/3`,
+  one shell for every such file): it is the `ps` text when the pid's stat file holds those ticks
+  before and after the `ps`. Otherwise the row has no start, and its `alive` says why
+  (`:replaced`, `:gone` or `:unknown`). A file that is gone has its row deleted. A file that cannot be
   parsed (half written, not JSON, a required key missing or of the wrong type) is not dropped:
   its row keeps the last good data, if any, and names the problem in `problem`. A read whose
   shell fails writes nothing and answers `{:unknown, reason}`.
@@ -67,8 +75,9 @@ defmodule CodingAgentFramework.Registry do
   Starts a `Registry`. Options: `programs:` (the host's `Programs`, naming its sh, env, ps and
   cat), `accounts:` (each account's name to its config directory on the host), `db:` (this
   instance's SQLite path), and optionally `notify:` (a function of one cue), `timeout:` (ms per
-  shell run, default 10 s) and `interval:` (ms between reads; without it, reads happen only on
-  `read/2`). It fails to start with `{:no_program, names}` when a program is missing.
+  shell run, default 10 s), `interval:` (ms between reads; without it, reads happen only on
+  `read/2`) and `proc:` (the directory read for a start in clock ticks, default `"/proc"`; a
+  test names one of its own). It fails to start with `{:no_program, names}` when a program is missing.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -100,7 +109,8 @@ defmodule CodingAgentFramework.Registry do
   its name. Answers `{:ok, %{live: pids, unknown: pids}}`: `unknown` holds a pid `ps` lists
   whose start time is not known, its file half written or naming none, or every pid when `ps`
   failed, so a caller that must be sure counts it as running. Or `{:unknown, reason}` when the
-  read failed, and `{:refused, {:no_program, names}}`. Option `timeout:` (ms, default 10 s).
+  read failed, and `{:refused, {:no_program, names}}`. Options `timeout:` (ms, default 10 s) and
+  `proc:` (as `start_link/1` takes it).
   """
   @spec running(Programs.t(), [Path.t()], keyword) ::
           {:ok, %{live: [pos_integer], unknown: [pos_integer]}}
@@ -113,7 +123,8 @@ defmodule CodingAgentFramework.Registry do
          {:ok, by_dir} <- read_files(host, paths, dirs, timeout) do
       procs = for files <- by_dir, {file, bytes} <- files, uniq: true, do: proc(file, bytes)
       procs = Enum.reject(procs, &is_nil(elem(&1, 0)))
-      alive = Holder.Process.liveness(host, procs, Map.to_list(paths) ++ [timeout: timeout])
+      reader = %{host: host, programs: paths, timeout: timeout, proc: proc_dir(opts)}
+      alive = Map.new(judged(reader, procs), fn {proc, {alive, _start}} -> {proc, alive} end)
       pids = fn want -> for({{pid, _}, ^want} <- alive, uniq: true, do: pid) |> Enum.sort() end
       {:ok, %{live: pids.(:live), unknown: pids.(:unknown) -- pids.(:live)}}
     end
@@ -133,6 +144,35 @@ defmodule CodingAgentFramework.Registry do
       _ -> nil
     end
   end
+
+  defp proc_dir(opts), do: Keyword.get(opts, :proc, "/proc")
+
+  # Each `{pid, start}` as a file gives it, to whether that process runs and its start in the
+  # `ps` form, or nil: a start in ticks by its stat file and `ps`, any other by one `ps`.
+  defp judged(_reader, []), do: %{}
+
+  defp judged(reader, procs) do
+    {ticks, rest} = Enum.split_with(procs, fn {_, start} -> Holder.Process.ticks?(start) end)
+    rest = Enum.map(rest, fn {pid, start} -> {{pid, start}, normal(start)} end)
+    opts = Map.to_list(reader.programs) ++ [timeout: reader.timeout, proc: reader.proc]
+
+    checked = for {{pid, _}, start} <- rest, do: {pid, start}
+    alive = Holder.Process.liveness(reader.host, checked, opts)
+    by_ps = Map.new(rest, fn {{pid, _} = proc, start} -> {proc, {alive[{pid, start}], start}} end)
+
+    by_ticks =
+      reader.host
+      |> Holder.Process.from_ticks(ticks, opts)
+      |> Map.new(fn
+        {proc, {:live, start}} -> {proc, {:live, start}}
+        {proc, other} -> {proc, {other, nil}}
+      end)
+
+    Map.merge(by_ps, by_ticks)
+  end
+
+  defp normal(nil), do: nil
+  defp normal(start), do: Holder.Process.normal(start)
 
   defp call(registry, request, opts),
     do: Reader.call(registry, request, Keyword.get(opts, :timeout, 2 * @timeout), :no_registry)
@@ -156,7 +196,8 @@ defmodule CodingAgentFramework.Registry do
         db: db,
         cache: cache,
         programs: paths,
-        timeout: Keyword.get(opts, :timeout, @timeout)
+        timeout: Keyword.get(opts, :timeout, @timeout),
+        proc: proc_dir(opts)
       }
 
       {:ok, Map.merge(state, Reader.loop(opts))}
@@ -231,19 +272,14 @@ defmodule CodingAgentFramework.Registry do
           uniq: true,
           do: {row.pid, row.proc_start}
 
-    alive =
-      Holder.Process.liveness(
-        state.host,
-        procs,
-        Map.to_list(state.programs) ++ [timeout: state.timeout]
-      )
+    judged = judged(state, procs)
 
     rows =
       Map.new(parsed, fn {account, files} ->
         {account,
          Map.new(files, fn {file, {row, problem}} ->
-           live = Map.get(alive, {row.pid, row.proc_start}, :unknown)
-           {file, Map.merge(row, %{problem: problem, alive: live})}
+           {live, start} = Map.get(judged, {row.pid, row.proc_start}, {:unknown, nil})
+           {file, Map.merge(row, %{problem: problem, alive: live, proc_start: start})}
          end)}
       end)
 
