@@ -199,6 +199,20 @@ defmodule CodingAgentFramework.Transcripts do
   def text(transcripts, account, session_id, from, opts \\ []),
     do: call(transcripts, {:text, {account, session_id}, from, Keyword.get(opts, :max)}, opts)
 
+  @doc """
+  How far the reader has read the session `{account, session_id}`'s transcript: its fold's
+  offset in bytes, from memory, with no file read (F-261). A caller that read the transcript
+  before keeps what it found while this has not moved. Answers `{:ok, offset}`, or
+  `{:refused, :unknown_session}` for a session never read.
+
+      Transcripts.offset(transcripts, "work", "s1")
+      #=> {:ok, 812}
+  """
+  @spec offset(GenServer.server(), String.t(), String.t(), keyword) ::
+          {:ok, non_neg_integer} | {:refused, term} | {:unknown, term}
+  def offset(transcripts, account, session_id, opts \\ []),
+    do: call(transcripts, {:offset, {account, session_id}}, opts)
+
   defp call(transcripts, request, opts),
     do:
       Reader.call(
@@ -263,6 +277,16 @@ defmodule CodingAgentFramework.Transcripts do
             :no_file -> {:ok, false}
             other -> other
           end
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:offset, key}, _from, state) do
+    reply =
+      case state.folds[key] do
+        %{fold: %{offset: offset}} -> {:ok, offset}
+        _ -> {:refused, :unknown_session}
       end
 
     {:reply, reply, state}

@@ -2477,7 +2477,11 @@ by the turn's result uuid, which `Mailbox` takes once, so no restart tells it tw
 headless delegate's `Stream` fold keeps each such result in `own`, and an interactive one's is
 the turn its transcript shows begun by a `<task-notification>` with no delivery mark, keyed by
 its reply line's uuid. A person's turn in an interactive delegate is not told. A turn with no
-reply text tells nothing.
+reply text tells nothing. An interactive delegate's own turns are read again only once its transcript's
+reader (`Transcripts.offset/4`) has moved since the last read; between, that read stands. Cues
+queued while `Delegates` settles are answered by one settle, as `Interventions`' and
+`HooksSilent`'s queued checks are by one check (F-261): each reads afresh, so a fix's call never
+waits behind a backlog of reads.
 
 **The operator** acts through these same tools and checks, as the parent of every main session
 (F-109). No agent messages the operator: it is no agent's addressee, and an agent reaches a

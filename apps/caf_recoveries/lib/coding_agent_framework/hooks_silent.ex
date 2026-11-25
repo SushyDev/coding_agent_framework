@@ -108,6 +108,7 @@ defmodule CodingAgentFramework.HooksSilent do
 
   @impl true
   def handle_info(:check, s) do
+    drain_checks()
     check_now(s)
     {:noreply, s}
   end
@@ -116,6 +117,16 @@ defmodule CodingAgentFramework.HooksSilent do
     check_now(s)
     if s.interval, do: Process.send_after(self(), :tick, s.interval)
     {:noreply, s}
+  end
+
+  # F-261: on a busy host cues come faster than a check ends; one check answers every cue
+  # queued before it, since it reads afresh.
+  defp drain_checks do
+    receive do
+      :check -> drain_checks()
+    after
+      0 -> :ok
+    end
   end
 
   defp check_now(s) do
