@@ -261,8 +261,8 @@ defmodule CodingAgentFramework.Sessions do
   `Inlet.press_bound/1`, F-249): that timeout, and a margin of 5 000 for this process's calls
   ahead of it and its reply (F-245). Pure.
 
-      iex> CodingAgentFramework.Sessions.press_wait(71_040)
-      76040
+      iex> CodingAgentFramework.Sessions.press_wait(88_560)
+      93560
   """
   @spec press_wait(pos_integer) :: pos_integer
   def press_wait(press) when is_integer(press) and press > 0, do: press + @read
@@ -274,7 +274,7 @@ defmodule CodingAgentFramework.Sessions do
   Answers `{:ok, ms}`, or the call's refusal or unknown. Option `:timeout` (ms, default 5 000).
 
       Sessions.press_call(sessions)
-      #=> {:ok, 76040}
+      #=> {:ok, 93560}
   """
   @spec press_call(GenServer.server(), keyword) :: outcome(pos_integer)
   def press_call(sessions, opts \\ []),
@@ -733,7 +733,7 @@ defmodule CodingAgentFramework.Sessions do
 
     with {:ok, holder} <- Holder.new(programs, Keyword.fetch!(opts, :dir)),
          {:ok, procs} <- Holder.Process.new(programs, holder),
-         {:ok, ps} <- Programs.take(programs, [:env, :ps, :tail]),
+         {:ok, ps} <- Programs.take(programs, [:env, :ps, :tail, :cat]),
          {:ok, waiter} <- waiter(programs, Keyword.get(opts, :waiter)),
          {:ok, press} <- press_bound(Keyword.get(opts, :inlet)),
          {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)) do
@@ -2405,7 +2405,7 @@ defmodule CodingAgentFramework.Sessions do
   defp liveness(state, row), do: alive(state, [row])[{row.pid, row.proc_start}]
 
   defp alive(state, rows) do
-    opts = [env: state.ps.env, ps: state.ps.ps, timeout: 5_000]
+    opts = [env: state.ps.env, ps: state.ps.ps, cat: state.ps.cat, timeout: 5_000]
     Holder.Process.liveness(state.host, Enum.map(rows, &{&1.pid, &1.proc_start}), opts)
   end
 

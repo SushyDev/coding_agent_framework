@@ -375,12 +375,21 @@ defmodule CodingAgentFramework.Holder.Process do
   end
 
   @doc """
-  Whether each `{pid, start}` still runs, by its pid and start time, with one `ps` on `host`:
-  `:live`, `:replaced` (`ps` lists the pid with another start time: it was reused), `:gone` (a
-  `ps` that ran cleanly does not list it), or `:unknown` (`ps` failed or answered something
-  unreadable, or no start time is known). A failed `ps` under load never counts a live process
-  as gone. Options, all required: `:env` and `:ps` (the host's programs; `ps` runs under `env
-  LC_ALL=C TZ=UTC`) and `:timeout` (ms).
+  Whether each `{pid, start}` still runs, by its pid and start time: `:live`, `:replaced` (the
+  pid runs with another start time: it was reused), `:gone` (a read that ran cleanly does not
+  find it), or `:unknown` (the read failed or answered something unreadable, or no start time is
+  known). A failed read under load never counts a live process as gone.
+
+  The start time is read in the form it is given (F-246). Claude Code 2.1.322 writes a session
+  file's `procStart` as `LC_ALL=C TZ=UTC ps -o lstart=` prints it on macOS (`pidDomain`
+  `darwin`), and on Linux as a bare integer: the process's start in clock ticks since boot,
+  field 22 of `/proc/<pid>/stat`. Starts in the `ps` form are judged by one `ps` on `host`;
+  those that are all digits, by one `cat` of their `/proc/<pid>/stat` files (`judge_stat/2`).
+  This module's own records are always in the `ps` form.
+
+  Options: `:env` and `:ps` (the host's programs; `ps` runs under `env LC_ALL=C TZ=UTC`) and
+  `:timeout` (ms), all required; `:cat`, required for a start in the integer form, else that
+  start is `:unknown`.
   """
   @spec liveness(Host.t(), [{pos_integer, String.t() | nil}], keyword) :: %{
           {pos_integer, String.t() | nil} => :live | :replaced | :gone | :unknown
@@ -388,12 +397,119 @@ defmodule CodingAgentFramework.Holder.Process do
   def liveness(_host, [], _opts), do: %{}
 
   def liveness(%Host{} = host, procs, opts) do
+    {ticks, rest} = Enum.split_with(procs, fn {_, start} -> ticks?(start) end)
+    Map.merge(by_ps(host, rest, opts), by_stat(host, ticks, opts))
+  end
+
+  defp ticks?(start), do: is_binary(start) and start =~ ~r/\A\d+\z/
+
+  defp by_ps(_host, [], _opts), do: %{}
+
+  defp by_ps(host, procs, opts) do
     pids = procs |> Enum.map(&elem(&1, 0)) |> Enum.uniq() |> Enum.join(",")
     args = ["LC_ALL=C", "TZ=UTC", Keyword.fetch!(opts, :ps), "-o", "pid=,lstart=", "-p", pids]
 
     host
     |> Shell.run(Keyword.fetch!(opts, :env), args, timeout: Keyword.fetch!(opts, :timeout))
     |> judge(procs)
+  end
+
+  defp by_stat(_host, [], _opts), do: %{}
+
+  defp by_stat(host, procs, opts) do
+    case Keyword.get(opts, :cat) do
+      nil ->
+        Map.new(procs, &{&1, :unknown})
+
+      cat ->
+        files = procs |> Enum.map(&"/proc/#{elem(&1, 0)}/stat") |> Enum.uniq()
+        timeout = Keyword.fetch!(opts, :timeout)
+
+        host
+        |> Shell.run(Keyword.fetch!(opts, :env), ["LC_ALL=C", cat | files], timeout: timeout)
+        |> judge_stat(procs)
+    end
+  end
+
+  @doc """
+  Judges each `{pid, start}`, `start` a Linux start time in clock ticks, from a `Shell` outcome
+  of `cat /proc/<pid>/stat …` (stderr merged), as `liveness/3` runs it. Pure. A stat line's
+  second field is the program's name in parentheses, which may itself hold spaces and
+  parentheses, so the fields are counted from after the line's last `)`: the start time is the
+  20th of them (field 22 of the line). A pid whose file `cat` reports missing is `:gone`; one
+  neither read nor reported missing, or any line read otherwise, is `:unknown`.
+
+      iex> line = "7 (a) (b c) S 1 7 7 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 1 0 653385178 1 2 3\\n"
+      iex> missing = "cat: /proc/8/stat: No such file or directory\\n"
+      iex> CodingAgentFramework.Holder.Process.judge_stat({:ok, %{status: 1, output: line <> missing}},
+      ...>   [{7, "653385178"}, {7, "1"}, {8, "5"}, {9, "5"}])
+      %{{7, "653385178"} => :live, {7, "1"} => :replaced, {8, "5"} => :gone, {9, "5"} => :unknown}
+  """
+  @spec judge_stat(Shell.outcome(), [{pos_integer, String.t()}]) :: %{
+          {pos_integer, String.t()} => :live | :replaced | :gone | :unknown
+        }
+  def judge_stat({:ok, %{status: status, output: out}}, procs) when status in [0, 1] do
+    case stats(out) do
+      {:ok, read} ->
+        Map.new(procs, fn {pid, start} ->
+          {{pid, start},
+           case Map.get(read, pid) do
+             :missing -> :gone
+             nil -> :unknown
+             ^start -> :live
+             _other -> :replaced
+           end}
+        end)
+
+      :unknown ->
+        Map.new(procs, &{&1, :unknown})
+    end
+  end
+
+  def judge_stat(_outcome, procs), do: Map.new(procs, &{&1, :unknown})
+
+  defp stats(out) do
+    out
+    |> String.split("\n", trim: true)
+    |> Enum.reduce_while({:ok, %{}}, fn line, {:ok, acc} ->
+      case stat_line(line) do
+        {pid, value} -> {:cont, {:ok, Map.put(acc, pid, value)}}
+        :unreadable -> {:halt, :unknown}
+      end
+    end)
+  end
+
+  defp stat_line(line) do
+    case Regex.run(~r{^cat: /proc/(\d+)/stat: No such file or directory$}, line) do
+      [_, pid] -> {String.to_integer(pid), :missing}
+      nil -> started(line)
+    end
+  end
+
+  # `<pid> (<comm>) <state> …`: the fields after the last `)`, the start time the 20th.
+  defp started(line) do
+    with [head, tail] <- split_last(line, ")"),
+         [pid, _comm] <- String.split(head, " (", parts: 2),
+         {pid, ""} <- Integer.parse(pid),
+         fields when length(fields) >= 20 <- String.split(tail),
+         start = Enum.at(fields, 19),
+         true <- start =~ ~r/\A\d+\z/ do
+      {pid, start}
+    else
+      _ -> :unreadable
+    end
+  end
+
+  defp split_last(line, sep) do
+    case :binary.matches(line, sep) do
+      [] -> [line]
+      matches -> [binary_part(line, 0, elem(List.last(matches), 0)) | [tail_after(line, matches)]]
+    end
+  end
+
+  defp tail_after(line, matches) do
+    {at, len} = List.last(matches)
+    binary_part(line, at + len, byte_size(line) - at - len)
   end
 
   @doc """

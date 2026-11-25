@@ -364,7 +364,9 @@ defmodule CodingAgentFramework.InletTest do
   # F-242, from F-238's new-1: the stand-in stopped (SIGSTOP) for 3 s as the press goes, as a
   # loaded host stops the real program. Its keys wait in the pane, and it redraws once it runs
   # again. At the library's 2 s `see:` that press is unknown and no Enter goes; at the tree's
-  # 10 s (`Config`'s `press_see`) the same press is answered, inside its `press_bound/1`.
+  # 10 s (`Config`'s `press_see`) the same press is answered, inside its `press_bound/1`. A
+  # stopped program draws nothing, so the press settles (F-246) and its keys go while it is
+  # stopped: the stop lasts 3 s past the settle.
   test "a press whose redraw comes past 2 s is answered within the tree's see", ctx do
     late = fn name, see ->
       probe = %Probe{inner: ctx.server, test: self()}
@@ -379,7 +381,7 @@ defmodule CodingAgentFramework.InletTest do
       {:ok, _} = screen(ctx, name, &match?(%{state: :dialog, kind: :trust}, &1))
       [pid] = File.ls!(Path.join(dir, "pids"))
       {:ok, %{status: 0}} = kill(pid, "-STOP")
-      spawn(fn -> receive after: (3_000 -> kill(pid, "-CONT")) end)
+      spawn(fn -> receive after: (Inlet.settle() + 3_000 -> kill(pid, "-CONT")) end)
 
       {took, answer} =
         :timer.tc(fn -> Inlet.choose(inlet, name, :trust, @trust, press(inlet)) end)
@@ -481,6 +483,66 @@ defmodule CodingAgentFramework.InletTest do
 
     assert_receive {:press, {:ok, :sent}}, 10_000
     assert {:ok, ["after"]} = submitted(ctx, 1)
+  end
+
+  # F-246, measured on 2.1.322: the trust dialog is drawn again about 150 ms after its first
+  # draw, its selection set back to "No, exit". The stand-in does the same (`redraw: 150`). A
+  # Down and Enter sent at its first draw are lost, as on the real program; the Inlet's press,
+  # made at once, waits for the dialog to settle, then trusts, each key sent once.
+  test "a trust dialog drawn again after its first show is pressed once it settles", ctx do
+    start = fn name, redraw ->
+      dir = Path.join(ctx.dir, name)
+      File.mkdir_p!(dir)
+      script = ScreenStandIn.write!(dir, @release, stand_in_idle(), trust: true, redraw: redraw)
+      {:ok, _} = Tmux.new_session(ctx.server, name, [script], size: {120, 40})
+      {:ok, _} = screen(ctx, name, &match?(%{state: :dialog, kind: :trust}, &1))
+      dir
+    end
+
+    # Pressed at the first draw, past the Inlet: the marker moves, the Enter is dropped, and
+    # the second draw puts the marker back on "No, exit". Its second draw comes at 3 s here, so
+    # the keys land before it on a loaded host.
+    dir = start.("raw", 3_000)
+    {:ok, pane} = pane(ctx, "raw")
+    {:ok, :sent} = Tmux.write(ctx.server, pane, "raw", {:keys, ["Down"]})
+    {:ok, _} = screen(ctx, "raw", &match?(%{selected: @trust}, &1))
+    {:ok, :sent} = Tmux.write(ctx.server, pane, "raw", {:keys, ["Enter"]})
+    {:ok, _} = screen(ctx, "raw", &match?(%{state: :dialog, selected: "No, exit"}, &1))
+    refute File.exists?(Path.join(dir, "trusted"))
+
+    dir = start.("settled", 150)
+
+    {took, answer} =
+      :timer.tc(fn -> Inlet.choose(ctx.inlet, "settled", :trust, @trust, press(ctx.inlet)) end)
+
+    assert {{:ok, :sent}, true} = {answer, div(took, 1_000) >= Inlet.settle()}
+    assert {:ok, _} = await(fn -> File.read(Path.join(dir, "trusted")) end)
+    assert ScreenStandIn.dialog_keys(dir) == ["down", "enter"]
+    inlet = ctx.inlet
+    assert_received {:write, ^inlet, {:keys, ["Down"]}}
+    assert_received {:write, ^inlet, {:keys, ["Enter"]}}
+    refute_received {:write, ^inlet, _}
+  end
+
+  # F-246: a dialog that never reads the same for the settle (drawn again every 300 ms, the
+  # marker moving each time) takes no key: refused at its bound, `settle/0` past `see:`.
+  test "a dialog that never settles is refused at its bound, no key sent", ctx do
+    script =
+      ScreenStandIn.write!(ctx.dir, @release, stand_in_idle(), trust: true, redraw: {:every, 300})
+
+    {:ok, _} = Tmux.new_session(ctx.server, "alpha", [script], size: {120, 40})
+    {:ok, _} = screen(ctx, "alpha", &match?(%{state: :dialog, kind: :trust}, &1))
+    probe = %Probe{inner: ctx.server, test: self()}
+    inlet = start_supervised!({Inlet, tmux: probe, see: 1_000}, id: :one_second)
+
+    {took, answer} =
+      :timer.tc(fn -> Inlet.choose(inlet, "alpha", :trust, @trust, press(inlet)) end)
+
+    assert {:refused, {:unsettled, _}} = answer
+    assert div(took, 1_000) >= Inlet.settle() + 1_000
+    refute_received {:write, _, _}
+    assert ScreenStandIn.dialog_keys(ctx.dir) == []
+    assert {:ok, _} = screen(ctx, "alpha", &match?(%{state: :dialog, kind: :trust}, &1))
   end
 
   # A press's options: the instance's own bound and its wait in the queue (F-245, F-249).
