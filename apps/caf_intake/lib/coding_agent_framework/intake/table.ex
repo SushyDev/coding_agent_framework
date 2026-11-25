@@ -141,6 +141,22 @@ defmodule CodingAgentFramework.Intake.Table do
   end
 
   @doc """
+  Deletes the rows of `PostToolUse` and `PostToolUseFailure` written before `before` (ms), for
+  `host`. Other events stay.
+  """
+  @spec sweep_tool_rows(db, String.t(), integer) :: :ok
+  def sweep_tool_rows(db, host, before) do
+    Store.query(
+      db,
+      "DELETE FROM intake_events WHERE host = ?1 AND written_at < ?2 " <>
+        "AND event IN ('PostToolUse', 'PostToolUseFailure') RETURNING id",
+      [host, before]
+    )
+
+    :ok
+  end
+
+  @doc """
   Moves row `id` from hold `from` to `to`, with `decision` when given, and the options
   `actor:`, `data:`, `prompt:` and `problem:` when given (a tool call's row gets its input only
   with a decision; a callback's answer out of shape is the problem of the row it passes).

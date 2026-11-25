@@ -114,6 +114,10 @@ defmodule CodingAgentFramework.Intake do
 
   @deadline 570_000
   @tool_deadline 5_000
+  # How long a call's duration row is kept (F-253): the tree reads durations of recent calls, and
+  # an older call keeps its transcript's `ms` while its `duration_ms` is nil.
+  @tool_rows_keep 7 * 24 * 60 * 60 * 1000
+  @sweep_every 60_000
   @stop_deadline 570_000
   # Claude Code 2.1.322 honors this many Stop blocks in a row and overrides the next (F-157).
   @stop_cap 8
@@ -204,7 +208,7 @@ defmodule CodingAgentFramework.Intake do
   waiter's heartbeats, 5,000 by default), `agent:` (`fun(account, session_id) -> name | nil`,
   for the events' `agent`), `stop:` (`fun(stop_event) -> :pass | {:block, reason}`, which
   makes each `Stop` a hold), `stop_deadline:` (ms a `Stop` is held, under the `Stop` hook's
-  600 s), `stop_cap:` (Claude Code's blocks in a row, 8), `project:` (`fun(agent) -> project |
+  600 s), `stop_cap:` (Claude Code's blocks in a row, 8), `tool_rows_keep:` (ms a `PostToolUse` or `PostToolUseFailure` row is kept before a sweep deletes it, 7 days), `project:` (`fun(agent) -> project |
   nil`, which a pause per project reads) and `name:` (for the embedding app's tree; the
   library looks up no name).
   """
@@ -246,7 +250,7 @@ defmodule CodingAgentFramework.Intake do
         ]) :: map
   def hooks(port, account, secret, tools \\ []) do
     long = ["PermissionRequest" | if(:stop in tools, do: ["Stop"], else: [])]
-    http = Enum.map(tools -- [:session_start], &Map.fetch!(@tools, &1))
+    http = Enum.map(tools -- [:session_start, :post_tool_use, :stop], &Map.fetch!(@tools, &1))
 
     Map.new(Event.names() ++ http, fn name ->
       hook = %{
@@ -613,6 +617,8 @@ defmodule CodingAgentFramework.Intake do
           session_start: Keyword.get(opts, :session_start),
           stop: Keyword.get(opts, :stop),
           stop_cap: Keyword.get(opts, :stop_cap, @stop_cap),
+          tool_rows_keep: Keyword.get(opts, :tool_rows_keep, @tool_rows_keep),
+          swept_at: nil,
           agent: Keyword.get(opts, :agent, fn _, _ -> nil end),
           project: Keyword.get(opts, :project, fn _ -> nil end),
           # {:agent | :project, name} -> :hold | :pass | {:block, reason}, as the table keeps them
@@ -634,6 +640,8 @@ defmodule CodingAgentFramework.Intake do
 
   @impl true
   def handle_call({:post, account, body}, from, state) do
+    state = sweep(state)
+
     case Event.parse(body) do
       %{event: "PreToolUse"} when state.pre_tool_use == nil ->
         {:reply, {:ok, :not_read}, state}
@@ -643,10 +651,8 @@ defmodule CodingAgentFramework.Intake do
         if state.stop,
           do: Table.reset_blocks(state.db, state.host, account, row.session_id, now())
 
-        # The `Stop` hold's settings post it for the reset alone: with no callback, no row.
-        if state.post_tool_use,
-          do: store(%{row | hold: true}, account, from, state),
-          else: {:reply, {:ok, :not_read}, state}
+        # With no callback the row is kept, not held: it carries the call's `duration_ms`.
+        store(%{row | hold: state.post_tool_use != nil}, account, from, state)
 
       # A session starts again at each resume, clear and compact, with the same session and
       # often the same source: each start is a hold of its own, as a Stop is.
@@ -826,8 +832,8 @@ defmodule CodingAgentFramework.Intake do
   defp store(row, account, {pid, _}, state) do
     # A tool call's row keeps `data` empty until a decision: `Transcripts` has the input and
     # the output.
-    tool? = row.event in ["PreToolUse", "PostToolUse"]
-    stored = if tool?, do: %{row | data: nil}, else: row
+    tool? = row.event in ["PreToolUse", "PostToolUse", "PostToolUseFailure"]
+    stored = if tool?, do: %{row | data: tool_data(row)}, else: row
 
     kinds = %{
       "PreToolUse" => :tool,
@@ -885,14 +891,25 @@ defmodule CodingAgentFramework.Intake do
     end
   end
 
+  # What a tool call's row keeps as `data` before a decision: nothing for a `PreToolUse`, and for
+  # the post events the tool, the id and the call's own `duration_ms` (F-253).
+  defp tool_data(%{event: "PreToolUse"}), do: nil
+
+  defp tool_data(row) do
+    case JSON.decode(row.data) do
+      {:ok, %{} = data} ->
+        JSON.encode!(Map.take(data, ["tool_name", "tool_use_id", "duration_ms"]))
+
+      _ ->
+        nil
+    end
+  end
+
   # What a decided tool call's row keeps as `data`: a PreToolUse's whole input, and a
-  # PostToolUse's tool and id, not the output it replaced, which `Transcripts` has.
+  # PostToolUse's `tool_data/1`, not the output it replaced, which `Transcripts` has.
   defp hold_data(:tool, row), do: row.data
 
-  defp hold_data(:post_tool, row) do
-    data = JSON.decode!(row.data)
-    JSON.encode!(Map.take(data, ["tool_name", "tool_use_id"]))
-  end
+  defp hold_data(:post_tool, row), do: tool_data(row)
 
   defp hold_data(_kind, _row), do: nil
 
@@ -1386,6 +1403,19 @@ defmodule CodingAgentFramework.Intake do
   # ids; `Mailbox` tries a row due to the session on it, and a view reloads.
   defp waiters_cue(state, account, session),
     do: state.notify.(%{topic: "intake:#{state.host}:#{account}:waiters", ids: [session]})
+
+  # Deletes the duration rows older than `tool_rows_keep:`, at most once a minute and with the
+  # post that finds one due: no timer, no process of its own.
+  defp sweep(%{swept_at: last} = state) do
+    at = now()
+
+    if is_nil(last) or at - last >= @sweep_every do
+      Table.sweep_tool_rows(state.db, state.host, at - state.tool_rows_keep)
+      %{state | swept_at: at}
+    else
+      state
+    end
+  end
 
   defp now, do: System.os_time(:millisecond)
   defp unique, do: System.unique_integer([:positive, :monotonic])

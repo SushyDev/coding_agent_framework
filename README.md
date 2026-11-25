@@ -453,6 +453,9 @@ Built, each from a checked model in `model/tla/`:
   before, during and after it, with its label and answer.
 - a test's helper process is defined before the test that starts it (F-247), so a loaded host
   cannot start the test before its helper exists.
+- `Tracker.tool_calls/3` gives each call `duration_ms`, its own time from the `PostToolUse` or
+  `PostToolUseFailure` hook (F-253), beside `ms`, the transcript's result less its call; `Intake`
+  now always writes both hooks' rows and sweeps them after `tool_rows_keep:` (7 days).
 - a test lists only the stand-in's session files (F-251), not the `.tmp` file the stand-in
   renames into one.
 - a trust press on a fresh start holds (F-246): Claude Code draws a dialog again about 150 ms

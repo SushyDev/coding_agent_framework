@@ -287,4 +287,40 @@ defmodule CodingAgentFramework.Tracker.ToolsTest do
     assert {:ok, %{agents: [%{tool: %{id: "tu-1"}}]}} = Tracker.agents(tracker)
     assert {:refused, :unknown_agent} = Tracker.tool_calls(tracker, "nobody")
   end
+
+  # An `Intake` row of a post-tool hook, as the table keeps it (`data` has the call's own time).
+  defp post_row(event, id, duration, key) do
+    data = JSON.encode!(%{tool_use_id: id, tool_name: "Bash", duration_ms: duration})
+    %{key: key, row: %{id: key, account: "w", session_id: "s", event: event, data: data}}
+  end
+
+  defp with_hooks(view, rows), do: put_in(view[{"h", "w"}].events, rows)
+
+  test "duration_ms is the call's own time from its hook; ms stays the batch's wait" do
+    # Two calls sent in one batch: both start together, and both results are read at the end.
+    bytes =
+      use_line("tu-1", "Bash", @t0) <>
+        use_line("tu-2", "Bash", @t0) <>
+        result_line("tu-1", @t1) <> result_line("tu-2", @t1) <> use_line("tu-3", "Read", @t2)
+
+    hooks = [
+      post_row("PostToolUse", "tu-1", 120, 1),
+      post_row("PostToolUseFailure", "tu-2", 35, 2)
+    ]
+
+    view = with_hooks(view(fold(bytes)), hooks)
+
+    assert {:ok, [read, second, first]} = Tree.tool_calls(view, "a-x")
+    assert %{id: "tu-1", ms: 2500, duration_ms: 120} = first
+    assert %{id: "tu-2", ms: 2500, duration_ms: 35} = second
+    assert %{id: "tu-3", ms: nil, duration_ms: nil} = read
+  end
+
+  test "a call with no hook row, or a row of another shape, has duration_ms nil" do
+    bytes = use_line("tu-1", "Bash", @t0) <> result_line("tu-1", @t1)
+    bad = %{key: 3, row: %{id: 3, account: "w", session_id: "s", event: "PostToolUse", data: "{"}}
+    view = with_hooks(view(fold(bytes)), [bad])
+
+    assert {:ok, [%{id: "tu-1", ms: 2500, duration_ms: nil}]} = Tree.tool_calls(view, "a-x")
+  end
 end
