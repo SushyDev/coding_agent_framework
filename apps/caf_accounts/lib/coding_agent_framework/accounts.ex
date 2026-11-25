@@ -6,13 +6,15 @@ defmodule CodingAgentFramework.Accounts do
   anything outside the home.
 
   `prepare/3` writes what an account's sessions run with, from data, before any launch. Claude
-  Code keeps files of its own in a config directory and rewrites them from memory, so a write
-  there is erased by its next save. In Claude Code 2.1.322 these are `.claude.json` (its global
+  Code keeps files of its own in a config directory and rewrites them while it runs, so a
+  write there races its saves. In Claude Code 2.1.322 these are `.claude.json` (its global
   state, which also holds MCP servers added with `claude mcp add`), `.credentials.json`,
   `settings.json` (written when a person changes a setting in a session), and the state it
   keeps in `projects/`, `sessions/`, `todos/`, `logs/` and the like. The framework touches none
-  of them. It writes only its own files under `<config>/framework/`, which Claude Code reads
-  because each launch names them (`CodingAgentFramework.ClaudeCLI`) and never writes:
+  of them but one key: `trust/3` marks a worktree the framework made as trusted in
+  `.claude.json`, under Claude Code's own lock. Otherwise it writes only its own files under
+  `<config>/framework/`, which Claude Code reads because each launch names them
+  (`CodingAgentFramework.ClaudeCLI`) and never writes:
 
   - `parent.settings.json` and `delegate.settings.json`: the account's settings and hooks,
     loaded with `--settings`. They differ only in `remoteControlAtStartup`: true for a main session
@@ -211,6 +213,126 @@ defmodule CodingAgentFramework.Accounts do
         not File.exists?(Path.join(dir, ".claude.json")) -> {:ok, :logged_out}
         true -> {:unknown, :login_not_readable}
       end
+    end
+  end
+
+  @doc """
+  Marks `path`, a worktree the framework made under its worktrees' `root`, as trusted in the
+  account's `.claude.json`, so Claude Code shows no trust dialog when a session starts there
+  (`docs/design.md`, "Startup dialogs"; `model/tla/Trust.tla`).
+
+  Claude Code 2.1.322 reads `projects[<path>].hasTrustDialogAccepted: true`, where `<path>` is
+  the worktree's real path (git prints it so, and `root` is physical). A session on the account
+  may be writing the same file. Each of its writes replaces the whole file from a read made just
+  before it, under the lock `<file>.lock`, a directory made by mkdir. So this write takes that
+  lock too: mkdir, read, write whole to a temporary name and rename, rmdir. It never waits on the
+  lock, and holds it for one read and one write, far less than the time the program waits
+  before it writes without it.
+
+  Answers:
+
+  - `{:ok, :trusted}`, the mark written; `{:ok, :already}`, the mark there, nothing written;
+  - `{:refused, {:outside, path}}` for a path not inside `root`: never a project's own
+    checkout or a path outside the home;
+  - `{:refused, :locked}` while another writer holds the lock;
+  - `{:refused, {:no_state, file}}` when Claude Code never ran on the account: the file it
+    makes at its first start is not made here, since `login/2` reads its absence;
+  - `{:refused, {:not_json, file}}` for a file that is not a JSON object;
+  - `{:unknown, {file, reason}}` when a read or write fails, and `{:unknown, {:lock_left,
+    reason}}` when the mark was written but the lock could not be removed (the program breaks
+    it as stale).
+
+  Nothing is written in any refusal.
+
+      iex> account = CodingAgentFramework.Accounts.Account.at("work", "/srv/caf/accounts/work/claude")
+      iex> CodingAgentFramework.Accounts.trust(account, "/srv/caf/worktrees", "/srv/app")
+      {:refused, {:outside, "/srv/app"}}
+  """
+  @spec trust(Account.t(), String.t(), String.t()) ::
+          {:ok, :trusted | :already} | {:refused, term} | {:unknown, term}
+  def trust(%Account{} = account, root, path) when is_binary(root) and is_binary(path) do
+    file = Path.join(account.config_dir, ".claude.json")
+
+    with :ok <- inside(root, path),
+         :ok <- take_lock(account, file <> ".lock") do
+      marked = mark(file, path)
+
+      case {File.rmdir(file <> ".lock"), marked} do
+        {:ok, _} -> marked
+        {{:error, reason}, {:ok, :trusted}} -> {:unknown, {:lock_left, reason}}
+        {{:error, _}, other} -> other
+      end
+    end
+  end
+
+  defp inside(root, path) do
+    if Path.type(root) == :absolute and Path.expand(path) == path and
+         String.starts_with?(path, String.trim_trailing(root, "/") <> "/"),
+       do: :ok,
+       else: {:refused, {:outside, path}}
+  end
+
+  defp take_lock(account, lock) do
+    case File.mkdir(lock) do
+      :ok -> :ok
+      {:error, :eexist} -> {:refused, :locked}
+      {:error, :enoent} -> {:refused, {:not_prepared, account.name}}
+      {:error, reason} -> {:unknown, {lock, reason}}
+    end
+  end
+
+  # Under the lock: the file read, the mark put over the path's own entry, the whole file
+  # written back with its mode.
+  defp mark(file, path) do
+    with {:ok, text} <- read_state(file),
+         {:ok, %{} = state} <- decode_state(text, file),
+         {:ok, projects} <- projects(state, file) do
+      entry = Map.get(projects, path, %{})
+
+      if entry["hasTrustDialogAccepted"] == true do
+        {:ok, :already}
+      else
+        projects = Map.put(projects, path, Map.put(entry, "hasTrustDialogAccepted", true))
+        write_state(file, Map.put(state, "projects", projects))
+      end
+    end
+  end
+
+  defp read_state(file) do
+    case File.read(file) do
+      {:ok, text} -> {:ok, text}
+      {:error, :enoent} -> {:refused, {:no_state, file}}
+      {:error, reason} -> {:unknown, {file, reason}}
+    end
+  end
+
+  defp decode_state(text, file) do
+    case JSON.decode(text) do
+      {:ok, %{} = state} -> {:ok, state}
+      _ -> {:refused, {:not_json, file}}
+    end
+  end
+
+  defp projects(state, file) do
+    case Map.get(state, "projects", %{}) do
+      %{} = projects -> {:ok, projects}
+      _ -> {:refused, {:not_json, file}}
+    end
+  end
+
+  # Claude Code writes the file with mode 0600; the copy keeps the file's own.
+  defp write_state(file, state) do
+    tmp = file <> ".framework.tmp"
+
+    with {:ok, %{mode: mode}} <- File.stat(file),
+         :ok <- File.write(tmp, JSON.encode!(state)),
+         :ok <- File.chmod(tmp, Bitwise.band(mode, 0o7777)),
+         :ok <- File.rename(tmp, file) do
+      {:ok, :trusted}
+    else
+      {:error, reason} ->
+        _ = File.rm(tmp)
+        {:unknown, {file, reason}}
     end
   end
 

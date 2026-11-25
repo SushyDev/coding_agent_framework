@@ -1778,6 +1778,23 @@ a press that did not end the process, gets SIGTERM to its held program's record
 for an end, and from the ask on it is never confirmed running: a session asked to end runs no
 later turn (NoTurnAfterEnd), and an asked end ends or answers unknown (EndEnds).
 
+**A worktree the framework made is trusted before the start** (F-255, `Trust.tla`). Claude
+Code 2.1.322 shows no trust dialog in a folder whose real path its account's `.claude.json`
+marks `projects[<path>].hasTrustDialogAccepted: true` (a symlinked form of the path is not
+read; a folder above a git root does not count; a subfolder of a marked one does). It has no
+launch flag or setting for an interactive session's trust. So an interactive start in a
+worktree under `<home>/worktrees` writes that mark on its account (`Accounts.trust/3`) once the
+tree is set up and before the hold, at every start and resume there, so a move's resume marks it
+on the new account; the row's `worktree` says `trusted`, `trusted already`, or why not. Never
+for a project's own checkout or any path outside the worktrees, and not for a headless start,
+which meets no dialog. Claude Code rewrites the whole file from a read made just before each
+write, under the lock `.claude.json.lock` (a directory made by mkdir), and writes without the
+lock after about 1.4 s of waiting on it; a plain read-modify-write loses its keys or the mark
+(`Break_Trust_Plain`). So the mark takes the same lock, never waits on it, and holds it for one
+read and one write: `{:refused, :locked}` while it is held, and refused, writing nothing, when
+the file is not there or not JSON. A mark not written leaves the trust dialog to the press
+above.
+
 A numbered menu no rule names that a start meets before its session file (an onboarding menu
 on a new account, F-203) is a startup dialog too, kind `start_menu`, which no callback answers.
 A new account's onboarding may show several such menus in one start, so a start's menu is
@@ -2072,9 +2089,10 @@ transports. `Delegates` needs the host's `Registry` for it. A brief longer than 
 carries goes as a pointer to its file (F-155, "The launch").
 
 - Its brief is stored first, as any delegate's, then marked by `launch`, and the start carries
-  it as its prompt. A startup dialog its start meets (the folder's trust dialog in a new
-  worktree, the imports dialog) waits on a person, as any interactive start's does ("Startup
-  dialogs"), unless the app's callback chose to answer that kind. Its settings carry the waiter
+  it as its prompt. Its worktree is marked trusted on its account before the start, so no
+  trust dialog shows ("Startup dialogs", F-255). A startup dialog its start still meets (the
+  trust dialog when the mark was refused, the imports dialog) waits on a person, as any
+  interactive start's does, unless the app's callback chose to answer that kind. Its settings carry the waiter
   hook in its launch overlay.
 - Its report is the reply to the brief's uuid, read from its transcript: the last reply that
   ended a message of the turn whose user line holds the brief's mark (or, after a resume, the
@@ -3560,7 +3578,9 @@ without it.
 - The framework writes each account's settings, hooks and MCP servers into that account's
   directory itself, from data, so what an agent runs with is the framework's. It writes only
   files of its own that each launch names by flag, never a file Claude Code rewrites
-  (`settings.json`, `.claude.json`, credentials). An agent's settings are one file: its launch
+  (`settings.json`, `.claude.json`, credentials), with one exception: the trust mark of a
+  worktree it made ("Startup dialogs", F-255), one key of `.claude.json` written under Claude
+  Code's own lock. An agent's settings are one file: its launch
   options' overlay merged over its account's settings, since `--settings` takes one value
   (F-110).
 - Check against each pinned Claude Code release what the help leaves open: which settings a

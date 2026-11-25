@@ -37,7 +37,10 @@ defmodule CodingAgentFramework.ScreenStandIn do
     as a running menu's, and the start goes on; `:menu2` draws it with another title
     (`menu_titles/0`), a second onboarding step (F-206), and each menu's answer is appended
     to `<dir>/menus` (`menu_answers/1`); each key the trust or imports dialog takes is
-    appended to `<dir>/dialog_keys` (`dialog_keys/1`): `down`, `up`, `enter`;
+    appended to `<dir>/dialog_keys` (`dialog_keys/1`): `down`, `up`, `enter`. Written with
+    `marks: true` too, it draws no trust dialog in a folder whose real path
+    `$CLAUDE_CONFIG_DIR/.claude.json` marks under `projects`, as 2.1.322 does (F-255): the
+    entry `{"hasTrustDialogAccepted":true}` as `Accounts.trust/3` writes a new one, compact;
   - written with `redraw: ms` too, it draws the trust dialog again once, `ms` after its first
     draw, as 2.1.322 does about 150 ms after it (F-246): until then a key moves the marker on
     the screen only and an Enter is dropped, and the second draw puts the marker and the
@@ -181,12 +184,14 @@ defmodule CodingAgentFramework.ScreenStandIn do
       end
 
     suffix = suffix <> if(proc_start <> stat_dir != "", do: "-ticks", else: "")
+    marks = if opts[:marks], do: "1", else: ""
+    suffix = suffix <> if(marks != "", do: "-marks", else: "")
     path = Path.join(dir, "claude-screen#{suffix}-#{release}")
     tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
 
     flags =
       {release, idle, dialogs, transcript, first, session_file, reloaded,
-       {redraw, every, proc_start, stat_dir}}
+       {redraw, every, proc_start, stat_dir, marks}}
 
     File.write!(tmp, script(dir, screens, flags))
 
@@ -303,7 +308,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
 
   defp script(dir, screens, flags) do
     {release, idle, dialogs, transcript, first, session_file, reloaded,
-     {redraw, every, proc_start, stat_dir}} = flags
+     {redraw, every, proc_start, stat_dir, marks}} = flags
 
     ~s"""
     #!#{program!(:bash)}
@@ -327,6 +332,14 @@ defmodule CodingAgentFramework.ScreenStandIn do
         *) shift ;;
       esac
     done
+    # With `marks`, a folder `.claude.json` marks trusted by its real path shows no trust
+    # dialog (F-255). Only then is the file read: a test VM may inherit a config dir that is
+    # not its own.
+    if [ -n "#{marks}" ] && [ -n "$CLAUDE_CONFIG_DIR" ]; then
+      json=$(#{program!(:cat)} "$CLAUDE_CONFIG_DIR/.claude.json" 2>/dev/null)
+      mark="\\"$(pwd -P)\\":{\\"hasTrustDialogAccepted\\":true"
+      [[ $json == *"$mark"* ]] && dialogs=${dialogs#trust}
+    fi
     # The startup dialogs left to answer; the first is shown.
     set -- $dialogs
     [ $# -gt 0 ] && screen=$1
