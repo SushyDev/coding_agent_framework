@@ -890,9 +890,12 @@ defmodule CodingAgentFramework.Sessions do
         # Checked, Added and the setup, in a task: a setup may take minutes, and other calls
         # go on meanwhile. The task is linked, so Sessions' death ends it, and the reaper its
         # commands' groups.
+        # An interactive start's tree is marked trusted on its account before the hold
+        # (F-255): a headless one meets no trust dialog.
         tree ->
           run = runner(state)
-          task = Task.async(fn -> prepare(run, tree, place.cwd, resume != nil) end)
+          trust = if Map.has_key?(way, :stream), do: nil, else: account
+          task = Task.async(fn -> prepare(run, tree, place.cwd, resume != nil, trust) end)
 
           {:noreply,
            put_in(state.pending[name], %{pending | kind: :tree} |> Map.put(:task, task.ref))}
@@ -2544,7 +2547,7 @@ defmodule CodingAgentFramework.Sessions do
              true <- state.reaper != nil or {:refused, :no_reaper},
              path = Worktree.path(root, project, name),
              [] <- Table.holding(state.db, state.host.name, path, name) do
-          {:ok, %{cwd: path, tree: %{project: project, branch: branch}}}
+          {:ok, %{cwd: path, tree: %{project: project, branch: branch, root: root}}}
         else
           [_ | _] = rows -> {:refused, {:held, Enum.map(rows, & &1.name)}}
           failed -> failed
@@ -2768,17 +2771,33 @@ defmodule CodingAgentFramework.Sessions do
     %{host: state.host, env: state.ps.env, git: git, sh: state.holder.sh, reaper: state.reaper}
   end
 
-  # Checked, Added and the setup (SetupStarts, SetupEnds). Runs in the start's task. Answers
-  # what the start did with the tree (nil before it had one) and the setup's outcome.
-  defp prepare(run, %{project: project, branch: branch}, path, resume?) do
+  # Checked, Added and the setup (SetupStarts, SetupEnds), then the trust mark on `account` once
+  # the setup passed (`Trust.tla`). Runs in the start's task. Answers what the start did with
+  # the tree (nil before it had one) and the setup's outcome. A mark not written leaves the
+  # trust dialog to a press; the row's `worktree` says which.
+  defp prepare(run, %{project: project, branch: branch} = tree, path, resume?, account) do
     with {:ok, list} <- git(run, project, :list),
          listed = Worktree.listed(list, path),
          {:ok, status} <- status(run, project, listed, branch, path),
          how when how in [:add, :reuse] <- Worktree.decide(listed, status, branch, resume?),
          :ok <- add(run, project, how, path, branch) do
-      {if(how == :add, do: "added", else: "reused"), setup(run, project, path)}
+      how = if how == :add, do: "added", else: "reused"
+
+      case setup(run, project, path) do
+        :ok when account != nil -> {how <> "; " <> trusted(account, tree.root, path), :ok}
+        set_up -> {how, set_up}
+      end
     else
       failed -> {nil, failed}
+    end
+  end
+
+  defp trusted(account, root, path) do
+    case Accounts.trust(account, root, path) do
+      {:ok, :trusted} -> "trusted"
+      {:ok, :already} -> "trusted already"
+      {:refused, reason} -> "not trusted: " <> Store.text(reason)
+      {:unknown, reason} -> "trust unknown: " <> Store.text(reason)
     end
   end
 

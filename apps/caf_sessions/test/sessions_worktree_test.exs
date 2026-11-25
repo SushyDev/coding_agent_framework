@@ -28,14 +28,17 @@ defmodule CodingAgentFramework.SessionsWorktreeTest do
   test "Checked, Added and the setup: a new branch's tree, set up again at each start", ctx do
     assert {:ok, _} = start(ctx, "w1", "unit/one")
     path = Path.join(ctx.root, "w1")
-    assert %{status: "running", cwd: ^path, worktree: "added"} = row(ctx, "w1")
+
+    assert %{status: "running", cwd: ^path, worktree: "added; not trusted: " <> _} =
+             row(ctx, "w1")
+
     assert {_, 0} = git(ctx, ["-C", ctx.repo, "show-ref", "--verify", "refs/heads/unit/one"])
     assert File.read!(Path.join(path, "built.log")) == "built\n"
     assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "w1")
 
     # The build state the setup made is ignored, so the tree is clean and reused.
     assert {:ok, _} = start(ctx, "w1", "unit/one")
-    assert %{worktree: "reused"} = row(ctx, "w1")
+    assert %{worktree: "reused; not trusted: " <> _} = row(ctx, "w1")
     assert File.read!(Path.join(path, "built.log")) == "built\nbuilt\n"
   end
 
@@ -47,7 +50,7 @@ defmodule CodingAgentFramework.SessionsWorktreeTest do
     assert {:refused, {:worktree, :dirty}} = start(ctx, "w2", "unit/two")
     launch = tree_launch(ctx, "unit/two")
     assert {:ok, _} = Sessions.resume(ctx.sessions, "w2", ctx.account, "earlier-2", launch)
-    assert %{worktree: "reused", resume: "earlier-2"} = row(ctx, "w2")
+    assert %{worktree: "reused; not trusted: " <> _, resume: "earlier-2"} = row(ctx, "w2")
   end
 
   test "OnlyInTrees: an add at a taken path leaves its branch, which is not the tree", ctx do
@@ -62,7 +65,7 @@ defmodule CodingAgentFramework.SessionsWorktreeTest do
     # Once the path is free, the branch left behind is checked out, without -b.
     File.rm_rf!(path)
     assert {:ok, _} = start(ctx, "w3", "unit/three")
-    assert %{worktree: "added"} = row(ctx, "w3")
+    assert %{worktree: "added; not trusted: " <> _} = row(ctx, "w3")
   end
 
   test "Checked: a path whose tree is on another branch is refused", ctx do
@@ -80,7 +83,7 @@ defmodule CodingAgentFramework.SessionsWorktreeTest do
     assert {:refused, {:setup, :timeout}} = start(ctx, "w5", "unit/five", slow, 300)
 
     assert {:ok, _} = start(ctx, "w5", "unit/five")
-    assert %{status: "running", worktree: "reused"} = row(ctx, "w5")
+    assert %{status: "running", worktree: "reused; not trusted: " <> _} = row(ctx, "w5")
   end
 
   test "RowWritten: a path another session's row holds is refused", ctx do

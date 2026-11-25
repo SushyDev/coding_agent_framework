@@ -477,6 +477,10 @@ Built, each from a checked model in `model/tla/`:
   when, and its source (a headless delegate's stream; an interactive session's newest `Stop`
   input, emptied by a later `idle` session file), or `unknown`, never none; a host's process
   groups read beside it, `unknown` on macOS.
+- a worktree the framework makes is trusted before Claude Code starts in it (F-255): an
+  interactive start marks the tree's real path in its account's `.claude.json`, under Claude
+  Code's own lock (`Trust.tla`), so no trust dialog shows; a mark refused leaves the dialog to
+  the press.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
