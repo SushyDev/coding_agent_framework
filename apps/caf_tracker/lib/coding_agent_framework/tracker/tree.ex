@@ -32,7 +32,11 @@ defmodule CodingAgentFramework.Tracker.Tree do
   - **What it does now** (F-235): `tool`, the call it runs now (`%{name, id, started_at}`),
     the newest call its transcript started and has not ended while it is `working`, else nil;
     and `last_event_at`, the newer of its transcript's last entry and its newest `Intake` row
-    (ms), or nil. `tool_calls/3` answers its recent calls. `partial` is true when its
+    (ms), or nil. `tool_calls/3` answers its recent calls. `background` is its background
+    commands, `%{count, since, source, groups}` or `{:unknown, reason}`
+    (`CodingAgentFramework.Tracker.Background`, F-259): a headless delegate's from its
+    `Stream` row, an interactive session's from its newest `Stop` row and its session file.
+    `groups` is the host's read of its process groups, given as the `groups:` option. `partial` is true when its
     transcript's first read took only the file's last part (F-244): calls and subagents started
     before that part are absent, and a subagent the fold knows only from its file's meta has its
     `type` and `description` from the meta and no `started_at`.
@@ -58,13 +62,16 @@ defmodule CodingAgentFramework.Tracker.Tree do
   """
 
   alias CodingAgentFramework.Sessions.{Agents, Turn}
+  alias CodingAgentFramework.Tracker.Background
 
   @read ["sessions:", "registry:", "stream:", "transcripts:"]
   @subagent [:agent_id, :type, :description, :state, :status, :tokens]
 
   @doc """
-  The tree in `view`: `%{agents: rows, sources: ages, problems: problems}`. Option `all:`
-  (false by default) keeps the delegates that ended.
+  The tree in `view`: `%{agents: rows, sources: ages, problems: problems}`. Options: `all:`
+  (false by default) keeps the delegates that ended, and `groups:`, a map of `{host, name}` to
+  that agent's read of its process groups (`StuckBackgrounds.Groups.read/3`'s answer), for
+  the agents `records/1` names.
   """
   @spec agents(map, keyword) :: %{agents: [map], sources: map, problems: [map]}
   def agents(view, opts \\ []) when is_map(view) do
@@ -86,6 +93,7 @@ defmodule CodingAgentFramework.Tracker.Tree do
     full = Map.new(good, &{{&1.row.host, &1.row.name}, &1.row})
     ev = %{streams: streams, transcripts: transcripts, files: files, full: full}
     ev = Map.put(ev, :hooks, hooks(entries.(:events)))
+    ev = Map.merge(ev, %{stops: stops(entries.(:events)), groups: opts[:groups] || %{}})
     shown = if opts[:all], do: good, else: Enum.reject(good, &Agents.ended?(&1.row))
     rows = Enum.map(Agents.tree(Enum.map(shown, & &1.row)), &row(&1, ev))
 
@@ -96,6 +104,28 @@ defmodule CodingAgentFramework.Tracker.Tree do
       sources: for({t, age} <- ages, String.starts_with?(t, @read), into: %{}, do: {t, age}),
       problems: for(e <- bad, do: %{key: e.key, problem: :shape})
     }
+  end
+
+  @doc """
+  The process of each running agent in `view` that a host can read the groups of, by
+  `{host, name}`: its pid and start time, the record `StuckBackgrounds.Groups.read/3` takes.
+
+      iex> alias CodingAgentFramework.Tracker.Tree
+      iex> m = %{id: 1, host: "h", name: "main", kind: "main", parent: nil, project: "app",
+      ...>   account: "work", status: "running", pid: 7, proc_start: "Sat Nov 21 09:00:00 2026"}
+      iex> Tree.records(%{{"h", "agents"} => %{agents: [%{key: 1, row: m}]}})
+      %{{"h", "main"} => %{pid: 7, start: "Sat Nov 21 09:00:00 2026"}}
+  """
+  @spec records(map) :: %{{String.t(), String.t()} => %{pid: pos_integer, start: String.t()}}
+  def records(view) when is_map(view) do
+    for p <- Map.values(view),
+        is_map(p),
+        %{row: %{} = r} <- List.wrap(p[:agents]),
+        agent?(r),
+        r.status == "running",
+        is_integer(r[:pid]) and is_binary(r[:proc_start]),
+        into: %{},
+        do: {{r.host, r.name}, %{pid: r.pid, start: r.proc_start}}
   end
 
   defp agent?(%{id: id, name: n, kind: k, status: s}),
@@ -114,7 +144,8 @@ defmodule CodingAgentFramework.Tracker.Tree do
       state: state,
       waits_on: waits,
       transcript: transcript(ev.transcripts[key(full)]),
-      subagents: subagents(ev.transcripts[key(full)])
+      subagents: subagents(ev.transcripts[key(full)]),
+      background: background(full, state, ev)
     })
     |> Map.merge(activity(full, state, ev))
   end
@@ -158,6 +189,31 @@ defmodule CodingAgentFramework.Tracker.Tree do
       acc -> Map.update(acc, key(r), r.written_at, &max(&1, r.written_at))
     end
   end
+
+  # Each session's `Stop` rows, by `{account, session_id}`.
+  defp stops(entries) do
+    for %{row: %{event: "Stop"} = r} <- entries, is_binary(r[:session_id]), reduce: %{} do
+      acc -> Map.update(acc, key(r), [r], &[r | &1])
+    end
+  end
+
+  defp background(row, state, ev) do
+    shown =
+      cond do
+        state in ["ended", "gone"] -> Background.none()
+        state == "starting" -> {:unknown, :starting}
+        state == "dialog" -> {:unknown, :dialog}
+        Agents.headless?(row) -> Background.headless(ev.streams[row[:session_id]])
+        true -> Background.interactive(file(row, ev), ev.stops[key(row)] || [])
+      end
+
+    case Map.fetch(ev.groups, {row.host, row.name}) do
+      {:ok, answer} -> Background.groups(shown, answer)
+      :error -> shown
+    end
+  end
+
+  defp file(row, ev), do: Turn.file(row, ev.files[{row[:host], row[:account]}] || [])
 
   defp newer(nil, b), do: b
   defp newer(a, nil), do: a
@@ -274,7 +330,7 @@ defmodule CodingAgentFramework.Tracker.Tree do
         {"dialog", dialog(row)}
 
       true ->
-        {word(Turn.file_state(Turn.file(row, ev.files[{row[:host], row[:account]}] || []))), []}
+        {word(Turn.file_state(file(row, ev))), []}
     end
   end
 

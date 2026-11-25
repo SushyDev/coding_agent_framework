@@ -473,6 +473,10 @@ Built, each from a checked model in `model/tla/`:
   longer waits past its bound.
 - `bin/caf-login` makes the home's `git` folder before its gh step (F-262): `gh auth login` writes
   git's global config, which the home holds.
+- the tree shows each agent's background commands (F-259, `Background.tla`): a count, since
+  when, and its source (a headless delegate's stream; an interactive session's newest `Stop`
+  input, emptied by a later `idle` session file), or `unknown`, never none; a host's process
+  groups read beside it, `unknown` on macOS.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

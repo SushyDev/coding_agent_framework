@@ -7,7 +7,8 @@ defmodule CodingAgentFramework.ClaudeStandIn do
     synthetic values: its pid, `sessionId` (the `--resume` id, or one made up), `name` (from
     `--name`), `cwd`, `procStart` as `ps` prints it, and `status`: `idle`, or `busy` or `shell`
     from the line of that word until the line `idle`, as a turn runs, or a background command
-    after it (Claude Code 2.1.322's `shell`). The file is written whole and renamed,
+    after it (Claude Code 2.1.322's `shell`), with `statusUpdatedAt`, the ms of that write, as
+    Claude Code stamps each write of a status (F-259). The file is written whole and renamed,
     and removed when the stand-in exits;
   - exits 143 on SIGTERM, as Claude Code does (F-114), unless it read the line `deaf`, after
     which it ignores SIGTERM, as a process that does not end would; after the line
@@ -74,8 +75,9 @@ defmodule CodingAgentFramework.ClaudeStandIn do
       start=$(LC_ALL=C TZ=UTC #{program!(:ps)} -o lstart= -p $$)
       start=${start#"${start%%[![:space:]]*}"}
       start=${start%"${start##*[![:space:]]}"}
-      printf '{"pid": %d, "sessionId": "%s", "name": "%s", "cwd": "%s", "procStart": "%s", "status": "%s"}' \\
-        $$ "${resume:-stand-in-$$}" "$name" "$PWD" "$start" "$status" > "$file.tmp"
+      ms=${EPOCHREALTIME/[.,]/}; ms=${ms%???}
+      printf '{"pid": %d, "sessionId": "%s", "name": "%s", "cwd": "%s", "procStart": "%s", "status": "%s", "statusUpdatedAt": %s}' \\
+        $$ "${resume:-stand-in-$$}" "$name" "$PWD" "$start" "$status" "$ms" > "$file.tmp"
       #{program!(:mv)} -f "$file.tmp" "$file"
       announced=1
     }
