@@ -487,6 +487,9 @@ Built, each from a checked model in `model/tla/`:
   turn's marks from its transcript, and `Mailbox.answered/4` stores the turn's reply under the
   message's key. A turn a message was queued into is never told as its own (`Reply.tla`), and a
   `<task-notification>` prompt is never a person's typing.
+- the inbox reads closed prompts and keeps a hidden mark (F-254): `answered/2` pages the prompts
+  that closed, each with its choice or withdrawal reason, who answered and when, from the ledger;
+  `hide/3` and `unhide/3` set an open prompt aside, still answerable, as a fact in `Acts`.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

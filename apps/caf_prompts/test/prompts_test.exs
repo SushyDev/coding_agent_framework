@@ -674,4 +674,133 @@ defmodule CodingAgentFramework.PromptsTest do
     assert {:refused, :settled} = Prompts.answer(ctx.prompts, lid, "go_on", "sam")
     assert {:ok, []} = Prompts.read(ctx.prompts, kind: "limit")
   end
+
+  defp question(header) do
+    %{
+      "header" => header,
+      "question" => "Rebase or merge?",
+      "multiSelect" => false,
+      "options" => [
+        %{"label" => "Rebase", "description" => "a straight history"},
+        %{"label" => "Merge", "description" => "keeps the merge"}
+      ]
+    }
+  end
+
+  @rebase [%{"labels" => ["Rebase"], "text" => ""}]
+
+  # F-254: a closed prompt reads from the ledger alone, its `opened` fact and its answer's row.
+  test "an answered dialog, an answered ask and a withdrawn ask read closed", ctx do
+    claude = ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), dialogs: [:trust])
+    launch = SessionsSetup.launch(ctx, :at_start) |> Keyword.put(:claude, claude)
+
+    assert {:unknown, {:dialog, :trust}} =
+             Sessions.start(ctx.sessions, "alpha", ctx.account, launch)
+
+    Prompts.cue(ctx.prompts, %{topic: "sessions:test"})
+    assert_receive {:prompts, %{topic: "prompts", ids: ["dialog:alpha:" <> _ = dialog]}}
+
+    {:ok, {:asked, one}} = Mailbox.ask(ctx.mailbox, "d1", [question("Base")])
+    assert cued(ctx) == ["ask:#{one}"]
+    {:ok, {:asked, two}} = Mailbox.ask(ctx.mailbox, "d1", [question("Again")])
+    assert cued(ctx) == ["ask:#{two}"]
+
+    # Open prompts are not closed ones.
+    assert {:ok, %{prompts: [], next: nil}} = Prompts.answered(ctx.prompts)
+
+    before = System.os_time(:millisecond)
+    assert {:ok, :sent} = Prompts.answer(ctx.prompts, dialog, @trust, "sam")
+    assert {:ok, _} = Prompts.answer(ctx.prompts, "ask:#{one}", @rebase, "d1-parent")
+    withdraw = {:withdraw, "Dismissed."}
+    assert {:ok, _} = Prompts.answer(ctx.prompts, "ask:#{two}", withdraw, "kim")
+    after_all = System.os_time(:millisecond)
+
+    assert {:ok, %{prompts: [withdrawn, answered, pressed], next: nil}} =
+             Prompts.answered(ctx.prompts)
+
+    assert %{id: "ask:" <> _, kind: "ask", status: "withdrawn", agent: "d1"} = withdrawn
+
+    assert %{by: "kim", reason: "Dismissed.", choice: nil, text: "Again: Rebase or merge?"} =
+             withdrawn
+
+    assert %{status: "answered", by: "d1-parent", reason: nil} = answered
+    assert answered.choice == [%{"labels" => ["Rebase"], "text" => ""}]
+    assert [%{"header" => "Base"}] = answered.options
+
+    assert %{id: ^dialog, kind: "dialog", status: "answered", agent: "alpha", by: "sam"} = pressed
+    assert %{choice: @trust, text: "trust dialog"} = pressed
+
+    for p <- [withdrawn, answered, pressed] do
+      assert p.at in before..after_all and is_integer(p.opened_at)
+    end
+
+    assert {:refused, {:bad, :filter}} = Prompts.answered(ctx.prompts, limit: 0)
+    assert {:refused, {:bad, :filter}} = Prompts.answered(ctx.prompts, limit: 201)
+    assert {:refused, {:bad, :filter}} = Prompts.answered(ctx.prompts, kind: "ask")
+  end
+
+  # F-254: a hidden prompt stays open and answerable; its mark is read only while it is open.
+  test "a hidden prompt is still answered, reads closed with its answer, and unhide brings it back",
+       ctx do
+    {:ok, {:asked, one}} = Mailbox.ask(ctx.mailbox, "d1", [question("Base")])
+    assert cued(ctx) == ["ask:#{one}"]
+    {:ok, {:asked, two}} = Mailbox.ask(ctx.mailbox, "d1", [question("Again")])
+    assert cued(ctx) == ["ask:#{two}"]
+    {one, two} = {"ask:#{one}", "ask:#{two}"}
+
+    assert {:ok, %{by: "sam", at: at}} = Prompts.hide(ctx.prompts, one, "sam")
+    assert_receive {:prompts, %{topic: "prompts", ids: [^one]}}
+    assert {:refused, {:hidden, %{by: "sam", at: ^at}}} = Prompts.hide(ctx.prompts, one, "kim")
+    assert {:refused, :not_hidden} = Prompts.unhide(ctx.prompts, two, "sam")
+    assert {:refused, {:bad, :who}} = Prompts.hide(ctx.prompts, two, "")
+    assert {:refused, :no_prompt} = Prompts.hide(ctx.prompts, "ask:999", "sam")
+
+    assert {:ok, [%{id: ^one, hidden: %{by: "sam", at: ^at}}, %{id: ^two, hidden: nil}]} =
+             Prompts.read(ctx.prompts)
+
+    assert {:ok, [%{id: ^two}]} = Prompts.read(ctx.prompts, hidden: false)
+    assert {:ok, [%{id: ^one}]} = Prompts.read(ctx.prompts, hidden: true)
+    assert {:refused, {:bad, :filter}} = Prompts.read(ctx.prompts, hidden: "no")
+
+    # Unhide brings it back, and a second hide is taken again.
+    assert {:ok, nil} = Prompts.unhide(ctx.prompts, one, "kim")
+    assert_receive {:prompts, %{topic: "prompts", ids: [^one]}}
+    assert {:ok, [_, _]} = Prompts.read(ctx.prompts, hidden: false)
+    assert {:ok, %{by: "kim"}} = Prompts.hide(ctx.prompts, one, "kim")
+
+    # Hidden, it is answered as any prompt, and reads closed with its answer.
+    assert {:ok, _} = Prompts.answer(ctx.prompts, one, @rebase, "sam")
+    assert {:ok, [%{id: ^two}]} = Prompts.read(ctx.prompts)
+    assert {:refused, :settled} = Prompts.hide(ctx.prompts, one, "sam")
+
+    assert {:ok, %{prompts: [%{id: ^one, status: "answered", by: "sam", choice: choice}]}} =
+             Prompts.answered(ctx.prompts)
+
+    assert choice == @rebase
+  end
+
+  # F-254: pages newest open first, within the limit, the next from the last page's cursor.
+  test "closed prompts page newest first within the bound", ctx do
+    ids =
+      for n <- 1..5 do
+        {:ok, {:asked, id}} = Mailbox.ask(ctx.mailbox, "d1", [question("Q#{n}")])
+        assert cued(ctx) == ["ask:#{id}"]
+        "ask:#{id}"
+      end
+
+    # One stays open, and is on no page.
+    for id <- Enum.take(ids, 4), do: {:ok, _} = Prompts.answer(ctx.prompts, id, @rebase, "sam")
+    [a, b, c, d, _open] = ids
+
+    assert {:ok, %{prompts: [%{id: ^d}, %{id: ^c}], next: next}} =
+             Prompts.answered(ctx.prompts, limit: 2)
+
+    assert {:ok, %{prompts: [%{id: ^b}, %{id: ^a}], next: last}} =
+             Prompts.answered(ctx.prompts, limit: 2, before: next)
+
+    assert {:ok, %{prompts: [], next: nil}} =
+             Prompts.answered(ctx.prompts, limit: 2, before: last)
+
+    assert {:ok, %{prompts: [_, _, _, _], next: nil}} = Prompts.answered(ctx.prompts)
+  end
 end

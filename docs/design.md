@@ -870,7 +870,16 @@ F-206 (F-203's new-2) keys a start's menu by its read, as a running one is: its 
 read that found it, kept while the pane shows that menu (its title and options) and its answer
 is not sent, so a start that shows several menus one after another asks a person each, its
 prompt `dialog:<agent>:<at>:start_menu`, its answer naming that read (`answer_dialog/5`'s
-`at:`) and its act's state the read too; each is pressed at most once. Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
+`at:`) and its act's state the read too; each is pressed at most once. F-254 reads closed
+prompts and keeps a hidden mark, still with no row of its own. `answered/3` pages the prompts
+that closed, newest open first and at most 200 a page, from the ledger alone: each prompt's
+`opened` fact (now with its text, options, parent and project, and written by the read before
+an answer too) and its `answer` row (choice, who, when; an ask's withdrawal and its reason).
+One that left with no answer through the inbox reads `closed`, with no one named. `hide/3` and
+`unhide/3` write a fact in `Acts` (act `hide` or `unhide`, target the prompt's id); `read/3`
+shows the latest as `hidden: nil | %{by, at}` and filters on `hidden:`. Nothing that answers
+reads the mark, so it cannot change what an answer presses, and a closed prompt's marks are
+ignored, since they are read only for prompts open now. Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
 `expired` prompts kept shown, and the kinds that need a reading first.
 
 `Prompt.tla` (B1) is its contract: it instances `Hold` (one response, its deadline, its holder's
@@ -902,7 +911,9 @@ One config and one supervisor in; a few calls and one stream of cues out.
 - **Calls.** `operate(caf, actor, verb, args)`: the seven verbs as the operator, and the
   operator's own: `end_main`, a main session's `move` and `resume`, a remedy's `approve` and
   `revoke`, a symptom's `clear`. `answer(caf, prompt, choice)` answers any prompt, in place of
-  `answer_startup`, an ask's answer and a request's answer. `prompts(caf, filter)`,
+  `answer_startup`, an ask's answer and a request's answer. `hide(caf, prompt, who)` and
+  `unhide(caf, prompt, who)` set an open prompt aside for a person's console and bring it back
+  (F-254). `prompts(caf, filter)`, `answered(caf, page)` (the prompts that closed, F-254),
   `view(caf, scope)`, `metrics(caf, query)`, `digest(caf, window)` and `query(caf, filter)` read.
 - **Cues.** `subscribe(caf, topics)`: one stream of `{topic, ids}` for every write, from the
   `Ledger`. The app re-reads by id, as every view does; `prompts` is the inbox's topic. Every

@@ -24,6 +24,8 @@ defmodule CodingAgentFramework.Example.Console do
       prompts(caf)                                   # everything that waits on a person
       prompts(caf, subtree: "demo-main", kind: "permission")
       answer(caf, "permission:41", "allow")          # as the config's operator, once
+      hide(caf, "ask:12")                            # set aside, still answerable; unhide(caf, id)
+      answered(caf, limit: 10)                       # the prompts that closed, and who answered
       symptoms(caf, status: ["open", "asked"])       # what the healer read
       limited(caf)                                   # the accounts at a usage limit
       acts(caf, actor: "absent_mains:ws")            # the ledger's acts
@@ -318,9 +320,10 @@ defmodule CodingAgentFramework.Example.Console do
 
   @doc """
   The prompts open now, oldest first (`CodingAgentFramework.prompts/2`): each one's id, kind,
-  agent, status and text, and how to answer it. `filter`: `agent:`, `subtree:`, `kind:`.
+  agent, status and text, and how to answer it. `filter`: `agent:`, `subtree:`, `kind:`,
+  `hidden:` (`false` leaves out the ones set aside with `hide/2`).
 
-      prompts(caf, subtree: "demo-main")
+      prompts(caf, subtree: "demo-main", hidden: false)
   """
   @spec prompts(pid, keyword) :: :ok
   def prompts(caf, filter \\ []) do
@@ -329,7 +332,8 @@ defmodule CodingAgentFramework.Example.Console do
         if prompts == [], do: say("no prompt waits")
 
         for p <- prompts do
-          say("#{p.id}: #{p.kind} of #{p.agent || "no agent"}, #{p.status}")
+          aside = if p.hidden, do: ", hidden by #{p.hidden.by}", else: ""
+          say("#{p.id}: #{p.kind} of #{p.agent || "no agent"}, #{p.status}#{aside}")
           for line <- lines(p.text), do: say("  | " <> line)
           say(~s|  answer(caf, "#{p.id}", #{choices(p)})|)
         end
@@ -350,6 +354,47 @@ defmodule CodingAgentFramework.Example.Console do
   def answer(caf, id, choice) do
     c = info(caf).config
     show(CodingAgentFramework.answer(c.instance, id, choice, c.operator))
+  end
+
+  @doc """
+  The prompts that closed, newest open first (`CodingAgentFramework.answered/2`): each one's
+  id, kind, agent, how it closed, who answered and their choice or reason. `filter`: `limit:`,
+  `before:` (the cursor the last page printed).
+
+      answered(caf, limit: 10)
+  """
+  @spec answered(pid, keyword) :: :ok
+  def answered(caf, filter \\ []) do
+    case CodingAgentFramework.answered(info(caf).config.instance, filter) do
+      {:ok, %{prompts: prompts, next: next}} ->
+        if prompts == [], do: say("no prompt closed")
+
+        for p <- prompts do
+          say("#{p.id}: #{p.kind} of #{p.agent || "no agent"}, #{p.status}")
+          for line <- lines(p.text || ""), do: say("  | " <> line)
+          if p.by, do: say("  by #{p.by}: #{inspect(p.choice || p.reason)}")
+        end
+
+        if next, do: say("older: answered(caf, before: #{next})")
+        :ok
+
+      other ->
+        show(other)
+    end
+  end
+
+  @doc "Sets open prompt `id` aside as the config's operator (`CodingAgentFramework.hide/3`)."
+  @spec hide(pid, String.t()) :: :ok
+  def hide(caf, id) do
+    c = info(caf).config
+    show(CodingAgentFramework.hide(c.instance, id, c.operator))
+  end
+
+  @doc "Brings hidden prompt `id` back (`CodingAgentFramework.unhide/3`)."
+  @spec unhide(pid, String.t()) :: :ok
+  def unhide(caf, id) do
+    c = info(caf).config
+    show(CodingAgentFramework.unhide(c.instance, id, c.operator))
   end
 
   @doc """

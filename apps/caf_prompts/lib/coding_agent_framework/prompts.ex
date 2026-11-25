@@ -25,7 +25,7 @@ defmodule CodingAgentFramework.Prompts do
   A later kind is one more clause of `list/2` and of `answer/5`, and the same data.
 
   Each prompt is `%{id, kind, status, agent, parent, project, subagent, text, options,
-  opened_at, deadline}`: `id` names its owner's key, so one state is one prompt
+  opened_at, deadline, hidden}`: `id` names its owner's key, so one state is one prompt
   (`"permission:<intake id>"`, `"permission:stream:<session>:<request id>"`,
   `"stop_cap:<intake id>"`, `"dialog:<agent>:<start>:<dialog>"`,
   `"dialog:<agent>:<at>:start_menu"` and `"dialog:<agent>:<at>:menu"` (`at` the wall-clock ms
@@ -44,7 +44,8 @@ defmodule CodingAgentFramework.Prompts do
   `parent` and `project` its row's; `options` the labels a choice is one of,
   or for an ask its questions, each with its options; `opened_at` and `deadline` wall-clock ms,
   `deadline` nil for a kind that waits for ever (a stream's request among them: Claude Code
-  waits on the stream for its answer). A `usage_credits` prompt has the deadline the
+  waits on the stream for its answer); `hidden` nil, or `%{by, at}` for a prompt a person set
+  aside (`hide/3`). A `usage_credits` prompt has the deadline the
   healer set, whose default is the stop, the healer's (`CodingAgentFramework.Limits`); an
   agent's `limit` prompt has none, and a start's has its row's: the reset plus the margin, at
   which its owner takes the default, the wait, and picks its account again.
@@ -69,9 +70,20 @@ defmodule CodingAgentFramework.Prompts do
 
   **Each open a fact** (F-202). The first read that lists a prompt records its open in `Acts`
   (`Acts.record/7`, actor `prompts:<host>`, act `opened`, keyed `opened:<host>:<prompt id>`),
-  its `detail` the prompt's id, kind, agent and `opened_at`. The inbox never reads it back: it
-  is for the metrics, so a dialog, login or limit prompt never answered still counts, with its
-  open time.
+  its `detail` the prompt's id, kind, agent, `opened_at`, and (F-254) its parent, project,
+  subagent, text and options. A dialog, login or limit prompt never answered still counts, with
+  its open time. The read before an answer records it too, so every prompt answered here has one.
+
+  **Closed prompts** (F-254, `answered/3`). A prompt that left the inbox has no owner's row that
+  still shows it, so it is read from the ledger alone: its `opened` fact (what was asked) and
+  its `answer` row (who chose what, and when). No copy is kept; open prompts keep no row of
+  their own.
+
+  **A hidden mark** (F-254, `hide/3`, `unhide/3`). A person sets a prompt aside: it stays open
+  and answerable, its owner and its answer path unchanged, and `read/3` shows `hidden: %{by,
+  at}`. The mark is a fact in `Acts` (act `hide` or `unhide`, actor the person, target the
+  prompt's id), the latest one wins, and nothing that answers a prompt reads it. A closed
+  prompt's marks are ignored: they are read only for the prompts open now.
 
   **The parent told once.** When a delegate's prompt opens, its parent gets one notice through
   `Mailbox` (`Mailbox.notify/4`, kind `prompt`, from the delegate): ``From <delegate> (prompt):
@@ -87,7 +99,7 @@ defmodule CodingAgentFramework.Prompts do
   use GenServer
 
   alias CodingAgentFramework.{Acts, Delegates, Intake, Logins, Mailbox, Mains, Sessions, Stream}
-  alias CodingAgentFramework.Watch
+  alias CodingAgentFramework.{Store, Watch}
   alias CodingAgentFramework.Sessions.{Agents, Limit, Menu}
 
   @timeout 5_000
@@ -108,8 +120,31 @@ defmodule CodingAgentFramework.Prompts do
           text: String.t(),
           options: list,
           opened_at: integer | nil,
-          deadline: integer | nil
+          deadline: integer | nil,
+          hidden: %{by: String.t(), at: integer} | nil
         }
+
+  @typedoc "A closed prompt, as `answered/3` says."
+  @type closed :: %{
+          id: String.t(),
+          kind: String.t(),
+          status: String.t(),
+          agent: String.t() | nil,
+          parent: String.t() | nil,
+          project: String.t() | nil,
+          subagent: String.t() | nil,
+          text: String.t() | nil,
+          options: list | nil,
+          opened_at: integer | nil,
+          choice: term,
+          by: String.t() | nil,
+          at: integer | nil,
+          reason: term
+        }
+
+  # The most closed prompts one page of `answered/3` holds, and its default.
+  @page 200
+  @default_page 50
 
   @doc """
   Starts the inbox of one host. Options: `host:`, `intake:` (the host's `Intake`) and
@@ -150,16 +185,89 @@ defmodule CodingAgentFramework.Prompts do
 
   @doc """
   The prompts open now, oldest first, within `filter`: `agent:` (that agent's), `subtree:` (that
-  agent's and every agent's under it), `kind:` (one of `kinds/0`). Answers `{:ok, prompts}`,
+  agent's and every agent's under it), `kind:` (one of `kinds/0`), `hidden:` (`false` leaves out
+  the prompts a person set aside, `true` keeps only those). Answers `{:ok, prompts}`,
   `{:refused, {:bad, :filter}}`, or `{:unknown, reason}` when an owner did not answer.
 
-      Prompts.read(prompts, subtree: "app-main", kind: "permission")
-      #=> {:ok, [%{id: "permission:41", kind: "permission", agent: "app-unit", …}]}
+      Prompts.read(prompts, subtree: "app-main", kind: "permission", hidden: false)
+      #=> {:ok, [%{id: "permission:41", kind: "permission", agent: "app-unit", hidden: nil, …}]}
   """
   @spec read(GenServer.server(), keyword, keyword) ::
           {:ok, [prompt]} | {:refused, term} | {:unknown, term}
   def read(prompts, filter \\ [], opts \\ []) do
     with :ok <- check_filter(filter), do: call(prompts, {:read, filter}, opts)
+  end
+
+  @doc """
+  The prompts that closed, newest open first, one page of at most `limit:` (1 to #{@page},
+  #{@default_page} by default), the next older page from `before:` (the last page's `next`).
+  It is a separate read from `read/3`, not a filter on it, since a closed prompt has no owner's
+  row: it is read from the ledger, its `opened` fact and its `answer` row in `Acts`.
+
+  Each is `%{id, kind, status, agent, parent, project, subagent, text, options, opened_at,
+  choice, by, at, reason}`: `status` is
+
+  - `answered`: its answer through `answer/5` was taken; `choice` as given (JSON's terms: an
+    ask's answers one per question, a deny with its message `["deny", message]`), `by` who
+    answered (a person, the app, or an agent's parent by its name), `at` when (ms);
+  - `withdrawn`: an ask withdrawn through `answer/5`; `reason` the reason the agent read;
+  - `unknown`: an answer was handed on and its owner did not say whether it took it; `reason`
+    the owner's answer;
+  - `closed`: it left with no answer through the inbox (answered on the pane, by its owner's
+    own default, or its agent ended): `choice`, `by` and `at` are nil.
+
+  It pages by when each prompt opened, since that is a fact for every prompt, while when one
+  closed is known only for those answered here. Answers `{:ok, %{prompts: closed, next:
+  cursor}}`, `next` nil for a page shorter than its limit (the last); `{:refused, {:bad,
+  :filter}}`, `{:refused, :no_ledger}` for an inbox started with no `acts_db:`, or `{:unknown,
+  reason}`.
+
+      Prompts.answered(prompts, limit: 20)
+      #=> {:ok, %{prompts: [%{id: "ask:12", status: "answered", by: "sam", …}], next: 431}}
+  """
+  @spec answered(GenServer.server(), keyword, keyword) ::
+          {:ok, %{prompts: [closed], next: integer | nil}} | {:refused, term} | {:unknown, term}
+  def answered(prompts, filter \\ [], opts \\ []) do
+    limit = Keyword.get(filter, :limit, @default_page)
+    before = Keyword.get(filter, :before)
+
+    ok? =
+      Keyword.keyword?(filter) and Keyword.keys(filter) -- [:limit, :before] == [] and
+        is_integer(limit) and limit in 1..@page and (before == nil or is_integer(before))
+
+    if ok?, do: call(prompts, {:answered, limit, before}, opts), else: {:refused, {:bad, :filter}}
+  end
+
+  @doc """
+  Sets open prompt `id` aside for `who`, a person: it stays open and answerable, and `read/3`
+  shows it `hidden: %{by: who, at: ms}`. The mark is a fact in `Acts` (act `hide`), and nothing
+  that answers a prompt reads it. Answers `{:ok, %{by, at}}`; `{:refused, {:hidden, mark}}`
+  when it is hidden already; `{:refused, :settled}` or `{:refused, :no_prompt}` for one not
+  open, as `answer/5`; `{:refused, {:bad, :who}}`; `{:refused, :no_ledger}`.
+
+      Prompts.hide(prompts, "ask:12", "sam")
+      #=> {:ok, %{by: "sam", at: 1_764_000_000_000}}
+  """
+  @spec hide(GenServer.server(), String.t(), String.t(), keyword) ::
+          {:ok, map} | {:refused, term} | {:unknown, term}
+  def hide(prompts, id, who, opts \\ []), do: mark(prompts, id, who, :hide, opts)
+
+  @doc """
+  Brings hidden prompt `id` back, for `who`: a fact in `Acts` (act `unhide`), after which
+  `read/3` shows it `hidden: nil`. Answers `{:ok, nil}`; `{:refused, :not_hidden}`; or as
+  `hide/3`.
+
+      Prompts.unhide(prompts, "ask:12", "sam")
+      #=> {:ok, nil}
+  """
+  @spec unhide(GenServer.server(), String.t(), String.t(), keyword) ::
+          {:ok, nil} | {:refused, term} | {:unknown, term}
+  def unhide(prompts, id, who, opts \\ []), do: mark(prompts, id, who, :unhide, opts)
+
+  defp mark(prompts, id, who, act, opts) do
+    if is_binary(who) and String.trim(who) != "" and is_binary(id),
+      do: call(prompts, {:mark, id, who, act}, opts),
+      else: {:refused, {:bad, :who}}
   end
 
   @doc """
@@ -349,16 +457,138 @@ defmodule CodingAgentFramework.Prompts do
     {:reply, reply, s}
   end
 
+  # The read before an answer records each open too (F-254), so every prompt answered here has
+  # its `opened` fact, which `answered/3` reads.
   def handle_call({:get, id}, _from, s) do
+    case list(s) do
+      {:ok, all} ->
+        reply =
+          case Enum.find(all, &(&1.id == id)) do
+            nil -> gone(s, id)
+            prompt -> {:ok, prompt, s.owners}
+          end
+
+        {:reply, reply, opened(s, all)}
+
+      unread ->
+        {:reply, unread, s}
+    end
+  end
+
+  def handle_call(_closed_or_mark, _from, %{adb: nil} = s),
+    do: {:reply, {:refused, :no_ledger}, s}
+
+  def handle_call({:answered, limit, before}, _from, s) do
     reply =
       with {:ok, all} <- list(s) do
-        case Enum.find(all, &(&1.id == id)) do
-          nil -> gone(s, id)
-          prompt -> {:ok, prompt, s.owners}
-        end
+        open = MapSet.new(all, & &1.id)
+        facts = opened_facts(s, limit + MapSet.size(open), before)
+        page = facts |> Enum.reject(&(&1.id in open)) |> Enum.take(limit)
+        answers = answers(s, page)
+        next = if length(page) == limit, do: List.last(page).fact
+
+        {:ok, %{prompts: Enum.map(page, &closed(&1, answers[&1.id] || [])), next: next}}
       end
 
     {:reply, reply, s}
+  end
+
+  # One step in this process, so two marks of one prompt are taken in turn and each checks the
+  # one before it. Its write cues `acts`, and the read again here cues `prompts` at once.
+  def handle_call({:mark, id, who, act}, _from, s) do
+    with {:ok, all} <- list(s),
+         {:ok, prompt} <- shown(s, all, id),
+         :ok <- markable(prompt.hidden, act),
+         {:ok, _} <- Acts.record(s.owners.acts, who, id, act, :verified) do
+      {:reply, {:ok, marks(s, [id])[id]}, reread(s)}
+    else
+      other -> {:reply, other, s}
+    end
+  end
+
+  defp shown(s, all, id) do
+    case Enum.find(all, &(&1.id == id)) do
+      nil -> gone(s, id)
+      prompt -> {:ok, prompt}
+    end
+  end
+
+  defp markable(nil, :hide), do: :ok
+  defp markable(mark, :hide), do: {:refused, {:hidden, mark}}
+  defp markable(nil, :unhide), do: {:refused, :not_hidden}
+  defp markable(_mark, :unhide), do: :ok
+
+  # The newest `opened` facts of this host before the cursor, as prompts: `n` covers a page
+  # whatever of them is open now.
+  defp opened_facts(s, n, before) do
+    {cursor, args} = if before, do: {" AND id < ?2", [before]}, else: {"", []}
+    where = "actor = ?1 AND act = 'opened'#{cursor} ORDER BY id DESC LIMIT #{n}"
+
+    for row <-
+          Store.select(s.adb, "acts", Acts.Table.columns(), where, ["prompts:" <> s.host | args]),
+        d = decode(row.detail),
+        is_binary(d["prompt"]) do
+      %{
+        id: d["prompt"],
+        kind: d["kind"],
+        agent: d["agent"],
+        parent: d["parent"],
+        project: d["project"],
+        subagent: d["subagent"],
+        text: d["text"],
+        options: d["options"],
+        opened_at: d["opened_at"],
+        fact: row.id
+      }
+    end
+  end
+
+  # The `answer` rows of these prompts, by prompt id, oldest first. An answer's row is targeted
+  # at the prompt's agent, or at its id when it has none (`answering/4`).
+  defp answers(_s, []), do: %{}
+
+  defp answers(s, page) do
+    targets = page |> Enum.map(&(&1.agent || &1.id)) |> Enum.uniq()
+    ids = MapSet.new(page, & &1.id)
+    marks = Store.marks(length(targets), 1)
+
+    for row <- Acts.Table.select(s.adb, "target IN (#{marks}) AND act = 'answer'", targets),
+        prompt = decode(row.detail)["prompt"],
+        prompt in ids,
+        reduce: %{} do
+      acc -> Map.update(acc, prompt, [row], &(&1 ++ [row]))
+    end
+  end
+
+  # A closed prompt by its answer rows: the one taken, else one whose outcome is unknown, else
+  # none (it left another way). A refused answer left it open, so it says nothing here.
+  defp closed(fact, rows) do
+    taken = Enum.find(rows, &(&1.outcome == "verified"))
+    unknown = Enum.find(rows, &(&1.outcome == "unknown"))
+    base = Map.drop(fact, [:fact])
+
+    case taken || unknown do
+      nil ->
+        Map.merge(base, %{status: "closed", choice: nil, by: nil, at: nil, reason: nil})
+
+      row ->
+        choice = decode(row.detail)["choice"]
+        by = %{by: row.actor, at: row.claimed_at}
+
+        case {row.outcome, fact.kind, choice} do
+          {"verified", "ask", ["withdraw", reason]} ->
+            Map.merge(base, Map.merge(by, %{status: "withdrawn", choice: nil, reason: reason}))
+
+          {"verified", _, _} ->
+            Map.merge(base, Map.merge(by, %{status: "answered", choice: choice, reason: nil}))
+
+          {"unknown", _, _} ->
+            Map.merge(
+              base,
+              Map.merge(by, %{status: "unknown", choice: choice, reason: row.reason})
+            )
+        end
+    end
   end
 
   # A read of every prompt: what opened, moved or closed is cued, and a delegate's new prompt
@@ -367,7 +597,8 @@ defmodule CodingAgentFramework.Prompts do
   defp reread(s) do
     case list(s) do
       {:ok, all} ->
-        now = Map.new(all, &{&1.id, &1.status})
+        # A mark set or taken back moves a prompt as its status does (F-254).
+        now = Map.new(all, &{&1.id, {&1.status, &1.hidden}})
         moved = for {id, _} <- Map.merge(s.shown, now), s.shown[id] != now[id], do: id
         if moved != [], do: s.notify.(%{topic: "prompts", ids: Enum.sort(moved)})
         %{s | shown: now} |> opened(all) |> tell(all)
@@ -386,7 +617,9 @@ defmodule CodingAgentFramework.Prompts do
     for p <- all, not MapSet.member?(s.opened, p.id), reduce: s do
       s ->
         at = p.opened_at || System.os_time(:millisecond)
-        detail = [detail: %{prompt: p.id, kind: p.kind, agent: p.agent, opened_at: at}]
+        # What was asked, so a closed prompt reads from this fact alone (F-254).
+        asked = Map.take(p, [:kind, :agent, :parent, :project, :subagent, :text, :options])
+        detail = [detail: Map.merge(asked, %{prompt: p.id, opened_at: at})]
         key = [state: "opened:#{s.host}:#{p.id}"]
         actor = "prompts:" <> s.host
 
@@ -441,7 +674,24 @@ defmodule CodingAgentFramework.Prompts do
           logins(s) ++
           limits(rows) ++ starts(s)
 
+      marks = marks(s, Enum.map(prompts, & &1.id))
+      prompts = Enum.map(prompts, &Map.put(&1, :hidden, marks[&1.id]))
       {:ok, Enum.sort_by(prompts, &{&1.opened_at || 0, &1.id})}
+    end
+  end
+
+  # Each prompt's hidden mark (F-254): its latest `hide` or `unhide` fact in `Acts`, by id, nil
+  # for none or an `unhide`. Read only for the prompts open now, so a closed one's is ignored.
+  defp marks(%{adb: nil}, _ids), do: %{}
+  defp marks(_s, []), do: %{}
+
+  defp marks(s, ids) do
+    where = "target IN (#{Store.marks(length(ids), 1)}) AND act IN ('hide', 'unhide')"
+
+    for row <- Acts.Table.select(s.adb, where, ids), reduce: %{} do
+      acc ->
+        mark = if row.act == "hide", do: %{by: row.actor, at: row.claimed_at}
+        Map.put(acc, row.target, mark)
     end
   end
 
@@ -929,6 +1179,7 @@ defmodule CodingAgentFramework.Prompts do
       Enum.all?(filter, fn
         {key, name} when key in [:agent, :subtree] -> is_binary(name)
         {:kind, kind} -> kind in @kinds
+        {:hidden, hidden} -> is_boolean(hidden)
         _ -> false
       end)
 
@@ -944,6 +1195,9 @@ defmodule CodingAgentFramework.Prompts do
 
       {:kind, kind}, ps ->
         Enum.filter(ps, &(&1.kind == kind))
+
+      {:hidden, hidden}, ps ->
+        Enum.filter(ps, &(&1.hidden != nil == hidden))
 
       # A start that waits has no agent row yet: its parent places it (F-196).
       {:subtree, name}, ps ->
