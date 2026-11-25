@@ -108,7 +108,8 @@ Built, each from a checked model in `model/tla/`:
 - the base layer, the readers, the writer, `Sessions`, the `Tracker` and `Recoveries`;
 - `Delegates`: start, report, resume once after a kill, report a second kill;
 - the tree's tools: `Grants`, `Mailbox` and the MCP tools, and the operator (a person or the
-  app acting as every main session's parent);
+  app acting as every main session's parent), who resumes, answers and interrupts a main
+  session;
 - `Copies`, `Jobs` and `Services` on any host;
 - launch options per agent (settings, environment, directories, appended prompt, tools);
 - `PreToolUse` held while the app decides, and `PostToolUse` handed on;

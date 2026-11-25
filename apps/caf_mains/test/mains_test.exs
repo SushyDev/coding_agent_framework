@@ -244,6 +244,98 @@ defmodule CodingAgentFramework.MainsTest do
     assert {:refused, {:running, "app-epic"}} = Mains.start_main(mains, "app", "app-epic", "Go.")
   end
 
+  # F-258; Team.tla's FixActs for the operator's interrupt of a main session: Escape through the
+  # Inlet, only on the state the caller claimed, answered once the screen shows the turn ended.
+  # With no turn running no key goes, and the refusal is a delegate's (`{:screen, reading}`).
+  test "the operator's interrupt of a main session ends its running turn", ctx do
+    # The stand-in started mid-turn, with no trust dialog, which would end on the idle screen.
+    claude = ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle())
+    wrapper = Path.join(ctx.dir, "claude-running")
+    File.write!(wrapper, "#!#{program!(:bash)}\nexec #{claude} --screen running \"$@\"\n")
+    File.chmod!(wrapper, 0o755)
+    inlet = start_supervised!(Supervisor.child_spec({Inlet, tmux: ctx.server}, id: :press))
+    launch = Keyword.put(ctx.mains_opts[:launch], :claude, wrapper)
+    opts = Keyword.merge(ctx.mains_opts, launch: launch, inlet: inlet)
+    mains = mains(%{ctx | mains_opts: opts})
+    assert {:ok, _} = level(ctx, mains)
+
+    # A declared main session has no process: refused before any key, as a gone delegate is.
+    assert {:ok, declared} = Mains.fix_state(mains, "app-main", fix: :interrupt)
+    assert {:refused, :gone} = Mains.fix_check(:interrupt, declared)
+    assert {:refused, :gone} = Mains.interrupt(mains, "app-main", state: declared)
+
+    assert {:ok, %{name: "app-epic"}} =
+             Mains.start_main(mains, "app", "app-epic", "Plan it.", from: "app-main")
+
+    assert {:ok, _} = await(fn -> running(ctx, "app-epic") end)
+
+    assert {:ok, %{status: "running", offset: nil} = state} =
+             Mains.fix_state(mains, "app-epic", fix: :interrupt)
+
+    assert :ok = Mains.fix_check(:interrupt, state)
+
+    # A state that is no longer the session's presses nothing.
+    assert {:refused, {:moved, ^state}} =
+             Mains.interrupt(mains, "app-epic", state: %{state | pid: -1})
+
+    refute File.exists?(Path.join(ctx.dir, "interrupted"))
+    assert {:ok, :sent} = Mains.interrupt(mains, "app-epic", state: state)
+    assert File.exists?(Path.join(ctx.dir, "interrupted"))
+
+    # The turn ended: a second interrupt finds none, and sends no key.
+    assert {:ok, now} = Mains.fix_state(mains, "app-epic", fix: :interrupt)
+    assert {:refused, {:screen, %{state: :idle}}} = Mains.interrupt(mains, "app-epic", state: now)
+  end
+
+  # F-258: only an interrupt's state has the newest hook event. An answer's state is as before,
+  # so a hook event between the answer's read and its act moves the interrupt's state only, and
+  # the answer is still taken (Team.tla's AnswerClaimed, then FixActs).
+  test "a main session's answer is taken though a hook event came after its read", ctx do
+    intake = start_supervised!({Intake, db: ctx.mailbox_db, host: "test"})
+    opts = ctx.mains_opts ++ [intake: intake, intake_db: ctx.mailbox_db]
+    mains = mains(%{ctx | mains_opts: opts})
+    assert {:ok, _} = level(ctx, mains)
+
+    assert {:unknown, {:dialog, :trust}} =
+             Mains.start_main(mains, "app", "app-epic", "Plan it.", from: "app-main")
+
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :trust, @trust)
+    assert {:ok, %{session_id: sid}} = await(fn -> running(ctx, "app-epic") end)
+    post = &Intake.post(intake, "work", JSON.encode!(Map.put(&1, "session_id", sid)))
+    me = self()
+
+    hold =
+      Task.async(fn ->
+        # The holder, as `Intake.Plug` is: it writes the decision, then says so.
+        body = %{"hook_event_name" => "PermissionRequest", "tool_use_id" => "t1"}
+        {:ok, {:held, held, ref, _wait}} = post.(body)
+        send(me, :held)
+
+        receive do
+          {^ref, {:decision, text}} ->
+            Intake.written(intake, held, ref)
+            {:decision, text}
+        after
+          10_000 -> :none
+        end
+      end)
+
+    assert_receive :held, 5_000
+    assert {:ok, %{held: [id]} = state} = Mains.fix_state(mains, "app-epic")
+    refute Map.has_key?(state, :offset)
+    assert {:ok, before} = Mains.fix_state(mains, "app-epic", fix: :interrupt)
+
+    # A hook event after the read: the interrupt's state moved, the answer's did not.
+    assert {:ok, :stored} = post.(%{"hook_event_name" => "Notification", "message" => "Waiting"})
+    assert {:ok, later} = Mains.fix_state(mains, "app-epic", fix: :interrupt)
+    assert later.offset > before.offset
+    assert {:ok, ^state} = Mains.fix_state(mains, "app-epic")
+
+    assert {:ok, :sent} = Mains.answer(mains, "app-epic", id, "allow", state: state)
+    assert {:decision, decision} = Task.await(hold)
+    assert decision =~ "allow"
+  end
+
   # Limit.tla's StartRefusedAtLimit, AnswerWait, a restart that keeps the row, and StartAtReset
   # (F-196): a main's start at a limit is its own row, waiting, and its sender is told once.
   test "a main's start refused at a usage limit waits as its row, and starts at its reset", ctx do

@@ -1606,6 +1606,18 @@ the session's and the request is held. `MCP` checks the id against that state's 
 the claim (F-148), so an id the session does not hold is refused `{:not_held, id}` and leaves
 its state unclaimed. A person may answer the dialog on its screen first.
 
+**An interrupt** of a main session's turn (F-258) is the operator's alone, as a delegate's is its
+parent's (`Team.tla`'s `MainInterruptedByOperatorOnly`). The operator's `interrupt` claims the
+state an interrupt reads (`Mains.fix_state/3` with `fix: :interrupt`), which also names
+`offset`, the newest hook event `Intake` stored for the session, so each turn is a new state. An
+answer's or a resume's state has no `offset`: a main session writes many hook events, and none
+of them should refuse a person's answer as moved. It calls `Mains.interrupt/3` with it, which presses Escape through
+`Inlet.interrupt/3` only while that state is still the session's, as an interactive delegate's
+interrupt does. It answers what the screen shows after the press: `{:ok, :sent}` once the turn
+ended, else `{:unknown, reason}`. With no turn running no key goes, and it is refused
+`{:screen, reading}`, as a delegate's is. A session whose agent row is not `running` is refused
+`:gone` before the claim.
+
 **Its end** (F-143, `Team.tla`'s `MainEnds`) is the operator's act alone: `end_main(name)`, the
 operator's tool, `Mains.end_main/3`, which `Sessions.end_main/3` does. It is refused while a
 start of the name is under way, but for a start whose call answered and whose agent row waits

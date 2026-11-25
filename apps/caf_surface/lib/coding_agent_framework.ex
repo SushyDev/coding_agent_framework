@@ -1286,6 +1286,7 @@ defmodule CodingAgentFramework do
              # The operator answers a main session's held permission request through it.
              # A checkout's rename and an import's rows are acts (F-156). A resume reads its
              # row's account's windows as the Scheduler does, through a connection of its own.
+             # The operator interrupts a main session's turn by Escape through it (F-258).
              host: host,
              home: c.home,
              name_room: Config.name_room(c).agent,
@@ -1314,6 +1315,7 @@ defmodule CodingAgentFramework do
              operator: c.operator,
              intake: pid.(:intake),
              intake_db: db,
+             inlet: pid.(:inlet),
              interval: every,
              notify: notify
            }
