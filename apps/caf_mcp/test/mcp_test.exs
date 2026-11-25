@@ -19,10 +19,11 @@ defmodule CodingAgentFramework.MCPTest do
   defmodule StandIn do
     @moduledoc false
     # A message `hold` waits for the test's go, so the test reads the call's row while it acts.
-    def message(test, from, to, text, _opts) do
+    def message(test, from, to, text, opts) do
       send(test, {:message, self(), from, to, text})
+      send(test, {:message_opts, from, opts})
       if text == "hold", do: receive(do: (:go -> :ok))
-      {:ok, {:queued, 7}}
+      if text == "slow", do: {:unknown, {:timeout, 5_000}}, else: {:ok, {:queued, 7}}
     end
 
     # A `Delegates` whose every start answers at once, and a `Mailbox` whose every report is
@@ -250,6 +251,46 @@ defmodule CodingAgentFramework.MCPTest do
     assert tool(mcp, t["app-fix"], "message", args) == %{"ok" => ["queued", 7]}
     assert_received {:message, _, "app-fix", "app-main", "done"}
     assert [%{agent: "app-fix", tool: "message", state: "answered"}] = MCP.calls(mcp)
+  end
+
+  test "a message's key is scoped to its sender and passed on", %{mcp: mcp, tokens: t} do
+    args = %{"to" => "app-main", "text" => "done", "key" => "k1"}
+    assert tool(mcp, t["app-fix"], "message", args) == %{"ok" => ["queued", 7]}
+    assert_received {:message_opts, "app-fix", opts}
+    assert opts[:key] == "msg:app-fix:k1"
+
+    # The same key from another sender is that sender's own.
+    tool(mcp, t["app-main"], "message", %{args | "to" => "app-fix"})
+    assert_received {:message_opts, "app-main", opts}
+    assert opts[:key] == "msg:app-main:k1"
+
+    # With no key nothing is passed, and the bound is the instance's step.
+    tool(mcp, t["app-fix"], "message", Map.delete(args, "key"))
+    assert_received {:message_opts, "app-fix", opts}
+    assert opts == [timeout: 5_000]
+  end
+
+  test "a key over 128 bytes, empty or not a string is refused, and nothing is sent",
+       %{mcp: mcp, tokens: t} do
+    for key <- [String.duplicate("k", 129), "", 5] do
+      args = %{"to" => "app-main", "text" => "done", "key" => key}
+      assert tool(mcp, t["app-fix"], "message", args) == %{"refused" => "bad_key"}
+    end
+
+    refute_received {:message, _, _, _, _}
+    max = String.duplicate("k", 128)
+    args = %{"to" => "app-main", "text" => "done", "key" => max}
+    assert tool(mcp, t["app-fix"], "message", args) == %{"ok" => ["queued", 7]}
+  end
+
+  test "an unknown answer names the key, and only when one was given", %{mcp: mcp, tokens: t} do
+    args = %{"to" => "app-main", "text" => "slow"}
+
+    assert tool(mcp, t["app-fix"], "message", args) == %{"unknown" => ["timeout", 5_000]}
+
+    keyed = Map.put(args, "key", "k1")
+    expected = %{"unknown" => %{"reason" => ["timeout", 5_000], "key" => "k1"}}
+    assert tool(mcp, t["app-fix"], "message", keyed) == expected
   end
 
   test "a missing, unknown or replaced token is refused, and writes no row",
