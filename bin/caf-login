@@ -247,7 +247,8 @@ scope_line="Token scopes:[^"$'\n'"]*$scope"
 has_scope() { [[ "$gh_out" =~ $scope_line ]]; }
 
 if [[ $mode == gh ]]; then
-  "$CAF_MKDIR" -p "$GH_CONFIG_DIR" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+  # gh auth login writes git's global config, $GIT_CONFIG_GLOBAL, which the home holds (F-262).
+  "$CAF_MKDIR" -p "$GH_CONFIG_DIR" "$home/git" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
   if ((check)); then
     echo "caf-login: GitHub CLI, $GH_CONFIG_DIR:"
     gh_read

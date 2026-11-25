@@ -51,6 +51,8 @@ defmodule CodingAgentFramework.Example.LoginTest do
       case " $* " in *" -s admin:ssh_signing_key "*) scopes="$scopes, 'admin:ssh_signing_key'" ;; esac
       echo "$scopes" > "$state/gh-login"
       printf 'github.com:\n    oauth_token: stand-in\n    user: someone\n' > "$GH_CONFIG_DIR/hosts.yml"
+      # As gh does: its git setup writes the global config, which fails if its folder is missing.
+      printf '[credential "https://github.com"]\n' >> "$GIT_CONFIG_GLOBAL" || exit 1
       exit 0 ;;
     "auth refresh")
       case " $* " in *" -s admin:ssh_signing_key "*) echo "$base, 'admin:ssh_signing_key'" > "$state/gh-login" ;; esac

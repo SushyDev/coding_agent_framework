@@ -471,6 +471,8 @@ Built, each from a checked model in `model/tla/`:
   finished delegate's own turns are read again only once its transcript has grown, and
   `Interventions` and `HooksSilent` take one check for a burst of cues, so a stop's state read no
   longer waits past its bound.
+- `bin/caf-login` makes the home's `git` folder before its gh step (F-262): `gh auth login` writes
+  git's global config, which the home holds.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
