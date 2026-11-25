@@ -481,6 +481,8 @@ Built, each from a checked model in `model/tla/`:
   interactive start marks the tree's real path in its account's `.claude.json`, under Claude
   Code's own lock (`Trust.tla`), so no trust dialog shows; a mark refused leaves the dialog to
   the press.
+- `bin/caf-login`'s gh step sets up git's credential helper when a kept login has none, and
+  its check reads it in the home's git config (F-263).
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

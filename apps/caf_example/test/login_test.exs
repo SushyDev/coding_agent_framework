@@ -51,8 +51,12 @@ defmodule CodingAgentFramework.Example.LoginTest do
       case " $* " in *" -s admin:ssh_signing_key "*) scopes="$scopes, 'admin:ssh_signing_key'" ;; esac
       echo "$scopes" > "$state/gh-login"
       printf 'github.com:\n    oauth_token: stand-in\n    user: someone\n' > "$GH_CONFIG_DIR/hosts.yml"
-      # As gh does: its git setup writes the global config, which fails if its folder is missing.
-      printf '[credential "https://github.com"]\n' >> "$GIT_CONFIG_GLOBAL" || exit 1
+      # As gh does when its question is answered yes: its git setup writes the global config,
+      # which fails if its folder is missing.
+      printf '[credential "https://github.com"]\n\thelper = !gh auth git-credential\n' >> "$GIT_CONFIG_GLOBAL" || exit 1
+      exit 0 ;;
+    "auth setup-git")
+      printf '[credential "https://github.com"]\n\thelper = !gh auth git-credential\n' >> "$GIT_CONFIG_GLOBAL" || exit 1
       exit 0 ;;
     "auth refresh")
       case " $* " in *" -s admin:ssh_signing_key "*) echo "$base, 'admin:ssh_signing_key'" > "$state/gh-login" ;; esac
@@ -232,6 +236,30 @@ defmodule CodingAgentFramework.Example.LoginTest do
 
     assert {_, 0} = ctx.login.(["--git", ctx.home])
     assert File.exists?(key)
+  end
+
+  # F-263: a login kept from before, with no credential helper in the home's git config, left
+  # git's fetch asking for a user name while the gh step said it was done.
+  test "a gh login kept with no credential helper: --check --gh fails, --gh sets it up", ctx do
+    gh_login!(ctx, "'gist', 'read:org', 'repo', '#{@scope}'")
+    config = Path.join(ctx.home, "git/config")
+
+    assert {out, 1} = ctx.login.(["--check", "--gh", ctx.home])
+    assert out =~ "the token has the scope #{@scope}"
+    assert out =~ "git's config, #{config}, has no credential helper for github.com"
+
+    calls!(ctx)
+    assert {out, 0} = ctx.login.(["--gh", ctx.home])
+    calls = calls!(ctx)
+    assert "gh auth setup-git -h github.com" in calls
+    refute Enum.any?(calls, &String.starts_with?(&1, "gh auth login"))
+    assert out =~ "the GitHub CLI is logged in already"
+    assert out =~ "git's config, #{config}, takes github.com's credentials from gh"
+
+    # Again: the helper is there, so nothing is set up twice.
+    assert {out, 0} = ctx.login.(["--gh", ctx.home])
+    refute "gh auth setup-git -h github.com" in calls!(ctx)
+    assert out =~ "takes github.com's credentials from gh already; it is kept"
   end
 
   test "--git with gh logged out says so and makes no key", ctx do

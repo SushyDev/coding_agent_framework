@@ -245,6 +245,10 @@ gh_read() {
 }
 scope_line="Token scopes:[^"$'\n'"]*$scope"
 has_scope() { [[ "$gh_out" =~ $scope_line ]]; }
+# Whether git's global config, the home's, sends github.com's credentials through gh. gh's
+# login sets it up only when its question is answered yes; a login kept from before may have
+# none, and git's fetch then asks for a user name (F-263).
+helper_set() { [[ -r "$GIT_CONFIG_GLOBAL" && "$(<"$GIT_CONFIG_GLOBAL")" == *"auth git-credential"* ]]; }
 
 if [[ $mode == gh ]]; then
   # gh auth login writes git's global config, $GIT_CONFIG_GLOBAL, which the home holds (F-262).
@@ -272,6 +276,12 @@ if [[ $mode == gh ]]; then
         status=1
       fi
     fi
+    if helper_set; then
+      echo "caf-login: git's config, $GIT_CONFIG_GLOBAL, takes github.com's credentials from gh"
+    else
+      echo "caf-login: git's config, $GIT_CONFIG_GLOBAL, has no credential helper for github.com; run bin/caf-login --gh $home to set it up" >&2
+      status=1
+    fi
     exit "$status"
   fi
   gh_read
@@ -284,6 +294,13 @@ if [[ $mode == gh ]]; then
     echo "caf-login: logging the GitHub CLI in, with $GH_CONFIG_DIR"
     # gh's own default is the OS keyring (macOS's Keychain), outside the home.
     "$CAF_GH" auth login -h github.com --insecure-storage -s "$scope"
+  fi
+  # A login or refresh that failed has ended the script (set -e), so gh is logged in here.
+  if helper_set; then
+    echo "caf-login: git's config takes github.com's credentials from gh already; it is kept"
+  else
+    echo "caf-login: setting git's config, $GIT_CONFIG_GLOBAL, to take github.com's credentials from gh"
+    "$CAF_GH" auth setup-git -h github.com
   fi
   echo
   exec "$BASH" "$self" --check --gh "$home"
