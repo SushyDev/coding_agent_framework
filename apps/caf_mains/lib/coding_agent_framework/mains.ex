@@ -89,7 +89,7 @@ defmodule CodingAgentFramework.Mains do
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, Acts, Intake, Mailbox, Programs, Scheduler}
+  alias CodingAgentFramework.{Accounts, Acts, Inlet, Intake, Mailbox, Programs, Scheduler}
   alias CodingAgentFramework.{Sessions, Shell, Store, Stream, Transcripts, Usage}
   alias CodingAgentFramework.Intake.Table, as: IntakeTable
   alias CodingAgentFramework.Mains.{Checkout, Import, Rename, Starts, Table, Work}
@@ -121,7 +121,8 @@ defmodule CodingAgentFramework.Mains do
   `%{"seat" => 1}`), `operator:` (a name no main session may take), `interval:` (ms between the
   checkouts' reads, default 5 000), `clone_timeout:` (ms, default 600 000), `intake:` (the
   host's `Intake`) and `intake_db:` (its file), through which the operator answers a main
-  session's held permission request (`answer/5`), `acts:` (the instance's `Acts`, where a
+  session's held permission request (`answer/5`), `inlet:` (the host's `Inlet`), through which
+  the operator interrupts a main session's turn (`interrupt/3`), `acts:` (the instance's `Acts`, where a
   checkout's rename, an import's rows and a resume's copy are recorded, F-156, F-177),
   `allowance:` (a function of an account answering `:room` or `{:spent, retry_at}`, the
   `Scheduler`'s own, `Usage.Allowance.check/3`; without it every account has room: a resume
@@ -230,22 +231,33 @@ defmodule CodingAgentFramework.Mains do
   and stop is a new state, and `held`, the ids of the `PermissionRequest` rows `Intake` holds
   for its session (none without `intake:`), so an answer moves it. The operator's `resume` and
   `answer` tools claim it, then call `resume_main/3` or `answer/5` with it. Answers `{:ok,
-  state}`, or refused `:no_session` or `{:not_main, kind}`. Option: `:timeout`.
+  state}`, or refused `:no_session` or `{:not_main, kind}`. Options: `:timeout`, and `fix:`
+  (`:interrupt` for the state an interrupt claims, `interrupt/3`; F-258), which adds `offset`,
+  the id of the newest hook event `Intake` stored for its session (nil without `intake:` or
+  before a start). So each new turn is a new state for an interrupt, as an interactive
+  delegate's is, while an answer or a resume is not refused for a hook event that came between
+  its read and its act: a main session writes many.
 
       Mains.fix_state(mains, "app-epic")
       #=> {:ok, %{status: "stopped", session_id: "…", pid: 4242, proc_start: "…", held: []}}
+      Mains.fix_state(mains, "app-epic", fix: :interrupt)
+      #=> {:ok, %{status: "running", session_id: "…", pid: 4242, proc_start: "…", held: [],
+      #=>   offset: 812}}
   """
   @spec fix_state(GenServer.server(), String.t(), keyword) :: outcome(map)
-  def fix_state(mains, name, opts \\ []),
-    do: call(mains, {:fix_state, name}, Keyword.get(opts, :timeout, @step))
+  def fix_state(mains, name, opts \\ []) do
+    request = {:fix_state, name, Keyword.get(opts, :fix)}
+    call(mains, request, Keyword.get(opts, :timeout, @step))
+  end
 
   @doc """
   What the operator's fix needs of `state` (`fix_state/3`'s), read from that state alone, so
   its caller checks it before it claims the state (`Team.tla`'s Needed, F-149) and a fix the
   state refuses takes no claim: a `:resume` is refused `{:not_stopped, status}` unless the
   session's process ended (`stopped`) with a session id to take up, as `resume_main/3` refuses
-  it. A start under way or a move is the resume's to meet when it acts. An answer's request is
-  checked against `held` by its caller.
+  it. A start under way or a move is the resume's to meet when it acts. An `:interrupt` is
+  refused `:gone` unless its agent row is `running`, as a delegate's whose process is gone. An
+  answer's request is checked against `held` by its caller.
 
       Mains.fix_check(:resume, %{status: "declared", session_id: nil})
       #=> {:refused, {:not_stopped, "declared"}}
@@ -253,6 +265,7 @@ defmodule CodingAgentFramework.Mains do
   @spec fix_check(atom | tuple, map) :: :ok | {:refused, term}
   def fix_check(:resume, %{status: "stopped", session_id: sid}) when is_binary(sid), do: :ok
   def fix_check(:resume, %{status: status}), do: {:refused, {:not_stopped, status}}
+  def fix_check(:interrupt, %{status: status}) when status != "running", do: {:refused, :gone}
   def fix_check(_fix, _state), do: :ok
 
   @doc """
@@ -273,6 +286,30 @@ defmodule CodingAgentFramework.Mains do
   def answer(mains, name, request, label, opts \\ []) do
     claimed = Keyword.get(opts, :state, :any)
     call(mains, {:answer, name, request, label, claimed}, Keyword.get(opts, :timeout, 2 * @step))
+  end
+
+  @doc """
+  Interrupts main session `name`'s running turn by Escape, through `Inlet.interrupt/3`, as an
+  interactive delegate's is interrupted (F-258): the operator's act, since a main session has no
+  parent. Only while `state:` (the state the caller claimed, `fix_state/3`'s with `fix:
+  :interrupt`) is still the session's; else `{:refused, {:moved, now}}` and no key goes. The press runs in the caller's
+  process, so `Mains` answers its other calls meanwhile. Answers what the screen read after the
+  press shows: `{:ok, :sent}` once the turn has ended, or `{:unknown, reason}` (`{:escape,
+  reason}`, `{:still_running, reading}`); refused `{:screen, reading}` when no turn runs, as
+  `Inlet.interrupt/3` and a delegate's interrupt refuse it, `:gone` when its agent row is not
+  `running`, `:no_inlet` without `inlet:`, and as `fix_state/3`. Option `:timeout` (default
+  30 000 ms), what the press may take.
+
+      Mains.interrupt(mains, "app-epic", state: state)
+      #=> {:ok, :sent}
+  """
+  @spec interrupt(GenServer.server(), String.t(), keyword) :: outcome(:sent)
+  def interrupt(mains, name, opts \\ []) do
+    claimed = Keyword.get(opts, :state, :any)
+
+    with {:ok, %{inlet: inlet, release: release}} <-
+           call(mains, {:interrupt, name, claimed}, @step),
+         do: Inlet.interrupt(inlet, name, release: release, timeout: opts[:timeout] || @call)
   end
 
   @doc """
@@ -353,6 +390,7 @@ defmodule CodingAgentFramework.Mains do
         Map.merge(s, %{
           projects: projects,
           intake: intake,
+          inlet: Keyword.get(opts, :inlet),
           db: db,
           starts: starts,
           agents: agents,
@@ -583,8 +621,8 @@ defmodule CodingAgentFramework.Mains do
     {:reply, reply, s}
   end
 
-  def handle_call({:fix_state, name}, _from, s) do
-    {:reply, with({:ok, agent} <- main_agent(s, name), do: fix_state_of(s, agent)), s}
+  def handle_call({:fix_state, name, fix}, _from, s) do
+    {:reply, with({:ok, agent} <- main_agent(s, name), do: fix_state_of(s, agent, fix)), s}
   end
 
   # Team.tla's CanAct: the answer goes out only on the state its claim holds. The hold's one
@@ -600,6 +638,19 @@ defmodule CodingAgentFramework.Mains do
         decision = if label == "allow", do: :allow, else: {:deny, "Denied by the operator."}
         Intake.answer(s.intake.pid, String.to_integer(request), decision, timeout: @step)
       end
+
+    {:reply, reply, s}
+  end
+
+  # Team.tla's CanAct, as for an answer. Only the check is made here: the press is the
+  # caller's, so a turn that takes the Inlet's bound to end holds no other call of Mains.
+  def handle_call({:interrupt, name, claimed}, _from, s) do
+    reply =
+      with true <- s.inlet != nil or {:refused, :no_inlet},
+           {:ok, agent} <- main_agent(s, name),
+           :ok <- claimed(s, agent, claimed, :interrupt),
+           :ok <- fix_check(:interrupt, agent),
+           do: {:ok, %{inlet: s.inlet, release: agent.release}}
 
     {:reply, reply, s}
   end
@@ -655,28 +706,34 @@ defmodule CodingAgentFramework.Mains do
     end
   end
 
-  defp fix_state_of(s, agent) do
+  # Only an interrupt's state has the newest hook event: a main session writes many, and an
+  # answer or a resume refused `{:moved, now}` for one would be refused for nothing (F-258).
+  defp fix_state_of(s, agent, fix \\ nil) do
     state = Map.take(agent, [:status, :session_id, :pid, :proc_start])
-    {:ok, Map.put(state, :held, held(s, agent))}
+    {held, offset} = hooked(s, agent)
+    state = Map.put(state, :held, held)
+    {:ok, if(fix == :interrupt, do: Map.put(state, :offset, offset), else: state)}
   end
 
-  # The session's held PermissionRequests, as Intake keeps them. An Intake that never started
-  # on this host holds none.
-  defp held(%{intake: nil}, _agent), do: []
+  # The session's held PermissionRequests and its newest hook event, as Intake keeps them. An
+  # Intake that never started on this host holds none and has read none.
+  defp hooked(%{intake: nil}, _agent), do: {[], nil}
 
-  defp held(s, %{session_id: sid, account: account}) when is_binary(sid) and is_binary(account) do
+  defp hooked(s, %{session_id: sid, account: account})
+       when is_binary(sid) and is_binary(account) do
     case IntakeTable.session(s.intake.db, s.host, account, sid) do
-      {:ok, %{held: held}} -> Enum.map(held, &Integer.to_string/1)
-      :unread -> []
+      {:ok, %{held: held, last: last}} -> {Enum.map(held, &Integer.to_string/1), last}
+      :unread -> {[], nil}
     end
   end
 
-  defp held(_s, _agent), do: []
+  defp hooked(_s, _agent), do: {[], nil}
 
-  defp claimed(_s, _agent, :any), do: :ok
+  defp claimed(s, agent, state, fix \\ nil)
+  defp claimed(_s, _agent, :any, _fix), do: :ok
 
-  defp claimed(s, agent, state) do
-    {:ok, now} = fix_state_of(s, agent)
+  defp claimed(s, agent, state, fix) do
+    {:ok, now} = fix_state_of(s, agent, fix)
     if now == state, do: :ok, else: {:refused, {:moved, now}}
   end
 

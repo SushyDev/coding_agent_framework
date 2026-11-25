@@ -71,7 +71,10 @@
 (*             (`Operator`) go through the same calls under its name, and  *)
 (*             its answer to an ask through `Mailbox.answer`; each fix's   *)
 (*             check of the state it claims (`Delegates.fix_check/2`,     *)
-(*             `Mains.fix_check/2`).                                       *)
+(*             `Mains.fix_check/2`);                                       *)
+(*   Mains     the operator's fixes of a main session: its resume, its    *)
+(*             answer, and its interrupt (`Mains.interrupt/3`, F-258),    *)
+(*             each on the state its claim holds.                          *)
 (*                                                                         *)
 (* What moved to Delivery.tla (R6): the sending mark and its settle, the  *)
 (* typed write (DeliveryTyped), the order, the ended mark, the replies and *)
@@ -849,6 +852,12 @@ NoSelfFix == \A r \in claims : r.by # r.t
 \* No agent fixes a main session, only the operator; no fix stops one: only
 \* its end does.
 MainFixedByOperatorOnly == \A r \in claims : r.t \in Mains => r.by \in Operators /\ r.act # "stop"
+\* The interrupt of a main session's turn (F-258) is the operator's alone, through `Mains`: no
+\* other main session interrupts it, and it does not interrupt itself through the tool.
+\* MainFixedByOperatorOnly holds it too; this one names the interrupt, so a Break that lets an
+\* agent claim a main session fails on an interrupt and not on a resume.
+MainInterruptedByOperatorOnly ==
+    \A r \in claims : r.t \in Mains /\ r.act = "interrupt" => r.by \in Operators
 
 \* A main session's end is the operator's, taken idle or with its process
 \* gone, and leaves no delegate of it that has not ended.

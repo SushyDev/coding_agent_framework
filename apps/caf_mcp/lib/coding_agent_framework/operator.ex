@@ -101,7 +101,12 @@ defmodule CodingAgentFramework.Operator do
   @spec message(GenServer.server(), String.t(), String.t()) :: answer
   def message(mcp, to, text), do: MCP.operate(mcp, "message", %{"to" => to, "text" => text})
 
-  @doc "Interrupts `agent`'s turn, under a claim on its current state."
+  @doc """
+  Interrupts `agent`'s turn, under a claim on its current state: a delegate's through
+  `Delegates`, a main session's through `Mains.interrupt/3` (F-258). Answers `{:ok, %{done:
+  :sent, claim, settled}}` once the turn has ended; refused `{:screen, reading}` when no turn
+  runs (an interactive session's), and `{:unknown, reason}` when the screen still shows it.
+  """
   @spec interrupt(GenServer.server(), String.t()) :: answer
   def interrupt(mcp, agent), do: fix(mcp, "interrupt", agent)
 

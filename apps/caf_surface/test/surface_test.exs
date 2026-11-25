@@ -1016,7 +1016,14 @@ defmodule CodingAgentFramework.SurfaceTest do
     assert {:refused, {:not_held, "1"}} = Operator.answer(parts.mcp, "app-main", "1", "allow")
     assert {:ok, []} = Acts.rows(parts.acts, target: "app-main")
 
-    assert {:refused, {:not_built, :main_fix}} = Operator.interrupt(parts.mcp, "app-main")
+    # The operator's interrupt of a main session goes to `Mains` (F-258): a declared one has no
+    # process, which is checked on the state before the claim, so it takes none. No main session
+    # interrupts itself through the tool.
+    assert {:refused, :gone} = Operator.interrupt(parts.mcp, "app-main")
+    assert {:ok, []} = Acts.rows(parts.acts, target: "app-main")
+
+    assert {:refused, :no_self_fix} =
+             MCP.call(parts.mcp, "app-main", "interrupt", %{"agent" => "app-main"})
 
     # A main session's end (F-143) is the operator's: a declared one with no delegate ends at
     # once, and its name never starts again.
