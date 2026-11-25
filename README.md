@@ -483,6 +483,10 @@ Built, each from a checked model in `model/tla/`:
   the press.
 - `bin/caf-login`'s gh step sets up git's credential helper when a kept login has none, and
   its check reads it in the home's git config (F-263).
+- an interactive delegate's reply to a message is stored (F-257): `Delegates` reads each ended
+  turn's marks from its transcript, and `Mailbox.answered/4` stores the turn's reply under the
+  message's key. A turn a message was queued into is never told as its own (`Reply.tla`), and a
+  `<task-notification>` prompt is never a person's typing.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

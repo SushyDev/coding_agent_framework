@@ -277,59 +277,79 @@ defmodule CodingAgentFramework.Transcripts.Fold do
   end
 
   @doc """
-  The turns of an interactive delegate's own after the turn that `bytes` (whole lines of a
-  transcript, from that turn's first line) begins: each a turn a background command of its own
-  began (F-155), its first entry a `<task-notification>` that `marked?` finds no delivery of the
-  framework's in. A person's prompt, or a row the framework delivered, begins a turn that is not
-  its own. Each with a reply: `%{uuid, text, closed}`, the uuid of the reply's line (the turn's
-  key), its text, and whether a later turn closed it; a turn not closed may still be running.
+  The turns of an interactive delegate from the turn that `bytes` (whole lines of a transcript,
+  from that turn's first line) begins, that one first (F-155, F-257). Each is `%{marks, own,
+  uuid, text, closed}`:
+
+  - `marks`: the delivery uuids `marks` finds in the turn's user lines and its queued texts (a
+    waiter's `queued_command` attachment), oldest first: the framework's rows that went into
+    the turn, which its reply answers;
+  - `own`: a turn a background command of its own began, its first entry a
+    `<task-notification>`, with no mark in it. A person's prompt begins a turn that is not its
+    own, and a turn a row went into is that row's;
+  - `uuid` and `text`: its last reply's line uuid (an own turn's key) and text, or nil for none;
+  - `closed`: whether a later turn began; a turn not closed may still be running.
 
       iex> alias CodingAgentFramework.Transcripts.Fold
       iex> brief = ~s({"type":"user","message":{"content":"Look. [delivery b-1]"}}\\n)
       iex> wake = ~s({"type":"user","message":{"content":"<task-notification>done"}}\\n)
+      iex> queued = ~s({"type":"attachment","attachment":{"type":"queued_command",) <>
+      ...>   ~s("prompt":"Green? [delivery m-1]"}}\\n)
       iex> reply = ~s({"type":"assistant","uuid":"r-1","message":{"id":"m1",) <>
       ...>   ~s("stop_reason":"end_turn","content":[{"type":"text","text":"It passed."}]}}\\n)
-      iex> marked? = &String.contains?(&1, "[delivery ")
-      iex> Fold.own_turns(brief <> reply <> wake <> reply, marked?)
-      [%{uuid: "r-1", text: "It passed.", closed: false}]
-      iex> Fold.own_turns(brief <> reply <> brief <> reply, marked?)
-      []
+      iex> marks = &Regex.scan(~r/\\[delivery ([^\\]]+)\\]/, &1, capture: :all_but_first)
+      iex> marks = &List.flatten(marks.(&1))
+      iex> [_report, own] = Fold.turns(brief <> reply <> wake <> reply, marks)
+      iex> own
+      %{marks: [], own: true, uuid: "r-1", text: "It passed.", closed: false}
+      iex> [_report, answer] = Fold.turns(brief <> reply <> wake <> queued <> reply, marks)
+      iex> {answer.marks, answer.own}
+      {["m-1"], false}
   """
-  @spec own_turns(binary, (String.t() -> boolean)) :: [
-          %{uuid: String.t(), text: String.t(), closed: boolean}
+  @spec turns(binary, (String.t() -> [String.t()])) :: [
+          %{
+            marks: [String.t()],
+            own: boolean,
+            uuid: String.t() | nil,
+            text: String.t() | nil,
+            closed: boolean
+          }
         ]
-  def own_turns(bytes, marked?) do
+  def turns(bytes, marks) do
     turns =
       bytes
       |> String.split("\n")
       |> Enum.drop(-1)
-      |> Enum.drop(1)
       |> Enum.reduce([], fn l, turns ->
         cond do
-          opens?(l) -> [[l] | turns]
-          turns == [] -> turns
+          opens?(l) or turns == [] -> [[l] | turns]
           true -> [[l | hd(turns)] | tl(turns)]
         end
       end)
       |> Enum.map(&Enum.reverse/1)
+      |> Enum.reverse()
 
     count = length(turns)
 
-    for {[first | _] = turn, i} <- Enum.with_index(Enum.reverse(turns)),
-        own?(first, marked?),
-        %{uuid: uuid, text: text} <- [Enum.reduce(turn, new(), &line(&2, &1)).last_reply],
-        is_binary(uuid),
-        do: %{uuid: uuid, text: text, closed: i < count - 1}
+    for {[first | _] = turn, i} <- Enum.with_index(turns) do
+      found = turn |> Enum.flat_map(&line_texts/1) |> Enum.flat_map(marks) |> Enum.uniq()
+      reply = Enum.reduce(turn, new(), &line(&2, &1)).last_reply
+
+      %{
+        marks: found,
+        own: found == [] and Enum.any?(line_texts(first), &notification/1),
+        uuid: reply && reply.uuid,
+        text: reply && reply.text,
+        closed: i < count - 1
+      }
+    end
   end
 
-  defp own?(line, marked?) do
+  # A user line's texts, or a queued text's; none for any other line.
+  defp line_texts(line) do
     case JSON.decode(line) do
-      {:ok, %{"type" => "user"} = e} ->
-        texts = texts(e)
-        Enum.any?(texts, &notification/1) and not Enum.any?(texts, marked?)
-
-      _ ->
-        false
+      {:ok, %{} = e} -> texts(e)
+      _ -> []
     end
   end
 

@@ -94,16 +94,16 @@ defmodule CodingAgentFramework.Mailbox.Transport.Waiter do
   def mark(uuid), do: "[delivery " <> uuid <> "]"
 
   @doc """
-  Whether `text` carries a row's mark, of any uuid: a delivery of the framework's, which a
-  turn of a delegate's own never begins with (F-155).
+  The uuids of the rows whose marks `text` carries: the framework's deliveries, which a turn of
+  a delegate's own never holds (F-155, F-257).
 
-      iex> CodingAgentFramework.Mailbox.Transport.Waiter.marked?("Hi. [delivery u1]")
-      true
-      iex> CodingAgentFramework.Mailbox.Transport.Waiter.marked?("<task-notification>")
-      false
+      iex> CodingAgentFramework.Mailbox.Transport.Waiter.marks("Hi.\\n\\n[delivery u1]")
+      ["u1"]
+      iex> CodingAgentFramework.Mailbox.Transport.Waiter.marks("<task-notification>")
+      []
   """
-  @spec marked?(String.t()) :: boolean
-  def marked?(text), do: String.contains?(text, "[delivery ")
+  @spec marks(String.t()) :: [String.t()]
+  def marks(text), do: for([_, uuid] <- Regex.scan(~r/\[delivery ([^\]\s]+)\]/, text), do: uuid)
 
   @doc """
   What the transcript `bytes` (whole lines) show of the row stored under `uuid`: `:taken` (a

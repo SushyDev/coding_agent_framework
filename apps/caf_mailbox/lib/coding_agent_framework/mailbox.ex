@@ -89,7 +89,9 @@ defmodule CodingAgentFramework.Mailbox do
   the sender of its brief, for a message from `framework`), `reply_to` the message's uuid, with
   the result's `subtype` and `is_error`. When the process ended during the message's turn with
   no result, a notice from `"framework"` says so in its place. The table's unique `reply_to`
-  lets in one answer per row. The answers to a brief or a word to go on are `Delegates'`: it
+  lets in one answer per row. An interactive delegate's turn writes no result: `Delegates` reads
+  the answer from its transcript and stores it through `answered/4`, under the same key
+  (F-257). The answers to a brief or a word to go on are `Delegates'`: it
   decides between a finish, a resume and a second kill, and hands the report here.
 
   **Asks.** An agent asks a person through `ask/4`: a row from it to the operator, kept for the
@@ -277,6 +279,23 @@ defmodule CodingAgentFramework.Mailbox do
 
     store(mailbox, Map.merge(row, %{to: to, uuid: Stream.uuid(), reply_to: key}))
   end
+
+  @doc """
+  Stores interactive delegate `from`'s answer to the message stored under `uuid`, read from its
+  transcript by `Delegates` (F-257, `Reply.tla`): `{:reply, text}`, the reply of the turn the
+  message went into, or `:ended`, its process gone in that turn with no reply, for which the
+  notice from `framework` goes in its place. Either goes to the message's sender under the
+  message's uuid, as a headless delegate's reply does, so one answer goes in per message.
+  Answers `{:ok, {:queued, id}}`, `{:ok, :stored_before}`, or `{:refused, reason}` with no row:
+  `:no_message`, `:not_a_message` (a row to another agent, or one no turn answers: a brief, a
+  word to go on, a notice, an answer), `:not_delivered` (its row not yet settled delivered),
+  `:no_sender`.
+
+      Mailbox.answered(mailbox, "app-unit-review", uuid, {:reply, "Yes, green."})
+      #=> {:ok, {:queued, 8}}
+  """
+  def answered(mailbox, from, uuid, answer),
+    do: call(mailbox, {:answered, from, uuid, answer}, [])
 
   @doc """
   Marks the first `queued` row to interactive session `to` `sending` by `launch` (F-137,
@@ -909,6 +928,18 @@ defmodule CodingAgentFramework.Mailbox do
   def handle_call({:status, id}, _from, s),
     do: {:reply, shown(Table.get(s.db, id) || {:refused, :no_message}), s}
 
+  def handle_call({:answered, from, uuid, answer}, _from, s) do
+    m = Table.by_uuid(s.db, uuid)
+
+    cond do
+      m == nil -> {:reply, {:refused, :no_message}, s}
+      m.to_agent != from or m.kind not in [nil, "msg"] -> {:reply, {:refused, :not_a_message}, s}
+      m.status != "delivered" -> {:reply, {:refused, :not_delivered}, s}
+      sender(s, m) == nil -> {:reply, {:refused, :no_sender}, s}
+      true -> stored(s, put(s, answer_row(m, sender(s, m), outcome(answer))))
+    end
+  end
+
   def handle_call({:answer_to, key}, _from, s),
     do: {:reply, shown(Table.answer(s.db, key) || {:refused, :no_answer}), s}
 
@@ -1250,16 +1281,22 @@ defmodule CodingAgentFramework.Mailbox do
   defp turn_ended?({:result, _}), do: true
   defp turn_ended?(outcome), do: outcome == :exited
 
-  defp reply_row(s, m, to, {:result, r}) do
+  defp reply_row(s, m, to, outcome), do: stored_quietly(s, put(s, answer_row(m, to, outcome)))
+
+  # The reply to `m` from its addressee, or the framework's notice when its process ended first.
+  defp answer_row(m, to, {:result, r}) do
     row = %{from: m.to_agent, to: to, text: r.text, uuid: Stream.uuid(), kind: "reply"}
-    row = Map.merge(row, %{reply_to: m.uuid, subtype: r.subtype, is_error: r.is_error})
-    stored_quietly(s, put(s, row))
+    Map.merge(row, %{reply_to: m.uuid, subtype: r.subtype, is_error: r.is_error})
   end
 
-  defp reply_row(s, m, to, :exited) do
+  defp answer_row(m, to, :exited) do
     row = %{from: @framework, to: to, text: notice(m), uuid: Stream.uuid(), kind: "notice"}
-    stored_quietly(s, put(s, Map.put(row, :reply_to, m.uuid)))
+    Map.put(row, :reply_to, m.uuid)
   end
+
+  # An interactive turn's answer as a headless result's: it has no result line, so no subtype.
+  defp outcome({:reply, text}), do: {:result, %{text: text, subtype: nil, is_error: nil}}
+  defp outcome(:ended), do: :exited
 
   defp notice(m),
     do:

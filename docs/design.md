@@ -2504,19 +2504,30 @@ or a notice goes in, never both. Its sender is `framework`, a name reserved for 
 itself: no agent may hold it (F-81). `Stream`'s fold keeps each result on the messages it names, so a turn the delegate
 starts by itself never replaces a reply or a report.
 
+An interactive delegate's turn writes no `result`, so its reply is read from its transcript
+(F-257, `Reply.tla`): `Delegates` reads its turns from the report's turn
+(`Transcripts.Fold.turns/2`), and each turn that has ended (a later turn began, its session
+reads idle, or its process is gone) answers every message whose mark is in it. The mark is in
+the user line the waiter's text began a turn with, or, for a message handed to the waiter while
+a turn ran, in the `queued_command` attachment that joined that turn. `Mailbox.answered/4`
+stores the turn's last reply as the reply, or with the process gone in that turn and no reply,
+the notice, under the message's uuid, so one goes in per message as for a headless delegate. A
+turn a later one closed with no reply answers nothing.
+
 That turn of its own (a background command of the delegate's own woke it, and it answers no
 message) is told to its parent once its report is taken (F-155, `Delegate.tla`'s TurnToldOnce,
 TurnNotReport, TurnNoticed): `Delegates` stores its last reply as a `notice` from `framework`
 (`Mailbox.notify/4` with `kind: :notice`, a word no turn answers), keyed `turn:<host>:<uuid>`
 by the turn's result uuid, which `Mailbox` takes once, so no restart tells it twice; a
 headless delegate's `Stream` fold keeps each such result in `own`, and an interactive one's is
-the turn its transcript shows begun by a `<task-notification>` with no delivery mark, keyed by
-its reply line's uuid. A person's turn in an interactive delegate is not told. A turn with no
-reply text tells nothing. An interactive delegate's own turns are read again only once its transcript's
-reader (`Transcripts.offset/4`) has moved since the last read; between, that read stands. Cues
-queued while `Delegates` settles are answered by one settle, as `Interventions`' and
-`HooksSilent`'s queued checks are by one check (F-261): each reads afresh, so a fix's call never
-waits behind a backlog of reads.
+the turn its transcript shows begun by a `<task-notification>` with no delivery mark in it,
+keyed by its reply line's uuid. A turn a message was queued into is that message's, never its
+own (`Reply.tla`'s NotToldAsOwn). A person's turn in an interactive delegate is not told. A
+turn with no reply text tells nothing. An interactive delegate's turns, its own and those that
+answer messages, are read again only once its transcript's reader (`Transcripts.offset/4`) has
+moved since the last read; between, that read stands. Cues queued while `Delegates` settles
+are answered by one settle, as `Interventions`' and `HooksSilent`'s queued checks are by one
+check (F-261): each reads afresh, so a fix's call never waits behind a backlog of reads.
 
 **The operator** acts through these same tools and checks, as the parent of every main session
 (F-109). No agent messages the operator: it is no agent's addressee, and an agent reaches a

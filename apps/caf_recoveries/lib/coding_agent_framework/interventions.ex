@@ -9,7 +9,9 @@ defmodule CodingAgentFramework.Interventions do
   agent's session (a main session, or a delegate started `interactive: true`), whose prompt
   carries no mark of a row `Mailbox` handed that agent. Every text the framework puts into a
   session carries its row's mark, `[delivery <uuid>]` (`Mailbox.Transport`): typed by the
-  `Inlet`, the prompt of a start, a waiter's text. A headless delegate has no box a person types
+  `Inlet`, the prompt of a start, a waiter's text. A prompt that begins with
+  `<task-notification>` is Claude Code's own turn, a background command's end or a waiter's
+  text, and is never typed input (F-257). A headless delegate has no box a person types
   in, so its prompts are never read here. A row whose session no agent row names yet decides
   nothing until `settle:` ms (a minute by default) after it was written, then is passed by.
 
@@ -212,7 +214,10 @@ defmodule CodingAgentFramework.Interventions do
 
           true ->
             prompt = decode(row.data)["prompt"]
-            framework = Enum.any?(marks(prompt), &handed?(s, &1, name))
+
+            framework =
+              notification?(prompt) or Enum.any?(marks(prompt), &handed?(s, &1, name))
+
             fact = if framework, do: [], else: [typed_fact(s, row, name, prompt)]
             {facts ++ fact, if(open, do: past, else: row.id), open}
         end
@@ -231,6 +236,12 @@ defmodule CodingAgentFramework.Interventions do
       detail: %{intake: row.id, session_id: row.session_id, at: row.written_at, chars: chars}
     }
   end
+
+  # Claude Code's own turn, never a person's (F-257): a background command's end, or the
+  # waiter's text, which 2.1.322 opens with "<task-notification>" and whose prompt may carry
+  # no mark.
+  defp notification?(prompt),
+    do: is_binary(prompt) and String.starts_with?(prompt, "<task-notification>")
 
   defp handed?(s, uuid, name),
     do: match?(%{to_agent: ^name}, MailboxTable.by_uuid(s.mailbox, uuid))
