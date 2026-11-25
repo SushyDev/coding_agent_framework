@@ -11,7 +11,7 @@ defmodule CodingAgentFramework.Jobs.Table do
   if it asked for one. A job its lease refused is `refused` with `reason` (`queue_full`,
   `deadline`, `pressure`, `allowance`, or the framework's own, such as `scheduler_ended`) and
   `retry_at` (wall-clock ms): not a failed run, and when to ask again, under a new id. `host`, `project` and `name`
-  name the copy it runs in; `deadline` is the call's, wall-clock ms. `late` is `owed` once its
+  name the copy it runs in; `argv` is the command, as JSON, written with the row; `deadline` is the call's, wall-clock ms. `late` is `owed` once its
   call answered unknown or was cut by a restart, and `told` once its end was handed on.
 
       iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "doc.db")
@@ -23,9 +23,9 @@ defmodule CodingAgentFramework.Jobs.Table do
   alias CodingAgentFramework.Store
 
   @columns ~w(id host project name state code start_until deadline late worktree lease reason
-              retry_at)a
+              retry_at argv)a
   # A file made before a column gains it; a newer file already has it.
-  @added ["worktree TEXT", "lease INTEGER", "reason TEXT", "retry_at INTEGER"]
+  @added ["worktree TEXT", "lease INTEGER", "reason TEXT", "retry_at INTEGER", "argv TEXT"]
   @schema """
   CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY, host TEXT NOT NULL, project TEXT NOT NULL, name TEXT NOT NULL,

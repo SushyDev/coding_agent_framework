@@ -65,6 +65,13 @@ defmodule CodingAgentFramework.Copies.Table do
   @spec all(db) :: [map]
   def all(db), do: select(db, "1 = 1", [])
 
+  @doc "The first `n` rows by host, project and name, without `sent`: a view's bounded read."
+  @spec first(db, pos_integer) :: [map]
+  def first(db, n) do
+    where = "1 = 1 ORDER BY host, project, name LIMIT ?1"
+    Store.select(db, "copies", @columns -- [:sent], where, [n])
+  end
+
   @doc "Writes row `key` with `fields` (`holder`, `state`, `until`, `sent`)."
   @spec put(db, key, map) :: :ok
   def put(db, {host, project, name}, fields) do
