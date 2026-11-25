@@ -80,7 +80,7 @@ defmodule CodingAgentFramework.Jobs do
 
   use GenServer
 
-  alias CodingAgentFramework.{Copies, Holder, Programs, Reader, Scheduler, Shell}
+  alias CodingAgentFramework.{Copies, Holder, Programs, Reader, Scheduler, Shell, Store}
   alias CodingAgentFramework.Copies.Held
   alias CodingAgentFramework.Jobs.Table
 
@@ -172,7 +172,7 @@ defmodule CodingAgentFramework.Jobs do
          {:ok, config} <- call(jobs, :config),
          {:ok, ask} <- lease_request(config, id, opts),
          {:ok, ctx} <- context_of(config, id, where, start),
-         :ok <- call(jobs, {:ask, row(id, where, worktree), self()}),
+         :ok <- call(jobs, {:ask, row(id, where, worktree, argv), self()}),
          {:ok, lease} <- lease(jobs, id, config.scheduler, ask, opts),
          refused = fn _ -> put(jobs, id, %{state: "refused"}) end,
          {:ok, %{record: record}} <- Held.ready(ctx, worktree, opts, refused),
@@ -585,9 +585,10 @@ defmodule CodingAgentFramework.Jobs do
 
   defp mono, do: System.monotonic_time(:millisecond)
 
-  defp row(id, where, worktree) do
+  defp row(id, where, worktree, argv) do
     %{
       id: id,
+      argv: Store.text(argv),
       host: where.host,
       project: where.project,
       name: where.name,

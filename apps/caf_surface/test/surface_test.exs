@@ -260,6 +260,78 @@ defmodule CodingAgentFramework.SurfaceTest do
     assert CodingAgentFramework.agent_rows("none") == {:refused, :no_instance}
   end
 
+  # F-266: an app's panel of what holds the machine, read through the facade.
+  test "holds reads two leases with their jobs, the copies and the pressure", ctx do
+    programs = Map.drop(ctx.fields[:programs], [:gh, :ssh, :ssh_keygen])
+    fields = [home: ctx.home, instance: "t", programs: programs, env: %{path: "/nonexistent"}]
+    {:ok, config} = Config.new(fields ++ [agents: false])
+    parts = CodingAgentFramework.parts(start_supervised!({CodingAgentFramework, config}))
+    {:ok, units} = CodingAgentFramework.job_units(config, :heavy, "app")
+    lease = %{class: :heavy, module: "app", units: units}
+    repo = Path.join(ctx.dir, "repo")
+    gate = Path.join(ctx.dir, "gate")
+    # Each job says it started, then waits for the test's gate.
+    script = "echo started $0; while [ ! -e \"$1\" ]; do \"$2\" 0.05; done"
+    command = fn n -> [program!(:sh), "-c", script, n, gate, program!(:sleep)] end
+
+    runs =
+      for n <- ~w(one two) do
+        where = %{host: "ws", project: "app", name: "app-" <> n}
+        argv = command.(n)
+
+        Task.async(fn ->
+          Jobs.run(parts.jobs, n, where, repo, argv, timeout: 20_000, lease: lease)
+        end)
+      end
+
+    started = fn ->
+      with {:ok, %{leases: [_, _] = leases} = holds} <- CodingAgentFramework.holds("t"),
+           true <- Enum.all?(leases, &match?(%{job: %{state: "running"}}, &1)),
+           true <- Enum.all?(leases, &(File.read(&1.job.log) == {:ok, "started #{&1.job.id}\n"})) do
+        {:ok, holds}
+      else
+        _ -> nil
+      end
+    end
+
+    {:ok, holds} = await(started, 20_000)
+    ws = Path.join(ctx.home, "ws")
+
+    for {%{job: job} = l, n} <- Enum.zip(Enum.sort_by(holds.leases, & &1.job.id), ~w(one two)) do
+      assert %{class: "heavy", module: "app", released_at: nil, holder: {"job", ^n}} = l
+      assert is_integer(l.since) and l.request == "job:" <> n
+      assert job.argv == command.(n)
+      assert job.dir == Path.join([ws, "copies", "app", "app-" <> n])
+      assert %{host: "ws", worktree: ^repo} = job
+    end
+
+    assert holds.resources["slot"] == %{capacity: 2, held: 2}
+    assert %{level: _, source: _, unread: _} = holds.pressure
+
+    assert [%{host: "ws", project: "app", name: "app-one", path: path}, %{name: "app-two"}] =
+             holds.copies
+
+    assert File.dir?(path)
+
+    File.write!(gate, "")
+    assert [{:ok, %{exit: 0}}, {:ok, %{exit: 0}}] = Task.await_many(runs, 20_000)
+
+    # Each lease is released once its job's end is written: newest first, the last `ended:`.
+    released = fn ->
+      case CodingAgentFramework.holds("t", ended: 1) do
+        {:ok, %{leases: [%{released_at: at}]} = h} when is_integer(at) -> {:ok, h}
+        _ -> nil
+      end
+    end
+
+    {:ok, %{leases: [last], resources: %{"slot" => %{held: 0}}}} = await(released, 20_000)
+    assert %{job: %{id: id, state: "exited", code: 0}, released_by: "monitor"} = last
+    assert last.id == Enum.max(Enum.map(holds.leases, & &1.id)) and id in ~w(one two)
+
+    assert {:refused, {:bad, :ended}} = CodingAgentFramework.holds("t", ended: 201)
+    assert {:refused, :no_instance} = CodingAgentFramework.holds("none")
+  end
+
   # F-199: the metrics are read from the store alone, once, whether the tree runs or not.
   test "the metrics read each part's rows from the store, and a table not made has none", ctx do
     db = Path.join(ctx.home, "caf.db")

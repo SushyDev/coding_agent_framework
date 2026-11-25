@@ -81,6 +81,13 @@ defmodule CodingAgentFramework.Scheduler.Table do
   @spec unreleased(db) :: [map]
   def unreleased(db), do: select(db, "outcome = 'granted' AND released_at IS NULL", [])
 
+  @doc "The last `n` granted leases released, newest first: a view's bounded history."
+  @spec released(db, pos_integer) :: [map]
+  def released(db, n) do
+    where = "outcome = 'granted' AND released_at IS NOT NULL ORDER BY id DESC LIMIT ?1"
+    db |> Store.select("leases", @columns, where, [n]) |> Enum.map(&load/1)
+  end
+
   @doc "The units each resource's unreleased leases hold, as the rows say."
   @spec held(db) :: %{String.t() => non_neg_integer}
   def held(db) do

@@ -914,7 +914,8 @@ One config and one supervisor in; a few calls and one stream of cues out.
   `answer_startup`, an ask's answer and a request's answer. `hide(caf, prompt, who)` and
   `unhide(caf, prompt, who)` set an open prompt aside for a person's console and bring it back
   (F-254). `prompts(caf, filter)`, `answered(caf, page)` (the prompts that closed, F-254),
-  `view(caf, scope)`, `metrics(caf, query)`, `digest(caf, window)` and `query(caf, filter)` read.
+  `view(caf, scope)`, `metrics(caf, query)`, `digest(caf, window)`, `query(caf, filter)` and
+  `holds(caf, opts)` (the leases, their jobs, the copies and the pressure, F-266) read.
 - **Cues.** `subscribe(caf, topics)`: one stream of `{topic, ids}` for every write, from the
   `Ledger`. The app re-reads by id, as every view does; `prompts` is the inbox's topic. Every
   topic a part writes is subscribable (each part's `writes/0`). A subscription lives and dies
@@ -983,8 +984,16 @@ agent. The read runs in the host's `Transcripts` (`Transcripts.conversation/3`),
 host's shell, at most `limit` entries and `max_bytes` per file, so no call reads a whole
 transcript again; a cursor whose bytes changed, or of another file, starts that file again and
 says so (`reset`). The agent's row names its host; only the workstation has a `Transcripts`
-today, so a session on another host answers `{:unknown, {:host, {:no_reader, host}}}`. The
-other calls are B3's rest.
+today, so a session on another host answers `{:unknown, {:host, {:no_reader, host}}}`. F-266
+added `holds/2`, an app's panel of what holds the machine: every unreleased lease and the last
+`ended:` released ones (at most 200), each with its class, module, holder, units, grant and
+release times, and for a job's lease the job's command, copy, log path (both on its host),
+state and exit code; the first 200 copies with their paths and turns; each resource's capacity
+and held units; and `Scheduler.pressure/2`. The leases, the jobs and the copies are read once
+each, read-only, from their parts' files, leases first, and the pressure from the running
+`Scheduler`. A job's row keeps its command (`argv`) from its ask. A heavy command's lease
+(`caf-run`) shows its agent, its tool call's id, its process and its release; its command and
+log are kept nowhere (F-266's new-1). The other calls are B3's rest.
 The config answers the room the home leaves for an agent's name (`Config.name_room/1`, F-172), and the tree hands it to `Delegates` and
 `Mains`, which refuse a longer name `{:bad, :name, {:longer_than, n}}` before any row;
 sockets stay in the home. A service's socket is named by the first 16 hex digits of the SHA-256

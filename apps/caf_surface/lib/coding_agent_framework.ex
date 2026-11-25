@@ -390,6 +390,141 @@ defmodule CodingAgentFramework do
   end
 
   @doc """
+  What holds the machine in the running instance named `instance` (F-266): the leases, the job
+  under each, the copies and the pressure, for an app's panel. One call, since a panel shows
+  them together and the pressure is only in the `Scheduler`'s process; each table is read once,
+  read-only, from where its part keeps it, and the pressure by `Scheduler.pressure/2`.
+
+  Answers `{:ok, %{leases: leases, copies: copies, resources: resources, pressure: pressure}}`:
+
+    * `leases`: every granted lease not yet released, oldest first, then the last `ended:`
+      released ones, newest first. Each is `%{id, request, class, module, account, units,
+      holder: {kind, key}, since, released_at, released_by, job}`. `since` is the grant's time
+      and `released_at` the release's, wall-clock ms. A heavy command's lease (`caf-run`) has
+      holder `{"run", "<pid> <start>"}`, `module` its agent and `request` `run:<tool call id>`;
+      its `released_at` is when its process was seen ended.
+    * `job`: for a lease whose holder is a job, nil otherwise or when its row is gone: `%{id,
+      host, argv, worktree, dir, log, state, code, reason}`. `argv` is the command (nil for a
+      row written before it was kept), `dir` the copy it runs in and `log` its log, both paths
+      on `host`, which `Jobs.log/4` reads. `state` and `code` are `Jobs.Table`'s: its end is
+      `exited` with `code`, `timedout` or `lost`.
+    * `copies`: the first 200 copies by host, project and name, `%{host, project, name, path,
+      state, holder}`; `holder` is the run that holds its turn.
+    * `resources`: each resource's `%{capacity: n, held: n}`, as the unreleased leases hold it.
+    * `pressure`: `Scheduler.pressure/2`'s `%{level, source, at, unread}`.
+
+  The three files are read one after another, the leases first, so a job may show its end
+  before its lease's release, never the other way round. Option `ended:`, 0 to 200, default 20.
+
+  `{:refused, :no_instance}`; `{:refused, {:bad, :ended}}`; the store's `{:refused, {:sqlite,
+  reason}}`; or the `Scheduler`'s `{:unknown, reason}`.
+
+      {:ok, %{leases: [%{class: "landing", job: %{log: log, state: "running"}} | _],
+              pressure: %{level: :ok}}} = CodingAgentFramework.holds("a", ended: 5)
+  """
+  @spec holds(String.t(), keyword) :: {:ok, map} | {:refused, term} | {:unknown, term}
+  def holds(instance, opts \\ []) do
+    ended = Keyword.get(opts, :ended, 20)
+
+    with true <- (is_integer(ended) and ended in 0..200) || {:refused, {:bad, :ended}},
+         {:ok, c} <- config(instance),
+         {:ok, scheduler} <- tree_part(instance, :scheduler),
+         {:ok, leases} <- lease_rows(c, ended),
+         {:ok, jobs} <- job_rows(c, leases),
+         {:ok, copies} <- copy_rows(c),
+         %{level: _} = pressure <- Scheduler.pressure(scheduler) do
+      held =
+        for %{released_at: nil, units: units} <- leases, {r, n} <- units, reduce: %{} do
+          acc -> Map.update(acc, r, n, &(&1 + n))
+        end
+
+      {:ok,
+       %{
+         leases: Enum.map(leases, &Map.put(&1, :job, job_of(c, &1, jobs))),
+         copies: copies,
+         resources:
+           Map.new(resources(c), fn {r, n} -> {r, %{capacity: n, held: held[r] || 0}} end),
+         pressure: pressure
+       }}
+    end
+  end
+
+  defp tree_part(instance, key) do
+    with {:ok, sup} <- tree(instance) do
+      case parts(sup) do
+        %{^key => pid} when is_pid(pid) -> {:ok, pid}
+        _ -> {:unknown, {:no_part, key}}
+      end
+    end
+  catch
+    :exit, _ -> {:refused, :no_instance}
+  end
+
+  defp lease_rows(c, ended) do
+    read = fn db ->
+      released = if ended > 0, do: Scheduler.Table.released(db, ended), else: []
+      Scheduler.Table.unreleased(db) ++ released
+    end
+
+    with {:ok, rows} <- Store.read_only(Config.path(c, "caf.db"), "leases", [], read) do
+      {:ok,
+       for l <- rows do
+         l
+         |> Map.take(~w(id class module account units holder released_at released_by)a)
+         |> Map.merge(%{request: l.request_id, since: l.decided_at})
+       end}
+    end
+  end
+
+  defp job_rows(c, leases) do
+    ids = for %{holder: {"job", id}} <- leases, do: id
+    read = fn db -> for id <- ids, row = Jobs.Table.get(db, id), into: %{}, do: {id, row} end
+    Store.read_only(Config.path(c, "parts/jobs/jobs.db"), "jobs", %{}, read)
+  end
+
+  defp copy_rows(c) do
+    read = &Copies.Table.first(&1, 200)
+
+    with {:ok, rows} <-
+           Store.read_only(Config.path(c, "parts/copies/copies.db"), "copies", [], read) do
+      {:ok, for(r <- rows, do: Map.put(r, :path, copy_path(c, r)))}
+    end
+  end
+
+  defp job_of(c, %{holder: {"job", id}}, jobs) do
+    with %{} = row <- jobs[id] do
+      argv = with a when is_binary(a) <- row.argv, {:ok, list} <- JSON.decode(a), do: list
+      fields = ~w(id host worktree state code reason)a
+
+      row
+      |> Map.take(fields)
+      |> Map.merge(%{
+        argv: argv,
+        dir: copy_path(c, row),
+        log:
+          with(
+            d when is_binary(d) <- host_dir(c, row.host),
+            do: Path.join([d, "jobs", id <> ".log"])
+          )
+      })
+    end
+  end
+
+  defp job_of(_c, _lease, _jobs), do: nil
+
+  # A path on the row's host, as `Copies.place/1` and `Copies.Held.context/3` make it.
+  defp copy_path(c, %{host: host, project: project, name: name}) do
+    with d when is_binary(d) <- host_dir(c, host),
+         {:ok, {path, _lock}} <- Copies.place(%{dir: d, project: project, name: name}),
+         do: path,
+         else: (_ -> nil)
+  end
+
+  # Each host's framework directory, as the tree hands it to `Jobs` and `Copies`.
+  defp host_dir(%Config{workstation: ws} = c, ws), do: Config.path(c, "ws")
+  defp host_dir(c, host), do: get_in(c.hosts, [host, :dir])
+
+  @doc """
   The kind of the home `config` names, read now (F-214): `{:ok, :agents}` or `{:ok,
   :agentless}` for a home whose first tree recorded it, `{:ok, :new}` for a home no tree
   started on, and `{:refused, reason}` when its database cannot be read. Only `home` of the

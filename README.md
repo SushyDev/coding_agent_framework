@@ -494,6 +494,10 @@ Built, each from a checked model in `model/tla/`:
   `CodingAgentFramework.conversation/3` answers its prompts, replies, tool calls, notices,
   interrupts and system lines as entries, a cursor for what comes next, and the rows queued for
   it; the host's `Transcripts` reads the file, bounded, through that host's shell.
+- an app reads what holds the machine through the facade (F-266): `CodingAgentFramework.holds/2`
+  answers the unreleased leases and the last released ones, each job under its lease with its
+  command, copy and log path, the copies, each resource's held units and the pressure. A job's
+  row now keeps its command.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
