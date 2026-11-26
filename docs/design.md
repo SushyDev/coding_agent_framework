@@ -740,6 +740,26 @@ and a crash is healed by its supervisor, deterministically, from the rows.
   framework does today: a live process is adopted, a gone one settled, a start under way
   settled at its deadline. Nothing is started again because a process restarted. A call to it
   that a crash cut answers `{:unknown, :restarted}` to its caller.
+- **A held process leaves the app's cgroup where the host says so** (F-274). On Linux, an app run
+  as a systemd user unit with `KillMode=control-group` keeps every process it starts in that
+  unit's cgroup, and each stop or restart of the unit sends them TERM, then KILL: every `dtach -n`
+  holder, and so every agent and service, ended with the app. A host whose `scope` is
+  `:systemd_user` (`Host`; the config's `scope` for the workstation) starts each holder through
+  `systemd-run --user --scope --collect --expand-environment=no --unit=caf-<key>-<name>`, `<key>`
+  from the holder's directory so two instances never share a unit, and each tmux client that may
+  start the server through a scope of its own. A `systemd-run` that fails (no user bus, no
+  lingering, a unit of that name still running) refuses the start, `{:refused, {:scope,
+  output}}`; it never starts the holder without a scope. `:none` is the default, and macOS has no
+  cgroup to leave. `KillMode=process` on the app's unit is not the fix: it leaves the app's own
+  child watchers behind, and it is the app's choice, not the library's.
+  - The scope changes nothing for a stop by the framework: `Holder.Process` still signals the
+    held program's process group by its record, and the scope, empty, is collected.
+  - On the app's restart, the holders, their sessions and the tmux server live on in their
+    scopes, and the app re-adopts them by their records and sockets, as above. A viewer pane is
+    the tmux server's child, so it lives on too.
+  - `systemd-run` is the host's own program, found on its `PATH` with the rest, never one devenv
+    brings: it is a client of the running user manager, which only the host's own systemd is, and
+    a host without systemd has none.
 - **The restart budget is the healing budget.** Each agent process runs under its own small
   supervisor with an intensity (`max_restarts` in `max_seconds`, the app's, three in a minute by
   default). Past it, that supervisor gives up; the dynamic supervisor does not restart it

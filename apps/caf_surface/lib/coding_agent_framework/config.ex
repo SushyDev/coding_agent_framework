@@ -27,6 +27,18 @@ defmodule CodingAgentFramework.Config do
     name is refused): 1 to 100 bytes, no control character;
   - `workstation`: the workstation's host name, and `programs`, the absolute path of each
     program there (`CodingAgentFramework.Programs`);
+  - `scope`: the workstation's launcher for what outlives the app (`CodingAgentFramework.Host`,
+    F-274): `:none` by default, or `:systemd_user`, where each `dtach -n` holder and the tmux
+    server start in a `systemd-run --user --scope` unit of their own, so a stop of the app's
+    systemd unit ends neither. It needs `programs` to name `systemd_run`, the host's own
+    `systemd-run`: `{:bad, :scope, {:no_program, :systemd_run}}` without it. A remote host
+    names its own, in its `Host`;
+
+        iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
+        ...>   accounts: [], ports: %{intake: 1, mcp: 2}, claude: "/bin/claude",
+        ...>   env: %{path: "/bin"}, user: "me", scope: :systemd_user)
+        {:refused, {:bad, :scope, {:no_program, :systemd_run}}}
+
   - `hosts`: the other hosts, name to `%{programs: programs, dir: dir}` as `Jobs` and `Services`
     read them, each host reached by `Host.ssh/5` with the home's `ToolHome.ssh_options/1`;
     none by default;
@@ -297,7 +309,18 @@ defmodule CodingAgentFramework.Config do
       {:refused, {:bad, :home}}
   """
 
-  alias CodingAgentFramework.{ClaudeCLI, Mains, MCP, Runs, Services, ToolHooks, Usable, Watch}
+  alias CodingAgentFramework.{
+    ClaudeCLI,
+    Host,
+    Mains,
+    MCP,
+    Runs,
+    Services,
+    ToolHooks,
+    Usable,
+    Watch
+  }
+
   alias CodingAgentFramework.Mains.Checkout
   alias CodingAgentFramework.Scheduler.Queue
   alias CodingAgentFramework.Sessions.Dialog
@@ -319,6 +342,7 @@ defmodule CodingAgentFramework.Config do
     claude: nil,
     user: nil,
     workstation: "ws",
+    scope: :none,
     hosts: %{},
     projects: %{},
     mains: %{},
@@ -460,6 +484,12 @@ defmodule CodingAgentFramework.Config do
 
       Map.get(fields, :undeclared_cues, :route) not in [:route, :raise] ->
         {:refused, {:bad, :undeclared_cues}}
+
+      Map.get(fields, :scope, :none) not in Host.scopes() ->
+        {:refused, {:bad, :scope}}
+
+      Map.get(fields, :scope) == :systemd_user and not is_map_key(fields.programs, :systemd_run) ->
+        {:refused, {:bad, :scope, {:no_program, :systemd_run}}}
 
       Watch.check_remedies(Map.get(fields, :remedies, %{})) != :ok ->
         {:refused, {:bad, :remedies}}
