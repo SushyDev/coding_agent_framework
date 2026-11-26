@@ -1284,10 +1284,10 @@ any reply does (new-4).
   n}}`, its place when it was queued, after which exactly one more answer comes, the lease or a
   refusal, as a message, and no position updates (each message to an idle session costs its
   whole context); or `{:refused, {reason, retry_at}}`, `reason` one of `queue_full`,
-  `deadline`, `pressure`, `allowance`. A refusal is final for its request id, holds nothing,
-  is a row the `Tracker` shows, and is never a failed run. Requests are idempotent
-  by request id: the lease is looked up before any refusal is decided, so a second request
-  answers the lease already granted.
+  `deadline`, `{:pressure, level, reading}`, `allowance`. A refusal is final for its request
+  id, holds nothing, is a row the `Tracker` shows, and is never a failed run. Requests are
+  idempotent by request id: the lease is looked up before any refusal is decided, so a second
+  request answers the lease already granted.
   - **Classes**, four and fixed, in this order: a person's main session, a landing's gates,
     builders, heavy runs. A class is served only when no waiting request of a higher class can
     be granted, a grant takes no unit a waiting request of a higher class needs (a waiting
@@ -1305,14 +1305,24 @@ any reply does (new-4).
     request whose budget runs out is refused then; pressure that bars a class refuses its
     request at once too. An account with no reading, or a window its reading lacks, has room:
     an account has no reading until a session on it draws its status line. `severe` is taken at
-    once; `high`, and a return to a lower state, only once asked for a whole window (F-135).
+    once; `high` only once each sample of a whole window asked for it (F-135); a lower state
+    once no sample of a whole window asked for the current one or above, and then the highest
+    any of them asked, so samples that flip between `ok` and `high` take `severe` down to
+    `high` (F-273). With stall times, each level is a share of the span between two samples
+    (2 s): `severe` is memory `full` (every task waiting on memory) over 1% of it; `high` is a
+    `some` line over its share, cpu 25%, memory 10% or io 20%; `ok` is neither. Measured on
+    the Linux workstation, memory `full` grew by under 0.001% of any span at rest or under the
+    test suite, so 1% reads only a real stall (F-273). A sample at or before the last (a clock
+    set back) only starts the next span. A pressure refusal carries the reading that set the
+    level, `{:pressure, level, %{file, line, share, threshold, at}}`, in the answer and in the
+    lease row's `reason`.
     On macOS the level is `sysctl -n kern.memorystatus_vm_pressure_level`: 1 (normal) `ok`, 2
     (warn) `high`, 4 (critical) `severe`, and any other value unknown, never `ok`: a sample
     that cannot be read changes nothing and is named in `Scheduler.pressure/2`, beside the
     level's source and its last sample's time; each change of the level is cued (F-171).
     Gates stop new starts only: an admitted session is never shed. Thresholds, reserves and
     the windows' figures are measured on the workstation, not modeled: each is an option with a
-    placeholder default.
+    default, a placeholder until it is measured (memory `full`'s is, F-273).
   - **The queue** is bounded per class and in memory (decided): a restart loses it, and a
     requester told `queued` asks again under its request id, which answers its lease if the
     grant was written before the restart. A queued request is refused at its deadline.

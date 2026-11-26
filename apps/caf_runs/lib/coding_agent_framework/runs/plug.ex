@@ -114,8 +114,8 @@ defmodule CodingAgentFramework.Runs.Plug do
           {:error, _} -> conn
         end
 
-      {:refused, {reason, retry_at}} when is_atom(reason) and is_integer(retry_at) ->
-        answer(conn, "refused #{reason} #{time(retry_at)}")
+      {:refused, {reason, retry_at}} when is_integer(retry_at) ->
+        answer(conn, "refused #{word(reason)} #{time(retry_at)}")
 
       {:refused, why} ->
         answer(conn, "refused #{word(why)} -")
@@ -143,7 +143,7 @@ defmodule CodingAgentFramework.Runs.Plug do
         last(conn, granted(lease, holder))
 
       {:lease, ^id, {:refused, {reason, retry_at}}} ->
-        last(conn, "refused #{reason} #{time(retry_at)}")
+        last(conn, "refused #{word(reason)} #{time(retry_at)}")
     after
       max(min(beat, left), 0) ->
         cond do

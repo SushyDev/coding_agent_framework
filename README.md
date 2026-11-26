@@ -518,6 +518,9 @@ Built, each from a checked model in `model/tla/`:
 - Remote Control follows the kind (F-275): only a main session has it, never a delegate, even an
   interactive one; a main takes a `title:` at its start and resume, which its launch gives
   `--name` and `--remote-control` while its agent name stays its address.
+- pressure measured on the Linux workstation (F-273): memory `full` reads `severe` over 1% of a
+  span, samples that flip between `ok` and `high` take `severe` down, a clock set back starts a
+  new span, and a pressure refusal carries the reading that set the level.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
