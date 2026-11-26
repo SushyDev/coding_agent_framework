@@ -296,6 +296,7 @@ ParentProc == IF parentRuns THEN parentStops + 1 ELSE 0
 D == INSTANCE Delivery WITH
        Ids <- Delegates, Addrs <- {Parent}, Headless <- {}, Senders <- Delegates,
        MaxSent <- 0, Awaited <- Awaited, ClientLeaves <- ClientLeaves, SelfTurns <- FALSE,
+       Continues <- FALSE,
        MaxRestarts <- 0, MaxEnds <- 0, MaxPrompts <- 0, MaxStops <- 0,
        Break <- IF Break = "NoPointer" THEN "NoPointer" ELSE "none",
        up <- up,

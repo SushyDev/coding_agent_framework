@@ -250,10 +250,15 @@ defmodule CodingAgentFramework.Mailbox.Transport.Typed do
   turn ended (`turn/2`: the session file reads idle with no waiter held, for the process the row
   was marked for) and the screen shows an empty box. `{:ok, :sent}` says the keys went in, not
   that Claude Code took them, so the row stays `sending` until the transcript decides, as a
-  waiter's does: the user line carrying the mark, once the turn it started has ended (or its
-  process is gone), is delivered; no line of it past the take bound, or its process gone with no
-  line, is due again, first, under its same uuid. An unknown write keeps the mark and is never
-  typed again by the `Inlet`; the same evidence settles it.
+  waiter's does (`Waiter.settle/2`): the user line carrying the mark, the row's own or its
+  pointer's, is delivered at once, whether the turn it started has ended or not (F-277); no line
+  of it past the take bound, or its process gone with no line, is due again, first, under its
+  same uuid. An unknown write keeps the mark and is never typed again by the `Inlet`; the same
+  evidence settles it.
+
+  The turn's end decides nothing: `Mailbox` settles at its cues, and an app that answers a
+  waiter itself starts the next turn before any cue reads the last one ended. A seen row that
+  waited for an ended turn stayed `sending`, and every row behind it waited with it.
 
   The bound runs from `sent_at`. The mark sets it to the latest the hand-on can be (the mark's
   time and the `Inlet`'s call timeout), and the answer to its own time, so a restart between the
@@ -262,37 +267,34 @@ defmodule CodingAgentFramework.Mailbox.Transport.Typed do
       iex> alias CodingAgentFramework.Mailbox.Transport.Typed
       iex> Typed.text("Done.", "u1")
       "Done. [delivery u1]"
-      iex> Typed.settle(%{sent_at: 0}, %{seen: :taken, ended: false, gone: false, now: 1, bound: 10})
-      :keep
+      iex> Typed.settle(%{sent_at: 0}, %{seen: :taken, gone: false, now: 1, bound: 10})
+      :delivered
   """
 
   alias CodingAgentFramework.Mailbox.Transport.Waiter
-
-  # The longest line typed as the row's own text: under the box of an 80-column pane, the
-  # narrowest a session's pane is drawn at, so a short row needs no screen's width to decide.
-  @short 76
 
   @doc "The text typed: the row's text and, at the end of the same line, its uuid."
   @spec text(String.t(), String.t()) :: String.t()
   def text(text, uuid), do: text <> " [delivery " <> uuid <> "]"
 
-  @doc "The longest line typed as a row's own text, in characters."
-  @spec short() :: pos_integer
-  def short, do: @short
-
   @doc """
   Whether a row's text is typed as itself (`text/2`): one line of printable characters within
-  `short/0`. Any other row is written to a file and typed as `pointer/2` (F-142).
+  `limit`, the characters the pane's box holds on one line as the `Inlet` reads it in its write
+  step (`Inlet.type/4`). Any other row is written to a file and typed as `pointer/2` (F-142).
+  A 200-column pane holds 196, so a 4-character text and its 73 of frame and mark fit (F-277).
 
-      iex> CodingAgentFramework.Mailbox.Transport.Typed.short?("Done.", "u1")
+      iex> alias CodingAgentFramework.Mailbox.Transport.Typed
+      iex> Typed.fits?("Done.", "u1", 196)
       true
-      iex> CodingAgentFramework.Mailbox.Transport.Typed.short?("Done.\\nAll of it.", "u1")
+      iex> Typed.fits?(String.duplicate("x", 300), "u1", 196)
+      false
+      iex> Typed.fits?("Done.\\nAll of it.", "u1", 196)
       false
   """
-  @spec short?(String.t(), String.t()) :: boolean
-  def short?(text, uuid) do
+  @spec fits?(String.t(), String.t(), non_neg_integer) :: boolean
+  def fits?(text, uuid, limit) do
     line = text(text, uuid)
-    String.length(line) <= @short and not Regex.match?(~r/[\x00-\x1f\x7f]/, line)
+    String.length(line) <= limit and not Regex.match?(~r/[\x00-\x1f\x7f]/, line)
   end
 
   @doc """
@@ -348,20 +350,9 @@ defmodule CodingAgentFramework.Mailbox.Transport.Typed do
 
   def text_refused?(_attempt), do: false
 
-  @doc """
-  Settles `row` by `evidence`: `%{seen: seen/2's answer | :unread, ended: whether the session's
-  turn reads ended or idle now, gone: whether the process it was typed into is gone, now:
-  wall-clock ms, bound: the take bound}`.
-  """
+  @doc "Settles `row` by `evidence` as `Waiter.settle/2` does: the typed write's evidence is the same."
   @spec settle(map, map) :: :keep | :delivered | :again
-  def settle(_row, %{seen: :unread}), do: :keep
-  def settle(_row, %{seen: :taken, gone: true}), do: :delivered
-  def settle(_row, %{seen: :taken, ended: ended}), do: if(ended, do: :delivered, else: :keep)
-  def settle(_row, %{gone: true}), do: :again
-  def settle(_row, %{seen: :queued}), do: :keep
-
-  def settle(row, %{now: now, bound: bound}),
-    do: if(now >= row.sent_at + bound, do: :again, else: :keep)
+  def settle(row, evidence), do: Waiter.settle(row, evidence)
 end
 
 defmodule CodingAgentFramework.Mailbox.Transport.Launch do

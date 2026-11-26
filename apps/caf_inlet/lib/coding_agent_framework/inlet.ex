@@ -169,18 +169,27 @@ defmodule CodingAgentFramework.Inlet do
   def press_timeout(press) when is_integer(press) and press > 0, do: press + @queue + @answer
 
   @doc """
-  Types `text` into `session` and then Enter, checked as the module doc says. Options:
+  Types `text` into `session` and then Enter, checked as the module doc says. `text` may be a
+  function of the limit, the pane's width less four columns as this step reads it: it answers
+  `{:ok, line}`, the line to type, or `{:refused, reason}`, the call's refusal, and nothing is
+  typed. `Mailbox` types a row whole by it whenever the pane holds it (F-277). Options:
   `release:` (required: the Claude Code release the session runs, or nil when none was
   recorded), `turn:` (required: a function read in the write's step, `:ok` when the turn has
   ended), `see:` and `timeout:` (ms).
 
-  Refusals: `{:bad_text, :empty | :control}`, `{:too_long, limit}`, `:no_release`,
+  Refusals: `{:bad_text, :empty | :control}`, `{:too_long, limit}`, the function's own or
+  `{:line, answer}` for an answer of another shape, `:no_release`,
   `{:unknown_release, release}`, `{:turn, reason}`, `{:screen, reading}` (the screen read but not
   idle with an empty box, or `:unrecognized`), and `Tmux`'s (`:no_pane`, `{:tagged_for, other}`,
   `:no_server`). Unknown: `{:not_seen, reading}` (typed, and the box never showed it; no Enter
   went), `{:enter, reason}` (typed and seen, the Enter's outcome not known), or `Tmux`'s.
   """
-  @spec type(GenServer.server(), String.t(), String.t(), keyword) :: outcome
+  @spec type(
+          GenServer.server(),
+          String.t(),
+          String.t() | (pos_integer -> {:ok, String.t()} | {:refused, term}),
+          keyword
+        ) :: outcome
   def type(inlet, session, text, opts) do
     request = {:type, session, text, Keyword.fetch!(opts, :release), Keyword.fetch!(opts, :turn)}
     call(inlet, request, Keyword.get(opts, :see), opts)
@@ -408,12 +417,14 @@ defmodule CodingAgentFramework.Inlet do
 
   defp bound(_request, _state), do: 0
 
-  defp act({:type, session, text, release, turn}, see, tmux) do
-    with :ok <- text?(text),
+  defp act({:type, session, line, release, turn}, see, tmux) do
+    with :ok <- if(is_binary(line), do: text?(line), else: :ok),
          :ok <- if(is_binary(release), do: :ok, else: {:refused, :no_release}),
          {:ok, pane} <- pane(tmux, session),
          :ok <- turn(turn),
          {:ok, width} <- empty_box(tmux, pane, session, release),
+         {:ok, text} <- line(line, width - @margin),
+         :ok <- text?(text),
          :ok <- fits(text, width),
          {:ok, :sent} <- Tmux.write(tmux, pane, session, {:text, text}) do
       expected = String.trim_trailing(text, " ")
@@ -697,6 +708,20 @@ defmodule CodingAgentFramework.Inlet do
         {:refused, _} = refused -> refused
       end
     end
+  end
+
+  # The line typed: the caller's, or the one its function answers for the limit read in this
+  # step, so a row is typed whole whenever the pane's real width holds it.
+  defp line(text, _limit) when is_binary(text), do: {:ok, text}
+
+  defp line(line, limit) do
+    case line.(limit) do
+      {:ok, text} when is_binary(text) -> {:ok, text}
+      {:refused, _} = refused -> refused
+      other -> {:refused, {:line, other}}
+    end
+  rescue
+    e -> {:refused, {:line, {:raised, e.__struct__}}}
   end
 
   defp fits(text, width) do

@@ -2398,9 +2398,12 @@ uuid at its end, only when the session file reads idle with no waiter held and t
 an empty box, both read again in the write's own step, and sends Enter as its own command once
 the box shows the text. The limit (F-132): the `Inlet` refuses a text of more than one line, or
 longer than the pane's width less four columns, since no fixture shows how a release draws a
-wrapped box (F-113's new-1). So a row too long to type (more than one line, a control
-character, or a line longer than 76 characters with its mark, which fits an 80-column pane) is
-typed as a pointer (F-142, decided): `Mailbox` writes its whole text to
+wrapped box (F-113's new-1). The line is chosen in the `Inlet`'s write step, for the width it
+reads there (F-277): a row is typed whole when its framed text and mark fit the pane's real
+width less four. A 200-column pane, the `viewer` default, holds 123 characters of text from a
+sender whose frame is 25 characters; a 400-column pane holds 323. A fixed limit of an
+80-column pane left 3. So a row too long to type (more than one line, a control character, or
+a line wider than that) is typed as a pointer (F-142, decided): `Mailbox` writes its whole text to
 `<home>/due/<agent>/<row id>.md` (`Sessions.due_dir/2`), and types one line, "A message for
 you is in <path>; read it.", with the row's uuid at its end. Each interactive start of the
 agent passes that directory by `--add-dir`, so reading the file never asks permission, and it
@@ -2683,7 +2686,7 @@ changed (R6).
 |---|---|---|---|
 | `stream` | a headless session | the replay in `Stream`'s fold; at the exit, the transcript. Its first row to a new process is marked before the start and written right after the hold (F-152) | settled from the same evidence once read; undelivered is final, and the row is due again first, under its same uuid, to the resumed process; a start's first row with no line in the fold waits for the start's deadline |
 | `waiter` | an interactive session with a waiter | the transcript's lines carrying the row's uuid: the `queue-operation` `enqueue` (it reached Claude Code's queue), then its take, a `dequeue` and the user line `Stop hook blocking error …` into an ended turn, or a `remove` and a `queued_command` attachment into a running one; delivered at the take; due again once the take bound past its hand-on has passed with no line, or its process is gone with no take | settled from the same lines: delivered if the take is there, kept while only the `enqueue` is, due again if no line is there and the take bound has passed |
-| `typed` | an interactive session with no waiter | the `Inlet`'s answer, then the transcript's user line once the turn has ended; due again as `waiter` | as `waiter`; an unknown write is never typed again |
+| `typed` | an interactive session with no waiter | the `Inlet`'s answer, then the transcript's user line, its own or its pointer's, delivered at once whether its turn has ended or not: `Mailbox` settles at its cues, and an app's own answer to a waiter may start the next turn before any cue reads the last one ended (F-277, `Break_Delivery_SettleAtIdle`); due again as `waiter` | as `waiter`; an unknown write is never typed again |
 | `launch` | the first row to an interactive session's new process | its start: the text is the start's prompt argument, read from a file into the last argument (`ClaudeCLI.prompted/5`, at most `ClaudeCLI.prompt_max/1` for the host's operating system; a longer row's text is written to the agent's due directory and the prompt is one line naming it, with the row's uuid, F-155); then the transcript's first user line whose text is the prompt, its mark last (the launch's own line, never a waiter's), delivered at it; a start refused makes it due again; with no line, due again only once no process of the start runs: a startup dialog holds the first turn for as long as a person takes, so no take bound stands for it, and the row is handed to no other transport while its process lives (F-153's new-1, `Break_Delivery_LaunchBound`) | settled from the same evidence |
 | `call` | a waiting `run_delegate` | the endpoint's write, and the calling process still running after it | due again, for the parent's waiter: the call it answered is gone |
 

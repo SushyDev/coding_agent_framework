@@ -21,7 +21,8 @@ defmodule CodingAgentFramework.MailboxTypedTest do
   setup ctx do
     tree = [
       %{name: "main", project: "app", parent: nil},
-      %{name: "d1", project: "app", parent: "main"}
+      %{name: "d1", project: "app", parent: "main"},
+      %{name: "operator", project: "app", parent: "main"}
     ]
 
     db = Path.join(ctx.dir, "caf.db")
@@ -144,17 +145,130 @@ defmodule CodingAgentFramework.MailboxTypedTest do
   end
 
   # Break_Delivery_SettleEarly's guard (the take bound): with no user line past it, the row is
-  # due again, first, under its same uuid, and typed again.
+  # due again, first, under its same uuid, and typed again. The row behind it waits only that
+  # long, and goes once the retry is delivered (F-277).
   test "a typed row with no user line past the take bound is due again", ctx do
     main = main(ctx)
     {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "d1", "main", "lost one")
+    {:ok, {:queued, two}} = Mailbox.message(ctx.mailbox, "d1", "main", "two")
     %{uuid: u1} = Table.get(ctx.mtable, one)
     assert {:ok, ["From d1 (message): lost one [delivery " <> _]} = submitted(ctx, 1)
     assert {:ok, %{uuid: ^u1, again: 1}} = until(ctx, one, &(&1.again == 1))
+    assert %{status: "queued"} = Table.get(ctx.mtable, two)
 
     assert {:ok, [line, line]} = submitted(ctx, 2)
     user_line(main, line)
     assert {:ok, %{status: "delivered"}} = until(ctx, one, &(&1.status == "delivered"))
+
+    assert {:ok, [_, _, "From d1 (message): two [delivery " <> _ = line2]} = submitted(ctx, 3)
+    user_line(main, line2)
+    assert {:ok, %{status: "delivered"}} = until(ctx, two, &(&1.status == "delivered"))
+  end
+
+  # F-277: the line's limit is the box at the pane's real width, read in the `Inlet`'s write
+  # step, not an 80-column pane's. The 200-column pane `Sessions` draws by default holds a
+  # short text with its 25 characters of frame and 48 of mark; a fixed 76 left room for 3.
+  test "a 4-character message is typed whole into a 200-column pane", ctx do
+    main = main(ctx)
+    {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "operator", "main", "test")
+    %{uuid: u1} = Table.get(ctx.mtable, one)
+    line1 = "From operator (message): test [delivery #{u1}]"
+    assert String.length(line1) > 76
+    assert {:ok, [^line1]} = submitted(ctx, 1)
+
+    user_line(main, line1)
+    assert {:ok, %{status: "delivered"}} = until(ctx, one, &(&1.status == "delivered"))
+    refute File.exists?(Path.join(Sessions.due_dir(ctx.dir, "main"), "#{one}.md"))
+  end
+
+  # F-277: an app that draws its panes 400 columns wide gets a 300-character message typed
+  # whole; one longer than that box holds goes as a due file, settled by its pointer's line.
+  test "a 300-character message is typed whole into a 400-column pane, a longer one by file",
+       ctx do
+    stop_supervised!(Sessions)
+    wide = Keyword.put(ctx.opts, :size, {400, 50})
+    spec = Supervisor.child_spec({Sessions, wide}, id: :wide, restart: :temporary)
+    main = main(%{ctx | sessions: start_supervised!(spec)})
+
+    text = String.duplicate("y", 300)
+    {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "operator", "main", text)
+    longer = String.duplicate("z", 400)
+    {:ok, {:queued, two}} = Mailbox.message(ctx.mailbox, "operator", "main", longer)
+
+    %{uuid: u1} = Table.get(ctx.mtable, one)
+    line1 = "From operator (message): #{text} [delivery #{u1}]"
+    assert {:ok, [^line1]} = submitted(ctx, 1)
+    user_line(main, line1)
+    assert {:ok, %{status: "delivered"}} = until(ctx, one, &(&1.status == "delivered"))
+    refute File.exists?(Path.join(Sessions.due_dir(ctx.dir, "main"), "#{one}.md"))
+
+    file = Path.join(Sessions.due_dir(ctx.dir, "main"), "#{two}.md")
+    %{uuid: u2} = Table.get(ctx.mtable, two)
+    pointer = "a message for you is in `#{file}`; read it. [delivery #{u2}]"
+    line2 = "From operator (message): " <> pointer
+    assert {:ok, [^line1, ^line2]} = submitted(ctx, 2)
+    assert File.read!(file) == "From operator (message): " <> longer
+    assert %{status: "sending", via: "typed"} = Table.get(ctx.mtable, two)
+
+    user_line(main, line2)
+    assert {:ok, %{status: "delivered"}} = until(ctx, two, &(&1.status == "delivered"))
+  end
+
+  # SettleSeen, Break_Delivery_SettleAtIdle (F-277): a typed row's line delivers it while the
+  # turn it started still runs. The app may answer each turn's end itself, so no settle reads an
+  # ended turn; a row waiting for one stayed sending, and every row behind it waited. Here the
+  # pointer's line is in the transcript, the session file reads busy, and the row is delivered;
+  # the row behind it goes once the turn ends.
+  test "a typed pointer's line delivers its row while the turn runs", ctx do
+    main = main(ctx)
+    since = since(ctx, main)
+    long = String.duplicate("x", 300)
+    {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "d1", "main", long)
+    {:ok, {:queued, two}} = Mailbox.message(ctx.mailbox, "d1", "main", "two")
+
+    %{uuid: u1} = Table.get(ctx.mtable, one)
+    assert {:ok, [line1]} = submitted(ctx, 1)
+    assert line1 =~ "a message for you is in `" and line1 =~ "[delivery #{u1}]"
+    running(ctx, main, since)
+
+    user_line(main, line1)
+    assert {:ok, %{status: "delivered"}} = until(ctx, one, &(&1.status == "delivered"))
+    assert %{status: "queued"} = Table.get(ctx.mtable, two)
+
+    set_turn(ctx, main, "idle")
+    assert {:ok, [^line1, "From d1 (message): two [delivery " <> _ = line2]} = submitted(ctx, 2)
+    user_line(main, line2)
+    assert {:ok, %{status: "delivered"}} = until(ctx, two, &(&1.status == "delivered"))
+  end
+
+  # RedeliverAfterRestart's guard (F-277): a row a restart left sending is settled by the same
+  # evidence, its turn running or not, never typed again; the row behind it then goes.
+  test "a typed row left sending by a restart is settled by its line", ctx do
+    main = main(ctx)
+    since = since(ctx, main)
+    {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "d1", "main", "one")
+    {:ok, {:queued, two}} = Mailbox.message(ctx.mailbox, "d1", "main", "two")
+    assert {:ok, [line1]} = submitted(ctx, 1)
+    running(ctx, main, since)
+
+    # The Inlet's answer is in (its own time replaces the mark's later one), so no hand-on runs.
+    assert {:ok, _} = until(ctx, one, &(&1.sent_at <= System.os_time(:millisecond)))
+    stop_supervised!(Mailbox)
+
+    ctx = %{
+      ctx
+      | mailbox: start_supervised!(Supervisor.child_spec({Mailbox, ctx.mopts}, id: :again))
+    }
+
+    assert %{status: "sending", via: "typed"} = Table.get(ctx.mtable, one)
+
+    user_line(main, line1)
+    assert {:ok, %{again: 0}} = until(ctx, one, &(&1.status == "delivered"))
+    assert ScreenStandIn.submitted(ctx.dir) == [line1]
+
+    set_turn(ctx, main, "idle")
+    assert {:ok, [^line1, "From d1 (message): two [delivery " <> _]} = submitted(ctx, 2)
+    assert %{status: "sending"} = Table.get(ctx.mtable, two)
   end
 
   # F-233: the operator's reload goes in as a typed row does, its turn read in the write's step;
@@ -180,6 +294,39 @@ defmodule CodingAgentFramework.MailboxTypedTest do
 
     {:ok, transcript} = Transcripts.path(ctx.account.config_dir, ctx.dir, sid)
     %{pid: pid, transcript: transcript}
+  end
+
+  # Once the stand-in has run the typed line's turn, the turn reads running, as when an app's
+  # answer to the Stop hook goes on with it. The stand-in's last write for the Enter is its
+  # session file saying idle, newer than `since`. Its screen is no sign: it draws once a burst
+  # of keys is in, so the empty box from before the line can still show.
+  defp running(ctx, main, since) do
+    assert {:ok, _} =
+             await(fn ->
+               case session_file(ctx, main) do
+                 %{"status" => "idle", "updatedAt" => at} = file when at > since -> {:ok, file}
+                 other -> other
+               end
+             end)
+
+    set_turn(ctx, main, "busy")
+  end
+
+  # The time of the session file's last write, before any line is typed.
+  defp since(ctx, main), do: session_file(ctx, main)["updatedAt"]
+
+  defp session_file(ctx, main) do
+    path = Path.join([ctx.account.config_dir, "sessions", "#{main.pid}.json"])
+    {:ok, json} = path |> File.read!() |> JSON.decode()
+    json
+  end
+
+  defp set_turn(ctx, main, status) do
+    path = Path.join([ctx.account.config_dir, "sessions", "#{main.pid}.json"])
+    json = session_file(ctx, main)
+    json = %{json | "status" => status, "updatedAt" => System.os_time(:millisecond)}
+    File.write!(path <> ".tmp", JSON.encode!(json))
+    File.rename!(path <> ".tmp", path)
   end
 
   # The user line Claude Code writes for a prompt typed into an ended turn.

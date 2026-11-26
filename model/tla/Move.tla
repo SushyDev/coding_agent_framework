@@ -278,7 +278,8 @@ Held == AtLimit /\ Current # 0 /\ Break # "LimitIdleForAll"
 
 D == INSTANCE Delivery WITH
        Ids <- Ids, Addrs <- {Main}, Headless <- {}, Senders <- Senders, MaxSent <- 0,
-       Awaited <- {}, ClientLeaves <- FALSE, SelfTurns <- FALSE, MaxRestarts <- 0, MaxEnds <- 0,
+       Awaited <- {}, ClientLeaves <- FALSE, SelfTurns <- FALSE,
+       Continues <- FALSE, MaxRestarts <- 0, MaxEnds <- 0,
        MaxPrompts <- 0, MaxStops <- 0,
        Break <- CASE Break = "MarkWhileEnding" -> "MarkWhileStopping"
                   [] Break = "StopWhileSending" -> "StopWhileSending"
