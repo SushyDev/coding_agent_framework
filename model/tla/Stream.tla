@@ -208,7 +208,7 @@ Dg == "delegate"
 
 D == INSTANCE Delivery WITH
        Ids <- Msgs, Addrs <- {Dg}, Headless <- {Dg}, Senders <- {Parent}, MaxSent <- 0,
-       Awaited <- {}, ClientLeaves <- FALSE, SelfTurns <- FALSE, MaxRestarts <- 0,
+       Awaited <- {}, Notices <- {}, ClientLeaves <- FALSE, SelfTurns <- FALSE, MaxRestarts <- 0,
        MaxEnds <- 0, MaxPrompts <- 0, MaxStops <- 0,
        Break <- CASE Break = "NoResultWait" -> "IntoRunningTurn"
                   [] Break = "MsgAfterEnd" -> "MarkWhileStopping"

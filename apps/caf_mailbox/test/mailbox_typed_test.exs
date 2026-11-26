@@ -171,6 +171,59 @@ defmodule CodingAgentFramework.MailboxTypedTest do
     assert ScreenStandIn.submitted(ctx.dir) == ["/reload-plugins"]
   end
 
+  # Delivery.tla's PromptWithdraws, ClosedNotHandedOn (F-256): a prompt's notice whose prompt
+  # closed before its row was handed on is typed never and settles withdrawn, and the row behind
+  # it goes on; a notice whose prompt is still open is typed as any row is.
+  test "a prompt notice whose prompt closed is withdrawn, never typed", ctx do
+    main = main(ctx)
+    closed = ["dialog:d1:trust"]
+    m = with_prompts(ctx, fn id -> {:ok, if(id in closed, do: :closed, else: :open)} end)
+    notify = &Mailbox.notify(m, "main", &1, key: "prompt:" <> &2, kind: :prompt, from: "d1")
+    {:ok, {:queued, gone}} = notify.("trust", "dialog:d1:trust")
+    {:ok, {:queued, live}} = notify.("Bash", "permission:7")
+
+    %{uuid: u2} = Table.get(ctx.mtable, live)
+    line = "From d1 (prompt): Bash [delivery #{u2}]"
+    assert {:ok, [^line]} = submitted(ctx, 1)
+    assert {:ok, %{status: "withdrawn", attempt: "prompt_closed"}} = Mailbox.status(m, gone)
+    user_line(main, line)
+    assert {:ok, %{status: "delivered"}} = await(fn -> delivered(m, live) end)
+    assert ScreenStandIn.submitted(ctx.dir) == [line]
+  end
+
+  # A prompt the check could not read is no answer: nothing is typed, the mark is undone, and
+  # the row says why and waits for its next cue (no hidden retry).
+  test "a prompt notice whose prompt cannot be read is refused, not typed", ctx do
+    main(ctx)
+    m = with_prompts(ctx, fn _id -> {:unknown, :prompts_down} end)
+    opts = [key: "prompt:permission:7", kind: :prompt, from: "d1"]
+    {:ok, {:queued, one}} = Mailbox.notify(m, "main", "waiting", opts)
+
+    assert {:ok, %{status: "queued", attempt: ~s(["prompt","prompts_down"])}} =
+             await(fn ->
+               Mailbox.status(m, 0)
+               row = Table.get(ctx.mtable, one)
+               if row.attempt, do: {:ok, row}, else: row
+             end)
+
+    assert ScreenStandIn.submitted(ctx.dir) == []
+  end
+
+  defp with_prompts(ctx, prompt_open) do
+    stop_supervised!(Mailbox)
+    mopts = Keyword.put(ctx.mopts, :prompt_open, prompt_open)
+    start_supervised!(Supervisor.child_spec({Mailbox, mopts}, id: :prompts))
+  end
+
+  defp delivered(m, id) do
+    Mailbox.cue(m, %{topic: "sessions:test:work", ids: []})
+
+    case Mailbox.status(m, id) do
+      {:ok, %{status: "delivered"}} = ok -> ok
+      {:ok, row} -> row
+    end
+  end
+
   defp main(ctx) do
     launch =
       Keyword.put(SessionsSetup.launch(ctx, :at_start), :claude, ScreenStandIn.write!(ctx.dir))

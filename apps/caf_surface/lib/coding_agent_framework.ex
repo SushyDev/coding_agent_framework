@@ -694,6 +694,20 @@ defmodule CodingAgentFramework do
   # the atom is made only at a start, and an app's lookup never makes one.
   defp names(instance), do: String.to_atom(@names <> instance)
 
+  # `Mailbox`'s read of a prompt before it hands on a notice of it (F-256): open while the inbox
+  # lists it. The inbox is reached by its registered name, since it starts after `Mailbox` and
+  # reads it; a read it could not answer is not an answer.
+  defp prompt_open(c) do
+    prompts = {:via, Elixir.Registry, {names(c.instance), :prompts}}
+
+    fn id ->
+      case Prompts.read(prompts) do
+        {:ok, open} -> {:ok, if(Enum.any?(open, &(&1.id == id)), do: :open, else: :closed)}
+        {_tag, reason} -> {:unknown, reason}
+      end
+    end
+  end
+
   defp registry(instance) when is_binary(instance) do
     name = String.to_existing_atom(@names <> instance)
     if Process.whereis(name), do: {:ok, name}, else: {:refused, :no_instance}
@@ -1235,6 +1249,7 @@ defmodule CodingAgentFramework do
             home: c.home,
             os: Programs.os(p),
             acts: pid.(:acts),
+            prompt_open: prompt_open(c),
             notify: notify}
          end},
         {:delegates,

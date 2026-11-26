@@ -483,6 +483,10 @@ Built, each from a checked model in `model/tla/`:
   the press.
 - `bin/caf-login`'s gh step sets up git's credential helper when a kept login has none, and
   its check reads it in the home's git config (F-263).
+- a `prompt` notice whose prompt closed before delivery is withdrawn, not typed (F-256):
+  `Mailbox` reads the prompt as the last act of the hand-on (`prompt_open:`), so a dialog
+  answered while its parent was mid-turn gives no false alarm. A launch's first row is not yet
+  checked.
 - an interactive delegate's reply to a message is stored (F-257): `Delegates` reads each ended
   turn's marks from its transcript, and `Mailbox.answered/4` stores the turn's reply under the
   message's key. A turn a message was queued into is never told as its own (`Reply.tla`), and a

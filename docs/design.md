@@ -833,7 +833,9 @@ the choice to its owner, whose own guard lets one answer in (a hold moves only f
 ask's answer and withdrawal share a key, a dialog's press is marked first); a late or second
 answer is refused `{:refused, :settled}`, and `{:withdraw, reason}` withdraws an ask. When a
 delegate's prompt opens, its parent gets one notice through `Mailbox` (kind `prompt`, from the
-delegate, keyed by the prompt). The operator's `answer_startup` and `withdraw` go through it.
+delegate, keyed by the prompt). The notice may wait for its parent's turn to end, and the prompt
+may close meanwhile; `Mailbox` then settles it `withdrawn` and types nothing ("Delivery",
+F-256). The operator's `answer_startup` and `withdraw` go through it.
 F-182 added the `remedy` kind: the `Watch`'s symptom row the healer asked, open while it is
 `asked`, answered by `Watch.answer/5`; it is not told to the agent's parent, since it is the
 `Watch`'s wait, not the agent's. F-181 added the `login` kind: `Logins`' row of an account a
@@ -2380,6 +2382,20 @@ session's waiter coming and going on a topic of its own (`intake:<host>:<account
 the session ids), and `Mailbox` tries a due row on that cue, not on a timer (F-123's new-3).
 The cue also settles a row `sending` by the last waiter: a turn's end starts the next waiter,
 so the transcript then holds the take. `Mailbox`'s one timer is the take bound's, per row.
+
+**A prompt's notice** (kind `prompt`, F-256) is queued while its prompt is open and may be
+delivered a whole turn later. As the last act of its hand-on, before the transport is called
+(stream, waiter or typed write), `Mailbox` reads the prompt through the app's `prompt_open:`
+function (built from `Prompts.read/3`). A closed prompt's row settles `withdrawn`, attempt
+`prompt_closed`: nothing is written, the ledger keeps the row, and the next row goes on
+(`Delivery.tla`'s `PromptCloses`, `PromptWithdraws`, `ClosedNotHandedOn`;
+`Break_Delivery_ClosedTyped`). The read is in the hand-on's task, since `Prompts` reads
+`Mailbox`: a call from `Mailbox`'s own process would wait on a process that waits on it. A
+prompt that closes after the read, within the one transport call, is delivered: a typed line
+cannot be called back, and the window is that call. A read `Prompts` could not answer refuses
+the hand-on and undoes the mark. The wake line is a fixed line and is not checked; the waiter
+that carries the row is. A launch's first row is not checked yet: its caller would check it,
+since `Mailbox.launch/4` runs in `Mailbox`'s own process (the build note's findings).
 
 **Ending a session** is SIGTERM to its pid, by the row's pid and start time, once its session
 file says `idle` and no `Mailbox` row to the session is `sending`; once its row is `stopping`,

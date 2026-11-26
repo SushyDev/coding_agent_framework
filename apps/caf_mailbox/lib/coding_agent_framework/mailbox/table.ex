@@ -12,7 +12,8 @@ defmodule CodingAgentFramework.Mailbox.Table do
   before it goes, with its transport `via`, `stream`, `waiter` or `call`, the `session_id` and
   the process `at` it is for), then `delivered` or `ended`, or `unknown` (still `sending` when
   the operator forced its addressee's end, F-170: never resent, never counted delivered), or
-  `undelivered` (never typed or read: no waiter came within the wait bound, F-240), or
+  `undelivered` (never typed or read: no waiter came within the wait bound, F-240),
+  `withdrawn` (a prompt's notice whose prompt closed before it was handed on, F-256), or
   `queued` again if it did not go
   in, under the `uuid` it was stored with; `again` says it was made due again, so it goes first.
   A row to the operator (a reply, a notice or an ask) is `kept` from its store: it is no

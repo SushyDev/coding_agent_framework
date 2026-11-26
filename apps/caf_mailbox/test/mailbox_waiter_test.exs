@@ -323,6 +323,50 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
     assert {:ok, []} = Mailbox.ended_while_sending(m, "main")
   end
 
+  # Delivery.tla's PromptWithdraws (F-256): a delegate's dialog is answered while its parent is
+  # mid-turn. At the turn's end the waiter carries the next row, not the notice of the closed
+  # prompt, which settles withdrawn; a notice of a prompt still open, and the row after it, go.
+  test "a prompt notice whose prompt closed is withdrawn at the turn's end, the next row goes",
+       ctx do
+    main = main(ctx)
+    GenServer.stop(ctx.mailbox)
+
+    closed =
+      start_supervised!(Supervisor.child_spec({Agent, fn -> MapSet.new() end}, id: :closed))
+
+    prompt_open = fn id ->
+      {:ok, if(MapSet.member?(Agent.get(closed, & &1), id), do: :closed, else: :open)}
+    end
+
+    m = restart(Map.put(ctx, :mopts, Keyword.put(ctx.mopts, :prompt_open, prompt_open)))
+    Process.put(:mailbox, m)
+    opts = fn key -> [key: "prompt:" <> key, kind: :prompt, from: "d1"] end
+    {:ok, {:queued, gone}} = Mailbox.notify(m, "main", "waiting on dialog: trust", opts.("a"))
+    {:ok, {:queued, live}} = Mailbox.notify(m, "main", "waiting on permission: Bash", opts.("b"))
+    {:ok, {:queued, after_it}} = Mailbox.message(m, "d1", "main", "after both")
+
+    # Open while it was queued; the person answers it while the parent's turn runs.
+    assert {:ok, %{status: "queued", attempt: "no_waiter"}} = until(ctx, gone, & &1.attempt)
+    Agent.update(closed, &MapSet.put(&1, "a"))
+
+    turn = WaiterStandIn.turn_end(main.settings, main.sid, main.transcript, :idle)
+
+    assert {2, "From d1 (prompt): waiting on permission: Bash\n\n[delivery " <> _} =
+             Task.await(turn, 10_000)
+
+    assert %{status: "withdrawn", attempt: "prompt_closed"} =
+             Table.get(ctx.mtable, gone)
+
+    assert %{status: status, via: "waiter"} = Table.get(ctx.mtable, live)
+    assert status in ~w(sending delivered)
+    assert %{status: "queued"} = Table.get(ctx.mtable, after_it)
+
+    # The withdrawn row is out of the table's open rows: it is never due again.
+    turn = WaiterStandIn.turn_end(main.settings, main.sid, main.transcript, :idle)
+    assert {2, "From d1 (message): after both" <> _} = Task.await(turn, 10_000)
+    assert {:ok, %{status: "withdrawn"}} = Mailbox.status(m, gone)
+  end
+
   # The waiter's hook in a main session's start: the overlay carries it beside the account's.
   defp main(ctx) do
     {:ok, %{pid: pid, session_id: sid}} =

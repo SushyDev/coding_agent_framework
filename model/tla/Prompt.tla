@@ -59,6 +59,8 @@
 (* answer/4 hands it to the owner by the prompt's kind. When the asker is  *)
 (* a delegate, Prompts tells its parent once that it waits (Notice:        *)
 (* ParentToldOnce, ParentTold, broken by NoticeUnkeyed).                   *)
+(* The notice may reach its parent after the prompt closed: Mailbox then   *)
+(* checks the prompt before it hands the row on (Delivery.tla, F-256).     *)
 (*                                                                         *)
 (* A headless delegate's permission request (F-190) is Claude Code's       *)
 (* can_use_tool over the stream, held in its Stream fold: a held prompt of *)

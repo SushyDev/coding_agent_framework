@@ -99,6 +99,18 @@
 (* (ForcedSettles, F-172).                                                 *)
 (* ForceEnded settles it ended, which says it never went in.               *)
 (*                                                                         *)
+(* A prompt's notice (kind prompt, F-256; Prompt.tla's Notice) is queued  *)
+(* while its prompt is open, and the prompt may close before the row goes  *)
+(* in (PromptCloses): a person answered it while the addressee was mid-    *)
+(* turn. The hand-on, whatever its transport, checks the prompt as its     *)
+(* last act before the write. A closed prompt's notice is written to no    *)
+(* transport and settles withdrawn, with reason prompt_closed             *)
+(* (PromptWithdraws): final, and the rows behind it go on. An open one is  *)
+(* delivered as any row. The check and the write are one step here, so a   *)
+(* prompt closing after the check is a notice delivered: the code's window *)
+(* is one transport call, and a notice cannot be called back once typed.   *)
+(* ClosedTyped hands on a notice whose prompt closed.                      *)
+(*                                                                         *)
 (* Models these modules of CodingAgentFramework (R7 and R8 build them):    *)
 (*   Mailbox   the table of rows (durable); the mark, the hand-on in       *)
 (*             memory, one module per transport with its restart policy;   *)
@@ -178,6 +190,7 @@ CONSTANTS
     Senders,       \* alone: who stores rows (beside replies and notices)
     MaxSent,       \* alone: rows the senders store; the rest are answers and resumes
     Awaited,       \* rows a run_delegate call may wait on
+    Notices,       \* alone: the rows that are a prompt's notice (F-256), none of them Awaited
     ClientLeaves,  \* the client may give up on a call before its deadline
     SelfTurns,     \* alone: a headless session may start a turn by itself
     MaxRestarts,   \* alone: restarts of the framework and of an addressee's agent process
@@ -219,12 +232,14 @@ Breaks == {
     "ForceEnded",            \* a row a forced end left sending is settled ended, not unknown
     "SettleInCall",          \* a forced end's rows settle only in the operator's call, which a restart cuts
     "WaitForever",           \* a row too wide to type waits for a waiter with no bound (F-240)
-    "WakeInMemory"           \* the wake line's mark is memory: a restart types it again (F-240)
+    "WakeInMemory",          \* the wake line's mark is memory: a restart types it again (F-240)
+    "ClosedTyped"            \* a notice whose prompt closed is handed on all the same (F-256)
 }
 
 ASSUME Break \in Breaks
 ASSUME Headless \subseteq Addrs /\ Awaited \subseteq Ids /\ Long \subseteq Ids
 ASSUME Wide \subseteq Long
+ASSUME Notices \subseteq Ids /\ Notices \cap Awaited = {}
 ASSUME Launched \subseteq Addrs
 ASSUME ClientLeaves \in BOOLEAN /\ SelfTurns \in BOOLEAN
 
@@ -234,7 +249,8 @@ OwnTurn == 0     \* a result that names no row: a turn a session started by itse
 NoResult == -1   \* no result since the last row went in
 Transports == {"stream", "waiter", "typed", "launch", "call"}
 NoRow == [from |-> Nobody, to |-> Nobody, kind |-> "none", re |-> 0, src |-> NoResult,
-          st |-> "none", via |-> "none", at |-> 0, again |-> FALSE, woke |-> FALSE, wakes |-> 0]
+          st |-> "none", via |-> "none", at |-> 0, again |-> FALSE, woke |-> FALSE, wakes |-> 0,
+          closed |-> FALSE]
 
 VARIABLES
     \* The addressee: an instancing spec gives its own state for these.
@@ -333,6 +349,13 @@ Due(i) == [row[i] EXCEPT !.st = "due", !.via = "none", !.at = 0]
 DueAgain(i) == [Due(i) EXCEPT !.again = TRUE]
 Delivered(i) == [row[i] EXCEPT !.st = "delivered"]
 
+\* A prompt's notice whose prompt closed goes to no transport (F-256). The check is the last
+\* thing the hand-on does before its write: here it and the write are one step, so a prompt that
+\* closes after it is a notice delivered, which is allowed. The window it leaves in the code is
+\* one transport call.
+Closed(i) == IF row[i].closed THEN {"closed prompt"} ELSE {}
+Checked(i) == ~row[i].closed \/ Break = "ClosedTyped"
+
 -----------------------------------------------------------------------------
 (* The steps an instancing spec takes: each changes only this module's     *)
 (* variables, and reads the addressee's.                                   *)
@@ -376,12 +399,13 @@ Mark(i, t) ==
 Handed(i) ==
     LET a == row[i].to IN
     /\ up /\ i \in hand /\ row[i].via \in {"stream", "waiter", "typed"} /\ ~ForStart(i)
-    /\ Open(i)
+    /\ Open(i) /\ Checked(i)
     /\ hand' = hand \ {i}
     /\ wire' = [wire EXCEPT ![i] = @ + 1]
     /\ claimed' = IF row[i].via = "stream" THEN claimed \cup {i} ELSE claimed
     /\ waiter' = IF row[i].via = "waiter" THEN [waiter EXCEPT ![a] = 0] ELSE waiter
-    /\ UNCHANGED <<row, call, tx, fold, rmem, last, unsure, lost, wrong>>
+    /\ wrong' = wrong \cup Closed(i)
+    /\ UNCHANGED <<row, call, tx, fold, rmem, last, unsure, lost>>
 
 \* launch: the start is the hand-on. The row's text is the start's prompt
 \* argument, for the process p the start makes (the instancing spec starts
@@ -391,17 +415,19 @@ Handed(i) ==
 \* restart between the two leaves a process with no init, which Sessions
 \* never confirms and Recoveries ends (Start.tla).
 Launch(i, p) ==
-    /\ up /\ i \in hand /\ ForStart(i) /\ Open(i)
+    /\ up /\ i \in hand /\ ForStart(i) /\ Open(i) /\ Checked(i)
     /\ hand' = hand \ {i}
     /\ wire' = [wire EXCEPT ![i] = @ + 1]
     /\ row' = [row EXCEPT ![i].at = p]
     /\ claimed' = IF row[i].via = "stream" THEN claimed \cup {i} ELSE claimed
-    /\ UNCHANGED <<waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
+    /\ wrong' = wrong \cup Closed(i)
+    /\ UNCHANGED <<waiter, call, tx, fold, rmem, last, unsure, lost>>
 
 \* The transport refuses: nothing went out, and the mark is undone. A start
 \* may be refused whatever its check read (a setup that failed, say).
 Refused(i) ==
     /\ up /\ i \in hand
+    /\ Checked(i)  \* the check comes before the transport, so a closed notice is not refused
     /\ \/ row[i].via \in {"stream", "waiter", "typed"} /\ ~ForStart(i) /\ ~Open(i)
        \/ ForStart(i)
     /\ hand' = hand \ {i}
@@ -411,11 +437,28 @@ Refused(i) ==
 \* The Inlet answers unknown: the keys may have gone in. The mark stays, for
 \* the evidence; under UnknownUndone it is undone.
 Unknown(i) ==
-    /\ up /\ i \in hand /\ row[i].via = "typed" /\ Open(i)
+    /\ up /\ i \in hand /\ row[i].via = "typed" /\ Open(i) /\ Checked(i)
     /\ hand' = hand \ {i}
     /\ wire' \in {wire, [wire EXCEPT ![i] = @ + 1]}
     /\ row' = IF Break = "UnknownUndone" THEN [row EXCEPT ![i] = Due(i)] ELSE row
     /\ UNCHANGED <<claimed, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
+
+\* A notice's prompt closes (answered, withdrawn or its agent gone) while its row is due or
+\* marked and not yet handed on. It happens or not: the prompt is not Mailbox's.
+PromptCloses(i) ==
+    /\ i \in Notices /\ ~row[i].closed
+    /\ \/ row[i].st = "due"
+       \/ row[i].st = "sending" /\ i \in hand
+    /\ row' = [row EXCEPT ![i].closed = TRUE]
+    /\ UNCHANGED <<hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
+
+\* The check finds the prompt closed: nothing is written, the mark is replaced by the settle
+\* `withdrawn` (reason `prompt_closed`), and the rows behind it go on. Final: never due again.
+PromptWithdraws(i) ==
+    /\ up /\ i \in hand /\ row[i].closed /\ Break # "ClosedTyped"
+    /\ hand' = hand \ {i}
+    /\ row' = [row EXCEPT ![i].st = "withdrawn"]
+    /\ UNCHANGED <<claimed, wire, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
 
 \* After a restart, a stream row whose line is not claimed is claimed again:
 \* the spool is still there, so nothing of it went in.
@@ -775,7 +818,8 @@ Mailbox(A) == A /\ UNCHANGED <<avars, alone>>
 \* A sender stores a row; the first to a headless session is its brief.
 Sends(i, s, a) ==
     /\ i <= MaxSent /\ ~over[a]
-    /\ Store(i, s, a, IF a \in Headless \cup Launched /\ To(a) = {} THEN "brief" ELSE "msg")
+    /\ Store(i, s, a, IF i \in Notices THEN "prompt"
+                      ELSE IF a \in Headless \cup Launched /\ To(a) = {} THEN "brief" ELSE "msg")
     /\ UNCHANGED <<avars, alone>>
 
 \* A take starts a turn; a call's write goes into the turn that called.
@@ -919,6 +963,7 @@ Next ==
                       \/ Mailbox(EndedFirst(i)) \/ Mailbox(ForceSettled(i))
                       \/ Mailbox(ReplyStored(i) \/ NoticeStored(i) \/ GoOn(i))
                       \/ Mailbox(WaitBound(i)) \/ \E took \in BOOLEAN : Woken(i, took)
+                      \/ Mailbox(PromptCloses(i) \/ PromptWithdraws(i))
 
 \* One row's steps after its mark and hand-on, but the take: each is the
 \* next one the row can take, so one fairness for them all is enough, and
@@ -927,7 +972,8 @@ Next ==
 RowSteps(i) ==
     Mailbox(\/ Refused(i) \/ Reclaim(i) \/ Settle(i) \/ Deadline(i) \/ Written(i) \/ Told(i)
                \/ CallerSeen(i) \/ SettleCut(i) \/ EndedFirst(i) \/ ReplyStored(i)
-               \/ NoticeStored(i) \/ GoOn(i) \/ ForceSettled(i) \/ WaitBound(i))
+               \/ NoticeStored(i) \/ GoOn(i) \/ ForceSettled(i) \/ WaitBound(i)
+               \/ PromptWithdraws(i))
 
 Fairness ==
     /\ WF_vars(FrameworkStarts)
@@ -945,11 +991,12 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 
 TypeOK ==
     /\ \A i \in Ids : /\ row[i].st \in {"none", "due", "sending", "delivered", "ended", "kept",
-                                       "unknown", "undelivered"}
+                                       "unknown", "undelivered", "withdrawn"}
                       /\ row[i].wakes \in 0..2
                       /\ row[i].via \in Transports \cup {"none"}
                       /\ row[i].kind \in {"none", "msg", "brief", "resume", "reply", "notice",
-                                         "ask", "answer"}
+                                         "ask", "answer", "prompt"}
+                      /\ row[i].closed \in BOOLEAN
     /\ hand \subseteq Ids /\ claimed \subseteq Ids /\ unsure \subseteq Ids
     /\ wire \in [Ids -> 0..2]
     /\ call \in [Ids -> {"none", "waiting", "timedout", "writing", "wrote", "failed", "gone",
@@ -1005,7 +1052,8 @@ AnswersTheBrief ==
 \* never sent twice, and never counted delivered (F-170). So does a row the
 \* wait bound made undelivered (F-240).
 UnknownStays ==
-    [][\A i \in Ids : row[i].st \in {"unknown", "undelivered"} => row'[i].st = row[i].st]_row
+    [][\A i \in Ids : row[i].st \in {"unknown", "undelivered", "withdrawn"}
+                       => row'[i].st = row[i].st]_row
 
 \* A row in flight to a session whose end the operator forced settles, once
 \* that session ended, whatever restart comes between (F-172).
@@ -1015,6 +1063,12 @@ ForcedSettles ==
 
 \* A row in flight settles.
 SendingSettles == \A i \in Ids : row[i].st = "sending" ~> row[i].st # "sending"
+
+\* A notice's prompt that closed before the row was handed on is never delivered, and a row is
+\* withdrawn only for that (F-256). ClosedTyped breaks it.
+ClosedNotHandedOn == "closed prompt" \notin wrong
+WithdrawnWhy ==
+    \A i \in Ids : row[i].st = "withdrawn" => row[i].kind = "prompt" /\ row[i].closed
 
 \* A due row is delivered, or marked ended once its session ended. None
 \* waits for a person's prompt: a long row is typed as a pointer (F-142).
@@ -1027,7 +1081,8 @@ Arrives ==
     \A i \in Ids : row[i].st = "due"
                      ~> (row[i].st \in {"delivered", "ended"}
                          \/ (row[i].st = "unknown" /\ row[i].to \in forced)
-                         \/ (row[i].st = "undelivered" /\ i \in Wide))
+                         \/ (row[i].st = "undelivered" /\ i \in Wide)
+                         \/ (row[i].st = "withdrawn" /\ row[i].closed))
 
 \* A row is unknown only by a forced end, and undelivered only by the wait
 \* bound (F-240).

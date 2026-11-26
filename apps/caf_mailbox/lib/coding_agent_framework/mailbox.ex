@@ -94,6 +94,19 @@ defmodule CodingAgentFramework.Mailbox do
   (F-257). The answers to a brief or a word to go on are `Delegates'`: it
   decides between a finish, a resume and a second kill, and hands the report here.
 
+  **A prompt's notice.** A `prompt` notice is queued while its prompt is open, and the prompt may
+  close before the row goes in: a person answered it while the parent was mid-turn
+  (`Delivery.tla`'s `PromptCloses`, `PromptWithdraws`). Given `prompt_open:`, the hand-on of
+  every transport (stream, waiter, typed write) reads the prompt in its task, as the last act
+  before the write; this process never calls `Prompts`, which calls it. A closed prompt's row
+  settles `withdrawn`, with attempt `prompt_closed`, and nothing is written: the ledger keeps
+  the row, and the next row goes on. A prompt that closes after the check, within the one
+  transport call, is delivered, as the model allows: a typed line cannot be called back. An
+  answer `{:unknown, reason}` of the check is a refusal, `{:prompt, reason}`: the mark is
+  undone and the row waits for its next cue. A launch's first row is not checked here (F-256
+  leaves it to its caller). The wake line is a fixed line, not the row's text, and is not
+  checked; the waiter that carries the row is.
+
   **Asks.** An agent asks a person through `ask/4`: a row from it to the operator, kept for the
   app and never delivered, read by `open_asks/2` and `asked/3`. The app answers through
   `answer/4`: a row from the operator to the agent that asked, under the ask's uuid, delivered
@@ -157,7 +170,12 @@ defmodule CodingAgentFramework.Mailbox do
   limit (`ClaudeCLI.prompt_max/1`) bounds a launch's prompt; `frame:`, a function that frames a
   row's text with its sender (`frame/1` by default, F-170); `acts:`, the instance's `Acts`,
   whose forced end of an agent settles its rows left `sending` at `Mailbox`'s own settle
-  (F-172; without it only `ended_while_sending/3` settles them).
+  (F-172; without it only `ended_while_sending/3` settles them); `prompt_open:`, a function of
+  a prompt's id that answers `{:ok, :open}`, `{:ok, :closed}` or `{:unknown, reason}`, which
+  the embedding app builds from `Prompts.read/3` (this app cannot call `Prompts`, which uses
+  it). With it, each `prompt` notice's prompt is checked as the last act of its hand-on, before
+  its transport is called; see the module doc, "A prompt's notice". Without it nothing is
+  checked.
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -596,6 +614,7 @@ defmodule CodingAgentFramework.Mailbox do
       s = Map.merge(s, %{hands: %{}, launching: MapSet.new()})
       s = Map.put(s, :frame, Keyword.get(opts, :frame, &frame/1))
       s = Map.put(s, :acts, opts[:acts])
+      s = Map.put(s, :prompt_open, opts[:prompt_open])
       {:ok, Map.merge(s, %{waiter: waiter, typed: typed}), {:continue, :read}}
     else
       {:refused, reason} -> {:stop, reason}
@@ -1216,6 +1235,18 @@ defmodule CodingAgentFramework.Mailbox do
 
   defp handing(s), do: MapSet.new(Map.values(s.hands), fn {m, _} -> m.id end)
 
+  # A prompt's notice whose prompt closed (`Delivery.tla`'s PromptWithdraws): settled withdrawn
+  # unless something settled it while the check ran.
+  defp handed(s, ref, {:withdrawn, why}) do
+    {{m, _after_hand}, hands} = Map.pop(s.hands, ref)
+    s = %{s | hands: hands}
+
+    if match?(%{status: "sending"}, Table.get(s.db, m.id)),
+      do: write(s, m, status: "withdrawn", attempt: why)
+
+    s
+  end
+
   # A row settled while its hand-on ran (`ended_while_sending/3`) takes no answer of it.
   defp handed(s, ref, answer) do
     {{m, after_hand}, hands} = Map.pop(s.hands, ref)
@@ -1228,10 +1259,27 @@ defmodule CodingAgentFramework.Mailbox do
   # task is linked, so it ends with this process; the row is then settled by its transport's
   # restart policy. `hand_on` answers its part's outcome; a raise, throw or exit in it is an
   # unknown answer, since the write may have gone in.
-  defp hand_on(s, m, hand_on, after_hand) do
-    task = Task.async(fn -> guarded(hand_on) end)
+  # A prompt's notice reads its prompt first, in the task, so this process never waits on
+  # `Prompts`; `check` false is the wake line's, which is not the row's text.
+  defp hand_on(s, m, hand_on, after_hand, check \\ true) do
+    open = check && s.prompt_open
+
+    task =
+      Task.async(fn -> guarded(fn -> with :ok <- prompt_open(open, m), do: hand_on.() end) end)
+
     put_in(s.hands[task.ref], {m, after_hand})
   end
+
+  defp prompt_open(open, %{kind: "prompt", reply_to: "key:prompt:" <> id})
+       when is_function(open, 1) do
+    case open.(id) do
+      {:ok, :open} -> :ok
+      {:ok, :closed} -> {:withdrawn, :prompt_closed}
+      {:unknown, why} -> {:refused, {:prompt, why}}
+    end
+  end
+
+  defp prompt_open(_open, _row), do: :ok
 
   # A write that raised may have gone in: unknown, never refused.
   defp guarded(write) do
@@ -1463,7 +1511,13 @@ defmodule CodingAgentFramework.Mailbox do
     inlet = s.typed.inlet
     opts = [release: srow.release, turn: turn, timeout: @inlet]
     # Its answer writes nothing: the row stays queued, and the waiter or the bound settles it.
-    hand_on(s, m, fn -> Inlet.type(inlet, srow.name, @wake, opts) end, fn _s, _m, _ -> :ok end)
+    hand_on(
+      s,
+      m,
+      fn -> Inlet.type(inlet, srow.name, @wake, opts) end,
+      fn _s, _m, _ -> :ok end,
+      false
+    )
   end
 
   # The undelivered row's notice to its sender, under its key, as a process's end gives one.
