@@ -67,7 +67,9 @@ defmodule CodingAgentFramework.Mailbox do
   - `launch` (F-137), for the first row to an interactive session's new process: marked by
     `launch/4` before the start that carries it as its prompt, told the start's answer by
     `launched/3` (refused, due again), and settled by the transcript's user line with its mark
-    (`Transport.Launch`). A row longer than the workstation's argument carries
+    (`Transport.Launch`), in the session the start made: from the offset the mark read when it
+    is the session the agent row named then (a resume), else from its first byte (F-282). A row
+    longer than the workstation's argument carries
     (`ClaudeCLI.prompt_max/1`) is written to the agent's due directory as a typed row's is, and
     the prompt is one line naming that file (`Transport.Launch.pointer/2`, F-155).
 
@@ -817,8 +819,12 @@ defmodule CodingAgentFramework.Mailbox do
         if is_integer(m.sent_at), do: bound(s, m.sent_at)
         {:reply, {:ok, "sending"}, s, {:continue, :settle}}
 
+      # The mark's offset is of the session the agent row named before the start: a resume's,
+      # whose transcript the start writes on. A new session's transcript is read from its start.
       {%{status: "sending", via: "launch"} = m, {:ok, %{session_id: sid} = started}} ->
-        write(s, m, session_id: sid, at: started[:pid], sent_at: now(), attempt: nil)
+        from = if sid == m.session_id, do: m.from_byte, else: 0
+        fields = [session_id: sid, from_byte: from, at: started[:pid], sent_at: now()]
+        write(s, m, fields ++ [attempt: nil])
         {:reply, {:ok, "sending"}, s}
 
       {%{status: "sending", via: "launch"} = m, {:refused, why}} ->
@@ -1795,12 +1801,16 @@ defmodule CodingAgentFramework.Mailbox do
 
   # A launch row's evidence: its own user line (`Transport.Launch.seen/2`), and whether the
   # start's process is gone: before the start's answer the row names no process, and the start
-  # is gone once its agent row holds none. Its session is the agent row's when the mark had none
-  # (a new session, a restart before the answer).
+  # is gone once its agent row holds none. Until the start's answer (a restart cut it, or it was
+  # unknown) its session is the agent row's now, which the start rewrites: the mark's names the
+  # session before it, the one its offset is of, and another session is read from its first
+  # byte (F-282).
   defp launch_seen(s, m) do
     srow = Agents.get(s.agents, m.to_agent)
     gone = srow == nil or Agents.free?(srow) or (m.at != nil and srow.pid != m.at)
-    m = %{m | session_id: m.session_id || (srow && srow.session_id)}
+    sid = if m.at == nil and srow != nil, do: srow.session_id || m.session_id, else: m.session_id
+    from = if sid == m.session_id, do: m.from_byte, else: 0
+    m = %{m | session_id: sid, from_byte: from}
 
     seen =
       if is_binary(m.session_id),

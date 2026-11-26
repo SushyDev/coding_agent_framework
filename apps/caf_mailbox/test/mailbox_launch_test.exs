@@ -210,6 +210,60 @@ defmodule CodingAgentFramework.MailboxLaunchTest do
     assert %{status: "queued"} = Table.get(ctx.mtable, two)
   end
 
+  # F-282: a new start of an agent whose row names an earlier session. The mark reads the offset
+  # of that session's transcript, long by then; the start makes a new session, whose transcript
+  # holds the launch's line from its first byte. The row settles by that line, whether the start's
+  # answer is told or a restart of the tree cut it before it was.
+  for cut <- [:told, :restart] do
+    test "a new session's launch row settles by its line, its answer #{cut}", ctx do
+      m = mailbox(ctx)
+      {sid1, path1} = delivered(ctx, m, "The first.")
+      pad = %{"type" => "summary", "summary" => String.duplicate("x", 4_000)}
+      File.write!(path1, List.duplicate([JSON.encode!(pad), "\n"], 50), [:append])
+      assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "main")
+
+      {:ok, {:queued, two}} = Mailbox.message(m, "d1", "main", "The second.")
+      deadline = System.os_time(:millisecond) + 30_000
+      assert {:ok, %{id: ^two, text: text}} = Mailbox.launch(m, "main", deadline)
+      assert %{session_id: ^sid1, from_byte: from} = Table.get(ctx.mtable, two)
+      assert from > 200_000
+
+      {:ok, %{session_id: sid2} = started} = start(ctx, text)
+      assert sid2 != sid1
+
+      if unquote(cut) == :told do
+        assert {:ok, "sending"} = Mailbox.launched(m, two, {:ok, started})
+        assert %{session_id: ^sid2, from_byte: 0} = Table.get(ctx.mtable, two)
+      else
+        GenServer.stop(m)
+        Process.put(:mailbox, restart(ctx.mopts))
+      end
+
+      {:ok, path2} = Transcripts.path(ctx.account.config_dir, ctx.dir, sid2)
+      user(path2, text)
+      assert {:ok, %{status: "delivered"}} = until(ctx, two, &(&1.status == "delivered"))
+    end
+  end
+
+  # A first session's launch, delivered: its session and transcript.
+  defp delivered(ctx, m, text) do
+    {:ok, {:queued, id}} = Mailbox.message(m, "d1", "main", text)
+    deadline = System.os_time(:millisecond) + 30_000
+    {:ok, %{text: prompt}} = Mailbox.launch(m, "main", deadline)
+    {:ok, %{session_id: sid} = started} = start(ctx, prompt)
+    {:ok, "sending"} = Mailbox.launched(m, id, {:ok, started})
+    {:ok, path} = Transcripts.path(ctx.account.config_dir, ctx.dir, sid)
+    user(path, prompt)
+    {:ok, %{status: "delivered"}} = until(ctx, id, &(&1.status == "delivered"))
+    {sid, path}
+  end
+
+  defp start(ctx, prompt) do
+    launch = SessionsSetup.launch(ctx, :at_start)
+    launch = Keyword.merge(launch, claude: ScreenStandIn.write!(ctx.dir), prompt: prompt)
+    Sessions.start(ctx.sessions, "main", ctx.account, launch)
+  end
+
   defp user(path, text) do
     File.mkdir_p!(Path.dirname(path))
     line = %{"type" => "user", "uuid" => "u-1", "message" => %{"content" => text}}
