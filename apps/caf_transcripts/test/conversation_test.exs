@@ -121,14 +121,15 @@ defmodule CodingAgentFramework.ConversationTest do
     assert %{subtype: "compact_boundary", text: "Conversation compacted"} = system
   end
 
-  test "a conversation read in two calls by cursor, each bounded by its limit", ctx do
+  test "a conversation read in calls by cursor, each bounded by its limit", ctx do
     File.write!(ctx.path, prompt("u1", "one") <> use("a1", "tu-1", "Bash", %{}, 1))
 
-    assert {:ok, %{entries: [%{uuid: "u1"}], next: next}} =
+    # The first read answers the newest entry; the older cursor reads the one before it.
+    assert {:ok, %{entries: [%{uuid: "a1", done: false}], next: next, older: older}} =
              Transcripts.conversation(ctx.t, ctx.path, limit: 1)
 
-    assert {:ok, %{entries: [%{uuid: "a1", done: false}], next: next}} =
-             Transcripts.conversation(ctx.t, ctx.path, from: next)
+    assert {:ok, %{entries: [%{uuid: "u1"}], older: nil, next: nil, queue: nil}} =
+             Transcripts.conversation(ctx.t, ctx.path, before: older)
 
     # Nothing new: no entry, and the cursor stays where it was.
     assert {:ok, %{entries: [], next: ^next}} =
@@ -193,26 +194,148 @@ defmodule CodingAgentFramework.ConversationTest do
              Transcripts.conversation(ctx.t, ctx.path, subagents: true, from: next)
   end
 
-  test "a line longer than the read's bound is one entry and the read goes on", ctx do
-    long = prompt("u1", String.duplicate("x", 300))
-    File.write!(ctx.path, long <> prompt("u2", "short"))
+  test "a line longer than the read's bound is one entry, forward and backward", ctx do
+    long = prompt("u2", String.duplicate("x", 300))
+    File.write!(ctx.path, prompt("u1", "first"))
+    {:ok, %{next: next}} = Transcripts.conversation(ctx.t, ctx.path)
+    File.write!(ctx.path, long <> prompt("u3", "short"), [:append])
 
-    # Each call reads 150 bytes at most, over the short line's length: the long line is passed
+    # Each call reads 150 bytes at most, over the short lines' length: the long line is passed
     # over in pieces, then the short one read.
     {entries, _} =
-      Enum.reduce(1..6, {[], nil}, fn _, {got, from} ->
+      Enum.reduce(1..6, {[], next}, fn _, {got, from} ->
         {:ok, %{entries: entries, next: next}} =
           Transcripts.conversation(ctx.t, ctx.path, max_bytes: 150, from: from)
 
         {got ++ entries, next}
       end)
 
-    assert [%{kind: "system", subtype: "unread_line", offset: 0}, %{uuid: "u2"}] = entries
+    offset = byte_size(prompt("u1", "first"))
+    assert [%{subtype: "unread_line", offset: ^offset}, %{uuid: "u3"}] = entries
+
+    # Backward from the end: the short line, the long one once, then the first.
+    assert {:ok, %{entries: [%{uuid: "u3"}], older: older}} =
+             Transcripts.conversation(ctx.t, ctx.path, max_bytes: 150)
+
+    assert older_entries(ctx, older, max_bytes: 150) ==
+             [{"prompt", "u1"}, {"system", nil}]
+  end
+
+  # Every entry the older cursors read, oldest first, as `{kind, uuid}`.
+  defp older_entries(ctx, older, opts, got \\ [])
+  defp older_entries(_ctx, nil, _opts, got), do: got
+
+  defp older_entries(ctx, older, opts, got) do
+    {:ok, %{entries: entries, older: older}} =
+      Transcripts.conversation(ctx.t, ctx.path, [before: older] ++ opts)
+
+    older_entries(ctx, older, opts, Enum.map(entries, &{&1.kind, &1.uuid}) ++ got)
+  end
+
+  # A prompt or a reply of `n` filler characters, so lines differ in length.
+  defp numbered(i) do
+    text = "#{i} " <> String.duplicate("y", rem(i * 37, 211))
+    if rem(i, 3) == 0, do: reply("r#{i}", text), else: prompt("p#{i}", text)
+  end
+
+  defp uuids(range), do: Enum.map(range, &if(rem(&1, 3) == 0, do: "r#{&1}", else: "p#{&1}"))
+
+  test "paging backward to the start and then forward loses and repeats no entry", ctx do
+    File.write!(ctx.path, Enum.map_join(1..120, &numbered/1))
+    # A block holds 4 to 9 of these lines, so some reads stop at the limit and some at a block's
+    # edge, with a line cut there.
+    opts = [limit: 7, max_bytes: 1_500]
+
+    assert {:ok, %{entries: newest, next: next, older: older}} =
+             Transcripts.conversation(ctx.t, ctx.path, opts)
+
+    assert length(newest) in 1..7
+    seen = older_entries(ctx, older, opts) ++ Enum.map(newest, &{&1.kind, &1.uuid})
+    assert Enum.map(seen, &elem(&1, 1)) == uuids(1..120)
+
+    File.write!(ctx.path, Enum.map_join(121..150, &numbered/1), [:append])
+
+    later =
+      Stream.unfold(next, fn from ->
+        case Transcripts.conversation(ctx.t, ctx.path, [from: from] ++ opts) do
+          {:ok, %{entries: [], next: ^from}} -> nil
+          {:ok, %{entries: entries, next: next}} -> {Enum.map(entries, & &1.uuid), next}
+        end
+      end)
+
+    assert Enum.concat(later) == uuids(121..150)
+  end
+
+  test "a first read of a long transcript reads only its end", ctx do
+    # The host's head is a stand-in that notes the bytes each read takes at most: every
+    # bounded read runs through it.
+    log = Path.join(ctx.dir, "head.log")
+    head = Path.join(ctx.dir, "head")
+
+    File.write!(head, """
+    #!#{program!(:sh)}
+    printf '%s\\n' "$2" >> "#{log}"
+    exec #{program!(:head)} "$@"
+    """)
+
+    File.chmod!(head, 0o755)
+    opts = Keyword.merge(ctx.opts, programs: programs(host(), %{head: head}))
+    {:ok, t} = Transcripts.start_link(Keyword.put(opts, :db, Path.join(ctx.dir, "h.db")))
+
+    File.write!(ctx.path, Enum.map_join(1..30_000, &numbered/1))
+    size = File.stat!(ctx.path).size
+    assert size > 4_000_000
+
+    assert {:ok, %{entries: entries, older: older}} =
+             Transcripts.conversation(t, ctx.path, limit: 20, max_bytes: 65_536)
+
+    assert Enum.map(entries, & &1.uuid) == uuids(29_981..30_000)
+    assert is_binary(older)
+    assert [bytes] = log |> File.read!() |> String.split() |> Enum.map(&String.to_integer/1)
+    assert bytes == 65_537
+  end
+
+  defp queue(op, text, second),
+    do: line(%{type: "queue-operation", operation: op, timestamp: at(second), content: text})
+
+  test "a message enqueued while a turn runs shows as queued, and is gone after its take", ctx do
+    File.write!(
+      ctx.path,
+      prompt("u1", "go") <>
+        use("a1", "tu-1", "Bash", %{command: "make"}, 1) <>
+        queue("enqueue", "Also run the tests.", 2) <>
+        queue("enqueue", "Hi.\n\n[delivery row-7]", 3)
+    )
+
+    assert {:ok, %{queue: [typed, delivered], next: next}} =
+             Transcripts.conversation(ctx.t, ctx.path)
+
+    assert %{source: :claude_code, text: "Also run the tests.", message: nil} = typed
+    assert typed.at == DateTime.to_unix(~U[2026-11-25 09:00:02Z], :millisecond)
+    assert %{message: "row-7"} = delivered
+
+    # The running turn takes the first at its next tool boundary, by its text.
+    File.write!(
+      ctx.path,
+      result("u2", "tu-1", "ok", 4) <> queue("remove", "Also run the tests.", 4),
+      [:append]
+    )
+
+    assert {:ok, %{queue: [%{message: "row-7"}], next: next}} =
+             Transcripts.conversation(ctx.t, ctx.path, from: next)
+
+    File.write!(ctx.path, queue("dequeue", nil, 5), [:append])
+    assert {:ok, %{queue: []}} = Transcripts.conversation(ctx.t, ctx.path, from: next)
   end
 
   test "its refusals name what is wrong", ctx do
     assert {:refused, :no_file} = Transcripts.conversation(ctx.t, ctx.path)
     assert {:refused, {:bad, :from}} = Transcripts.conversation(ctx.t, ctx.path, from: "nope")
+    assert {:refused, {:bad, :before}} = Transcripts.conversation(ctx.t, ctx.path, before: 1)
+
+    assert {:refused, {:bad, :before}} =
+             Transcripts.conversation(ctx.t, ctx.path, from: "a", before: "b")
+
     assert {:refused, {:bad, :limit}} = Transcripts.conversation(ctx.t, ctx.path, limit: 0)
 
     assert {:refused, {:bad, :subagents}} =

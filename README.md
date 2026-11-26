@@ -494,7 +494,9 @@ Built, each from a checked model in `model/tla/`:
 - an app reads an agent's conversation through the facade (F-260):
   `CodingAgentFramework.conversation/3` answers its prompts, replies, tool calls, notices,
   interrupts and system lines as entries, a cursor for what comes next, and the rows queued for
-  it; the host's `Transcripts` reads the file, bounded, through that host's shell.
+  it; the host's `Transcripts` reads the file, bounded, through that host's shell. A first read
+  answers the newest entries from the file's end, an older cursor pages back, and `queued` shows
+  Claude Code's own queue beside the framework's (F-267).
 - an app reads what holds the machine through the facade (F-266): `CodingAgentFramework.holds/2`
   answers the unreleased leases and the last released ones, each job under its lease with its
   command, copy and log path, the copies, each resource's held units and the pressure. A job's

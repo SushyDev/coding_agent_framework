@@ -77,6 +77,17 @@ defmodule CodingAgentFramework.Transcripts do
   printf 'file%s\n' "$f"
   exec "$2" -c "+$((f + 1))" "$1"
   """
+  # A conversation's first read (F-267): the file's size from the host's wc (`$3`), then its last
+  # `$4` bytes and the one before them, through the host's head (`$5`), so the bytes are bounded
+  # even when the file grows between the two runs; the byte they start at is printed first.
+  @ending ~S"""
+  [ -f "$1" ] || { printf 'nofile'; exit 0; }
+  [ -r "$1" ] || exit 1
+  s=$("$3" -c < "$1") || exit 1
+  f=$(($s > $4 ? $s - $4 - 1 : 0))
+  printf 'file%s\n' "$f"
+  "$2" -c "+$((f + 1))" "$1" 2>/dev/null | "$5" -c "$(($s - $f))"
+  """
   # `$1` is a session's `subagents/` directory, `$2` the host's wc. Each subagent's file with its
   # size, in one run however many there are. A file removed between the glob and wc is left out
   # (its complaint goes to /dev/null), so the reader sees it gone, as on its next read.
@@ -218,33 +229,51 @@ defmodule CodingAgentFramework.Transcripts do
   each read runs the host's tail and head through `Shell`, so over ssh for another host, and
   only the bytes read cross. It changes no row and needs no read of the session before.
 
-  Answers `{:ok, %{entries: entries, next: cursor, reset: reset}}`: the entries as
-  `Fold.entries/2` gives them, and `next`, an opaque cursor that a later call passes as `from:`
-  to read only what came since. `reset` is nil, or why the read began the file again from its
-  start: `:rewritten` when the bytes before the cursor are not the ones it read (the file shrank
-  or was replaced), `:new_file` when the cursor was of another file (a resumed session's new
-  transcript).
+  Answers `{:ok, %{entries: entries, next: cursor, older: cursor, reset: reset, queue: queue}}`,
+  the entries as `Fold.entries/2` gives them, in file order. A read with no cursor answers the
+  newest entries (F-267): it reads the file's last `max_bytes:` and keeps the newest lines'
+  entries within `limit:`, so a long transcript is never read from its start.
 
-  Bounded: a call reads at most `max_bytes:` of each file (default 1 MB) and answers at most
-  `limit:` entries (default 100, at most 1000), never the whole file again. A line longer than
-  `max_bytes` is not read: it is one `system` entry, `subtype` `"unread_line"`, and the read
-  goes on after it. With `subagents: true` each subagent's own file
-  (`<session id>/subagents/agent-<id>.jsonl`) is read too, after the session's own and within
-  the same `limit`, each entry with its `agent`.
+  - `next` is an opaque cursor that a later call passes as `from:` to read what came since,
+    forward from the newest line read, up to `limit` and `max_bytes` again.
+  - `older` is an opaque cursor that a later call passes as `before:` to read the entries
+    before the oldest one answered, backward, one block of at most `max_bytes` each call; nil
+    when the file's start was read. A `before:` read answers its own `older`, and `next` and
+    `queue` nil: the app keeps the `next` it has. A line cut by a block's edge is read whole by
+    the next older read, which ends where the oldest line kept begins.
+  - `reset` is nil, or why the read began the file again from its end: `:rewritten` when the
+    bytes at the cursor are not the ones it read (the file shrank or was replaced), `:new_file`
+    when the cursor was of another file (a resumed session's new transcript).
+  - `queue` is Claude Code's own queue after the newest line read: the texts its
+    `queue-operation` lines enqueued and did not yet take (`Fold.entries/2`). A first read
+    finds only what its block holds.
+
+  Entries are merged by `id` across reads: a call whose result is in a newer read than its call
+  comes in each, and the one with `done: true` holds the result.
+
+  Bounded: a call reads at most `max_bytes:` of each file (default 1 MB), and one byte more,
+  and answers at most `limit:` entries (default 100, at most 1000), never the whole file again.
+  A line longer than `max_bytes` is not read: it is one `system` entry, `subtype`
+  `"unread_line"` (its `offset` nil when read backward), and the read goes on past it. With
+  `subagents: true` each subagent's own file (`<session id>/subagents/agent-<id>.jsonl`) is
+  read too, forward from its start, after the session's own and within the same `limit`, each
+  entry with its `agent`; a `before:` read reads only the session's own.
 
   `{:refused, :no_file}` for a path with no file, `{:refused, {:bad, key}}` for an option or a
-  cursor out of shape, `{:unknown, {:host, reason}}` when the host's shell fails or cannot be
-  reached, `{:refused, {:host, reason}}` when it cannot be run.
+  cursor out of shape (both `from:` and `before:` is `{:bad, :before}`), `{:unknown, {:host,
+  reason}}` when the host's shell fails or cannot be reached, `{:refused, {:host, reason}}`
+  when it cannot be run.
 
-      {:ok, %{entries: [%{kind: "prompt"} | _], next: next}} =
+      {:ok, %{entries: newest, next: next, older: older}} =
         Transcripts.conversation(t, path, limit: 50)
       {:ok, %{entries: later, next: _}} = Transcripts.conversation(t, path, from: next)
+      {:ok, %{entries: earlier, older: _}} = Transcripts.conversation(t, path, before: older)
   """
   @spec conversation(GenServer.server(), String.t(), keyword) ::
           {:ok, map} | {:refused, term} | {:unknown, term}
   def conversation(transcripts, path, opts \\ []) do
     with {:ok, read} <- conversation_opts(opts),
-         {:ok, cursor} <- decode_cursor(read.from) do
+         {:ok, cursor} <- cursor(read) do
       call(transcripts, {:conversation, path, cursor, read}, opts)
     end
   end
@@ -254,12 +283,14 @@ defmodule CodingAgentFramework.Transcripts do
   defp conversation_opts(opts) do
     read = %{
       from: Keyword.get(opts, :from),
+      before: Keyword.get(opts, :before),
       limit: Keyword.get(opts, :limit, 100),
       max: Keyword.get(opts, :max_bytes, @first_read),
       subagents: Keyword.get(opts, :subagents, false)
     }
 
     cond do
+      read.from != nil and read.before != nil -> {:refused, {:bad, :before}}
       not (is_integer(read.limit) and read.limit in 1..@max_limit) -> {:refused, {:bad, :limit}}
       not (is_integer(read.max) and read.max > 0) -> {:refused, {:bad, :max_bytes}}
       not is_boolean(read.subagents) -> {:refused, {:bad, :subagents}}
@@ -267,26 +298,38 @@ defmodule CodingAgentFramework.Transcripts do
     end
   end
 
-  # The cursor is the reader's own term, so an app keeps it as a string and never reads it.
-  defp decode_cursor(nil), do: {:ok, nil}
+  defp cursor(%{from: nil, before: nil}), do: {:ok, nil}
+  defp cursor(%{before: nil, from: from}), do: decode_cursor(from, :from)
+  defp cursor(%{before: before}), do: decode_cursor(before, :before)
 
-  defp decode_cursor(text) when is_binary(text) do
+  # The cursor is the reader's own term, so an app keeps it as a string and never reads it.
+  defp decode_cursor(text, key) when is_binary(text) do
     with {:ok, bytes} <- Base.url_decode64(text, padding: false),
-         %{path: path, main: main, files: files} = cursor when is_binary(path) and is_map(files) <-
-           :erlang.binary_to_term(bytes, [:safe]),
-         true <- Enum.all?([main | Map.values(files)], &position?/1) do
+         cursor when is_map(cursor) <- :erlang.binary_to_term(bytes, [:safe]),
+         true <- cursor?(cursor, key) do
       {:ok, cursor}
     else
-      _ -> {:refused, {:bad, :from}}
+      _ -> {:refused, {:bad, key}}
     end
   rescue
-    ArgumentError -> {:refused, {:bad, :from}}
+    ArgumentError -> {:refused, {:bad, key}}
   end
 
-  defp decode_cursor(_), do: {:refused, {:bad, :from}}
+  defp decode_cursor(_text, key), do: {:refused, {:bad, key}}
 
-  defp position?(%{offset: o, seam: s, skip: k, open: open}),
-    do: is_integer(o) and o >= 0 and is_binary(s) and is_boolean(k) and is_map(open)
+  defp cursor?(%{path: path, main: main, files: files}, :from)
+       when is_binary(path) and is_map(files),
+       do: Enum.all?([main | Map.values(files)], &position?/1)
+
+  defp cursor?(%{path: path, older: %{end: e, seam: s, skip: k}}, :before),
+    do: is_binary(path) and is_integer(e) and e > 0 and is_binary(s) and is_boolean(k)
+
+  defp cursor?(_cursor, _key), do: false
+
+  defp position?(%{offset: o, seam: s, skip: k, open: open, queue: queue}),
+    do:
+      is_integer(o) and o >= 0 and is_binary(s) and is_boolean(k) and is_map(open) and
+        is_list(queue)
 
   defp position?(_), do: false
 
@@ -387,19 +430,17 @@ defmodule CodingAgentFramework.Transcripts do
   end
 
   def handle_call({:conversation, path, cursor, read}, _from, state) do
-    {main, files, reset} =
-      cond do
-        cursor == nil -> {position(), %{}, nil}
-        cursor.path != path -> {position(), %{}, :new_file}
-        true -> {cursor.main, cursor.files, nil}
+    reply =
+      case cursor do
+        nil -> from_end(state, path, read, nil)
+        %{path: other} when other != path -> from_end(state, path, read, :new_file)
+        %{older: older} -> older(state, path, older, read)
+        %{main: main, files: files} -> newer(state, path, main, files, read)
       end
 
     reply =
-      with {:ok, main, entries, reset} <- read_position(state, path, main, read, nil, reset),
-           {:ok, files, more} <- read_subagents(state, path, files, read, length(entries)) do
-        next = encode_cursor(%{path: path, main: main, files: files})
-        {:ok, %{entries: entries ++ more, next: next, reset: reset}}
-      else
+      case reply do
+        {:ok, answer} -> {:ok, answer}
         :no_file -> {:refused, :no_file}
         {:unknown, reason} -> {:unknown, {:host, reason}}
         {:refused, reason} -> {:refused, {:host, reason}}
@@ -411,24 +452,210 @@ defmodule CodingAgentFramework.Transcripts do
   @impl true
   def handle_info(:tick, state), do: {:noreply, Reader.tick(state, &read_now(&1, :known))}
 
-  # A file's place in a conversation read: the whole lines read, the bytes before them as a
-  # fold's seam, whether a line too long to read is being passed over, and the calls open.
-  defp position, do: %{offset: 0, seam: "", skip: false, open: %{}}
+  # A file's place in a newer read: the whole lines read, the bytes before them as a fold's
+  # seam, whether a line too long to read is being passed over, the calls open, and Claude
+  # Code's queue after those lines.
+  defp position, do: %{offset: 0, seam: "", skip: false, open: %{}, queue: []}
 
-  defp read_position(state, path, pos, read, agent, reset) do
+  @seam 64
+
+  # A read with no place to go on from (F-267): the file's last `max_bytes`, of which the
+  # newest entries within `limit`. Its `next` goes on from the last whole line, its `older`
+  # reads back from the oldest line it kept.
+  defp from_end(state, path, read, reset) do
+    with {:ok, from, chunk} <- ending(state, path, read.max) do
+      back = back(chunk, from, false, read.limit)
+
+      main = %{
+        offset: back.offset,
+        seam: seam_before(chunk, back.offset - from),
+        skip: back.skip,
+        open: back.open,
+        queue: back.queue
+      }
+
+      with {:ok, files, more} <- read_subagents(state, path, %{}, read, length(back.entries)) do
+        {:ok,
+         %{
+           entries: back.entries ++ more,
+           next: encode_cursor(%{path: path, main: main, files: files}),
+           older: older_cursor(path, back.older),
+           reset: reset,
+           queue: main.queue
+         }}
+      end
+    end
+  end
+
+  defp newer(state, path, main, files, read) do
+    case read_position(state, path, main, read, nil) do
+      {:ok, main, entries} ->
+        with {:ok, files, more} <- read_subagents(state, path, files, read, length(entries)) do
+          next = encode_cursor(%{path: path, main: main, files: files})
+
+          {:ok,
+           %{entries: entries ++ more, next: next, older: nil, reset: nil, queue: main.queue}}
+        end
+
+      :rewritten ->
+        from_end(state, path, read, :rewritten)
+
+      other ->
+        other
+    end
+  end
+
+  # The block of at most `max_bytes` before the cursor's line, and the cursor's own first bytes
+  # after it, which must be the ones it read; else the file was rewritten.
+  defp older(state, path, older, read) do
+    from = max(older.end - read.max - 1, 0)
+    size = older.end - from
+    seam = older.seam
+
+    case tail(state, path, from, size + byte_size(seam)) do
+      {:ok, <<chunk::binary-size(^size), ^seam::binary>>} ->
+        back = back(chunk, from, older.skip, read.limit)
+
+        {:ok,
+         %{
+           entries: back.entries,
+           next: nil,
+           older: older_cursor(path, back.older),
+           reset: nil,
+           queue: nil
+         }}
+
+      {:ok, _other} ->
+        from_end(state, path, read, :rewritten)
+
+      other ->
+        other
+    end
+  end
+
+  defp older_cursor(_path, nil), do: nil
+  defp older_cursor(path, older), do: encode_cursor(%{path: path, older: older})
+
+  # Reads `chunk`, the bytes from `from` up to a line's start or the file's end, backward
+  # (F-267). Unless `from` is 0 its first byte is the one before the first line it may keep, so
+  # a line that starts there is kept whole. The bytes up to its first newline end a line that
+  # began before it, and the bytes after its last newline are a line not yet whole (the file's
+  # end) or, with `skip`, the rest of a line too long to read: neither is read here. The older
+  # read ends where the oldest line kept begins, so a line cut by the block's edge is read whole
+  # by that read. Answers the entries, the older place (nil at the file's start), and the place
+  # a newer read goes on from, with the calls open and Claude Code's queue there.
+  defp back(chunk, from, skip, limit) do
+    whole =
+      case :binary.matches(chunk, "\n") do
+        [] -> 0
+        found -> found |> List.last() |> elem(0) |> Kernel.+(1)
+      end
+
+    first =
+      cond do
+        from == 0 -> 0
+        whole == 0 -> nil
+        true -> chunk |> :binary.match("\n") |> elem(0) |> Kernel.+(1)
+      end
+
+    none = %{entries: [], older: nil, offset: from + whole, skip: false, open: %{}, queue: []}
+
+    cond do
+      whole == 0 and from == 0 ->
+        none
+
+      # The block is inside one line longer than it: one entry for the line, once.
+      whole == 0 ->
+        %{
+          none
+          | entries: if(skip, do: [], else: [unread_line()]),
+            older: %{end: from, skip: true, seam: seam_at(chunk, 0)},
+            offset: from + byte_size(chunk),
+            skip: true
+        }
+
+      # The one line that ends in the block began before it, and fills it: too long to read.
+      first == whole and whole == byte_size(chunk) ->
+        %{
+          none
+          | entries: [unread_line()],
+            older: %{end: from, skip: true, seam: seam_at(chunk, 0)}
+        }
+
+      # The one line that ends in the block began before it: the next older read has it.
+      first == whole ->
+        %{none | older: %{end: from + whole, skip: false, seam: seam_at(chunk, whole)}}
+
+      true ->
+        start = from + first
+        region = binary_part(chunk, first, whole - first)
+        # Every line of the block is read: a line's entries are fewer than its bytes.
+        all = Fold.entries(region, limit: byte_size(region) + 1, at: start)
+        {cut, entries} = newest(region, start, all.entries, limit)
+        older = if cut > 0, do: %{end: cut, skip: false, seam: seam_at(chunk, cut - from)}
+        %{none | entries: entries, older: older, open: all.open, queue: all.queue}
+    end
+  end
+
+  defp unread_line,
+    do: %{
+      kind: "system",
+      subtype: "unread_line",
+      text: "",
+      at: nil,
+      uuid: nil,
+      offset: nil,
+      agent: nil
+    }
+
+  # The newest lines' entries within `limit`, a line's entries never split, and the byte the
+  # oldest kept line begins at. Read again from there, so a call of a line not kept whose
+  # result is kept comes as a newer read gives it: again under its id, with its name and start.
+  defp newest(region, start, entries, limit) do
+    groups = Enum.chunk_by(entries, & &1.offset)
+    {kept, dropped} = keep(Enum.reverse(groups), 0, limit, [])
+
+    if dropped == [], do: {start, entries}, else: from_cut(region, start, dropped, kept, limit)
+  end
+
+  defp keep([group | rest], count, limit, kept) when kept == [] or count + length(group) <= limit,
+    do: keep(rest, count + length(group), limit, [group | kept])
+
+  defp keep(rest, _count, _limit, kept), do: {kept, Enum.reverse(rest)}
+
+  defp from_cut(region, start, dropped, [oldest | newer], limit) do
+    cut = hd(oldest).offset
+
+    open =
+      for %{kind: "tool_call", id: id} = call <- List.flatten(dropped),
+          into: %{},
+          do: {id, %{name: call.name, started_at: call.at}}
+
+    bytes = binary_part(region, cut - start, byte_size(region) - (cut - start))
+    got = Fold.entries(bytes, limit: byte_size(bytes) + 1, at: cut, open: open)
+
+    if length(got.entries) > limit and newer != [],
+      do: from_cut(region, start, dropped ++ [oldest], newer, limit),
+      else: {cut, got.entries}
+  end
+
+  defp seam_at(chunk, at), do: binary_part(chunk, at, min(@seam, byte_size(chunk) - at))
+
+  defp seam_before(chunk, at) do
+    kept = min(at, @seam)
+    binary_part(chunk, at - kept, kept)
+  end
+
+  defp read_position(state, path, pos, read, agent) do
     seam = byte_size(pos.seam)
 
     case tail(state, path, pos.offset - seam, seam + read.max) do
       {:ok, <<before::binary-size(^seam), chunk::binary>>} when before == pos.seam ->
         {pos, entries} = advance(pos, chunk, read, agent)
-        {:ok, pos, entries, reset}
+        {:ok, pos, entries}
 
-      {:ok, _other} when pos.offset > 0 ->
-        read_position(state, path, position(), read, agent, :rewritten)
-
-      {:ok, chunk} ->
-        {pos, entries} = advance(pos, chunk, read, agent)
-        {:ok, pos, entries, reset}
+      {:ok, _other} ->
+        :rewritten
 
       other ->
         other
@@ -444,7 +671,15 @@ defmodule CodingAgentFramework.Transcripts do
       end
 
     start = pos.offset + skipped
-    got = Fold.entries(rest, limit: read.limit, open: pos.open, at: start, agent: agent)
+
+    got =
+      Fold.entries(rest,
+        limit: read.limit,
+        open: pos.open,
+        queue: pos.queue,
+        at: start,
+        agent: agent
+      )
 
     {used, entries, skip} =
       cond do
@@ -469,7 +704,8 @@ defmodule CodingAgentFramework.Transcripts do
        offset: pos.offset + used,
        seam: binary_part(read_bytes, byte_size(read_bytes), -kept),
        skip: skip,
-       open: got.open
+       open: got.open,
+       queue: got.queue
      }, entries}
   end
 
@@ -494,8 +730,8 @@ defmodule CodingAgentFramework.Transcripts do
           true ->
             file = Path.join(dir, "agent-#{agent}.jsonl")
 
-            case read_position(state, file, pos, %{read | limit: left}, agent, nil) do
-              {:ok, pos, entries, _reset} ->
+            case subagent(state, file, pos, %{read | limit: left}, agent) do
+              {:ok, pos, entries} ->
                 {:cont, {:ok, Map.put(files, agent, pos), got ++ entries}}
 
               :no_file ->
@@ -506,6 +742,14 @@ defmodule CodingAgentFramework.Transcripts do
             end
         end
       end)
+    end
+  end
+
+  # A subagent's file is read forward from its start, and again from there when rewritten.
+  defp subagent(state, file, pos, read, agent) do
+    case read_position(state, file, pos, read, agent) do
+      :rewritten -> read_position(state, file, position(), read, agent)
+      other -> other
     end
   end
 
@@ -738,15 +982,18 @@ defmodule CodingAgentFramework.Transcripts do
   end
 
   defp last(state, path) do
-    args = [
-      "-c",
-      @last,
-      "sh",
-      path,
-      state.programs.tail,
-      state.programs.wc,
-      Integer.to_string(state.first_read)
-    ]
+    args = [path, state.programs.tail, state.programs.wc, Integer.to_string(state.first_read)]
+    from_end_run(state, @last, args)
+  end
+
+  defp ending(state, path, max) do
+    %{tail: tail, wc: wc, head: head} = state.programs
+    from_end_run(state, @ending, [path, tail, wc, Integer.to_string(max), head])
+  end
+
+  # Runs a script that prints the byte it starts at on its first line, then the bytes.
+  defp from_end_run(state, script, args) do
+    args = ["-c", script, "sh" | args]
 
     case Shell.run(state.host, state.programs.sh, args, timeout: state.timeout) do
       {:ok, %{status: 0, output: "nofile"}} ->

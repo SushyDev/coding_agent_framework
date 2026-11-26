@@ -84,14 +84,35 @@ defmodule CodingAgentFramework.SurfaceConversationTest do
       kind: "msg"
     })
 
-    assert {:ok, %{entries: [prompt], next: next, queued: queued, reset: nil}} =
+    # The newest entry first, then the one before it by the older cursor, with no queue.
+    assert {:ok, %{entries: [reply], next: next, older: older, queued: queued, reset: nil}} =
              CodingAgentFramework.conversation(instance, "app-main", limit: 1)
 
-    assert %{kind: "prompt", uuid: "u1", message: "row-1"} = prompt
-    assert [%{uuid: "row-2", from: "app-unit", status: "queued", text: ^text}] = queued
+    assert %{kind: "assistant", uuid: "a1", text: "Looked."} = reply
 
-    assert {:ok, %{entries: [%{kind: "assistant", text: "Looked."}]}} =
+    assert [%{source: :framework, uuid: "row-2", from: "app-unit", status: "queued", text: ^text}] =
+             queued
+
+    assert {:ok, %{entries: [prompt], older: nil, queued: nil}} =
+             CodingAgentFramework.conversation(instance, "app-main", before: older)
+
+    assert %{kind: "prompt", uuid: "u1", message: "row-1"} = prompt
+
+    # Claude Code queued the row's text while a turn ran: both queues show it, by source.
+    File.write!(
+      path,
+      line(%{
+        type: "queue-operation",
+        operation: "enqueue",
+        content: text <> "\n\n[delivery row-2]"
+      }),
+      [:append]
+    )
+
+    assert {:ok, %{entries: [], queued: [%{source: :framework}, claude]}} =
              CodingAgentFramework.conversation(instance, "app-main", from: next)
+
+    assert %{source: :claude_code, message: "row-2"} = claude
 
     assert {:refused, {:bad, :limit}} =
              CodingAgentFramework.conversation(instance, "app-main", limit: -1)
