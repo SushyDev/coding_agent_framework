@@ -323,14 +323,21 @@ defmodule CodingAgentFramework.Sessions.Table do
     Store.insert(db, "agents", fields, tail <> " RETURNING id") |> hd() |> hd()
   end
 
+  # What a replaced row's last run left (F-271): its process, its view, its dialog and prompt
+  # state, its stop and deadline, its usage limit and any move. None is the imported session's.
+  @replaced ~w(viewer pid proc_start deadline dialog answers menu end_asked ended_at usage_limit
+               move move_from move_to move_act move_deadline resume)a
+
   @doc """
   Writes main session `name`, a conversation an import copied in (F-156), `stopped` with reason
   `imported`, role `parent`, from `fields` (`project`, `account`, `session_id`, `cwd`, `meta`
   as JSON or nil), over a declared row of that name. The caller checked that the row, if any,
-  is a declared main session. Answers the row's id.
+  is a declared main session, or, with `replace: true` (F-271), a main session's row that holds
+  no process: its start time is then the import's, and its last run's fields (`@replaced`) are
+  cleared. Answers the row's id.
   """
-  @spec imported(db, String.t(), String.t(), map) :: integer
-  def imported(db, host, name, fields) do
+  @spec imported(db, String.t(), String.t(), map, keyword) :: integer
+  def imported(db, host, name, fields, opts \\ []) do
     now = System.os_time(:millisecond)
     keys = [:project, :account, :session_id, :cwd, :meta]
     given = Enum.map(keys, &{&1, fields[&1]})
@@ -339,12 +346,10 @@ defmodule CodingAgentFramework.Sessions.Table do
       [host: host, name: name, kind: "main", socket: name, role: "parent"] ++
         given ++ [status: "stopped", reason: "imported", started_at: now, updated_at: now]
 
-    sets =
-      Enum.map_join(
-        keys ++ [:role, :status, :reason, :updated_at],
-        ", ",
-        &"#{&1} = excluded.#{&1}"
-      )
+    taken = keys ++ [:role, :status, :reason, :updated_at]
+    taken = if opts[:replace], do: taken ++ [:started_at], else: taken
+    cleared = if opts[:replace], do: Enum.map(@replaced, &"#{&1} = NULL"), else: []
+    sets = Enum.join(Enum.map(taken, &"#{&1} = excluded.#{&1}") ++ cleared, ", ")
 
     tail = "ON CONFLICT (host, name) DO UPDATE SET #{sets} RETURNING id"
     Store.insert(db, "agents", row, tail) |> hd() |> hd()

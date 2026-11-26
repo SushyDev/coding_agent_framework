@@ -4,7 +4,8 @@ defmodule CodingAgentFramework.Mains.Import do
   `bin/caf-import`'s work, and the manifest `Mains` reads at its start.
 
       bin/caf-import <home> <account> <source config dir> [--map <old cwd>=<project>]...
-        [--name <session id>=<name>]... [--meta <session id>=<json>]... [--db <path>]
+        [--name <session id>=<name>]... [--meta <session id>=<json>]... [--replace <name>]...
+        [--db <path>]
 
   **What it copies** (`run/1`), never moving, from the source config directory into the home's
   account directory `<home>/accounts/<account>/claude`, once:
@@ -47,7 +48,15 @@ defmodule CodingAgentFramework.Mains.Import do
   same session copies nothing and says it was imported already. At each start `Mains` reads
   the manifests (`manifest/1`) and has `Sessions` write each named conversation as a main
   session's row, `stopped` with its session id (`Sessions.import_main/4`), so the app's
-  start-or-resume resumes it (`Mains.resume_main/3`). The rows go through `Sessions`, their one
+  start-or-resume resumes it (`Mains.resume_main/3`).
+
+  **A replace** (F-271): `--replace <name>`, for a name this run gives with `--name`, lets the
+  row take over that name's main session when the app started one before the import (a fresh
+  conversation of the same name). The manifest records `replace_at`, the run's time, and a rerun
+  for a conversation imported already stamps it again. `Sessions` then replaces a `main` row
+  that holds no process and was started before `replace_at`, with the manifest's session id and
+  account; a row that runs, or one started after it, stays refused `{:exists, status}`, so a
+  later start under the name is never undone at the app's next start. The rows go through `Sessions`, their one
   writer, at the app's start rather than through a call into the running app's node: the app
   runs no distributed node and names no process, and an import on a new host is made before
   its sessions ever run.
@@ -55,7 +64,8 @@ defmodule CodingAgentFramework.Mains.Import do
       iex> CodingAgentFramework.Mains.Import.parse(["/caf", "work", "/old/.claude",
       ...>   "--map", "/src/app=app", "--name", "s1=app-epic", "--meta", ~s(s1={"epic":7})])
       {:ok, %{home: "/caf", account: "work", source: "/old/.claude", maps: [{"/src/app", "app"}],
-        names: %{"s1" => "app-epic"}, metas: %{"s1" => %{"epic" => 7}}, db: "/caf/caf.db"}}
+        names: %{"s1" => "app-epic"}, metas: %{"s1" => %{"epic" => 7}}, replace: [],
+        db: "/caf/caf.db"}}
       iex> {:ok, %{db: db}} = CodingAgentFramework.Mains.Import.parse(["/caf", "work", "/old",
       ...>   "--map", "/src/app=app", "--db", "/var/app/tables.db"])
       iex> db
@@ -101,11 +111,12 @@ defmodule CodingAgentFramework.Mains.Import do
 
   @doc """
   The script's arguments as `run/1` takes them, or `{:usage, why}`. `db` is `--db`'s path, by
-  default `<home>/caf.db`.
+  default `<home>/caf.db`; `replace` the `--replace` names, in order.
   """
   @spec parse([String.t()]) :: {:ok, map} | {:usage, String.t()}
   def parse([home, account, source | flags]) do
     acc = %{home: home, account: account, source: source, maps: [], names: %{}, metas: %{}}
+    acc = Map.put(acc, :replace, [])
 
     with {:ok, acc} <- flags(flags, Map.put(acc, :db, nil)),
          do: {:ok, %{acc | db: acc.db || Path.join(home, "caf.db")}}
@@ -145,6 +156,9 @@ defmodule CodingAgentFramework.Mains.Import do
 
   defp flags(["--db", path | rest], acc), do: flags(rest, %{acc | db: path})
 
+  defp flags(["--replace", name | rest], acc),
+    do: flags(rest, %{acc | replace: Enum.uniq(acc.replace ++ [name])})
+
   defp flags([flag | _], _acc), do: {:usage, "unknown or incomplete option #{flag}"}
 
   defp programs(env) do
@@ -163,7 +177,7 @@ defmodule CodingAgentFramework.Mains.Import do
 
   @doc """
   Imports as the module doc says. `opts`: `home`, `account`, `source`, `maps` (`[{old cwd,
-  project}]`), `names` and `metas` (by session id), `programs` (this host's, naming sh, cat,
+  project}]`), `names` and `metas` (by session id), `replace` (names), `programs` (this host's, naming sh, cat,
   env and ps), and optionally `db` (the app's tables, by default `<home>/caf.db`). Answers
   `{:ok, lines}`, what it did and what was imported already; `{:refused, reason}` with nothing
   copied; or `{:unknown, reason}` when a copy failed part way (a second run goes on from what
@@ -208,7 +222,8 @@ defmodule CodingAgentFramework.Mains.Import do
         project: m["project"],
         name: m["name"],
         meta: m["meta"],
-        cwd: m["cwd"]
+        cwd: m["cwd"],
+        replace_at: m["replace_at"]
       }
     end
   end
@@ -247,8 +262,18 @@ defmodule CodingAgentFramework.Mains.Import do
 
   defp metas_ok(o) do
     case Enum.find(Map.keys(o.metas), &(not Map.has_key?(o.names, &1))) do
-      nil -> :ok
+      nil -> replace_ok(o)
       sid -> {:refused, {:meta_without_name, sid}}
+    end
+  end
+
+  # A name to replace is one this run gives a conversation (F-271).
+  defp replace_ok(o) do
+    names = Map.values(o.names)
+
+    case Enum.find(Map.get(o, :replace, []), &(&1 not in names)) do
+      nil -> :ok
+      name -> {:refused, {:replace_without_name, name}}
     end
   end
 
@@ -365,7 +390,8 @@ defmodule CodingAgentFramework.Mains.Import do
           "cwd" => dir.cwd,
           "name" => o.names[sid],
           "meta" => o.metas[sid]
-        }
+        },
+        replace: o.names[sid] != nil and o.names[sid] in Map.get(o, :replace, [])
       }
     end
   end
@@ -496,6 +522,17 @@ defmodule CodingAgentFramework.Mains.Import do
     if exists?(to), do: {:ok, :there}, else: with(:ok <- copy_whole(from, to), do: {:ok, :copied})
   end
 
+  # A replace asked of a conversation imported before stamps its manifest again (F-271), so
+  # a person reruns the import with --replace once its name's row is in the way.
+  defp session(%{already: true, replace: true} = s) do
+    with {:ok, text} <- File.read(s.done) |> named(s.done),
+         {:ok, %{} = entry} <- JSON.decode(text) |> named(s.done),
+         entry = Map.merge(entry, %{"name" => s.entry["name"], "replace_at" => now()}),
+         :ok <- write_whole(s.done, JSON.encode!(entry)) do
+      {:ok, "#{s.sid}: imported already; replaces main session #{s.entry["name"]}'s row"}
+    end
+  end
+
   defp session(%{already: true} = s),
     do: {:ok, "#{s.sid}: imported already (#{label(s)})"}
 
@@ -505,9 +542,15 @@ defmodule CodingAgentFramework.Mains.Import do
     with :ok <- copy_whole(s.side),
          :ok <- copy_whole(s.env),
          :ok <- if(exists?(to), do: :ok, else: copy_whole(from, to)),
-         :ok <- write_whole(s.done, JSON.encode!(Map.put(s.entry, "imported_at", now()))) do
+         :ok <- write_whole(s.done, JSON.encode!(done_entry(s))) do
       {:ok, "#{s.sid}: imported (#{label(s)})"}
     end
+  end
+
+  defp done_entry(s) do
+    at = now()
+    entry = Map.put(s.entry, "imported_at", at)
+    if s.replace, do: Map.put(entry, "replace_at", at), else: entry
   end
 
   defp label(s) do

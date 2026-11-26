@@ -532,8 +532,11 @@ defmodule CodingAgentFramework.Sessions do
   with reason `imported`, on `entry`'s `account`, `project` and `session_id`, in `cwd` (its
   project's checkout), with `meta` (a map, or nil), so a resume (`Mains.resume_main/3`) takes
   the conversation up. Taken only by a name with no row, or a main session declared for that
-  project and never started. Answers `{:ok, row}`; `{:ok, :already}` when the row already
-  holds that session; refused `{:bad, field}`, `{:bad, :meta}`, or `{:exists, status}` for a
+  project and never started, or, when `entry` has a `replace_at` (`bin/caf-import --replace`,
+  F-271), a main session's row that holds no process and was started before it: that row takes
+  the entry's session, account and project, its last run's process, dialog and move fields
+  cleared. Answers `{:ok, row}`; `{:ok, :already}` when the row already holds that session;
+  refused `{:bad, field}`, `{:bad, :meta}`, or `{:exists, status}` for a
   name another agent holds. Option: `:timeout` (ms, default 5 000).
 
       Sessions.import_main(sessions, "app-epic", %{project: "app", account: "work",
@@ -1021,6 +1024,13 @@ defmodule CodingAgentFramework.Sessions do
           row == nil or (Agents.declared?(row) and row.project in [nil, entry.project]) ->
             fields = Map.take(entry, [:project, :account, :session_id, :cwd])
             id = Table.imported(state.db, state.host.name, name, Map.put(fields, :meta, meta))
+            state.notify.(%{topic: topic(state), ids: [id]})
+            {:ok, Table.get(state.db, state.host.name, name)}
+
+          replaces?(row, entry) ->
+            fields = Map.take(entry, [:project, :account, :session_id, :cwd])
+            fields = Map.put(fields, :meta, meta)
+            id = Table.imported(state.db, state.host.name, name, fields, replace: true)
             state.notify.(%{topic: topic(state), ids: [id]})
             {:ok, Table.get(state.db, state.host.name, name)}
 
@@ -2519,6 +2529,15 @@ defmodule CodingAgentFramework.Sessions do
   end
 
   defp imported_entry(_name, _entry), do: {:refused, {:bad, :entry}}
+
+  # An import asked to replace a name (F-271) takes over a main session the app started under
+  # it before the import: one that holds no process, started before the import's time. A row
+  # started after it is a later start of the name, never undone at a start that reads the
+  # manifest again.
+  defp replaces?(row, %{replace_at: at}) when is_integer(at),
+    do: row.kind == "main" and Agents.free?(row) and row.started_at < at
+
+  defp replaces?(_row, _entry), do: false
 
   defp kind_of(%{kind: "main"}), do: :main
   defp kind_of(%{kind: "delegate"}), do: :delegate

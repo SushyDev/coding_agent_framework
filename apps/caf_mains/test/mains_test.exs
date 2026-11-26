@@ -734,6 +734,71 @@ defmodule CodingAgentFramework.MainsTest do
     assert {:refused, {:running, ["app-epic"]}} = Import.run(run)
   end
 
+  # F-271: the app started a main session under a name before the import, so the imported
+  # conversation's name is taken by a stopped row with a fresh session. `--replace` lets the
+  # import take that row over once, on its manifest's account; a row started after the import's
+  # time, or a name the run does not give, is not replaced.
+  test "an import with --replace takes over a stopped main started before it", ctx do
+    mains = mains(ctx)
+    assert {:ok, _} = level(ctx, mains)
+
+    # The fresh main session the app started first, on another account.
+    fresh = %{session_id: "s-fresh", account: "spare", project: "app", cwd: ctx.checkout}
+    assert {:ok, _} = Sessions.import_main(ctx.sessions, "app-epic", Map.put(fresh, :meta, nil))
+
+    assert %{session_id: "s-fresh", account: "spare"} =
+             before = Agents.get(ctx.agents, "app-epic")
+
+    source = Path.join(ctx.dir, "old-claude")
+    {:ok, app_dir} = Transcripts.project_dir(source, "/old/app")
+    write!(Path.join(app_dir, "s-app.jsonl"), ~s({"type":"user"}\n))
+    File.ln_s!(Path.join(ctx.dir, "home/accounts"), Path.join(ctx.dir, "accounts"))
+
+    run = %{
+      home: ctx.dir,
+      account: "work",
+      source: source,
+      maps: [{"/old/app", "app"}],
+      names: %{"s-app" => "app-epic"},
+      metas: %{},
+      programs: programs()
+    }
+
+    assert {:refused, {:replace_without_name, "other"}} =
+             Import.run(Map.put(run, :replace, ["other"]))
+
+    # Without --replace the name stays the fresh session's, and the refusal is an act.
+    assert {:ok, _} = Import.run(run)
+    GenServer.stop(mains)
+    mains = mains(ctx)
+    assert %{session_id: "s-fresh"} = Agents.get(ctx.agents, "app-epic")
+
+    # The rerun with --replace copies nothing and stamps the manifest; the next start replaces.
+    assert {:ok, lines} = Import.run(Map.put(run, :replace, ["app-epic"]))
+    assert "s-app: imported already; replaces main session app-epic's row" in lines
+    assert [%{replace_at: at}] = Import.manifest(ctx.dir)
+    assert is_integer(at) and at > before.started_at
+    GenServer.stop(mains)
+    mains = mains(ctx)
+
+    assert %{session_id: "s-app", account: "work", status: "stopped", reason: "imported"} =
+             row = Agents.get(ctx.agents, "app-epic")
+
+    assert row.started_at >= at and row.pid == nil and row.dialog == nil
+
+    # Read again at each start, the manifest finds its own session there: nothing changes.
+    GenServer.stop(mains)
+    _mains = mains(ctx)
+    assert Agents.get(ctx.agents, "app-epic").started_at == row.started_at
+
+    # A row started after the import's time is a later start of the name, never undone.
+    entry = %{session_id: "s-other", account: "work", project: "app", cwd: ctx.checkout}
+    entry = Map.merge(entry, %{replace_at: at, meta: nil})
+
+    assert {:refused, {:exists, "stopped"}} =
+             Sessions.import_main(ctx.sessions, "app-epic", entry)
+  end
+
   # F-177 (`Move.tla`'s Resume): a conversation is only in the account it ran on or was imported
   # into, so a resume runs there, even with another account's allowance larger; only when that
   # account is refused does it go to another, which first takes a copy (ResumeCopy); a copy

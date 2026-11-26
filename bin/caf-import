@@ -2,7 +2,8 @@
 # Moves an app's existing Claude Code conversations onto a framework home, once (F-156):
 #
 #   bin/caf-import <home> <account> <source config dir> [--map <old cwd>=<project>]...
-#     [--name <session id>=<name>]... [--meta <session id>=<json>]... [--db <path>]
+#     [--name <session id>=<name>]... [--meta <session id>=<json>]... [--replace <name>]...
+#     [--db <path>]
 #
 # It copies, never moves, the source config directory's conversations of each mapped working
 # directory into the home's account directory, <home>/accounts/<account>/claude, under the
@@ -15,7 +16,9 @@
 # Each conversation given a --name becomes a main session of that name at the app's next
 # start: Mains reads the import's manifest (<home>/imports/<account>/) and Sessions writes its
 # row stopped, with its session id, so the app's start-or-resume resumes it. --meta gives the
-# row the app's own metadata, a JSON object.
+# row the app's own metadata, a JSON object. --replace <name> (one of the --name names) lets
+# that row take over a main session the app started under the name before the import, while
+# it holds no process; a rerun for a conversation imported already stamps the replace again.
 #
 # Start the app once on this host first: the checkouts' paths are read from the app's tables,
 # --db, by default <home>/caf.db. It is refused while any session of the account runs, or any
@@ -30,7 +33,8 @@ set -euo pipefail
 
 usage() {
   echo "usage: bin/caf-import <home> <account> <source config dir> [--map <old cwd>=<project>]..."
-  echo "         [--name <session id>=<name>]... [--meta <session id>=<json>]... [--db <path>]"
+  echo "         [--name <session id>=<name>]... [--meta <session id>=<json>]... [--replace <name>]..."
+  echo "         [--db <path>]"
 }
 
 case "${1:-}" in
