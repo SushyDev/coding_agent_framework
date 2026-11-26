@@ -521,6 +521,9 @@ Built, each from a checked model in `model/tla/`:
 - pressure measured on the Linux workstation (F-273): memory `full` reads `severe` over 1% of a
   span, samples that flip between `ok` and `high` take `severe` down, a clock set back starts a
   new span, and a pressure refusal carries the reading that set the level.
+- a launch row is read in the session its start made (F-282): a new start of an agent whose row
+  named an earlier session read that session's offset in the new transcript, never found the
+  brief's line, and kept the row `sending`, so the parent's stop was refused `open`.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

@@ -218,6 +218,7 @@ Breaks == {
     "NoPointer",             \* a long row is not typed: it waits for a waiter (F-132)
     "BriefAfterInit",        \* a headless start waits for its init before its first row
     "LaunchBound",           \* a launch with no line is due again while its process lives (F-153)
+    "OldWindow",             \* a launch's line is read in the session before its start (F-282)
     "AgentCutUndoes",        \* a hand its addressee's agent process's crash cut is due again
     "ForceEnded",            \* a row a forced end left sending is settled ended, not unknown
     "SettleInCall",          \* a forced end's rows settle only in the operator's call, which a restart cuts
@@ -484,13 +485,22 @@ SettleExit(i, has) ==
 \* to a session whose end the operator forced, once that session ended, is
 \* ForceSettled's alone (F-172): unknown, as the design says, never made due
 \* again by its process's end and then ended, which would say it never went in.
-SettleSeen(i, has) ==
-    LET a == row[i].to  gone == pr[a] # row[i].at IN
+\* `has` is the transcript of the process the row went to. A launch's mark is
+\* made before its start, so the session it names, and the offset it read,
+\* may be the agent's session before: a new start writes its line in a new
+\* one (F-282). OldWindow reads that window, which never shows the line; with
+\* no line, the code keeps a launch row while its process lives, so the row
+\* stays sending for as long as it does.
+SettleSeen(i, read) ==
+    LET a == row[i].to  gone == pr[a] # row[i].at
+        blind == Break = "OldWindow" /\ row[i].via = "launch"
+        has == read /\ ~blind
+    IN
     /\ up /\ row[i].st = "sending" /\ row[i].via \in {"waiter", "typed", "launch"}
     /\ i \notin hand /\ ~(a \in forced /\ over[a])
     /\ \/ has /\ (Break # "SettleAtIdle" \/ idle[a] \/ gone \/ row[i].via # "typed")
           /\ row' = [row EXCEPT ![i] = Delivered(i)]
-       \/ ~has /\ (wire[i] = 0 \/ gone \/ Break = "SettleEarly"
+       \/ ~has /\ ((wire[i] = 0 /\ ~blind) \/ gone \/ Break = "SettleEarly"
                    \/ (Break = "LaunchBound" /\ row[i].via = "launch"))
           /\ row' = [row EXCEPT ![i] = DueAgain(i)]
     /\ wire' = IF gone THEN [wire EXCEPT ![i] = 0] ELSE wire

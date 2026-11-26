@@ -596,6 +596,48 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
 
     assert {:ok, %{text: "Done after the limit.", resumes: 0, resume_uuid: ^w}} =
              cue_until(ctx, id, &(&1.status == "finished"))
+
+    # The resume's row, launched into the same session, settles by its line too (F-282).
+    assert {:ok, %{status: "delivered", via: "launch"}} = settled(ctx, w)
+  end
+
+  # F-282: a branch's second delegate, started once its first is stopped. Its agent row named the
+  # first's session, whose transcript is long by then, when its brief was marked; its start
+  # made a new session, whose first line is the brief's. The brief settles delivered by it, and
+  # the parent's stop is not refused for a row still open.
+  test "a branch's second interactive delegate has its brief settled, and its stop goes", ctx do
+    start = fn brief ->
+      Delegates.start_delegate(ctx.delegates, "main", "app", "unit/one", "opus", brief,
+        interactive: true
+      )
+    end
+
+    assert {:ok, %{id: one, name: name, brief_uuid: u1, session_id: sid1}} = start.("First.")
+    {:ok, dir} = Accounts.config_dir(ctx.accounts, "work")
+    cwd = Agents.get(ctx.agents, name).cwd
+    {:ok, path1} = Transcripts.path(dir, cwd, sid1)
+    pad = %{"type" => "summary", "summary" => String.duplicate("x", 4_000)}
+    lines(path1, [user("First.\n\n[delivery #{u1}]"), reply("m1", "Done.")])
+    lines(path1, List.duplicate(pad, 50))
+    assert {:ok, %{report: "taken"}} = cue_until(ctx, one, &(&1.report == "taken"))
+    assert {:ok, %{status: "delivered"}} = settled(ctx, u1)
+    parent_takes(ctx, u1)
+
+    {:ok, state} = Delegates.fix_state(ctx.delegates, "main", name)
+    assert {:ok, :stopped} = Delegates.fix(ctx.delegates, "main", name, :stop, state)
+
+    assert {:ok, %{id: two, name: ^name, brief_uuid: u2, session_id: sid2}} = start.("Again.")
+    assert two != one and sid2 != sid1
+    {:ok, path2} = Transcripts.path(dir, cwd, sid2)
+    lines(path2, [user("Again.\n\n[delivery #{u2}]"), reply("m2", "Done again.")])
+
+    assert {:ok, %{report: "taken", text: "Done again."}} =
+             cue_until(ctx, two, &(&1.report == "taken"))
+
+    assert {:ok, %{status: "delivered"}} = settled(ctx, u2)
+    parent_takes(ctx, u2)
+    {:ok, state} = Delegates.fix_state(ctx.delegates, "main", name)
+    assert {:ok, :stopped} = Delegates.fix(ctx.delegates, "main", name, :stop, state)
   end
 
   # A delegate whose Mailbox has a waiter held for it, its report taken.
@@ -674,6 +716,28 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
              &match?({:ok, %{kind: "brief"}}, &1)
            ) do
         {:ok, %{}} = found -> if uuid_of(ctx, found) == u, do: found, else: :other
+        nil -> :none
+      end
+    end)
+  end
+
+  # The parent's `run_delegate` takes the report to brief `u` (the call transport): delivered.
+  defp parent_takes(ctx, u) do
+    assert {:ok, %{id: id, kind: "reply"}} = Mailbox.await(ctx.mailbox, "main", u, 5_000)
+    assert {:ok, :delivered} = Mailbox.told(ctx.mailbox, id, :written)
+  end
+
+  # The row stored under `u`, once it is no longer `sending`.
+  defp settled(ctx, u) do
+    {:ok, mtable} = Mailbox.Table.open(Path.join(ctx.dir, "caf.db"))
+
+    await(fn ->
+      Mailbox.cue(ctx.mailbox, %{topic: "transcripts:test:work", ids: []})
+      :sys.get_state(ctx.mailbox)
+
+      case Mailbox.Table.by_uuid(mtable, u) do
+        %{status: "sending"} -> :sending
+        %{} = row -> {:ok, row}
         nil -> :none
       end
     end)
