@@ -29,6 +29,56 @@ defmodule CodingAgentFramework.ClaudeCLITest do
                ["--remote-control", "unit-7", "--resume", "s-1", "--", "go on"]
   end
 
+  # F-275: Remote Control follows the kind, not the role. An interactive delegate (role
+  # `:parent`) has no flag and the delegate's file, whose `remoteControlAtStartup` is false.
+  test "an interactive delegate has Remote Control off, a main has it on" do
+    delegate = @dir <> "/framework/delegate.settings.json"
+    parent = @dir <> "/framework/parent.settings.json"
+
+    assert {:ok, %{argv: argv}} = ClaudeCLI.session(:parent, account(), opts(kind: :delegate))
+    refute "--remote-control" in argv
+    assert Enum.chunk_every(argv, 2, 1) |> Enum.member?(["--settings", delegate])
+
+    own = "/caf/agents/unit-7.settings.json"
+
+    assert {:ok, %{argv: argv}} =
+             ClaudeCLI.session(:parent, account(), opts(kind: :delegate, settings: own))
+
+    refute "--remote-control" in argv
+    assert Enum.chunk_every(argv, 2, 1) |> Enum.member?(["--settings", own])
+
+    assert {:ok, %{argv: argv}} = ClaudeCLI.session(:parent, account(), opts(kind: :main))
+    assert Enum.take(argv, -2) == ["--remote-control", "unit-7"]
+    assert Enum.chunk_every(argv, 2, 1) |> Enum.member?(["--settings", parent])
+
+    assert ClaudeCLI.session(:delegate, account(), opts(kind: :main, prompt: "x")) ==
+             {:refused, {:bad, :kind}}
+
+    assert ClaudeCLI.session(:parent, account(), opts(kind: :other)) == {:refused, {:bad, :kind}}
+  end
+
+  test "a main's title goes to --name and --remote-control; the name stays without one" do
+    title = "Acme - shop"
+    assert {:ok, %{argv: argv}} = ClaudeCLI.session(:parent, account(), opts(title: title))
+    assert Enum.slice(argv, 3, 2) == ["--name", title]
+    assert Enum.take(argv, -2) == ["--remote-control", title]
+    refute "unit-7" in argv
+
+    assert {:ok, %{argv: argv}} = ClaudeCLI.session(:parent, account(), opts(title: nil))
+    assert Enum.slice(argv, 3, 2) == ["--name", "unit-7"]
+    assert Enum.take(argv, -2) == ["--remote-control", "unit-7"]
+
+    for bad <- ["", "two\nlines", "-x", String.duplicate("a", 121), 7] do
+      assert ClaudeCLI.title(bad) == {:refused, {:bad, :title}}
+      assert ClaudeCLI.session(:parent, account(), opts(title: bad)) == {:refused, {:bad, :title}}
+    end
+
+    assert {:ok, _} = ClaudeCLI.title(String.duplicate("a", 120))
+
+    assert ClaudeCLI.session(:parent, account(), opts(kind: :delegate, title: title)) ==
+             {:refused, {:bad, :title}}
+  end
+
   test "a delegate has Remote Control off and its brief as the first prompt" do
     brief = "-- fix the build\nthen report"
     assert {:ok, %{argv: argv}} = ClaudeCLI.session(:delegate, account(), opts(prompt: brief))

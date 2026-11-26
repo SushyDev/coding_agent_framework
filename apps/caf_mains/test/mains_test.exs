@@ -524,6 +524,62 @@ defmodule CodingAgentFramework.MainsTest do
     assert {:ok, %{session_id: ^sid}} = await(fn -> running(ctx, "app-main") end)
   end
 
+  # F-275: a main is shown under the app's title, in `--name` and `--remote-control`, while its
+  # agent name stays its address; the start is confirmed by the session file with the title.
+  test "a main's title goes to both flags, stays on its row, and a resume may change it", ctx do
+    mains = mains(ctx)
+    assert {:ok, _} = level(ctx, mains)
+    flags = fn argv, title -> {flag(argv, "--name"), flag(argv, "--remote-control"), title} end
+
+    assert {:refused, {:bad, :title}} =
+             Mains.start_main(mains, "app", "app-epic", "Plan.", title: "two\nlines")
+
+    assert {Starts.rows(ctx.starts, "test"), Agents.get(ctx.agents, "app-epic")} == {[], nil}
+    assert ScreenStandIn.argvs(ctx.dir) == []
+
+    title = "Acme - app"
+
+    assert {:unknown, {:dialog, :trust}} =
+             Mains.start_main(mains, "app", "app-epic", "Plan.", title: title)
+
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :trust, @trust)
+    assert {:ok, %{title: ^title, session_id: sid}} = await(fn -> running(ctx, "app-epic") end)
+    assert {:ok, [argv]} = await(fn -> nonempty(ScreenStandIn.argvs(ctx.dir)) end)
+    assert {title, title, title} == flags.(argv, title)
+    assert {:ok, _} = await(fn -> settled(ctx, mains) end)
+
+    # A resume that names no title keeps the row's; one that names one changes it.
+    for {given, shown} <- [{[], title}, {[title: "Acme - app 2"], "Acme - app 2"}] do
+      assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "app-epic")
+      free = fn -> if leases(ctx, &is_nil(&1.released_at)) == :none, do: {:ok, :free} end
+      assert {:ok, :free} = await(free)
+      File.rm_rf!(Path.join(ctx.dir, "argv"))
+      File.mkdir_p!(Path.join(ctx.dir, "argv"))
+      assert {:refused, {:bad, :title}} = Mains.resume_main(mains, "app-epic", title: "-x")
+      assert {:unknown, {:dialog, :trust}} = Mains.resume_main(mains, "app-epic", given)
+      assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :trust, @trust)
+      assert {:ok, %{title: ^shown, session_id: ^sid}} = await(fn -> running(ctx, "app-epic") end)
+      assert {:ok, [argv]} = await(fn -> nonempty(ScreenStandIn.argvs(ctx.dir)) end)
+      assert {shown, shown, shown} == flags.(argv, shown)
+      assert {:ok, _} = await(fn -> settled(ctx, mains) end)
+    end
+
+    # The agent name is still the address: a main without a title launches under it.
+    assert {:unknown, {:dialog, :trust}} = Mains.start_main(mains, "app", "app-main", nil)
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-main", :trust, @trust)
+    assert {:ok, %{title: nil}} = await(fn -> running(ctx, "app-main") end)
+
+    assert {:ok, argvs} =
+             await(fn ->
+               if length(ScreenStandIn.argvs(ctx.dir)) == 2,
+                 do: {:ok, ScreenStandIn.argvs(ctx.dir)}
+             end)
+
+    assert Enum.any?(argvs, &(flags.(&1, nil) == {"app-main", "app-main", nil}))
+  end
+
+  defp flag(argv, name), do: argv |> Enum.drop_while(&(&1 != name)) |> Enum.at(1)
+
   # F-146's new-5: the operator answers a main session's held PermissionRequest through
   # Intake, on the state its claim holds (Team.tla's CanAct), as an interactive delegate's.
   test "answer sends a main session's held permission request its decision, once", ctx do

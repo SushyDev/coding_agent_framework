@@ -89,7 +89,17 @@ defmodule CodingAgentFramework.Mains do
 
   use GenServer
 
-  alias CodingAgentFramework.{Accounts, Acts, Inlet, Intake, Mailbox, Programs, Scheduler}
+  alias CodingAgentFramework.{
+    Accounts,
+    Acts,
+    ClaudeCLI,
+    Inlet,
+    Intake,
+    Mailbox,
+    Programs,
+    Scheduler
+  }
+
   alias CodingAgentFramework.{Sessions, Shell, Store, Stream, Transcripts, Usage}
   alias CodingAgentFramework.Intake.Table, as: IntakeTable
   alias CodingAgentFramework.Mains.{Checkout, Import, Rename, Starts, Table, Work}
@@ -166,8 +176,11 @@ defmodule CodingAgentFramework.Mains do
   first message (see the module doc). Options: `from:` (the brief's sender: a main session's
   name, or the operator's; the operator's by default), `model:` (the model it runs, else the
   app's launch's, F-141's new-8), `meta:` (a map of the app's own keys kept on the agent row,
-  `Sessions.start/5`, F-154; refused `{:bad, :meta}` when not a map), `timeout:` (what the
-  caller waits,
+  `Sessions.start/5`, F-154; refused `{:bad, :meta}` when not a map), `title:` (the title it is
+  shown under in Remote Control's list and on its screen, such as `"Acme - shop"`, which the
+  launch gives `--name` and `--remote-control`; the agent name by default, which stays the
+  address agents message; checked by `ClaudeCLI.title/1` and refused `{:bad, :title}` before
+  any row; kept on the agent row, F-275), `timeout:` (what the caller waits,
   default 300 000 ms; the start goes on past it). Answers `{:ok, %{name, account,
   session_id}}`; `{:refused, reason}`: `{:running, name}`, `{:unknown_project, project}`,
   `{:checkout, state}` while the checkout is not made, `{:origin_mismatch, path, found}` when
@@ -182,7 +195,10 @@ defmodule CodingAgentFramework.Mains do
           outcome(map)
   def start_main(mains, project, name, brief, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 300_000)
-    start = {:start_main, project, name, brief, opts[:from], opts[:model], opts[:meta]}
+
+    start =
+      {:start_main, project, name, brief, opts[:from], opts[:model], opts[:meta], opts[:title]}
+
     call(mains, start, timeout)
   end
 
@@ -196,7 +212,9 @@ defmodule CodingAgentFramework.Mains do
   others not refused (the most room), and resumed there; with none, the resume is refused
   `{:account, account, reason}`, or waits as a start does when every usable account is
   limited (`waiting: until`), and a copy refused `{:copy, reason}`, the row left on its
-  account. Options: `model:` (else the model its row keeps), `state:` (the operator's fix,
+  account. Options: `model:` (else the model its row keeps), `title:` (as `start_main/5`'s:
+  a new title, which the row keeps from then on; else the title its row keeps, so an app
+  changes a stopped main's title by naming it at its next resume), `state:` (the operator's fix,
   F-144: the state its claim in `Acts` holds, `fix_state/3`'s; the resume is refused `{:moved,
   state}` when the row's is another now) and `timeout:`. Answers as `start_main/5` does;
   refused also `:no_session`, `{:not_main, kind}`, `{:not_stopped, status}` and `{:running,
@@ -208,7 +226,8 @@ defmodule CodingAgentFramework.Mains do
   @spec resume_main(GenServer.server(), String.t(), keyword) :: outcome(map)
   def resume_main(mains, name, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 300_000)
-    call(mains, {:resume_main, name, opts[:model], Keyword.get(opts, :state, :any)}, timeout)
+    resume = {:resume_main, name, opts[:model], Keyword.get(opts, :state, :any), opts[:title]}
+    call(mains, resume, timeout)
   end
 
   @doc """
@@ -550,7 +569,7 @@ defmodule CodingAgentFramework.Mains do
     {:reply, reply, s}
   end
 
-  def handle_call({:start_main, project, name, brief, from_name, model, meta}, from, s) do
+  def handle_call({:start_main, project, name, brief, from_name, model, meta, title}, from, s) do
     with :ok <- name_ok(s, name),
          {:ok, p} <- Map.fetch(s.projects, project) |> known(project),
          :ok <- made(s, project),
@@ -559,10 +578,12 @@ defmodule CodingAgentFramework.Mains do
          :ok <- brief_ok(brief),
          :ok <- model_ok(model),
          true <- meta == nil or is_map(meta) or {:refused, {:bad, :meta}},
+         :ok <- title_ok(title),
          picked = pick(s),
          :ok <- picked_or_limited(picked) do
       uuid = if brief, do: Stream.uuid()
       start = %{p: p, brief: brief, from: from_name || s.operator, model: model, meta: meta}
+      start = Map.put(start, :title, title)
       start = Map.put(start, :resume, nil)
 
       case picked do
@@ -576,7 +597,7 @@ defmodule CodingAgentFramework.Mains do
 
   # F-141's new-5: a resume is new work, so it asks for a lease of its own, as a start does.
   # A fix's resume acts only on the state its claim holds (Team.tla's CanAct).
-  def handle_call({:resume_main, name, model, claimed}, from, s) do
+  def handle_call({:resume_main, name, model, claimed, title}, from, s) do
     agent = Agents.get(s.agents, name)
 
     with :ok <- resumable(s, agent),
@@ -584,8 +605,9 @@ defmodule CodingAgentFramework.Mains do
          :ok <- claimed(s, agent, claimed),
          {:ok, p} <- Map.fetch(s.projects, agent.project) |> known(agent.project),
          :ok <- made(s, agent.project),
-         :ok <- model_ok(model) do
-      start = %{p: p, brief: nil, from: nil, model: model, kept: agent.model}
+         :ok <- model_ok(model),
+         :ok <- title_ok(title) do
+      start = %{p: p, brief: nil, from: nil, model: model, kept: agent.model, title: title}
       start = Map.put(start, :resume, agent.session_id)
 
       case resume_account(s, agent) do
@@ -1342,6 +1364,12 @@ defmodule CodingAgentFramework.Mains do
   defp model_ok(model) when is_binary(model) and model != "", do: :ok
   defp model_ok(_model), do: {:refused, {:bad, :model}}
 
+  defp title_ok(nil), do: :ok
+
+  defp title_ok(title) do
+    with {:ok, _} <- ClaudeCLI.title(title), do: :ok
+  end
+
   # A main session whose process ended, with a session to resume (fix_check/2, what its fix
   # state says), not moving, and no start of it under way.
   defp resumable(_s, nil), do: {:refused, :no_session}
@@ -1452,6 +1480,8 @@ defmodule CodingAgentFramework.Mains do
       launch = if launched, do: launch ++ [prompt: launched.text], else: launch
       # A start that names no metadata, and a resume, keep the row's (`Sessions.start/5`).
       launch = if start[:meta], do: launch ++ [meta: start.meta], else: launch
+      # A start or resume that names no title keeps the row's, as its metadata.
+      launch = if start[:title], do: launch ++ [title: start.title], else: launch
       {sessions, mailbox, mcp} = {s.sessions, s.mailbox, s.mcp}
       copy = copy(s, row, start)
 

@@ -251,7 +251,8 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
 
   # F-200: an interactive delegate is run as a main session is (role `parent`), but it is a
   # delegate: its launch line has `--effort`, and its settings file says no git instructions.
-  test "an interactive delegate has its effort on its launch and no git instructions", ctx do
+  # F-275: and no Remote Control, neither the flag nor in its overlay.
+  test "an interactive delegate has its effort, no git instructions, no Remote Control", ctx do
     start = &Delegates.start_delegate(ctx.delegates, "main", "app", "unit/one", "opus", "Go.", &1)
     assert {:refused, {:effort, "ultra"}} = start.(interactive: true, effort: "ultra")
     assert Table.rows(ctx.dtable, "test") == []
@@ -263,12 +264,14 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     assert ["--model", "opus", "--name", name, "--effort", "max"] == Enum.slice(argv, 0, 6)
     # F-227: an interactive delegate's mode is pinned, `auto` unless the config says otherwise.
     assert ["--permission-mode", "auto"] == Enum.slice(argv, 6, 2)
-    assert "--remote-control" in argv
+    refute "--remote-control" in argv
 
     file = argv |> Enum.drop_while(&(&1 != "--settings")) |> Enum.at(1)
     {:ok, dir} = Accounts.config_dir(ctx.accounts, "work")
     assert file == Path.join(dir, "framework/agents/#{name}.settings.json")
-    assert %{"includeGitInstructions" => false} = JSON.decode!(File.read!(file))
+
+    assert %{"includeGitInstructions" => false, "remoteControlAtStartup" => false} =
+             JSON.decode!(File.read!(file))
 
     # What a resume launches with (its own, or a move's) is the row's effort again.
     assert {:ok, launch} = Delegates.launch(ctx.delegates, name)

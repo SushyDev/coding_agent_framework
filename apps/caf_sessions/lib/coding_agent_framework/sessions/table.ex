@@ -26,7 +26,9 @@ defmodule CodingAgentFramework.Sessions.Table do
   for none. `model` is the model the start launched (`--model`), or NULL when its launch named
   none; a resume whose launch names none takes it again, as it takes `options`, so a move or a
   recovery gives the same launch (F-133's new-3). `release` is the Claude Code release an
-  interactive start launched, as its `--version` reads, or NULL when it was not read.
+  interactive start launched, as its `--version` reads, or NULL when it was not read. `title`
+  is a main session's display title, which its launch gives `--name` and `--remote-control` in
+  the name's place, or NULL for none (the name then); the name stays its address (F-275).
   `dialog` is the startup dialog the start's pane shows, or showed last, as JSON (`kind`,
   `options`, `selected`, and the imports dialog's `paths` and `shortened`), and `answers` each
   kind's answer as JSON (`kind => {label, mark, act, cleared}`, `mark` one of `pressing`, `sent`,
@@ -83,7 +85,7 @@ defmodule CodingAgentFramework.Sessions.Table do
   @columns ~w(id host name kind parent project socket account role cwd resume status reason
               viewer pid session_id proc_start started_at updated_at deadline repo branch
               worktree options model release move move_from move_to move_act move_deadline
-              dialog answers end_asked ended_at meta usage_limit menu)a
+              dialog answers end_asked ended_at meta usage_limit menu title)a
 
   @schema """
   CREATE TABLE IF NOT EXISTS agents (
@@ -94,7 +96,7 @@ defmodule CodingAgentFramework.Sessions.Table do
     repo TEXT, branch TEXT, worktree TEXT, options TEXT, model TEXT, release TEXT, move TEXT,
     move_from TEXT, move_to TEXT, move_act INTEGER, move_deadline INTEGER, dialog TEXT,
     answers TEXT, end_asked INTEGER, ended_at INTEGER, meta TEXT, usage_limit TEXT,
-    menu TEXT, UNIQUE (host, name));
+    menu TEXT, title TEXT, UNIQUE (host, name));
   CREATE INDEX IF NOT EXISTS agents_status ON agents (host, status);
   CREATE INDEX IF NOT EXISTS agents_cwd ON agents (host, cwd);
   CREATE INDEX IF NOT EXISTS agents_parent ON agents (host, parent);
@@ -105,7 +107,8 @@ defmodule CodingAgentFramework.Sessions.Table do
   # The columns a later build added to `agents`, so added if missing: the release a session
   # runs (R8), a move's phase on the row (F-133), the model (F-136), and a startup dialog and
   # its answers (F-140), an end asked (F-144), the end's own time (F-165), and the app's own
-  # metadata (F-154), a usage limit (F-185), and a menu on a running screen (F-198).
+  # metadata (F-154), a usage limit (F-185), a menu on a running screen (F-198), and a main
+  # session's title (F-275).
   @added [
     agents: [
       "release TEXT",
@@ -121,7 +124,8 @@ defmodule CodingAgentFramework.Sessions.Table do
       "ended_at INTEGER",
       "meta TEXT",
       "usage_limit TEXT",
-      "menu TEXT"
+      "menu TEXT",
+      "title TEXT"
     ]
   ]
 
@@ -229,7 +233,8 @@ defmodule CodingAgentFramework.Sessions.Table do
                :ended_at,
                :meta,
                :usage_limit,
-               :menu
+               :menu,
+               :title
              ])
 
       Store.transaction(db, fn ->
@@ -270,7 +275,7 @@ defmodule CodingAgentFramework.Sessions.Table do
 
     keys =
       ~w(host name kind parent project socket account role cwd resume session_id deadline repo
-         branch options model release meta)a
+         branch options model release meta title)a
 
     fields =
       Enum.map(keys, &{&1, start[&1]}) ++ [status: "starting", started_at: now, updated_at: now]

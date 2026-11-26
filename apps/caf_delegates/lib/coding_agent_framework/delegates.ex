@@ -76,7 +76,8 @@ defmodule CodingAgentFramework.Delegates do
   stores the word with no resume (`resume: false`), and the move's resume carries it (F-191).
 
   **An interactive delegate** (`interactive: true`, F-137; `docs/design.md`, "Interactive
-  delegates") runs Claude Code's terminal interface: role `:parent`, kind `:delegate`. Its brief
+  delegates") runs Claude Code's terminal interface: role `:parent`, kind `:delegate`, and like every
+  delegate no Remote Control (F-275). Its brief
   is marked by `Mailbox.launch/4` and carried by its start as the prompt; its report is the
   reply of the turn its brief (or its word to go on) began, read from its transcript
   (`Transcripts.Fold.reply_to/2`) once that turn has ended: closed by a later turn, or its
@@ -875,8 +876,8 @@ defmodule CodingAgentFramework.Delegates do
   end
 
   # An interactive delegate runs Claude Code's terminal interface, as a main session does: role
-  # `:parent`, kind `:delegate`. The row's effort goes in at every launch, a resume's too, and
-  # none is no flag.
+  # `:parent`, kind `:delegate`, which keeps Remote Control off (F-275). The row's effort goes in
+  # at every launch, a resume's too, and none is no flag.
   defp launch(s, row, p, how) do
     role = if how == :interactive, do: :parent, else: :delegate
     tree = %{project: p, branch: row.branch}
