@@ -44,10 +44,12 @@ defmodule CodingAgentFramework.Tracker do
   Starts a `Tracker`. Options: `sources:` (a list of `{module, opts}`), and optionally
   `notify:` (a function of one cue), `clock:` (a function answering ms of wall time, default
   `System.os_time(:millisecond)`; ages and the once-a-second limit are measured by it) and
-  `timer: false` (no timer sends a held cue; the caller calls `flush/2`, as tests do).
+  `timer: false` (no timer sends a held cue; the caller calls `flush/2`, as tests do), and
+  `name:`, a `GenServer` name the caller gives so an app finds it (a `:via` of the instance's
+  own registry; never a global one).
   """
   @spec start_link(keyword) :: GenServer.on_start()
-  def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
 
   @doc "Hands the `Tracker` a reader's cue. Never raises and never waits."
   @spec cue(GenServer.server(), term) :: :ok

@@ -501,6 +501,8 @@ Built, each from a checked model in `model/tla/`:
   answers the unreleased leases and the last released ones, each job under its lease with its
   command, copy and log path, the copies, each resource's held units and the pressure. A job's
   row now keeps its command.
+- an app reads agent rows by session id or by a key in their `meta`, each with its turn state
+  from the tree (F-265): `agent_rows/2` filters in the store's query, the session id by an index.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

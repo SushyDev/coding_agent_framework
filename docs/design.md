@@ -951,7 +951,13 @@ a config with `agents: false` needs only the keys that tree reads (the table bel
 no tool home; `agent_rows/1` also takes the instance's name, read from the config its running
 tree keeps in its `Registry`, since a hook's `opts` are plain data and a struct there, the
 config among them, is refused by name (`{:not_data, module, {:struct, struct}}`); and
-`post_tool_use/3` may answer `{:context, text}`. F-236 added `session_start/3`, answering
+`post_tool_use/3` may answer `{:context, text}`. F-265 added `agent_rows/2`, for an app that
+keeps its records by Claude Code's session id or by a key in an agent's `meta`: `session_id: id`
+or `meta: {key, value}` (a string or an integer, of JSON's same type), filtered in the store's
+query (`Sessions.Table.by/3`; the session id by the index `agents_session`, a `meta` key with
+no index), each row with its `turn`, the tree's state as `Tracker.agents/2` reads it, from the
+`Tracker` the tree registers in the instance's `Registry`. A row resumed into a new session id
+is found by its current id only. F-236 added `session_start/3`, answering
 `{:context, text}` for a session's start, carried by a `command` hook since Claude Code runs no
 `http` hook there ("A held `SessionStart`"). F-214 made the rule F-195's new-2 asked for
 a check: a home is agentful or agentless for its whole life, since an agentless tree asks no

@@ -1256,6 +1256,74 @@ defmodule CodingAgentFramework.SurfaceTest do
     assert {:refused, :no_instance} = CodingAgentFramework.symptoms("nope")
   end
 
+  # F-265: an app reads its agents' rows by session id or by a meta key, each with the turn the
+  # tree reads. The stand-in's `bg` brief keeps its delegate in a turn while its background
+  # command runs (no line is written to the FIFO here), and a stopped delegate ends for good.
+  test "an app reads agent rows by session id or by a meta key, with their turn", ctx do
+    parts = start(ctx.config)
+    {_, 0} = System.cmd(program!(:mkfifo), [Path.join(ctx.dir, "bg.fifo")])
+
+    assert {:ok, %{delegate: "app-unit-one"}} =
+             MCP.call(parts.mcp, "app-main", "start_delegate", args("unit/one"))
+
+    bg = Map.put(args("unit/two"), "brief", "bg go")
+
+    assert {:ok, %{delegate: "app-unit-two"}} =
+             MCP.call(parts.mcp, "app-main", "start_delegate", bg)
+
+    for name <- ~w(app-unit-one app-unit-two),
+        do:
+          {:ok, _} = CodingAgentFramework.Sessions.put_meta(parts.sessions, name, %{"epic" => 7})
+
+    turns = fn by ->
+      with {:ok, rows} <- CodingAgentFramework.agent_rows("t", by),
+           do: {:ok, Enum.map(rows, &{&1.name, &1.turn})}
+    end
+
+    # By a meta key: both rows, one idle after its report and one in a turn.
+    {:ok, _} =
+      await(
+        fn ->
+          want = {:ok, [{"app-unit-one", "idle"}, {"app-unit-two", "working"}]}
+          if turns.(meta: {"epic", 7}) == want, do: want
+        end,
+        20_000
+      )
+
+    # By session id: the one row, as `agent_rows/1` gives it, with its turn.
+    two = Table.get(ctx.sessions, "ws", "app-unit-two")
+    {:ok, %{agents: all}} = CodingAgentFramework.agent_rows("t")
+    listed = Enum.find(all, &(&1.name == "app-unit-two"))
+
+    assert {:ok, [row]} = CodingAgentFramework.agent_rows("t", session_id: two.session_id)
+
+    assert Enum.sort(Map.keys(row)) == Enum.sort([:turn | Map.keys(listed)])
+    assert {row.id, row.name, row.turn} == {listed.id, "app-unit-two", "working"}
+
+    # Ended: stopped once idle, then ended for good.
+    {:ok, :stopped} = CodingAgentFramework.Sessions.stop(parts.sessions, "app-unit-one")
+    {:ok, :ended} = CodingAgentFramework.Sessions.ended(parts.sessions, "app-unit-one")
+    one = Table.get(ctx.sessions, "ws", "app-unit-one")
+
+    {:ok, _} =
+      await(fn ->
+        want = {:ok, [{"app-unit-one", "ended"}]}
+        if turns.(session_id: one.session_id) == want, do: want
+      end)
+
+    # No match, a key of no read, a value out of shape, and no instance of that name.
+    assert {:ok, []} = CodingAgentFramework.agent_rows("t", meta: {"epic", 8})
+    assert {:ok, []} = CodingAgentFramework.agent_rows("t", session_id: "no-such-session")
+    assert {:refused, {:bad, :ticket}} = CodingAgentFramework.agent_rows("t", ticket: 41)
+    assert {:refused, {:bad, :meta}} = CodingAgentFramework.agent_rows("t", meta: {"epic", 7.5})
+    assert {:refused, {:bad, :by}} = CodingAgentFramework.agent_rows("t", [])
+
+    assert {:refused, {:bad, :by}} =
+             CodingAgentFramework.agent_rows("t", session_id: "a", meta: {"epic", 7})
+
+    assert {:refused, :no_instance} = CodingAgentFramework.agent_rows("nope", session_id: "a")
+  end
+
   defp ok(nil), do: nil
   defp ok(value), do: {:ok, value}
 
