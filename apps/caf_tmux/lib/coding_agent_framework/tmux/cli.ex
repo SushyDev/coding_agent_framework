@@ -14,6 +14,14 @@ defmodule CodingAgentFramework.Tmux.CLI do
       iex> CodingAgentFramework.Tmux.key(server)
       {"laptop", "agents"}
 
+  On a host whose `scope` is `:systemd_user` (`CodingAgentFramework.Host`), `new_session/4`
+  runs its tmux client through `systemd-run --user --scope`. The client that finds no server
+  starts it, and the server stays in that client's scope, out of the app's cgroup, so a stop of
+  the app's systemd unit does not end it. A client that finds the server exits at once, and its
+  empty scope is collected. Each scope's unit is new (`caf-<key>-tmux-<time>-<n>`), since a scope
+  that holds the server outlives the session it started with. A `systemd-run` that fails refuses
+  the start, `{:refused, {:scope, output}}`.
+
   A write is one tmux command:
 
       if-shell -F -t %3 '#{&&:#{==:#{pane_id},%3},#{==:#{@tag},alpha}}'
@@ -31,13 +39,23 @@ defmodule CodingAgentFramework.Tmux.CLI do
   alias CodingAgentFramework.{Host, Programs, Shell, Tmux}
 
   @enforce_keys [:host, :server, :tmux, :rm]
-  defstruct [:host, :server, :tmux, :rm, tag: "@caf_session", config: "/dev/null", timeout: 5_000]
+  defstruct [
+    :host,
+    :server,
+    :tmux,
+    :rm,
+    systemd_run: nil,
+    tag: "@caf_session",
+    config: "/dev/null",
+    timeout: 5_000
+  ]
 
   @type t :: %__MODULE__{
           host: Host.t(),
           server: {:name, String.t()} | {:socket, String.t()},
           tmux: String.t(),
           rm: String.t(),
+          systemd_run: String.t() | nil,
           tag: String.t(),
           config: String.t(),
           timeout: pos_integer
@@ -45,16 +63,20 @@ defmodule CodingAgentFramework.Tmux.CLI do
 
   @doc """
   A server handle on the host of `programs`, which must name its tmux and rm (`kill_server/1`
-  removes the socket file with it). Nothing runs until a call. Options: `:tag`, `:config`,
+  removes the socket file with it), and its systemd_run on a host whose `scope` is
+  `:systemd_user`. Nothing runs until a call. Options: `:tag`, `:config`,
   `:timeout`.
   """
   @spec new(Programs.t(), {:name, String.t()} | {:socket, String.t()}, keyword) ::
           {:ok, t} | {:refused, {:no_program, list}}
   def new(%Programs{host: host} = programs, server, opts \\ []) do
-    with {:ok, paths} <- Programs.take(programs, [:tmux, :rm]),
+    with {:ok, paths} <- Programs.take(programs, [:tmux, :rm | scoped(host)]),
          do:
            {:ok, struct!(__MODULE__, [host: host, server: server] ++ Map.to_list(paths) ++ opts)}
   end
+
+  defp scoped(%Host{scope: :systemd_user}), do: [:systemd_run]
+  defp scoped(%Host{scope: :none}), do: []
 
   @impl true
   def key(%__MODULE__{host: host, server: {_, name}}), do: {host.name, name}
@@ -76,7 +98,7 @@ defmodule CodingAgentFramework.Tmux.CLI do
         ["-P", "-F", "\#{pane_id}", "--"] ++
         Enum.map(argv, &escape/1) ++ [";", "set-option", "-p", "-t", "=#{session}:", tag, session]
 
-    case run(s, args) do
+    case run(s, args, scope(s)) do
       {:ok, %{status: 0, output: out}} ->
         case String.split(out, "\n", trim: true) do
           [pane] -> {:ok, pane}
@@ -85,6 +107,9 @@ defmodule CodingAgentFramework.Tmux.CLI do
 
       {:ok, %{status: 1, output: "duplicate session" <> _}} ->
         {:refused, {:session_exists, session}}
+
+      {:ok, %{status: 1, output: "Failed to " <> _ = out}} when s.host.scope == :systemd_user ->
+        {:refused, {:scope, out}}
 
       other ->
         failure(other)
@@ -286,14 +311,28 @@ defmodule CodingAgentFramework.Tmux.CLI do
     end
   end
 
-  defp run(%__MODULE__{server: server} = s, args) do
+  defp run(%__MODULE__{server: server} = s, args, scope \\ []) do
     socket =
       case server do
         {:name, name} -> ["-L", name]
         {:socket, path} -> ["-S", path]
       end
 
-    Shell.run(s.host, s.tmux, socket ++ ["-f", s.config | args], timeout: s.timeout)
+    [program | words] = scope ++ [s.tmux | socket] ++ ["-f", s.config | args]
+    Shell.run(s.host, program, words, timeout: s.timeout)
+  end
+
+  # The client that may start the server runs in a scope of its own, named anew each time.
+  defp scope(%__MODULE__{host: %Host{scope: :none}}), do: []
+
+  defp scope(%__MODULE__{server: {_, name}} = s) do
+    key =
+      :erlang.md5(s.host.name <> "\0" <> name)
+      |> Base.encode16(case: :lower)
+      |> binary_part(0, 12)
+
+    unit = "caf-#{key}-tmux-#{System.os_time(:microsecond)}-#{System.unique_integer([:positive])}"
+    Host.scope_argv(s.host, s.systemd_run, unit)
   end
 
   defp failure({:ok, %{status: 1, output: out}}) do

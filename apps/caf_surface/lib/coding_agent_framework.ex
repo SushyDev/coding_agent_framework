@@ -1807,7 +1807,7 @@ defmodule CodingAgentFramework do
 
   defp programs(c) do
     case Map.fetch(c.programs, :kill) do
-      {:ok, kill} -> Programs.new(Host.local(c.workstation, kill), c.programs)
+      {:ok, kill} -> Programs.new(Host.local(c.workstation, kill, scope: c.scope), c.programs)
       :error -> {:refused, {:no_program, :kill}}
     end
   end

@@ -503,6 +503,9 @@ Built, each from a checked model in `model/tla/`:
   row now keeps its command.
 - an app reads agent rows by session id or by a key in their `meta`, each with its turn state
   from the tree (F-265): `agent_rows/2` filters in the store's query, the session id by an index.
+- a held session outlives a stop of the app's systemd unit (F-274): a host whose `scope` is
+  `:systemd_user` starts each `dtach -n` holder and the tmux server in a `systemd-run --user
+  --scope` unit of its own, out of the app's cgroup, and refuses a start whose scope fails.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

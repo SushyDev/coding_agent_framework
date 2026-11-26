@@ -5,8 +5,10 @@ defmodule CodingAgentFramework.Programs do
   ps, cat, tail, head, mkdir and mkfifo (a headless delegate's stdin is a FIFO), wc (a service's log
   offset at its start), nc (a service's port wait), lsof (whether a forward's own ssh holds
   its local port), curl (a main session's waiter hook, `Intake.waiter_hook/5`) and ssh_keygen
-  (`ssh-keygen`, which git signs and checks a commit with, `CodingAgentFramework.ToolHome`), and
-  sysctl (macOS's memory-pressure level, the `Scheduler`'s pressure there).
+  (`ssh-keygen`, which git signs and checks a commit with, `CodingAgentFramework.ToolHome`),
+  sysctl (macOS's memory-pressure level, the `Scheduler`'s pressure there), and systemd_run
+  (`systemd-run`, which starts a held process in its own scope on a host whose `scope` is
+  `:systemd_user`, `CodingAgentFramework.Host`).
 
   The paths are found once, by the host's own shell (`command -v`), so no later call looks a
   program up through a `PATH`: a long `PATH` searched on the VM's file server slowed every file
@@ -64,6 +66,7 @@ defmodule CodingAgentFramework.Programs do
           | :curl
           | :ssh_keygen
           | :sysctl
+          | :systemd_run
   @type os :: :darwin | :linux | :unknown
   @type t :: %__MODULE__{host: Host.t(), paths: %{name => String.t()}, os: os}
 
@@ -92,7 +95,8 @@ defmodule CodingAgentFramework.Programs do
     :lsof,
     :curl,
     :ssh_keygen,
-    :sysctl
+    :sysctl,
+    :systemd_run
   ]
   # The one fixed path in the library: `find/3` needs a shell to find the rest, sh included.
   @sh "/bin/sh"

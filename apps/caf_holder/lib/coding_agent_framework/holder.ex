@@ -26,6 +26,25 @@ defmodule CodingAgentFramework.Holder do
       {:ok, ["/run/bin/env", "-i", "HOME=/h", "/run/bin/dtach", "-n", "/tmp/agents/alpha.sock",
              "-E", "-z", "-r", "winch", "/run/bin/claude"]}
 
+  On a host whose `scope` is `:systemd_user` (`CodingAgentFramework.Host`), the command starts
+  with `systemd-run --user --scope`, so the holder runs in a scope unit of its own and leaves
+  the caller's cgroup: a stop of the app's systemd unit does not end it. The unit is
+  `caf-<key>-<name>.scope`, `<key>` twelve hex digits of the directory's MD5, so two instances on
+  one host never share a unit (`unit/2`). A `systemd-run` that fails (no user bus, a unit of that
+  name still running) refuses the start, `{:refused, {:scope, output}}`; it never falls back to
+  a start without a scope.
+
+      iex> host = CodingAgentFramework.Host.local("box", "/run/bin/kill", scope: :systemd_user)
+      iex> paths = %{dtach: "/run/bin/dtach", sh: "/run/bin/sh", env: "/run/bin/env",
+      ...>   rm: "/run/bin/rm", systemd_run: "/usr/bin/systemd-run"}
+      iex> {:ok, programs} = CodingAgentFramework.Programs.new(host, paths)
+      iex> {:ok, holder} = CodingAgentFramework.Holder.new(programs, "/tmp/agents")
+      iex> CodingAgentFramework.Holder.hold_argv(holder, "alpha", ["/run/bin/claude"], [])
+      {:ok, ["/usr/bin/systemd-run", "--user", "--scope", "--collect", "--quiet",
+             "--expand-environment=no", "--unit=caf-73733ffdeabe-alpha", "/run/bin/env", "-i",
+             "/run/bin/dtach", "-n", "/tmp/agents/alpha.sock", "-E", "-z", "-r", "winch",
+             "/run/bin/claude"]}
+
   Two callers holding one name at once are serialized by dtach itself: the second `dtach -n`
   finds the path bound and is refused. The host's one writer is meant to be the only caller.
   """
@@ -33,7 +52,7 @@ defmodule CodingAgentFramework.Holder do
   alias CodingAgentFramework.{Host, Programs, Shell}
 
   @enforce_keys [:host, :dir, :dtach, :sh, :env, :rm]
-  defstruct [:host, :dir, :dtach, :sh, :env, :rm, timeout: 5_000]
+  defstruct [:host, :dir, :dtach, :sh, :env, :rm, systemd_run: nil, timeout: 5_000]
 
   @type t :: %__MODULE__{
           host: Host.t(),
@@ -42,6 +61,7 @@ defmodule CodingAgentFramework.Holder do
           sh: String.t(),
           env: String.t(),
           rm: String.t(),
+          systemd_run: String.t() | nil,
           timeout: pos_integer
         }
   @type state :: :live | :stale | :absent
@@ -78,13 +98,16 @@ defmodule CodingAgentFramework.Holder do
 
   @doc """
   A holder of sockets in `dir` on the host of `programs`, which must name its dtach, sh, env and
-  rm. Nothing runs. Option: `:timeout` (ms per shell run, default 5 s).
+  rm, and its systemd_run on a host whose `scope` is `:systemd_user`. Nothing runs. Option: `:timeout` (ms per shell run, default 5 s).
   """
   @spec new(Programs.t(), String.t(), keyword) :: {:ok, t} | {:refused, {:no_program, list}}
   def new(%Programs{host: host} = programs, dir, opts \\ []) do
-    with {:ok, paths} <- Programs.take(programs, @programs),
+    with {:ok, paths} <- Programs.take(programs, @programs ++ scoped(host)),
          do: {:ok, struct!(__MODULE__, [host: host, dir: dir] ++ Map.to_list(paths) ++ opts)}
   end
+
+  defp scoped(%Host{scope: :systemd_user}), do: [:systemd_run]
+  defp scoped(%Host{scope: :none}), do: []
 
   @doc "The `{host, dir}` that names this holder."
   @spec key(t) :: {String.t(), String.t()}
@@ -96,19 +119,19 @@ defmodule CodingAgentFramework.Holder do
   an account's settings. A stale socket file is removed first; a live one refuses the start.
 
   Returns `{:ok, socket_path}`, `{:refused, {:live, name}}`, `{:refused, {:bad_name, name}}`,
-  `{:refused, {:socket_path_too_long, path}}`, `{:refused, {:bad_variable, variable}}`, or
-  `{:unknown, reason}`.
+  `{:refused, {:socket_path_too_long, path}}`, `{:refused, {:bad_variable, variable}}`,
+  `{:refused, {:scope, output}}` (a scoped host's `systemd-run` failed), or `{:unknown, reason}`.
   """
   @spec hold(t, String.t(), [String.t()], keyword) ::
           {:ok, String.t()} | {:refused, term} | {:unknown, term}
   def hold(%__MODULE__{} = h, name, argv, opts \\ []) do
-    with {:ok, [env | args]} <- hold_argv(h, name, argv, Keyword.get(opts, :env, [])),
+    with {:ok, [program | args]} <- hold_argv(h, name, argv, Keyword.get(opts, :env, [])),
          {:ok, _} <- clear(h, name) do
       path = Path.join(h.dir, name <> ".sock")
 
-      case Shell.run(h.host, env, args, timeout: h.timeout) do
+      case Shell.run(h.host, program, args, timeout: h.timeout) do
         {:ok, %{status: 0}} -> {:ok, path}
-        {:ok, %{status: 1, output: out}} -> started_elsewhere(name, path, out)
+        {:ok, %{status: 1, output: out}} -> started_elsewhere(h, name, path, out)
         {:ok, %{status: status, output: out}} -> {:unknown, {:dtach, status, out}}
         other -> other
       end
@@ -117,7 +140,7 @@ defmodule CodingAgentFramework.Holder do
 
   @doc """
   The command `hold/4` runs on the host for `name`, `argv` and the environment `env`: the
-  host's `env -i`, each variable, then `dtach -n`. Pure; `CodingAgentFramework.Shell.command/3`
+  host's `env -i`, each variable, then `dtach -n`, all under `systemd-run` on a scoped host. Pure; `CodingAgentFramework.Shell.command/3`
   shows it as a remote host runs it.
   """
   @spec hold_argv(t, String.t(), [String.t()], [{String.t(), String.t()}]) ::
@@ -125,8 +148,32 @@ defmodule CodingAgentFramework.Holder do
   def hold_argv(%__MODULE__{} = h, name, argv, env) do
     with {:ok, path} <- socket(h, name),
          {:ok, assignments} <- assignments(env),
-         do: {:ok, [h.env, "-i" | assignments] ++ [h.dtach, "-n", path | @flags] ++ argv}
+         do:
+           {:ok,
+            scope(h, name) ++
+              [h.env, "-i" | assignments] ++ [h.dtach, "-n", path | @flags] ++ argv}
   end
+
+  @doc """
+  The name of `name`'s scope unit on a scoped host: `caf-<key>-<name>`, `<key>` the first
+  twelve hex digits of the MD5 of the holder's directory. A name is at most 64 bytes of
+  `[A-Za-z0-9_-]`, so the unit is a valid systemd unit name. The directory is under one
+  instance's home, so two instances on one host never name the same unit.
+
+      iex> host = CodingAgentFramework.Host.local("box", "/run/bin/kill")
+      iex> paths = %{dtach: "/d", sh: "/s", env: "/e", rm: "/r"}
+      iex> {:ok, programs} = CodingAgentFramework.Programs.new(host, paths)
+      iex> {:ok, holder} = CodingAgentFramework.Holder.new(programs, "/tmp/agents")
+      iex> CodingAgentFramework.Holder.unit(holder, "alpha")
+      "caf-73733ffdeabe-alpha"
+  """
+  @spec unit(t, String.t()) :: String.t()
+  def unit(%__MODULE__{dir: dir}, name) do
+    key = :erlang.md5(dir) |> Base.encode16(case: :lower) |> binary_part(0, 12)
+    "caf-" <> key <> "-" <> name
+  end
+
+  defp scope(h, name), do: Host.scope_argv(h.host, h.systemd_run, unit(h, name))
 
   # A name that is not a plain variable name could hold `=` and change what `env` reads.
   defp assignments(env) do
@@ -226,10 +273,14 @@ defmodule CodingAgentFramework.Holder do
   end
 
   # dtach exits 1 when the path is already bound: another caller held this name in between.
-  defp started_elsewhere(name, path, out) do
-    if String.contains?(out, "Address already in use"),
-      do: {:refused, {:live, name}},
-      else: {:unknown, {:dtach, 1, out, path}}
+  # systemd-run exits 1 too when it cannot start the scope, and each of its errors starts
+  # "Failed to", which dtach never prints.
+  defp started_elsewhere(h, name, path, out) do
+    cond do
+      String.contains?(out, "Address already in use") -> {:refused, {:live, name}}
+      h.host.scope == :systemd_user and out =~ ~r/^Failed to /m -> {:refused, {:scope, out}}
+      true -> {:unknown, {:dtach, 1, out, path}}
+    end
   end
 
   defp script(h, script, args),

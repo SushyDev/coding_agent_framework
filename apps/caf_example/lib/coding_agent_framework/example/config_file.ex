@@ -471,13 +471,22 @@ defmodule CodingAgentFramework.Example.ConfigFile do
   defp ca_bundle(env),
     do: for(name <- @ca_names, absolute?(env[name]), into: %{}, do: {name, env[name]})
 
+  # `systemd-run` is the host's own, never devenv's (`CodingAgentFramework.Host`'s `scope`), so
+  # it is taken only when the environment names it.
   defp programs(env) do
-    vars = for name <- Programs.names(), do: {name, "CAF_" <> String.upcase(to_string(name))}
+    vars =
+      for name <- Programs.names() -- [:systemd_run],
+          do: {name, "CAF_" <> String.upcase(to_string(name))}
 
     case for({_, var} <- vars, not absolute?(env[var]), do: var) do
-      [] -> {:ok, Map.new(vars, fn {name, var} -> {name, env[var]} end)}
+      [] -> {:ok, Map.new(vars, fn {name, var} -> {name, env[var]} end) |> host_program(env)}
       unset -> {:refused, {:programs, {:unset, unset}}}
     end
+  end
+
+  defp host_program(programs, env) do
+    path = env["CAF_SYSTEMD_RUN"]
+    if absolute?(path), do: Map.put(programs, :systemd_run, path), else: programs
   end
 
   defp absolute(map, key, at) do

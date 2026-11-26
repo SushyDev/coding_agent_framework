@@ -8,4 +8,7 @@ File.mkdir_p!(CodingAgentFramework.TestHost.vm_dir())
 ExUnit.after_suite(fn _ -> CodingAgentFramework.TestHost.end_vm() end)
 # A message a test waits for is announced, but under a heavy load it can take longer than
 # ExUnit's 100 ms default to arrive. A wait still ends on the message, not on the timeout.
-ExUnit.start(assert_receive_timeout: 5_000)
+# The test that stops a transient user unit runs only where the host's user systemd starts a
+# scope (`CodingAgentFramework.SystemdUser.available?/0`): a Linux host with a user systemd.
+exclude = if CodingAgentFramework.SystemdUser.available?(), do: [], else: [:systemd_user]
+ExUnit.start(assert_receive_timeout: 5_000, exclude: exclude)
