@@ -12,7 +12,10 @@ defmodule CodingAgentFramework.ProgramsBuiltinTest do
   end
 
   test "a program that is also a shell builtin is found as a file on the PATH" do
-    System.put_env("PATH", "/bin:/usr/bin")
+    # Only the directories that hold kill and sleep as files: /bin on macOS, and on NixOS a
+    # directory such as /run/current-system/sw/bin, since it has no /bin/kill or /usr/bin/sleep.
+    dirs = Enum.map(["kill", "sleep"], &Path.dirname(System.find_executable(&1)))
+    System.put_env("PATH", dirs |> Enum.uniq() |> Enum.join(":"))
 
     assert {:ok, programs} = Programs.find(host(), [:kill, :sleep])
 

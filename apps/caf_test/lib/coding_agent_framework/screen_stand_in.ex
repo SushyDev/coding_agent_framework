@@ -401,6 +401,12 @@ defmodule CodingAgentFramework.ScreenStandIn do
       } >> "$d/$sid.jsonl"
     }
     draw() {
+      drawing=1
+      paint
+      drawing=''
+      if [ -n "$winched" ]; then resized; fi
+    }
+    paint() {
       printf '\\033[H\\033[2J'
       if [ $screen = running ] || [ $screen = limit_wait ]; then
         #{program!(:cat)} "#{screens}/$screen"
@@ -421,6 +427,19 @@ defmodule CodingAgentFramework.ScreenStandIn do
     # Keys are read one at a time with no echo, so text typed without an Enter is drawn by the
     # stand-in, in its box, as Claude Code draws it, and the terminal shows nothing else.
     #{program!(:stty)} -echo -icanon min 1
+    # Claude Code draws again when its size changes, and only then (F-272). dtach keeps no
+    # output, so a screen drawn before a viewer attached shows only once the viewer's grow
+    # makes it draw again. Bash runs the trap while a read waits, and the read goes on.
+    # A trap also runs between a draw's commands, so a resize then waits for the draw's end.
+    resized() {
+      winched=''
+      local now; now=$(#{program!(:stty)} size 2>/dev/null)
+      [ "$now" = "$size" ] && return 0
+      size=$now
+      draw
+    }
+    winched='' drawing='' size=$(#{program!(:stty)} size 2>/dev/null)
+    trap 'if [ -n "$drawing" ]; then winched=1; else resized; fi' WINCH
     # Past the startup dialogs: the session file, then the start's prompt as the first turn.
     # `busy` comes before the prompt's file, so a test that has seen the prompt knows the file's
     # next `idle` is the turn's end, not the one before it.

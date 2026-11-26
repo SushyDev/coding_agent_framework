@@ -2648,9 +2648,10 @@ time, and KILL to the group after a grace (the call's timeout), as its own step:
 done only once the socket reads dead. A group signal that fails while every member of the
 group is a zombie not yet reaped, or none is left, reads as gone: macOS answers EPERM for such
 a group, and nothing in it runs again; one that fails while a member is not a zombie stays
-unknown (F-124). A service runs in the foreground, in its own group: a program that daemonizes
-itself into a new session leaves a process no end reaches, so it is started in its foreground
-mode (a database with its no-daemon flag, say). A start that settles
+unknown (F-124). Linux sends the signal to a group of zombies and `kill` succeeds, so there it
+reads as sent (F-272). A service runs in the foreground, in its own group: a program that
+daemonizes itself into a new session leaves a process no end reaches, so it is started in its
+foreground mode (a database with its no-daemon flag, say). A start that settles
 after its owner has ended does not stay running: its settle reads the owner's end first, and
 ends the service, or hands it to the owner's parent when it has `keep` (F-83).
 

@@ -301,7 +301,8 @@ defmodule CodingAgentFramework.Holder.Process do
   (nothing was sent), or `{:unknown, reason}`. A group's signal that fails while every member of
   the group is a zombie not yet reaped, or none is left, is `{:ok, :gone}` too: macOS answers
   EPERM for such a group, and nothing in it can run again. It stays `{:unknown, reason}` while
-  any member is not a zombie.
+  any member is not a zombie. Linux sends the signal to such a group, and `kill` succeeds, so
+  there the answer is `{:ok, :sent}`.
   """
   @spec signal(t, held, String.t(), keyword) :: {:ok, :sent | :gone} | {:unknown, term}
   def signal(%__MODULE__{holder: h} = p, %{pid: pid, start: start}, signal, opts \\ [])
