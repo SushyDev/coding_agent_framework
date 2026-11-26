@@ -509,6 +509,12 @@ Built, each from a checked model in `model/tla/`:
 - the gates pass on a Linux host (NixOS) as on macOS (F-272): the screen stand-in redraws when
   its size changes, as Claude Code does, and the tests no longer assume macOS paths, signals or
   timing.
+- a typed row is delivered by its line in the transcript, its turn ended or not (F-277): one
+  that waited for an ended turn stayed `sending` when the app's answer to the Stop hook went on
+  with the turn, and every row behind it waited.
+- a typed row goes whole when it fits the pane's real width, read in the `Inlet`'s write step
+  (F-277): a 200-column pane holds 123 characters of text past a 25-character frame, where a
+  fixed 80-column limit left 3 and sent short messages as due files.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

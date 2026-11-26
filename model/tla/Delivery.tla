@@ -31,8 +31,10 @@
 (*           line, or wider than the box) is written to a file the session *)
 (*           may read, and the line typed names it (F-142); which line is  *)
 (*           typed is left abstract. Refused when the check fails; unknown *)
-(*           keeps the mark, and is never typed again; settled as waiter,  *)
-(*           once the turn that took it has ended. A row in Wide has a     *)
+(*           keeps the mark, and is never typed again; settled as waiter:  *)
+(*           its line delivers it, its turn ended or not (F-277), since    *)
+(*           Mailbox may read no ended turn before the next one starts     *)
+(*           (SettleAtIdle). A row in Wide has a                            *)
 (*           pointer line the box still cannot hold (a long home, F-240):  *)
 (*           it is never typed. An idle session with no waiter starts none *)
 (*           until a turn of it ends, and a restart cuts the one it had,   *)
@@ -180,6 +182,7 @@ CONSTANTS
     Awaited,       \* rows a run_delegate call may wait on
     ClientLeaves,  \* the client may give up on a call before its deadline
     SelfTurns,     \* alone: a headless session may start a turn by itself
+    Continues,     \* alone: an app answers a waiter itself, and the turn goes on
     MaxRestarts,   \* alone: restarts of the framework and of an addressee's agent process
     MaxEnds,       \* alone: processes that end by themselves (a crash, a kill)
     MaxPrompts,    \* alone: a person's prompts
@@ -219,14 +222,15 @@ Breaks == {
     "ForceEnded",            \* a row a forced end left sending is settled ended, not unknown
     "SettleInCall",          \* a forced end's rows settle only in the operator's call, which a restart cuts
     "WaitForever",           \* a row too wide to type waits for a waiter with no bound (F-240)
-    "WakeInMemory"           \* the wake line's mark is memory: a restart types it again (F-240)
+    "WakeInMemory",          \* the wake line's mark is memory: a restart types it again (F-240)
+    "SettleAtIdle"           \* a typed row's line delivers it only while its turn reads ended (F-277)
 }
 
 ASSUME Break \in Breaks
 ASSUME Headless \subseteq Addrs /\ Awaited \subseteq Ids /\ Long \subseteq Ids
 ASSUME Wide \subseteq Long
 ASSUME Launched \subseteq Addrs
-ASSUME ClientLeaves \in BOOLEAN /\ SelfTurns \in BOOLEAN
+ASSUME ClientLeaves \in BOOLEAN /\ SelfTurns \in BOOLEAN /\ Continues \in BOOLEAN
 
 Framework == "framework"
 Nobody == "nobody"
@@ -462,8 +466,13 @@ SettleExit(i, has) ==
     /\ UNCHANGED <<hand, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
 
 \* waiter, typed and launch: the transcript (`has`): a waiter's take line (a
-\* dequeue or a remove) and a launch's user line at once, a typed write's
-\* once the turn that took it has ended. There, delivered; not there, due
+\* dequeue or a remove), a launch's user line and a typed write's user line,
+\* at once, whether the turn it started has ended or not. Mailbox settles at
+\* its cues, and a turn's end may show it no ended turn: the next one starts
+\* first, by the app's own answer to the waiter (Continued) or a prompt. So
+\* under SettleAtIdle, which waits for an ended turn as the code did before
+\* F-277, a typed row stays sending for good, and every row behind it waits.
+\* There, delivered; not there, due
 \* again once no answer of it is on its way to a turn, or the process it was
 \* for is gone (a launch whose start a restart cut never made it). The code
 \* reads "on its way" by a take bound for the waiter and the typed write; a
@@ -479,7 +488,7 @@ SettleSeen(i, has) ==
     LET a == row[i].to  gone == pr[a] # row[i].at IN
     /\ up /\ row[i].st = "sending" /\ row[i].via \in {"waiter", "typed", "launch"}
     /\ i \notin hand /\ ~(a \in forced /\ over[a])
-    /\ \/ has /\ (idle[a] \/ gone \/ row[i].via \in {"waiter", "launch"})
+    /\ \/ has /\ (Break # "SettleAtIdle" \/ idle[a] \/ gone \/ row[i].via # "typed")
           /\ row' = [row EXCEPT ![i] = Delivered(i)]
        \/ ~has /\ (wire[i] = 0 \/ gone \/ Break = "SettleEarly"
                    \/ (Break = "LaunchBound" /\ row[i].via = "launch"))
@@ -606,6 +615,15 @@ SettleCut(i) ==
 Connects(a) ==
     /\ up /\ a \notin Headless /\ pr[a] # 0 /\ idle[a] /\ turned[a] /\ waiter[a] # pr[a]
     /\ waiter' = [waiter EXCEPT ![a] = pr[a]]
+    /\ UNCHANGED <<row, hand, claimed, wire, call, tx, fold, rmem, last, unsure, lost, wrong>>
+
+\* Alone: the app answers a's waiter itself, as an app's own Stop answer
+\* that blocks does, and the turn goes on at once (F-277). Unbounded, so a
+\* turn's end may never be read ended for as long as the app answers so.
+Continued(a) ==
+    /\ Continues /\ up /\ a \notin Headless /\ pr[a] # 0 /\ idle[a] /\ waiter[a] = pr[a]
+    /\ idle' = [idle EXCEPT ![a] = FALSE] /\ waiter' = [waiter EXCEPT ![a] = 0]
+    /\ UNCHANGED <<up, pr, stopping, over, turned, alone>>
     /\ UNCHANGED <<row, hand, claimed, wire, call, tx, fold, rmem, last, unsure, lost, wrong>>
 
 \* The waiter's own deadline, or its program gone.
@@ -905,7 +923,7 @@ Next ==
     \/ FrameworkDies \/ FrameworkStarts
     \/ \E a \in Addrs : \/ Prompted(a) \/ SelfStarts(a) \/ TurnEnds(a) \/ Ends(a)
                         \/ Resumed(a) \/ StopAsked(a) \/ IdleRead(a) \/ Term(a) \/ Over(a)
-                        \/ ForcedEnd(a)
+                        \/ ForcedEnd(a) \/ Continued(a)
                         \/ Mailbox(Connects(a)) \/ Mailbox(WaiterEnds(a))
                         \/ AgentRestart(a)
     \/ \E i \in Ids : \/ \E s \in Senders, a \in Addrs : Sends(i, s, a)

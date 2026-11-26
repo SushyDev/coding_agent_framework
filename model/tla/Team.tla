@@ -333,7 +333,8 @@ Over(a) == proc[a] \in {"ended", "refused"}
 
 D == INSTANCE Delivery WITH
        Ids <- Ids, Addrs <- Agents, Headless <- Delegates, Senders <- Actors, MaxSent <- 0,
-       Awaited <- {}, ClientLeaves <- FALSE, SelfTurns <- SelfTurns, MaxRestarts <- 0,
+       Awaited <- {}, ClientLeaves <- FALSE, SelfTurns <- SelfTurns,
+       Continues <- FALSE, MaxRestarts <- 0,
        MaxEnds <- 0, MaxPrompts <- 0, MaxStops <- 0,
        Break <- IF Break = "NoPointer" THEN "NoPointer" ELSE "none",
        up <- up,

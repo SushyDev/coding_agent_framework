@@ -48,7 +48,8 @@ defmodule CodingAgentFramework.Mailbox do
     (`Transport.Typed`). The `Inlet` reads the turn again in its own step, with the screen as
     the session's recorded release draws it, and types only into an ended turn with an empty
     box. The transcript settles it, as a waiter's row. A row too long to type (more than one
-    line, a control character, or longer than `Transport.Typed.short/0`) is written whole to
+    line, a control character, or longer than the box holds at the pane's width as the `Inlet`
+    reads it in its write step, `Transport.Typed.fits?/3`) is written whole to
     `<home>/due/<agent>/<id>.md` (`Sessions.due_dir/2`, which each interactive start of the agent
     may read by `--add-dir`), and the line typed names that file in backticks, framed with the
     row's sender (`Transport.pointer_line/2`, `Transport.Typed.pointer/2`, F-172);
@@ -1135,7 +1136,7 @@ defmodule CodingAgentFramework.Mailbox do
         evidence =
           case m.via do
             "waiter" -> Map.put(evidence, :waiter, seen(s, m))
-            "typed" -> Map.put(evidence, :typed, typed_seen(s, m))
+            "typed" -> Map.put(evidence, :typed, seen(s, m))
             "launch" -> Map.put(evidence, :launch, launch_seen(s, m))
             _ -> evidence
           end
@@ -1551,18 +1552,39 @@ defmodule CodingAgentFramework.Mailbox do
     end
   end
 
-  # The line typed: the row's own, or for a row too long to type, one that names the file its
-  # text is written to in the agent's due directory, which its start may read (F-142).
+  # The line typed, chosen by the `Inlet` for the limit it reads in its write step: the row's
+  # own when the pane's real width holds it, or else one that names the file its text is
+  # written to in the agent's due directory, which its start may read (F-142). A fixed limit
+  # of an 80-column pane left 3 characters of text past the frame and the mark (F-277).
   defp line(s, m, srow) do
-    with {:ok, text} <- framed(s, m) do
-      if Transport.Typed.short?(text, m.uuid),
-        do: {:ok, Transport.Typed.text(text, m.uuid)},
-        else:
-          with(
-            {:ok, path} <- due_file(s, srow.name, m, text),
-            {:ok, line} <- pointer(s, m, path),
-            do: {:ok, Transport.Typed.pointer(line, m.uuid)}
-          )
+    with {:ok, text} <- framed(s, m),
+         {:ok, pointer} <- pointer_for(s, m, srow.name) do
+      uuid = m.uuid
+
+      {:ok,
+       fn limit ->
+         cond do
+           Transport.Typed.fits?(text, uuid, limit) -> {:ok, Transport.Typed.text(text, uuid)}
+           pointer == nil -> {:refused, {:too_long, :no_home}}
+           true -> typed_pointer(pointer, text, uuid)
+         end
+       end}
+    end
+  end
+
+  # The pointer line and its file's path, framed here; nil with no home to write the file in.
+  defp pointer_for(%{home: nil}, _m, _name), do: {:ok, nil}
+
+  defp pointer_for(s, m, name) do
+    path = due_path(s, name, m)
+    with {:ok, line} <- pointer(s, m, path), do: {:ok, {path, line}}
+  end
+
+  # Nothing is typed yet, so a file that could not be written refuses the write.
+  defp typed_pointer({path, line}, text, uuid) do
+    case write_due(path, text) do
+      {:ok, _path} -> {:ok, Transport.Typed.pointer(line, uuid)}
+      {:unknown, why} -> {:refused, why}
     end
   end
 
@@ -1637,9 +1659,11 @@ defmodule CodingAgentFramework.Mailbox do
   # The row's whole text in the agent's due directory, written whole and renamed into place.
   defp due_file(%{home: nil}, _name, _m, _text), do: {:refused, {:too_long, :no_home}}
 
-  defp due_file(s, name, m, text) do
-    path = Path.join(Sessions.due_dir(s.home, name), "#{m.id}.md")
+  defp due_file(s, name, m, text), do: write_due(due_path(s, name, m), text)
 
+  defp due_path(s, name, m), do: Path.join(Sessions.due_dir(s.home, name), "#{m.id}.md")
+
+  defp write_due(path, text) do
     with :ok <- File.mkdir_p(Path.dirname(path)),
          :ok <- File.write(path <> ".tmp", text),
          :ok <- File.rename(path <> ".tmp", path) do
@@ -1652,11 +1676,6 @@ defmodule CodingAgentFramework.Mailbox do
   defp type_line(s, m, _srow, {:refused, why}) do
     write(s, m, attempt: why)
     refused(s, m)
-    s
-  end
-
-  defp type_line(s, m, _srow, {:unknown, why}) do
-    if m.attempt != Store.text(why), do: write(s, m, attempt: why)
     s
   end
 
@@ -1736,21 +1755,6 @@ defmodule CodingAgentFramework.Mailbox do
       answer ->
         answer
     end
-  end
-
-  # A typed row's evidence: the waiter's, and whether the turn reads ended now.
-  defp typed_seen(s, m) do
-    srow = s.agents |> Agents.get(m.to_agent) |> Agents.unheld(div(now(), 1000))
-
-    ended =
-      with %{} <- srow,
-           {:ok, files} <- files(s, srow) do
-        Turn.interactive(srow, files, false) in [:idle, :ended]
-      else
-        _ -> false
-      end
-
-    Map.put(seen(s, m), :ended, ended)
   end
 
   defp bound(s, sent_at),
