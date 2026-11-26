@@ -182,6 +182,41 @@ defmodule CodingAgentFramework.StoreTest do
     assert {:ok, _} = open.()
   end
 
+  # F-267: a reader of a WAL file reads the last commit while a writer holds the write lock.
+  test "a read-only read against a held write lock answers at once, the last commit" do
+    path = path()
+    {:ok, db} = Store.open(path, @schema)
+    Store.insert(db, "t", host: "h")
+    read = &Store.query(&1, "SELECT host FROM t", [])
+
+    assert {{:ok, [["h"]]}, ms} =
+             against_held(path, fn -> Store.read_only(path, "t", [], read) end)
+
+    assert ms < Store.busy_bound()
+
+    snapshot = fn -> Store.snapshot(path, fn db, _tables -> read.(db) end) end
+    assert {{:ok, [["h"]]}, ms} = against_held(path, snapshot)
+    assert ms < Store.busy_bound()
+  end
+
+  # Only a lock that shuts readers out, such as an exclusive one on a file not in WAL, makes a
+  # reader wait; it is refused busy within the bound.
+  test "a read-only read against an exclusive lock is refused busy within the bound" do
+    path = path()
+    {:ok, writer} = Exqlite.Sqlite3.open(path)
+    :ok = Exqlite.Sqlite3.execute(writer, "CREATE TABLE t (host TEXT)")
+    :ok = Exqlite.Sqlite3.execute(writer, "BEGIN EXCLUSIVE")
+
+    try do
+      began = System.monotonic_time(:millisecond)
+      read = &Store.query(&1, "SELECT host FROM t", [])
+      assert {:refused, {:sqlite, :busy}} = Store.read_only(path, "t", [], read)
+      assert_bounded(System.monotonic_time(:millisecond) - began)
+    after
+      Exqlite.Sqlite3.close(writer)
+    end
+  end
+
   test "a write waits while the lock is held and runs once it is let go, before the bound" do
     path = path()
     {:ok, db} = Store.open(path, @schema)

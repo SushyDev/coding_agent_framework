@@ -414,12 +414,18 @@ defmodule CodingAgentFramework.Transcripts.Fold do
   - `"system"`: `subtype` and `text`: a `system` line, or an API error's reply line
     (`subtype` `"api_error"`).
 
+  `queue` is Claude Code's own queue after these lines (F-267): each text a `queue-operation`
+  `enqueue` added that no `dequeue` or `remove` has taken yet, oldest first, as
+  `%{source: :claude_code, text, at, offset, message}` (`message` as a prompt's). A take with a
+  text takes the oldest entry of that text, and one without a text the oldest entry. At most
+  100 entries are kept, the newest.
+
   Thinking, meta lines, a subagent's lines in the main file (written there only before
   2.1.322) and lines the fold skips have no entry.
 
   Options: `limit:` (entries at most; a line's entries are never split, so a first line with
-  more than `limit` is answered whole), `open:` (from the last read), `at:` (the byte `bytes`
-  starts at) and `agent:`.
+  more than `limit` is answered whole), `open:` and `queue:` (from the last read), `at:` (the
+  byte `bytes` starts at) and `agent:`.
 
       iex> alias CodingAgentFramework.Transcripts.Fold
       iex> go = ~s({"type":"user","uuid":"u1","message":{"content":"Go. [delivery d-1]"}}\\n)
@@ -434,21 +440,40 @@ defmodule CodingAgentFramework.Transcripts.Fold do
       iex> {call.name, call.result, call.done}
       {"Bash", "a.txt", true}
   """
-  @spec entries(binary, keyword) :: %{entries: [map], used: non_neg_integer, open: map}
+  @spec entries(binary, keyword) ::
+          %{entries: [map], used: non_neg_integer, open: map, queue: [map]}
   def entries(bytes, opts) do
     acc = %{
       entries: [],
       count: 0,
       used: 0,
       open: Keyword.get(opts, :open, %{}),
+      queue: Keyword.get(opts, :queue, []),
       limit: Keyword.fetch!(opts, :limit),
       at: Keyword.get(opts, :at, 0),
       agent: Keyword.get(opts, :agent)
     }
 
     acc = entry_lines(acc, bytes)
-    %{entries: Enum.reverse(acc.entries), used: acc.used, open: acc.open}
+    %{entries: Enum.reverse(acc.entries), used: acc.used, open: acc.open, queue: acc.queue}
   end
+
+  @doc """
+  The operation and text of a decoded `queue-operation` line, `{op, text}` (`text` nil when the
+  line has none), or nil for any other line: the one reading of Claude Code's queue lines, which
+  `entries/2` and the `waiter` transport's settle both use.
+
+      iex> alias CodingAgentFramework.Transcripts.Fold
+      iex> Fold.queue_operation(%{"type" => "queue-operation", "operation" => "enqueue", "content" => "hi"})
+      {"enqueue", "hi"}
+      iex> Fold.queue_operation(%{"type" => "user"})
+      nil
+  """
+  @spec queue_operation(map) :: {String.t(), String.t() | nil} | nil
+  def queue_operation(%{"type" => "queue-operation", "operation" => op} = e) when is_binary(op),
+    do: {op, if(is_binary(e["content"]), do: e["content"])}
+
+  def queue_operation(_line), do: nil
 
   @result_max 20_000
   @kept_open 100
@@ -460,7 +485,7 @@ defmodule CodingAgentFramework.Transcripts.Fold do
 
       [line, rest] ->
         base = %{at: nil, uuid: nil, offset: acc.at + acc.used, agent: acc.agent}
-        %{new: new, open: open, ended: ended} = line_entries(line, base, acc)
+        %{new: new, open: open, ended: ended, queue: queue} = line_entries(line, base, acc)
 
         if acc.count > 0 and acc.count + length(new) > acc.limit do
           acc
@@ -472,7 +497,8 @@ defmodule CodingAgentFramework.Transcripts.Fold do
             | entries: Enum.reverse(new, entries),
               count: acc.count + length(new),
               used: acc.used + byte_size(line) + 1,
-              open: open
+              open: open,
+              queue: queue
           }
 
           if acc.count >= acc.limit, do: acc, else: entry_lines(acc, rest)
@@ -484,11 +510,14 @@ defmodule CodingAgentFramework.Transcripts.Fold do
   defp call_id(_entry), do: nil
 
   defp line_entries(line, base, acc) do
-    none = %{new: [], open: acc.open, ended: %{}}
+    none = %{new: [], open: acc.open, ended: %{}, queue: acc.queue}
 
     case JSON.decode(line) do
       {:ok, %{"isSidechain" => true}} when acc.agent == nil ->
         none
+
+      {:ok, %{"type" => "queue-operation"} = e} ->
+        %{none | queue: queued(acc.queue, queue_operation(e), e, base)}
 
       {:ok, %{"type" => type} = e} when type in ["user", "assistant", "attachment", "system"] ->
         of_line(type, e, %{base | at: ms(e["timestamp"]), uuid: e["uuid"]}, none, acc)
@@ -571,6 +600,27 @@ defmodule CodingAgentFramework.Transcripts.Fold do
 
   defp of_line(_type, _e, _base, none, _acc), do: none
 
+  defp queued(queue, {"enqueue", text}, e, base) when is_binary(text) do
+    entry = %{
+      source: :claude_code,
+      text: text,
+      at: ms(e["timestamp"]),
+      offset: base.offset,
+      message: mark(text)
+    }
+
+    Enum.take(queue ++ [entry], -@kept_open)
+  end
+
+  defp queued(queue, {op, text}, _e, _base) when op in ["dequeue", "remove"] do
+    case Enum.find_index(queue, &(text == nil or &1.text == text)) do
+      nil -> queue
+      at -> List.delete_at(queue, at)
+    end
+  end
+
+  defp queued(queue, _op, _e, _base), do: queue
+
   defp oldest(open),
     do: open |> Enum.min_by(fn {_, c} -> c.started_at || 0 end) |> elem(0)
 
@@ -612,13 +662,15 @@ defmodule CodingAgentFramework.Transcripts.Fold do
     images =
       if is_list(content), do: Enum.count(content, &match?(%{"type" => "image"}, &1)), else: 0
 
-    message =
-      case Regex.run(~r/\[delivery ([^\]\s]+)\]/, text) do
-        [_, uuid] -> uuid
-        nil -> nil
-      end
+    Map.merge(base, %{kind: "prompt", text: text, images: images, message: mark(text)})
+  end
 
-    Map.merge(base, %{kind: "prompt", text: text, images: images, message: message})
+  # The uuid of a delivered message's `[delivery <uuid>]` mark, nil without one.
+  defp mark(text) do
+    case Regex.run(~r/\[delivery ([^\]\s]+)\]/, text) do
+      [_, uuid] -> uuid
+      nil -> nil
+    end
   end
 
   defp notice(content, base) do

@@ -982,8 +982,16 @@ each read by the fold's own rules (`Transcripts.Fold.entries/2`), a delivered me
 with its row's uuid, an opaque cursor for what came since, and the rows still queued for the
 agent. The read runs in the host's `Transcripts` (`Transcripts.conversation/3`), through that
 host's shell, at most `limit` entries and `max_bytes` per file, so no call reads a whole
-transcript again; a cursor whose bytes changed, or of another file, starts that file again and
-says so (`reset`). The agent's row names its host; only the workstation has a `Transcripts`
+transcript again; a cursor whose bytes changed, or of another file, starts that file again
+from its end and says so (`reset`). F-267 made a read with no cursor read the file's last
+`max_bytes` and answer the newest entries, with a `next` cursor that reads forward and an
+`older` one that reads back one block a call (`before:`), its edge at a whole line's start;
+and `queued` adds Claude Code's own queue (its `queue-operation` lines enqueued and not yet
+taken, read by the one parser `Fold.queue_operation/1`), each entry with its `source`. The
+agent's row and the rows queued for it are one `Store.snapshot/2`: a read-only reader of the
+WAL file reads the last commit while a writer holds the lock, and only a lock that shuts
+readers out makes it wait, at most `busy_bound`, before `{:refused, {:sqlite, :busy}}`. The
+agent's row names its host; only the workstation has a `Transcripts`
 today, so a session on another host answers `{:unknown, {:host, {:no_reader, host}}}`. F-266
 added `holds/2`, an app's panel of what holds the machine: every unreleased lease and the last
 `ended:` released ones (at most 200), each with its class, module, holder, units, grant and

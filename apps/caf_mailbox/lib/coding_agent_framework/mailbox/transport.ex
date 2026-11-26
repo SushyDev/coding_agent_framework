@@ -127,19 +127,27 @@ defmodule CodingAgentFramework.Mailbox.Transport.Waiter do
 
   defp line(text, mark) do
     case JSON.decode(text) do
-      {:ok, %{"type" => "queue-operation", "operation" => op, "content" => c}}
-      when is_binary(c) ->
-        cond do
-          not String.contains?(c, mark) -> :none
-          op == "enqueue" -> :queued
-          op in ["dequeue", "remove"] -> :taken
-          true -> :none
-        end
+      {:ok, %{} = e} -> line_of(e, CodingAgentFramework.Transcripts.Fold.queue_operation(e), mark)
+      _ -> :none
+    end
+  end
 
-      {:ok, %{"attachment" => %{"type" => "queued_command", "prompt" => p}}} when is_binary(p) ->
+  # A `queue-operation` line by `Fold`'s reading of it, the one reading of Claude Code's queue.
+  defp line_of(_e, {op, c}, mark) do
+    cond do
+      not is_binary(c) or not String.contains?(c, mark) -> :none
+      op == "enqueue" -> :queued
+      op in ["dequeue", "remove"] -> :taken
+      true -> :none
+    end
+  end
+
+  defp line_of(e, nil, mark) do
+    case e do
+      %{"attachment" => %{"type" => "queued_command", "prompt" => p}} when is_binary(p) ->
         if String.contains?(p, mark), do: :taken, else: :none
 
-      {:ok, %{"type" => "user", "message" => %{"content" => c}}} ->
+      %{"type" => "user", "message" => %{"content" => c}} ->
         if String.contains?(content(c), mark), do: :taken, else: :none
 
       _ ->

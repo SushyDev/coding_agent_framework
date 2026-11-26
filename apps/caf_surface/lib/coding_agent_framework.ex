@@ -293,56 +293,82 @@ defmodule CodingAgentFramework do
   whose doc gives each entry's fields), which reads the file through that host's shell, so only
   the bytes read cross. The agent's row names its host, account, working directory and session.
 
-  Answers `{:ok, %{entries: entries, next: cursor, queued: rows, reset: reset}}`: `next` an
-  opaque cursor to pass as `from:` to read only what came since; `reset` nil, or why the read
-  began the transcript again (`:rewritten`, `:new_file` for a resumed session's); `queued` the
-  rows to the agent still `queued` or `sending`, oldest first, each `%{id, uuid, from, kind,
-  text, status, at}`. A delivered message's entry carries its row's `uuid` as `message`. The
-  queued rows are read before the transcript, so a row delivered between the two reads is in
-  both, never in neither.
+  Answers `{:ok, %{entries: entries, next: cursor, older: cursor, queued: queued, reset:
+  reset}}`. A read with no cursor answers the newest entries; `next` is an opaque cursor to
+  pass as `from:` to read only what came since, and `older` one to pass as `before:` to read
+  the entries before these, nil at the transcript's start (`Transcripts.conversation/3` says
+  how each reads). `reset` is nil, or why the read began the transcript again from its end
+  (`:rewritten`, `:new_file` for a resumed session's). A delivered message's entry carries its
+  row's `uuid` as `message`.
 
-  Options: `from:` (a cursor), `limit:` (entries at most, default 100), `subagents:` (each
-  subagent's entries too, default false) and `max_bytes:` (each file's read at most, 1 MB).
+  `queued` is what waits for the agent, each entry marked by its `source`: first the rows to it
+  still `queued` or `sending`, oldest first, each `%{source: :framework, id, uuid, from, kind,
+  text, status, at}`; then Claude Code's own queue, what its transcript enqueued and did not yet
+  take, each `%{source: :claude_code, text, at, offset, message}`. A row handed to the session
+  is in both until Claude Code takes it, its uuid as the second's `message`. The rows are read
+  before the transcript, so a row delivered between the two reads is in both, never in neither.
+  A `before:` read answers `queued: nil`: it reads the past, and `next` the present.
+
+  The agent's row and the queued rows are one read-only read of the store, at one instant. A
+  reader of the store's WAL file never waits for the tree's writers, and a statement that meets
+  a lock waits at most `Store.busy_bound/0`; then the read answers `{:refused, {:sqlite,
+  :busy}}` (F-267).
+
+  Options: `from:` or `before:` (a cursor), `limit:` (entries at most, default 100),
+  `subagents:` (each subagent's entries too, default false) and `max_bytes:` (each file's read
+  at most, 1 MB).
 
   `{:refused, :no_instance}`; `{:refused, :unknown_agent}` for a name with no agent row;
   `{:refused, {:no_session, status}}` before its session is known; `{:refused, :no_file}`;
   `{:refused, {:bad, key}}`; `{:unknown, {:host, reason}}` when the host's shell fails, or
   `{:no_reader, host}` for a host the tree reads no transcript on; or the store's refusal.
 
-      {:ok, %{entries: [%{kind: "prompt", message: uuid} | _], next: next, queued: []}} =
+      {:ok, %{entries: [%{kind: "prompt", message: uuid} | _], next: next, older: older}} =
         CodingAgentFramework.conversation("a", "app-unit", limit: 50)
       {:ok, %{entries: later}} = CodingAgentFramework.conversation("a", "app-unit", from: next)
+      {:ok, %{entries: earlier}} =
+        CodingAgentFramework.conversation("a", "app-unit", before: older)
   """
   @spec conversation(String.t(), String.t(), keyword) ::
           {:ok, map} | {:refused, term} | {:unknown, term}
   def conversation(instance, agent, opts \\ []) when is_binary(agent) do
     with {:ok, c} <- config(instance),
-         {:ok, row} <- conversation_row(c, agent),
+         {:ok, row, queued} <- conversation_rows(c, agent),
          {:ok, path} <- transcript_path(c, row),
          {:ok, reader} <- transcript_reader(instance, c, row.host),
-         {:ok, queued} <- queued(c, agent),
          {:ok, read} <- Transcripts.conversation(reader, path, opts) do
-      {:ok, Map.put(read, :queued, queued)}
+      {queue, read} = Map.pop(read, :queue)
+      {:ok, Map.put(read, :queued, queue && queued ++ queue)}
     end
   end
 
-  # The agent's row on any host of the config: a name is unique on its host.
-  defp conversation_row(c, agent) do
-    path = Config.path(c, "caf.db")
+  # The agent's row on any host of the config (a name is unique on its host) and the rows
+  # queued to it, in one read of the store at one instant (F-267).
+  defp conversation_rows(c, agent) do
+    hosts = [c.workstation | Map.keys(c.hosts)]
 
-    Enum.reduce_while([c.workstation | Map.keys(c.hosts)], {:refused, :unknown_agent}, fn host,
-                                                                                          none ->
-      case Sessions.Agents.read_only(path, host) do
-        {:ok, rows} ->
-          case Enum.find(rows, &(&1.name == agent)) do
-            nil -> {:cont, none}
-            row -> {:halt, {:ok, row}}
-          end
+    read = fn db, tables ->
+      row =
+        if "agents" in tables,
+          do:
+            Enum.find_value(
+              hosts,
+              &Enum.find(Sessions.Table.rows(db, &1), fn r -> r.name == agent end)
+            )
 
-        other ->
-          {:halt, other}
-      end
-    end)
+      queued =
+        if "messages" in tables,
+          do: for(%{to_agent: ^agent} = m <- Mailbox.Table.open_rows(db), do: m),
+          else: []
+
+      {row, queued}
+    end
+
+    case Store.snapshot(Config.path(c, "caf.db"), read) do
+      {:ok, {nil, _queued}} -> {:refused, :unknown_agent}
+      {:ok, {row, queued}} -> {:ok, row, queued(queued)}
+      refused -> refused
+    end
   end
 
   defp transcript_path(_c, %{session_id: sid, status: status} = row)
@@ -370,22 +396,18 @@ defmodule CodingAgentFramework do
 
   defp transcript_reader(_instance, _c, host), do: {:unknown, {:host, {:no_reader, host}}}
 
-  defp queued(c, agent) do
-    read = fn db -> for %{to_agent: ^agent} = m <- Mailbox.Table.open_rows(db), do: m end
-
-    with {:ok, rows} <- Store.read_only(Config.path(c, "caf.db"), "messages", [], read) do
-      {:ok,
-       for m <- Enum.sort_by(rows, & &1.id) do
-         %{
-           id: m.id,
-           uuid: m.uuid,
-           from: m.from_agent,
-           kind: m.kind,
-           text: m.text,
-           status: m.status,
-           at: m.created_at
-         }
-       end}
+  defp queued(rows) do
+    for m <- Enum.sort_by(rows, & &1.id) do
+      %{
+        source: :framework,
+        id: m.id,
+        uuid: m.uuid,
+        from: m.from_agent,
+        kind: m.kind,
+        text: m.text,
+        status: m.status,
+        at: m.created_at
+      }
     end
   end
 
