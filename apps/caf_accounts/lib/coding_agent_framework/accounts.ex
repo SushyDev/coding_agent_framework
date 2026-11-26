@@ -18,7 +18,8 @@ defmodule CodingAgentFramework.Accounts do
 
   - `parent.settings.json` and `delegate.settings.json`: the account's settings and hooks,
     loaded with `--settings`. They differ only in `remoteControlAtStartup`: true for a main session
-    and false for a headless delegate (an interactive one runs in the main role, F-227), since
+    and false for every delegate, headless or interactive (Remote Control follows the kind, not
+    the role), since
     2.1.322 has a flag to turn Remote Control on but none to turn it off. Both set
     `autoContinueAtUsageLimit` true, whatever the caller's settings say:
     at a usage limit under 24 hours away an interactive session waits and goes on by itself, as
@@ -144,7 +145,8 @@ defmodule CodingAgentFramework.Accounts do
 
   @doc """
   Writes agent `name`'s own settings file, `<config>/framework/agents/<name>.settings.json`:
-  the account's `role` settings with `settings` (checked by `ClaudeCLI.Options`) over them. The
+  the account's `which` settings file (`:parent`, a main session's, or `:delegate`, every
+  delegate's) with `settings` (checked by `ClaudeCLI.Options`) over them. The
   `permissions` rule lists (`allow`, `deny`, `ask`, `additionalDirectories`) add to the
   account's, and so do the `hooks` of each event (the account's first, as `prepare/3` puts
   Intake's after the caller's), so a main session's waiter never drops Intake's hooks; any
@@ -156,7 +158,7 @@ defmodule CodingAgentFramework.Accounts do
   """
   @spec overlay(Account.t(), :parent | :delegate, String.t(), map, map) ::
           {:ok, String.t()} | {:refused, term} | {:unknown, term}
-  def overlay(account, role, name, settings, defaults \\ %{})
+  def overlay(account, which, name, settings, defaults \\ %{})
 
   def overlay(%Account{} = account, role, name, settings, defaults)
       when role in [:parent, :delegate] and is_map(settings) and is_map(defaults) do

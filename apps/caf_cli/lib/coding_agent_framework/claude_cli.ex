@@ -6,16 +6,20 @@ defmodule CodingAgentFramework.ClaudeCLI do
 
   The flags are those of Claude Code 2.1.322 (`claude --help`), the version devenv pins:
 
-  - `--model <model>` and `--name <name>`, and `--effort <level>` after them when the launch
+  - `--model <model>` and `--name <title>`, the main session's `:title` or else the agent's
+    `:name`, and `--effort <level>` after them when the launch
     names an `:effort` (`efforts/0`, the levels `claude --help` lists), then
     `--permission-mode <mode>` when it names a `:permission_mode` (`permission_modes/0`, F-227);
-  - `--settings <file>` (the role's settings file) and `--mcp-config <file>` with
+  - `--settings <file>` (the kind's settings file: a main session's turns Remote Control on,
+    a delegate's turns it off) and `--mcp-config <file>` with
     `--strict-mcp-config`, the files `CodingAgentFramework.Accounts.prepare/3` wrote, and
     after the account's file the agent's own (`mcp:`, from `CodingAgentFramework.MCP.issue/2`),
     which carries who the agent is;
   - the agent's own `:options` (`CodingAgentFramework.ClaudeCLI.Options.argv/1`), and its own
     `:settings` file in the account's place when it has a settings overlay;
-  - `--remote-control <name>` for a main session (role `:parent`) only. A delegate's settings
+  - `--remote-control <title>` for a main session (kind `:main`) only, never a delegate, even
+    one that runs Claude Code's terminal interface (role `:parent`): a person looks at a
+    delegate through the app's panel, not in their Remote Control list. A delegate's settings
     file sets `remoteControlAtStartup` to false, since no flag turns Remote Control off;
   - `--resume <id>` when given;
   - `--` and the first prompt last, so a prompt that starts with `-` is not read as a flag and
@@ -96,6 +100,9 @@ defmodule CodingAgentFramework.ClaudeCLI do
   # whose init reads `"default"`: Claude Code asks before a tool runs.
   @permission_modes ~w(acceptEdits auto bypassPermissions manual dontAsk plan)
 
+  # A title's bound, in bytes: long enough for "<org> - <project>", short enough for a list.
+  @title_max 120
+
   # Set by the framework, not given by the caller, so no launch can leave it out.
   @fixed [{"DISABLE_AUTOUPDATER", "1"}]
 
@@ -123,15 +130,20 @@ defmodule CodingAgentFramework.ClaudeCLI do
   The argv and environment of a session of `role` on `account` (from
   `CodingAgentFramework.Accounts.ready/2`).
 
-  Options: `:claude` (its absolute path, from `Programs`), `:model`, `:name`, `:env` (a map of
+  Options: `:claude` (its absolute path, from `Programs`), `:model`, `:name`, `:kind` (`:main`
+  or `:delegate`, the agent's place in the tree, which decides Remote Control; by default
+  `:main` for role `:parent` and `:delegate` for role `:delegate`, which only a delegate
+  takes), `:env` (a map of
   `:home`, `:path`, `:term`, `:lang` and optionally `:user`), `:tool_timeout` (ms, 1 000 to 2 147 483 647: the MCP
   tool timeout), and optionally `:resume` (a session id), `:prompt` (the first prompt),
-  `:effort` (one of `efforts/0`; nil is none), `:options` and `:settings`. A delegate needs its
-  brief as `:prompt` unless it resumes.
+  `:effort` (one of `efforts/0`; nil is none), `:options`, `:settings` and a main session's
+  `:title` (`title/1`; nil is none), which goes to `--name` and `--remote-control` in the
+  name's place. A delegate needs its brief as `:prompt` unless it resumes.
 
   Returns `{:ok, %{argv: argv, env: env}}` or `{:refused, reason}`: `:no_account_dir` when
   `account` is not an account with a config directory, `{:missing, option}`, `{:bad, option}`,
-  `{:bad_role, role}`, `:delegate_without_brief` or `{:bad_option, option, why}`.
+  `{:bad_role, role}`, `:delegate_without_brief` or `{:bad_option, option, why}`. A title on a
+  delegate is `{:bad, :title}`.
   """
   @spec session(role, Account.t() | term, keyword) :: {:ok, launch} | {:refused, term}
   def session(role, account, opts)
@@ -143,21 +155,25 @@ defmodule CodingAgentFramework.ClaudeCLI do
     with {:ok, claude} <- path(opts, :claude),
          {:ok, model} <- word(opts, :model),
          {:ok, name} <- word(opts, :name),
+         {:ok, kind} <- kind(role, opts),
+         {:ok, title} <- launch_title(kind, opts),
          {:ok, effort} <- effort(opts),
          {:ok, mode} <- permission_mode(opts),
          {:ok, resume} <- optional_word(opts, :resume),
          {:ok, mcp} <- mcp(account, opts),
          {:ok, prompt} <- prompt(role, opts, resume),
-         {:ok, own} <- own(account.settings[role], opts),
+         {:ok, own} <- own(account.settings[settings_of(kind)], opts),
          {:ok, env} <- env(account, opts, own.options) do
+      shown = title || name
+
       argv =
-        [claude, "--model", model, "--name", name] ++
+        [claude, "--model", model, "--name", shown] ++
           effort ++
           mode ++
           own.argv ++
           ["--mcp-config" | mcp] ++
           ["--strict-mcp-config"] ++
-          if(role == :parent, do: ["--remote-control", name], else: []) ++
+          if(kind == :main, do: ["--remote-control", shown], else: []) ++
           if(resume, do: ["--resume", resume], else: []) ++
           if(prompt, do: ["--", prompt], else: [])
 
@@ -166,6 +182,49 @@ defmodule CodingAgentFramework.ClaudeCLI do
   end
 
   def session(_role, _account, _opts), do: {:refused, :no_account_dir}
+
+  @doc """
+  Checks a main session's display title, which it launches with in `--name` and
+  `--remote-control` (Remote Control's list and the screen show it). The agent name stays the
+  address other agents message. A title is a word as the other launch words are, so spaces and
+  a hyphen inside it are fine, but not a leading hyphen, a control character such as a newline,
+  or more than #{@title_max} bytes. It goes into the argv as one element, so no shell splits
+  it; over ssh `Shell` quotes it in single quotes as it quotes every word.
+
+      iex> CodingAgentFramework.ClaudeCLI.title("Acme - shop")
+      {:ok, "Acme - shop"}
+      iex> CodingAgentFramework.ClaudeCLI.title("two\\nlines")
+      {:refused, {:bad, :title}}
+  """
+  @spec title(term) :: {:ok, String.t()} | {:refused, {:bad, :title}}
+  def title(title) do
+    if is_binary(title) and byte_size(title) <= @title_max and String.valid?(title) and
+         word?(title),
+       do: {:ok, title},
+       else: {:refused, {:bad, :title}}
+  end
+
+  # Remote Control follows the kind, not the role: an interactive delegate (role `:parent`) is
+  # still a delegate. Only a delegate runs headless.
+  defp kind(role, opts) do
+    case {role, Keyword.get(opts, :kind, if(role == :parent, do: :main, else: :delegate))} do
+      {:parent, kind} when kind in [:main, :delegate] -> {:ok, kind}
+      {:delegate, :delegate} -> {:ok, :delegate}
+      _ -> {:refused, {:bad, :kind}}
+    end
+  end
+
+  # The account's file whose `remoteControlAtStartup` the kind takes: true only for a main.
+  defp settings_of(:main), do: :parent
+  defp settings_of(:delegate), do: :delegate
+
+  defp launch_title(kind, opts) do
+    case Keyword.get(opts, :title) do
+      nil -> {:ok, nil}
+      _ when kind == :delegate -> {:refused, {:bad, :title}}
+      title -> title(title)
+    end
+  end
 
   @doc """
   The argv and environment of `claude auth status --json` on `account`: the same environment a

@@ -50,7 +50,8 @@ Each word below names one thing, and the design, the code and the views use it o
   own worktree. By default it runs headless: it reads JSON messages on stdin and writes JSON
   events on stdout, and nothing reads its screen. Started `interactive: true`, it runs Claude
   Code's terminal interface as a main session does, held the same way, so a person can attach
-  and type, and what the framework hands it goes in as a main session's does. It acts like a subagent
+  and type, and what the framework hands it goes in as a main session's does, but it never has
+  Remote Control (F-275): a person looks at it through the app's panel. It acts like a subagent
   of its main session: it gets a brief and gives its reports.
 - **Operator**: a person or the app acting on agents from outside the tree (from a view, say).
   It acts through the same checks and claims as a parent, as a parent of every main session and
@@ -3687,11 +3688,20 @@ without it.
   (F-107). An `asyncRewake` one can: it runs in the background and its exit 2 starts a turn,
   measured on 2.1.322 after 12 minutes idle (F-114). Each pinned release's check measures a
   waiter through a long idle and a compaction.
-- Remote Control starts only with an interactive session, so a headless delegate never has it;
-  its settings still set `remoteControlAtStartup` to false, and a check against each pinned
-  Claude Code release confirms a headless delegate starts with it off. An interactive delegate
-  runs in the main role and has Remote Control as a main session does, so a person can look in
-  on it, or steer it, from another device (decided, F-227).
+- Remote Control is for main sessions only, never for a delegate: it follows the kind, not the
+  role (decided, F-275). A main session launches with `--remote-control` and the main
+  session's settings file, `remoteControlAtStartup` true. Every delegate, headless or
+  interactive, launches with no flag and the delegate's file, or its overlay of it, with
+  `remoteControlAtStartup` false, since no flag turns Remote Control off. An interactive
+  delegate still runs in the main role, Claude Code's terminal interface, but it is not in a
+  person's Remote Control list: a person looks at it, or steers it, through the app's panel.
+  Remote Control starts only with an interactive session, and a check against each pinned
+  Claude Code release confirms a headless delegate starts with it off.
+- A main session shows under a title the app gives (`title:` at its start and resume, such as
+  `"<org> - <project>"`), which its launch passes to `--name` and `--remote-control`; with
+  none, its agent name. The agent name stays the address other agents message. A resume that
+  names no title keeps the row's, so the app changes a stopped main's title at its resume.
+  The start is confirmed by the session file that carries the title (F-275).
 - An interactive session in a new directory meets the workspace trust dialog first, and until it
   is trusted Claude Code runs no status line; a project whose `CLAUDE.md` imports a file outside
   its folder meets the imports dialog next. Neither sends a hook event, and no session file

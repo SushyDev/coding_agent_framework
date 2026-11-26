@@ -515,6 +515,9 @@ Built, each from a checked model in `model/tla/`:
 - a typed row goes whole when it fits the pane's real width, read in the `Inlet`'s write step
   (F-277): a 200-column pane holds 123 characters of text past a 25-character frame, where a
   fixed 80-column limit left 3 and sent short messages as due files.
+- Remote Control follows the kind (F-275): only a main session has it, never a delegate, even an
+  interactive one; a main takes a `title:` at its start and resume, which its launch gives
+  `--name` and `--remote-control` while its agent name stays its address.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

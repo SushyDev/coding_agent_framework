@@ -304,8 +304,12 @@ defmodule CodingAgentFramework.Sessions do
   delegate's and names it at each resume); a delegate's settings overlay, written at every
   start, has `includeGitInstructions: false` under its own settings, which a main session's does
   not (F-200); and `meta:`, a map of the app's own keys kept on the row (refused `{:bad, :meta}`
-  otherwise, `Table.meta_text/1`), which any start that names none keeps from the row (F-154).
-  Options:
+  otherwise, `Table.meta_text/1`), which any start that names none keeps from the row (F-154);
+  and a main session's `title:` (`ClaudeCLI.title/1`, refused `{:bad, :title}` before any row,
+  and on a delegate), its display title in `--name` and `--remote-control` in place of `name`,
+  kept on the row, and which any start or resume that names none keeps from the row, as
+  `meta:`. The name stays the agent's address, and the start is confirmed by the session file
+  that carries the title. Options:
   `:timeout`, to which a worktree's start adds its setup's deadline and its git commands'
   bounds; and `:caller_deadline`, wall-clock ms on this `Sessions`' `clock:`, the last moment
   the caller takes the start to be in time. A start `Sessions` takes from its mailbox at or
@@ -857,6 +861,7 @@ defmodule CodingAgentFramework.Sessions do
   def handle_call({{:start, name, account, launch, resume, by}, timeout}, from, state) do
     with :ok <- in_time(state, name, by),
          launch = model(state, name, resume, launch),
+         launch = title(state, name, launch),
          :ok <- free(state, name),
          {:ok, place} <- place(state, name, launch),
          {:ok, role} <- Keyword.fetch(launch, :role) |> required(:role),
@@ -2363,7 +2368,8 @@ defmodule CodingAgentFramework.Sessions do
          {:ok, registry} <- registry(state),
          {:ok, _} <- if(read?, do: Registry.read(registry), else: {:ok, :cued}),
          {:ok, %{rows: files}} <- Registry.rows(registry, row.account) do
-      named = Enum.filter(files, &(&1.name == row.name))
+      # The file carries the name the launch gave `--name`: the title, else the agent name.
+      named = Enum.filter(files, &(&1.name == (row[:title] || row.name)))
       file = Enum.find(named, &(&1.alive == :live))
 
       cond do
@@ -2584,7 +2590,10 @@ defmodule CodingAgentFramework.Sessions do
   defp release(_state, _role, _launch), do: nil
 
   defp cli(role, account, name, resume, launch, own) do
-    keys = [:claude, :model, :effort, :permission_mode, :env, :tool_timeout, :prompt, :mcp]
+    keys =
+      [:claude, :model, :effort, :permission_mode, :env, :tool_timeout, :prompt, :mcp] ++
+        [:kind, :title]
+
     opts = Keyword.take(launch, keys)
     opts = opts ++ [name: name] ++ own
     opts = if resume, do: opts ++ [resume: resume], else: opts
@@ -2604,6 +2613,15 @@ defmodule CodingAgentFramework.Sessions do
 
   # The agent's own options, before its row: the launch's, or on a resume that names none, its
   # row's. A start refused after the overlay's write leaves the file for the next to rewrite.
+  # A main session (title nil) keeps its row's title unless the launch names its own: any
+  # start or resume of it, as its metadata, so a recovery's resume launches under it too.
+  defp title(state, name, launch) do
+    case {Keyword.has_key?(launch, :title), Table.get(state.db, state.host.name, name)} do
+      {false, %{title: title}} when is_binary(title) -> Keyword.put(launch, :title, title)
+      _ -> launch
+    end
+  end
+
   # An interactive session's waiter hook goes into its overlay beside the agent's own settings;
   # the row keeps only the agent's own options, so a resume adds the hook again.
   #
@@ -2611,6 +2629,7 @@ defmodule CodingAgentFramework.Sessions do
   # `includeGitInstructions: false` under the account's file and its own settings (F-200): Claude
   # Code reads the setting as `?? true`, so a main session, which has none, keeps the git
   # instructions, and an app that wants a delegate's back sets it true in the delegate's options.
+  # The overlay is over the kind's file, so no delegate, interactive or not, has Remote Control.
   defp own(state, role, account, name, resume, launch, hooks \\ nil) do
     row = Table.get(state.db, state.host.name, name)
     kept = resume && not Keyword.has_key?(launch, :options) && row
@@ -2621,8 +2640,9 @@ defmodule CodingAgentFramework.Sessions do
          s = with_hooks(options[:settings], hooks),
          s = if(delegate?, do: s || %{}, else: s),
          defaults = if(delegate?, do: @delegate_settings, else: %{}),
+         base = if(delegate?, do: :delegate, else: :parent),
          {:ok, file} <-
-           if(s, do: Accounts.overlay(account, role, name, s, defaults), else: {:ok, nil}),
+           if(s, do: Accounts.overlay(account, base, name, s, defaults), else: {:ok, nil}),
          do: {:ok, options, [options: options] ++ if(file, do: [settings: file], else: [])}
   end
 
@@ -2671,8 +2691,10 @@ defmodule CodingAgentFramework.Sessions do
   # hold's wrapper reads it from a file into the last argument (`ClaudeCLI.prompted/5`).
   defp way(state, role, account, name, _cwd, resume, launch) do
     row = Table.get(state.db, state.host.name, name)
-    who = if kind(row, role, launch, resume) == :delegate, do: :interactive, else: :main
+    kind = kind(row, role, launch, resume)
+    who = if kind == :delegate, do: :interactive, else: :main
     launch = Keyword.put_new(launch, :permission_mode, state.permission_modes[who])
+    launch = Keyword.put(launch, :kind, kind)
 
     with {:ok, prompt} <- prompt(state, launch[:prompt]),
          {:ok, hooks} <- waiter_hooks(state, account),
@@ -2760,6 +2782,7 @@ defmodule CodingAgentFramework.Sessions do
       session_id: way[:session_id],
       options: Options.encode(way.options),
       model: launch[:model],
+      title: launch[:title],
       repo: place.tree && place.tree.project.repo,
       branch: place.tree && place.tree.branch
     }
