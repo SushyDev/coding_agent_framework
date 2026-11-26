@@ -55,6 +55,17 @@ defmodule CodingAgentFramework.Sessions.Agents do
   def read_only(path, host),
     do: CodingAgentFramework.Store.read_only(path, "agents", [], &Table.rows(&1, host))
 
+  @doc """
+  The host's rows that `by` names in `Sessions`' file at `path`, read once as `read_only/2`
+  reads (F-265): `Table.by/3` says each `by` and its refusal. `{:ok, []}` before `Sessions`
+  made its table.
+  """
+  @spec read_only(String.t(), String.t(), {atom, term}) :: {:ok, [row]} | {:refused, term}
+  def read_only(path, host, by) do
+    with {:ok, _where, _args} <- Table.where(by),
+         do: CodingAgentFramework.Store.read_only(path, "agents", [], &Table.by(&1, host, by))
+  end
+
   @doc "The host's rows, oldest first."
   @spec rows(t) :: [row]
   def rows(%__MODULE__{db: db, host: host}), do: Table.rows(db, host)

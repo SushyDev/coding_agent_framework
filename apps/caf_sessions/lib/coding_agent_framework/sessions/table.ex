@@ -62,7 +62,9 @@ defmodule CodingAgentFramework.Sessions.Table do
 
   **Indexes.** Nothing is pruned (an ended delegate keeps its row), so each hot read has one:
   by name (the unique key), by status (each settle), by cwd (a start's check that no other
-  process holds it), by parent (a parent's delegates) and by move (the moves under way).
+  process holds it), by parent (a parent's delegates), by move (the moves under way) and by
+  session id (an app's read of its record's agent, `by/3`). A read by a `meta` key has none:
+  its keys are the app's, so it reads the host's rows in SQLite and answers only the matches.
 
   **Migration** (F-129): a file an earlier build made has `held_sessions`, with no kind, parent
   or project. `open/1` takes its rows into `agents`, ids kept, each of kind `delegate` when it
@@ -97,6 +99,7 @@ defmodule CodingAgentFramework.Sessions.Table do
   CREATE INDEX IF NOT EXISTS agents_cwd ON agents (host, cwd);
   CREATE INDEX IF NOT EXISTS agents_parent ON agents (host, parent);
   CREATE INDEX IF NOT EXISTS agents_move ON agents (host, move);
+  CREATE INDEX IF NOT EXISTS agents_session ON agents (host, session_id);
   """
 
   # The columns a later build added to `agents`, so added if missing: the release a session
@@ -404,6 +407,77 @@ defmodule CodingAgentFramework.Sessions.Table do
   @doc "The host's rows, oldest first."
   @spec rows(db, String.t()) :: [row]
   def rows(db, host), do: select(db, "host = ?1", [host])
+
+  @doc """
+  The host's rows that `by` names, oldest first (F-265), filtered in the query:
+  `{:session_id, id}`, the row whose current session is `id` (a resume that took a new id
+  rewrote the column, so an earlier id finds nothing), or `{:meta, {key, value}}`, the rows
+  whose app metadata holds `key` with exactly `value`, a string or an integer of JSON's same
+  type (so `1` never matches `true` or `"1"`). An atom key is its string, as `meta_text/1`
+  writes it. `{:refused, {:bad, key}}` for a value out of shape, or for a `by` of another key.
+
+      iex> path = Path.join(CodingAgentFramework.TestHost.test_dir(), "by.db")
+      iex> {:ok, db} = CodingAgentFramework.Sessions.Table.open(path)
+      iex> CodingAgentFramework.Sessions.Table.by(db, "laptop", {:meta, {"ticket", 41}})
+      []
+      iex> CodingAgentFramework.Sessions.Table.by(db, "laptop", {:meta, {"ticket", 4.1}})
+      {:refused, {:bad, :meta}}
+  """
+  @spec by(db, String.t(), {atom, term}) :: [row] | {:refused, {:bad, atom}}
+  def by(db, host, by) do
+    with {:ok, where, args} <- where(by), do: select(db, "host = ?1 AND " <> where, [host | args])
+  end
+
+  @doc """
+  The condition `by/3` reads with, and its arguments from `?2`, or its refusal: a pure check,
+  so a reader refuses a `by` out of shape before it opens a file.
+
+      iex> CodingAgentFramework.Sessions.Table.where({:ticket, 41})
+      {:refused, {:bad, :ticket}}
+  """
+  @spec where(term) :: {:ok, String.t(), list} | {:refused, {:bad, atom}}
+  def where({:session_id, id}) when is_binary(id) and id != "",
+    do: {:ok, "session_id = ?2", [id]}
+
+  def where({:meta, {key, value}}) do
+    with {:ok, path} <- meta_path(key),
+         {:ok, type} <- meta_type(value) do
+      # Nested so `json_type` never reads a text that is not JSON: SQLite does not promise the
+      # order an `AND` evaluates in.
+      where =
+        "CASE WHEN json_valid(meta) THEN CASE WHEN json_type(meta, ?2) = ?3 " <>
+          "THEN json_extract(meta, ?2) END END = ?4"
+
+      {:ok, where, [path, type, value]}
+    end
+  end
+
+  # A known key with a value out of shape, or a key of no read.
+  def where({key, _value}) when is_atom(key), do: {:refused, {:bad, key}}
+  def where(_by), do: {:refused, {:bad, :by}}
+
+  # A JSON path of one quoted label, so a key with a dot or a bracket is one key. SQLite's
+  # path has no escape for a double quote, so a key with one is refused.
+  defp meta_path(key) when is_atom(key) and key not in [nil, true, false],
+    do: meta_path(Atom.to_string(key))
+
+  defp meta_path(key) when is_binary(key) and key != "" do
+    if String.valid?(key) and not String.contains?(key, "\""),
+      do: {:ok, ~s($."#{key}")},
+      else: {:refused, {:bad, :meta}}
+  end
+
+  defp meta_path(_key), do: {:refused, {:bad, :meta}}
+
+  # JSON's type for the value, as `json_type` names it: SQLite reads a JSON integer as an
+  # INTEGER only within 64 bits.
+  defp meta_type(value) when is_binary(value), do: {:ok, "text"}
+
+  defp meta_type(value)
+       when is_integer(value) and value >= -0x8000000000000000 and value <= 0x7FFFFFFFFFFFFFFF,
+       do: {:ok, "integer"}
+
+  defp meta_type(_value), do: {:refused, {:bad, :meta}}
 
   @doc "The host's rows whose parent is `parent`, oldest first."
   @spec children(db, String.t(), String.t()) :: [row]

@@ -547,6 +547,50 @@ defmodule CodingAgentFramework do
   defp host_dir(c, host), do: get_in(c.hosts, [host, :dir])
 
   @doc """
+  The agent rows of the running instance named `instance` that `by` names, each with its `turn`
+  (F-265): for an app that keeps its own records by Claude Code's session id, or by a key it put
+  in an agent's `meta`, and shows each beside its agent. `by` is one of:
+
+  - `session_id: id`, the row whose current session is `id`. A resume that took a new id
+    rewrote the row, so the new id finds it and an earlier one does not.
+  - `meta: {key, value}`, the rows whose `meta` holds `key` with exactly `value`, a string or
+    an integer (`Sessions.Table.by/3`).
+
+  The filter runs in the store's query, read once read-only as `agent_rows/1` reads, so the
+  app's process never holds the other rows. Each row is as `agent_rows/1` gives it, plus
+  `turn`: the agent's state in the tree, as `Tracker.agents/2` reads it from the same view
+  (`Tracker.Tree`'s words: `"idle"`, `"working"`, `"waiting"` while a prompt is open,
+  `"dialog"`, `"starting"`, `"gone"`, `"ended"`, or `"unread"` for a row the tree has not read).
+
+  Answers `{:ok, rows}`, oldest first (`{:ok, []}` for no match); `{:refused, {:bad, key}}` for
+  a key of no read or a value out of shape (`{:bad, :by}` for a `by` that is not one pair);
+  `{:refused, :no_instance}` when no tree of that name runs; `{:refused, {:sqlite, reason}}`; or
+  the `Tracker`'s `{:unknown, reason}`.
+
+      {:ok, [%{name: "app-unit-one", session_id: "6f1c…", turn: "working"}]} =
+        CodingAgentFramework.agent_rows("a", session_id: "6f1c…")
+      {:ok, [%{turn: "idle"}, %{turn: "ended"}]} =
+        CodingAgentFramework.agent_rows("a", meta: {"ticket", 41})
+  """
+  @spec agent_rows(String.t(), keyword) :: {:ok, [map]} | {:refused, term} | {:unknown, term}
+  def agent_rows(instance, [{_key, _value} = by]) when is_binary(instance) do
+    with {:ok, _where, _args} <- Sessions.Table.where(by),
+         {:ok, %Config{} = c} <- config(instance),
+         {:ok, tracker} <- part(instance, :tracker),
+         {:ok, rows} <- Sessions.Agents.read_only(Config.path(c, "caf.db"), c.workstation, by),
+         {:ok, %{agents: tree}} <- turns(rows, tracker) do
+      turns = Map.new(tree, &{{&1.host, &1.name}, &1.state})
+      {:ok, Enum.map(rows, &Map.put(&1, :turn, Map.get(turns, {&1.host, &1.name}, "unread")))}
+    end
+  end
+
+  def agent_rows(instance, _by) when is_binary(instance), do: {:refused, {:bad, :by}}
+
+  # No row matched: the tree is not read.
+  defp turns([], _tracker), do: {:ok, %{agents: []}}
+  defp turns(_rows, tracker), do: Tracker.agents(tracker, all: true)
+
+  @doc """
   The kind of the home `config` names, read now (F-214): `{:ok, :agents}` or `{:ok,
   :agentless}` for a home whose first tree recorded it, `{:ok, :new}` for a home no tree
   started on, and `{:refused, reason}` when its database cannot be read. Only `home` of the
@@ -1224,7 +1268,12 @@ defmodule CodingAgentFramework do
             acts: pid.(:acts),
             size: c.viewer}
          end},
-        {:tracker, fn _ -> {Tracker, sources: sources(w)} end},
+        # The app finds it in the instance's `Registry`, for `agent_rows/2`'s turn state.
+        {:tracker,
+         fn _ ->
+           {Tracker,
+            sources: sources(w), name: {:via, Elixir.Registry, {names(c.instance), :tracker}}}
+         end},
         # Before `Delegates` and `Jobs`, which ask it for a lease before each start. The owners'
         # answers and the allowance are read through connections of its own, never by a call.
         {:scheduler,
