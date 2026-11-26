@@ -199,13 +199,16 @@ defmodule CodingAgentFramework.Holder.ProcessTest do
     assert {:ok, :gone} = await(fn -> if alive?(sleeper), do: :alive, else: {:ok, :gone} end)
   end
 
-  test "a group whose members are all zombies not yet reaped is gone to a group signal",
+  test "a group whose members are all zombies not yet reaped is never unknown to a group signal",
        %{p: p} = ctx do
     zombie = zombie_leader!(ctx)
     record = %{pid: zombie, start: own_start(zombie)}
-    # macOS answers EPERM for this group; another system may answer ESRCH. Either is gone.
-    assert {:ok, :gone} = Holder.Process.signal(p, record, "TERM", group: true)
-    assert {:ok, :gone} = Holder.Process.signal(p, record, "KILL", group: true)
+    # macOS answers EPERM for this group, so it is gone. Linux sends the signal to the zombies
+    # and kill succeeds, so it is sent, to nothing that runs.
+    for signal <- ["TERM", "KILL"] do
+      assert {:ok, answer} = Holder.Process.signal(p, record, signal, group: true)
+      assert answer == if(:os.type() == {:unix, :linux}, do: :sent, else: :gone)
+    end
   end
 
   test "a group signal that fails while a member lives stays unknown", ctx do

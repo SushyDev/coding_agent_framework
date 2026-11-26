@@ -200,12 +200,14 @@ defmodule CodingAgentFramework.HomeTest do
     refute File.exists?(new.home)
 
     # A file that is no database: the kind is not known, and a start is refused, not crashed.
-    # The earlier tree's WAL files go too: left beside a rewritten file, SQLite answers
-    # "malformed" from a later statement instead of refusing the open.
-    Enum.each(["-wal", "-shm"], &File.rm(db(less) <> &1))
-    File.write!(db(less), String.duplicate("not a database ", 20))
-    assert {:refused, {:home_mark, _}} = CodingAgentFramework.home_kind(less)
-    assert {:refused, {:sqlite, _}} = CodingAgentFramework.start_link(less)
+    # It is a home no tree ran on. A stopped tree's connections close when the VM frees their
+    # processes, which can come after the stop returns (F-272); the last one's close writes its
+    # WAL into the file, so a file it had open reads "malformed" instead of refusing the open.
+    broken = agentless(Path.join(ctx.dir, "broken"))
+    File.mkdir_p!(broken.home)
+    File.write!(db(broken), String.duplicate("not a database ", 20))
+    assert {:refused, {:home_mark, _}} = CodingAgentFramework.home_kind(broken)
+    assert {:refused, {:sqlite, _}} = CodingAgentFramework.start_link(broken)
   end
 
   # Two trees of different kinds start at once on a home no tree has started on: the write lock

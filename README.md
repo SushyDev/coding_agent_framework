@@ -506,6 +506,9 @@ Built, each from a checked model in `model/tla/`:
 - a held session outlives a stop of the app's systemd unit (F-274): a host whose `scope` is
   `:systemd_user` starts each `dtach -n` holder and the tmux server in a `systemd-run --user
   --scope` unit of its own, out of the app's cgroup, and refuses a start whose scope fails.
+- the gates pass on a Linux host (NixOS) as on macOS (F-272): the screen stand-in redraws when
+  its size changes, as Claude Code does, and the tests no longer assume macOS paths, signals or
+  timing.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
