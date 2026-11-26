@@ -224,14 +224,31 @@ defmodule CodingAgentFramework.SchedulerTest do
     assert is_integer(at)
     # Each change of the level is cued once.
     assert_received {:cue, %{topic: "scheduler:ws", pressure: :severe}}
-    assert {:refused, {:pressure, _}} = Scheduler.request(s, req("b", :builder, %{"seat" => 1}))
+    # The refusal names the reading that set the level, in the answer and in the row.
+    # Samples go on every 5 ms, so the reading is the latest that asked for `severe`.
+    assert %{reading: %{file: :level, line: :level, share: 4, threshold: 4}} =
+             Scheduler.pressure(s)
+
+    assert {:refused, {{:pressure, :severe, reading}, _}} =
+             Scheduler.request(s, req("b", :builder, %{"seat" => 1}))
+
+    assert %{file: :level, share: 4, threshold: 4, at: read_at} = reading
+    assert read_at >= at
+    assert [%{reason: row}] = for(%{request_id: "b"} = r <- Scheduler.leases(s), do: r)
+
+    assert {:ok, ["pressure", "severe", %{"file" => "level", "share" => 4, "at" => ^read_at}]} =
+             JSON.decode(row)
+
     assert {:ok, _} = Scheduler.request(s, req("main", :main, %{"seat" => 1}))
 
     set.(2)
     assert %{level: :high} = Scheduler.pressure(s)
     assert_received {:cue, %{topic: "scheduler:ws", pressure: :high}}
     refute_received {:cue, %{pressure: _}}
-    assert {:refused, {:pressure, _}} = Scheduler.request(s, req("h", :heavy, %{"slot" => 1}))
+
+    assert {:refused, {{:pressure, :high, %{threshold: 2}}, _}} =
+             Scheduler.request(s, req("h", :heavy, %{"slot" => 1}))
+
     assert {:ok, _} = Scheduler.request(s, req("l", :landing, %{"slot" => 1, "lock" => 1}))
 
     # A value nobody knows changes nothing and is named, never read as ok.
@@ -283,15 +300,79 @@ defmodule CodingAgentFramework.SchedulerTest do
 
     write.(0, 0)
     p = step.(Pressure.new(window: 2_000), 0)
-    write.(0, 10_000)
+    write.(0, 20_000)
     p = step.(p, 1_000)
     assert p.level == :severe
-    write.(0, 10_000)
+    write.(0, 20_000)
     p = step.(p, 2_000)
     assert p.level == :severe
     p = step.(p, 4_000)
     assert p.level == :ok
     assert {:unknown, {:psi, :cpu, :enoent}} = Pressure.psi(Path.join(dir, "none"))
+  end
+
+  # A sample as `Pressure.psi/1` reads it: each line's cumulative `total` in µs.
+  defp psi(cpu, mem_full, mem_some \\ 0) do
+    {:psi,
+     %{
+       cpu: %{some: cpu, full: 0},
+       memory: %{some: mem_some, full: mem_full},
+       io: %{some: 0, full: 0}
+     }}
+  end
+
+  test "memory full: background growth reads ok, a stall over the threshold severe, the app's own threshold first" do
+    # 30 µs in a 2 s span, the most the workstation's background grew `full` by (F-273).
+    p = Pressure.new() |> Pressure.step(psi(0, 0), 0) |> Pressure.step(psi(0, 30), 2_000)
+    assert %{level: :ok, reading: nil} = p
+
+    # 2% of the span is past the default 1%.
+    p = Pressure.step(p, psi(0, 40_030), 4_000)
+    assert %{level: :severe, reading: %{file: :memory, line: :full, threshold: 0.01} = r} = p
+    assert_in_delta r.share, 0.02, 1.0e-9
+    assert r.at == 4_000
+
+    # The app's threshold is read over the default: 2% is under its 5%, 6% over it.
+    app = Pressure.new(full: 0.05) |> Pressure.step(psi(0, 0), 0)
+    assert %{level: :ok} = Pressure.step(app, psi(0, 40_000), 2_000)
+
+    assert %{level: :severe, reading: %{threshold: 0.05}} =
+             Pressure.step(app, psi(0, 120_000), 2_000)
+  end
+
+  test "a first sample, a span of 0, a counter that went back and a clock set back read nothing" do
+    # A first sample only starts a span, whatever its totals.
+    p = Pressure.step(Pressure.new(), psi(0, 999_999_999), 10_000)
+    assert %{level: :ok, at: 10_000} = p
+
+    # A span of 0 ms, and a clock set back, start the next span from this sample.
+    p = Pressure.step(p, psi(0, 999_999_999 + 5_000), 10_000)
+    assert %{level: :ok, at: 10_000} = p
+    p = Pressure.step(p, psi(0, 999_999_999 + 9_000), 1_000)
+    assert %{level: :ok, at: 1_000} = p
+
+    # So the growth before the clock went back is never divided by a span of 1 ms.
+    p = Pressure.step(p, psi(0, 999_999_999 + 9_000), 10_001)
+    assert %{level: :ok} = p
+
+    # A counter that went back (a reboot) reads 0.
+    p = Pressure.step(p, psi(0, 3), 12_001)
+    assert %{level: :ok} = p
+  end
+
+  test "samples that flip between ok and high take severe down to high after a quiet window" do
+    p = Pressure.new(window: 4_000) |> Pressure.step(psi(0, 0), 0)
+    p = Pressure.step(p, psi(0, 100_000), 2_000)
+    assert p.level == :severe
+
+    # cpu `some` 40% of a span asks for high, 10% for ok, in turn: neither holds a window alone.
+    {p, _} =
+      Enum.reduce(1..4, {p, 0}, fn i, {p, cpu} ->
+        cpu = cpu + if(rem(i, 2) == 1, do: 800_000, else: 200_000)
+        {Pressure.step(p, psi(cpu, 100_000), 2_000 + i * 2_000), cpu}
+      end)
+
+    assert %{level: :high, reading: %{file: :cpu, line: :some, threshold: 0.25}} = p
   end
 
   @doc false

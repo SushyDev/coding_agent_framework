@@ -17,8 +17,10 @@ defmodule CodingAgentFramework.Scheduler do
       retry_at}}}`, and no position updates;
     * `{:refused, {reason, retry_at}}`, final for the request, holding nothing, never a failed
       run: `:allowance` (the account's five-hour or weekly window has no room; `retry_at` is its
-      reset), `:pressure` (the host's pressure bars the class), `:queue_full`, or `:deadline` (a
-      queued request waited its class's `max_wait`). `retry_at` is wall-clock ms.
+      reset), `{:pressure, level, reading}` (the host's pressure bars the class: the level and the
+      reading that set it, `Scheduler.Pressure`'s), `:queue_full`, or `:deadline` (a queued
+      request waited its class's `max_wait`). `retry_at` is wall-clock ms. The row's `reason` is
+      the atom's name, or the pressure refusal as JSON, `["pressure","severe",{"at":…}]`.
 
   A refused request is a row too, so a view shows it. A requester's process that ends while it
   waits leaves the queue; the queue is in memory, so after a restart a requester still waiting
@@ -31,8 +33,8 @@ defmodule CodingAgentFramework.Scheduler do
 
   **The gates.** Pressure (`Scheduler.Pressure`, read on its own interval): `high` admits no new
   heavy run, `severe` nothing new but a person's main session. Each change of the level is cued,
-  `%{topic: "scheduler:<host>", pressure: level}`, and `pressure/2` answers the level with its
-  source and its last sample's time; a sample that could not be read (an unknown value
+  `%{topic: "scheduler:<host>", pressure: level}`, and `pressure/2` answers the level with the
+  reading that set it, its source and its last sample's time; a sample that could not be read (an unknown value
   included) changes nothing and is named there, never read as `ok`. A request its class is barred
   from is refused at once; a queued one waits for its deadline. The allowance, the function
   `allowance:`, answers `:room` or `{:spent, retry_at}` for an account: a spent one is refused at
@@ -64,7 +66,7 @@ defmodule CodingAgentFramework.Scheduler do
   alias CodingAgentFramework.Scheduler.{Pressure, Queue, Table}
 
   @call 5_000
-  @reasons [:queue_full, :deadline, :pressure, :allowance]
+  @reasons [:queue_full, :deadline, :allowance]
 
   @doc """
   Starts the `Scheduler`. Options: `db:` (its file), `host:` (for its topic), `resources:` (each
@@ -105,16 +107,24 @@ defmodule CodingAgentFramework.Scheduler do
   def leases(scheduler, opts \\ []), do: call(scheduler, :leases, opts)
 
   @doc """
-  The host's pressure now: `level` (`:ok`, `:high` or `:severe`, as the gates read it), its
+  The host's pressure now: `level` (`:ok`, `:high` or `:severe`, as the gates read it), the
+  `reading` that set it (`Scheduler.Pressure`'s, nil at `ok`), its
   `source` (`:psi`, `:none`, or a `{:level, read}` source's `name:`), `at` (the wall-clock ms of
   the last sample read, nil before any) and `unread` (nil, or why the last sample could not be
   read: it changed nothing).
 
       Scheduler.pressure(s)
-      #=> %{level: :high, source: "sysctl", at: 1_763_500_000_000, unread: nil}
+      #=> %{level: :high, reading: %{file: :level, line: :level, share: 2, threshold: 2, at: 1_763_500_000_000},
+      #=>   source: "sysctl", at: 1_763_500_000_000, unread: nil}
   """
   @spec pressure(GenServer.server(), keyword) ::
-          %{level: Pressure.level(), source: atom | String.t(), at: integer | nil, unread: term}
+          %{
+            level: Pressure.level(),
+            reading: Pressure.reading() | nil,
+            source: atom | String.t(),
+            at: integer | nil,
+            unread: term
+          }
           | {:unknown, term}
   def pressure(scheduler, opts \\ []), do: call(scheduler, :pressure, opts)
 
@@ -196,7 +206,8 @@ defmodule CodingAgentFramework.Scheduler do
 
   def handle_call(:pressure, _from, s) do
     source = with {:level, _} <- s.source, do: s.source_name
-    {:reply, %{level: s.pressure.level, source: source, at: s.sampled_at, unread: s.unread}, s}
+    reply = %{level: s.pressure.level, reading: s.pressure.reading, source: source}
+    {:reply, Map.merge(reply, %{at: s.sampled_at, unread: s.unread}), s}
   end
 
   @impl true
@@ -292,7 +303,7 @@ defmodule CodingAgentFramework.Scheduler do
 
     cond do
       spent = spent(s, req) -> {:allowance, spent}
-      Pressure.bars?(s.pressure.level, req.class) -> {:pressure, now(s) + window(s)}
+      Pressure.bars?(s.pressure.level, req.class) -> {barred(s), now(s) + window(s)}
       waiting >= by_class(s.bound, req.class) -> {:queue_full, now(s)}
       true -> nil
     end
@@ -349,9 +360,10 @@ defmodule CodingAgentFramework.Scheduler do
   defp tell(%{pid: nil}, _answer), do: :ok
   defp tell(e, answer), do: send(e.pid, {:lease, e.req.id, answer})
 
-  defp refused(s, req, reason, retry_at) when reason in @reasons do
+  defp refused(s, req, reason, retry_at)
+       when reason in @reasons or (is_tuple(reason) and elem(reason, 0) == :pressure) do
     row = Table.refuse(s.db, req, reason, retry_at, now(s))
-    meta = %{class: req.class, module: req.module, account: req[:account], reason: reason}
+    meta = %{class: req.class, module: req.module, account: req[:account], reason: kind(reason)}
     :telemetry.execute([:coding_agent_framework, :scheduler, :refusal], %{count: 1}, meta)
     announce(s, row.id)
   end
@@ -433,6 +445,12 @@ defmodule CodingAgentFramework.Scheduler do
   defp sample(%{source: {:level, read}}), do: with({:ok, n} <- read.(), do: {:ok, {:level, n}})
 
   defp window(s), do: s.pressure.opts[:window]
+
+  # A pressure refusal names the level and the reading that set it, so a row says what was read.
+  defp barred(s), do: {:pressure, s.pressure.level, s.pressure.reading}
+
+  defp kind({:pressure, _level, _reading}), do: :pressure
+  defp kind(reason), do: reason
 
   defp by_class(%{} = map, class), do: Map.fetch!(map, class)
   defp by_class(n, _class), do: n

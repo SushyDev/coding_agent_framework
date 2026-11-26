@@ -260,6 +260,32 @@ defmodule CodingAgentFramework.SurfaceTest do
     assert CodingAgentFramework.agent_rows("none") == {:refused, :no_instance}
   end
 
+  # F-273: the tree's one `Scheduler`, which every lease asks, reads the app's `pressure:`.
+  test "the tree's one Scheduler reads the config's pressure thresholds", ctx do
+    programs = Map.drop(ctx.fields[:programs], [:gh, :ssh, :ssh_keygen])
+    dir = Path.join(ctx.dir, "psi")
+    File.mkdir_p!(dir)
+    for f <- ~w(cpu memory io), do: File.write!(Path.join(dir, f), "some total=0\nfull total=0\n")
+    pressure = [source: :psi, dir: dir, full: 0.05]
+
+    fields = [home: ctx.home, instance: "t", programs: programs, env: %{path: "/nonexistent"}]
+    {:ok, config} = Config.new(fields ++ [agents: false, pressure: pressure])
+    sup = start_supervised!({CodingAgentFramework, config})
+    parts = CodingAgentFramework.parts(sup)
+
+    schedulers =
+      for {_, pid, _, _} <- Supervisor.which_children(sup),
+          is_pid(pid),
+          {:dictionary, d} = Process.info(pid, :dictionary),
+          d[:"$initial_call"] == {Scheduler, :init, 1},
+          do: pid
+
+    assert schedulers == [parts.scheduler]
+    assert %{source: :psi, psi: ^dir, pressure: %{opts: opts}} = :sys.get_state(parts.scheduler)
+    assert opts[:full] == 0.05
+    assert %{level: :ok, source: :psi} = Scheduler.pressure(parts.scheduler)
+  end
+
   # F-266: an app's panel of what holds the machine, read through the facade.
   test "holds reads two leases with their jobs, the copies and the pressure", ctx do
     programs = Map.drop(ctx.fields[:programs], [:gh, :ssh, :ssh_keygen])

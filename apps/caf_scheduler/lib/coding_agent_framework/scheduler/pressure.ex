@@ -18,12 +18,21 @@ defmodule CodingAgentFramework.Scheduler.Pressure do
   1 (normal) is `ok`, 2 (warn) `high`, 4 (critical) `severe`; any other value is unknown, never
   `ok`.
 
-  **Hysteresis.** `severe` is taken at once. `high` is taken once it was asked for a whole
-  `window:` (ms), and a lower state only once it was asked for a whole `window:` too, so one
-  quiet sample does not admit work again.
+  **Hysteresis.** `severe` is taken at once. `high` is taken once each sample of a whole
+  `window:` (ms) asked for it. A lower state is taken once no sample of a whole `window:` asked
+  for the current state or above, and it is the highest state any of them asked: one quiet
+  sample does not admit work again, and samples that flip between `ok` and `high` take
+  `severe` down to `high`.
 
-  Every threshold here is a placeholder until it is measured on the workstation: each is an
-  option with a default.
+  **The reading.** `reading` holds what set the level: the file and line read, its `share` of
+  the span (or the macOS level), the `threshold` it passed and the sample's time `at`, as
+  `%{file: :memory, line: :full, share: 0.02, threshold: 0.01, at: ms}`. A `pressure` refusal
+  carries it. At `ok` it is nil.
+
+  Each threshold is an option with a default. Memory `full`'s, 1% of the span, is measured
+  (`docs/build-notes/F-273.md`): on the Linux workstation it grew by under 0.001% of any 2 s
+  span at rest and under the test suite, so 1% reads only a real stall. The others are
+  placeholders until they are measured.
 
       iex> alias CodingAgentFramework.Scheduler.Pressure
       iex> p = Pressure.new(window: 1_000)
@@ -43,7 +52,7 @@ defmodule CodingAgentFramework.Scheduler.Pressure do
     cpu: 0.25,
     memory: 0.10,
     io: 0.20,
-    full: 0.0,
+    full: 0.01,
     level_high: 2,
     level_severe: 4
   ]
@@ -52,16 +61,32 @@ defmodule CodingAgentFramework.Scheduler.Pressure do
 
   @type level :: :ok | :high | :severe
   @type sample :: {:psi, map} | {:level, integer}
-  @type t :: %{level: level, at: integer | nil, last: map | nil, toward: {level, integer} | nil}
+  @type reading :: %{file: atom, line: atom, share: number, threshold: number, at: integer}
+  @type t :: %{
+          level: level,
+          reading: reading | nil,
+          at: integer | nil,
+          last: map | nil,
+          toward: {level, integer, reading | nil} | nil,
+          opts: keyword
+        }
 
-  @doc "The default thresholds and window: placeholders, measured on the workstation later."
+  @doc "The default thresholds and window (see the module's doc for which are measured)."
   @spec defaults() :: keyword
   def defaults, do: @defaults
 
   @doc "A fresh state, `:ok`, with the thresholds in `opts` over the defaults."
   @spec new(keyword) :: map
-  def new(opts \\ []),
-    do: %{level: :ok, last: nil, at: nil, toward: nil, opts: Keyword.merge(@defaults, opts)}
+  def new(opts \\ []) do
+    %{
+      level: :ok,
+      reading: nil,
+      last: nil,
+      at: nil,
+      toward: nil,
+      opts: Keyword.merge(@defaults, opts)
+    }
+  end
 
   @doc """
   Whether `level` bars a new request of `class`: `severe` bars every class but a person's main
@@ -75,64 +100,91 @@ defmodule CodingAgentFramework.Scheduler.Pressure do
   def bars?(:high, class), do: class == :heavy
   def bars?(:ok, _class), do: false
 
-  @doc "Folds one sample taken at `now` (ms) into the state."
+  @doc """
+  Folds one sample taken at `now` (ms) into the state. The first sample, and one taken at or
+  before the last (a clock set back), only start the next span: a span is never shorter than
+  the time between two samples, so no growth is divided by a span it did not happen in.
+  """
   @spec step(map, sample, integer) :: map
   def step(%{last: nil} = p, {:psi, sample}, now), do: %{p | last: sample, at: now}
 
   def step(p, {:psi, sample}, now) when now > p.at do
     o = p.opts
-    share = fn file, line -> share(p.last, sample, file, line, now - p.at) end
+    span = now - p.at
 
-    asked =
-      cond do
-        share.(:memory, :full) > o[:full] -> :severe
-        share.(:cpu, :some) > o[:cpu] -> :high
-        share.(:memory, :some) > o[:memory] -> :high
-        share.(:io, :some) > o[:io] -> :high
-        true -> :ok
-      end
+    read = fn file, line, threshold ->
+      read(p.last, sample, file, line, span, o[threshold], now)
+    end
 
-    judge(%{p | last: sample, at: now}, asked, now)
+    checks = [
+      {:severe, read.(:memory, :full, :full)},
+      {:high, read.(:cpu, :some, :cpu)},
+      {:high, read.(:memory, :some, :memory)},
+      {:high, read.(:io, :some, :io)}
+    ]
+
+    {asked, reading} =
+      Enum.find(checks, {:ok, nil}, fn {_, r} -> r.share > r.threshold end)
+
+    judge(%{p | last: sample, at: now}, asked, reading, now)
   end
 
-  def step(p, {:psi, _sample}, _now), do: p
+  def step(p, {:psi, sample}, now), do: %{p | last: sample, at: now}
 
   def step(p, {:level, n}, now) when is_integer(n) do
-    asked =
-      cond do
-        n >= p.opts[:level_severe] -> :severe
-        n >= p.opts[:level_high] -> :high
-        true -> :ok
-      end
+    o = p.opts
 
-    judge(p, asked, now)
-  end
-
-  # Severe at once; any other change once it was asked for a whole window.
-  defp judge(p, :severe, _now), do: %{p | level: :severe, toward: nil}
-  defp judge(%{level: level} = p, level, _now), do: %{p | toward: nil}
-
-  defp judge(p, asked, now) do
-    since =
-      case p.toward do
-        {^asked, since} -> since
-        _ -> now
-      end
-
-    if now - since >= p.opts[:window] and @rank[asked] != @rank[p.level],
-      do: %{p | level: asked, toward: nil},
-      else: %{p | toward: {asked, since}}
-  end
-
-  # The share of `span` ms that `total` (µs) grew by; a counter that went back (a reboot) is 0.
-  defp share(last, now, file, line, span) do
-    with %{^line => a} <- Map.get(last, file),
-         %{^line => b} <- Map.get(now, file),
-         true <- b >= a do
-      (b - a) / (span * 1000)
-    else
-      _ -> 0.0
+    reading = fn threshold ->
+      %{file: :level, line: :level, share: n, threshold: o[threshold], at: now}
     end
+
+    {asked, reading} =
+      cond do
+        n >= o[:level_severe] -> {:severe, reading.(:level_severe)}
+        n >= o[:level_high] -> {:high, reading.(:level_high)}
+        true -> {:ok, nil}
+      end
+
+    judge(p, asked, reading, now)
+  end
+
+  # Severe at once. Up to `high` once each sample of a whole window asked for it. Down once no
+  # sample of a whole window asked for the level or above, to the highest any of them asked:
+  # samples that flip between `ok` and `high` take a `severe` level down to `high`.
+  defp judge(p, :severe, reading, _now), do: %{p | level: :severe, reading: reading, toward: nil}
+  defp judge(%{level: level} = p, level, reading, _now), do: %{p | reading: reading, toward: nil}
+
+  defp judge(p, asked, reading, now) do
+    {target, since, kept} =
+      case p.toward do
+        nil ->
+          {asked, now, reading}
+
+        {target, since, kept} ->
+          if @rank[asked] >= @rank[target],
+            do: {asked, since, reading},
+            else: {target, since, kept}
+      end
+
+    if now - since >= p.opts[:window],
+      do: %{p | level: target, reading: kept, toward: nil},
+      else: %{p | toward: {target, since, kept}}
+  end
+
+  # One file's line over a span of `span` ms: the share of the span its `total` (µs) grew by,
+  # with the threshold it is held to. A line that is missing, or a counter that went back (a
+  # reboot), reads 0.
+  defp read(last, now_sample, file, line, span, threshold, at) do
+    share =
+      with %{^line => a} <- Map.get(last, file),
+           %{^line => b} <- Map.get(now_sample, file),
+           true <- b >= a do
+        (b - a) / (span * 1000)
+      else
+        _ -> 0.0
+      end
+
+    %{file: file, line: line, share: share, threshold: threshold, at: at}
   end
 
   @doc """

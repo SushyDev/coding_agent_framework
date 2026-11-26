@@ -330,12 +330,19 @@ defmodule CodingAgentFramework.Jobs do
   defp leased(not_granted, jobs, id) do
     {reason, retry_at} =
       case not_granted do
-        {:refused, {reason, retry_at}} when is_atom(reason) -> {reason, retry_at}
+        {:refused, {reason, retry_at}} when is_integer(retry_at) -> {reason, retry_at}
         {:refused, reason} -> {reason, now()}
         {:unknown, reason} -> {{:unknown, reason}, now()}
       end
 
-    text = if is_atom(reason), do: Atom.to_string(reason), else: inspect(reason)
+    text =
+      case reason do
+        reason when is_atom(reason) -> Atom.to_string(reason)
+        # The level and the reading are the lease row's; the job's row names the gate.
+        {:pressure, _level, _reading} -> "pressure"
+        reason -> inspect(reason)
+      end
+
     put(jobs, id, %{state: "refused", reason: text, retry_at: retry_at})
     {:refused, {:lease, {reason, retry_at}}}
   end
