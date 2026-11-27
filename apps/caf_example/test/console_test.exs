@@ -24,7 +24,7 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
 
     data = %{
       "home" => Path.join(dir, "home"),
-      "instance" => "t",
+      "instance" => instance_name("console"),
       "accounts" => ["one", "two"],
       "ports" => %{"intake" => free_port(), "mcp" => free_port()},
       "projects" => %{
@@ -85,8 +85,9 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
   test "a config file is read whole into the example app's config", ctx do
     assert {:ok, %Config{} = c} = ConfigFile.read(write!(ctx, ctx.data), ctx.env)
     home = ctx.data["home"]
+    instance = ctx.data["instance"]
 
-    assert %{home: ^home, instance: "t", accounts: ["one", "two"], operator: "operator"} = c
+    assert %{home: ^home, instance: ^instance, accounts: ["one", "two"], operator: "operator"} = c
     assert c.mains == %{"app-main" => "app"}
     assert c.main_model == "opus" and c.interval == 200
     assert %{"app" => %{name: "app", repo: repo, trunk: "main", cap: 2, setup: []}} = c.projects

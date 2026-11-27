@@ -423,7 +423,10 @@ defmodule CodingAgentFramework.DelegatesTest do
       assert notice.kind == "notice"
       assert notice.text =~ "app-unit-one, queued for a seat, did not start"
       assert notice.text =~ "refused its lease (deadline); ask again after"
-      assert %{status: "refused", tell: nil} = Table.get(ctx.dtable, id)
+      # StartCleared follows StartTold: the mark is cleared only after Mailbox took the notice,
+      # so a read the moment the notice shows can still find it.
+      cleared = &match?(%{status: "refused", tell: nil}, Table.get(ctx.dtable, &1))
+      {:ok, _} = await(fn -> if cleared.(id), do: {:ok, id} end)
 
       # A restart between the notice and the mark's clear tells nothing twice: Mailbox has the
       # row's key.

@@ -16,6 +16,15 @@ defmodule CodingAgentFramework.TestHost do
     dir
   end
 
+  @doc """
+  An instance name of the calling test's own. An instance's name is a lock in its VM (its
+  `Home.Lock` holder is registered by it), so two tests that start a tree under one fixed name
+  refuse each other with `{:instance_running, name}` when they run together.
+
+      instance_name("console") #=> "console-4711"
+  """
+  def instance_name(label), do: "#{label}-#{System.unique_integer([:positive])}"
+
   @doc "The local host tests run on, with devenv's kill."
   def host, do: Host.local("test", program!(:kill))
 
