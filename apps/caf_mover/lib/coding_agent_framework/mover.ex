@@ -547,12 +547,30 @@ defmodule CodingAgentFramework.Mover do
   end
 
   defp marked(s, row, via) do
-    case Mailbox.launch(s.mailbox, row.name, s.clock.() + @resume + @step, via: via) do
-      {:ok, %{id: _, text: _} = launched} -> {:ok, launched}
-      {:ok, :none} -> {:ok, :none}
-      {:refused, :no_transcripts} -> {:ok, nil}
-      {:refused, {:sending, ids}} -> {:unknown, {:sending, ids}}
-      {_, why} -> {:unknown, {:launch, why}}
+    deadline = s.clock.() + @resume + @step
+
+    case Mailbox.launch(s.mailbox, row.name, deadline, via: via) do
+      {:ok, %{id: _, text: _} = launched} ->
+        {:ok, launched}
+
+      {:ok, :none} ->
+        {:ok, :none}
+
+      {:refused, :no_transcripts} ->
+        {:ok, nil}
+
+      {:refused, {:sending, ids}} ->
+        {:unknown, {:sending, ids}}
+
+      # F-284: the call gave up, and Mailbox may make the mark after all; this resume makes
+      # nothing, so the mark is undone (Mailbox takes this call after that one), and the next
+      # try finds the row due, not sending.
+      {:unknown, why} ->
+        Mailbox.launch_lost(s.mailbox, row.name, deadline)
+        {:unknown, {:launch, why}}
+
+      {_, why} ->
+        {:unknown, {:launch, why}}
     end
   end
 

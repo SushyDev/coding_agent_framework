@@ -67,7 +67,10 @@
 (*           before the start; a start refused undoes the mark, under the  *)
 (*           same key; settled as waiter, by the transcript's user line,   *)
 (*           and with no line due again only once its process is gone: no  *)
-(*           bound stands for its take (LaunchBound, F-153).               *)
+(*           bound stands for its take (LaunchBound, F-153). A caller that *)
+(*           lost the mark's answer makes no start and undoes the mark     *)
+(*           (MarkLost; LostMark, F-284); a brief marked for a start that  *)
+(*           a restart left with no process is ended (NoStart).            *)
 (*   call    the answer of a waiting run_delegate, inside the turn that    *)
 (*           called. Delivered when the endpoint's write succeeded and the *)
 (*           calling process still runs; a failed write, the end of the    *)
@@ -225,7 +228,8 @@ Breaks == {
     "SettleInCall",          \* a forced end's rows settle only in the operator's call, which a restart cuts
     "WaitForever",           \* a row too wide to type waits for a waiter with no bound (F-240)
     "WakeInMemory",          \* the wake line's mark is memory: a restart types it again (F-240)
-    "SettleAtIdle"           \* a typed row's line delivers it only while its turn reads ended (F-277)
+    "SettleAtIdle",          \* a typed row's line delivers it only while its turn reads ended (F-277)
+    "LostMark"               \* a start that lost its mark's answer tells Mailbox nothing (F-284)
 }
 
 ASSUME Break \in Breaks
@@ -240,7 +244,8 @@ OwnTurn == 0     \* a result that names no row: a turn a session started by itse
 NoResult == -1   \* no result since the last row went in
 Transports == {"stream", "waiter", "typed", "launch", "call"}
 NoRow == [from |-> Nobody, to |-> Nobody, kind |-> "none", re |-> 0, src |-> NoResult,
-          st |-> "none", via |-> "none", at |-> 0, again |-> FALSE, woke |-> FALSE, wakes |-> 0]
+          st |-> "none", via |-> "none", at |-> 0, again |-> FALSE, woke |-> FALSE, wakes |-> 0,
+          unheard |-> FALSE]
 
 VARIABLES
     \* The addressee: an instancing spec gives its own state for these.
@@ -335,7 +340,7 @@ Open(i) ==
          [] row[i].via = "waiter" -> waiter[a] = p
          [] OTHER                 -> pr[a] = p /\ idle[a] /\ waiter[a] # p
 
-Due(i) == [row[i] EXCEPT !.st = "due", !.via = "none", !.at = 0]
+Due(i) == [row[i] EXCEPT !.st = "due", !.via = "none", !.at = 0, !.unheard = FALSE]
 DueAgain(i) == [Due(i) EXCEPT !.again = TRUE]
 Delivered(i) == [row[i] EXCEPT !.st = "delivered"]
 
@@ -397,7 +402,7 @@ Handed(i) ==
 \* restart between the two leaves a process with no init, which Sessions
 \* never confirms and Recoveries ends (Start.tla).
 Launch(i, p) ==
-    /\ up /\ i \in hand /\ ForStart(i) /\ Open(i)
+    /\ up /\ i \in hand /\ ForStart(i) /\ Open(i) /\ ~row[i].unheard
     /\ hand' = hand \ {i}
     /\ wire' = [wire EXCEPT ![i] = @ + 1]
     /\ row' = [row EXCEPT ![i].at = p]
@@ -405,14 +410,41 @@ Launch(i, p) ==
     /\ UNCHANGED <<waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
 
 \* The transport refuses: nothing went out, and the mark is undone. A start
-\* may be refused whatever its check read (a setup that failed, say).
+\* may be refused whatever its check read (a setup that failed, say). A
+\* start whose mark's answer its caller never heard is undone too: under
+\* LostMark its caller tells nothing, and the row stays in hand for good.
 Refused(i) ==
     /\ up /\ i \in hand
     /\ \/ row[i].via \in {"stream", "waiter", "typed"} /\ ~ForStart(i) /\ ~Open(i)
-       \/ ForStart(i)
+       \/ ForStart(i) /\ (~row[i].unheard \/ Break # "LostMark")
     /\ hand' = hand \ {i}
     /\ row' = [row EXCEPT ![i] = Due(i)]
     /\ UNCHANGED <<claimed, wire, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
+
+\* The caller of a start's mark gave up on its answer (its call's timeout,
+\* while Mailbox was busy) after Mailbox made the mark (F-284): it makes no
+\* start, so Launch never comes for it. The caller tells Mailbox so in its
+\* next call (`Mailbox.launch_lost/3`), and Mailbox takes the two in the
+\* order sent, since one process sends both: that is Refused, the mark
+\* undone. The caller then settles the start's rows as for any refused
+\* start (EndedFirst's, by `Mailbox.ended/3`), so its next start of the
+\* name finds no row sending.
+MarkLost(i) ==
+    /\ up /\ i \in hand /\ ForStart(i) /\ ~row[i].unheard
+    /\ row' = [row EXCEPT ![i].unheard = TRUE]
+    /\ UNCHANGED <<hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
+
+\* A brief marked for a start that never made a process (`at` 0) and that
+\* no start will now make (out of hand: a restart took the memory of its
+\* call), past the start's deadline in the code, with no agent row: nothing
+\* of it went in, and nothing will, since a later start stores a brief of
+\* its own. So it is ended rather than due again to an agent no start runs
+\* (F-284). Another row waits for the next start, due again (SettleSeen).
+NoStart(i) ==
+    /\ up /\ row[i].st = "sending" /\ ForStart(i) /\ i \notin hand /\ row[i].at = 0
+    /\ wire[i] = 0 /\ row[i].kind = "brief"
+    /\ row' = [row EXCEPT ![i].st = "ended"]
+    /\ UNCHANGED <<hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
 
 \* The Inlet answers unknown: the keys may have gone in. The mark stays, for
 \* the evidence; under UnknownUndone it is undone.
@@ -940,6 +972,7 @@ Next ==
     \/ \E i \in Ids : \/ \E s \in Senders, a \in Addrs : Sends(i, s, a)
                       \/ \E t \in Transports : Mailbox(Mark(i, t))
                       \/ Mailbox(Handed(i) \/ Refused(i) \/ Unknown(i) \/ Reclaim(i))
+                      \/ Mailbox(MarkLost(i) \/ NoStart(i))
                       \/ Launches(i)
                       \/ Takes(i) \/ Mailbox(Settle(i))
                       \/ CallMade(i)
