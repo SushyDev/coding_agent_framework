@@ -819,14 +819,33 @@ defmodule CodingAgentFramework do
   end
 
   @doc """
+  Checks an ask's `questions` with the one function the framework refuses them by when an
+  agent's `ask` is stored (`Mailbox.Ask.questions/1`, F-270), so an app that checks first is
+  never refused later: one to four questions, each a `header`, the `question`'s text, two to
+  four `options` (each a `label` and a `description`, neither blank, the labels distinct) and
+  `multiSelect`. The design asks a description of each option, so an app can show it as a
+  dialog. Answers `{:ok, questions}` in the stored form, string keys only, or `{:refused, {:bad,
+  :questions}}`. It needs no instance.
+
+      {:refused, {:bad, :questions}} =
+        CodingAgentFramework.check_ask([%{header: "Base", question: "Rebase or merge?",
+          multiSelect: false, options: [%{label: "Rebase"}, %{label: "Merge"}]}])
+  """
+  @spec check_ask(term) :: {:ok, [map]} | {:refused, {:bad, :questions}}
+  def check_ask(questions), do: Mailbox.Ask.questions(questions)
+
+  @doc """
   The prompts that closed in the instance the config named `instance`, newest open first, one
   page at a time (`Prompts.answered/3`): each one's question, its choice or its withdrawal's
-  reason, who answered and when, read from the ledger. `filter`: `limit:` (1 to 200, 50 by
-  default) and `before:` (the last page's `next`). Answers `{:ok, %{prompts: closed, next:
-  cursor}}`, `{:refused, :no_instance}`, or as `Prompts.answered/3` does.
+  reason, who answered or closed it and when, read from the ledger. `filter`: `limit:` (1 to
+  200, 50 by default), `before:` (the last page's `next`) and `agent:` (that agent's prompts
+  only, F-270). A prompt the framework closed names it, `by: {:framework, why}` (a hold
+  `:expired` at its deadline, a start's wait taken as its `:default`, its agent `:ended`, …),
+  never nil. A key it does not take is `{:refused, {:bad, key}}`. Answers `{:ok, %{prompts:
+  closed, next: cursor}}`, `{:refused, :no_instance}`, or as `Prompts.answered/3` does.
 
       {:ok, %{prompts: [%{id: "ask:12", status: "withdrawn", by: "sam", reason: r}], next: _}} =
-        CodingAgentFramework.answered("a", limit: 20)
+        CodingAgentFramework.answered("a", agent: "app-unit", limit: 20)
   """
   @spec answered(String.t(), keyword) :: {:ok, map} | {:refused, term} | {:unknown, term}
   def answered(instance, filter \\ []) do

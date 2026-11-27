@@ -49,6 +49,9 @@ defmodule CodingAgentFramework.MailboxAskTest do
     two_same = %{one | "options" => [hd(one["options"]), hd(one["options"])]}
     assert {:refused, {:bad, :questions}} = Mailbox.ask(m, "d1", [two_same])
     assert {:refused, {:bad, :questions}} = Mailbox.ask(m, "d1", [%{one | "header" => ""}])
+    # An option with no description, as the facade's `check_ask/1` refuses it (F-270).
+    bare = %{one | "options" => Enum.map(one["options"], &Map.delete(&1, "description"))}
+    assert {:refused, {:bad, :questions}} = Mailbox.ask(m, "d1", [bare])
     assert {:refused, {:unknown_agent, "nobody"}} = Mailbox.ask(m, "nobody", [one])
     assert {:refused, {:not_an_agent, "operator"}} = Mailbox.ask(m, "operator", [one])
     assert Table.open_rows(ctx.mtable) == []

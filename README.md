@@ -550,6 +550,11 @@ Built, each from a checked model in `model/tla/`:
 - a `Mailbox` call answers within its 5 s on a loaded host (F-289): a settle pass reads the
   transcripts and the other parts in a task, and applies what it read to each row as it is
   then, so a slow read no longer holds `message`, `launch/4` or `ended/3`.
+- four gaps an app met on prompts and interrupts (F-270): the facade checks an ask with the
+  framework's own check (`check_ask/1`); a prompt the framework closed names who closed it,
+  `{:framework, :expired}` say, never nil; `answered/2` reads one agent's closed prompts
+  (`agent:`) and names a bad key; and a main session's second interrupt is taken once the first
+  settled, or refused because no turn runs, never refused as already claimed.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

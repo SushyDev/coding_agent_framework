@@ -74,7 +74,9 @@
 (*             `Mains.fix_check/2`);                                       *)
 (*   Mains     the operator's fixes of a main session: its resume, its    *)
 (*             answer, and its interrupt (`Mains.interrupt/3`, F-258),    *)
-(*             each on the state its claim holds.                          *)
+(*             each on the state its claim holds; the interrupt's state   *)
+(*             names the newest interrupt that acted and settled, so a    *)
+(*             retry is claimed after one that did not help (F-270).      *)
 (*                                                                         *)
 (* What moved to Delivery.tla (R6): the sending mark and its settle, the  *)
 (* typed write (DeliveryTyped), the order, the ended mark, the replies and *)
@@ -107,7 +109,8 @@
 (* (off in the configurations that do not check replies, to keep their     *)
 (* state small). A fix either helps or not, in the step it acts. The       *)
 (* number of each agent's state (`epoch`) stands for what the framework    *)
-(* reads of it; it moves when the agent sticks, dies, is fixed or ends.    *)
+(* reads of it; it moves when the agent sticks, dies, is fixed or ends,    *)
+(* and when an interrupt of a main session that did not help settles.     *)
 (* `life` numbers an agent's processes: a resume starts a new one. An      *)
 (* interrupt takes a stuck delegate, a resume a dead one, a stop an idle   *)
 (* one.                                                                    *)
@@ -233,7 +236,8 @@ Breaks == {
     "AnswerNotHeld",         \* an answer's claim is taken on a request its state does not hold
     "ClaimBeforeCheck",      \* a fix is claimed before its check of the claimed state
     "RefusedKept",           \* a delegate whose start was refused is never ended (F-153)
-    "ForceByAgent"           \* a main session may force another main session's end (F-170)
+    "ForceByAgent",          \* a main session may force another main session's end (F-170)
+    "RetryBlocked"           \* an interrupt that did not end the turn keeps its state (F-270)
 }
 
 Agents == UNION Projects
@@ -652,10 +656,22 @@ CanAct(r) == /\ Cl(ClaimBreak(r.by))!Current(r)
 
 
 \* The fix acts on the state it claimed. An interrupt or a resume may not
-\* help; the state is then still claimed. An interrupt that helps ends the
-\* turn with a result (`error_during_execution`) that names its row; a
+\* help. A resume or an answer that did not help, or a delegate's interrupt,
+\* leaves the state as it was, still claimed. A main session's interrupt that
+\* did not help (its key reached a screen that went on running, F-270) moves
+\* the state: the state its interrupt reads names the newest interrupt whose
+\* act ran and settled (`Mains.fix_state/3`'s `interrupted`), so a retry is
+\* claimed once the first one settled, with no wait for a hook event. The
+\* agent is still stuck. The faults bound counts it, as it counts a stick, so
+\* the states stay few; at the bound an interrupt helps. RetryBlocked keeps
+\* the state, as the code before F-270 did: the retry is refused as claimed
+\* until the agent moves by itself.
+\* An interrupt that helps ends the turn with a result
+\* (`error_during_execution`) that names its row; a
 \* resume starts a new process, whose turn names none; a stop takes an idle
 \* agent. An answer takes one request out of those held, and leaves the process as it is.
+Retried(r) == r.act = "interrupt" /\ r.t \in Mains /\ Break # "RetryBlocked"
+
 FixActs(r) ==
     /\ up /\ CanAct(r) /\ Cl(ClaimBreak(r.by))!Act(r)
     /\ \/ /\ proc' = [proc EXCEPT ![r.t] = CASE r.act = "interrupt" -> "idle"
@@ -674,10 +690,15 @@ FixActs(r) ==
           /\ CASE r.act = "interrupt" -> D!Result(r.t)
                [] r.act = "stop" -> D!Exited(r.t, FALSE)
                [] OTHER -> UNCHANGED dvars
-       \/ (r.act # "stop" /\ UNCHANGED <<proc, epoch, life, turned, held, dvars>>)
+          /\ UNCHANGED faults
+       \/ /\ r.act # "stop" /\ ~Retried(r)
+          /\ UNCHANGED <<proc, epoch, life, turned, held, dvars, faults>>
+       \/ /\ Retried(r) /\ faults < MaxFaults
+          /\ epoch' = [epoch EXCEPT ![r.t] = @ + 1] /\ faults' = faults + 1
+          /\ UNCHANGED <<proc, life, turned, held, dvars>>
     /\ wrong' = wrong \cup (IF epoch[r.t] = r.s THEN {} ELSE {"stale"})
                        \cup (IF r.act # "answer" /\ r.t \in ending THEN {"resume ending"} ELSE {})
-    /\ UNCHANGED <<up, restarts, faults, reqs, svcVars, qvars, ending, forcedEnd>>
+    /\ UNCHANGED <<up, restarts, reqs, svcVars, qvars, ending, forcedEnd>>
 
 FixRefused(r) ==
     /\ up /\ ~CanAct(r) /\ Cl("none")!LetGo(r)
@@ -860,6 +881,15 @@ MainFixedByOperatorOnly == \A r \in claims : r.t \in Mains => r.by \in Operators
 \* agent claim a main session fails on an interrupt and not on a resume.
 MainInterruptedByOperatorOnly ==
     \A r \in claims : r.t \in Mains /\ r.act = "interrupt" => r.by \in Operators
+
+\* A main session's interrupt whose act ran and ended leaves no claim on a state that still
+\* needs one (F-270): a main session still stuck after it is in a new state, so a retry is
+\* claimed once the first one settled, with no hook event first. RetryBlocked keeps the
+\* state, and the stuck session's next interrupt is refused as claimed.
+InterruptRetryOpen ==
+    \A r \in done : r.act = "interrupt" /\ r.t \in Mains /\ <<r.t, r.s>> \in fixed
+                    /\ epoch[r.t] = r.s
+        => proc[r.t] # "stuck"
 
 \* A main session's end is the operator's, taken idle or with its process
 \* gone, and leaves no delegate of it that has not ended.

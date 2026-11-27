@@ -902,7 +902,20 @@ One that left with no answer through the inbox reads `closed`, with no one named
 `unhide/3` write a fact in `Acts` (act `hide` or `unhide`, target the prompt's id); `read/3`
 shows the latest as `hidden: nil | %{by, at}` and filters on `hidden:`. Nothing that answers
 reads the mark, so it cannot change what an answer presses, and a closed prompt's marks are
-ignored, since they are read only for prompts open now. Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
+ignored, since they are read only for prompts open now. F-270 (F-254's new-1) names who closed
+each prompt, never nil: the read that finds a prompt gone writes a `closed` fact in `Acts`
+(actor `prompts:<host>`, keyed by the prompt, so once), its `by` read from the owner's row in
+that read: an answer row's actor, a hold's recorded actor, a startup dialog's press's actor, a
+`Watch` row's `answered_by`, or `{:framework, why}` for the framework's own close (`expired`
+at a deadline with no default, `default` where the kind declares one, `ended` when its agent
+ended, `withdrawn` when Claude Code or its screen no longer waits on it with no answer of
+ours, `passed` when its owner's row moved on, `logged_in`, `unknown`). `Prompts`' module doc
+lists every place a prompt closes and its `by`. A close no read saw is named by the first
+`answered/3` page that holds it, from the owner's row as it is then, with no time. That page
+takes `agent:` too (the prompt's `agent`, the agent whose wait it was), a term of the
+ledger's query on the `opened` fact's target, and a bad key is refused `{:bad, key}`. An ask's
+option needs its description, as `ask` says; the app checks an ask first with
+`CodingAgentFramework.check_ask/1`, the same function `Mailbox` refuses one by. Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
 `expired` prompts kept shown, and the kinds that need a reading first.
 
 `Prompt.tla` (B1) is its contract: it instances `Hold` (one response, its deadline, its holder's
@@ -1689,7 +1702,14 @@ of them should refuse a person's answer as moved. It calls `Mains.interrupt/3` w
 interrupt does. It answers what the screen shows after the press: `{:ok, :sent}` once the turn
 ended, else `{:unknown, reason}`. With no turn running no key goes, and it is refused
 `{:screen, reading}`, as a delegate's is. A session whose agent row is not `running` is refused
-`:gone` before the claim.
+`:gone` before the claim. The interrupt's state also names `interrupted`, the newest of the
+operator's interrupts of it whose act ran and settled (F-270, `Team.tla`'s FixActs and
+`InterruptRetryOpen`): an Escape that reached a screen that went on running writes no hook
+event, so without it the first interrupt's settled claim refused the next as claimed until one
+came. Now the next is claimed on a new state once the first settled; while the first is under
+way the state is the same and a second is refused as claimed; a claim a restart cut moves
+nothing, since its key may have gone. After an interrupt that ended the turn the next is
+claimed too, finds no turn running, and is refused `{:screen, reading}` with its claim let go.
 
 **Its end** (F-143, `Team.tla`'s `MainEnds`) is the operator's act alone: `end_main(name)`, the
 operator's tool, `Mains.end_main/3`, which `Sessions.end_main/3` does. It is refused while a

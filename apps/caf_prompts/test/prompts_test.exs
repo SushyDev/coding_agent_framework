@@ -734,9 +734,105 @@ defmodule CodingAgentFramework.PromptsTest do
       assert p.at in before..after_all and is_integer(p.opened_at)
     end
 
-    assert {:refused, {:bad, :filter}} = Prompts.answered(ctx.prompts, limit: 0)
-    assert {:refused, {:bad, :filter}} = Prompts.answered(ctx.prompts, limit: 201)
-    assert {:refused, {:bad, :filter}} = Prompts.answered(ctx.prompts, kind: "ask")
+    # F-270: a bad filter names its key.
+    assert {:refused, {:bad, :limit}} = Prompts.answered(ctx.prompts, limit: 0)
+    assert {:refused, {:bad, :limit}} = Prompts.answered(ctx.prompts, limit: 201)
+    assert {:refused, {:bad, :kind}} = Prompts.answered(ctx.prompts, kind: "ask")
+    assert {:refused, {:bad, :agent}} = Prompts.answered(ctx.prompts, agent: 7)
+    assert {:refused, {:bad, :filter}} = Prompts.answered(ctx.prompts, %{limit: 2})
+
+    # F-270: one agent's, in the ledger's query: the asks are d1's, the dialog alpha's.
+    assert {:ok, %{prompts: [^withdrawn, ^answered], next: nil}} =
+             Prompts.answered(ctx.prompts, agent: "d1")
+
+    assert {:ok, %{prompts: [^pressed], next: nil}} =
+             Prompts.answered(ctx.prompts, agent: "alpha")
+
+    assert {:ok, %{prompts: [^withdrawn], next: next}} =
+             Prompts.answered(ctx.prompts, agent: "d1", limit: 1)
+
+    assert {:ok, %{prompts: [^answered]}} =
+             Prompts.answered(ctx.prompts, agent: "d1", before: next)
+
+    assert {:ok, %{prompts: [], next: nil}} = Prompts.answered(ctx.prompts, agent: "nobody")
+  end
+
+  # F-270 (F-254's new-1): a prompt the framework closed names who closed it, never nil. A hold
+  # that ends at its deadline is the framework's `expired`, seen as it closed; one that closed
+  # while the inbox was down is named by the first page that finds it, from its owner's row,
+  # with no time. Each close is one fact.
+  test "a hold the framework expired reads closed by the framework, seen live or found late",
+       ctx do
+    :ok = stop_supervised(Prompts)
+    :ok = stop_supervised(Intake)
+    me = self()
+    db = Path.join(ctx.dir, "caf.db")
+    # Holds that end at 1 s: the deadline the framework's own close is.
+    intake =
+      start_supervised!(
+        {Intake, db: db, host: "test", notify: &send(me, {:cue, &1}), deadline: 1_000}
+      )
+
+    popts = Keyword.put(ctx.popts, :intake, intake)
+    prompts = start_supervised!({Prompts, popts})
+    ctx = %{ctx | intake: intake, prompts: prompts}
+
+    sid = started(ctx, "d1")
+    fields = &%{"tool_use_id" => &1, "tool_name" => "Bash", "tool_input" => %{"command" => "ls"}}
+    holder = held(ctx, "PermissionRequest", sid, fields.("t1"))
+    [id] = cued(ctx)
+
+    # It expires: the inbox sees it go, and writes who closed it.
+    assert :released = Task.await(holder, 10_000)
+    assert [^id] = cued(ctx)
+
+    assert {:ok, %{prompts: [%{id: ^id, status: "closed", choice: nil} = live]}} =
+             Prompts.answered(prompts, agent: "d1")
+
+    assert %{by: {:framework, :expired}, kind: "permission", reason: nil} = live
+
+    assert is_integer(live.at) and live.at >= live.opened_at
+
+    key = "closed:test:#{id}"
+
+    assert {:ok, [%{actor: "prompts:test", target: "d1", state: ^key, detail: detail}]} =
+             Acts.rows(ctx.acts, act: "closed")
+
+    assert %{"prompt" => ^id, "by" => ["framework", "expired"]} = JSON.decode!(detail)
+
+    # A second hold expires while the inbox is down: no read saw it close.
+    holder = held(ctx, "PermissionRequest", sid, fields.("t2"))
+    [late] = cued(ctx)
+    :ok = stop_supervised(Prompts)
+    assert :released = Task.await(holder, 10_000)
+    prompts = start_supervised!({Prompts, popts})
+
+    assert {:ok, %{prompts: [%{id: ^late, by: {:framework, :expired}, at: nil}, ^live]}} =
+             Prompts.answered(prompts, agent: "d1")
+
+    # Found once: a second page reads the same, and the ledger holds one fact per close.
+    assert {:ok, %{prompts: [%{id: ^late, at: nil}, ^live]}} = Prompts.answered(prompts)
+    assert {:ok, [_, %{state: "closed:test:" <> ^late}]} = Acts.rows(ctx.acts, act: "closed")
+  end
+
+  # F-270: a startup dialog whose start was stopped before anyone answered it closed by its
+  # agent's end, the framework's.
+  test "a dialog whose start was stopped reads closed by the agent's end", ctx do
+    claude = ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), dialogs: [:trust])
+    launch = SessionsSetup.launch(ctx, :at_start) |> Keyword.put(:claude, claude)
+
+    assert {:unknown, {:dialog, :trust}} =
+             Sessions.start(ctx.sessions, "alpha", ctx.account, launch)
+
+    Prompts.cue(ctx.prompts, %{topic: "sessions:test"})
+    assert_receive {:prompts, %{topic: "prompts", ids: ["dialog:alpha:" <> _ = dialog]}}
+
+    assert {:ok, _} = Sessions.stop(ctx.sessions, "alpha")
+    Prompts.cue(ctx.prompts, %{topic: "sessions:test"})
+    assert_receive {:prompts, %{topic: "prompts", ids: [^dialog]}}, 5_000
+
+    assert {:ok, %{prompts: [%{id: ^dialog, status: "closed", by: {:framework, :ended}}]}} =
+             Prompts.answered(ctx.prompts, agent: "alpha")
   end
 
   # F-254: a hidden prompt stays open and answerable; its mark is read only while it is open.
