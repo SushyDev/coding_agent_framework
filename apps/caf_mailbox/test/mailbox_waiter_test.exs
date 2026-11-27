@@ -310,9 +310,13 @@ defmodule CodingAgentFramework.MailboxWaiterTest do
     m = restart(Map.put(ctx, :mopts, mopts))
     Process.put(:mailbox, m)
 
+    # The start's pass reads in a task (F-289): the status call answers before it settles.
     assert {:ok, %{status: "unknown", attempt: "ended_while_sending"}} =
              await(fn ->
-               with {:ok, %{status: "unknown"}} = ok <- Mailbox.status(m, one), do: ok
+               case Mailbox.status(m, one) do
+                 {:ok, %{status: "unknown"}} = ok -> ok
+                 _ -> nil
+               end
              end)
 
     assert {:ok, [%{actor: "op", target: "main", outcome: "unknown", detail: detail}]} =

@@ -2731,6 +2731,21 @@ changed (R6).
   hand-on never blocks `Mailbox`: it runs in a task whose answer comes back as a message, the
   row `sending` meanwhile and settled by no evidence until the answer is in (`Delivery.tla`'s
   `hand`), so its calls answer while a typed write runs (F-132's new-2).
+- **A settle never holds a call** (F-289). A settle pass's reads of the other parts (`Stream`'s
+  folds, `Acts`' forced ends, `Intake`'s waiters, `Registry`'s session files, each row's
+  transcript) run in a task of their own, and `Mailbox` applies the answer to its table as it
+  is then. A row's evidence decides only while the row is as it was read, with no hand-on of
+  it under way; a row written since is read again by the next pass. One pass reads at a time,
+  and the cues that come meanwhile make one more after it. The transcript's offset a waiter's
+  or typed mark keeps is read by its hand-on, before its write; a resume's `launch/4` reads its
+  session's offset from `Transcripts`' memory (`Transcripts.offset/4`) in a task, which answers
+  the caller, waiting 2 s at most: with none by then, the row is read from the transcript's
+  first byte. So a call answers within `Mailbox`'s own step, which writes only its table (a
+  resume's launch within 2 s more), and the calls with a 5 s bound keep it on a loaded host.
+  Measured at 20 rows sent, with a transcript read held 0.4 s: a pass held every call for
+  17.6 s before; after, calls answered in 8 to 151 ms and a resume's launch in 332 to 395 ms
+  (`Delivery.tla`'s `Read`, `Apply`, `CallInBound`, `Break_Delivery_ReadInMailbox`,
+  `Break_Delivery_StaleEvidence`).
 - **Into an ended turn only, to the current process only.** The turn state is `Sessions`'
   function for the target's kind; the process is the agent row's. The waiter's row is the one
   exception: Claude Code queues a waiter's answer and takes it into a person's turn still

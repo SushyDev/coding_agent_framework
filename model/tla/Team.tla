@@ -345,7 +345,8 @@ D == INSTANCE Delivery WITH
        turned <- turned, Long <- Ids, Wide <- {}, Launched <- {},
        call <- dcall, lost <- dlost, wrong <- dwrong,
        restarts <- 0, lives <- 0, ends <- 0, prompts <- 0, stops <- 0, readAt <- 0,
-       forced <- forcedEnd, fcall <- {}
+       forced <- forcedEnd, fcall <- {},
+       ev <- 0, asks <- FALSE, late <- FALSE
 
 Msgs == {i \in Ids : row[i].kind = "msg"}
 Asks == {i \in Ids : row[i].kind = "ask"}

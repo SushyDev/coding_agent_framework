@@ -114,6 +114,13 @@ defmodule CodingAgentFramework.Mailbox do
   `Delegates`, `Transcripts` and `Intake`'s waiters, as `reads/0` declares; a waiter row's
   transcript only on the last two) and at a waiter row's take bound; after each write
   `notify` gets `%{topic: "mailbox", ids: [id]}`.
+
+  **A settle never holds a call** (F-289, `Delivery.tla`'s `Read`, `Apply`). A pass reads the
+  other parts (`Stream`, `Acts`, `Intake`, `Registry`, the transcripts) in a task of its own,
+  and its answer is applied here to the table as it is then: a row's evidence decides only
+  while the row is as it was read. One pass reads at a time; the cues meanwhile make one more
+  after it. So every call answers within this process's own step, which writes only its table
+  (a resume's `launch/4` once its session's offset is read, from `Transcripts`' memory).
   """
 
   use GenServer
@@ -144,6 +151,9 @@ defmodule CodingAgentFramework.Mailbox do
   @hold 5_000
   # How often that wait reads them again.
   @look 100
+  # How long a resume's launch waits for its session's offset (F-289): well within the launch
+  # call's 5 s, so the call answers in its bound even while `Transcripts` reads a slow file.
+  @offset 2_000
   # The sender of a notice and of the words to go on; no agent has this name, as an agent's
   # name holds its project's.
   @framework "framework"
@@ -306,7 +316,10 @@ defmodule CodingAgentFramework.Mailbox do
   Marks the first `queued` row to interactive session `to` `sending` by `launch` (F-137,
   `Transport.Launch`): its text, with its uuid on a last line, is the prompt argument of the
   start or resume the caller makes next, which must end by `deadline` (wall-clock ms). The
-  caller tells the start's answer with `launched/3`. Answers `{:ok, %{id, uuid, text}}`,
+  caller tells the start's answer with `launched/3`. For a resume (the agent row names a
+  session), the answer comes once that session's transcript offset is read from `Transcripts`'
+  memory (`Transcripts.offset/4`, F-289), with no file read, within 2 s; a session it never read,
+  or one whose offset is not read by then, is settled from the transcript's first byte. Answers `{:ok, %{id, uuid, text}}`,
   `{:ok, :none}` when no row is due, or `{:refused, reason}` with nothing marked:
   `{:sending, ids}` while a row to `to` is in flight, `:no_transcripts` for a `Mailbox` with no
   waiter or typed transport, which settles none.
@@ -615,6 +628,9 @@ defmodule CodingAgentFramework.Mailbox do
         Map.merge(s, %{home: opts[:home], os: Keyword.get_lazy(opts, :os, &Programs.local_os/0)})
 
       s = Map.merge(s, %{hands: %{}, launching: MapSet.new()})
+      # `pass`: the reader task of the settle under way; `again`: nil, or a pass is due after
+      # it (true when it reads waiter rows); `first`: the first pass reads Stream's logs first.
+      s = Map.merge(s, %{pass: nil, again: nil, first: true})
       s = Map.put(s, :frame, Keyword.get(opts, :frame, &frame/1))
       s = Map.put(s, :acts, opts[:acts])
       {:ok, Map.merge(s, %{waiter: waiter, typed: typed}), {:continue, :read}}
@@ -630,7 +646,6 @@ defmodule CodingAgentFramework.Mailbox do
   # came is read again at that start's deadline (F-284).
   @impl true
   def handle_continue(:read, s) do
-    Stream.read(s.stream, timeout: @step)
     s = keep_operators(s)
 
     for %{via: via, status: "sending", sent_at: at} <- Table.open_rows(s.db),
@@ -777,7 +792,7 @@ defmodule CodingAgentFramework.Mailbox do
   # The mark before a start: one row in flight per addressee, the first due, for the process
   # the start makes; its transcript's offset now bounds what its settle reads. The row is in
   # `launching` until the start's answer: no evidence settles it before.
-  def handle_call({:launch, to, deadline, via}, _from, s) do
+  def handle_call({:launch, to, deadline, via}, caller, s) do
     rows = for %{to_agent: ^to} = m <- Table.open_rows(s.db), do: m
 
     case {Enum.filter(rows, &(&1.status == "sending")), rows} do
@@ -804,16 +819,21 @@ defmodule CodingAgentFramework.Mailbox do
           refused -> {:reply, refused, s}
         end
 
+      # A resume's offset is read in a task, which answers the caller (`launch_offset/5`).
       {[], [m | _]} ->
         with {:ok, text} <- launch_text(s, to, m) do
           srow = Agents.get(s.agents, to)
           sid = srow && srow.session_id
-          from = if is_binary(sid), do: offset(s, srow), else: 0
           mark = [status: "sending", via: "launch", session_id: sid, at: nil, attempt: nil]
+          from = if is_binary(sid), do: nil, else: 0
           write(s, m, mark ++ [from_byte: from, sent_at: deadline])
           at_deadline(deadline)
           s = %{s | launching: MapSet.put(s.launching, m.id)}
-          {:reply, {:ok, %{id: m.id, uuid: m.uuid, text: text}}, s}
+          reply = {:ok, %{id: m.id, uuid: m.uuid, text: text}}
+
+          if is_binary(sid),
+            do: {:noreply, launch_offset(s, m, srow, caller, reply)},
+            else: {:reply, reply, s}
         else
           other -> {:reply, other, s}
         end
@@ -1060,6 +1080,13 @@ defmodule CodingAgentFramework.Mailbox do
   # again from the next settle on.
   # An answer that kept the mark is settled at once: evidence that came in meanwhile was left.
   # A refusal waits for the next cue, as the row did before its mark.
+  # A pass's reads: applied here, then the pass a cue asked for meanwhile, if any.
+  def handle_info({ref, read}, %{pass: ref} = s) do
+    Process.demonitor(ref, [:flush])
+    s = %{applied(s, read) | pass: nil}
+    {:noreply, if(s.again == nil, do: s, else: settle(%{s | again: nil}, s.again))}
+  end
+
   def handle_info({ref, answer}, %{hands: hands} = s) when is_map_key(hands, ref) do
     Process.demonitor(ref, [:flush])
     s = handed(s, ref, answer)
@@ -1166,62 +1193,135 @@ defmodule CodingAgentFramework.Mailbox do
   # A waiter's row is read against its transcript only when `transcript?` (F-127's new-1): on a
   # cue of the transcripts or the waiters, at its take bound and at the start. A launch row is
   # read at every cue, as a typed one is: its process's end, a `sessions` cue, is its evidence too.
-  defp settle(s, transcript? \\ false) do
-    s = forced(s)
+  #
+  # A pass (F-289, `Delivery.tla`'s `Read` and `Apply`): what the other parts hold (Stream's
+  # folds, Acts' forced ends, Intake's waiters, Registry's session files, the transcripts) is
+  # read in a task, so a call never waits on a file or a program; its answer is applied here, to
+  # the table as it is then. A row's transcript decides only while the row is as it was read.
+  # One pass reads at a time: the cues that come meanwhile make one more, after it.
+  defp settle(s, transcript? \\ false)
 
-    with {:ok, %{rows: rows}} <- Stream.rows(s.stream, timeout: @step) do
-      folds = Map.new(rows, &{&1.session, &1})
+  defp settle(%{pass: nil} = s, transcript?) do
+    rows = Table.open_rows(s.db)
+    handing = handing(s)
+    groups = Enum.group_by(rows, & &1.to_agent)
 
-      handing = handing(s)
+    seen =
+      for %{status: "sending", via: via} = m <- rows,
+          via in ["typed", "launch"] or (via == "waiter" and transcript?),
+          not MapSet.member?(handing, m.id) and not launching?(s, m),
+          unstarted(s, m) == :read,
+          do: m
 
+    # Only an addressee whose first row is due may be marked, and only it is read for it.
+    looks = for {to, [%{status: "queued"} | _] = g} <- groups, not sending?(g), do: to
+    ended = if s.acts, do: for({to, g} <- groups, sending?(g), do: to), else: []
+    r = Map.take(s, [:agents, :stream, :acts, :typed, :waiter, :first])
+    task = Task.async(fn -> guarded(fn -> reads(r, seen, looks, ended) end) end)
+    %{s | pass: task.ref, first: false}
+  end
+
+  defp settle(s, transcript?), do: %{s | again: (s.again || false) or transcript?}
+
+  defp sending?(rows), do: Enum.any?(rows, &(&1.status == "sending"))
+
+  # The reader task's reads. `now` is taken before the fold is read, so a start's deadline
+  # passed by then means its line, had the start written it, is in that fold.
+  defp reads(r, seen, looks, ended) do
+    if r.first, do: Stream.read(r.stream, timeout: @step)
+    now = now()
+
+    folds =
+      with {:ok, %{rows: rows}} <- Stream.rows(r.stream, timeout: @step),
+           do: Map.new(rows, &{&1.session, &1}),
+           else: (_ -> nil)
+
+    %{
+      now: now,
+      folds: folds,
+      forced: for(to <- ended, act = forced_end(r, to), into: %{}, do: {to, act}),
+      seen: Map.new(seen, &{&1.id, {&1, evidence(r, &1)}}),
+      looks: for(to <- looks, look = look(r, to), into: %{}, do: {to, look})
+    }
+  end
+
+  defp evidence(r, %{via: "launch"} = m), do: launch_seen(r, m)
+  defp evidence(r, m), do: seen(r, m)
+
+  # What a mark to an interactive addressee needs of its session now: whether a waiter is held,
+  # and with none and the typed write, the turn as `turn_now/3` reads it. A hand-on reads both
+  # again in its own step (Intake's waiter, the Inlet's turn), so an older read costs a refusal.
+  defp look(r, to) do
+    with {:waiter, srow} <- target(r, to, %{}),
+         true <- Agents.running?(srow) and is_integer(srow.pid) and is_binary(srow.session_id) do
+      held = waiter?(r, srow)
+      turn = if held == {:ok, false} and r.typed != nil, do: turn_now(r, to, srow.pid)
+      %{pid: srow.pid, session_id: srow.session_id, held: held, turn: turn}
+    else
+      _ -> nil
+    end
+  end
+
+  # The pass's reads, applied. A raise in the task decided nothing.
+  defp applied(s, %{now: _} = read) do
+    s = forced(s, read.forced)
+
+    if read.folds == nil do
+      take_waiting(s)
+    else
       s = %{
         s
         | launching:
             MapSet.filter(s.launching, &match?(%{status: "sending"}, Table.get(s.db, &1)))
       }
 
+      handing = handing(s)
+
       for %{status: "sending"} = m <- Table.open_rows(s.db),
           not MapSet.member?(handing, m.id) and not launching?(s, m),
-          m.via != "waiter" or transcript? do
-        case unstarted(s, m) do
-          :no_start ->
-            settled(s, m, :no_start)
+          do: settle_read(s, m, read)
 
-          :again ->
-            settled(s, m, :again)
-
-          :waits ->
-            :ok
-
-          :read ->
-            evidence = %{
-              fold: folds[m.session_id || session_of(s, m)],
-              calls: s.calls,
-              now: now()
-            }
-
-            evidence =
-              case m.via do
-                "waiter" -> Map.put(evidence, :waiter, seen(s, m))
-                "typed" -> Map.put(evidence, :typed, seen(s, m))
-                "launch" -> Map.put(evidence, :launch, launch_seen(s, m))
-                _ -> evidence
-              end
-
-            settled(s, m, Transport.settle(m, evidence))
-        end
-      end
-
-      replies(s, folds)
+      replies(s, read.folds)
 
       Table.open_rows(s.db)
       |> Enum.group_by(& &1.to_agent)
-      |> Enum.reduce(s, fn {to, rows}, s -> deliver(s, rows, target(s, to, folds)) end)
+      |> Enum.reduce(s, fn {to, rows}, s ->
+        deliver(s, rows, looked(target(s, to, read.folds), read.looks))
+      end)
       |> take_waiting()
-    else
-      _ -> take_waiting(s)
     end
   end
+
+  defp applied(s, _raised), do: take_waiting(s)
+
+  @read %{"waiter" => :waiter, "typed" => :typed, "launch" => :launch}
+
+  # A row settled by its transcript only on the evidence read for it as it is now; one written
+  # since (its answer, its start's answer) is read again by the pass that write asked for.
+  defp settle_read(s, m, read) do
+    case unstarted(s, m) do
+      :read -> settled(s, m, read_settle(s, m, read))
+      :waits -> :ok
+      settle -> settled(s, m, settle)
+    end
+  end
+
+  defp read_settle(s, m, read) do
+    evidence = %{
+      fold: read.folds[m.session_id || session_of(s, m)],
+      calls: s.calls,
+      now: read.now
+    }
+
+    case {@read[m.via], read.seen[m.id]} do
+      {nil, _} -> Transport.settle(m, evidence)
+      {key, {^m, part}} -> Transport.settle(m, Map.put(evidence, key, part))
+      _ -> :keep
+    end
+  end
+
+  defp looked({:waiter, srow}, looks), do: {:waiter, srow, looks[srow.name]}
+  defp looked(target, _looks), do: target
 
   # Rows still `sending` at a forced end settle unknown, never resent, never delivered
   # (`Delivery.tla`'s ForceSettled, ForcedSettles; F-170, F-172).
@@ -1235,10 +1335,11 @@ defmodule CodingAgentFramework.Mailbox do
   # Mailbox's own ForceSettled, before any transport reads its evidence: a row `sending` to an
   # agent whose row ended, with no process of it left, whose end the operator forced (the
   # end's claim in `Acts`, `detail` `force`, made before that end). Each settle is a row of
-  # `Acts`, as the operator's call writes it. A read of `Acts` that fails decides nothing.
-  defp forced(%{acts: nil} = s), do: s
+  # `Acts`, as the operator's call writes it. A read of `Acts` that fails decides nothing. The
+  # pass reads `Acts` (`found`, by agent); an agent row ends for good, so it is read here again.
+  defp forced(s, found) when map_size(found) == 0, do: s
 
-  defp forced(s) do
+  defp forced(s, found) do
     Table.open_rows(s.db)
     |> Enum.filter(&(&1.status == "sending"))
     |> Enum.group_by(& &1.to_agent)
@@ -1246,7 +1347,7 @@ defmodule CodingAgentFramework.Mailbox do
       srow = Agents.get(s.agents, to)
 
       with true <- srow != nil and Agents.ended?(srow) and Agents.free?(srow),
-           %{actor: actor} <- forced_end(s, srow) do
+           %{actor: actor} <- found[to] do
         {ids, s} = unknown(s, rows)
 
         for id <- ids do
@@ -1263,7 +1364,13 @@ defmodule CodingAgentFramework.Mailbox do
     end)
   end
 
-  defp forced_end(s, srow) do
+  # The forced end's row of agent `to`, once its row ended with no process left, else nil.
+  defp forced_end(r, to) do
+    srow = Agents.get(r.agents, to)
+    if srow != nil and Agents.ended?(srow) and Agents.free?(srow), do: forced_act(r, srow)
+  end
+
+  defp forced_act(s, srow) do
     case Acts.rows(s.acts, [target: srow.name, act: ["end_main", "stop"]], timeout: @step) do
       {:ok, acts} ->
         Enum.find(acts, fn a ->
@@ -1485,8 +1592,10 @@ defmodule CodingAgentFramework.Mailbox do
   # into a running one (a person's prompt started a turn while the last turn's waiter waited);
   # nothing is typed either way. A session with no waiter gets the Inlet's typed write, into an
   # ended turn only; with no Inlet, or a text it refused, its rows stay due, and `Intake`'s
-  # waiter cue tries them again.
-  defp deliver(s, rows, {:waiter, srow}) do
+  # waiter cue tries them again. `look` is what the pass read of the session (`look/2`); a
+  # session it did not read as it runs now (its first row came due in this pass) is read by
+  # the next pass.
+  defp deliver(s, rows, {:waiter, srow, look}) do
     m = hd(rows)
 
     cond do
@@ -1496,8 +1605,11 @@ defmodule CodingAgentFramework.Mailbox do
       not Agents.running?(srow) or not is_integer(srow.pid) or not is_binary(srow.session_id) ->
         s
 
+      match?(%{pid: pid, session_id: sid} when pid == srow.pid and sid == srow.session_id, look) ->
+        interactive(s, m, srow, look)
+
       true ->
-        interactive(s, m, srow, waiter?(s, srow))
+        %{s | again: s.again || false}
     end
   end
 
@@ -1509,18 +1621,18 @@ defmodule CodingAgentFramework.Mailbox do
   defp before_end?(m, at) when is_integer(at), do: m.created_at < at
   defp before_end?(_m, nil), do: false
 
-  defp interactive(s, m, srow, {:ok, true}), do: hand(s, m, srow)
+  defp interactive(s, m, srow, %{held: {:ok, true}}), do: hand(s, m, srow)
 
-  defp interactive(s, m, srow, held) do
+  defp interactive(s, m, srow, %{held: held, turn: turn}) do
     refused = Transport.Typed.text_refused?(m.attempt)
 
     cond do
       # Only a waiter known absent: an unread one may be there, and its turn not ended.
       held == {:ok, false} and s.typed != nil and not refused ->
-        type(s, m, srow)
+        type(s, m, srow, turn)
 
       refused and held == {:ok, false} and s.typed != nil ->
-        stuck(s, m, srow, turn_now(s, srow.name, srow.pid))
+        stuck(s, m, srow, turn)
 
       m.attempt != "no_waiter" and not refused ->
         write(s, m, attempt: :no_waiter)
@@ -1595,39 +1707,46 @@ defmodule CodingAgentFramework.Mailbox do
     )
   end
 
-  # Mark, then the hand-on, as `mark/4`; the transcript's offset read before the mark bounds
-  # what its settle reads. Sent or unknown starts the take bound: the text may have been read.
+  # Mark, then the hand-on, as `mark/4`. The hand-on reads the transcript's offset before its
+  # write, which bounds what its settle reads, and its answer writes it (F-289): until then no
+  # settle reads the row, and a restart before it reads the transcript from its first byte. Sent
+  # or unknown starts the take bound: the text may have been read.
   defp hand(s, m, srow), do: with_framed(s, m, &hand(&1, m, srow, &2))
 
   defp hand(s, m, srow, text) do
-    from = offset(s, srow)
     mark = [status: "sending", via: "waiter", session_id: srow.session_id, at: srow.pid]
-    write(s, m, mark ++ [from_byte: from, sent_at: nil])
+    write(s, m, mark ++ [from_byte: nil, sent_at: nil])
     text = Transport.Waiter.text(text, m.uuid)
-    intake = s.waiter.intake
+    {intake, reads} = {s.waiter.intake, Map.take(s, [:waiter])}
 
     hand_on(
       s,
       m,
-      fn -> Intake.deliver(intake, srow.account, srow.session_id, text, timeout: @step) end,
+      fn ->
+        from = offset(reads, srow)
+        {from, Intake.deliver(intake, srow.account, srow.session_id, text, timeout: @step)}
+      end,
       &sent/3
     )
   end
 
-  # A waiter's or typed write's answer: sent or unknown starts the take bound, refused undoes
-  # the mark.
-  defp sent(s, m, {:ok, :sent}) do
-    write(s, m, sent_at: now(), attempt: nil)
+  # A waiter's or typed write's answer, with the offset its hand-on read: sent or unknown
+  # starts the take bound, refused undoes the mark.
+  defp sent(s, m, {from, answer}) when is_integer(from), do: sent(s, m, answer, from_byte: from)
+  defp sent(s, m, answer), do: sent(s, m, answer, [])
+
+  defp sent(s, m, {:ok, :sent}, from) do
+    write(s, m, [sent_at: now(), attempt: nil] ++ from)
     bound(s, now())
   end
 
-  defp sent(s, m, {:refused, why}) do
+  defp sent(s, m, {:refused, why}, _from) do
     write(s, m, status: "queued", via: nil, at: nil, sent_at: nil, attempt: why)
     refused(s, m)
   end
 
-  defp sent(s, m, {:unknown, why}) do
-    write(s, m, sent_at: now(), attempt: why)
+  defp sent(s, m, {:unknown, why}, from) do
+    write(s, m, [sent_at: now(), attempt: why] ++ from)
     bound(s, now())
   end
 
@@ -1639,9 +1758,10 @@ defmodule CodingAgentFramework.Mailbox do
   # The typed write: marked only once the session file reads idle (a row is not marked and
   # unmarked at every cue while a turn runs); the Inlet reads the turn again in its own step,
   # with the screen. `sent_at` at the mark is the latest the keys can go in, the Inlet's call
-  # timeout past it, so a restart before the answer waits that long and the bound.
-  defp type(s, m, srow) do
-    case turn_now(s, srow.name, srow.pid) do
+  # timeout past it, so a restart before the answer waits that long and the bound. `turn` is
+  # the pass's read (`look/2`).
+  defp type(s, m, srow, turn) do
+    case turn do
       :ok ->
         type_line(s, m, srow, line(s, m, srow))
 
@@ -1764,10 +1884,10 @@ defmodule CodingAgentFramework.Mailbox do
     s
   end
 
+  # The hand-on reads the transcript's offset before the keys, as `hand/4`'s does.
   defp type_line(s, m, srow, {:ok, text}) do
-    from = offset(s, srow)
     mark = [status: "sending", via: "typed", session_id: srow.session_id, at: srow.pid]
-    write(s, m, mark ++ [from_byte: from, sent_at: now() + @inlet])
+    write(s, m, mark ++ [from_byte: nil, sent_at: now() + @inlet])
     reads = Map.take(s, [:agents, :typed, :waiter])
     turn = fn -> turn_now(reads, srow.name, srow.pid) end
     inlet = s.typed.inlet
@@ -1776,8 +1896,9 @@ defmodule CodingAgentFramework.Mailbox do
       s,
       m,
       fn ->
+        from = offset(reads, srow)
         opts = [release: srow.release, turn: turn, buffer: "caf-#{m.uuid}", timeout: @inlet]
-        Inlet.type(inlet, srow.name, text, opts)
+        {from, Inlet.type(inlet, srow.name, text, opts)}
       end,
       &sent/3
     )
@@ -1872,11 +1993,13 @@ defmodule CodingAgentFramework.Mailbox do
   defp now, do: System.os_time(:millisecond)
 
   # The waiter's evidence for row `m`: its lines in the transcript of its session, read now
-  # from the offset its mark kept, and whether the process it was handed to is gone.
+  # from the offset its mark kept, and whether the process it was handed to is gone. The time
+  # is taken before the read: a take bound passed by then means its line, had it come, was read.
   defp seen(s, m) do
     srow = Agents.get(s.agents, m.to_agent)
     gone = srow == nil or srow.pid != m.at or Agents.free?(srow)
-    %{seen: lines(s, srow, m), gone: gone, now: now(), bound: s.waiter.bound}
+    now = now()
+    %{seen: lines(s, srow, m), gone: gone, now: now, bound: s.waiter.bound}
   end
 
   # A launch row's evidence: its own user line (`Transport.Launch.seen/2`), and whether the
@@ -1933,6 +2056,39 @@ defmodule CodingAgentFramework.Mailbox do
     else
       _ -> 0
     end
+  end
+
+  # A resume's launch (F-289): its session's offset as the reader holds it, from memory
+  # (`Transcripts.offset/4`, no file read), read in a task before the caller's start, which may
+  # begin once it answers. No offset within `@offset` (a session never read, or a reader busy
+  # past it) is the file's first byte: the settle reads more, never less. A settle
+  # reads from the first byte until the offset is written back here, a write the start's own
+  # answer may come before: it goes only on the row as marked, of the session it was read for.
+  defp launch_offset(s, m, srow, caller, reply) do
+    transcripts = s.waiter.transcripts
+
+    read = fn ->
+      case Transcripts.offset(transcripts, srow.account, srow.session_id, timeout: @offset) do
+        {:ok, offset} -> offset
+        _ -> 0
+      end
+    end
+
+    hand_on(
+      s,
+      m,
+      fn ->
+        from = guarded(read)
+        GenServer.reply(caller, reply)
+        from
+      end,
+      fn s, m, from ->
+        with true <- is_integer(from),
+             %{via: "launch", from_byte: nil, session_id: sid} = row when sid == srow.session_id <-
+               Table.get(s.db, m.id),
+             do: write(s, row, from_byte: from)
+      end
+    )
   end
 
   defp transcript(s, srow) do
