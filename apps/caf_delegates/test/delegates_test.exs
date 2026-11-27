@@ -871,7 +871,9 @@ defmodule CodingAgentFramework.DelegatesTest do
     deny = %{"permissions" => %{"deny" => ["Bash(git push *)"]}}
     assert {:ok, %{session_id: sid}} = start_with(ctx, options: %{settings: deny})
     assert %{"includeGitInstructions" => false} = launch_settings(ctx, sid)
-    assert launch_settings(ctx, sid)["permissions"] == deny["permissions"]
+
+    assert launch_settings(ctx, sid)["permissions"] ==
+             Map.put(deny["permissions"], "allow", ["Artifact"])
   end
 
   test "an app that wants a delegate's git instructions back sets true, which wins", ctx do

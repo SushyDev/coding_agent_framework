@@ -28,7 +28,8 @@ defmodule CodingAgentFramework.Accounts do
     `skillOverrides` with `"auto-mode-setup": "off"` (`skill_overrides/0`, F-285): Claude Code
     otherwise offers "Teach auto mode about your environment?" at a turn's end once auto mode
     has blocked a few actions, and on a delegate the offer comes back every turn and holds its
-    messages. The caller's other `skillOverrides` entries are kept, and the framework's wins;
+    messages. The caller's other `skillOverrides` entries are kept, and the framework's wins.
+    Both also have `allowed_tools/0` in `permissions.allow` (F-298), added to the caller's;
   - `mcp.json`: the MCP servers, loaded with `--mcp-config` and `--strict-mcp-config`, so no
     server from `.claude.json` joins them;
   - `agents/<agent>.settings.json`: an agent's own settings over the account's (`overlay/5`),
@@ -61,6 +62,9 @@ defmodule CodingAgentFramework.Accounts do
   @agent ~r/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z/
   @rules ~w(allow deny ask additionalDirectories)
   @skill_overrides %{"auto-mode-setup" => "off"}
+  # F-298: the operator's rule (ask 559). Auto mode's check refuses a publish asked for in a
+  # message rather than a typed prompt, so every session the framework starts may use the tool.
+  @allowed_tools ["Artifact"]
 
   @doc """
   The accounts `names` under `home`, an absolute path. Nothing is written.
@@ -159,6 +163,16 @@ defmodule CodingAgentFramework.Accounts do
   def skill_overrides, do: @skill_overrides
 
   @doc """
+  The `permissions.allow` rules every settings file the framework writes carries, added to any
+  the caller gives: the `Artifact` tool, which publishes a private page (F-298).
+
+      iex> CodingAgentFramework.Accounts.allowed_tools()
+      ["Artifact"]
+  """
+  @spec allowed_tools() :: [String.t()]
+  def allowed_tools, do: @allowed_tools
+
+  @doc """
   Writes agent `name`'s own settings file, `<config>/framework/agents/<name>.settings.json`:
   the account's `which` settings file (`:parent`, a main session's, or `:delegate`, every
   delegate's) with `settings` (checked by `ClaudeCLI.Options`) over them. The
@@ -186,7 +200,7 @@ defmodule CodingAgentFramework.Accounts do
          {:ok, %{} = base} <- JSON.decode(text),
          base = Map.merge(defaults, base),
          :ok <- mkdir(dir),
-         {:ok, merged} <- own_skills(Map.merge(base, settings, &merge/3)),
+         {:ok, merged} <- own_entries(Map.merge(base, settings, &merge/3)),
          :ok <- write_all([{path, JSON.encode!(merged)}]) do
       {:ok, path}
     else
@@ -359,18 +373,33 @@ defmodule CodingAgentFramework.Accounts do
   end
 
   defp encode(account, settings, mcp_servers) do
-    with {:ok, settings} <- own_skills(settings) do
+    with {:ok, settings} <- own_entries(settings) do
       settings
       |> Map.put("autoContinueAtUsageLimit", true)
       |> encode_files(account, mcp_servers)
     end
   end
 
-  # The framework's entries go over the merged file's, so an account file written before F-285,
-  # or a caller that skips `Options`, still has them.
-  defp own_skills(settings) do
+  # The framework's entries go over the merged file's, so an account file written before F-285
+  # or F-298, or a caller that skips `Options`, still has them.
+  defp own_entries(settings) do
     with {:ok, overrides} <- own_overrides(settings),
-         do: {:ok, Map.put(settings, "skillOverrides", Map.merge(overrides, @skill_overrides))}
+         {:ok, permissions} <- own_permissions(settings) do
+      allow = Enum.uniq(Map.get(permissions, "allow", []) ++ @allowed_tools)
+
+      {:ok,
+       settings
+       |> Map.put("skillOverrides", Map.merge(overrides, @skill_overrides))
+       |> Map.put("permissions", Map.put(permissions, "allow", allow))}
+    end
+  end
+
+  defp own_permissions(settings) do
+    case Map.get(settings, "permissions", %{}) do
+      %{"allow" => allow} = permissions when is_list(allow) -> {:ok, permissions}
+      %{} = permissions when not is_map_key(permissions, "allow") -> {:ok, permissions}
+      other -> {:refused, {:bad, {:permissions, other}}}
+    end
   end
 
   defp own_overrides(settings) do
