@@ -237,7 +237,10 @@ defmodule CodingAgentFramework.Scheduler do
   end
 
   @impl true
-  def handle_cast(:check, s), do: {:noreply, check(s)}
+  def handle_cast(:check, s) do
+    drain_checks()
+    {:noreply, check(s)}
+  end
 
   @impl true
   def handle_info(:tick, s) do
@@ -441,33 +444,49 @@ defmodule CodingAgentFramework.Scheduler do
     %{s | entries: Enum.reject(s.entries, &(&1.seq == e.seq))}
   end
 
+  # F-299: on a busy host cues come faster than a check ends, each asking every lease's owner.
+  # One check asks each owner afresh, and a cue is sent after the write it tells of, so it
+  # answers every cue queued before it. Only the cues are taken: requests keep their order.
+  defp drain_checks do
+    receive do
+      {:"$gen_cast", :check} -> drain_checks()
+    after
+      0 -> :ok
+    end
+  end
+
   # The monitor and the reclaimer: each lease's owner is asked whether its work ended. A
   # reclaimed row that is live is monitored from then on; an unknown answer decides nothing.
+  # The unreleased rows are read once for the whole check, not once per lease (F-299).
   defp check(s) do
-    {s, _} = Enum.reduce(s.reclaim, {s, "reclaim"}, &ask_owner/2)
-    {s, _} = Enum.reduce(s.monitored, {s, "monitor"}, &ask_owner/2)
+    rows = Map.new(Table.unreleased(s.db), &{&1.id, &1})
+    s = Enum.reduce(s.reclaim, s, &ask_owner(&2, &1, rows[&1], "reclaim"))
+    s = Enum.reduce(s.monitored, s, &ask_owner(&2, &1, rows[&1], "monitor"))
     serve(s)
   end
 
-  defp ask_owner(id, {s, by}) do
-    with %{released_at: nil, holder: {kind, key}} <- Table.get(s.db, id),
-         {:ok, owner} <- Map.fetch(s.holders, kind) |> known(kind) do
+  # A row not among the unreleased ones was released: it is forgotten.
+  defp ask_owner(s, id, nil, _by), do: forget(s, id)
+
+  defp ask_owner(s, id, %{holder: {kind, key}}, by) do
+    with {:ok, owner} <- Map.fetch(s.holders, kind) |> known(kind) do
       case owner.(key) do
         :ended ->
           if Table.release(s.db, id, by, now(s)) == :released, do: announce(s, id)
-          {forget(s, id), by}
+          forget(s, id)
 
         :live ->
-          {%{forget(s, id) | monitored: MapSet.put(s.monitored, id)}, by}
+          %{forget(s, id) | monitored: MapSet.put(s.monitored, id)}
 
         {:unknown, _} ->
-          {s, by}
+          s
       end
     else
-      %{released_at: at} when is_integer(at) -> {forget(s, id), by}
-      _no_owner -> {s, by}
+      _no_owner -> s
     end
   end
+
+  defp ask_owner(s, _id, _no_holder, _by), do: s
 
   defp known(:error, kind), do: {:unknown, {:no_owner, kind}}
   defp known(ok, _kind), do: ok

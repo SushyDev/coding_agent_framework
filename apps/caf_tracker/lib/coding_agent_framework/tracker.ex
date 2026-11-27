@@ -35,7 +35,7 @@ defmodule CodingAgentFramework.Tracker do
 
   use GenServer
 
-  alias CodingAgentFramework.Tracker.Fold
+  alias CodingAgentFramework.Tracker.{Fold, Tree}
 
   @second 1_000
   @timeout 5_000
@@ -59,9 +59,17 @@ defmodule CodingAgentFramework.Tracker do
   @spec reads() :: %{topics: :all, cue: (pid, term -> :ok)}
   def reads, do: %{topics: :all, cue: &cue/2}
 
-  @doc "The state per `{host, account}` (`Fold.view/2`), with each source's newest read re-read."
+  @doc """
+  The state per `{host, account}` (`Fold.view/3`), with each source's newest read re-read.
+  Option `parts:`, a list of row kinds (`[:agents]`), builds and copies only those kinds' rows,
+  each as the whole view has it (F-299): a large source a caller does not read, such as
+  `Intake`'s events, is neither built nor copied to it.
+
+      Tracker.view(tracker, parts: [:agents])
+      #=> {:ok, %{{"laptop", "agents"} => %{agents: [...], sources: %{...}, age: 120}, ...}}
+  """
   @spec view(GenServer.server(), keyword) :: {:ok, map} | {:refused, term} | {:unknown, term}
-  def view(tracker, opts \\ []), do: call(tracker, :view, opts)
+  def view(tracker, opts \\ []), do: call(tracker, {:view, Keyword.get(opts, :parts, :all)}, opts)
 
   @doc """
   The tree, read from the view as `view/2` gives it (`CodingAgentFramework.Tracker.Tree`).
@@ -70,16 +78,24 @@ defmodule CodingAgentFramework.Tracker do
   Each running agent on such a host is read once, in the caller's process, and its
   `background` shows how many groups it leads, or `{:unknown, :no_proc}` on macOS (F-259).
 
+  The tree is folded inside the `Tracker` and only it is copied to the caller, never the view
+  it is read from (F-299). With `groups:`, the running agents are first read from the view's
+  agents alone, then their groups in the caller, then the tree: two calls, so an agent that
+  starts between them shows no groups until the next read.
+
       Tracker.agents(tracker, groups: %{"laptop" => &Groups.read(procs, &1)})
       #=> {:ok, %{agents: [%{name: "main", background: %{count: 1, groups: 2, …}, …}], …}}
   """
   @spec agents(GenServer.server(), keyword) :: {:ok, map} | {:refused, term} | {:unknown, term}
   def agents(tracker, opts \\ []) do
-    alias CodingAgentFramework.Tracker.Tree
+    with {:ok, groups} <- groups(tracker, Keyword.get(opts, :groups, %{}), opts),
+         do: call(tracker, {:tree, [all: opts[:all], groups: groups]}, opts)
+  end
 
-    with {:ok, view} <- view(tracker, opts) do
-      readers = Keyword.get(opts, :groups, %{})
+  defp groups(_tracker, readers, _opts) when map_size(readers) == 0, do: {:ok, %{}}
 
+  defp groups(tracker, readers, opts) do
+    with {:ok, view} <- view(tracker, Keyword.put(opts, :parts, [:agents])) do
       groups =
         for {{host, _name} = key, record} <- Tree.records(view),
             read = readers[host],
@@ -87,7 +103,7 @@ defmodule CodingAgentFramework.Tracker do
             into: %{},
             do: {key, read.(record)}
 
-      {:ok, Tree.agents(view, all: opts[:all], groups: groups)}
+      {:ok, groups}
     end
   end
 
@@ -103,15 +119,8 @@ defmodule CodingAgentFramework.Tracker do
   """
   @spec tool_calls(GenServer.server(), String.t(), keyword) ::
           {:ok, [map]} | {:refused, term} | {:unknown, term}
-  def tool_calls(tracker, agent, opts \\ []) do
-    with {:ok, view} <- view(tracker, opts),
-         do:
-           CodingAgentFramework.Tracker.Tree.tool_calls(
-             view,
-             agent,
-             Keyword.take(opts, [:limit, :host])
-           )
-  end
+  def tool_calls(tracker, agent, opts \\ []),
+    do: call(tracker, {:tool_calls, agent, Keyword.take(opts, [:limit, :host])}, opts)
 
   @doc "The sources `:unread`, or whose newest read is older than `bound` ms (`Fold.behind/3`)."
   @spec behind(GenServer.server(), non_neg_integer, keyword) ::
@@ -177,9 +186,23 @@ defmodule CodingAgentFramework.Tracker do
   def handle_cast({:cue, _}, state), do: {:noreply, state}
 
   @impl true
-  def handle_call(:view, _from, state) do
+  def handle_call({:view, kinds}, _from, state) do
     state = refresh(state)
-    {:reply, {:ok, Fold.view(state.fold, state.clock.())}, state}
+    {:reply, {:ok, Fold.view(state.fold, state.clock.(), kinds)}, state}
+  end
+
+  # The tree and the tool calls are folded here from the kinds they read, so only their answer
+  # is copied out. A fold that raises answers unknown and leaves the `Tracker` as it was.
+  def handle_call({:tree, opts}, _from, state) do
+    state = refresh(state)
+    view = Fold.view(state.fold, state.clock.(), Tree.kinds())
+    {:reply, safe(fn -> {:ok, Tree.agents(view, opts)} end), state}
+  end
+
+  def handle_call({:tool_calls, agent, opts}, _from, state) do
+    state = refresh(state)
+    view = Fold.view(state.fold, state.clock.(), Tree.kinds())
+    {:reply, safe(fn -> Tree.tool_calls(view, agent, opts) end), state}
   end
 
   def handle_call({:behind, bound}, _from, state) do

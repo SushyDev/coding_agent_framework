@@ -588,6 +588,12 @@ Built, each from a checked model in `model/tla/`:
 - a finished delegate frees its seat (F-301): its lease ends once its report is delivered and
   its process idles; a message to it asks for a lease again first, and waits or queues like a
   start.
+- the `Scheduler` and the `Tracker` cost less on a busy host (F-299): cues queued behind a
+  check are answered by one more check, not one each, so a lease request is not left behind
+  them; a cue of one row of a large source compares that row alone; `Tracker.view/2` builds
+  only the `parts:` asked for, and the tree and the tool calls are folded in the `Tracker`, so
+  only they are copied to the caller; `HooksSilent` reads a transcript's tail again only once
+  `Transcripts` has read past it.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

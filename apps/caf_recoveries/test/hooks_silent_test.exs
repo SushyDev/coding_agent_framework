@@ -118,4 +118,41 @@ defmodule CodingAgentFramework.HooksSilentTest do
     assert {:ok, %{silent: []}} = HooksSilent.check(ctx.detector)
     assert {:ok, []} = Watch.read(ctx.watch, kind: "hooks_silent")
   end
+
+  test "a transcript is read again only once its reader read past it (F-299)", ctx do
+    call(ctx, "tu-1", @t0)
+    # Read once at this offset, after the detector's own first check.
+    assert {:ok, %{silent: []}} = HooksSilent.check(ctx.detector)
+    # Each tail read is a `{:text, …}` call into `Transcripts`, which runs a shell there.
+    :erlang.trace_pattern(
+      {Transcripts, :handle_call, 3},
+      [{[{:text, :_, :_, :_}, :_, :_], [], []}],
+      [:local]
+    )
+
+    :erlang.trace(ctx.transcripts, true, [:call])
+    for _ <- 1..5, do: HooksSilent.check(ctx.detector)
+    tick(ctx, @bound)
+    state = "hooks_silent:app-epic:tu-1"
+    assert {:ok, %{silent: [^state]}} = HooksSilent.check(ctx.detector)
+
+    call(ctx, "tu-2", @t0 + @bound)
+    tick(ctx, @bound)
+    assert {:ok, %{silent: ["hooks_silent:app-epic:tu-2"]}} = HooksSilent.check(ctx.detector)
+    :erlang.trace(ctx.transcripts, false, [:call])
+    ref = :erlang.trace_delivered(ctx.transcripts)
+    assert_receive {:trace_delivered, _, ^ref}
+
+    # Seven checks, one read: at the offset the reader moved to with tu-2.
+    reads = Stream.repeatedly(fn -> receive_text(ctx.transcripts) end) |> Enum.take_while(& &1)
+    assert length(reads) == 1
+  end
+
+  defp receive_text(pid) do
+    receive do
+      {:trace, ^pid, :call, {Transcripts, :handle_call, [{:text, _, _, _}, _, _]}} -> true
+    after
+      0 -> nil
+    end
+  end
 end

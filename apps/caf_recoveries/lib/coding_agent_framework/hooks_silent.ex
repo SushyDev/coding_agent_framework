@@ -10,7 +10,9 @@ defmodule CodingAgentFramework.HooksSilent do
   part of its transcript (`Transcripts.Fold.tool_calls/1`) is silent when it is older than
   `bound:` ms and the session's newest `Intake` row was written before it, less `slack:` ms for
   the two clocks (Claude Code's timestamp and the framework's). A tool call with no timestamp,
-  a transcript or an `Intake` not read yet, decides nothing. One state per call:
+  a transcript or an `Intake` not read yet, decides nothing. A transcript's last part is read
+  again only once `Transcripts` has read past where it was (`Transcripts.offset/4`, F-299);
+  until then the call found there is kept. One state per call:
   `hooks_silent:<name>:<tool use id>`; one no longer read silent passes.
 
   The embedding app's tree starts one per host, given the host's `Sessions.Agents` reader and
@@ -93,6 +95,7 @@ defmodule CodingAgentFramework.HooksSilent do
         bound: Keyword.get(opts, :bound, @bound),
         slack: Keyword.get(opts, :slack, @slack),
         interval: Keyword.get(opts, :interval),
+        seen: %{},
         clock: Keyword.get(opts, :clock, fn -> System.os_time(:millisecond) end)
       }
 
@@ -104,17 +107,20 @@ defmodule CodingAgentFramework.HooksSilent do
   end
 
   @impl true
-  def handle_call(:check, _from, s), do: {:reply, check_now(s), s}
+  def handle_call(:check, _from, s) do
+    {reply, s} = check_now(s)
+    {:reply, reply, s}
+  end
 
   @impl true
   def handle_info(:check, s) do
     drain_checks()
-    check_now(s)
+    {_, s} = check_now(s)
     {:noreply, s}
   end
 
   def handle_info(:tick, s) do
-    check_now(s)
+    {_, s} = check_now(s)
     if s.interval, do: Process.send_after(self(), :tick, s.interval)
     {:noreply, s}
   end
@@ -129,23 +135,56 @@ defmodule CodingAgentFramework.HooksSilent do
     end
   end
 
+  # Each running agent's newest tool call is kept with the transcript's offset it was read at,
+  # and only the agents of this check are kept.
   defp check_now(s) do
     now = s.clock.()
-    silent = for r <- Sessions.Agents.rows(s.agents), sym = silent(s, r, now), sym, do: sym
+    read = for r <- Sessions.Agents.rows(s.agents), do: silent(s, r, now)
+    s = %{s | seen: Map.new(for {_, seen} <- read, seen, do: seen)}
+    silent = for {sym, _} <- read, sym, do: sym
 
-    with :ok <- record(s, silent) do
-      present = %{targets: Enum.map(silent, & &1.target), states: Enum.map(silent, & &1.state)}
-      Watch.pass(s.watch, {s.source, @kind}, present)
-      {:ok, %{silent: Enum.map(silent, & &1.state)}}
+    reply =
+      with :ok <- record(s, silent) do
+        present = %{targets: Enum.map(silent, & &1.target), states: Enum.map(silent, & &1.state)}
+        Watch.pass(s.watch, {s.source, @kind}, present)
+        {:ok, %{silent: Enum.map(silent, & &1.state)}}
+      end
+
+    {reply, s}
+  end
+
+  # The newest tool call, read again only once the reader's offset moved (F-299): a tail read at
+  # the same offset reads the same bytes (`Transcripts.offset/4`, F-261), and each read runs a
+  # shell inside `Transcripts`, which every cue of `intake` asked for every running agent.
+  defp newest_call(s, {account, sid} = key) do
+    with {:ok, offset} <- Transcripts.offset(s.transcripts, account, sid) do
+      case s.seen do
+        %{^key => {^offset, call}} ->
+          {:read, call, {key, {offset, call}}}
+
+        _ ->
+          with {:ok, %{bytes: bytes}} <-
+                 Transcripts.text(s.transcripts, account, sid, {:last, @tail}, max: @tail) do
+            call = List.last(Fold.tool_calls(bytes))
+            {:read, call, {key, {offset, call}}}
+          end
+      end
     end
   end
 
   defp silent(s, %{status: "running", session_id: sid, account: account} = r, now)
        when is_binary(sid) and is_binary(account) do
-    with {:ok, %{bytes: bytes}} <-
-           Transcripts.text(s.transcripts, account, sid, {:last, @tail}, max: @tail),
-         call when call != nil <- List.last(Fold.tool_calls(bytes)),
-         newest = IntakeTable.newest(s.intake, s.host, account, sid),
+    case newest_call(s, {account, sid}) do
+      {:read, nil, seen} -> {nil, seen}
+      {:read, call, seen} -> {silent(s, r, call, account, sid, now), seen}
+      _unread -> {nil, nil}
+    end
+  end
+
+  defp silent(_s, _row, _now), do: {nil, nil}
+
+  defp silent(s, r, call, account, sid, now) do
+    with newest = IntakeTable.newest(s.intake, s.host, account, sid),
          true <- silent?(call, newest, now, s) do
       %{
         kind: @kind,
@@ -159,8 +198,6 @@ defmodule CodingAgentFramework.HooksSilent do
       _ -> nil
     end
   end
-
-  defp silent(_s, _row, _now), do: nil
 
   defp record(s, silent) do
     Enum.reduce_while(silent, :ok, fn sym, :ok ->

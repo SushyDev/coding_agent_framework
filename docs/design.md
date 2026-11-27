@@ -716,7 +716,8 @@ state per group (its leader's pid and start time); the remedy is TERM to the gro
 record, once per state; its outcome is read from the next `background_tasks_changed`: a task
 gone from it is recovered, all still listed fails the verify. No partial report goes
 (`StuckAfterReport`). And `hooks_silent` (`HooksSilent`): the newest tool call in an agent's
-transcript older than a bound with no `Intake` row of its session written since, shown only.
+transcript older than a bound with no `Intake` row of its session written since, shown only;
+it reads a transcript's last part again only once `Transcripts.offset/4` moved (F-299).
 Both read at the tree's `interval` as well as at their cues (F-190): a hung command writes
 nothing to the stream, so no cue would read its group again. Not built: `mcp_dropped` (F-183's
 new-2).
@@ -1247,7 +1248,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Jobs` | one-off commands on a host, in a copy: held, logged, ended by their exit or their timeout; each asks the `Scheduler` for a lease first, in the class its caller names, its row the holder (`Jobs.Work` answers for it), and its wrapper runs only under the fence of that lease ("A lease") | `jobs`, with each row's lease id and a lease refusal's reason and retry time |
 | `Runs` | a heavy native `Bash` command under a lease (F-171): the `PreToolUse` policy that rewrites a call the app lists as heavy into the wrapper `<home>/bin/caf-run`, the wrapper itself, its endpoint on the intake's port (`Runs.Plug`), a match placed on another host run there as a job with its log streamed back (`Runs.Remote`, F-296), and the lease's owner, the wrapper's own process read by `ps` | no table: the lease is the row |
 | `Services` | programs agents start and keep on a host, in a copy: held, owned, read, written to, restarted, with ports forwarded to the workstation; the forward is a second `Holder.Process` record of the service | `services` |
-| `Tracker` | the state views read: the fold of every reader | — |
+| `Tracker` | the state views read: the fold of every reader. A view of some `parts:` (row kinds) builds and copies only those, each as the whole view has it; the tree and the tool calls are folded inside it, so only they reach the caller; a cue's read compares only the rows it names (F-299) | — |
 | `Watch` | the symptom record and the healer's allow-list (F-182, `Heal.tla`): each symptom state a fact (kind, target, state, since, evidence, source), recorded before anything acts on it and passed when no longer read; the list's acts (the healer's drop, the operator's revoke and approve), so a restart reads it as left; a state the healer leaves to a person is `asked`, the `remedy` prompt `Prompts` reads | `symptoms`, `remedy_acts` |
 | `Recoveries` | the healer (F-182): records each broken state in `Watch`, acts only by the allow-list's remedy for its kind and under its cap, takes its act in `Acts`, acts once per state, verifies, drops a remedy whose verify failed, and asks for the rest; reopens a lost viewer, and so starts a host's tmux server again after it dies; ends an orphan's process, or one that did not exit after its end within its stop's deadline, by `Holder.Process` (`Sessions` itself never kills). Two states wait for a person, whose clear (the `remedy` prompt's answer, F-183) makes the next one new: a viewer lost a third time within a window, and an end whose process outlived the KILL (`unknown`, F-118's new-5); the fault ledger shows both | no table of its own |
 | `AbsentMains` | the healer of `absent_main` (F-183, `Remedies.tla`): a main session whose process exited by itself, resumed once per absence through `Mains` under the `Scheduler`'s lease, on the same shape as `Recoveries`; a second absence of one main within the bound is asked | no table of its own |
@@ -1454,7 +1455,8 @@ any reply does (new-4).
     session is never finished, so its lease is as before. Not gated: a turn the delegate's own
     background command starts, and a person's turn in an interactive one
     (`NoTurnWithoutGrant` covers the turns a row starts). While it runs it monitors each lease it holds
-    and asks at each cue of the owner's rows; after a restart it asks about every unreleased
+    and asks at each cue of the owner's rows; one check answers every cue queued before it,
+    since it asks each owner afresh (F-299); after a restart it asks about every unreleased
     row, releases it if the work ended and monitors it again if not. Both release by
     `UPDATE … WHERE id = ? AND
     released_at IS NULL`, so exactly one succeeds. A resource the lease guards (a heavy slot's
