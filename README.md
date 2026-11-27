@@ -572,6 +572,10 @@ Built, each from a checked model in `model/tla/`:
   runs nothing (F-302); `CAF_RUN_UNLEASED=1` is the explicit way to run without a lease.
 - the tests hold on a loaded host (F-293): a test's port is picked below the kernel's ephemeral
   range, and a test that cues `Mailbox` waits for the cue's pass to end before it reads.
+- the framework trusts the folders it starts sessions in (F-286, `Dialog.tla`'s Rule): the trust
+  dialog of a delegate's worktree or a main session's configured checkout is pressed by the
+  framework, an act in `Acts` naming the rule and the folder; any other folder's waits on a
+  person.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

@@ -1512,7 +1512,10 @@ defmodule CodingAgentFramework.Mains do
   defp begin(s, row, start, from) do
     with :ok <- brief(s, row, start),
          {:ok, launched} <- launch_first(s, row, start) do
+      # The project's checkout is the one the app configured: the operator's rule trusts it,
+      # so its trust dialog is the framework's to press (F-286).
       launch = [role: :parent, kind: :main, cwd: start.p.repo, project: row.project]
+      launch = launch ++ [trusted: :checkout]
       launch = launch ++ launch_model(s.launch, start)
       launch = if launched, do: launch ++ [prompt: launched.text], else: launch
       # A start that names no metadata, and a resume, keep the row's (`Sessions.start/5`).

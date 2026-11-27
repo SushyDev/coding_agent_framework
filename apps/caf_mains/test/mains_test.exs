@@ -17,7 +17,9 @@ defmodule CodingAgentFramework.MainsTest do
   `Mains` over a real `Sessions`, `Inlet`, `Registry`, `Mailbox` and `Scheduler`, real dtach,
   tmux and git, a project's repository in this test's own directory, and the screen stand-in
   for Claude Code, which draws 2.1.322's trust dialog first: a new checkout is a folder Claude
-  Code has not seen. Each test names the `Checkout.tla` steps or properties it checks.
+  Code has not seen. The checkout is the one the app configured, so the operator's rule has the
+  framework press that dialog (F-286); the stand-in then draws the imports dialog, which waits
+  on a person. Each test names the `Checkout.tla` steps or properties it checks.
   """
   use ExUnit.Case, async: true
 
@@ -35,7 +37,7 @@ defmodule CodingAgentFramework.MainsTest do
   alias CodingAgentFramework.Mains.{Checkout, Import, Starts, Work}
   alias CodingAgentFramework.Sessions.{Agents, Memory}
 
-  @trust "Yes, I trust this folder"
+  @imports "Yes, allow external imports"
 
   setup {SessionsSetup, :sessions}
 
@@ -86,7 +88,9 @@ defmodule CodingAgentFramework.MainsTest do
          holders: %{"main" => &Work.state(work, &1)}}
       )
 
-    claude = ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), trust: true)
+    claude =
+      ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), dialogs: [:trust, :imports])
+
     launch = SessionsSetup.launch(ctx, :at_start) |> Keyword.take([:env, :tool_timeout, :model])
     project = %{origin: origin, trunk: "main", setup: [], setup_timeout: 10_000}
     project = Map.put(project, :env, %{"HOME" => ctx.dir})
@@ -189,7 +193,8 @@ defmodule CodingAgentFramework.MainsTest do
   end
 
   # The start: its name checked, its agent row declared, its own row the lease's holder, the
-  # brief from its sender carried by launch, and the trust dialog of the new checkout waiting
+  # brief from its sender carried by launch, the trust dialog of the new checkout pressed by the
+  # operator's rule, an act by the framework (F-286), and the imports dialog after it waiting
   # on a person (F-140); the row runs once the agent row does.
   test "start_main leases and starts a main session in the checkout, through its dialog", ctx do
     mains = mains(ctx)
@@ -206,7 +211,7 @@ defmodule CodingAgentFramework.MainsTest do
 
     assert {:refused, {:unknown_project, "web"}} = Mains.start_main(mains, "web", "web-a", "Go.")
 
-    assert {:unknown, {:dialog, :trust}} =
+    assert {:unknown, {:dialog, :imports}} =
              Mains.start_main(mains, "app", "app-epic", "Plan the epic.", from: "app-main")
 
     # A name whose start is under way is in use.
@@ -214,9 +219,13 @@ defmodule CodingAgentFramework.MainsTest do
              Mains.start_main(mains, "app", "app-epic", "Again.")
 
     assert %{kind: "main", parent: nil, project: "app", status: "dialog", cwd: cwd} =
-             Agents.get(ctx.agents, "app-epic")
+             row = Agents.get(ctx.agents, "app-epic")
 
     assert cwd == ctx.checkout
+    # The trust dialog went by the rule, with no person: the checkout is the app's.
+    assert %{trust: "checkout"} = row
+    assert %{kind: :imports, answers: %{trust: %{mark: "sent"}}} = Agents.dialog(row)
+    assert File.exists?(Path.join(ctx.dir, "trusted"))
     assert [%{status: "starting", id: id, brief_uuid: uuid}] = Starts.rows(ctx.starts, "test")
 
     # The lease of a person's main session, held by the start's row while its dialog waits.
@@ -228,7 +237,7 @@ defmodule CodingAgentFramework.MainsTest do
     assert to_string(class) == "main"
 
     # A person answers the dialog; past it the session runs, and the brief was its prompt.
-    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :trust, @trust)
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :imports, @imports)
     assert {:ok, _} = await(fn -> running(ctx, "app-epic") end)
     Mains.cue(mains, %{topic: "sessions:test", ids: []})
     assert {:ok, %{status: "running"}} = await(fn -> start_row(ctx, id, "running") end)
@@ -377,10 +386,10 @@ defmodule CodingAgentFramework.MainsTest do
     mains = mains(%{ctx | mains_opts: opts})
     assert {:ok, _} = level(ctx, mains)
 
-    assert {:unknown, {:dialog, :trust}} =
+    assert {:unknown, {:dialog, :imports}} =
              Mains.start_main(mains, "app", "app-epic", "Plan it.", from: "app-main")
 
-    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :trust, @trust)
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :imports, @imports)
     assert {:ok, %{session_id: sid}} = await(fn -> running(ctx, "app-epic") end)
     post = &Intake.post(intake, "work", JSON.encode!(Map.put(&1, "session_id", sid)))
     me = self()
@@ -449,8 +458,8 @@ defmodule CodingAgentFramework.MainsTest do
 
     # The row says `starting` before the start asks `Scheduler` for its lease: wait for the lease.
     assert {:ok, [%{holder: {"main", _}}]} = await(fn -> leases(ctx, fn _ -> true end) end)
-    assert {:ok, _} = await(fn -> dialog(ctx, "app-epic") end)
-    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :trust, @trust)
+    assert {:ok, _} = await(fn -> imports(ctx, "app-epic") end)
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :imports, @imports)
     assert {:ok, _} = await(fn -> running(ctx, "app-epic") end)
 
     told = fn ->
@@ -513,10 +522,10 @@ defmodule CodingAgentFramework.MainsTest do
     mains = mains(ctx)
     assert {:ok, _} = level(ctx, mains)
 
-    assert {:unknown, {:dialog, :trust}} =
+    assert {:unknown, {:dialog, :imports}} =
              Mains.start_main(mains, "app", "app-epic", "Plan.", model: "sonnet")
 
-    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :trust, @trust)
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :imports, @imports)
     assert {:ok, %{model: "sonnet"}} = await(fn -> running(ctx, "app-epic") end)
     assert {:ok, _} = await(fn -> settled(ctx, mains) end)
 
@@ -547,14 +556,16 @@ defmodule CodingAgentFramework.MainsTest do
     assert {:refused, {:not_main, "delegate"}} = Mains.end_main(mains, "app-epic-api")
   end
 
-  # Dialog.tla's AskEnd and EndDone (F-231's new-3): a main session whose start waits on its trust
-  # dialog is ended by the operator, forced or not, with no answer first: its exit option is
-  # pressed, its agent row ended, and the start that waited is refused, `ended`. It ran no turn.
-  test "end_main ends a main session whose start waits on its trust dialog", ctx do
+  # Dialog.tla's AskEnd, EndTerm and EndDone (F-231's new-3): a main session whose start waits
+  # on a startup dialog is ended by the operator, forced or not, with no answer first. Past the
+  # trust dialog the rule pressed (F-286), the imports dialog has no exit option, so its held
+  # program gets SIGTERM; its agent row is ended, and the start that waited is refused, `ended`.
+  # It ran no turn. The exit option's press is `Sessions`' own test of `end_main/3`.
+  test "end_main ends a main session whose start waits on a startup dialog", ctx do
     mains = mains(ctx)
     assert {:ok, _} = level(ctx, mains)
 
-    assert {:unknown, {:dialog, :trust}} = Mains.start_main(mains, "app", "app-epic", "Plan.")
+    assert {:unknown, {:dialog, :imports}} = Mains.start_main(mains, "app", "app-epic", "Plan.")
     assert [%{status: "starting", id: id}] = Starts.rows(ctx.starts, "test")
 
     assert {:ok, :ended} = Mains.end_main(mains, "app-epic", force: true)
@@ -575,8 +586,8 @@ defmodule CodingAgentFramework.MainsTest do
     assert {:ok, _} = level(ctx, mains)
 
     assert {:refused, {:not_stopped, "declared"}} = Mains.resume_main(mains, "app-main")
-    assert {:unknown, {:dialog, :trust}} = Mains.start_main(mains, "app", "app-main", nil)
-    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-main", :trust, @trust)
+    assert {:unknown, {:dialog, :imports}} = Mains.start_main(mains, "app", "app-main", nil)
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-main", :imports, @imports)
     assert {:ok, %{session_id: sid}} = await(fn -> running(ctx, "app-main") end)
     assert {:ok, _} = await(fn -> settled(ctx, mains) end)
 
@@ -590,7 +601,7 @@ defmodule CodingAgentFramework.MainsTest do
     assert {:refused, {:moved, ^dead}} =
              Mains.resume_main(mains, "app-main", state: %{dead | pid: -1})
 
-    assert {:unknown, {:dialog, :trust}} = Mains.resume_main(mains, "app-main", state: dead)
+    assert {:unknown, {:dialog, :imports}} = Mains.resume_main(mains, "app-main", state: dead)
 
     # The start's row says which session it resumed (F-143's new-5).
     assert [%{resume: nil}, %{status: "starting", id: id, resume: ^sid}] =
@@ -601,7 +612,7 @@ defmodule CodingAgentFramework.MainsTest do
     assert {:ok, [%{holder: {"main", ^key}}]} =
              await(fn -> leases(ctx, &is_nil(&1.released_at)) end)
 
-    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-main", :trust, @trust)
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-main", :imports, @imports)
     assert {:ok, %{session_id: ^sid}} = await(fn -> running(ctx, "app-main") end)
   end
 
@@ -620,10 +631,10 @@ defmodule CodingAgentFramework.MainsTest do
 
     title = "Acme - app"
 
-    assert {:unknown, {:dialog, :trust}} =
+    assert {:unknown, {:dialog, :imports}} =
              Mains.start_main(mains, "app", "app-epic", "Plan.", title: title)
 
-    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :trust, @trust)
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :imports, @imports)
     assert {:ok, %{title: ^title, session_id: sid}} = await(fn -> running(ctx, "app-epic") end)
     assert {:ok, [argv]} = await(fn -> nonempty(ScreenStandIn.argvs(ctx.dir)) end)
     assert {title, title, title} == flags.(argv, title)
@@ -637,8 +648,8 @@ defmodule CodingAgentFramework.MainsTest do
       File.rm_rf!(Path.join(ctx.dir, "argv"))
       File.mkdir_p!(Path.join(ctx.dir, "argv"))
       assert {:refused, {:bad, :title}} = Mains.resume_main(mains, "app-epic", title: "-x")
-      assert {:unknown, {:dialog, :trust}} = Mains.resume_main(mains, "app-epic", given)
-      assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :trust, @trust)
+      assert {:unknown, {:dialog, :imports}} = Mains.resume_main(mains, "app-epic", given)
+      assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :imports, @imports)
       assert {:ok, %{title: ^shown, session_id: ^sid}} = await(fn -> running(ctx, "app-epic") end)
       assert {:ok, [argv]} = await(fn -> nonempty(ScreenStandIn.argvs(ctx.dir)) end)
       assert {shown, shown, shown} == flags.(argv, shown)
@@ -646,8 +657,8 @@ defmodule CodingAgentFramework.MainsTest do
     end
 
     # The agent name is still the address: a main without a title launches under it.
-    assert {:unknown, {:dialog, :trust}} = Mains.start_main(mains, "app", "app-main", nil)
-    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-main", :trust, @trust)
+    assert {:unknown, {:dialog, :imports}} = Mains.start_main(mains, "app", "app-main", nil)
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-main", :imports, @imports)
     assert {:ok, %{title: nil}} = await(fn -> running(ctx, "app-main") end)
 
     assert {:ok, argvs} =
@@ -671,8 +682,8 @@ defmodule CodingAgentFramework.MainsTest do
 
     assert {:ok, %{held: []}} = Mains.fix_state(mains, "app-main")
     assert {:refused, {:not_held, "1"}} = Mains.answer(mains, "app-main", "1", "allow")
-    assert {:unknown, {:dialog, :trust}} = Mains.start_main(mains, "app", "app-main", nil)
-    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-main", :trust, @trust)
+    assert {:unknown, {:dialog, :imports}} = Mains.start_main(mains, "app", "app-main", nil)
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-main", :imports, @imports)
     assert {:ok, %{session_id: sid}} = await(fn -> running(ctx, "app-main") end)
 
     me = self()
@@ -860,8 +871,8 @@ defmodule CodingAgentFramework.MainsTest do
     # The app's start-or-resume: a start is refused, as for any session to resume; the resume
     # takes it up in the app's checkout, with the memory it had.
     assert {:refused, {:running, "app-epic"}} = Mains.start_main(mains, "app", "app-epic", "Go.")
-    assert {:unknown, {:dialog, :trust}} = Mains.resume_main(mains, "app-epic")
-    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :trust, @trust)
+    assert {:unknown, {:dialog, :imports}} = Mains.resume_main(mains, "app-epic")
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :imports, @imports)
     assert {:ok, %{session_id: "s-app", cwd: cwd}} = await(fn -> running(ctx, "app-epic") end)
     assert cwd == ctx.checkout
     {:ok, account_dir} = Transcripts.project_dir(config, ctx.checkout)
@@ -911,9 +922,9 @@ defmodule CodingAgentFramework.MainsTest do
     assert {:ok, _} = Sessions.import_main(ctx.sessions, "app-epic", entry)
 
     # `spare` has more allowance left; the resume runs where the conversation is (ResumeHere).
-    assert {:unknown, {:dialog, :trust}} = Mains.resume_main(mains, "app-epic")
+    assert {:unknown, {:dialog, :imports}} = Mains.resume_main(mains, "app-epic")
     assert [%{account: "work", resume: "s-epic"}] = Starts.rows(ctx.starts, "test")
-    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :trust, @trust)
+    assert {:ok, :sent} = Sessions.answer_dialog(ctx.sessions, "app-epic", :imports, @imports)
     assert {:ok, %{account: "work"}} = await(fn -> running(ctx, "app-epic") end)
     assert {:ok, _} = await(fn -> settled(ctx, mains) end)
     assert {:ok, :stopped} = Sessions.stop(ctx.sessions, "app-epic")
@@ -941,7 +952,7 @@ defmodule CodingAgentFramework.MainsTest do
     assert {:ok, :none} = await(fn -> held(ctx) end)
 
     # The copy, then the resume on `spare` under the same session id (ResumeCopied).
-    assert {:unknown, {:dialog, :trust}} = Mains.resume_main(mains, "app-epic")
+    assert {:unknown, {:dialog, :imports}} = Mains.resume_main(mains, "app-epic")
     {:ok, copy} = Transcripts.path(spare.config_dir, ctx.checkout, "s-epic")
     assert File.read!(copy) == File.read!(transcript)
     assert File.exists?(Path.join([Path.rootname(copy), "subagents", "a.jsonl"]))
@@ -1204,10 +1215,13 @@ defmodule CodingAgentFramework.MainsTest do
     resets * 1000
   end
 
-  defp dialog(ctx, name) do
-    case Agents.get(ctx.agents, name) do
-      %{status: "dialog"} = row -> {:ok, row}
-      row -> row
+  # The row waits on the imports dialog, past the trust dialog the rule pressed (F-286).
+  defp imports(ctx, name) do
+    row = Agents.get(ctx.agents, name)
+
+    case row && Agents.dialog(row) do
+      %{kind: :imports} -> {:ok, row}
+      _ -> row
     end
   end
 

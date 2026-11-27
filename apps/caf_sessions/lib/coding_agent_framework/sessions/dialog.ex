@@ -366,8 +366,31 @@ defmodule CodingAgentFramework.Sessions.Dialog do
   end
 
   @doc """
+  The option the operator's rule presses on the row's trust dialog (F-286): the one that
+  trusts the folder, `Yes, I trust this folder` on 2.1.322, while it may still be answered
+  (`check/4`). Refused `{:no_trust, kind}` for another dialog or one with no such option.
+
+      iex> alias CodingAgentFramework.Sessions.Dialog
+      iex> row = %{dialog: %{kind: :trust, options: ["No, exit", "Yes, I trust this folder"]}, answers: nil}
+      iex> Dialog.trust_option(row)
+      {:ok, "Yes, I trust this folder"}
+      iex> Dialog.trust_option(%{row | dialog: %{kind: :imports, options: ["Yes", "No"]}})
+      {:refused, {:no_trust, :imports}}
+  """
+  @spec trust_option(map) :: {:ok, String.t()} | {:refused, term}
+  def trust_option(row) do
+    with %{kind: :trust, options: options} <- shown(row),
+         label when is_binary(label) <- Enum.find(options, &(&1 =~ ~r/\AYes\b.*\btrust\b/)) do
+      with :ok <- check(row, :trust, label), do: {:ok, label}
+    else
+      _ -> {:refused, {:no_trust, shown(row) && shown(row).kind}}
+    end
+  end
+
+  @doc """
   The default of the app's `dialog:` callback: ask a person. Nothing answers a startup dialog
-  on its own unless the app gives a callback that does.
+  on its own unless the app gives a callback that does, but for the trust dialog of a folder
+  the operator's rule names (`trust_option/1`), which the framework presses first.
 
       iex> CodingAgentFramework.Sessions.Dialog.ask(:trust, ["No, exit", "Yes, I trust this folder"])
       :ask

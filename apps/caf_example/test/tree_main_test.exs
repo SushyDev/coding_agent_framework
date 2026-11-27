@@ -92,12 +92,16 @@ defmodule CodingAgentFramework.Example.TreeMainTest do
     assert {:ok, []} = await(fn -> if File.ls(sessions) == {:ok, []}, do: {:ok, []} end)
   end
 
-  # F-246's second item: a main whose start meets the trust dialog, answered from the inbox
+  # F-246's second item: a main whose start meets a startup dialog, answered from the inbox
   # after the start's own call answered unknown, as the real suite answers it. The row must
-  # leave `dialog` once the stand-in writes its session file: `agents` reads it idle.
-  test "a main session answered past its trust dialog reaches idle in agents", ctx do
+  # leave `dialog` once the stand-in writes its session file: `agents` reads it idle. The trust
+  # dialog before it is the operator's rule's, in the app's checkout (F-286): no prompt asks it.
+  test "a main session answered past its startup dialogs reaches idle in agents", ctx do
     claude =
-      ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), trust: true, transcript: true)
+      ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(),
+        dialogs: [:trust, :imports],
+        transcript: true
+      )
 
     data = ctx.path |> File.read!() |> JSON.decode!() |> put_in(["launch", "claude"], claude)
     File.write!(ctx.path, JSON.encode!(data))
@@ -117,9 +121,10 @@ defmodule CodingAgentFramework.Example.TreeMainTest do
     see.(fn -> Console.checkout(caf) end, "app: ready, on main", 30_000)
     mains = Run.parts(caf).mains
 
-    assert {:unknown, {:dialog, :trust}} =
+    assert {:unknown, {:dialog, :imports}} =
              Mains.start_main(mains, "app", "app-epic", "Plan the epic.")
 
+    assert File.exists?(Path.join(ctx.dir, "trusted"))
     instance = ctx.config.instance
 
     assert {:ok, [%{id: id, options: options}]} =
@@ -130,9 +135,10 @@ defmodule CodingAgentFramework.Example.TreeMainTest do
                end
              end)
 
-    trust = Enum.find(options, &(&1 =~ ~r/trust/i))
-    assert {:ok, _} = CodingAgentFramework.answer(instance, id, trust, ctx.config.operator)
-    assert File.exists?(Path.join(ctx.dir, "trusted"))
+    assert id =~ "imports"
+    allow = Enum.find(options, &(&1 =~ ~r/\AYes/))
+    assert {:ok, _} = CodingAgentFramework.answer(instance, id, allow, ctx.config.operator)
+    assert File.read!(Path.join(ctx.dir, "imports")) == "yes"
     see.(fn -> Console.agents(caf) end, "app-epic: main of app, on one, idle", 30_000)
     # The brief goes once its turn shows in the transcript; the end waits for its delivery.
     assert {:ok, [_]} = await(fn -> nonempty(ScreenStandIn.prompts(ctx.dir)) end)
