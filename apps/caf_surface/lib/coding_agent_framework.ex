@@ -476,7 +476,9 @@ defmodule CodingAgentFramework do
          leases: Enum.map(leases, &Map.put(&1, :job, job_of(c, &1, jobs))),
          copies: copies,
          resources:
-           Map.new(resources(c), fn {r, n} -> {r, %{capacity: n, held: held[r] || 0}} end),
+           Map.new(resources(c), fn {r, n} ->
+             {r, %{capacity: n, held: held[Scheduler.key(r)] || 0}}
+           end),
          pressure: pressure
        }}
     end
@@ -1230,7 +1232,9 @@ defmodule CodingAgentFramework do
       # it is looked up at each request.
       {:intake_http,
        fn pid ->
-         runs = [scheduler: fn -> pid.(:scheduler) end, units: &run_units(c, w, &1, &2)]
+         # Its wrappers run on the workstation, so their slot is its (F-292).
+         units = &run_units(c, w, &1, &2)
+         runs = [scheduler: fn -> pid.(:scheduler) end, units: units, host: host]
          opts = [intake: pid.(:intake), secret: w.secret, runs: runs]
          {Bandit, plug: {Endpoint, opts}, ip: @local, port: c.ports.intake, startup_log: false}
        end},

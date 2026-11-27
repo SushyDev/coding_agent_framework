@@ -9,7 +9,8 @@ defmodule CodingAgentFramework.Scheduler do
   class), its `account` (or nil), the `units` of each declared resource it needs, all taken in
   one lease, and its `holder`, `{kind, key}`: the row of the work the lease admits (an agent
   row, a job row), whose owner says when that work ended, and optionally its caller's `wait`
-  (ms from now that the caller waits for its answer, its call's bound; F-276). The answer
+  (ms from now that the caller waits for its answer, its call's bound; F-276), and optionally
+  its host, `where: %{host: name}`, absent for the `Scheduler`'s own (F-292). The answer
   comes at once:
 
     * `{:ok, lease}`: granted now, or granted before under this id (the lease is looked up
@@ -33,6 +34,17 @@ defmodule CodingAgentFramework.Scheduler do
   whether the caller's process lives, before its timer or monitor is read (`Schedule.tla`'s
   `NoGrantToGone`). The queue is in memory, so after a restart a requester still waiting asks
   again under its id, and is handed the lease if the grant was written.
+
+  **Hosts** (F-292, `model/tla/HostSlots.tla`). A resource is declared by its name, the
+  `Scheduler`'s own host's or a resource of no host (a seat, a lock), or for another host as
+  `{name, host}` (`{"slot", "mac"} => 2`). A name declared for any host is per host, and its
+  plain name is this host's. A request on another host takes that host's unit of each
+  per-host resource it names and the shared ones as they are; it is refused at once
+  `{:unknown_resource, {name, host}}` when that host has no such resource, and
+  `{:unknown_host, host}` when it would take nothing of that host's, so it never takes this
+  host's slot. Its row's `units` name that host's as `"<name>@<host>"` (`key/1`). Pressure is
+  this host's: it gates only requests on this host, and another host's runs are bounded by
+  their slots alone.
 
   **The grant** (`Scheduler.Queue` picks the next request) is one immediate transaction that
   sums the units the unreleased rows hold and inserts only within each resource's capacity and
@@ -78,8 +90,9 @@ defmodule CodingAgentFramework.Scheduler do
   @reasons [:queue_full, :deadline, :allowance, :caller_gone]
 
   @doc """
-  Starts the `Scheduler`. Options: `db:` (its file), `host:` (for its topic), `resources:` (each
-  resource's name to its capacity), and optionally `holders:` (each holder kind to a function
+  Starts the `Scheduler`. Options: `db:` (its file), `host:` (its own host, and its topic's),
+  `resources:` (each resource's name, or `{name, host}` for another host's, to its capacity;
+  a key out of shape, or a name with `@`, stops it `{:bad, :resources}`), and optionally `holders:` (each holder kind to a function
   of its key answering `:live`, `:ended` or `{:unknown, reason}`), `allowance:` (a function of
   an account answering `:room` or `{:spent, retry_at}`; without it every account has room),
   `pressure:` (`source: :psi | {:level, read} | :none`, `dir:` for `:psi`, `name:` for a
@@ -163,13 +176,17 @@ defmodule CodingAgentFramework.Scheduler do
 
   @impl true
   def init(opts) do
-    with {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)) do
+    host = Keyword.fetch!(opts, :host)
+
+    with {:ok, {capacity, per_host}} <- capacity(Keyword.fetch!(opts, :resources), host),
+         {:ok, db} <- Table.open(Keyword.fetch!(opts, :db)) do
       pressure = Keyword.get(opts, :pressure, source: :none)
 
       s = %{
         db: db,
-        host: Keyword.fetch!(opts, :host),
-        capacity: Keyword.fetch!(opts, :resources),
+        host: host,
+        capacity: capacity,
+        per_host: per_host,
         holders: Keyword.get(opts, :holders, %{}),
         allowance: Keyword.get(opts, :allowance, fn _ -> :room end),
         bound: Keyword.get(opts, :queue_bound, 4),
@@ -319,7 +336,7 @@ defmodule CodingAgentFramework.Scheduler do
 
   # A queued answer says why it waits when pressure bars its class, so a caller can show it.
   defp queued(s, e) do
-    barred = if Pressure.bars?(s.pressure.level, e.req.class), do: barred(s)
+    barred = if bars?(s, e.req), do: barred(s)
     %{id: e.req.id, position: position(s, e), barred: barred}
   end
 
@@ -339,7 +356,7 @@ defmodule CodingAgentFramework.Scheduler do
   defp expire(s, %{why: :caller_gone} = e), do: refuse_queued(s, e, :caller_gone, now(s))
 
   defp expire(s, e) do
-    if Pressure.bars?(s.pressure.level, e.req.class),
+    if bars?(s, e.req),
       do: refuse_queued(s, e, barred(s), now(s) + window(s)),
       else: refuse_queued(s, e, :deadline, now(s))
   end
@@ -350,7 +367,7 @@ defmodule CodingAgentFramework.Scheduler do
   defp serve(s) do
     s = Enum.reduce(s.entries, s, &expire_spent/2)
     s = Enum.reduce(s.entries, s, &expire_gone/2)
-    admitted? = fn e -> not Pressure.bars?(s.pressure.level, e.req.class) end
+    admitted? = fn e -> not bars?(s, e.req) end
     held = Table.held(s.db)
     t = now(s)
 
@@ -458,18 +475,16 @@ defmodule CodingAgentFramework.Scheduler do
   defp forget(s, id),
     do: %{s | reclaim: MapSet.delete(s.reclaim, id), monitored: MapSet.delete(s.monitored, id)}
 
-  # A request's own checks: a known class, units of declared resources, a holder.
+  # A request's own checks: a known class, units of declared resources, a holder; its units
+  # then resolved on its host.
   defp checked(%{id: id, class: class, module: m, units: units, holder: {kind, _}} = req, s)
        when is_binary(id) and is_binary(m) and is_map(units) and is_binary(kind) do
     cond do
       class not in Queue.classes() ->
         {:refused, {:bad, :class}}
 
-      units == %{} ->
+      units == %{} or not Enum.all?(Map.keys(units), &(is_binary(&1) and not (&1 =~ "@"))) ->
         {:refused, {:bad, :units}}
-
-      bad = Enum.find(Map.keys(units), &(not Map.has_key?(s.capacity, &1))) ->
-        {:refused, {:unknown_resource, bad}}
 
       not Enum.all?(Map.values(units), &(is_integer(&1) and &1 > 0)) ->
         {:refused, {:bad, :units}}
@@ -478,15 +493,98 @@ defmodule CodingAgentFramework.Scheduler do
         {:refused, {:bad, :wait}}
 
       true ->
-        {:ok, req |> Map.put_new(:account, nil) |> Map.put_new(:wait, nil)}
+        with {:ok, host} <- host_of(req, s),
+             {:ok, units} <- resolve(units, host, s) do
+          req = req |> Map.put_new(:account, nil) |> Map.put_new(:wait, nil)
+          {:ok, %{req | units: units} |> Map.put(:host, host)}
+        end
     end
   end
 
   defp checked(_req, _s), do: {:refused, {:bad, :request}}
 
+  defp host_of(%{where: %{host: host}}, _s) when is_binary(host), do: {:ok, host}
+  defp host_of(%{where: _}, _s), do: {:refused, {:bad, :where}}
+  defp host_of(_req, s), do: {:ok, s.host}
+
+  # HostSlots.tla's grant reads and takes only its own host's slot. On this host a unit is
+  # the resource of its name. On another a resource declared per host is that host's, and
+  # the rest (a seat, a lock) are shared; a request there that would take nothing of that
+  # host's is refused, so it never falls back on this host's slot.
+  defp resolve(units, host, %{host: host} = s) do
+    case Enum.find(Map.keys(units), &(not Map.has_key?(s.capacity, &1))) do
+      nil -> {:ok, units}
+      bad -> {:refused, {:unknown_resource, bad}}
+    end
+  end
+
+  defp resolve(units, host, s) do
+    resolved =
+      Enum.map(units, fn {r, n} ->
+        if MapSet.member?(s.per_host, r), do: {key({r, host}), n, {r, host}}, else: {r, n, r}
+      end)
+
+    cond do
+      missing = Enum.find(resolved, fn {k, _, _} -> not Map.has_key?(s.capacity, k) end) ->
+        {:refused, {:unknown_resource, elem(missing, 2)}}
+
+      not Enum.any?(resolved, &match?({_, _, {_, ^host}}, &1)) ->
+        {:refused, {:unknown_host, host}}
+
+      true ->
+        {:ok, Map.new(resolved, fn {k, n, _} -> {k, n} end)}
+    end
+  end
+
   # A caller on this node that has died; the monitor tells of any other.
   defp gone?(pid) when node(pid) == node(), do: not Process.alive?(pid)
   defp gone?(_pid), do: false
+
+  # Pressure is read on this host alone: another host's is taken as `ok` (F-292), and its
+  # runs are bounded by its slots.
+  defp bars?(%{host: host} = s, %{host: host, class: class}),
+    do: Pressure.bars?(s.pressure.level, class)
+
+  defp bars?(_s, _req), do: false
+
+  # The declared capacities by key, and the names declared per host. `{name, host}` of this
+  # host is its plain name.
+  defp capacity(resources, host) when is_map(resources) do
+    keyed =
+      Enum.map(resources, fn
+        {{r, ^host}, n} -> {r, n, nil}
+        {{r, h}, n} -> {{r, h}, n, r}
+        {r, n} -> {r, n, nil}
+      end)
+
+    keys = Enum.map(keyed, fn {k, _, _} -> k end)
+
+    if Enum.all?(keyed, fn {k, n, _} -> is_integer(n) and n >= 0 and key?(k) end) and
+         length(Enum.uniq(Enum.map(keys, &key/1))) == length(keys) do
+      per_host = MapSet.new(for {_, _, r} <- keyed, r, do: r)
+      {:ok, {Map.new(keyed, fn {k, n, _} -> {key(k), n} end), per_host}}
+    else
+      {:stop, {:bad, :resources}}
+    end
+  end
+
+  defp capacity(_resources, _host), do: {:stop, {:bad, :resources}}
+
+  defp key?({r, h}), do: key?(r) and key?(h)
+  defp key?(name), do: is_binary(name) and name != "" and not (name =~ "@")
+
+  @doc """
+  A resource's key as a lease row's `units` names it: a name as it is, another host's
+  resource `{name, host}` as `"<name>@<host>"`.
+
+      iex> CodingAgentFramework.Scheduler.key({"slot", "mac"})
+      "slot@mac"
+      iex> CodingAgentFramework.Scheduler.key("seat")
+      "seat"
+  """
+  @spec key(String.t() | {String.t(), String.t()}) :: String.t()
+  def key({name, host}), do: name <> "@" <> host
+  def key(name) when is_binary(name), do: name
 
   defp spent(_s, %{account: nil}), do: nil
 

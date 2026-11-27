@@ -369,11 +369,23 @@ framework's hooks deciding:
   code are the command's and the lease's holder is that process (`{"run", "<pid> <start>"}`),
   released once on any end, a kill included, read by `ps` (`Schedule.tla`'s shape `Native`);
   a refusal prints one line with its whole reason (a pressure refusal's level and reading,
-  F-276) and retry time and exits 75, and a queued line says when pressure bars it; the plug's
-  own wait is the request's `wait`; with no answer it
+  F-276) and retry time and exits 75, and a queued line says when pressure bars it. Its wait
+  is its own, `caf-run --wait <seconds>` or `CAF_RUN_WAIT` (the flag first), whole seconds, or
+  else the plug's `:wait` (600 s); the plug takes none over its `:max_wait` (an hour by
+  default) and refuses it `long_wait` at once (F-292). The wait is the request's `wait`, the
+  caller's deadline (F-276): the lease is waited for until the class's `max_wait` or this
+  wait, whichever ends first, so a class that allows more keeps a wrapper's place as long as
+  the wrapper says. At its own wait the request is refused `caller_gone` and the wrapper
+  exits 75, never runs without a lease: the plug holds the ask 2 s past the wait, so the
+  `Scheduler`'s refusal is what the wrapper reads, and the plug's own `unknown no_answer`
+  only says the `Scheduler` did not answer by then (decided, F-292, F-276's new-3). With no
+  answer it
   asks again once a second until 30 s by the clock have passed since its first ask with none
   (F-217), then runs without a lease and says so, as a hook fails open; one ask is bound by
-  curl's `--max-time`, the plug's `:wait` and 5 s, and an ask cut there is no answer (F-218).
+  curl's `--max-time`, its wait and 5 s, and an ask cut there is no answer (F-218). The plug
+  answers 127.0.0.1 alone, so every wrapper runs on the plug's own host, the workstation, and
+  its lease is that host's slot (`Runs.Plug`'s `host:`, the config's `workstation`; F-292).
+  A command run on another host goes through `Jobs`, whose lease names that host.
   The `run` tool, its late end and `MCP.caller/3` were removed in F-176 (F-171's new-3); the
   operator keeps no
   `run`, since a landing is the app's own `Jobs.run/6`;
@@ -1074,8 +1086,8 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 | `claude`, `env`, `user` | what every launch shares; the OS user (required on macOS) | required, `env` with its `path` for every tree (F-203); with `agents: false` only `env` (F-201) |
 | `tool_timeout`, `margin` | Claude Code's MCP tool timeout, and what `run_delegate` keeps under it | 1 h, 1 min |
 | `interval` | ms between the timed readers' reads | 2 s |
-| `resources`, `lease`, `job_lease` | the `Scheduler`'s capacities and the units each start asks for | seat 4, slot 2 |
-| `pressure` | how the host's pressure is read | the host's own |
+| `resources`, `lease`, `job_lease` | the `Scheduler`'s capacities and the units each start asks for | seat 4, slot 2; another host's `{"slot", host}`, none by default (F-292) |
+| `pressure` | how the workstation's pressure is read; another host's is taken as `ok` (F-292) | the host's own |
 | `tool_hooks` | the app's `pre_tool_use`, `post_tool_use`, `stop` and `session_start` (F-236) callbacks, as `{module, opts}` (`ToolHooks`, F-195) | none |
 | `usable` | which accounts the app lets a start or a resume use, as `{module, opts}`: `usable?(account, opts, part)` answers `true` or `{false, reason}`, and the tree hands it to `Mains`, `Delegates` and the `Mover` beside `Logins.usable/3`, an account usable only if both say so (`Usable`, F-207) | none: the framework's check alone |
 | `heavy` | the app's heavy commands, run under a lease | none |
@@ -1389,6 +1401,22 @@ any reply does (new-4).
     `Jobs.run/6` (`CodingAgentFramework.job_units/3`); an agent's heavy command takes its class
     from the app's list of heavy commands (F-171). A refused job's row says why and when to
     retry, under a new job id.
+  - **Slots per host** (F-292, `HostSlots.tla`). A resource is declared by its name, the
+    workstation's or of no host (a seat, a lock), or for another host as `{name, host}`
+    (`{"slot", "mac"} => 2`); a name declared for any host is per host, and its plain name is
+    the workstation's. A request names its host, `where: %{host: name}`, absent for the
+    `Scheduler`'s own: `Jobs` names its job's, `Runs.Plug` its own. On another host it takes
+    that host's unit of each per-host resource it names and the shared ones as they are (a
+    landing there takes that host's slot and its project's one lock), and is refused at once
+    `{:unknown_resource, {name, host}}` when the host has no such resource and `{:unknown_host,
+    host}` when it would take nothing of the host's, so it never falls back on the
+    workstation's slot. A row names that host's units `"<name>@<host>"`. A host's slots are
+    independent: its grants, holds and queue never wait on another host's. Pressure gates
+    only the workstation's requests; another host's runs are taken as unpressured and bounded
+    by their slots alone (decided, F-292: the smaller rule; reading another host's pressure
+    over ssh would put an ssh on every sample, and the static slot count is how a macOS host's
+    heavy runs are bounded already). A host away refuses a job at its placement, before any
+    request, so it never queues and never holds a slot.
   - **Accounts.** Holding several Claude accounts and moving work between them is allowed
     (decided), so the account is a resource with several entries; a start's account is
     chosen when it is admitted, and `Mover` moves a session later.
@@ -3226,6 +3254,16 @@ lease past the command's end). It instances neither `Claim` nor `Hold`: a lease 
 units counted against a capacity for a process's life, not one act per state, and a queued
 request has no row, may be answered twice (queued, then once more) and is asked again after a
 restart rather than settled; the spec's header says so.
+
+`HostSlots.tla` (F-292) models heavy slots per host: the workstation's one and another host's
+two, five runs asked once, each host's pressure and whether the other host is away as the
+environment. Invariants `CapacityHolds` (per host), `OwnHost` (a lease holds only its own
+host's slot), `OnlyGrantedHold`, `HostUnaffected` (a queued run whose own host has a free slot
+and admits it can be granted now, whatever the other host holds or reads), and
+`AwayRefusedAtOnce`; `NoHeavyUnderHigh` per host and `QueuedIsAnswered`. Breaks:
+`OtherHostSlot` (a run on another host takes the workstation's slot, as before F-292),
+`SharedPressure` (every grant reads the workstation's pressure) and `NoPlace` (a run asked for
+with no find of its host).
 
 `Boxes.tla` (F-163) composes the seven boxes by their contracts ("Contracts and one composed
 spec"). Each box is only what it promises and what it assumes: `Sessions`' agent row, its

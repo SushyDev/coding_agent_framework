@@ -20,7 +20,8 @@ defmodule CodingAgentFramework.Jobs do
   **The lease** (`docs/design.md`, "A lease"; `model/tla/Schedule.tla`). With a `scheduler:`,
   a run asks it for a lease before the copy's turn, in the class its caller names (`lease:`,
   `%{class: :heavy | :builder | :landing, module: m, units: units}`): one request for every
-  unit the job needs, so a landing's slot and lock come in one gang lease or not at all. The
+  unit the job needs, so a landing's slot and lock come in one gang lease or not at all. It
+  names the job's host (`where: %{host: host}`), so a slot is that host's (F-292). The
   holder is the job's row, written `asked` first; `Jobs.Work` answers for it, and the lease
   lasts until the row holds the job's end. Queued, the run waits in the caller's process for
   the one more answer, at most `:lease_wait` ms, which the request carries, so no lease is
@@ -171,7 +172,7 @@ defmodule CodingAgentFramework.Jobs do
 
     with :ok <- named(paths),
          {:ok, config} <- call(jobs, :config),
-         {:ok, ask} <- lease_request(config, id, opts),
+         {:ok, ask} <- lease_request(config, id, where, opts),
          {:ok, ctx} <- context_of(config, id, where, start, :place),
          :ok <- call(jobs, {:ask, row(id, where, worktree, argv), self()}),
          {:ok, lease} <- lease(jobs, id, config.scheduler, ask, opts),
@@ -271,9 +272,9 @@ defmodule CodingAgentFramework.Jobs do
   end
 
   # The lease a run asks for, when `Jobs` has a `Scheduler`: the caller names its class.
-  defp lease_request(%{scheduler: nil}, _id, _opts), do: {:ok, nil}
+  defp lease_request(%{scheduler: nil}, _id, _where, _opts), do: {:ok, nil}
 
-  defp lease_request(_config, id, opts) do
+  defp lease_request(_config, id, where, opts) do
     case Keyword.get(opts, :lease) do
       %{class: class, module: module, units: units} when class in [:landing, :builder, :heavy] ->
         {:ok,
@@ -284,6 +285,8 @@ defmodule CodingAgentFramework.Jobs do
            account: nil,
            units: units,
            holder: {"job", id},
+           # Its slot is its own host's (HostSlots.tla, F-292).
+           where: %{host: where.host},
            # The caller waits this long for a queued lease: none is granted after (F-276).
            wait: Keyword.get(opts, :lease_wait, @lease_wait)
          }}

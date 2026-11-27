@@ -8,7 +8,7 @@ defmodule CodingAgentFramework.RemoteHostTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Config, Host, Hosts, Jobs}
+  alias CodingAgentFramework.{Config, Host, Hosts, Jobs, Scheduler}
 
   setup do
     dir = test_dir()
@@ -47,21 +47,23 @@ defmodule CodingAgentFramework.RemoteHostTest do
         programs: programs,
         env: %{path: "/nonexistent"},
         agents: false,
-        hosts: %{"mac" => %{host: mac, dir: Path.join(dir, "mac")}}
+        hosts: %{"mac" => %{host: mac, dir: Path.join(dir, "mac")}},
+        # The workstation's one heavy slot, and two on the other host (F-292).
+        resources: %{"seat" => 4, "slot" => 1, {"slot", "mac"} => 2}
       )
 
     File.mkdir_p!(config.home)
     parts = CodingAgentFramework.parts(start_supervised!({CodingAgentFramework, config}))
     {:ok, units} = CodingAgentFramework.job_units(config, :heavy, "app")
     lease = %{class: :heavy, module: "app", units: units}
-    %{dir: dir, bin: bin, repo: repo, jobs: parts.jobs, lease: lease}
+    %{dir: dir, bin: bin, repo: repo, jobs: parts.jobs, scheduler: parts.scheduler, lease: lease}
   end
 
   defp link(bin, name, target), do: File.ln_s!(target, Path.join(bin, name))
 
-  defp run(c, id) do
-    where = %{host: "mac", project: "app", name: "app-w"}
-    argv = [program!(:cat), "a.txt"]
+  defp run(c, id, host \\ "mac", argv \\ [program!(:cat), "a.txt"]) do
+    # A copy of its own each, so two jobs at once never wait on one copy's turn.
+    where = %{host: host, project: "app", name: "app-" <> id}
     opts = [timeout: 10_000, start_timeout: 2_000, lease: c.lease]
     Jobs.run(c.jobs, id, where, c.repo, argv, opts)
   end
@@ -86,8 +88,49 @@ defmodule CodingAgentFramework.RemoteHostTest do
     assert {:refused, {:host_away, "mac"}} = run(c, "j1")
     assert System.monotonic_time(:millisecond) - begun < 2_000
     assert Jobs.rows(c.jobs) == []
+    # HostSlots.tla's AwayRefusedAtOnce: it never asked for a slot.
+    assert Scheduler.leases(c.scheduler) == []
 
     File.rm!(Path.join(c.dir, "down"))
     assert {:ok, %{exit: 0}} = run(c, "j2")
+  end
+
+  test "HostSlots: two heavy runs on a two-slot host run while a third queues, and the workstation's slot is its own",
+       c do
+    gate = Path.join(c.dir, "gate")
+    {_, 0} = System.cmd(program!(:mkfifo), [gate])
+    held = [program!(:cat), gate]
+    runs = for id <- ~w(m1 m2), do: Task.async(fn -> run(c, id, "mac", held) end)
+
+    held? = fn ->
+      case for(
+             %{released_at: nil, units: %{"slot@mac" => 1}} = l <- Scheduler.leases(c.scheduler),
+             do: l
+           ) do
+        [_, _] = two -> {:ok, two}
+        other -> {:held, other}
+      end
+    end
+
+    assert {:ok, _} = await(held?, 10_000)
+
+    third = %{
+      id: "m3",
+      class: :heavy,
+      module: "app",
+      units: %{"slot" => 1},
+      holder: {"job", "m3"},
+      where: %{host: "mac"},
+      wait: 60_000
+    }
+
+    assert {:queued, %{position: 1}} = Scheduler.request(c.scheduler, third)
+
+    # The workstation's single slot is free: a job there runs at once.
+    assert {:ok, %{exit: 0, log: "one\n"}} = run(c, "w1", "ws")
+
+    File.write!(gate, "go\n")
+    for t <- runs, do: assert({:ok, %{exit: 0}} = Task.await(t, 20_000))
+    assert_receive {:lease, "m3", {:ok, %{units: %{"slot@mac" => 1}}}}, 10_000
   end
 end
