@@ -32,9 +32,11 @@ defmodule CodingAgentFramework.SurfaceTest do
     # (F-169, F-175).
     home = Path.join([dir, "Application Support", "app", "framework"])
 
+    instance = instance_name("surface")
+
     fields = [
       home: home,
-      instance: "t",
+      instance: instance,
       programs: programs().paths,
       accounts: ["work"],
       projects: %{"app" => project},
@@ -55,7 +57,7 @@ defmodule CodingAgentFramework.SurfaceTest do
     on_exit(fn -> Tmux.kill_server(server) end)
     on_exit(fn -> end_recorded(dir) end)
     {:ok, sessions} = Table.open(Path.join(home, "caf.db"))
-    %{config: config, fields: fields, sessions: sessions, dir: dir, home: home}
+    %{config: config, i: instance, fields: fields, sessions: sessions, dir: dir, home: home}
   end
 
   defp free_port do
@@ -165,7 +167,7 @@ defmodule CodingAgentFramework.SurfaceTest do
     # A restart on the same home: the parts read their tables again, `Sessions` adopts the
     # held delegates, which ran on, and the tree comes back the same. The hooks' secret is the
     # home's, so the held delegates' hooks are still taken.
-    :ok = stop_supervised({CodingAgentFramework, "t"})
+    :ok = stop_supervised({CodingAgentFramework, ctx.i})
     parts = start(ctx.config)
     {:ok, again} = settled(parts, ctx)
     assert Enum.map(again.agents, & &1.name) == Enum.map(tree.agents, & &1.name)
@@ -180,7 +182,7 @@ defmodule CodingAgentFramework.SurfaceTest do
   # An app's landing runs through `Jobs` itself (F-171's new-3): no agent's tool runs a job.
   test "a job's late end is kept in its row, told, and cued on jobs", ctx do
     start(ctx.config)
-    {:ok, %{ref: _}} = CodingAgentFramework.subscribe("t", ["jobs"])
+    {:ok, %{ref: _}} = CodingAgentFramework.subscribe(ctx.i, ["jobs"])
     {:ok, jobs} = Jobs.Table.open(Path.join(ctx.home, "parts/jobs/jobs.db"))
 
     # A job whose call answered `{:unknown, :dropped}`, its end read since: `Jobs` owes it, and
@@ -224,7 +226,7 @@ defmodule CodingAgentFramework.SurfaceTest do
   test "a tree with agents: false starts the lease parts alone, and a job takes its lease",
        ctx do
     programs = Map.drop(ctx.fields[:programs], [:gh, :ssh, :ssh_keygen])
-    fields = [home: ctx.home, instance: "t", programs: programs, env: %{path: "/nonexistent"}]
+    fields = [home: ctx.home, instance: ctx.i, programs: programs, env: %{path: "/nonexistent"}]
     {:ok, config} = Config.new(fields ++ [agents: false])
     parts = CodingAgentFramework.parts(start_supervised!({CodingAgentFramework, config}))
     assert Enum.sort(Map.keys(parts)) == Enum.sort([:home | Config.agentless()])
@@ -256,7 +258,7 @@ defmodule CodingAgentFramework.SurfaceTest do
 
     assert CodingAgentFramework.agent_rows(config) == {:ok, %{agents: [], delegates: []}}
     # By the instance's name, as `subscribe/2` takes it (F-201).
-    assert CodingAgentFramework.agent_rows("t") == {:ok, %{agents: [], delegates: []}}
+    assert CodingAgentFramework.agent_rows(ctx.i) == {:ok, %{agents: [], delegates: []}}
     assert CodingAgentFramework.agent_rows("none") == {:refused, :no_instance}
   end
 
@@ -268,7 +270,7 @@ defmodule CodingAgentFramework.SurfaceTest do
     for f <- ~w(cpu memory io), do: File.write!(Path.join(dir, f), "some total=0\nfull total=0\n")
     pressure = [source: :psi, dir: dir, full: 0.05]
 
-    fields = [home: ctx.home, instance: "t", programs: programs, env: %{path: "/nonexistent"}]
+    fields = [home: ctx.home, instance: ctx.i, programs: programs, env: %{path: "/nonexistent"}]
     {:ok, config} = Config.new(fields ++ [agents: false, pressure: pressure])
     sup = start_supervised!({CodingAgentFramework, config})
     parts = CodingAgentFramework.parts(sup)
@@ -289,7 +291,7 @@ defmodule CodingAgentFramework.SurfaceTest do
   # F-266: an app's panel of what holds the machine, read through the facade.
   test "holds reads two leases with their jobs, the copies and the pressure", ctx do
     programs = Map.drop(ctx.fields[:programs], [:gh, :ssh, :ssh_keygen])
-    fields = [home: ctx.home, instance: "t", programs: programs, env: %{path: "/nonexistent"}]
+    fields = [home: ctx.home, instance: ctx.i, programs: programs, env: %{path: "/nonexistent"}]
     {:ok, config} = Config.new(fields ++ [agents: false])
     parts = CodingAgentFramework.parts(start_supervised!({CodingAgentFramework, config}))
     {:ok, units} = CodingAgentFramework.job_units(config, :heavy, "app")
@@ -311,7 +313,7 @@ defmodule CodingAgentFramework.SurfaceTest do
       end
 
     started = fn ->
-      with {:ok, %{leases: [_, _] = leases} = holds} <- CodingAgentFramework.holds("t"),
+      with {:ok, %{leases: [_, _] = leases} = holds} <- CodingAgentFramework.holds(ctx.i),
            true <- Enum.all?(leases, &match?(%{job: %{state: "running"}}, &1)),
            true <- Enum.all?(leases, &(File.read(&1.job.log) == {:ok, "started #{&1.job.id}\n"})) do
         {:ok, holds}
@@ -344,7 +346,7 @@ defmodule CodingAgentFramework.SurfaceTest do
 
     # Each lease is released once its job's end is written: newest first, the last `ended:`.
     released = fn ->
-      case CodingAgentFramework.holds("t", ended: 1) do
+      case CodingAgentFramework.holds(ctx.i, ended: 1) do
         {:ok, %{leases: [%{released_at: at}]} = h} when is_integer(at) -> {:ok, h}
         _ -> nil
       end
@@ -354,7 +356,7 @@ defmodule CodingAgentFramework.SurfaceTest do
     assert %{job: %{id: id, state: "exited", code: 0}, released_by: "monitor"} = last
     assert last.id == Enum.max(Enum.map(holds.leases, & &1.id)) and id in ~w(one two)
 
-    assert {:refused, {:bad, :ended}} = CodingAgentFramework.holds("t", ended: 201)
+    assert {:refused, {:bad, :ended}} = CodingAgentFramework.holds(ctx.i, ended: 201)
     assert {:refused, :no_instance} = CodingAgentFramework.holds("none")
   end
 
@@ -397,7 +399,7 @@ defmodule CodingAgentFramework.SurfaceTest do
     parent = start_supervised!(child)
     watch = Process.monitor(parent)
     [{_, tree, _, _}] = Supervisor.which_children(parent)
-    {:ok, %{tree: ^tree}} = CodingAgentFramework.subscribe("t", ["sessions"])
+    {:ok, %{tree: ^tree}} = CodingAgentFramework.subscribe(ctx.i, ["sessions"])
 
     Process.exit(tree, :kill)
 
@@ -413,11 +415,11 @@ defmodule CodingAgentFramework.SurfaceTest do
       )
 
     refute_received {:DOWN, ^watch, _, _, _}
-    assert {:ok, %{tree: ^again}} = CodingAgentFramework.subscribe("t", ["sessions"])
+    assert {:ok, %{tree: ^again}} = CodingAgentFramework.subscribe(ctx.i, ["sessions"])
 
     # An instance that runs on is still refused, once the bound has passed.
     assert CodingAgentFramework.start_link(%{ctx.config | restart_wait: 100}) ==
-             {:refused, {:instance_running, "t"}}
+             {:refused, {:instance_running, ctx.i}}
   end
 
   test "a delegate's end ends its services, and hands a kept one to its parent", ctx do
@@ -1205,7 +1207,7 @@ defmodule CodingAgentFramework.SurfaceTest do
   test "a delegate's held request is in the inbox, cued, told to its parent, answered once",
        ctx do
     parts = start(ctx.config)
-    {:ok, %{ref: _}} = CodingAgentFramework.subscribe("t", ["prompts"])
+    {:ok, %{ref: _}} = CodingAgentFramework.subscribe(ctx.i, ["prompts"])
 
     assert {:ok, %{delegate: name}} =
              MCP.call(parts.mcp, "app-main", "start_delegate", args("unit/one"))
@@ -1230,9 +1232,9 @@ defmodule CodingAgentFramework.SurfaceTest do
       end)
 
     assert_receive {:caf_cue, %{topic: "prompts", ids: [id]}}, 20_000
-    assert {:ok, [p]} = CodingAgentFramework.prompts("t", subtree: "app-main")
+    assert {:ok, [p]} = CodingAgentFramework.prompts(ctx.i, subtree: "app-main")
     assert %{id: ^id, kind: "permission", agent: ^name, parent: "app-main", project: "app"} = p
-    assert {:ok, []} = CodingAgentFramework.prompts("t", kind: "dialog")
+    assert {:ok, []} = CodingAgentFramework.prompts(ctx.i, kind: "dialog")
 
     {:ok, mtable} = Mailbox.Table.open(Path.join(ctx.home, "caf.db"))
 
@@ -1241,9 +1243,9 @@ defmodule CodingAgentFramework.SurfaceTest do
 
     assert [%{from_agent: ^name, text: "waiting on permission: Bash ls (prompt " <> _}] = told
 
-    assert {:ok, :sent} = CodingAgentFramework.answer("t", id, "allow", "sam")
+    assert {:ok, :sent} = CodingAgentFramework.answer(ctx.i, id, "allow", "sam")
     assert Task.await(holder, 25_000) =~ ~s("behavior":"allow")
-    assert {:refused, :settled} = CodingAgentFramework.answer("t", id, "deny", "sam")
+    assert {:refused, :settled} = CodingAgentFramework.answer(ctx.i, id, "deny", "sam")
     assert_receive {:caf_cue, %{topic: "prompts", ids: [^id]}}, 20_000
     assert {:refused, :no_instance} = CodingAgentFramework.prompts("nope")
 
@@ -1258,15 +1260,15 @@ defmodule CodingAgentFramework.SurfaceTest do
   test "the Watch's symptoms and allow-list are the app's to read, and its prompt answered",
        ctx do
     parts = start(ctx.config)
-    {:ok, _} = CodingAgentFramework.subscribe("t", ["watch", "prompts"])
+    {:ok, _} = CodingAgentFramework.subscribe(ctx.i, ["watch", "prompts"])
 
     assert {:ok, %{"lost_viewer" => %{remedy: "reopen", cap: 10, allowed: true}}} =
-             CodingAgentFramework.remedies("t", :list)
+             CodingAgentFramework.remedies(ctx.i, :list)
 
     assert {:refused, {:bad, :request}} =
-             CodingAgentFramework.remedies("t", {:drop, "lost_viewer", :why})
+             CodingAgentFramework.remedies(ctx.i, {:drop, "lost_viewer", :why})
 
-    assert {:ok, false} = CodingAgentFramework.remedies("t", {:revoke, "end_owed", "sam"})
+    assert {:ok, false} = CodingAgentFramework.remedies(ctx.i, {:revoke, "end_owed", "sam"})
 
     sym = %{kind: "end_owed", target: "app-main", state: "k1", source: "healer", since: 1}
     {:ok, %{id: sid}} = CodingAgentFramework.Watch.record(parts.watch, sym)
@@ -1274,11 +1276,11 @@ defmodule CodingAgentFramework.SurfaceTest do
     assert_receive {:caf_cue, %{topic: "watch", ids: [^sid]}}, 20_000
 
     assert {:ok, [%{id: ^sid, status: "asked"}]} =
-             CodingAgentFramework.symptoms("t", kind: "end_owed")
+             CodingAgentFramework.symptoms(ctx.i, kind: "end_owed")
 
     assert_receive {:caf_cue, %{topic: "prompts", ids: ["remedy:" <> _ = id]}}, 20_000
-    assert {:ok, :answered} = CodingAgentFramework.answer("t", id, "approve", "sam")
-    assert {:ok, %{"end_owed" => %{allowed: true}}} = CodingAgentFramework.remedies("t", :list)
+    assert {:ok, :answered} = CodingAgentFramework.answer(ctx.i, id, "approve", "sam")
+    assert {:ok, %{"end_owed" => %{allowed: true}}} = CodingAgentFramework.remedies(ctx.i, :list)
     assert {:refused, :no_instance} = CodingAgentFramework.symptoms("nope")
   end
 
@@ -1302,7 +1304,7 @@ defmodule CodingAgentFramework.SurfaceTest do
           {:ok, _} = CodingAgentFramework.Sessions.put_meta(parts.sessions, name, %{"epic" => 7})
 
     turns = fn by ->
-      with {:ok, rows} <- CodingAgentFramework.agent_rows("t", by),
+      with {:ok, rows} <- CodingAgentFramework.agent_rows(ctx.i, by),
            do: {:ok, Enum.map(rows, &{&1.name, &1.turn})}
     end
 
@@ -1318,10 +1320,10 @@ defmodule CodingAgentFramework.SurfaceTest do
 
     # By session id: the one row, as `agent_rows/1` gives it, with its turn.
     two = Table.get(ctx.sessions, "ws", "app-unit-two")
-    {:ok, %{agents: all}} = CodingAgentFramework.agent_rows("t")
+    {:ok, %{agents: all}} = CodingAgentFramework.agent_rows(ctx.i)
     listed = Enum.find(all, &(&1.name == "app-unit-two"))
 
-    assert {:ok, [row]} = CodingAgentFramework.agent_rows("t", session_id: two.session_id)
+    assert {:ok, [row]} = CodingAgentFramework.agent_rows(ctx.i, session_id: two.session_id)
 
     assert Enum.sort(Map.keys(row)) == Enum.sort([:turn | Map.keys(listed)])
     assert {row.id, row.name, row.turn} == {listed.id, "app-unit-two", "working"}
@@ -1338,14 +1340,14 @@ defmodule CodingAgentFramework.SurfaceTest do
       end)
 
     # No match, a key of no read, a value out of shape, and no instance of that name.
-    assert {:ok, []} = CodingAgentFramework.agent_rows("t", meta: {"epic", 8})
-    assert {:ok, []} = CodingAgentFramework.agent_rows("t", session_id: "no-such-session")
-    assert {:refused, {:bad, :ticket}} = CodingAgentFramework.agent_rows("t", ticket: 41)
-    assert {:refused, {:bad, :meta}} = CodingAgentFramework.agent_rows("t", meta: {"epic", 7.5})
-    assert {:refused, {:bad, :by}} = CodingAgentFramework.agent_rows("t", [])
+    assert {:ok, []} = CodingAgentFramework.agent_rows(ctx.i, meta: {"epic", 8})
+    assert {:ok, []} = CodingAgentFramework.agent_rows(ctx.i, session_id: "no-such-session")
+    assert {:refused, {:bad, :ticket}} = CodingAgentFramework.agent_rows(ctx.i, ticket: 41)
+    assert {:refused, {:bad, :meta}} = CodingAgentFramework.agent_rows(ctx.i, meta: {"epic", 7.5})
+    assert {:refused, {:bad, :by}} = CodingAgentFramework.agent_rows(ctx.i, [])
 
     assert {:refused, {:bad, :by}} =
-             CodingAgentFramework.agent_rows("t", session_id: "a", meta: {"epic", 7})
+             CodingAgentFramework.agent_rows(ctx.i, session_id: "a", meta: {"epic", 7})
 
     assert {:refused, :no_instance} = CodingAgentFramework.agent_rows("nope", session_id: "a")
   end

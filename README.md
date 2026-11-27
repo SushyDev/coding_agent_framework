@@ -527,6 +527,8 @@ Built, each from a checked model in `model/tla/`:
 - a typed row is pasted whole, any number of lines up to 8 000 bytes, into a tmux buffer named
   for its row, and settled by its transcript line (F-279): a message arrives as a message, not
   as a due file, which serves only the rows past that bound.
+- each test that starts a tree takes an instance name of its own (F-283), so two such tests in
+  one VM no longer refuse each other `{:instance_running, "t"}`.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

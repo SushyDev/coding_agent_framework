@@ -194,9 +194,12 @@ defmodule CodingAgentFramework.TmuxContractTest do
 
       assert {:ok, %{width: 50, text: "hello\nworld\n" <> _}} =
                await(fn ->
-                 with {:ok, %{text: "hello\nworld\n" <> _}} = ok <-
-                        Tmux.capture(ctx.server, pane, "alpha"),
-                      do: ok
+                 # A capture before the script printed is an `{:ok, …}` too, so only the
+                 # printed one ends the wait.
+                 case Tmux.capture(ctx.server, pane, "alpha") do
+                   {:ok, %{text: "hello\nworld\n" <> _}} = ok -> ok
+                   _ -> nil
+                 end
                end)
     end
 

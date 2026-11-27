@@ -19,7 +19,7 @@ defmodule CodingAgentFramework.Example.TreeMainTest do
 
     data = %{
       "home" => Path.join(dir, "home"),
-      "instance" => "t",
+      "instance" => instance_name("tree-main"),
       "accounts" => ["one"],
       "ports" => %{"intake" => free_port(), "mcp" => free_port()},
       "projects" => %{
