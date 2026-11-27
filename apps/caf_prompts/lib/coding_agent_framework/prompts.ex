@@ -85,6 +85,15 @@ defmodule CodingAgentFramework.Prompts do
   the prompt's id, kind and `by`, who closed it, read from its owner's row in that read.
   `answered/3` reads it as the closed prompt's `by` and `at`. A close no read saw (the inbox
   was down) is recorded by the first `answered/3` page that holds it, `late`, with no time.
+
+  **An answer settles before its close** (F-295, `model/tla/Inbox.tla`). An owner may take an
+  answer and cue before `answer/5` settles the answer's row in `Acts` (the `Mailbox` since
+  F-289). A prompt the last read listed that has left its owner while its answer's row is open
+  (claimed or acted) is still listed, `answering`, so a read on the owner's cue never finds it
+  only gone; and a close whose answer row is open writes no `closed` fact, so no closer is
+  guessed. Once the row settles, `answer/5` has the inbox read again, which lets the prompt go
+  and writes its fact with the answer's actor, and cues `prompts` with its id itself.
+
   Every place a prompt closes, and its `by`, never nil:
 
   | kind | it closes when | `by` |
@@ -124,7 +133,8 @@ defmodule CodingAgentFramework.Prompts do
 
   **Cues.** It reads again on each cue of its owners (`reads/0`), and after a read that opened,
   moved or closed a prompt it calls `notify` with `%{topic: "prompts", ids: ids}`, the ids of
-  those prompts: the inbox's one topic. The embedding app's tree starts one per instance.
+  those prompts: the inbox's one topic. An answer's own cue, once its row settled, is called
+  from `answer/5`'s caller (F-295). The embedding app's tree starts one per instance.
   """
 
   use GenServer
@@ -250,6 +260,9 @@ defmodule CodingAgentFramework.Prompts do
   - `withdrawn`: an ask withdrawn through `answer/5`; `reason` the reason the agent read;
   - `unknown`: an answer was handed on and its owner did not say whether it took it; `reason`
     the owner's answer;
+  - `answering`: it left its owner while its answer's row is not yet settled, seen only past a
+    restart of the inbox (F-295; before one, `read/3` lists it `answering`); `choice`, `by` and
+    `at` as its answer's row has them, and no `closed` fact is written for it;
   - `closed`: it left with no answer through the inbox: `choice` is nil, and `by` names who
     closed it, never nil (the module doc's "Each close a fact"): the actor its owner recorded
     (`app` for the app's callback, a name), or `{:framework, why}` for a close of the
@@ -365,14 +378,28 @@ defmodule CodingAgentFramework.Prompts do
           {:ok, term} | {:refused, term} | {:unknown, term}
   def answer(prompts, id, choice, who, opts \\ []) do
     with true <- (is_binary(who) and String.trim(who) != "") or {:refused, {:bad, :who}},
-         {:ok, prompt, owners} <- call(prompts, {:get, id}, opts),
+         {:ok, prompt, owners, notify} <- call(prompts, {:get, id}, opts),
          true <- prompt.status == "open" or refused_status(prompt.status),
          {:ok, act} <- choose(prompt, choice, who),
          {:ok, row} <- answering(owners.acts, prompt, choice, who) do
       answer = hand(owners, prompt, act, who)
       Acts.answered(owners.acts, row, answer)
+      settled(prompts, notify, id, answer)
       answer
     end
+  end
+
+  # F-295 (`Inbox.tla`'s CueSettled): the owner cues as it takes the answer, before its row in
+  # `Acts` settles, and the read on that cue lists the prompt `answering`. Once the row has
+  # settled, the inbox reads again, which writes its `closed` fact, and the prompt's cue goes
+  # from here, so no restart of the inbox loses it; that read leaves it out of its own cue. A
+  # refused answer moved nothing of its own, but the prompt may have left its owner otherwise
+  # while its row was open: that read cues it as it would any move.
+  defp settled(prompts, _notify, _id, {:refused, _}), do: GenServer.cast(prompts, :read)
+
+  defp settled(prompts, notify, id, _answer) do
+    GenServer.cast(prompts, {:settled, id})
+    notify.(%{topic: "prompts", ids: [id]})
   end
 
   @doc """
@@ -501,6 +528,8 @@ defmodule CodingAgentFramework.Prompts do
 
   @impl true
   def handle_cast(:read, s), do: {:noreply, reread(s)}
+  # An answer's row settled (F-295): its caller cues the prompt itself.
+  def handle_cast({:settled, id}, s), do: {:noreply, reread(s, [id])}
 
   @impl true
   def handle_call({:read, filter}, _from, s) do
@@ -518,7 +547,7 @@ defmodule CodingAgentFramework.Prompts do
         reply =
           case Enum.find(all, &(&1.id == id)) do
             nil -> gone(s, id)
-            prompt -> {:ok, prompt, s.owners}
+            prompt -> {:ok, prompt, s.owners, s.notify}
           end
 
         {:reply, reply, opened(s, all)}
@@ -649,7 +678,14 @@ defmodule CodingAgentFramework.Prompts do
   defp closed(fact, rows, shut) do
     base = Map.drop(fact, [:fact, :deadline])
 
-    case taken(rows) do
+    case taken(rows) || settling(rows) do
+      # Gone from its owner, its answer's row not yet settled: past a restart of the inbox,
+      # which lists such a prompt only while its last read did (F-295).
+      %{status: status} = row when status in ["claimed", "acted"] ->
+        by = %{by: row.actor, at: row.claimed_at, reason: nil}
+        choice = decode(row.detail)["choice"]
+        Map.merge(base, Map.merge(by, %{status: "answering", choice: choice}))
+
       nil ->
         d = decode(shut && shut.detail)
         by = load_by(d["by"])
@@ -678,13 +714,16 @@ defmodule CodingAgentFramework.Prompts do
 
   # A read of every prompt: what opened, moved or closed is cued, and a delegate's new prompt
   # is told to its parent. A read an owner did not answer decides nothing; the next cue reads
-  # again.
-  defp reread(s) do
+  # again. The ids in `cued` are cued by their answer's caller, so this read leaves them out.
+  defp reread(s, cued \\ []) do
     case list(s) do
       {:ok, all} ->
         # A mark set or taken back moves a prompt as its status does (F-254).
         now = Map.new(all, &{&1.id, {&1.status, &1.hidden}})
-        moved = for {id, _} <- Map.merge(s.shown, now), s.shown[id] != now[id], do: id
+
+        moved =
+          for {id, _} <- Map.merge(s.shown, now), s.shown[id] != now[id], id not in cued, do: id
+
         if moved != [], do: s.notify.(%{topic: "prompts", ids: Enum.sort(moved)})
         %{s | shown: now} |> opened(all) |> tell(all) |> closes(all)
 
@@ -736,7 +775,13 @@ defmodule CodingAgentFramework.Prompts do
   # One close's fact. `late` marks one found by `answered/3` with no fact: when it closed is not
   # known, and its closer is read from its owner's row as it is now.
   defp close(s, p, late) do
-    by = closer(s, p)
+    case closer(s, p) do
+      :settling -> :settling
+      by -> close(s, p, by, late)
+    end
+  end
+
+  defp close(s, p, by, late) do
     detail = %{prompt: p.id, kind: p.kind, by: dump_by(by)}
     detail = if late, do: Map.put(detail, :late, true), else: detail
     key = [state: "closed:#{s.host}:#{p.id}"]
@@ -759,12 +804,20 @@ defmodule CodingAgentFramework.Prompts do
 
   # Who closed prompt `p`, never nil: whoever answered it here (its answer row, taken or
   # unknown), else its owner's row's word, else `{:framework, why}` for the framework's close.
+  # An answer row still open names no one yet: its answer may be what closed it, so nothing is
+  # written until it settles (F-295, `Inbox.tla`'s FactNamesAnswerer).
   defp closer(s, p) do
-    case taken(answers(s, [p])[p.id] || []) do
-      %{actor: actor} -> actor
-      nil -> owned(s, p)
+    rows = answers(s, [p])[p.id] || []
+
+    case {taken(rows), settling(rows)} do
+      {%{actor: actor}, _} -> actor
+      {nil, %{}} -> :settling
+      {nil, nil} -> owned(s, p)
     end
   end
+
+  # An answer row claimed (or acted) and not yet settled by its owner's answer.
+  defp settling(rows), do: Enum.find(rows, &(&1.status in ["claimed", "acted"]))
 
   # A hold names who decided it, or how it ended (`Intake.Table`'s `hold` and `actor`).
   defp owned(s, %{kind: kind, id: id} = p) when kind in ["permission", "stop_cap"] do
@@ -883,8 +936,10 @@ defmodule CodingAgentFramework.Prompts do
 
   @doc """
   Every prompt open now, as one function of its owners' rows (the module doc's table): the
-  `Intake` holds, the agent rows of `Sessions` and the asks of `Mailbox`. `s` is the process's
-  state; answers `{:ok, prompts}` or `{:unknown, reason}` when `Mailbox` did not answer.
+  `Intake` holds, the agent rows of `Sessions` and the asks of `Mailbox`, and a prompt the last
+  read listed that left its owner while its answer's row is open, `answering` (F-295). `s` is
+  the process's state; answers `{:ok, prompts}` or `{:unknown, reason}` when `Mailbox` did not
+  answer.
   """
   @spec list(map) :: {:ok, [prompt]} | {:unknown, term}
   def list(s) do
@@ -902,10 +957,28 @@ defmodule CodingAgentFramework.Prompts do
           logins(s) ++
           limits(rows) ++ starts(s)
 
+      prompts = prompts ++ answering(s, prompts)
       marks = marks(s, Enum.map(prompts, & &1.id))
       prompts = Enum.map(prompts, &Map.put(&1, :hidden, marks[&1.id]))
       {:ok, Enum.sort_by(prompts, &{&1.opened_at || 0, &1.id})}
     end
+  end
+
+  # F-295 (`Inbox.tla`'s Listed): a prompt the last read listed that has left its owner's rows
+  # while its answer's row is open. Its owner took the answer and cued before the row settled
+  # (the Mailbox since F-289), so it is `answering` until the row settles: a read on that cue
+  # never finds it only gone, and its close is written once the row names who answered.
+  defp answering(%{adb: nil}, _prompts), do: []
+
+  defp answering(s, prompts) do
+    open = MapSet.new(prompts, & &1.id)
+    gone = for {id, p} <- s.seen, not MapSet.member?(open, id), do: p
+    answers = answers(s, gone)
+
+    for p <- gone,
+        rows = answers[p.id] || [],
+        taken(rows) == nil and settling(rows) != nil,
+        do: %{p | status: "answering"}
   end
 
   # Each prompt's hidden mark (F-254): its latest `hide` or `unhide` fact in `Acts`, by id, nil
