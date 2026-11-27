@@ -287,6 +287,87 @@ defmodule CodingAgentFramework.MainsTest do
     assert {:refused, {:screen, %{state: :idle}}} = Mains.interrupt(mains, "app-epic", state: now)
   end
 
+  # F-270; Team.tla's FixActs and InterruptRetryOpen: an interrupt whose Escape reached a screen
+  # that went on running moves no hook event, yet once its claim settled the next one is a new
+  # state. The claims are taken and settled here as `MCP`'s fix does (`act/5`).
+  test "a main session's second interrupt is claimed once the first settled, refused once idle",
+       ctx do
+    claude = ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle())
+    wrapper = Path.join(ctx.dir, "claude-stubborn")
+    run = "exec #{claude} --screen running --ignore-escapes 1 \"$@\"\n"
+    File.write!(wrapper, "#!#{program!(:bash)}\n" <> run)
+    File.chmod!(wrapper, 0o755)
+    inlet = start_supervised!(Supervisor.child_spec({Inlet, tmux: ctx.server}, id: :press))
+
+    acts =
+      start_supervised!(
+        {Acts, db: Path.join(ctx.dir, "acts.db"), start_id: "s1", host: "test", instance: "t"}
+      )
+
+    launch = Keyword.put(ctx.mains_opts[:launch], :claude, wrapper)
+    opts = Keyword.merge(ctx.mains_opts, launch: launch, inlet: inlet, acts: acts)
+    mains = mains(%{ctx | mains_opts: opts})
+    assert {:ok, _} = level(ctx, mains)
+
+    assert {:ok, %{name: "app-epic"}} =
+             Mains.start_main(mains, "app", "app-epic", "Plan it.", from: "app-main")
+
+    assert {:ok, _} = await(fn -> running(ctx, "app-epic") end)
+
+    assert {:ok, %{interrupted: nil} = first} =
+             Mains.fix_state(mains, "app-epic", fix: :interrupt)
+
+    # The first: the key goes, and the screen goes on running.
+    {:ok, one} = Acts.claim(acts, "op", "app-epic", first, :interrupt)
+
+    # While it is under way the state is the same, and a second claim of it is refused.
+    assert {:ok, ^first} = Mains.fix_state(mains, "app-epic", fix: :interrupt)
+    assert {:refused, {:claimed, "op"}} = Acts.claim(acts, "op", "app-epic", first, :interrupt)
+
+    assert {:unknown, {:still_running, _}} = Mains.interrupt(mains, "app-epic", state: first)
+    assert File.read!(Path.join(ctx.dir, "escapes")) == "esc\n"
+    refute File.exists?(Path.join(ctx.dir, "interrupted"))
+    settle(acts, one, {:unknown, :still_running})
+
+    # Settled, it moved the state: no hook event came, and the retry is claimed and acts.
+    assert {:refused, {:already_claimed, "op"}} =
+             Acts.claim(acts, "op", "app-epic", first, :interrupt)
+
+    assert {:ok, %{interrupted: ^one} = second} =
+             Mains.fix_state(mains, "app-epic", fix: :interrupt)
+
+    assert second.offset == first.offset
+    assert {:refused, {:moved, ^second}} = Mains.interrupt(mains, "app-epic", state: first)
+    {:ok, two} = Acts.claim(acts, "op", "app-epic", second, :interrupt)
+    assert {:ok, :sent} = Mains.interrupt(mains, "app-epic", state: second)
+    assert File.exists?(Path.join(ctx.dir, "interrupted"))
+    settle(acts, two, {:ok, :sent})
+
+    # The turn ended: the next is claimed on a new state and finds no turn, its claim let go.
+    assert {:ok, %{interrupted: ^two} = third} =
+             Mains.fix_state(mains, "app-epic", fix: :interrupt)
+
+    {:ok, three} = Acts.claim(acts, "op", "app-epic", third, :interrupt)
+
+    assert {:refused, {:screen, %{state: :idle}}} =
+             Mains.interrupt(mains, "app-epic", state: third)
+
+    settle(acts, three, {:refused, :screen})
+    assert File.read!(Path.join(ctx.dir, "escapes")) == "esc\n"
+
+    # A claim let go moved nothing: the state is the same, and free for the next.
+    assert {:ok, ^third} = Mains.fix_state(mains, "app-epic", fix: :interrupt)
+    assert {:ok, _} = Acts.claim(acts, "op", "app-epic", third, :interrupt)
+  end
+
+  # As `MCP`'s `act/5` settles a fix: acted unless refused, and a refused one's state let go.
+  defp settle(acts, id, outcome) do
+    acted = not match?({:refused, _}, outcome)
+
+    {:ok, _} =
+      Acts.settle(acts, id, :not_verified, answer: outcome, acted: acted, free: not acted)
+  end
+
   # F-258: only an interrupt's state has the newest hook event. An answer's state is as before,
   # so a hook event between the answer's read and its act moves the interrupt's state only, and
   # the answer is still taken (Team.tla's AnswerClaimed, then FixActs).

@@ -75,9 +75,40 @@ defmodule CodingAgentFramework.Prompts do
   its open time. The read before an answer records it too, so every prompt answered here has one.
 
   **Closed prompts** (F-254, `answered/3`). A prompt that left the inbox has no owner's row that
-  still shows it, so it is read from the ledger alone: its `opened` fact (what was asked) and
-  its `answer` row (who chose what, and when). No copy is kept; open prompts keep no row of
-  their own.
+  still shows it, so it is read from the ledger alone: its `opened` fact (what was asked), its
+  `answer` row (who chose what, and when) and its `closed` fact (who closed it, F-270). No copy
+  is kept; open prompts keep no row of their own.
+
+  **Each close a fact** (F-270, from F-254's new-1). The read that finds a prompt it listed
+  before no longer open records its close in `Acts` (`Acts.record/7`, actor `prompts:<host>`,
+  act `closed`, keyed `closed:<host>:<prompt id>`, target as its `opened` fact), its `detail`
+  the prompt's id, kind and `by`, who closed it, read from its owner's row in that read.
+  `answered/3` reads it as the closed prompt's `by` and `at`. A close no read saw (the inbox
+  was down) is recorded by the first `answered/3` page that holds it, `late`, with no time.
+  Every place a prompt closes, and its `by`, never nil:
+
+  | kind | it closes when | `by` |
+  | --- | --- | --- |
+  | any | an answer through `answer/5` is taken, or handed on with its outcome unknown | the answer's `who` (the answer row's actor) |
+  | `permission`, `stop_cap` | `Intake` decides the hold otherwise: the app's callback, a pause, the cap | the hold's `actor` (`app`, `pause`, `capped`, a name) |
+  | `permission`, `stop_cap` | the hold's deadline passes | `{:framework, :expired}` |
+  | `permission`, `stop_cap` | the hold passes with no actor, or its decision's write is unknown | `{:framework, :passed}`, `{:framework, :unknown}` |
+  | `permission` (a hook's or a stream's) | Claude Code stops waiting on it (its hook's connection closed, or its request left the fold): answered on its screen, or its session ended | `{:framework, :withdrawn}`, `{:framework, :ended}` once its agent row ended or stopped |
+  | `dialog` | a startup dialog the app's callback or the config pressed | that press's act's actor in `Acts` |
+  | `dialog` | the screen no longer shows it with no press of ours (answered on the pane), or its start stopped | `{:framework, :withdrawn}`, `{:framework, :ended}` |
+  | `ask` | only by `answer/5` (an answer or a withdrawal) | the answer's `who`; one answered before F-194 has no answer row, and reads `{:framework, :passed}` |
+  | `remedy` | the `Watch`'s row answered elsewhere (a healer copying a person's answer, F-183), or its state passed | the row's `answered_by`; `{:framework, :passed}` |
+  | `login` | a check before a start or a resume finds the account logged in | `{:framework, :logged_in}` |
+  | start's `limit` | its deadline passes: its owner takes the wait | `{:framework, :default}`, else `{:framework, :passed}` |
+  | `usage_credits` | its deadline passes: the healer takes the stop | `{:framework, :default}` |
+  | `limit` (an agent's) | the limit leaves its row (a reset, a turn after it) | `{:framework, :passed}` |
+  | any with an agent | its agent row ended or stopped first | `{:framework, :ended}` |
+
+  `{:framework, why}` names the framework's own close: `:expired` (a deadline passed, no
+  default), `:default` (a deadline passed and its owner took its kind's default), `:ended`,
+  `:withdrawn` (Claude Code or its screen no longer waits on it, no answer of ours), `:passed`
+  (its owner's row moved on by its own rule), `:unknown` and `:logged_in`. It is read from the
+  owner's row when the inbox sees the close, so for a `late` one it is the row as it is then.
 
   **A hidden mark** (F-254, `hide/3`, `unhide/3`). A person sets a prompt aside: it stays open
   and answerable, its owner and its answer path unchanged, and `read/3` shows `hidden: %{by,
@@ -100,7 +131,7 @@ defmodule CodingAgentFramework.Prompts do
 
   alias CodingAgentFramework.{Acts, Delegates, Intake, Logins, Mailbox, Mains, Sessions, Stream}
   alias CodingAgentFramework.{Store, Watch}
-  alias CodingAgentFramework.Sessions.{Agents, Limit, Menu}
+  alias CodingAgentFramework.Sessions.{Agents, Dialog, Limit, Menu}
 
   @timeout 5_000
   # The most characters of a tool call's input a permission prompt's text carries.
@@ -137,7 +168,7 @@ defmodule CodingAgentFramework.Prompts do
           options: list | nil,
           opened_at: integer | nil,
           choice: term,
-          by: String.t() | nil,
+          by: String.t() | {:framework, atom},
           at: integer | nil,
           reason: term
         }
@@ -200,9 +231,15 @@ defmodule CodingAgentFramework.Prompts do
 
   @doc """
   The prompts that closed, newest open first, one page of at most `limit:` (1 to #{@page},
-  #{@default_page} by default), the next older page from `before:` (the last page's `next`).
+  #{@default_page} by default), the next older page from `before:` (the last page's `next`),
+  and only agent `agent:`'s when it is given (F-270): the prompts whose `agent` is that name,
+  as `read/3`'s `agent:` reads open ones. That is the agent whose wait it is: the asker of an
+  ask, a permission or a dialog, the agent a start waits to start as, and the agent a remedy is
+  about. It is the agent an `opened` fact is keyed by, so the filter is a term of the ledger's
+  query, on its index, and the page is bounded as without it.
   It is a separate read from `read/3`, not a filter on it, since a closed prompt has no owner's
-  row: it is read from the ledger, its `opened` fact and its `answer` row in `Acts`.
+  row: it is read from the ledger, its `opened` fact, its `answer` row and its `closed` fact in
+  `Acts`.
 
   Each is `%{id, kind, status, agent, parent, project, subagent, text, options, opened_at,
   choice, by, at, reason}`: `status` is
@@ -213,29 +250,42 @@ defmodule CodingAgentFramework.Prompts do
   - `withdrawn`: an ask withdrawn through `answer/5`; `reason` the reason the agent read;
   - `unknown`: an answer was handed on and its owner did not say whether it took it; `reason`
     the owner's answer;
-  - `closed`: it left with no answer through the inbox (answered on the pane, by its owner's
-    own default, or its agent ended): `choice`, `by` and `at` are nil.
+  - `closed`: it left with no answer through the inbox: `choice` is nil, and `by` names who
+    closed it, never nil (the module doc's "Each close a fact"): the actor its owner recorded
+    (`app` for the app's callback, a name), or `{:framework, why}` for a close of the
+    framework's, `why` one of `:expired`, `:default`, `:ended`, `:withdrawn`, `:passed`,
+    `:unknown` and `:logged_in`. `at` is when the inbox saw it close, nil for a close found
+    only by this read.
 
-  It pages by when each prompt opened, since that is a fact for every prompt, while when one
-  closed is known only for those answered here. Answers `{:ok, %{prompts: closed, next:
-  cursor}}`, `next` nil for a page shorter than its limit (the last); `{:refused, {:bad,
-  :filter}}`, `{:refused, :no_ledger}` for an inbox started with no `acts_db:`, or `{:unknown,
-  reason}`.
+  It pages by when each prompt opened, since that is a fact for every prompt. Answers `{:ok,
+  %{prompts: closed, next: cursor}}`, `next` nil for a page shorter than its limit (the last);
+  `{:refused, {:bad, key}}` for a key it does not take or a value it does not (`limit:` out of
+  range, say), `{:refused, {:bad, :filter}}` for a filter that is not a keyword list,
+  `{:refused, :no_ledger}` for an inbox started with no `acts_db:`, or `{:unknown, reason}`.
 
-      Prompts.answered(prompts, limit: 20)
+      Prompts.answered(prompts, agent: "app-unit", limit: 20)
       #=> {:ok, %{prompts: [%{id: "ask:12", status: "answered", by: "sam", …}], next: 431}}
+      Prompts.answered(prompts, kind: "ask")
+      #=> {:refused, {:bad, :kind}}
   """
   @spec answered(GenServer.server(), keyword, keyword) ::
           {:ok, %{prompts: [closed], next: integer | nil}} | {:refused, term} | {:unknown, term}
   def answered(prompts, filter \\ [], opts \\ []) do
-    limit = Keyword.get(filter, :limit, @default_page)
-    before = Keyword.get(filter, :before)
+    with true <- Keyword.keyword?(filter) or {:refused, {:bad, :filter}},
+         :ok <- page_filter(filter) do
+      page = {Keyword.get(filter, :limit, @default_page), filter[:before], filter[:agent]}
+      call(prompts, {:answered, page}, opts)
+    end
+  end
 
-    ok? =
-      Keyword.keyword?(filter) and Keyword.keys(filter) -- [:limit, :before] == [] and
-        is_integer(limit) and limit in 1..@page and (before == nil or is_integer(before))
-
-    if ok?, do: call(prompts, {:answered, limit, before}, opts), else: {:refused, {:bad, :filter}}
+  # Each key named, so a caller reads which one it got wrong.
+  defp page_filter(filter) do
+    Enum.find_value(filter, :ok, fn
+      {:limit, n} when is_integer(n) and n in 1..@page -> nil
+      {:before, id} when is_integer(id) -> nil
+      {:agent, name} when is_binary(name) and name != "" -> nil
+      {key, _} -> {:refused, {:bad, key}}
+    end)
   end
 
   @doc """
@@ -425,7 +475,10 @@ defmodule CodingAgentFramework.Prompts do
         # across starts, and this keeps it to one call per start.
         told: MapSet.new(),
         # The prompts whose open is recorded in `Acts` since this start, the same way.
-        opened: MapSet.new()
+        opened: MapSet.new(),
+        # id -> prompt, as the last read found them, and those gone whose close is not yet
+        # written: a prompt in it that a read no longer lists has closed (F-270).
+        seen: %{}
       }
 
       {:ok, s, {:continue, :read}}
@@ -478,16 +531,29 @@ defmodule CodingAgentFramework.Prompts do
   def handle_call(_closed_or_mark, _from, %{adb: nil} = s),
     do: {:reply, {:refused, :no_ledger}, s}
 
-  def handle_call({:answered, limit, before}, _from, s) do
+  def handle_call({:answered, {limit, before, agent}}, _from, s) do
     reply =
       with {:ok, all} <- list(s) do
         open = MapSet.new(all, & &1.id)
-        facts = opened_facts(s, limit + MapSet.size(open), before)
+        facts = opened_facts(s, limit + MapSet.size(open), before, agent)
         page = facts |> Enum.reject(&(&1.id in open)) |> Enum.take(limit)
         answers = answers(s, page)
         next = if length(page) == limit, do: List.last(page).fact
 
-        {:ok, %{prompts: Enum.map(page, &closed(&1, answers[&1.id] || [])), next: next}}
+        # A close the inbox did not see (it closed while the inbox was down, or before F-270)
+        # is named now, once, from its owner's row as it is now.
+        shut = shut(s, page)
+
+        late =
+          for p <- page, shut[p.id] == nil, taken(answers[p.id] || []) == nil, do: p
+
+        shut =
+          if late == [],
+            do: shut,
+            else: Enum.each(late, &close(s, &1, true)) && shut(s, page)
+
+        {:ok,
+         %{prompts: Enum.map(page, &closed(&1, answers[&1.id] || [], shut[&1.id])), next: next}}
       end
 
     {:reply, reply, s}
@@ -518,14 +584,15 @@ defmodule CodingAgentFramework.Prompts do
   defp markable(nil, :unhide), do: {:refused, :not_hidden}
   defp markable(_mark, :unhide), do: :ok
 
-  # The newest `opened` facts of this host before the cursor, as prompts: `n` covers a page
-  # whatever of them is open now.
-  defp opened_facts(s, n, before) do
-    {cursor, args} = if before, do: {" AND id < ?2", [before]}, else: {"", []}
-    where = "actor = ?1 AND act = 'opened'#{cursor} ORDER BY id DESC LIMIT #{n}"
+  # The newest `opened` facts of this host before the cursor, and of one agent when `agent` names
+  # it (the fact's target, F-270), as prompts: `n` covers a page whatever of them is open now.
+  defp opened_facts(s, n, before, agent) do
+    args = ["prompts:" <> s.host] ++ List.wrap(before) ++ List.wrap(agent)
+    cursor = if before, do: " AND id < ?2", else: ""
+    target = if agent, do: " AND target = ?#{length(args)}", else: ""
+    where = "actor = ?1 AND act = 'opened'#{cursor}#{target} ORDER BY id DESC LIMIT #{n}"
 
-    for row <-
-          Store.select(s.adb, "acts", Acts.Table.columns(), where, ["prompts:" <> s.host | args]),
+    for row <- Store.select(s.adb, "acts", Acts.Table.columns(), where, args),
         d = decode(row.detail),
         is_binary(d["prompt"]) do
       %{
@@ -538,6 +605,7 @@ defmodule CodingAgentFramework.Prompts do
         text: d["text"],
         options: d["options"],
         opened_at: d["opened_at"],
+        deadline: d["deadline"],
         fact: row.id
       }
     end
@@ -545,31 +613,48 @@ defmodule CodingAgentFramework.Prompts do
 
   # The `answer` rows of these prompts, by prompt id, oldest first. An answer's row is targeted
   # at the prompt's agent, or at its id when it has none (`answering/4`).
-  defp answers(_s, []), do: %{}
-
   defp answers(s, page) do
+    of_prompts(s, page, "answer", fn acc, prompt, row ->
+      Map.update(acc, prompt, [row], &(&1 ++ [row]))
+    end)
+  end
+
+  # The `closed` fact of each of these prompts, by prompt id, targeted as its `opened` fact.
+  defp shut(s, page), do: of_prompts(s, page, "closed", &Map.put(&1, &2, &3))
+
+  defp of_prompts(_s, [], _act, _put), do: %{}
+
+  defp of_prompts(s, page, act, put) do
     targets = page |> Enum.map(&(&1.agent || &1.id)) |> Enum.uniq()
     ids = MapSet.new(page, & &1.id)
-    marks = Store.marks(length(targets), 1)
+    marks = Store.marks(length(targets), 2)
+    where = "act = ?1 AND target IN (#{marks})"
 
-    for row <- Acts.Table.select(s.adb, "target IN (#{marks}) AND act = 'answer'", targets),
+    for row <- Acts.Table.select(s.adb, where, [act | targets]),
         prompt = decode(row.detail)["prompt"],
         prompt in ids,
         reduce: %{} do
-      acc -> Map.update(acc, prompt, [row], &(&1 ++ [row]))
+      acc -> put.(acc, prompt, row)
     end
   end
 
-  # A closed prompt by its answer rows: the one taken, else one whose outcome is unknown, else
-  # none (it left another way). A refused answer left it open, so it says nothing here.
-  defp closed(fact, rows) do
-    taken = Enum.find(rows, &(&1.outcome == "verified"))
-    unknown = Enum.find(rows, &(&1.outcome == "unknown"))
-    base = Map.drop(fact, [:fact])
+  # An answer row that closed its prompt: the one taken, else one whose outcome is unknown. A
+  # refused answer left it open, so it says nothing here.
+  defp taken(rows) do
+    Enum.find(rows, &(&1.outcome == "verified")) || Enum.find(rows, &(&1.outcome == "unknown"))
+  end
 
-    case taken || unknown do
+  # A closed prompt by its answer rows, else by its `closed` fact (F-270): who closed it, and
+  # when the inbox saw it, nil for a close found late.
+  defp closed(fact, rows, shut) do
+    base = Map.drop(fact, [:fact, :deadline])
+
+    case taken(rows) do
       nil ->
-        Map.merge(base, %{status: "closed", choice: nil, by: nil, at: nil, reason: nil})
+        d = decode(shut && shut.detail)
+        by = load_by(d["by"])
+        at = if shut && d["late"] != true, do: shut.claimed_at
+        Map.merge(base, %{status: "closed", choice: nil, by: by, at: at, reason: nil})
 
       row ->
         choice = decode(row.detail)["choice"]
@@ -601,7 +686,7 @@ defmodule CodingAgentFramework.Prompts do
         now = Map.new(all, &{&1.id, {&1.status, &1.hidden}})
         moved = for {id, _} <- Map.merge(s.shown, now), s.shown[id] != now[id], do: id
         if moved != [], do: s.notify.(%{topic: "prompts", ids: Enum.sort(moved)})
-        %{s | shown: now} |> opened(all) |> tell(all)
+        %{s | shown: now} |> opened(all) |> tell(all) |> closes(all)
 
       _unread ->
         s
@@ -617,8 +702,11 @@ defmodule CodingAgentFramework.Prompts do
     for p <- all, not MapSet.member?(s.opened, p.id), reduce: s do
       s ->
         at = p.opened_at || System.os_time(:millisecond)
-        # What was asked, so a closed prompt reads from this fact alone (F-254).
-        asked = Map.take(p, [:kind, :agent, :parent, :project, :subagent, :text, :options])
+        # What was asked, so a closed prompt reads from this fact alone (F-254), and its
+        # deadline, by which a close found late is named (F-270).
+        asked =
+          Map.take(p, [:kind, :agent, :parent, :project, :subagent, :text, :options, :deadline])
+
         detail = [detail: Map.merge(asked, %{prompt: p.id, opened_at: at})]
         key = [state: "opened:#{s.host}:#{p.id}"]
         actor = "prompts:" <> s.host
@@ -630,6 +718,146 @@ defmodule CodingAgentFramework.Prompts do
         end
     end
   end
+
+  # Each close as a fact (F-270, from F-254's new-1): a prompt the last read listed and this one
+  # does not has closed, and one row in `Acts` names who closed it (`closer/2`), read from its
+  # owner's row now, in the read that found it gone. Actor `prompts:<host>`, act `closed`, keyed
+  # `closed:<host>:<prompt id>`, so it is written once across restarts; one not written stays
+  # in `seen` and is tried again at the next read. With no ledger file nothing is read back, so
+  # nothing is written.
+  defp closes(%{adb: nil} = s, _all), do: s
+
+  defp closes(s, all) do
+    open = Map.new(all, &{&1.id, &1})
+    left = for {id, p} <- s.seen, not Map.has_key?(open, id), close(s, p, false) != :ok, do: p
+    %{s | seen: Map.merge(Map.new(left, &{&1.id, &1}), open)}
+  end
+
+  # One close's fact. `late` marks one found by `answered/3` with no fact: when it closed is not
+  # known, and its closer is read from its owner's row as it is now.
+  defp close(s, p, late) do
+    by = closer(s, p)
+    detail = %{prompt: p.id, kind: p.kind, by: dump_by(by)}
+    detail = if late, do: Map.put(detail, :late, true), else: detail
+    key = [state: "closed:#{s.host}:#{p.id}"]
+    actor = "prompts:" <> s.host
+
+    case Acts.record(
+           s.owners.acts,
+           actor,
+           p.agent || p.id,
+           :closed,
+           :verified,
+           [detail: detail],
+           key
+         ) do
+      {:ok, _} -> :ok
+      {:refused, {:already_claimed, _}} -> :ok
+      not_written -> not_written
+    end
+  end
+
+  # Who closed prompt `p`, never nil: whoever answered it here (its answer row, taken or
+  # unknown), else its owner's row's word, else `{:framework, why}` for the framework's close.
+  defp closer(s, p) do
+    case taken(answers(s, [p])[p.id] || []) do
+      %{actor: actor} -> actor
+      nil -> owned(s, p)
+    end
+  end
+
+  # A hold names who decided it, or how it ended (`Intake.Table`'s `hold` and `actor`).
+  defp owned(s, %{kind: kind, id: id} = p) when kind in ["permission", "stop_cap"] do
+    case String.split(id, ":") do
+      [_, n] ->
+        case Intake.Table.rows_by_id(s.idb, [int(n)]) do
+          [%{hold: hold, actor: actor}]
+          when hold in ["answered", "passed"] and is_binary(actor) ->
+            actor
+
+          [%{hold: "expired"}] ->
+            {:framework, :expired}
+
+          [%{hold: "unknown"}] ->
+            {:framework, :unknown}
+
+          [%{hold: "passed"}] ->
+            {:framework, :passed}
+
+          _lost_or_none ->
+            ended_or(s, p, :withdrawn)
+        end
+
+      _stream ->
+        ended_or(s, p, :withdrawn)
+    end
+  end
+
+  # A startup dialog pressed by the app's callback or the config names the press's act's actor;
+  # one gone with no press of ours was answered on the pane, or its start ended.
+  defp owned(s, %{kind: "dialog", id: id} = p) do
+    with ["dialog", agent, _key, kind] when kind != "menu" <- String.split(id, ":"),
+         %{} = row <- Agents.get(s.agents, agent),
+         %{act: act} when is_integer(act) <-
+           Enum.find_value(Dialog.answers(row), fn {k, a} ->
+             if Atom.to_string(k) == kind and a.mark == "sent", do: a
+           end),
+         [%{actor: actor}] <- Acts.Table.select(s.adb, "id = ?1", [act]) do
+      actor
+    else
+      _ -> ended_or(s, p, :withdrawn)
+    end
+  end
+
+  # A remedy is the `Watch`'s wait about an agent, not the agent's: its state passed, or a
+  # person's answer was copied onto its row elsewhere (F-183).
+  defp owned(s, %{kind: "remedy", id: "remedy:" <> n} = p) do
+    case Watch.Table.select(s.wdb, "id = ?1", [int(n)]) do
+      [%{status: "answered", answered_by: by}] when is_binary(by) -> by
+      _ -> due_or(s, p, :passed)
+    end
+  end
+
+  # A login's prompt closes when a check finds the account logged in: one not answered here is
+  # a check the framework made before a start or a resume.
+  defp owned(_s, %{kind: "login"}), do: {:framework, :logged_in}
+
+  # A start's wait: at its deadline its owner takes the wait, the kind's default.
+  defp owned(s, %{kind: "limit", id: "limit:start:" <> _} = p), do: due_or(s, p, :passed)
+
+  defp owned(s, p), do: ended_or(s, p, :passed)
+
+  # Its agent ended (or its process is gone), else its deadline passed, else `why`.
+  defp ended_or(s, %{agent: agent} = p, why) when is_binary(agent) do
+    row = Agents.get(s.agents, agent)
+    gone? = row == nil or Agents.ended?(row) or row.status == "stopped"
+    if gone?, do: {:framework, :ended}, else: due_or(s, p, why)
+  end
+
+  defp ended_or(s, p, why), do: due_or(s, p, why)
+
+  # Past its deadline: its kind's default taken (a start's wait, the usage limit menu's stop),
+  # or, for a kind with none, expired.
+  defp due_or(_s, p, why) do
+    if is_integer(p[:deadline]) and System.os_time(:millisecond) >= p.deadline,
+      do: {:framework, if(p.kind in ["limit", "usage_credits"], do: :default, else: :expired)},
+      else: {:framework, why}
+  end
+
+  @closers ~w(expired default ended withdrawn passed unknown logged_in)a
+
+  defp dump_by({:framework, why}), do: ["framework", Atom.to_string(why)]
+  defp dump_by(by), do: by
+
+  defp load_by(["framework", why]) do
+    case Enum.find(@closers, &(Atom.to_string(&1) == why)) do
+      nil -> {:framework, :unknown}
+      known -> {:framework, known}
+    end
+  end
+
+  defp load_by(by) when is_binary(by), do: by
+  defp load_by(_), do: {:framework, :unknown}
 
   # Prompt.tla's Notice: one notice per prompt of a delegate, under the prompt's key.
   defp tell(s, all) do

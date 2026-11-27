@@ -255,13 +255,19 @@ defmodule CodingAgentFramework.Mains do
   the id of the newest hook event `Intake` stored for its session (nil without `intake:` or
   before a start). So each new turn is a new state for an interrupt, as an interactive
   delegate's is, while an answer or a resume is not refused for a hook event that came between
-  its read and its act: a main session writes many.
+  its read and its act: a main session writes many. The interrupt's state also names
+  `interrupted`, the id of the newest row in `Acts` of the operator's interrupt of it whose act
+  ran and settled (nil for none, or without `acts:`; F-270, `Team.tla`'s FixActs). An Escape
+  that reached a screen that went on running moves no hook event, and without it the first
+  interrupt's settled claim would refuse the next as claimed until one came; with it, the next
+  is a new state once the first settled. A claim still under way, or one a restart cut, moves
+  nothing. A read of `Acts` that did not answer is `{:unknown, {:acts, reason}}`.
 
       Mains.fix_state(mains, "app-epic")
       #=> {:ok, %{status: "stopped", session_id: "…", pid: 4242, proc_start: "…", held: []}}
       Mains.fix_state(mains, "app-epic", fix: :interrupt)
       #=> {:ok, %{status: "running", session_id: "…", pid: 4242, proc_start: "…", held: [],
-      #=>   offset: 812}}
+      #=>   offset: 812, interrupted: 31}}
   """
   @spec fix_state(GenServer.server(), String.t(), keyword) :: outcome(map)
   def fix_state(mains, name, opts \\ []) do
@@ -318,6 +324,12 @@ defmodule CodingAgentFramework.Mains do
   `Inlet.interrupt/3` and a delegate's interrupt refuse it, `:gone` when its agent row is not
   `running`, `:no_inlet` without `inlet:`, and as `fix_state/3`. Option `:timeout` (default
   30 000 ms), what the press may take.
+
+  A second interrupt (F-270): once the first ended the turn, the screen shows none running and
+  it is refused `{:screen, reading}` with no key sent, its claim let go. Once the first
+  answered `{:unknown, {:still_running, reading}}` and its claim settled, the state names it
+  (`fix_state/3`'s `interrupted`), so the next is claimed on a new state and presses Escape
+  again, with no wait for a hook event.
 
       Mains.interrupt(mains, "app-epic", state: state)
       #=> {:ok, :sent}
@@ -730,11 +742,39 @@ defmodule CodingAgentFramework.Mains do
 
   # Only an interrupt's state has the newest hook event: a main session writes many, and an
   # answer or a resume refused `{:moved, now}` for one would be refused for nothing (F-258).
+  # It also names the newest interrupt that acted and settled (F-270), so an interrupt whose
+  # key reached a screen that went on running leaves a new state for the next one.
   defp fix_state_of(s, agent, fix \\ nil) do
     state = Map.take(agent, [:status, :session_id, :pid, :proc_start])
     {held, offset} = hooked(s, agent)
     state = Map.put(state, :held, held)
-    {:ok, if(fix == :interrupt, do: Map.put(state, :offset, offset), else: state)}
+
+    if fix == :interrupt do
+      with {:ok, last} <- interrupted(s, agent.name),
+           do: {:ok, Map.merge(state, %{offset: offset, interrupted: last})}
+    else
+      {:ok, state}
+    end
+  end
+
+  # The id of the newest row of the operator's interrupt of `name` in `Acts` whose act ran and
+  # settled (Team.tla's FixActs moves the state then), nil for none or with no `acts:`. A claim
+  # still under way is not one, so a second interrupt read meanwhile claims the same state and
+  # is refused as claimed; a claim a restart cut is not one either, since its key may have gone
+  # (`Claim.tla`'s NoActOnCutOffClaim keeps its state). One target's interrupts are few.
+  defp interrupted(%{acts: nil}, _name), do: {:ok, nil}
+
+  defp interrupted(s, name) do
+    filter = [actor: s.operator, target: name, act: "interrupt", status: "settled"]
+
+    # Half the step, so the read ends within the call of `Mains` it is made in.
+    case Acts.rows(s.acts, filter, timeout: div(@step, 2)) do
+      {:ok, rows} ->
+        {:ok, rows |> Enum.filter(& &1.acted_at) |> Enum.map(& &1.id) |> Enum.max(fn -> nil end)}
+
+      {_, reason} ->
+        {:unknown, {:acts, reason}}
+    end
   end
 
   # The session's held PermissionRequests and its newest hook event, as Intake keeps them. An
@@ -755,8 +795,8 @@ defmodule CodingAgentFramework.Mains do
   defp claimed(_s, _agent, :any, _fix), do: :ok
 
   defp claimed(s, agent, state, fix) do
-    {:ok, now} = fix_state_of(s, agent, fix)
-    if now == state, do: :ok, else: {:refused, {:moved, now}}
+    with {:ok, now} <- fix_state_of(s, agent, fix),
+         do: if(now == state, do: :ok, else: {:refused, {:moved, now}})
   end
 
   # `resume` is the session id a resume takes up, nil for a start (F-143's new-5).

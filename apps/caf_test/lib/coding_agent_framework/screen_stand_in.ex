@@ -19,7 +19,8 @@ defmodule CodingAgentFramework.ScreenStandIn do
     says `busy`, then `idle`;
   - started with `--screen running`, it draws `turn-running`'s screen, its session file `busy`,
     until Escape, which ends the turn: it writes `<dir>/interrupted`, says `idle` and draws the
-    idle screen;
+    idle screen; with `--ignore-escapes n` too, the turn goes on past its first `n` Escapes,
+    each a line `esc` in `<dir>/escapes`, its screen still running (F-270);
   - started with `--screen limit_wait`, it draws `usage-limit-wait`'s screen, Claude Code's own
     wait at a usage limit, and takes no key; its session file says `busy`, since what 2.1.322's
     says during the wait was never measured (F-191), so only the screen tells the wait;
@@ -328,7 +329,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
       printf '{"loggedIn": true, "authMethod": "stand_in", "loginExpiresAt": null}\\n'; exit 0
     fi
     name='' resume='' screen=#{first} sel=1 prompt='' dialogs='#{dialogs}' choice=no transcript='#{transcript}'
-    reloaded='#{reloaded}' shown=''
+    reloaded='#{reloaded}' shown='' ignore=0
     # `choice` is the option the dialog holds, `drawn` the one its marker is drawn on. Until a
     # pending second draw (`redraw`, once; `every`, always), only `drawn` moves.
     drawn=no redraw='#{redraw}' every='#{every}' pending='' first_at=0
@@ -339,6 +340,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
         --name) name=$2; shift 2 ;;
         --resume) resume=$2; shift 2 ;;
         --screen) screen=$2; shift 2 ;;
+        --ignore-escapes) ignore=$2; shift 2 ;;
         --) prompt=$2; break ;;
         *) shift ;;
       esac
@@ -550,6 +552,10 @@ defmodule CodingAgentFramework.ScreenStandIn do
             shift; choice=no drawn=no
             if [ $# -gt 0 ]; then screen=$1; else screen=idle; first; fi ;;
         esac
+      elif [ $screen = running ] && [ "$key" = $'\\e' ] && [ "$ignore" -gt 0 ]; then
+        # A turn that goes on past an Escape (F-270): the key is taken, the screen unchanged.
+        ignore=$((ignore - 1))
+        printf 'esc\\n' >> "#{dir}/escapes"
       elif [ $screen = running ] && [ "$key" = $'\\e' ]; then
         # Escape interrupts the turn: the idle screen, as 2.1.322 shows after it.
         screen=idle
