@@ -1232,9 +1232,19 @@ defmodule CodingAgentFramework do
       # it is looked up at each request.
       {:intake_http,
        fn pid ->
-         # Its wrappers run on the workstation, so their slot is its (F-292).
+         # Its wrappers run on the workstation, so their slot is its (F-292); a command the
+         # app's list places on another host runs there as a job, in the agent's copy (F-296).
          units = &run_units(c, w, &1, &2)
-         runs = [scheduler: fn -> pid.(:scheduler) end, units: units, host: host]
+
+         runs = [
+           scheduler: fn -> pid.(:scheduler) end,
+           units: units,
+           host: host,
+           policy: w.runs,
+           jobs: fn -> pid.(:jobs) end,
+           where: &Sessions.Agents.place(w.agents, &1)
+         ]
+
          opts = [intake: pid.(:intake), secret: w.secret, runs: runs]
          {Bandit, plug: {Endpoint, opts}, ip: @local, port: c.ports.intake, startup_log: false}
        end},

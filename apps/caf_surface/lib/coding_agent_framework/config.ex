@@ -144,8 +144,11 @@ defmodule CodingAgentFramework.Config do
   - `heavy`: the app's heavy commands (F-171), each `%{match: regex_or_string, class: class}`
     as `CodingAgentFramework.Runs` takes them: an agent's `Bash` call whose command matches
     runs under the wrapper `<home>/bin/caf-run`, which takes a lease of that class (`heavy`,
-    `builder` or `landing`, its units the `job_lease` of the class) before it runs. None by
-    default;
+    `builder` or `landing`, its units the `job_lease` of the class) before it runs. An entry
+    with `host: name`, a host of `hosts`, runs its match there as a job in the agent's copy,
+    under that host's slot (`{"slot", name}` in `resources`), its output streamed back and its
+    exit code the wrapper's (F-296); a host not declared is `{:bad, :heavy, {:no_host,
+    name}}`. None by default;
   - `extensions`: the app's bundles as data, each `{module, opts}` (F-188): the tree calls the
     module's `bundle(opts, part)` (`CodingAgentFramework.Extension`'s callback) and serves the
     bundle, `%{name, scope, tools}`, on the agents' MCP endpoint beside the framework's tools.
@@ -505,6 +508,10 @@ defmodule CodingAgentFramework.Config do
       (bad = bad_hosts(Map.get(fields, :hosts, %{}), Map.get(fields, :workstation, "ws"))) != nil ->
         {:refused, {:bad, :hosts, bad}}
 
+      # A heavy command placed on a host runs only on one the config declares (F-296).
+      (bad = heavy_host(fields)) != nil ->
+        {:refused, {:bad, :heavy, {:no_host, bad}}}
+
       Watch.check_remedies(Map.get(fields, :remedies, %{})) != :ok ->
         {:refused, {:bad, :remedies}}
 
@@ -802,6 +809,12 @@ defmodule CodingAgentFramework.Config do
       {name, _} ->
         {:not_a_host, name}
     end)
+  end
+
+  defp heavy_host(fields) do
+    known = [Map.get(fields, :workstation, "ws") | Map.keys(Map.get(fields, :hosts, %{}))]
+    {:ok, heavy} = Runs.heavy(Map.get(fields, :heavy, []))
+    Enum.find_value(heavy, fn {_, _, host} -> if host && host not in known, do: host end)
   end
 
   # A name with no control character; on macOS a tree that runs agents must have it (see `user`

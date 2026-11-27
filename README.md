@@ -114,6 +114,8 @@ Built, each from a checked model in `model/tla/`:
   when work is placed there, refuses at once a host away or lacking a program, and takes the
   host back without a restart (F-280), finding them on the `PATH` its entry's `env` gives (F-291);
   each host's heavy slots are its own, and `caf-run` waits as long as its `--wait` says (F-292);
+  a heavy command the app places on another host runs there in the agent's copy, its output
+  streamed back and its exit code `caf-run`'s (F-296);
 - launch options per agent (settings, environment, directories, appended prompt, tools);
 - `PreToolUse` held while the app decides, and `PostToolUse` handed on;
 - `Screen`, reading a main session's screen from a real release's fixtures;

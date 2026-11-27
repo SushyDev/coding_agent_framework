@@ -385,7 +385,30 @@ framework's hooks deciding:
   curl's `--max-time`, its wait and 5 s, and an ask cut there is no answer (F-218). The plug
   answers 127.0.0.1 alone, so every wrapper runs on the plug's own host, the workstation, and
   its lease is that host's slot (`Runs.Plug`'s `host:`, the config's `workstation`; F-292).
-  A command run on another host goes through `Jobs`, whose lease names that host.
+  A heavy command the app's list places on another host runs there (F-296, `RemoteRun.tla`):
+  - **the host** is the entry's, `%{match: ~r/\bmix test\b/, class: :heavy, host: "mac"}`, a
+    host of the config's `hosts` (else `{:bad, :heavy, {:no_host, name}}`); the rewrite adds
+    `--host 'mac'`, and the plug runs it there only when its own match of the command names
+    that host, else refuses it `bad_host`, so a wrapper never names a host the app did not;
+  - **the tree** is the agent's copy on that host (its project, the agent's name as the copy's),
+    synced from its worktree by `Jobs.run/6` before each run, as a job's is. The command runs
+    as `sh -c` at the wrapper's directory relative to the worktree, with the host's
+    environment; nothing is fetched back. The job's lease is that host's slot, its row the
+    holder;
+  - **the stream**: the plug reads the job's log from an offset every second (one ssh
+    connection each) and sends it line by line, and the wrapper prints it on its output (the
+    job's output and errors as one).
+    The end goes only after the log's last line (`WholeStream`): the job's own code; 124 when
+    the host ended the job at its timeout (an hour, `Runs.remote_timeout/0`); 69 when its end
+    is unknown; 75 when it was refused and nothing ran;
+  - **the host away mid-run**: the log's reads fail, and once they have failed 30 s in a row
+    the run ends `unknown` and the wrapper exits 69 at once. The job may still run on the
+    host, so its slot is held until `Jobs` reads its end there (its row owed), never freed
+    before (`NoRunUnleased`); a host away takes no new work meanwhile, so the hold costs
+    nothing until it answers again (decided, F-296);
+  - **the agent's Ctrl-C** ends the wrapper; the plug's next write fails and it ends the run's
+    process. A job not started never starts; one started runs on to its own end or its
+    timeout, holding its slot, and its end is its row's (decided, F-296: `Jobs` has no stop).
   The `run` tool, its late end and `MCP.caller/3` were removed in F-176 (F-171's new-3); the
   operator keeps no
   `run`, since a landing is the app's own `Jobs.run/6`;
@@ -1198,7 +1221,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Hosts` | one per instance, against `Host.tla` (F-280): what is known of each other host, `unknown`, `ready`, `away` or `lacking`. Each placement of new work there (a job's run, a service's start or restart) finds the host's programs over ssh within the placement's start timeout, with an rsync of 3.1.3 or later (the copy's times to the nanosecond), and keeps them for the reads of work already placed | no table: memory, found again after a restart |
 | `Copies` | a host's copy of each worktree, brought in step by rsync before each job or service, and removed with the worktree | `copies` |
 | `Jobs` | one-off commands on a host, in a copy: held, logged, ended by their exit or their timeout; each asks the `Scheduler` for a lease first, in the class its caller names, its row the holder (`Jobs.Work` answers for it), and its wrapper runs only under the fence of that lease ("A lease") | `jobs`, with each row's lease id and a lease refusal's reason and retry time |
-| `Runs` | a heavy native `Bash` command under a lease (F-171): the `PreToolUse` policy that rewrites a call the app lists as heavy into the wrapper `<home>/bin/caf-run`, the wrapper itself, its endpoint on the intake's port (`Runs.Plug`), and the lease's owner, the wrapper's own process read by `ps` | no table: the lease is the row |
+| `Runs` | a heavy native `Bash` command under a lease (F-171): the `PreToolUse` policy that rewrites a call the app lists as heavy into the wrapper `<home>/bin/caf-run`, the wrapper itself, its endpoint on the intake's port (`Runs.Plug`), a match placed on another host run there as a job with its log streamed back (`Runs.Remote`, F-296), and the lease's owner, the wrapper's own process read by `ps` | no table: the lease is the row |
 | `Services` | programs agents start and keep on a host, in a copy: held, owned, read, written to, restarted, with ports forwarded to the workstation; the forward is a second `Holder.Process` record of the service | `services` |
 | `Tracker` | the state views read: the fold of every reader | — |
 | `Watch` | the symptom record and the healer's allow-list (F-182, `Heal.tla`): each symptom state a fact (kind, target, state, since, evidence, source), recorded before anything acts on it and passed when no longer read; the list's acts (the healer's drop, the operator's revoke and approve), so a restart reads it as left; a state the healer leaves to a person is `asked`, the `remedy` prompt `Prompts` reads | `symptoms`, `remedy_acts` |
@@ -3282,6 +3305,16 @@ and admits it can be granted now, whatever the other host holds or reads), and
 `OtherHostSlot` (a run on another host takes the workstation's slot, as before F-292),
 `SharedPressure` (every grant reads the workstation's pressure) and `NoPlace` (a run asked for
 with no find of its host).
+
+`RemoteRun.tla` (F-296) models a heavy command run on another host: two wrappers on one slot
+there, the job writing its log and exiting on the host whether or not it answers, the plug's
+stream, its give-up once the host is away, a cut, the agent's interrupt, and `Jobs`' settle of
+an owed row. Invariants `HostCapacity`, `NoRunUnleased` (a job runs only under its unreleased
+lease), `TrueCode` (a wrapper exits with a code only when the job exited with it) and
+`WholeStream` (only after every line reached it); liveness `WrapperEnds` and `SlotFreed` (every
+slot is freed once the job's end is read). Breaks: `FreeOnAway` (the give-up frees the slot
+while the job may run), `KeepSlot` (the give-up leaves the row to nobody), `ReportSuccess` (the
+give-up exits 0) and `CodeBeforeLog`.
 
 `Boxes.tla` (F-163) composes the seven boxes by their contracts ("Contracts and one composed
 spec"). Each box is only what it promises and what it assumes: `Sessions`' agent row, its

@@ -52,6 +52,18 @@ defmodule CodingAgentFramework.Runs do
   command within the first ask's bound, the no-answer bound, the bound of the last ask begun
   within it and a second's pause: 1 241 s with the defaults.
 
+  **On another host** (F-296, `model/tla/RemoteRun.tla`). An entry of the list may name a
+  host, `%{match: ~r/\\bmix test\\b/, class: :heavy, host: "mac"}`; a match is rewritten
+  with `--host 'mac'` before its class, and the wrapper sends its command and its directory
+  too. The plug runs it there as a job (`Runs.Remote`), under that host's slot, in the agent's
+  copy on that host, synced from its worktree first. While it runs, the wrapper prints
+  `caf-run: started on mac (job run-<id>)` on its errors and the job's log on its output, line
+  by line, and exits with the job's code once the last line came: 124 when the host ended the
+  job at its timeout (`remote_timeout/0`, an hour), 69 when its end is unknown (the host away
+  for the plug's bound, the stream cut), 75 when it was refused and nothing ran. A wrapper that
+  got its `started` line never runs the command itself. One ask's bound is its wait, the
+  job's timeout and 300 s.
+
   **The end.** The lease's owner is the process itself (`state/2`, for the `Scheduler`'s
   `holders:`): live while that pid runs with that start time, ended once it does not, read by
   `ps` (`Holder.Process.liveness/3`) on the `Scheduler`'s interval and after its restart. So
@@ -83,6 +95,10 @@ defmodule CodingAgentFramework.Runs do
   @wait 600_000
   @ask_slack 5_000
   @max_wait 3_600_000
+  @remote_timeout 3_600_000
+  # How long past its wait and its job's timeout one ask for a run on another host may run: the
+  # copy's sync and lock wait, the start, the host's own end and the log's last lines.
+  @remote_slack 300_000
 
   # $0 caf-run; the paths, the curl config, the URL, the no-answer bound and one ask's bound in
   # seconds are set above it by `prepare/5`. The body goes as form fields curl encodes. A queued
@@ -98,10 +114,17 @@ defmodule CodingAgentFramework.Runs do
   # One ask's bound is curl's `--max-time` (F-218). A cut ask prints no answer, so it takes the
   # path of an ask nobody answered.
   @wrapper ~S"""
-  w=${CAF_RUN_WAIT-}
-  if [ "$1" = --wait ] && [ "$#" -ge 2 ]; then w=$2; shift 2; fi
+  exec 3>&1
+  w=${CAF_RUN_WAIT-} host=
+  while [ "$#" -ge 2 ]; do
+    case $1 in
+      --wait) w=$2; shift 2 ;;
+      --host) host=$2; shift 2 ;;
+      *) break ;;
+    esac
+  done
   [ "$#" -eq 5 ] && [ "$4" = -- ] || {
-    echo 'caf-run: usage: caf-run [--wait <seconds>] <class> <id> <agent> -- <command>' >&2
+    echo 'caf-run: usage: caf-run [--wait <seconds>] [--host <host>] <class> <id> <agent> -- <command>' >&2
     exit 64; }
   case $w in
     '') ;;
@@ -111,22 +134,48 @@ defmodule CodingAgentFramework.Runs do
     *) asked=$((w + 5)) ;;
   esac
   class=$1 id=$2 agent=$3 cmd=$5
+  if [ -n "$host" ]; then
+    asked=$((${w:-$waits} + 5 + remote))
+    set -- --data-urlencode "host=$host" --data-urlencode "cmd=$cmd" --data-urlencode "cwd=$PWD"
+  else
+    set --
+  fi
   start=$(LC_ALL=C TZ=UTC "$ps" -o lstart= -p $$) || start=
   again=0 d=
   timer() { [ -n "$d" ] && kill -0 "$d" 2>/dev/null; }
-  run() { ! timer || kill "$d" 2>/dev/null; exec "$sh" -c "$cmd"; }
+  run() { ! timer || kill "$d" 2>/dev/null; exec "$sh" -c "$cmd" 3>&-; }
   while :; do
     last=$("$curl" -sN --max-time "$asked" -K "$cfg" --data-urlencode "class=$class" \
         --data-urlencode "id=$id" --data-urlencode "agent=$agent" --data-urlencode "pid=$$" \
-        --data-urlencode "start=$start" --data-urlencode "again=$again" --data-urlencode "wait=$w" "$url" 2>/dev/null |
-      while IFS= read -r line; do
-        case $line in
-          queued*) printf 'caf-run: %s\n' "$line" >&2 ;;
-          granted*|refused*|unknown*) printf '%s\n' "$line"; exit 0 ;;
-        esac
-      done)
+        --data-urlencode "start=$start" --data-urlencode "again=$again" --data-urlencode "wait=$w" \
+        "$@" "$url" 2>/dev/null |
+      { s=
+        while IFS= read -r line; do
+          case $line in
+            queued*) printf 'caf-run: %s\n' "$line" >&2 ;;
+            'o '*) printf '%s\n' "${line#o }" >&3 ;;
+            'p '*) printf '%s' "${line#p }" >&3 ;;
+            started*) s=1; printf 'caf-run: %s\n' "$line" >&2 ;;
+            granted*|refused*|unknown*|ended*) printf '%s\n' "$line"; exit 0 ;;
+          esac
+        done
+        [ -z "$s" ] || echo cut; })
     case $last in
       granted*) run ;;
+      ended*)
+        set -- $last
+        case $2 in
+          exit) exit "$3" ;;
+          timeout)
+            printf 'caf-run: the job on %s passed its timeout, and the host ended it\n' "$host" >&2
+            exit 124 ;;
+        esac
+        printf 'caf-run: the run on %s has no end (%s); its job may still run there\n' \
+          "$host" "${last#ended unknown }" >&2
+        exit 69 ;;
+      cut)
+        printf 'caf-run: the run on %s was cut off; its job may still run there\n' "$host" >&2
+        exit 69 ;;
       refused*)
         ! timer || kill "$d" 2>/dev/null
         set -- $last
@@ -172,16 +221,19 @@ defmodule CodingAgentFramework.Runs do
   end
 
   @doc """
-  Checks the app's list of heavy commands, each `%{match: regex_or_string, class: class}`:
-  `{:ok, [{regex, class}]}`, or `{:refused, {:bad, :heavy}}` for an entry out of shape or a
-  string that is not a regular expression. `new/3` runs it; a config checks it before start.
+  Checks the app's list of heavy commands, each `%{match: regex_or_string, class: class}` and
+  optionally `host: name`, the host a match runs on (F-296): `{:ok, [{regex, class, host}]}`,
+  `host` nil for none, or `{:refused, {:bad, :heavy}}` for an entry out of shape or a string that
+  is not a regular expression. `new/3` runs it; a config checks it, and each host's name, before
+  start.
 
-      iex> {:ok, [{r, :landing}]} =
-      ...>   CodingAgentFramework.Runs.heavy([%{match: "^make", class: :landing}])
+      iex> {:ok, [{r, :landing, nil}, {_, :heavy, "mac"}]} =
+      ...>   CodingAgentFramework.Runs.heavy([%{match: "^make", class: :landing},
+      ...>     %{match: "mix test", class: :heavy, host: "mac"}])
       iex> Regex.match?(r, "make all")
       true
   """
-  @spec heavy(term) :: {:ok, [{Regex.t(), class}]} | {:refused, {:bad, :heavy}}
+  @spec heavy(term) :: {:ok, [{Regex.t(), class, String.t() | nil}]} | {:refused, {:bad, :heavy}}
   def heavy(list) when is_list(list) do
     Enum.reduce_while(list, {:ok, []}, fn entry, {:ok, acc} ->
       case entry(entry) do
@@ -193,16 +245,28 @@ defmodule CodingAgentFramework.Runs do
 
   def heavy(_), do: {:refused, {:bad, :heavy}}
 
-  defp entry(%{match: %Regex{} = r, class: class}) when class in @classes, do: {:ok, {r, class}}
+  defp entry(%{match: match, class: class} = e) when class in @classes do
+    host = Map.get(e, :host)
 
-  defp entry(%{match: text, class: class}) when is_binary(text) and class in @classes do
-    case Regex.compile(text) do
-      {:ok, r} -> {:ok, {r, class}}
+    case {regex(match), host} do
+      {:bad, _} -> :bad
+      {r, h} when is_nil(h) or (is_binary(h) and h != "") -> {:ok, {r, class, h}}
       _ -> :bad
     end
   end
 
   defp entry(_), do: :bad
+
+  defp regex(%Regex{} = r), do: r
+
+  defp regex(text) when is_binary(text) do
+    case Regex.compile(text) do
+      {:ok, r} -> r
+      _ -> :bad
+    end
+  end
+
+  defp regex(_), do: :bad
 
   @doc """
   The wait, in ms, of a wrapper that names none, `Runs.Plug`'s `:wait` by default, and so the
@@ -224,12 +288,38 @@ defmodule CodingAgentFramework.Runs do
 
   @doc "The class of the first heavy command `command` matches: `{:ok, class}` or `:none`."
   @spec class(t, String.t()) :: {:ok, class} | :none
-  def class(%__MODULE__{heavy: heavy}, command) do
-    case Enum.find(heavy, fn {r, _} -> Regex.match?(r, command) end) do
-      {_, class} -> {:ok, class}
+  def class(%__MODULE__{} = runs, command) do
+    case place(runs, command) do
+      {:ok, class, _host} -> {:ok, class}
+      :none -> :none
+    end
+  end
+
+  @doc """
+  The class and the host of the first heavy command `command` matches: `{:ok, class, host}`,
+  `host` nil when the entry names none or names the workstation (`programs`' host), or `:none`.
+
+      iex> {:ok, runs} = CodingAgentFramework.Runs.new("/srv/caf",
+      ...>   CodingAgentFramework.TestHost.programs(),
+      ...>   [%{match: "mix test", class: :heavy, host: "mac"}])
+      iex> CodingAgentFramework.Runs.place(runs, "mix test --seed 0")
+      {:ok, :heavy, "mac"}
+  """
+  @spec place(t, String.t()) :: {:ok, class, String.t() | nil} | :none
+  def place(%__MODULE__{heavy: heavy, host: own}, command) do
+    case Enum.find(heavy, fn {r, _, _} -> Regex.match?(r, command) end) do
+      {_, class, host} when host == own.name -> {:ok, class, nil}
+      {_, class, host} -> {:ok, class, host}
       nil -> :none
     end
   end
+
+  @doc """
+  The timeout, in ms, of a heavy command run on another host, by default: 3 600 000, an hour.
+  The host ends the job at it (`Jobs.run/6`'s `:timeout`), and the wrapper exits 124.
+  """
+  @spec remote_timeout() :: pos_integer
+  def remote_timeout, do: @remote_timeout
 
   @doc """
   Writes the wrapper, `<home>/bin/caf-run` (mode 0700), with the workstation's `sh`, `curl`,
@@ -239,9 +329,11 @@ defmodule CodingAgentFramework.Runs do
   asks again before it runs the command without a lease. Option `:wait` (ms, `wait/0` by
   default): the `:wait` of the app's `Runs.Plug`, which one ask may run 5 s past (curl's
   `--max-time`); an ask cut there is no answer. An app that sets the plug's `:wait` sets it here
-  too. Answers `:ok`, `{:refused, reason}` for a program missing, a secret out of shape, or a
-  bound that is not a positive integer (`:bad_unanswered`, `:bad_wait`), or `{:unknown, reason}`
-  when a write fails.
+  too. Option `:remote_timeout` (ms, `remote_timeout/0` by default): the plug's, which bounds a
+  run on another host's ask with its wait and 300 s. Answers `:ok`, `{:refused, reason}` for a
+  program missing, a secret out of shape, or a bound that is not a positive integer
+  (`:bad_unanswered`, `:bad_wait`, `:bad_remote_timeout`), or `{:unknown, reason}` when a write
+  fails.
   """
   @spec prepare(t, Programs.t(), :inet.port_number(), String.t(), keyword) ::
           :ok | {:refused, term} | {:unknown, term}
@@ -249,10 +341,12 @@ defmodule CodingAgentFramework.Runs do
     cfg = Path.join(home, "runs.curl")
     unanswered = Keyword.get(opts, :unanswered, 30_000)
     wait = Keyword.get(opts, :wait, @wait)
+    remote = Keyword.get(opts, :remote_timeout, @remote_timeout)
 
     with true <- secret =~ ~r/\A[A-Za-z0-9._~+\/=-]{1,256}\z/ or {:refused, :bad_secret},
          true <- (is_integer(unanswered) and unanswered > 0) or {:refused, :bad_unanswered},
          true <- (is_integer(wait) and wait > 0) or {:refused, :bad_wait},
+         true <- (is_integer(remote) and remote > 0) or {:refused, :bad_remote_timeout},
          {:ok, p} <- Programs.take(programs, [:sh, :curl, :ps, :sleep]),
          :ok <- write(cfg, ~s(header = "x-caf-secret: #{secret}"\n), 0o600) do
       secs = &:erlang.float_to_binary(&1 / 1000, decimals: 3)
@@ -265,7 +359,10 @@ defmodule CodingAgentFramework.Runs do
           sleep: p.sleep,
           cfg: cfg,
           unanswered: secs.(unanswered),
-          asked: secs.(wait + @ask_slack)
+          asked: secs.(wait + @ask_slack),
+          # Whole seconds, for the shell's arithmetic: a run on another host (F-296).
+          waits: "#{div(wait + 999, 1000)}",
+          remote: "#{div(remote + @remote_slack + 999, 1000)}"
         ]
         |> Enum.map_join("", fn {k, v} -> "#{k}=#{sh_quote(v)}\n" end)
 
@@ -327,8 +424,10 @@ defmodule CodingAgentFramework.Runs do
          %{"command" => command} when is_binary(command) <- input,
          true <- is_binary(id) and id =~ @id and is_binary(agent) and agent =~ @agent,
          false <- String.starts_with?(command, sh_quote(wrapper(runs))),
-         {:ok, class} <- class(runs, command) do
-      line = Enum.map_join([wrapper(runs), class, id, agent], " ", &sh_quote/1) <> " -- "
+         {:ok, class, host} <- place(runs, command) do
+      on = if host, do: [:"--host", host], else: []
+      line = Enum.map_join([wrapper(runs)] ++ on ++ [class, id, agent], " ", &sh_quote/1)
+      line = line <> " -- "
       {:allow, [updated_input: %{input | "command" => line <> sh_quote(command)}] ++ context}
     else
       _ -> answer
@@ -374,16 +473,19 @@ defmodule CodingAgentFramework.Runs do
   end
 
   @doc """
-  A wrapper's request, from its form fields: `{:ok, %{class, id, agent, holder, again, wait}}`,
-  or `{:refused, {:bad, field}}`. The holder is `"<pid> <start time>"`, the start time with its
-  runs of spaces made one. `wait` is the wrapper's own wait in ms (its field in whole seconds,
-  1 to 99 999 999), or nil when it names none.
+  A wrapper's request, from its form fields: `{:ok, %{class, id, agent, holder, again, wait,
+  host, command, cwd}}`, or `{:refused, {:bad, field}}`. The holder is `"<pid> <start time>"`,
+  the start time with its runs of spaces made one. `wait` is the wrapper's own wait in ms (its
+  field in whole seconds, 1 to 99 999 999), or nil when it names none. `host` is the one its
+  `--host` names (F-296), with the command (`cmd`) and the wrapper's absolute directory (`cwd`);
+  each nil for a run on the plug's own host.
 
       iex> CodingAgentFramework.Runs.ask(%{"class" => "heavy", "id" => "toolu_1",
       ...>   "agent" => "fix-1", "pid" => "42", "start" => "Thu Nov 19  01:00:00 2026",
       ...>   "again" => "0"})
       {:ok, %{class: :heavy, id: "toolu_1", agent: "fix-1",
-        holder: "42 Thu Nov 19 01:00:00 2026", again: false, wait: nil}}
+        holder: "42 Thu Nov 19 01:00:00 2026", again: false, wait: nil, host: nil,
+        command: nil, cwd: nil}}
   """
   @spec ask(map) :: {:ok, map} | {:refused, {:bad, atom}}
   def ask(fields) do
@@ -408,8 +510,18 @@ defmodule CodingAgentFramework.Runs do
       not ((fields["wait"] || "") =~ ~r/\A([1-9][0-9]{0,7})?\z/) ->
         {:refused, {:bad, :wait}}
 
+      fields["host"] in [nil, ""] ->
+        {:ok, Map.merge(asked(fields, start), %{host: nil, command: nil, cwd: nil})}
+
+      not (is_binary(fields["cmd"]) and fields["cmd"] != "") ->
+        {:refused, {:bad, :cmd}}
+
+      not (is_binary(fields["cwd"]) and Path.type(fields["cwd"]) == :absolute) ->
+        {:refused, {:bad, :cwd}}
+
       true ->
-        {:ok, asked(fields, start)}
+        remote = %{host: fields["host"], command: fields["cmd"], cwd: fields["cwd"]}
+        {:ok, Map.merge(asked(fields, start), remote)}
     end
   end
 
