@@ -915,29 +915,39 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
   defp message(w, text, shape) do
     {:ok, {:queued, id}} = Mailbox.message(w.mailbox, "main", w.name, text)
     Mailbox.cue(w.mailbox, %{topic: "transcripts:test:work", ids: []})
-    assert_receive {:waiter, handed}, 5_000
+    # The hand-on comes after a pass, which reads in a task (F-289); a loaded host takes seconds.
+    assert_receive {:waiter, handed}, 10_000
     CodingAgentFramework.WaiterStandIn.take(w.path, w.sid, handed, shape)
 
     {:ok, _} =
-      await(fn ->
-        Mailbox.cue(w.mailbox, %{topic: "transcripts:test:work", ids: []})
+      await(
+        fn ->
+          Mailbox.cue(w.mailbox, %{topic: "transcripts:test:work", ids: []})
 
-        # The cue's pass reads in a task (F-289): the status call may answer before it settles.
-        case Mailbox.status(w.mailbox, id) do
-          {:ok, %{status: "delivered"}} = ok -> ok
-          _ -> nil
-        end
-      end)
+          # The cue's pass reads in a task (F-289): the status call may answer before it settles.
+          case Mailbox.status(w.mailbox, id) do
+            {:ok, %{status: "delivered"}} = ok -> ok
+            _ -> nil
+          end
+        end,
+        10_000
+      )
 
     id
   end
 
+  # A timeout shows the row and the marks Delegates holds answered, so a failure says which side
+  # held the answer back (F-293).
   defp answered(w, id) do
     await(
       fn ->
         Delegates.cue(w.delegates, %{topic: "transcripts:test:work"})
-        :sys.get_state(w.delegates)
-        Mailbox.reply(w.mailbox, id)
+        done = :sys.get_state(w.delegates).answered
+
+        case Mailbox.reply(w.mailbox, id) do
+          {:ok, _} = ok -> ok
+          other -> {:not_yet, other, Mailbox.status(w.mailbox, id), done}
+        end
       end,
       10_000
     )

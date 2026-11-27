@@ -34,13 +34,6 @@ defmodule CodingAgentFramework.SurfaceConversationTest do
     %{dir: dir, config: c, home: home}
   end
 
-  defp free_port do
-    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
-    {:ok, port} = :inet.port(socket)
-    :gen_tcp.close(socket)
-    port
-  end
-
   defp line(map), do: JSON.encode!(map) <> "\n"
 
   test "a session's entries by cursor, a delivered message's id, and the rows queued for it",

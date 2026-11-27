@@ -344,8 +344,7 @@ defmodule CodingAgentFramework.MailboxTypedTest do
   # Cues Mailbox as the app would on a reader's cue; a call after the cast answers once it is
   # handled.
   defp cue(ctx) do
-    Mailbox.cue(ctx.mailbox, %{topic: "sessions:test:work", ids: []})
-    Mailbox.status(ctx.mailbox, 0)
+    cued(ctx.mailbox, %{topic: "sessions:test:work", ids: []})
   end
 
   defp until(ctx, id, ready?) do
@@ -357,5 +356,21 @@ defmodule CodingAgentFramework.MailboxTypedTest do
       end,
       10_000
     )
+  end
+
+  # A cue's pass reads in a task and applies its answer after later calls have answered
+  # (F-289), so no call after the cue shows its effect. The cue is handled once the Mailbox
+  # runs no pass: a cue that came during one starts the next before this one ends.
+  defp cued(mailbox, cue) do
+    Mailbox.cue(mailbox, cue)
+    {:ok, _} = await(fn -> if passed?(mailbox), do: {:ok, :passed} end, 10_000)
+  end
+
+  # A Mailbox the test stopped or restarted runs no pass of this cue: its successor settles on
+  # its own start.
+  defp passed?(mailbox) do
+    :sys.get_state(mailbox).pass == nil
+  catch
+    :exit, {:noproc, _} -> true
   end
 end

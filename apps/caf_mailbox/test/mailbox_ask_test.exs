@@ -165,7 +165,10 @@ defmodule CodingAgentFramework.MailboxAskTest do
 
     {:ok, _} =
       await(
-        fn -> cue(ctx) && ("message #{u}" in HeadlessStandIn.taken(ctx.dir) && {:ok, 1}) end,
+        fn ->
+          cue(ctx)
+          "message #{u}" in HeadlessStandIn.taken(ctx.dir) && {:ok, 1}
+        end,
         10_000
       )
 
@@ -183,7 +186,13 @@ defmodule CodingAgentFramework.MailboxAskTest do
     assert {:ok, %{uuid: u}} = until(ctx, id, &(&1.status == "delivered"))
 
     assert {:ok, %{from: "d1", to: "operator", kind: "reply", status: "kept", text: text}} =
-             await(fn -> cue(ctx) && Mailbox.reply(ctx.mailbox, id) end, 10_000)
+             await(
+               fn ->
+                 cue(ctx)
+                 Mailbox.reply(ctx.mailbox, id)
+               end,
+               10_000
+             )
 
     # The reply's own text, as its row keeps it (F-146's new-4).
     assert %{text: ^text} = Table.answer(ctx.mtable, u)
@@ -237,25 +246,50 @@ defmodule CodingAgentFramework.MailboxAskTest do
 
     {:ok, _} =
       await(
-        fn -> cue(ctx) && HeadlessStandIn.taken(ctx.dir) == taken && idle?.() && {:ok, 1} end,
+        fn ->
+          cue(ctx)
+          HeadlessStandIn.taken(ctx.dir) == taken && idle?.() && {:ok, 1}
+        end,
         10_000
       )
   end
 
   defp cue(ctx) do
     {:ok, _} = Stream.read(ctx.stream)
-    Mailbox.cue(ctx.mailbox, %{topic: "stream:test", ids: []})
-    Mailbox.status(ctx.mailbox, 0)
+    cued(ctx.mailbox, %{topic: "stream:test", ids: []})
   end
 
   defp until(ctx, id, ready?) do
     check = fn row -> if ready?.(row), do: {:ok, row}, else: row end
-    await(fn -> cue(ctx) && check.(Table.get(ctx.mtable, id)) end, 10_000)
+
+    await(
+      fn ->
+        cue(ctx)
+        check.(Table.get(ctx.mtable, id))
+      end,
+      10_000
+    )
   end
 
   defp fold(ctx, sid) do
     cue(ctx)
     {:ok, %{rows: rows}} = Stream.rows(ctx.stream)
     Enum.find(rows, &(&1.session == sid))
+  end
+
+  # A cue's pass reads in a task and applies its answer after later calls have answered
+  # (F-289), so no call after the cue shows its effect. The cue is handled once the Mailbox
+  # runs no pass: a cue that came during one starts the next before this one ends.
+  defp cued(mailbox, cue) do
+    Mailbox.cue(mailbox, cue)
+    {:ok, _} = await(fn -> if passed?(mailbox), do: {:ok, :passed} end, 10_000)
+  end
+
+  # A Mailbox the test stopped or restarted runs no pass of this cue: its successor settles on
+  # its own start.
+  defp passed?(mailbox) do
+    :sys.get_state(mailbox).pass == nil
+  catch
+    :exit, {:noproc, _} -> true
   end
 end

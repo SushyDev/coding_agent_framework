@@ -194,15 +194,19 @@ defmodule CodingAgentFramework.TmuxContractTest do
       {:ok, pane} = Tmux.new_session(ctx.server, "alpha", argv, size: {50, 5})
       assert {:refused, {:tagged_for, "alpha"}} = Tmux.capture(ctx.server, pane, "beta")
 
+      # A capture before the script printed is an `{:ok, …}` too, so only the printed one ends
+      # the wait; an earlier one is kept, so a wait that ends unprinted shows what it read. On a
+      # loaded host the shell can take seconds to print (F-293).
       assert {:ok, %{width: 50, text: "hello\nworld\n" <> _}} =
-               await(fn ->
-                 # A capture before the script printed is an `{:ok, …}` too, so only the
-                 # printed one ends the wait.
-                 case Tmux.capture(ctx.server, pane, "alpha") do
-                   {:ok, %{text: "hello\nworld\n" <> _}} = ok -> ok
-                   _ -> nil
-                 end
-               end)
+               await(
+                 fn ->
+                   case Tmux.capture(ctx.server, pane, "alpha") do
+                     {:ok, %{text: "hello\nworld\n" <> _}} = ok -> ok
+                     other -> {:not_yet, other}
+                   end
+                 end,
+                 15_000
+               )
     end
 
     test "killing the server removes its socket file", ctx do

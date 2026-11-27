@@ -245,7 +245,15 @@ defmodule CodingAgentFramework.MailboxTest do
     assert {:ok, {:queued, id}} = Mailbox.message(ctx.mailbox, "main", "d1", "why?")
     assert {:ok, %{uuid: u}} = until(ctx, id, &(&1.status == "delivered"))
 
-    {:ok, _} = await(fn -> cue(ctx) && match?([_], answers(ctx, u)) && {:ok, 1} end, 10_000)
+    {:ok, _} =
+      await(
+        fn ->
+          cue(ctx)
+          match?([_], answers(ctx, u)) && {:ok, 1}
+        end,
+        10_000
+      )
+
     [r] = answers(ctx, u)
     assert %{from_agent: "d1", to_agent: "main", text: "done " <> ^u, kind: "reply"} = r
     assert {:ok, %{subtype: "success", is_error: false}} = Mailbox.status(mailbox(ctx), r.id)
@@ -263,7 +271,16 @@ defmodule CodingAgentFramework.MailboxTest do
     # The app's word is answered to the delegate's parent, the sender of its brief.
     {:ok, {:queued, w}} = Mailbox.notify(mailbox(ctx), "d1", "A job ended.")
     assert {:ok, %{uuid: wu}} = until(ctx, w, &(&1.status == "delivered"))
-    {:ok, _} = await(fn -> cue(ctx) && match?([_], answers(ctx, wu)) && {:ok, 1} end, 10_000)
+
+    {:ok, _} =
+      await(
+        fn ->
+          cue(ctx)
+          match?([_], answers(ctx, wu)) && {:ok, 1}
+        end,
+        10_000
+      )
+
     assert [%{from_agent: "d1", to_agent: "main"}] = answers(ctx, wu)
   end
 
@@ -276,7 +293,16 @@ defmodule CodingAgentFramework.MailboxTest do
     {:ok, _} = await(fn -> fold(ctx, sid).requests |> Map.fetch("req-#{u}") end)
 
     HeadlessStandIn.kill_all(ctx.dir)
-    {:ok, _} = await(fn -> cue(ctx) && match?([_], answers(ctx, u)) && {:ok, 1} end, 10_000)
+
+    {:ok, _} =
+      await(
+        fn ->
+          cue(ctx)
+          match?([_], answers(ctx, u)) && {:ok, 1}
+        end,
+        10_000
+      )
+
     [n] = answers(ctx, u)
     assert %{from_agent: "framework", to_agent: "main", kind: "notice"} = n
     assert n.text =~ "ended before it answered"
@@ -303,7 +329,15 @@ defmodule CodingAgentFramework.MailboxTest do
         if f.messages[u] && f.last_result.user_message_uuids == [], do: {:ok, f}
       end)
 
-    {:ok, _} = await(fn -> cue(ctx) && match?([_], answers(ctx, u)) && {:ok, 1} end, 10_000)
+    {:ok, _} =
+      await(
+        fn ->
+          cue(ctx)
+          match?([_], answers(ctx, u)) && {:ok, 1}
+        end,
+        10_000
+      )
+
     assert [%{from_agent: "d1", text: "done " <> ^u}] = answers(ctx, u)
   end
 
@@ -316,7 +350,15 @@ defmodule CodingAgentFramework.MailboxTest do
     {:ok, _} = await(fn -> fold(ctx, sid).requests |> Map.fetch("req-#{u}") end)
     {:ok, _} = Stream.interrupt(ctx.stream, sid)
 
-    {:ok, _} = await(fn -> cue(ctx) && match?([_], answers(ctx, u)) && {:ok, 1} end, 10_000)
+    {:ok, _} =
+      await(
+        fn ->
+          cue(ctx)
+          match?([_], answers(ctx, u)) && {:ok, 1}
+        end,
+        10_000
+      )
+
     [r] = answers(ctx, u)
 
     assert {:ok, %{reply_to: ^u, subtype: "error_during_execution"}} =
@@ -484,7 +526,10 @@ defmodule CodingAgentFramework.MailboxTest do
 
     {:ok, _} =
       await(
-        fn -> cue(ctx) && HeadlessStandIn.taken(ctx.dir) == taken && idle?.() && {:ok, 1} end,
+        fn ->
+          cue(ctx)
+          HeadlessStandIn.taken(ctx.dir) == taken && idle?.() && {:ok, 1}
+        end,
         10_000
       )
   end
@@ -493,13 +538,19 @@ defmodule CodingAgentFramework.MailboxTest do
   # answers once it is handled.
   defp cue(ctx) do
     {:ok, _} = Stream.read(ctx.stream)
-    Mailbox.cue(mailbox(ctx), %{topic: "stream:test", ids: []})
-    Mailbox.status(mailbox(ctx), 0)
+    cued(mailbox(ctx), %{topic: "stream:test", ids: []})
   end
 
   defp until(ctx, id, ready?) do
     check = fn row -> if ready?.(row), do: {:ok, row}, else: row end
-    await(fn -> cue(ctx) && check.(Table.get(ctx.mtable, id)) end, 10_000)
+
+    await(
+      fn ->
+        cue(ctx)
+        check.(Table.get(ctx.mtable, id))
+      end,
+      10_000
+    )
   end
 
   # Cues as `cue/1` does, so a row due goes in while the test waits on the fold.
@@ -507,5 +558,21 @@ defmodule CodingAgentFramework.MailboxTest do
     cue(ctx)
     {:ok, %{rows: rows}} = Stream.rows(ctx.stream)
     Enum.find(rows, &(&1.session == sid))
+  end
+
+  # A cue's pass reads in a task and applies its answer after later calls have answered
+  # (F-289), so no call after the cue shows its effect. The cue is handled once the Mailbox
+  # runs no pass: a cue that came during one starts the next before this one ends.
+  defp cued(mailbox, cue) do
+    Mailbox.cue(mailbox, cue)
+    {:ok, _} = await(fn -> if passed?(mailbox), do: {:ok, :passed} end, 10_000)
+  end
+
+  # A Mailbox the test stopped or restarted runs no pass of this cue: its successor settles on
+  # its own start.
+  defp passed?(mailbox) do
+    :sys.get_state(mailbox).pass == nil
+  catch
+    :exit, {:noproc, _} -> true
   end
 end
