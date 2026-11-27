@@ -3827,6 +3827,12 @@ without it.
   framework's. The offer, if it ever shows (a managed setting over `--settings`, or a release
   that reads the entry otherwise), is a menu no
   rule names, read with its title, and a person answers it ("A menu on a running screen").
+- Every settings file the framework writes, a main's and a delegate's, also has `Artifact` in
+  `permissions.allow` (F-298, the operator's rule). That tool publishes a private page. Auto
+  mode's check refuses it when the request reaches the session in a message rather than a
+  prompt the operator typed, and the operator then had to type the request again. The rule
+  adds to the account's and the agent's own `allow` rules, and an account file written before
+  F-298 still gets it.
 - Check against each pinned Claude Code release what the help leaves open: which settings a
   launch reads, whether `--append-system-prompt` has a file form, and how a tool pattern with a
   comma or a space inside its rule is split (F-110). Until the file form is confirmed, the

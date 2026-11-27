@@ -15,7 +15,13 @@ defmodule CodingAgentFramework.AccountsOverlayTest do
     assert path == Path.join(account.config_dir, "framework/agents/a-1.settings.json")
     deny = ["Bash(rm *)", "Bash(x *)"]
 
-    assert %{"permissions" => %{"deny" => ^deny, "allow" => ["Read"], "defaultMode" => "plan"}} =
+    assert %{
+             "permissions" => %{
+               "deny" => ^deny,
+               "allow" => ["Read", "Artifact"],
+               "defaultMode" => "plan"
+             }
+           } =
              %{"model" => "m", "theme" => "dark", "remoteControlAtStartup" => false} =
              JSON.decode!(File.read!(path))
 
@@ -96,6 +102,39 @@ defmodule CodingAgentFramework.AccountsOverlayTest do
 
     assert Accounts.prepare(accounts, "work", %{settings: %{"skillOverrides" => ["x"]}}) ==
              {:refused, {:bad, {:skillOverrides, ["x"]}}}
+  end
+
+  # F-298: every file allows the Artifact tool; the app's and the agent's own rules are kept.
+  test "every settings file allows the Artifact tool, added to the caller's own rules" do
+    home = Path.join(TestHost.test_dir(), "overlay-#{System.unique_integer([:positive])}")
+    {:ok, accounts} = Accounts.new(home, ["work"])
+    app = %{"allow" => ["Read", "Artifact"], "deny" => ["WebFetch"]}
+
+    {:ok, account} = Accounts.prepare(accounts, "work", %{settings: %{"permissions" => app}})
+
+    for file <- [account.settings.parent, account.settings.delegate],
+        do:
+          assert(
+            JSON.decode!(File.read!(file))["permissions"] ==
+              %{"allow" => ["Read", "Artifact"], "deny" => ["WebFetch"]}
+          )
+
+    own = %{"permissions" => %{"allow" => ["Bash(mix test)"]}}
+
+    for {role, name} <- [delegate: "d-1", parent: "main"] do
+      assert {:ok, path} = Accounts.overlay(account, role, name, own)
+
+      assert JSON.decode!(File.read!(path))["permissions"]["allow"] ==
+               ["Read", "Artifact", "Bash(mix test)"]
+    end
+
+    # An account file written before F-298 has no rule; its overlay gets one.
+    File.write!(account.settings.delegate, JSON.encode!(%{"theme" => "dark"}))
+    assert {:ok, path} = Accounts.overlay(account, :delegate, "d-2", %{})
+    assert JSON.decode!(File.read!(path))["permissions"] == %{"allow" => ["Artifact"]}
+
+    assert Accounts.prepare(accounts, "work", %{settings: %{"permissions" => ["x"]}}) ==
+             {:refused, {:bad, {:permissions, ["x"]}}}
   end
 
   test "an overlay's hooks add to the account's per event; they never replace them" do

@@ -21,7 +21,10 @@ defmodule CodingAgentFramework.SessionsOptionsTest do
     first = launch[:first].uuid
     assert {:ok, %{session_id: id}} = start(ctx, launch ++ [options: options])
     own = Path.join(ctx.account.config_dir, "framework/agents/o1.settings.json")
-    assert JSON.decode!(File.read!(own))["permissions"] == deny["permissions"]
+
+    assert JSON.decode!(File.read!(own))["permissions"] ==
+             Map.put(deny["permissions"], "allow", ["Artifact"])
+
     flags = ["--settings", own, "--add-dir", "/srv/docs", "--append-system-prompt=Be brief."]
     assert Enum.chunk_every(HeadlessStandIn.argv(ctx.dir, id), 5, 1) |> Enum.member?(flags)
     kept = Table.get(ctx.table, "test", "o1").options
@@ -67,7 +70,7 @@ defmodule CodingAgentFramework.SessionsOptionsTest do
     main = launch(ctx, :at_start) ++ [options: %{settings: deny}]
     assert {:ok, _} = Sessions.start(ctx.sessions, "m1", ctx.account, main)
     overlay = written.(Path.join(ctx.account.config_dir, "framework/agents/m1.settings.json"))
-    assert overlay["permissions"] == deny["permissions"]
+    assert overlay["permissions"] == Map.put(deny["permissions"], "allow", ["Artifact"])
     refute Map.has_key?(overlay, "includeGitInstructions")
   end
 

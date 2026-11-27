@@ -29,7 +29,8 @@ defmodule CodingAgentFramework.AccountsTest do
                "hooks" => data.hooks,
                "remoteControlAtStartup" => true,
                "autoContinueAtUsageLimit" => true,
-               "skillOverrides" => %{"auto-mode-setup" => "off"}
+               "skillOverrides" => %{"auto-mode-setup" => "off"},
+               "permissions" => %{"allow" => ["Artifact"]}
              })
 
     assert delegate == %{parent | "remoteControlAtStartup" => false}

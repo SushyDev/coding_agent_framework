@@ -561,6 +561,8 @@ Built, each from a checked model in `model/tla/`:
   only gone; its `closed` fact is written only once that row names who answered.
 - an interactive delegate's second interrupt is taken once the first settled, as a main
   session's is (F-294), or refused because no turn runs, never refused as already claimed.
+- every settings file the framework writes, a main's and a delegate's, allows the `Artifact`
+  tool (F-298), so a publish asked for in a message is not refused by auto mode's check.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
