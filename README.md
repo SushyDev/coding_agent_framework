@@ -540,6 +540,8 @@ Built, each from a checked model in `model/tla/`:
   the launch would have carried in its own brief's place.
 - a paste carries bracketed paste's markers in its own buffer (F-287), so a multi-line message
   is one submit even in a pane that attached under dtach after its program asked for the mode.
+- `bin/check-model` runs TLC on every core only while the load is under half the cores, and on 2
+  workers otherwise (F-290), so a model check on a busy shared host leaves its cores to others.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
