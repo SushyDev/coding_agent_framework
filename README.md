@@ -538,6 +538,9 @@ Built, each from a checked model in `model/tla/`:
   mark it never heard of, a brief marked for a start that never wrote its agent row ends at that
   start's deadline, and a delegate's new start ends an earlier start's brief left queued, which
   the launch would have carried in its own brief's place.
+- an interactive delegate's report is no longer held behind a background command (F-269): its
+  turn ends at Claude Code's turn-end line after the reply, whatever its session file reads,
+  and a fix whose state read times out is an `unknown` act of its own in the ledger.
 - a paste carries bracketed paste's markers in its own buffer (F-287), so a multi-line message
   is one submit even in a pane that attached under dtach after its program asked for the mode.
 - `bin/check-model` runs TLC on every core only while the load is under half the cores, and on 2

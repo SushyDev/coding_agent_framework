@@ -249,6 +249,52 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     assert {:ok, %{kind: "reply", from: ^name, to: "main"}} = Mailbox.answer_to(ctx.mailbox, u)
   end
 
+  # F-269, `Delegate.tla`'s ReportTurnEnded: the report's turn started a background command
+  # that runs on, so its session file reads `shell`. Claude Code writes the reply and its Stop
+  # hooks' summary, and the report waits while the turn may still run: a stop is refused at
+  # once, the report not yet taken. Then it writes its turn-end line, posts `Stop` and, about
+  # 3 s later, a `SubagentStop`; the turn-end line ends the turn whatever the file reads.
+  test "a report turn whose background command runs on is taken at its turn-end line", ctx do
+    assert {:ok, %{id: id, name: name, brief_uuid: u, session_id: sid}} =
+             Delegates.start_delegate(ctx.delegates, "main", "app", "unit/one", "opus", "Go.",
+               interactive: true
+             )
+
+    text = "Go.\n\n[delivery #{u}]"
+    assert {:ok, [^text]} = await(fn -> nonempty(ScreenStandIn.prompts(ctx.dir)) end)
+    shell!(ctx, sid)
+    {:ok, dir} = Accounts.config_dir(ctx.accounts, "work")
+    {:ok, path} = Transcripts.path(dir, Agents.get(ctx.agents, name).cwd, sid)
+    summary = %{"type" => "system", "subtype" => "stop_hook_summary", "hookCount" => 3}
+    lines(path, [user(text), reply("m1", "Built."), summary])
+
+    # The settle found the brief's line and read the reply, and took no report.
+    {:ok, _} =
+      await(fn ->
+        Delegates.cue(ctx.delegates, %{topic: "transcripts:test:work"})
+        if Map.has_key?(:sys.get_state(ctx.delegates).marks, {sid, u}), do: {:ok, true}
+      end)
+
+    :sys.get_state(ctx.delegates)
+    assert %{status: "running", report: "none"} = Table.get(ctx.dtable, id)
+
+    {:ok, state} = Delegates.fix_state(ctx.delegates, "main", name)
+    assert {:refused, {:report, "none"}} = Delegates.fix_check(:stop, state)
+    assert {:refused, {:report, _}} = Delegates.fix(ctx.delegates, "main", name, :stop, state)
+
+    lines(path, [%{"type" => "system", "subtype" => "turn_duration", "durationMs" => 4_000}])
+
+    for {event, extra} <- [{"Stop", %{}}, {"SubagentStop", %{"agent_id" => "bg-1"}}] do
+      body = Map.merge(%{"hook_event_name" => event, "session_id" => sid}, extra)
+      assert {:ok, _} = Intake.post(ctx.intake, "work", JSON.encode!(body))
+    end
+
+    assert {:ok, %{text: "Built.", report: "taken", taken_by: "turn_end"}} =
+             cue_until(ctx, id, &(&1.status == "finished" and &1.report == "taken"))
+
+    assert {:ok, %{kind: "reply", from: ^name, to: "main"}} = Mailbox.answer_to(ctx.mailbox, u)
+  end
+
   # F-200: an interactive delegate is run as a main session is (role `parent`), but it is a
   # delegate: its launch line has `--effort`, and its settings file says no git instructions.
   # F-275: and no Remote Control, neither the flag nor in its overlay.
@@ -844,6 +890,33 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
   defp uuid_of(ctx, {:ok, %{id: id}}) do
     {:ok, mtable} = Mailbox.Table.open(Path.join(ctx.dir, "caf.db"))
     Mailbox.Table.get(mtable, id).uuid
+  end
+
+  # Session `sid`'s file, once its first turn reads idle, says `shell` from now on, as 2.1.322's
+  # does while a background command of an ended turn runs. Renamed into place, as Claude Code
+  # writes it.
+  defp shell!(ctx, sid) do
+    {:ok, dir} = Accounts.config_dir(ctx.accounts, "work")
+    sessions = Path.join(dir, "sessions")
+
+    {:ok, {file, json}} =
+      await(fn ->
+        with {:ok, names} <- File.ls(sessions) do
+          Enum.find_value(names, fn name ->
+            file = Path.join(sessions, name)
+
+            with true <- String.ends_with?(name, ".json"),
+                 {:ok, bytes} <- File.read(file),
+                 {:ok, %{"sessionId" => ^sid, "status" => "idle"} = json} <- JSON.decode(bytes),
+                 do: {:ok, {file, json}},
+                 else: (_ -> nil)
+          end)
+        end
+      end)
+
+    tmp = file <> ".shell.tmp"
+    File.write!(tmp, JSON.encode!(%{json | "status" => "shell"}))
+    File.rename!(tmp, file)
   end
 
   defp user(text), do: %{"type" => "user", "message" => %{"content" => text}}

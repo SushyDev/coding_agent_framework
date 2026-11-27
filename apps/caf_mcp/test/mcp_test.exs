@@ -94,6 +94,12 @@ defmodule CodingAgentFramework.MCPTest do
       end
     end
 
+    # A `Delegates` too busy to read a fix's state within its bound (F-269's new-2).
+    def fix_state(test, parent, agent) do
+      send(test, {:fix_state, parent, agent})
+      {:unknown, {:timeout, 15_000}}
+    end
+
     # A `Mover` that begins every move at once.
     def move(test, actor, agent, opts) do
       send(test, {:move, actor, agent, opts})
@@ -605,6 +611,32 @@ defmodule CodingAgentFramework.MCPTest do
 
     assert [{"app-fix", "failed", "headless"}] =
              for(r <- rows, r.target == "app-fix", do: {r.target, r.outcome, r.reason})
+  end
+
+  # F-269's new-2: a fix whose state read answers unknown takes no claim, since it has no state
+  # to claim; the call is an act of its own, outcome unknown with the read's reason, and the
+  # caller gets the unknown whole. A second such call is a second act.
+  test "a stop whose state read times out is an unknown act in the ledger", ctx do
+    operating = operating(ctx)
+    acts = Process.get(:acts)
+    main = token(elem(MCP.issue(operating, "app-main"), 1))
+
+    for n <- 1..2 do
+      assert tool(operating, main, "stop", %{"agent" => "app-fix"}) ==
+               %{"unknown" => ["timeout", 15_000]}
+
+      assert_received {:fix_state, "app-main", "app-fix"}
+      assert {:ok, rows} = Acts.rows(acts, act: "stop")
+      assert length(rows) == n
+    end
+
+    {:ok, rows} = Acts.rows(acts, act: "stop")
+
+    for row <- rows do
+      assert %{actor: "app-main", target: "app-fix", outcome: "unknown"} = row
+      assert row.reason =~ "timeout" and row.reason =~ "15000"
+      assert row.detail == ~s({"step":"state"})
+    end
   end
 
   # An `MCP` with an operator, real `Acts` and the stand-in `Mains`, beside the setup's.

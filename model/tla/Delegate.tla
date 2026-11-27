@@ -72,6 +72,13 @@
 (* (ReportAnswersTheBrief). Later rows to it go by its waiter or the typed *)
 (* write, as to a main session (Delivery.tla's Delivery_Launch).          *)
 (*                                                                         *)
+(* Its report's turn ends at the transcript's turn-end line after the      *)
+(* reply (F-269), as a headless one's ends at its result (F-184): a        *)
+(* background command the turn started may run on after it (`shell`, its   *)
+(* session file's state), and a hung one never ends (BackgroundEnds has no *)
+(* fairness). BackgroundHolds reads the session file instead, and the      *)
+(* report waits behind the command for ever (ReportArrives fails).         *)
+(*                                                                         *)
 (* A delegate idle with no report (F-150, item 14): a turn of its may end *)
 (* with nothing the framework reads as its report (TurnEndsBare: an       *)
 (* interactive turn with no reply text, say), and nothing is due to it.   *)
@@ -216,7 +223,8 @@ Breaks == {
     "TurnInMemory",          \* an own turn's notice mark is kept in memory, not as Mailbox's key
     "TakeStale",             \* Sessions takes a request whose caller's deadline passed
     "StartOwedInMemory",     \* the parent owed a queued start's outcome is kept in memory only
-    "StartNoKey"             \* a queued start's outcome is told under no key Mailbox checks
+    "StartNoKey",            \* a queued start's outcome is told under no key Mailbox checks
+    "BackgroundHolds"        \* an interactive report's turn ends by its session file (F-269)
 }
 
 ASSUME Break \in Breaks
@@ -247,6 +255,8 @@ VARIABLES
                   \*      current message's turn has not replied), "brief" (that turn's),
                   \*      "person" (a person's later turn's), "own" (its own turn's)
     kills,        \* kills so far
+    shell,        \* the interactive delegates whose session file reads `shell`: a background
+                  \* command of an ended turn still runs (F-269)
     persons,      \* a person's turns so far
     rsrc,         \* table: d -> the turn its report was read from: "none" (a notice),
                   \*          "brief", "person"
@@ -280,7 +290,7 @@ VARIABLES
     row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, lost, wrong
 
 parentVars == <<parentRuns, turn, parentStops, parentTurned>>
-delegateVars == <<status, held, resumes, proc, reply, kills, persons, rsrc>>
+delegateVars == <<status, held, resumes, proc, reply, kills, shell, persons, rsrc>>
 callVars == <<call, queue, late, sess, marked, pipe, taken, resumed>>
 \* Item 14's: the idle notice and the start idempotent per branch (F-150); the
 \* queued start's lease and its notice (F-170).
@@ -356,6 +366,7 @@ Init ==
     /\ proc = [d \in Delegates |-> "none"]
     /\ reply = [d \in Delegates |-> "none"]
     /\ kills = 0 /\ persons = 0
+    /\ shell = {}
     /\ rsrc = [d \in Delegates |-> "none"]
     /\ stops = {}
     /\ call = [d \in Delegates |-> "none"]
@@ -404,7 +415,7 @@ FrameworkDies ==
     \* the parent owed a queued start's outcome is forgotten.
     /\ owed' = IF Break = "StartOwedInMemory" THEN [d \in Delegates |-> FALSE] ELSE owed
     /\ D!Restart
-    /\ UNCHANGED <<parentVars, status, resumes, proc, reply, kills, persons, rsrc,
+    /\ UNCHANGED <<parentVars, status, resumes, proc, reply, kills, shell, persons, rsrc,
                    queue, late, sess, marked, pipe, taken, resumed, idles, told, againStarts,
                    woken, ownDone, ownTold, sched, atOnce, startTold>>
 
@@ -435,7 +446,7 @@ RestartAgent(d) ==
           /\ sess' = [sess EXCEPT ![d] = "orphan"]
           /\ proc' = [proc EXCEPT ![d] = "waiting"]
           /\ resumed' = [resumed EXCEPT ![d] = IF sess[d] = "resume" THEN @ + 1 ELSE @]
-    /\ UNCHANGED <<up, parentVars, status, held, resumes, reply, kills, persons, rsrc, late,
+    /\ UNCHANGED <<up, parentVars, status, held, resumes, reply, kills, shell, persons, rsrc, late,
                    marked, pipe, taken, policyVars, dvars>>
 
 \* The parent's agent process crashes and its supervisor starts it again: a
@@ -454,7 +465,8 @@ OrphanEnded(d) ==
     /\ sess' = [sess EXCEPT ![d] = "refused"]
     /\ proc' = [proc EXCEPT ![d] = "dead"]
     /\ UNCHANGED <<up, restarts, parentVars, stops, policyVars, dvars, status, held, resumes,
-                   reply, kills, persons, rsrc, call, queue, late, marked, pipe, taken, resumed>>
+                   reply, kills, shell, persons, rsrc, call, queue, late, marked, pipe, taken,
+                   resumed>>
 
 -----------------------------------------------------------------------------
 (* The parent: its turns, and its process ending and running again (a move) *)
@@ -519,8 +531,8 @@ StartAsked(d) ==
           /\ atOnce' = [atOnce EXCEPT ![d] = TRUE]
           /\ UNCHANGED <<queue, late, marked, startTold>>
     /\ UNCHANGED <<up, restarts, parentVars, stops, idles, overdue, told, keys, againStarts,
-                   woken, ownDone, ownTold, dvars, held, resumes, proc, reply, kills, persons,
-                   rsrc, sess, pipe, taken, resumed>>
+                   woken, ownDone, ownTold, dvars, held, resumes, proc, reply, kills, shell,
+                   persons, rsrc, sess, pipe, taken, resumed>>
 
 \* The queued lease's one more answer (Schedule.tla's Tell). Delegates waits
 \* for it in memory: granted, the call of Sessions begins as StartAsked's
@@ -540,7 +552,7 @@ LeaseAnswered(d) ==
          ELSE UNCHANGED <<status, call, queue, late, marked>>
     /\ UNCHANGED <<up, restarts, parentVars, stops, idles, overdue, told, keys, againStarts,
                    woken, ownDone, ownTold, owed, atOnce, startTold, dvars, held, resumes, proc,
-                   reply, kills, persons, rsrc, sess, pipe, taken, resumed>>
+                   reply, kills, shell, persons, rsrc, sess, pipe, taken, resumed>>
 
 \* In a turn the parent starts the branch again. While the delegate's
 \* session is live the start answers it and writes nothing: no step. A row
@@ -563,7 +575,7 @@ StartAgain(d) ==
     /\ taken' = [taken EXCEPT ![d] = 0]
     /\ resumed' = [resumed EXCEPT ![d] = 0]
     /\ UNCHANGED <<up, restarts, parentVars, stops, idles, overdue, told, keys, woken, ownDone,
-                   ownTold, leaseVars, dvars, held, reply, kills, persons, rsrc, pipe>>
+                   ownTold, leaseVars, dvars, held, reply, kills, shell, persons, rsrc, pipe>>
 
 \* Sessions takes the request from its mailbox, whether Delegates runs or
 \* not. In the caller's time it writes its own row first (Start.tla). Past
@@ -607,8 +619,8 @@ SessionsDecides(d) ==
           /\ resumed' = [resumed EXCEPT ![d] = IF sess[d] = "resume" THEN @ + 1 ELSE @]
        \/ /\ sess' = [sess EXCEPT ![d] = "refused"]
           /\ UNCHANGED <<proc, pipe, resumed>>
-    /\ UNCHANGED <<others, status, held, resumes, reply, kills, persons, rsrc, call, queue, late,
-                   marked, taken>>
+    /\ UNCHANGED <<others, status, held, resumes, reply, kills, shell, persons, rsrc, call, queue,
+                   late, marked, taken>>
 
 \* A held headless process's init, once it read its first line, confirms
 \* the start; a process gone first is never confirmed, and the call is
@@ -660,8 +672,8 @@ CallAnswered(d) ==
          \* ResumeBeforeRow: the row learns of the resume only now.
          ELSE /\ resumes' = [resumes EXCEPT ![d] = @ + 1]
               /\ UNCHANGED status /\ NoReport
-    /\ UNCHANGED <<up, restarts, parentVars, stops, proc, reply, kills, persons, queue, late, sess,
-                   marked, pipe, taken, resumed, policyVars>>
+    /\ UNCHANGED <<up, restarts, parentVars, stops, proc, reply, kills, shell, persons, queue,
+                   late, sess, marked, pipe, taken, resumed, policyVars>>
 
 \* After a restart or a call's give-up, a row whose call was cut off is
 \* settled by Sessions' row of that call, once that row is settled; with
@@ -673,8 +685,8 @@ Settled(d) ==
        \/ sess[d] = "none" /\ (queue[d] = "none" \/ late[d])
        \/ Break = "SettleEarly"
     /\ Settle(d, sess[d])
-    /\ UNCHANGED <<up, restarts, parentVars, stops, resumes, proc, reply, kills, persons, callVars,
-                   policyVars>>
+    /\ UNCHANGED <<up, restarts, parentVars, stops, resumes, proc, reply, kills, shell, persons,
+                   callVars, policyVars>>
 
 \* A headless delegate's message goes in through Stream under the uuid the
 \* row holds, which Stream refuses a second time. Under NewUuid each write
@@ -694,8 +706,8 @@ InputTaken(d) ==
     /\ proc' = [proc EXCEPT ![d] = "working"]
     /\ reply' = [reply EXCEPT ![d] = "none"]
     /\ taken' = [taken EXCEPT ![d] = @ + 1]
-    /\ UNCHANGED <<others, status, held, resumes, kills, persons, rsrc, call, queue, late, sess,
-                   marked, resumed>>
+    /\ UNCHANGED <<others, status, held, resumes, kills, shell, persons, rsrc, call, queue, late,
+                   sess, marked, resumed>>
 
 \* A person attached to an interactive delegate types a prompt once its
 \* turn has ended: a turn of its own, after the brief's.
@@ -703,7 +715,7 @@ PersonTypes(d) ==
     /\ d \in Interactive /\ proc[d] = "idle" /\ persons < MaxPersonTurns
     /\ proc' = [proc EXCEPT ![d] = "person"]
     /\ persons' = persons + 1
-    /\ UNCHANGED <<others, status, held, resumes, reply, kills, rsrc, callVars>>
+    /\ UNCHANGED <<others, status, held, resumes, reply, kills, shell, rsrc, callVars>>
 
 \* Its turn ends with its last reply, and its Stop event (the result in its
 \* log, or an interactive session's Stop hook) comes. A kill before that is
@@ -712,14 +724,26 @@ PersonTypes(d) ==
 \* takes longer than that: the init is read before the turn it began ends.
 \* A turn that ended and a process that exited within one read would leave
 \* the start refused and the reply unread (F-152's build note, new-2).
+\* An interactive turn's transcript ends with Claude Code's turn-end line
+\* (`turn_duration`, after the reply and the Stop hooks' summary), written as
+\* the turn ends; a background command the turn started may run on, and its
+\* session file then reads `shell` (F-269).
 DelegateFinishes(d) ==
     /\ proc[d] \in {"working", "person"}
     /\ sess[d] # "held"
     /\ proc' = [proc EXCEPT ![d] = "idle"]
     /\ reply' = [reply EXCEPT ![d] = IF proc[d] = "working" THEN "brief" ELSE "person"]
     /\ stops' = IF up THEN stops \cup {d} ELSE stops
+    /\ shell' \in IF d \in Interactive THEN {shell, shell \cup {d}} ELSE {shell}
     /\ UNCHANGED <<up, restarts, parentVars, status, held, resumes, kills, persons, rsrc, callVars,
                    policyVars, dvars>>
+
+\* That background command ends. A hung one (a server, a watcher) never does,
+\* so this step has no fairness.
+BackgroundEnds(d) ==
+    /\ d \in shell
+    /\ shell' = shell \ {d}
+    /\ UNCHANGED <<others, status, held, resumes, proc, reply, kills, persons, rsrc, callVars>>
 
 \* Its turn ends with nothing the framework reads as its report (an
 \* interactive turn with no reply text): an idle state of its own begins.
@@ -731,8 +755,9 @@ TurnEndsBare(d) ==
     /\ idles' = [idles EXCEPT ![d] = @ + 1]
     /\ overdue' = [overdue EXCEPT ![d] = FALSE]
     /\ told' = [told EXCEPT ![d] = 0]
-    /\ UNCHANGED <<up, restarts, parentVars, status, held, resumes, reply, kills, persons, rsrc,
-                   stops, callVars, keys, againStarts, woken, ownDone, ownTold, leaseVars, dvars>>
+    /\ UNCHANGED <<up, restarts, parentVars, status, held, resumes, reply, kills, shell, persons,
+                   rsrc, stops, callVars, keys, againStarts, woken, ownDone, ownTold, leaseVars,
+                   dvars>>
 
 \* A background command of its own ends and wakes it: a turn that answers no
 \* message (F-155). Its row may still be running, its report not yet read.
@@ -740,8 +765,8 @@ OwnWakes(d) ==
     /\ proc[d] = "idle" /\ status[d] \in {"running", "finished"} /\ woken[d] < MaxWakes
     /\ proc' = [proc EXCEPT ![d] = "own"]
     /\ woken' = [woken EXCEPT ![d] = @ + 1]
-    /\ UNCHANGED <<up, restarts, parentVars, status, held, resumes, reply, kills, persons, rsrc,
-                   stops, callVars, idles, overdue, told, keys, againStarts, ownDone, ownTold,
+    /\ UNCHANGED <<up, restarts, parentVars, status, held, resumes, reply, kills, shell, persons,
+                   rsrc, stops, callVars, idles, overdue, told, keys, againStarts, ownDone, ownTold,
                    leaseVars, dvars>>
 
 \* That turn ends with its last reply and its result, which the log or the
@@ -752,45 +777,55 @@ OwnTurnEnds(d) ==
     /\ reply' = [reply EXCEPT ![d] = "own"]
     /\ ownDone' = ownDone \cup {<<d, woken[d]>>}
     /\ stops' = IF up THEN stops \cup {d} ELSE stops
-    /\ UNCHANGED <<up, restarts, parentVars, status, held, resumes, kills, persons, rsrc, callVars,
-                   idles, overdue, told, keys, againStarts, woken, ownTold, leaseVars, dvars>>
+    /\ UNCHANGED <<up, restarts, parentVars, status, held, resumes, kills, shell, persons, rsrc,
+                   callVars, idles, overdue, told, keys, againStarts, woken, ownTold, leaseVars,
+                   dvars>>
 
 DelegateKilled(d) ==
     /\ proc[d] \in {"waiting", "working", "person", "idle", "stalled", "own"} /\ kills < MaxKills
     /\ proc' = [proc EXCEPT ![d] = "dead"]
     /\ kills' = kills + 1
+    /\ shell' = shell \ {d}
     /\ UNCHANGED <<others, status, held, resumes, reply, persons, rsrc, callVars>>
 
 -----------------------------------------------------------------------------
 (* Delegates: from a finish or a kill to the report handed to Mailbox *)
 
+\* An interactive report's turn has ended once its transcript shows the
+\* turn-end line after the reply (F-269), whatever its session file reads:
+\* that line comes with the turn's end, so the reply read here is in an ended
+\* turn. Under BackgroundHolds the session file decides, and while a
+\* background command runs it reads `shell`, which holds the report.
+ReportTurnEnded(d) == d \notin shell \/ Break # "BackgroundHolds"
+
 \* The Stop event is the cue to read the report. Only a running delegate's
 \* row changes, so the event and the transcript fallback give one report.
 StopHandled(d) ==
     /\ up /\ d \in stops
+    /\ status[d] = "running" => ReportTurnEnded(d)
     /\ stops' = stops \ {d}
     /\ IF status[d] = "running"
          THEN status' = [status EXCEPT ![d] = "finished"] /\ Report(d, ReplyTurn(d))
          ELSE UNCHANGED status /\ NoReport
-    /\ UNCHANGED <<up, restarts, parentVars, resumes, proc, reply, kills, persons, callVars,
+    /\ UNCHANGED <<up, restarts, parentVars, resumes, proc, reply, kills, shell, persons, callVars,
                    policyVars>>
 
 \* A restart lost the Stop event: the transcript's reply is the report.
 TranscriptRead(d) ==
     /\ up /\ Break # "NoTranscriptFallback"
-    /\ status[d] = "running" /\ reply[d] # "none" /\ d \notin stops
-    /\ status' = [status EXCEPT ![d] = "finished"] /\ Report(d, ReplyTurn(d))
-    /\ UNCHANGED <<up, restarts, parentVars, resumes, proc, reply, kills, persons, stops, callVars,
-                   policyVars>>
+    /\ status[d] = "running" /\ reply[d] # "none" /\ d \notin stops /\ ReportTurnEnded(d)
+    /\ status'= [status EXCEPT ![d] = "finished"] /\ Report(d, ReplyTurn(d))
+    /\ UNCHANGED <<up, restarts, parentVars, resumes, proc, reply, kills, shell, persons, stops,
+                   callVars, policyVars>>
 
 \* Under HeldInMemory: the report waits in memory, then is stored.
 HeldStored(d) ==
     /\ up /\ d \in held
     /\ held' = held \ {d}
     /\ D!StoreRow(d, d, Parent, "reply", d, d)
-    /\ UNCHANGED <<up, restarts, parentVars, status, resumes, proc, reply, kills, persons, rsrc,
-                   stops, callVars, policyVars, hand, claimed, wire, waiter, dcall, tx, fold, rmem,
-                   last, unsure, lost, wrong>>
+    /\ UNCHANGED <<up, restarts, parentVars, status, resumes, proc, reply, kills, shell, persons,
+                   rsrc, stops, callVars, policyVars, hand, claimed, wire, waiter, dcall, tx, fold,
+                   rmem, last, unsure, lost, wrong>>
 
 \* A process killed before its last reply is resumed once: the row counts
 \* the resume, as resuming, before Sessions is asked, with the next turn's
@@ -810,7 +845,7 @@ KillSeen(d) ==
          ELSE /\ status' = [status EXCEPT ![d] = "failed"]
               /\ Report(d, "none")
               /\ UNCHANGED <<resumes, call, queue, late, sess, marked>>
-    /\ UNCHANGED <<up, restarts, parentVars, proc, reply, kills, persons, stops, pipe, taken,
+    /\ UNCHANGED <<up, restarts, parentVars, proc, reply, kills, shell, persons, stops, pipe, taken,
                    resumed, policyVars>>
 
 \* Delegates' wake at the bound the app sets, from when it first read the
@@ -865,6 +900,7 @@ DelegateEnds(d) ==
     /\ row[d].st = "delivered" \/ Break = "EndBeforeDelivery"
     /\ status' = [status EXCEPT ![d] = "ended"]
     /\ proc' = [proc EXCEPT ![d] = "none"]
+    /\ shell' = shell \ {d}
     /\ UNCHANGED <<others, held, resumes, reply, kills, persons, rsrc, callVars>>
 
 -----------------------------------------------------------------------------
@@ -914,7 +950,7 @@ Next ==
                             \/ LeaseAnswered(d)
                             \/ SessionsDecides(d) \/ Confirmed(d)
                             \/ InputTaken(d) \/ PersonTypes(d) \/ DelegateFinishes(d)
-                            \/ TurnEndsBare(d) \/ DelegateKilled(d)
+                            \/ TurnEndsBare(d) \/ DelegateKilled(d) \/ BackgroundEnds(d)
                             \/ RestartAgent(d) \/ OrphanEnded(d)
                             \/ OwnWakes(d) \/ OwnTurnEnds(d)
                             \/ Framework(d)
@@ -950,6 +986,7 @@ TypeOK ==
     /\ status \in [Delegates -> {"none", "refused", "starting", "running", "resuming",
                                  "finished", "failed", "ended"}]
     /\ held \subseteq Delegates
+    /\ shell \subseteq Interactive
     /\ proc \in [Delegates -> {"none", "waiting", "working", "person", "idle", "stalled", "own",
                                "dead"}]
     /\ reply \in [Delegates -> {"none", "brief", "person", "own"}]

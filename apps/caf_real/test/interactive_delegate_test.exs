@@ -78,6 +78,16 @@ defmodule CodingAgentFramework.Real.InteractiveDelegateTest do
       assert report =~ hash(), "the report: #{inspect(report)}"
     end)
 
+    # F-269: the pinned release ends a turn's lines with its own turn-end line after the reply,
+    # which ends an interactive report's turn whatever runs in the background.
+    step("4, the report's turn ends with Claude Code's turn-end line", fn ->
+      lines = String.split(transcript(ctx, name), "\n", trim: true)
+      last_reply = Enum.find_index(Enum.reverse(lines), &(&1 =~ ~s("stop_reason":"end_turn")))
+      assert last_reply, "no end_turn reply in #{name}'s transcript"
+      after_reply = Enum.take(lines, -last_reply)
+      assert Enum.any?(after_reply, &(&1 =~ ~s("subtype":"turn_duration"))), inspect(after_reply)
+    end)
+
     step("4, the main session was told once of each prompt", fn ->
       for id <- trust ++ allowed do
         assert told(ctx, id) == 1, "#{ctx.main} was told of #{id} #{told(ctx, id)} times"
