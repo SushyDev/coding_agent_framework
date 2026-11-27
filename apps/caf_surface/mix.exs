@@ -22,6 +22,7 @@ defmodule CafSurface.MixProject do
       {:caf_acts, in_umbrella: true},
       {:caf_cli, in_umbrella: true},
       {:caf_copies, in_umbrella: true},
+      {:caf_hosts, in_umbrella: true},
       {:caf_cues, in_umbrella: true},
       {:caf_delegates, in_umbrella: true},
       {:caf_grants, in_umbrella: true},

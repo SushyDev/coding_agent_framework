@@ -1049,7 +1049,7 @@ takes nothing else from the app (F-188): a part's process is never handed in, on
 | `home` | the framework home, absolute, at most 69 bytes (93 with `agents: false`, which runs no service, F-207) | required |
 | `instance` | the tree's name in the app, unique, 1 to 100 bytes | required |
 | `programs`, `workstation` | the workstation's programs, and its host name | required, `"ws"` |
-| `hosts` | the other hosts, name to `%{programs, dir}` | none |
+| `hosts` | the other hosts, name to `%{host, dir}`, each found when work is placed there (`Hosts`, F-280) | none |
 | `accounts` | the Claude accounts' names | required, unless `agents: false` |
 | `projects`, `mains` | the projects, and the main sessions declared on them | none |
 | `main_model`, `operator` | a main session's model; the operator's name | `"opus"`, `"operator"` |
@@ -1156,6 +1156,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Acts` | one ledger of acts: an actor's act on a target's state, written before it acts, once per state, settled after, closed as interrupted when a restart cut it, with a cue. Fixes, the operator's acts, recoveries, kills, resumes, starts and raised errors are its rows, and the fault ledger is a query of it | `acts` |
 | `Scheduler` | one per instance, against `Schedule.tla`: every agent start, heavy run and landing asks it for a lease first ("A lease" below). A grant is one write transaction that checks each resource's capacity and inserts the row, with all of a landing's resources in one lease; a release is a compare-and-set on the lease id, so it happens once; a lease names the row of the work it admits, and is released only when that row's owner says the work ended (by its `Holder.Process` record; a row still starting is live), never because time passed. It reads pressure and each account's budget, never the load average | `leases`: id (the fencing token), request id, outcome (granted or refused), class, module, account, the units of each resource, the holder (the work's row), asked, decided and released times, and a refusal's reason and retry time |
 | `Stacks` | the worktrees and `gh stack` chains of a main session's work | — |
+| `Hosts` | one per instance, against `Host.tla` (F-280): what is known of each other host, `unknown`, `ready`, `away` or `lacking`. Each placement of new work there (a job's run, a service's start or restart) finds the host's programs over ssh within the placement's start timeout, with an rsync of 3.1.3 or later (the copy's times to the nanosecond), and keeps them for the reads of work already placed | no table: memory, found again after a restart |
 | `Copies` | a host's copy of each worktree, brought in step by rsync before each job or service, and removed with the worktree | `copies` |
 | `Jobs` | one-off commands on a host, in a copy: held, logged, ended by their exit or their timeout; each asks the `Scheduler` for a lease first, in the class its caller names, its row the holder (`Jobs.Work` answers for it), and its wrapper runs only under the fence of that lease ("A lease") | `jobs`, with each row's lease id and a lease refusal's reason and retry time |
 | `Runs` | a heavy native `Bash` command under a lease (F-171): the `PreToolUse` policy that rewrites a call the app lists as heavy into the wrapper `<home>/bin/caf-run`, the wrapper itself, its endpoint on the intake's port (`Runs.Plug`), and the lease's owner, the wrapper's own process read by `ps` | no table: the lease is the row |
@@ -1385,6 +1386,19 @@ its host, as it has since the first part built, so the workstation is one host a
   directory of the framework's own (its copies, its dtach directory for services, and its
   logs). Nothing of Claude Code runs there, so no hook, session file or transcript is read from
   it;
+- another host may be away (asleep, off the network) and may lack programs, so nothing of it is
+  read at the tree's start (F-280, `Host.tla`). Each placement of new work there finds its
+  programs over ssh with `Programs.find/3`, bounded by the placement's start timeout, and
+  answers at once: placed; `{:refused, {:no_program, host, names}}`, naming every program
+  missing; `{:refused, {:old_rsync, host, line}}`, an rsync older than 3.1.3 (`line` its
+  `--version`'s first); or `{:refused, {:host_away, host}}`, no answer within the bound. A
+  refused placement writes no job row and marks a service's row `refused`. The next placement
+  finds the host again, so it joins without a restart. A placement finds a ready host again
+  too, since only a find shows that it still answers: one ssh per placement, and one more
+  for the version of an rsync not yet checked. A read of work
+  already placed (a log, a settle, a service's end) takes the programs kept, and a host not
+  ready is found again for such reads at most once each `retry` (30 s), since they run in a
+  part's own process on its interval;
 - a job or service runs in a copy of the worktree it names. Before a job or a service starts,
   `Copies` brings the copy in step with the worktree by rsync, over every file git does not
   ignore, edits not yet committed included; it compares a file by its size and its modification

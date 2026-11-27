@@ -39,9 +39,18 @@ defmodule CodingAgentFramework.Config do
         ...>   env: %{path: "/bin"}, user: "me", scope: :systemd_user)
         {:refused, {:bad, :scope, {:no_program, :systemd_run}}}
 
-  - `hosts`: the other hosts, name to `%{programs: programs, dir: dir}` as `Jobs` and `Services`
-    read them, each host reached by `Host.ssh/5` with the home's `ToolHome.ssh_options/1`;
-    none by default;
+  - `hosts`: the other hosts, which take jobs and services, name to `%{host: host, dir: dir}`:
+    `host` is reached by `Host.ssh/5` under the same name, with the home's
+    `ToolHome.ssh_options/1`, and `dir` is the framework's absolute directory there. An entry
+    may name `env`, the environment every program held there runs in, and `ssh_env`, a
+    forward's ssh's. Its programs are found when work is placed there
+    (`CodingAgentFramework.Hosts`). None by default; a host that is not one is refused
+    `{:bad, :hosts, {:not_a_host, name}}`;
+
+        iex> CodingAgentFramework.Config.new(home: "/srv/caf", instance: "a", programs: %{},
+        ...>   env: %{path: "/bin"}, agents: false, hosts: %{"mac" => %{dir: "/caf"}})
+        {:refused, {:bad, :hosts, {:not_a_host, "mac"}}}
+
   - `accounts`: the Claude accounts' names; required, as `ports` and `claude` are, unless
     `agents: false` (below);
   - `projects`: name to the project, as `CodingAgentFramework.Mains` takes it: its `origin`
@@ -378,8 +387,8 @@ defmodule CodingAgentFramework.Config do
 
   # The parts a lease needs (F-195): the reaper every command runs under, the instance's
   # `Registry` and `Cues`, `Acts` (where a part's crash is recorded), the `Tracker`, the
-  # `Scheduler`, and `Copies` and `Jobs`, whose jobs take its leases.
-  @agentless [:reaper, :names, :cues, :acts, :tracker, :scheduler, :copies, :jobs]
+  # `Scheduler`, and `Hosts`, `Copies` and `Jobs`, whose jobs take its leases.
+  @agentless [:reaper, :names, :cues, :acts, :tracker, :scheduler, :hosts, :copies, :jobs]
 
   # macOS cuts a unix socket path at 103 bytes (`Holder`). The tmux server's socket,
   # `<home>/tmux.sock`, is the one whose name is fixed, and tmux would fail on it only at its
@@ -490,6 +499,9 @@ defmodule CodingAgentFramework.Config do
 
       Map.get(fields, :scope) == :systemd_user and not is_map_key(fields.programs, :systemd_run) ->
         {:refused, {:bad, :scope, {:no_program, :systemd_run}}}
+
+      (bad = bad_hosts(Map.get(fields, :hosts, %{}), Map.get(fields, :workstation, "ws"))) != nil ->
+        {:refused, {:bad, :hosts, bad}}
 
       Watch.check_remedies(Map.get(fields, :remedies, %{})) != :ok ->
         {:refused, {:bad, :remedies}}
@@ -769,10 +781,26 @@ defmodule CodingAgentFramework.Config do
   lease needs, and nothing that runs or reads an agent.
 
       iex> CodingAgentFramework.Config.agentless()
-      [:reaper, :names, :cues, :acts, :tracker, :scheduler, :copies, :jobs]
+      [:reaper, :names, :cues, :acts, :tracker, :scheduler, :hosts, :copies, :jobs]
   """
   @spec agentless() :: [atom]
   def agentless, do: @agentless
+
+  # Each other host is reached over ssh under its own name, with an absolute directory.
+  defp bad_hosts(hosts, _workstation) when not is_map(hosts), do: :not_a_map
+
+  defp bad_hosts(hosts, workstation) do
+    Enum.find_value(hosts, fn
+      {^workstation, _} ->
+        {:workstation, workstation}
+
+      {name, %{host: %Host{name: name, reach: {:ssh, _, _}}, dir: "/" <> _}} ->
+        nil
+
+      {name, _} ->
+        {:not_a_host, name}
+    end)
+  end
 
   # A name with no control character; on macOS a tree that runs agents must have it (see `user`
   # above).

@@ -18,6 +18,7 @@ defmodule CafCopies.MixProject do
   defp deps do
     [
       {:caf_shell, in_umbrella: true},
+      {:caf_hosts, in_umbrella: true},
       {:caf_holder, in_umbrella: true},
       {:caf_store, in_umbrella: true},
       {:caf_test, in_umbrella: true, only: :test}
