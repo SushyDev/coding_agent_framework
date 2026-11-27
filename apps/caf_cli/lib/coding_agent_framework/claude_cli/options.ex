@@ -2,7 +2,9 @@ defmodule CodingAgentFramework.ClaudeCLI.Options do
   @moduledoc """
   An agent's own launch options, checked. Pure. Keys are atoms or their strings, each optional:
   `settings` (Claude Code settings, which `CodingAgentFramework.Accounts.overlay/4` merges over
-  the account's; never the keys the framework writes), `env` (names to strings; never a name
+  the account's; never the keys the framework writes, and in `skillOverrides`, a map of skill
+  name to text, never an entry it writes, `Accounts.skill_overrides/0`; the agent's other
+  entries merge one by one over the account's, F-285), `env` (names to strings; never a name
   the framework sets, `CLAUDECODE` or `TMUX…`), `add_dirs` (absolute paths),
   `append_system_prompt` (at most 64 KiB), and `allowed_tools` and `disallowed_tools` (patterns
   such as `Bash(git *)`). A list or map holds at most 64, and all of them as JSON at most 256
@@ -15,6 +17,8 @@ defmodule CodingAgentFramework.ClaudeCLI.Options do
       iex> Options.check(%{env: %{"CLAUDE_CONFIG_DIR" => "/tmp"}})
       {:refused, {:bad_option, :env, {:reserved, "CLAUDE_CONFIG_DIR"}}}
   """
+
+  alias CodingAgentFramework.Accounts
 
   @type t :: %{optional(atom) => term}
 
@@ -90,6 +94,7 @@ defmodule CodingAgentFramework.ClaudeCLI.Options do
 
     with :ok <- first(keys, &(&1 not in @own_settings), :reserved),
          :ok <- first(keys, &is_binary/1, :bad_key),
+         :ok <- skill_overrides(Map.get(settings, "skillOverrides", %{})),
          :ok <-
            first(rules, &(is_list(&1) and Enum.all?(&1, fn r -> is_binary(r) end)), :bad_rules),
          do: if(json?(settings, @total), do: :ok, else: :not_json)
@@ -116,6 +121,18 @@ defmodule CodingAgentFramework.ClaudeCLI.Options do
        do: first(list, &(is_binary(&1) and &1 =~ @tool), :bad_pattern)
 
   defp value(_key, _value), do: :bad_value
+
+  # An entry the framework writes (F-285) is refused, as a key it writes is; the others are the
+  # agent's, merged one by one over the account's.
+  defp skill_overrides(%{} = overrides) do
+    own = Map.keys(Accounts.skill_overrides())
+    entry? = fn {skill, value} -> is_binary(skill) and text?(value) end
+
+    with :ok <- first(Map.keys(overrides), &(&1 not in own), :reserved_skill),
+         do: first(Map.to_list(overrides), entry?, :bad_skill)
+  end
+
+  defp skill_overrides(other), do: {:bad_skill, other}
 
   # `:ok`, or the first item that fails `ok?`, as `{why, item}`.
   defp first(items, ok?, why) do
