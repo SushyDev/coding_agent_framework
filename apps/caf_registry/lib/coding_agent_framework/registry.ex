@@ -38,6 +38,13 @@ defmodule CodingAgentFramework.Registry do
   its row keeps the last good data, if any, and names the problem in `problem`. A read whose
   shell fails writes nothing and answers `{:unknown, reason}`.
 
+  **A turn is followed** (F-281). With an `interval:`, a read that leaves a live file reading a
+  turn in flight (`busy`, `shell` or `waiting`) reads again `follow:` ms after it (1 s by
+  default, never later than the interval), at a tick or a call alike. So a turn's end shows in
+  the table, and in the `Tracker`'s tree, within `follow` and one read's own time of the file
+  saying it, whatever the interval: no other part's read is waited for. With every file idle
+  or gone, the next read is the interval's.
+
   After a write that changed an account's rows, or its first read, it calls `notify` with a cue
   per account that names the topic and the row ids, never the data:
   `%{topic: "registry:<host>:<account>", ids: ids}`. The cue is a plain function so the library
@@ -51,6 +58,9 @@ defmodule CodingAgentFramework.Registry do
   alias CodingAgentFramework.Registry.{SessionFile, Table}
 
   @timeout 10_000
+  @follow 1_000
+  # The statuses of a turn in flight, whose end a read follows (F-281).
+  @in_flight ~w(busy shell waiting)
   @account "\0caf-account\0"
   @mark "\0caf-file\0"
   # Per account, a marker, then one listing and every file's bytes, each after a marker no JSON
@@ -76,7 +86,8 @@ defmodule CodingAgentFramework.Registry do
   cat), `accounts:` (each account's name to its config directory on the host), `db:` (this
   instance's SQLite path), and optionally `notify:` (a function of one cue), `timeout:` (ms per
   shell run, default 10 s), `interval:` (ms between reads; without it, reads happen only on
-  `read/2`) and `proc:` (the directory read for a start in clock ticks, default `"/proc"`; a
+  `read/2`), `follow:` (ms to the next read while a turn is in flight, default 1 s; only with an
+  interval) and `proc:` (the directory read for a start in clock ticks, default `"/proc"`; a
   test names one of its own). It fails to start with `{:no_program, names}` when a program is missing.
   """
   @spec start_link(keyword) :: GenServer.on_start()
@@ -197,7 +208,9 @@ defmodule CodingAgentFramework.Registry do
         cache: cache,
         programs: paths,
         timeout: Keyword.get(opts, :timeout, @timeout),
-        proc: proc_dir(opts)
+        proc: proc_dir(opts),
+        follow: Keyword.get(opts, :follow, @follow),
+        timer: nil
       }
 
       {:ok, Map.merge(state, Reader.loop(opts))}
@@ -209,14 +222,50 @@ defmodule CodingAgentFramework.Registry do
   @impl true
   def handle_call(:read, _from, state) do
     {reply, state} = read_now(state)
-    {:reply, reply, state}
+    {:reply, reply, schedule(state, false)}
   end
 
   def handle_call({:rows, account}, _from, state),
     do: {:reply, Table.rows(state.db, state.host.name, account), state}
 
   @impl true
-  def handle_info(:tick, state), do: {:noreply, Reader.tick(state, &read_now/1)}
+  # The first tick is `Reader.loop/1`'s; each later one names its timer, so a tick a nearer one
+  # replaced, sent before its timer was canceled, reads nothing.
+  def handle_info(:tick, state), do: {:noreply, tick(state)}
+  def handle_info({:tick, ref}, %{timer: {_, ref, _}} = state), do: {:noreply, tick(state)}
+  def handle_info({:tick, _replaced}, state), do: {:noreply, state}
+
+  defp tick(state) do
+    {_, state} = read_now(%{state | timer: nil})
+    schedule(state, true)
+  end
+
+  # The next tick: the interval's, or `follow`'s while a file reads a turn in flight, so its end
+  # is read soon whichever part read last (F-281). A call's read only brings an armed tick nearer.
+  defp schedule(%{interval: nil} = state, _ticked), do: state
+
+  defp schedule(state, ticked) do
+    delay =
+      if in_flight?(state.cache), do: min(state.follow, state.interval), else: state.interval
+
+    due = System.monotonic_time(:millisecond) + delay
+
+    case state.timer do
+      {_, _, at} when not ticked and at <= due ->
+        state
+
+      armed ->
+        with {timer, _, _} <- armed, do: Process.cancel_timer(timer)
+        ref = make_ref()
+        %{state | timer: {Process.send_after(self(), {:tick, ref}, delay), ref, due}}
+    end
+  end
+
+  defp in_flight?(cache) do
+    Enum.any?(cache, fn {_account, files} ->
+      Enum.any?(files, fn {_file, row} -> row[:alive] == :live and row[:status] in @in_flight end)
+    end)
+  end
 
   defp read_now(state) do
     {names, dirs} = Enum.unzip(state.accounts)

@@ -524,6 +524,9 @@ Built, each from a checked model in `model/tla/`:
 - a launch row is read in the session its start made (F-282): a new start of an agent whose row
   named an earlier session read that session's offset in the new transcript, never found the
   brief's line, and kept the row `sending`, so the parent's stop was refused `open`.
+- a turn's end shows in the tree within a second of its session file (F-281): `Registry` reads
+  again `follow` ms (1 s) after a read that saw a turn in flight, so a tree with a long
+  `interval` no longer shows a main `working` until some other part happens to read the files.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
