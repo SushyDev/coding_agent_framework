@@ -51,6 +51,11 @@ defmodule CodingAgentFramework.ClaudeCLI.OptionsTest do
     for {options, {option, why}} <- [
           {%{"other" => 1}, {"other", :unknown}},
           {%{settings: %{"hooks" => %{}}}, {:settings, {:reserved, "hooks"}}},
+          {%{settings: %{"skillOverrides" => %{"auto-mode-setup" => "on"}}},
+           {:settings, {:reserved_skill, "auto-mode-setup"}}},
+          {%{settings: %{"skillOverrides" => %{"review" => 1}}},
+           {:settings, {:bad_skill, {"review", 1}}}},
+          {%{settings: %{"skillOverrides" => "off"}}, {:settings, {:bad_skill, "off"}}},
           {%{settings: %{"permissions" => %{"deny" => "Bash"}}},
            {:settings, {:bad_rules, "Bash"}}},
           {%{env: %{"PATH" => "/x"}}, {:env, {:reserved, "PATH"}}},
@@ -65,5 +70,11 @@ defmodule CodingAgentFramework.ClaudeCLI.OptionsTest do
         ] do
       assert launch(:headless, options: options) == {:refused, {:bad_option, option, why}}
     end
+  end
+
+  # F-285: an agent's own skill overrides are its own; only the framework's entry is refused.
+  test "an agent's skill overrides other than the framework's are kept" do
+    settings = %{"skillOverrides" => %{"review" => "off", "notes" => "name-only"}}
+    assert Options.check(%{settings: settings}) == {:ok, %{settings: settings}}
   end
 end

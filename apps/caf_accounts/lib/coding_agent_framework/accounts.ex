@@ -24,7 +24,11 @@ defmodule CodingAgentFramework.Accounts do
     `autoContinueAtUsageLimit` true, whatever the caller's settings say:
     at a usage limit under 24 hours away an interactive session waits and goes on by itself, as
     `Limit.tla`'s own wait does (`docs/design.md`, "Usage limits"). The hooks need no matcher
-    of their own for a limit: Intake's post every `StopFailure` and `Notification`;
+    of their own for a limit: Intake's post every `StopFailure` and `Notification`. Both carry
+    `skillOverrides` with `"auto-mode-setup": "off"` (`skill_overrides/0`, F-285): Claude Code
+    otherwise offers "Teach auto mode about your environment?" at a turn's end once auto mode
+    has blocked a few actions, and on a delegate the offer comes back every turn and holds its
+    messages. The caller's other `skillOverrides` entries are kept, and the framework's wins;
   - `mcp.json`: the MCP servers, loaded with `--mcp-config` and `--strict-mcp-config`, so no
     server from `.claude.json` joins them;
   - `agents/<agent>.settings.json`: an agent's own settings over the account's (`overlay/5`),
@@ -56,6 +60,7 @@ defmodule CodingAgentFramework.Accounts do
   # An agent's name, as a file name.
   @agent ~r/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z/
   @rules ~w(allow deny ask additionalDirectories)
+  @skill_overrides %{"auto-mode-setup" => "off"}
 
   @doc """
   The accounts `names` under `home`, an absolute path. Nothing is written.
@@ -144,13 +149,24 @@ defmodule CodingAgentFramework.Accounts do
   end
 
   @doc """
+  The `skillOverrides` entries every settings file the framework writes carries, over any the
+  caller gives for the same skill: the offer to set up auto mode is off (F-285).
+
+      iex> CodingAgentFramework.Accounts.skill_overrides()
+      %{"auto-mode-setup" => "off"}
+  """
+  @spec skill_overrides() :: %{String.t() => String.t()}
+  def skill_overrides, do: @skill_overrides
+
+  @doc """
   Writes agent `name`'s own settings file, `<config>/framework/agents/<name>.settings.json`:
   the account's `which` settings file (`:parent`, a main session's, or `:delegate`, every
   delegate's) with `settings` (checked by `ClaudeCLI.Options`) over them. The
   `permissions` rule lists (`allow`, `deny`, `ask`, `additionalDirectories`) add to the
   account's, and so do the `hooks` of each event (the account's first, as `prepare/3` puts
-  Intake's after the caller's), so a main session's waiter never drops Intake's hooks; any
-  other key replaces it. `defaults` (a map, none by default) sit under the account's file: a key
+  Intake's after the caller's), so a main session's waiter never drops Intake's hooks;
+  `skillOverrides` entries merge one by one, with `skill_overrides/0`'s over them; any other
+  key replaces it. `defaults` (a map, none by default) sit under the account's file: a key
   the account's file or `settings` gives wins over it, so a default is only what nobody said
   (a delegate's `includeGitInstructions: false`, F-200). Answers `{:ok, path}`,
   `{:refused, {:bad, :name}}`, `{:refused, {:not_prepared, account}}` or
@@ -170,7 +186,8 @@ defmodule CodingAgentFramework.Accounts do
          {:ok, %{} = base} <- JSON.decode(text),
          base = Map.merge(defaults, base),
          :ok <- mkdir(dir),
-         :ok <- write_all([{path, JSON.encode!(Map.merge(base, settings, &merge/3))}]) do
+         {:ok, merged} <- own_skills(Map.merge(base, settings, &merge/3)),
+         :ok <- write_all([{path, JSON.encode!(merged)}]) do
       {:ok, path}
     else
       {:error, :enoent} -> {:refused, {:not_prepared, account.name}}
@@ -191,6 +208,9 @@ defmodule CodingAgentFramework.Accounts do
   # F-123's new-2: an overlay's hooks add to the account's, per event.
   defp merge("hooks", %{} = account, %{} = own),
     do: Map.merge(account, own, fn _event, a, b -> List.wrap(a) ++ List.wrap(b) end)
+
+  # F-285: an agent's skill overrides add to the account's one by one.
+  defp merge("skillOverrides", %{} = account, %{} = own), do: Map.merge(account, own)
 
   defp merge(_key, _account, own), do: own
 
@@ -339,8 +359,28 @@ defmodule CodingAgentFramework.Accounts do
   end
 
   defp encode(account, settings, mcp_servers) do
-    settings = Map.put(settings, "autoContinueAtUsageLimit", true)
+    with {:ok, settings} <- own_skills(settings) do
+      settings
+      |> Map.put("autoContinueAtUsageLimit", true)
+      |> encode_files(account, mcp_servers)
+    end
+  end
 
+  # The framework's entries go over the merged file's, so an account file written before F-285,
+  # or a caller that skips `Options`, still has them.
+  defp own_skills(settings) do
+    with {:ok, overrides} <- own_overrides(settings),
+         do: {:ok, Map.put(settings, "skillOverrides", Map.merge(overrides, @skill_overrides))}
+  end
+
+  defp own_overrides(settings) do
+    case Map.get(settings, "skillOverrides", %{}) do
+      %{} = overrides -> {:ok, overrides}
+      other -> {:refused, {:bad, {:skillOverrides, other}}}
+    end
+  end
+
+  defp encode_files(settings, account, mcp_servers) do
     files = [
       {account.settings.parent, Map.put(settings, "remoteControlAtStartup", true)},
       {account.settings.delegate, Map.put(settings, "remoteControlAtStartup", false)},

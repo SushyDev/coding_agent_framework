@@ -28,7 +28,8 @@ defmodule CodingAgentFramework.AccountsTest do
              Map.merge(data.settings, %{
                "hooks" => data.hooks,
                "remoteControlAtStartup" => true,
-               "autoContinueAtUsageLimit" => true
+               "autoContinueAtUsageLimit" => true,
+               "skillOverrides" => %{"auto-mode-setup" => "off"}
              })
 
     assert delegate == %{parent | "remoteControlAtStartup" => false}

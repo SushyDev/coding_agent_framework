@@ -55,6 +55,49 @@ defmodule CodingAgentFramework.AccountsOverlayTest do
     assert Accounts.overlay(account, :delegate, "d-4", %{}, :none) == {:refused, {:bad, :overlay}}
   end
 
+  # F-285: the offer to set up auto mode is off in every file; the app's other entries are kept.
+  test "skill overrides merge per entry, and the framework's auto-mode-setup entry wins" do
+    home = Path.join(TestHost.test_dir(), "overlay-#{System.unique_integer([:positive])}")
+    {:ok, accounts} = Accounts.new(home, ["work"])
+    app = %{"auto-mode-setup" => "on", "review" => "off", "notes" => "user-invocable-only"}
+
+    {:ok, account} =
+      Accounts.prepare(accounts, "work", %{settings: %{"skillOverrides" => app}})
+
+    account_wide = %{
+      "auto-mode-setup" => "off",
+      "review" => "off",
+      "notes" => "user-invocable-only"
+    }
+
+    for file <- [account.settings.parent, account.settings.delegate],
+        do: assert(JSON.decode!(File.read!(file))["skillOverrides"] == account_wide)
+
+    own = %{"skillOverrides" => %{"notes" => "off", "draw" => "name-only"}}
+    assert {:ok, path} = Accounts.overlay(account, :delegate, "d-1", own)
+
+    assert JSON.decode!(File.read!(path))["skillOverrides"] ==
+             %{
+               "auto-mode-setup" => "off",
+               "review" => "off",
+               "notes" => "off",
+               "draw" => "name-only"
+             }
+
+    # Even an overlay given the framework's own entry keeps it off.
+    off = %{"skillOverrides" => %{"auto-mode-setup" => "on"}}
+    assert {:ok, path} = Accounts.overlay(account, :parent, "main", off)
+    assert JSON.decode!(File.read!(path))["skillOverrides"] == account_wide
+
+    # An account file written before F-285 has no entry; its overlay gets one.
+    File.write!(account.settings.delegate, JSON.encode!(%{"theme" => "dark"}))
+    assert {:ok, path} = Accounts.overlay(account, :delegate, "d-2", %{})
+    assert JSON.decode!(File.read!(path))["skillOverrides"] == %{"auto-mode-setup" => "off"}
+
+    assert Accounts.prepare(accounts, "work", %{settings: %{"skillOverrides" => ["x"]}}) ==
+             {:refused, {:bad, {:skillOverrides, ["x"]}}}
+  end
+
   test "an overlay's hooks add to the account's per event; they never replace them" do
     home = Path.join(TestHost.test_dir(), "overlay-#{System.unique_integer([:positive])}")
     {:ok, accounts} = Accounts.new(home, ["work"])

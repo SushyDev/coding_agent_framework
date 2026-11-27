@@ -3691,6 +3691,17 @@ without it.
   Code's own lock. An agent's settings are one file: its launch
   options' overlay merged over its account's settings, since `--settings` takes one value
   (F-110).
+- Every settings file the framework writes, a main's and a delegate's, carries
+  `skillOverrides` with `"auto-mode-setup": "off"` (F-285): Claude Code 2.1.322 otherwise
+  offers "Teach auto mode about your environment?" at a turn's end once auto mode has blocked a
+  few actions and no `autoMode.environment` entry exists, and on a delegate the offer came back
+  every turn and held its messages. The framework owns that one entry, not the key: an
+  account's `skillOverrides` entries are kept, with the framework's over its own for the same
+  skill, as `autoContinueAtUsageLimit` is; an agent's launch options merge theirs one by one
+  over the account's and are refused `{:reserved_skill, "auto-mode-setup"}` for the
+  framework's. The offer, if it ever shows (a managed setting over `--settings`, or a release
+  that reads the entry otherwise), is a menu no
+  rule names, read with its title, and a person answers it ("A menu on a running screen").
 - Check against each pinned Claude Code release what the help leaves open: which settings a
   launch reads, whether `--append-system-prompt` has a file form, and how a tool pattern with a
   comma or a space inside its rule is split (F-110). Until the file form is confirmed, the
