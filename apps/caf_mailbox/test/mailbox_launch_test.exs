@@ -98,8 +98,9 @@ defmodule CodingAgentFramework.MailboxLaunchTest do
   end
 
   # Refused undoes the mark: a start refused makes the row due again, under its same uuid.
-  # After a restart that lost the start's answer, the evidence decides: no process of the start
-  # and no line, the row is due again.
+  # After a restart that lost the start's answer, with no agent row, the row waits for the
+  # start's deadline, since the start may still write one (F-284); then no process of the start
+  # and no line, a message is due again, for the next start.
   test "a refused start, or one a restart cut, makes the row due again", ctx do
     m = mailbox(ctx)
     {:ok, {:queued, one}} = Mailbox.message(m, "d1", "main", "Review it.")
@@ -109,23 +110,66 @@ defmodule CodingAgentFramework.MailboxLaunchTest do
     assert {:ok, "queued"} = Mailbox.launched(m, one, {:refused, :setup})
     assert %{status: "queued", uuid: ^uuid, via: nil} = Table.get(ctx.mtable, one)
 
-    {:ok, %{uuid: ^uuid}} = Mailbox.launch(m, "main", deadline)
+    soon = System.os_time(:millisecond) + 4_000
+    {:ok, %{uuid: ^uuid}} = Mailbox.launch(m, "main", soon)
     GenServer.stop(m)
     Process.put(:mailbox, restart(ctx.mopts))
+    Mailbox.cue(mailbox(ctx), %{topic: "sessions", ids: []})
+    Mailbox.status(mailbox(ctx), 0)
+    row = Table.get(ctx.mtable, one)
+    # A loaded host may have passed the deadline already; before it, the row waits.
+    assert row.status == "sending" or System.os_time(:millisecond) >= soon
     assert {:ok, %{status: "queued", uuid: ^uuid}} = until(ctx, one, &(&1.status == "queued"))
   end
 
+  # F-284, Delivery.tla's MarkLost: the caller of a start's mark gave up on its answer and
+  # starts nothing. Its next call undoes the mark of that start (its addressee and deadline),
+  # as a refused start's, and only that one.
+  test "a mark whose answer its caller lost is undone by its next call", ctx do
+    m = mailbox(ctx)
+    {:ok, {:queued, one}} = Mailbox.message(m, "d1", "main", "Review it.")
+    deadline = System.os_time(:millisecond) + 30_000
+
+    {:ok, %{id: ^one, uuid: uuid}} = Mailbox.launch(m, "main", deadline)
+    assert {:ok, []} = Mailbox.launch_lost(m, "main", deadline + 1)
+    assert %{status: "sending"} = Table.get(ctx.mtable, one)
+    assert {:ok, [^one]} = Mailbox.launch_lost(m, "main", deadline)
+    assert %{status: "queued", uuid: ^uuid, via: nil} = row = Table.get(ctx.mtable, one)
+    assert row.attempt == "launch_lost"
+    assert {:ok, %{id: ^one}} = Mailbox.launch(m, "main", deadline)
+  end
+
+  # F-284, Delivery.tla's NoStart: a brief marked for a start whose answer never came, while
+  # no agent row of it is written, ends at the start's deadline: nothing of it went in, and a
+  # later start stores a brief of its own. The deadline's own timer reads it, with no cue.
+  test "a brief marked for a start that never answered ends at the start's deadline", ctx do
+    m = mailbox(ctx)
+    uuid = CodingAgentFramework.Stream.uuid()
+    {:ok, {:queued, id}} = Mailbox.brief(m, "main", "d1", "Review it.", uuid)
+    soon = System.os_time(:millisecond) + 1_000
+
+    {:ok, %{id: ^id}} = Mailbox.launch(m, "d1", soon)
+
+    assert {:ok, %{status: "ended", attempt: "no_start"}} =
+             await(fn ->
+               Mailbox.status(m, 0)
+               row = Table.get(ctx.mtable, id)
+               if row.status == "ended", do: {:ok, row}, else: row
+             end)
+  end
+
   # F-153's new-1 (`Delivery.tla`'s SettleSeen, `Break_Delivery_LaunchBound`): the trust
-  # dialog holds the first turn for as long as a person takes, here past the start's deadline
-  # and the take bound, and the row stays `sending` by launch, handed to no other transport,
-  # until the transcript's first user line, drawn by the stand-in as 2.1.322 writes it, settles
-  # it delivered by launch.
+  # dialog holds the first turn for as long as a person takes, here past the take bound, and
+  # the row stays `sending` by launch, handed to no other transport, until the transcript's
+  # first user line, drawn by the stand-in as 2.1.322 writes it, settles it delivered by
+  # launch. The start's deadline bounds only a mark with no agent row behind it (F-284): a mark
+  # already past it reads as a start that will never come.
   test "a first turn a startup dialog holds is the launch's, however late", ctx do
     m = mailbox(ctx)
     {:ok, {:queued, one}} = Mailbox.message(m, "d1", "main", "Review it.\nTwo lines.")
-    past = System.os_time(:millisecond) - 60_000
+    deadline = System.os_time(:millisecond) + 120_000
 
-    assert {:ok, %{id: ^one, uuid: uuid, text: text}} = Mailbox.launch(m, "main", past)
+    assert {:ok, %{id: ^one, uuid: uuid, text: text}} = Mailbox.launch(m, "main", deadline)
 
     inlet = start_supervised!({Inlet, tmux: ctx.server})
     spec = {Sessions, ctx.opts ++ [inlet: inlet]}

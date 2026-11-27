@@ -70,7 +70,10 @@ defmodule CodingAgentFramework.Mailbox do
     is the session the agent row named then (a resume), else from its first byte (F-282). A row
     longer than the workstation's argument carries
     (`ClaudeCLI.prompt_max/1`) is written to the agent's due directory as a typed row's is, and
-    the prompt is one line naming that file (`Transport.Launch.pointer/2`, F-155).
+    the prompt is one line naming that file (`Transport.Launch.pointer/2`, F-155). A mark whose
+    caller lost its answer is undone by that caller's next call (`launch_lost/4`); a mark is read
+    by no evidence until the start's answer and no longer than the start's deadline, past which,
+    with no agent row, a brief ends and any other row is due again (F-284).
 
   Without `intake:` or `inlet:` a main session's rows stay `queued`, `attempt` `:no_delivery`,
   unless a call takes them.
@@ -335,6 +338,22 @@ defmodule CodingAgentFramework.Mailbox do
   and one refused before holds none of it, so the fold makes it due again.
   """
   def launched(mailbox, id, answer), do: call(mailbox, {:launched, id, answer}, [])
+
+  @doc """
+  The caller of `launch/4` for `to` by `deadline` did not get its answer (`{:unknown, _}`: its
+  call timed out while `Mailbox` was busy) and makes no start (F-284, `Delivery.tla`'s
+  `MarkLost`). The row that call marked, if `Mailbox` took it after all, is undone as a refused
+  start's is (`launched/3`): due again, under its same uuid, `attempt` `:launch_lost`, and the
+  caller settles it as for any start it refused (`ended/3`). `Mailbox` takes calls from one
+  process in the order sent, so this call, sent after the `launch/4` call from the same process,
+  always finds that call's mark made or never to be made: the caller may go on whatever this
+  call answers. Answers `{:ok, ids}`, the rows it undid.
+
+      Mailbox.launch_lost(mailbox, "app-unit-review", deadline)
+      #=> {:ok, [3]}
+  """
+  def launch_lost(mailbox, to, deadline, opts \\ []),
+    do: call(mailbox, {:launch_lost, to, deadline}, opts)
 
   @doc """
   Delegate `to` will never take a row: its start was refused. Its `queued` rows are settled
@@ -607,7 +626,8 @@ defmodule CodingAgentFramework.Mailbox do
   # A restart settles what it finds marked, from Stream's rows read to the end of each log; a
   # row a call took finds no call in memory, and is due again. A waiter's or typed row is settled
   # at its take bound, which no timer of the last process carries over; a headless start's first
-  # line, at its start's deadline; a launch row has none.
+  # line, at its start's deadline; a launch row has none, but one whose start's answer never
+  # came is read again at that start's deadline (F-284).
   @impl true
   def handle_continue(:read, s) do
     Stream.read(s.stream, timeout: @step)
@@ -617,6 +637,10 @@ defmodule CodingAgentFramework.Mailbox do
         via in ["waiter", "typed", "stream"],
         is_integer(at),
         do: bound(s, at)
+
+    for %{via: "launch", status: "sending", sent_at: at, at: nil} <- Table.open_rows(s.db),
+        is_integer(at),
+        do: at_deadline(at)
 
     # A row the Inlet refused waits for its wait bound, which runs from that refusal (F-240).
     for %{status: "queued"} = m <- Table.open_rows(s.db),
@@ -773,6 +797,7 @@ defmodule CodingAgentFramework.Mailbox do
           srow = Agents.get(s.agents, to)
           mark = [status: "sending", via: "stream", session_id: srow && srow.session_id, at: nil]
           write(s, m, mark ++ [attempt: nil, sent_at: deadline])
+          at_deadline(deadline)
           s = %{s | launching: MapSet.put(s.launching, m.id)}
           {:reply, {:ok, %{id: m.id, uuid: m.uuid, text: text}}, s}
         else
@@ -786,6 +811,7 @@ defmodule CodingAgentFramework.Mailbox do
           from = if is_binary(sid), do: offset(s, srow), else: 0
           mark = [status: "sending", via: "launch", session_id: sid, at: nil, attempt: nil]
           write(s, m, mark ++ [from_byte: from, sent_at: deadline])
+          at_deadline(deadline)
           s = %{s | launching: MapSet.put(s.launching, m.id)}
           {:reply, {:ok, %{id: m.id, uuid: m.uuid, text: text}}, s}
         else
@@ -840,6 +866,21 @@ defmodule CodingAgentFramework.Mailbox do
       {nil, _} ->
         {:reply, {:refused, :no_message}, s}
     end
+  end
+
+  # Delivery.tla's MarkLost: the mark's caller never got its answer and starts nothing.
+  def handle_call({:launch_lost, to, deadline}, _from, s) do
+    rows =
+      for %{to_agent: ^to, status: "sending", sent_at: ^deadline} = m <- Table.open_rows(s.db),
+          m.via in ["launch", "stream"] and MapSet.member?(s.launching, m.id),
+          do: m
+
+    for m <- rows,
+        do: write(s, m, status: "queued", via: nil, at: nil, sent_at: nil, attempt: :launch_lost)
+
+    ids = Enum.map(rows, & &1.id)
+    s = %{s | launching: MapSet.difference(s.launching, MapSet.new(ids))}
+    {:reply, {:ok, ids}, s}
   end
 
   def handle_call({:ended, to}, _from, s) do
@@ -1133,20 +1174,42 @@ defmodule CodingAgentFramework.Mailbox do
 
       handing = handing(s)
 
+      s = %{
+        s
+        | launching:
+            MapSet.filter(s.launching, &match?(%{status: "sending"}, Table.get(s.db, &1)))
+      }
+
       for %{status: "sending"} = m <- Table.open_rows(s.db),
-          not MapSet.member?(handing, m.id) and not MapSet.member?(s.launching, m.id),
+          not MapSet.member?(handing, m.id) and not launching?(s, m),
           m.via != "waiter" or transcript? do
-        evidence = %{fold: folds[m.session_id || session_of(s, m)], calls: s.calls, now: now()}
+        case unstarted(s, m) do
+          :no_start ->
+            settled(s, m, :no_start)
 
-        evidence =
-          case m.via do
-            "waiter" -> Map.put(evidence, :waiter, seen(s, m))
-            "typed" -> Map.put(evidence, :typed, seen(s, m))
-            "launch" -> Map.put(evidence, :launch, launch_seen(s, m))
-            _ -> evidence
-          end
+          :again ->
+            settled(s, m, :again)
 
-        settled(s, m, Transport.settle(m, evidence))
+          :waits ->
+            :ok
+
+          :read ->
+            evidence = %{
+              fold: folds[m.session_id || session_of(s, m)],
+              calls: s.calls,
+              now: now()
+            }
+
+            evidence =
+              case m.via do
+                "waiter" -> Map.put(evidence, :waiter, seen(s, m))
+                "typed" -> Map.put(evidence, :typed, seen(s, m))
+                "launch" -> Map.put(evidence, :launch, launch_seen(s, m))
+                _ -> evidence
+              end
+
+            settled(s, m, Transport.settle(m, evidence))
+        end
       end
 
       replies(s, folds)
@@ -1248,7 +1311,38 @@ defmodule CodingAgentFramework.Mailbox do
     kind, _ -> {:unknown, {kind, :hand_on}}
   end
 
+  # A row marked for a start is settled by no evidence until the start's answer, and no longer
+  # than the start's deadline (`sent_at`): by then `Sessions` took the start's call or never will
+  # (`caller_deadline`, F-166), and an answer that has not come is lost (F-284).
+  defp launching?(s, m) do
+    MapSet.member?(s.launching, m.id) and not (is_integer(m.sent_at) and now() >= m.sent_at)
+  end
+
+  # Delivery.tla's NoStart (F-284): a row marked for a start whose start made no process (`at`
+  # nil) while its addressee has no agent row, which `Sessions` writes before anything else. Until
+  # the start's deadline the start may still write it, and the row waits. Past it nothing of the
+  # row went in: a brief ends, since a later start stores its own and this one would go in in its
+  # place; any other row is due again, for the addressee's next start (F-143). A row for a resume
+  # names an agent row, and its evidence decides as before.
+  defp unstarted(s, %{via: via, at: nil, sent_at: deadline} = m)
+       when via in ["launch", "stream"] and is_integer(deadline) do
+    cond do
+      Agents.get(s.agents, m.to_agent) != nil -> :read
+      now() < deadline -> :waits
+      m.kind == "brief" -> :no_start
+      true -> :again
+    end
+  end
+
+  defp unstarted(_s, _m), do: :read
+
+  # The start's deadline: a row marked for it is read again then, answered or not.
+  defp at_deadline(deadline),
+    do: Process.send_after(self(), :bound, max(deadline - now(), 0) + 1)
+
   defp settled(_s, _m, :keep), do: :ok
+
+  defp settled(s, m, :no_start), do: write(s, m, status: "ended", attempt: :no_start)
 
   defp settled(s, m, :delivered) do
     # A pointer's file stays: the line is taken before the agent reads the file, in the turn it

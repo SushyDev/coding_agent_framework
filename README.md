@@ -534,6 +534,10 @@ Built, each from a checked model in `model/tla/`:
 - the offer to set up auto mode is off in every session's settings (F-285): `skillOverrides`
   carries `"auto-mode-setup": "off"`, over the app's entry for that skill, with the app's other
   entries kept, so a delegate's messages no longer wait behind the offer each turn.
+- a start whose launch call timed out no longer blocks its branch (F-284): its caller undoes the
+  mark it never heard of, a brief marked for a start that never wrote its agent row ends at that
+  start's deadline, and a delegate's new start ends an earlier start's brief left queued, which
+  the launch would have carried in its own brief's place.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

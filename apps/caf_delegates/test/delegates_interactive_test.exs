@@ -640,6 +640,104 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     assert {:ok, :stopped} = Delegates.fix(ctx.delegates, "main", name, :stop, state)
   end
 
+  # F-284, Delivery.tla's MarkLost: the Mailbox makes the brief's mark later than the start's
+  # call waits for it (a loaded host). The start is refused, and starts nothing; the mark is
+  # undone and the brief ended before its answer, so the branch's next start goes, its own brief
+  # its prompt.
+  test "a start whose mark outlived its call leaves no row sending, and starts again", ctx do
+    {delegates, mtable} = slow_mark(ctx, 6_000)
+
+    start = fn brief ->
+      Delegates.start_delegate(delegates, "main", "app", "unit/one", "opus", brief,
+        interactive: true
+      )
+    end
+
+    assert {:refused, {:launch, {:unknown, {:timeout, 5_000}}}} = start.("First.")
+    assert [%{status: "refused", name: name, brief_uuid: u1}] = Table.rows(ctx.dtable, "test")
+    assert Agents.get(ctx.agents, name) == nil
+    assert %{status: "ended"} = Mailbox.Table.by_uuid(mtable, u1)
+    assert ScreenStandIn.argvs(ctx.dir) == []
+
+    assert {:ok, %{name: ^name, brief_uuid: u2, session_id: sid}} = start.("Again.")
+    assert is_binary(sid)
+    text = "Again.\n\n[delivery #{u2}]"
+    assert {:ok, [^text]} = await(fn -> nonempty(ScreenStandIn.prompts(ctx.dir)) end)
+    assert %{status: "ended"} = Mailbox.Table.by_uuid(mtable, u1)
+  end
+
+  # F-284: a brief left queued to a name no process of which runs (an earlier start's, made due
+  # again by a restart after that start was refused) is ended by the name's next start, which
+  # carries its own brief, never the old one.
+  test "a new start ends an earlier start's brief left queued, and carries its own", ctx do
+    name = Turn.name(ctx.dopts[:projects]["app"], "unit/one")
+    old = CodingAgentFramework.Stream.uuid()
+    {:ok, {:queued, id}} = Mailbox.brief(ctx.mailbox, "main", name, "Stale.", old)
+    Mailbox.cue(ctx.mailbox, %{topic: "sessions", ids: []})
+    Mailbox.status(ctx.mailbox, id)
+    {:ok, mtable} = Mailbox.Table.open(Path.join(ctx.dir, "caf.db"))
+    assert %{status: "queued", attempt: "no_delivery"} = Mailbox.Table.get(mtable, id)
+
+    assert {:ok, %{name: ^name, brief_uuid: u}} =
+             Delegates.start_delegate(ctx.delegates, "main", "app", "unit/one", "opus", "Go.",
+               interactive: true
+             )
+
+    text = "Go.\n\n[delivery #{u}]"
+    assert {:ok, [^text]} = await(fn -> nonempty(ScreenStandIn.prompts(ctx.dir)) end)
+    assert %{status: "ended"} = Mailbox.Table.get(mtable, id)
+  end
+
+  # A start whose own work outlives its caller's bound goes on, and its brief follows it: the
+  # caller is answered unknown, the start runs, and its brief settles delivered by its line.
+  test "a start that outlives its caller's bound runs, and its brief settles by its line", ctx do
+    assert {:unknown, {:timeout, 1}} =
+             Delegates.start_delegate(ctx.delegates, "main", "app", "unit/one", "opus", "Go.",
+               interactive: true,
+               timeout: 1
+             )
+
+    assert {:ok, [%{id: id, brief_uuid: u}]} =
+             await(
+               fn ->
+                 with [%{status: "running"}] = rows <- Table.rows(ctx.dtable, "test"),
+                      do: {:ok, rows}
+               end,
+               30_000
+             )
+
+    text = "Go.\n\n[delivery #{u}]"
+    assert {:ok, [^text]} = await(fn -> nonempty(ScreenStandIn.prompts(ctx.dir)) end)
+    %{name: name} = Table.get(ctx.dtable, id)
+    %{session_id: sid, cwd: cwd} = Agents.get(ctx.agents, name)
+    {:ok, dir} = Accounts.config_dir(ctx.accounts, "work")
+    {:ok, path} = Transcripts.path(dir, cwd, sid)
+    lines(path, [user(text)])
+    assert {:ok, %{status: "delivered", via: "launch"}} = settled(ctx, u)
+  end
+
+  # A Delegates over a Mailbox whose write of a launch's mark is slow: its notify of the first
+  # mark waits `ms` in the Mailbox's process, past the 5 s its caller waits for the mark.
+  defp slow_mark(ctx, ms) do
+    Process.exit(ctx.delegates, :kill)
+    {:ok, mtable} = Mailbox.Table.open(Path.join(ctx.dir, "caf.db"))
+    once = :atomics.new(1, [])
+
+    notify = fn %{ids: [id]} ->
+      with %{status: "sending", via: "launch"} <- Mailbox.Table.get(mtable, id),
+           :ok <- :atomics.compare_exchange(once, 1, 0, 1),
+           do: Process.sleep(ms)
+
+      :ok
+    end
+
+    mopts = Keyword.put(ctx.mopts, :notify, notify)
+    mailbox = start_supervised!(Supervisor.child_spec({Mailbox, mopts}, id: make_ref()))
+    opts = Keyword.put(ctx.dopts, :mailbox, mailbox)
+    child = Supervisor.child_spec({Delegates, opts}, id: make_ref(), restart: :temporary)
+    {start_supervised!(child), mtable}
+  end
+
   # A delegate whose Mailbox has a waiter held for it, its report taken.
   defp with_waiter(ctx) do
     Process.exit(ctx.delegates, :kill)

@@ -522,7 +522,7 @@ defmodule CodingAgentFramework.Delegates do
          true <- holding(s, parent, name) <= p.cap or {:refused, {:cap, p.cap}},
          picked = pick(s),
          :ok <- picked_or_limited(picked),
-         :ok <- if(again, do: replaced(s, old), else: :ok) do
+         :ok <- if(again, do: replaced(s, old), else: leftovers(s, name)) do
       row = %{host: s.host, name: name, branch: branch, model: model, effort: effort}
       row = Map.put(row, :brief_uuid, Stream.uuid())
       start = %{p: p, parent: parent, options: options, brief: brief, how: how, meta: meta}
@@ -825,6 +825,18 @@ defmodule CodingAgentFramework.Delegates do
     end)
   end
 
+  # A new start of a name (F-284): no process of it runs or will, so a row still queued to it is
+  # an earlier start's that never ran (a brief a restart made due again after that start was
+  # refused). It ends here, before this start's brief is stored: the launch marks the first row
+  # due, which would carry that brief in this one's place. Mailbox takes this call before the
+  # brief's, from the same process, so an unknown answer still ends them first.
+  defp leftovers(s, name) do
+    case Mailbox.ended(s.mailbox, name) do
+      {:refused, why} -> {:refused, {:leftovers, why}}
+      _ok_or_unknown -> :ok
+    end
+  end
+
   # Called: Sessions writes its own row first and runs on through a restart of this process.
   # A start names the parent and the options; a resume takes the agent row's. It carries the
   # row `launch_first/3` marked: an interactive one as its prompt, a headless one as the line
@@ -904,9 +916,21 @@ defmodule CodingAgentFramework.Delegates do
     via = if how == :interactive, do: :launch, else: :stream
 
     case Mailbox.launch(s.mailbox, row.name, row.deadline, via: via) do
-      {:ok, %{id: _, text: _} = launched} -> {:ok, {how, launched}}
-      {:ok, :none} when how == :interactive -> {:ok, {how, nil}}
-      other -> {:launch, other}
+      {:ok, %{id: _, text: _} = launched} ->
+        {:ok, {how, launched}}
+
+      {:ok, :none} when how == :interactive ->
+        {:ok, {how, nil}}
+
+      # Delivery.tla's MarkLost (F-284): the call gave up, and Mailbox may make the mark after
+      # all. Nothing starts, so the mark is undone; Mailbox takes this call after that one,
+      # whatever it answers here, and the refusal's `Mailbox.ended/3` after this one.
+      {:unknown, _} = unknown ->
+        Mailbox.launch_lost(s.mailbox, row.name, row.deadline)
+        {:launch, unknown}
+
+      other ->
+        {:launch, other}
     end
   end
 

@@ -1575,9 +1575,21 @@ defmodule CodingAgentFramework.Mains do
 
   defp launch_first(s, row, _start) do
     case Mailbox.launch(s.mailbox, row.name, row.deadline) do
-      {:ok, %{id: _, text: _} = launched} -> {:ok, launched}
-      {:ok, :none} -> {:ok, nil}
-      other -> {:launch, other}
+      {:ok, %{id: _, text: _} = launched} ->
+        {:ok, launched}
+
+      {:ok, :none} ->
+        {:ok, nil}
+
+      # F-284: the call gave up, and Mailbox may make the mark after all. Nothing starts, so the
+      # mark is undone; Mailbox takes this call after that one, and the refusal's settle of the
+      # brief after this one.
+      {:unknown, _} = unknown ->
+        Mailbox.launch_lost(s.mailbox, row.name, row.deadline)
+        {:launch, unknown}
+
+      other ->
+        {:launch, other}
     end
   end
 
