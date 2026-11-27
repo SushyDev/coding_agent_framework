@@ -152,7 +152,9 @@ Built, each from a checked model in `model/tla/`:
   delegate's start asks first. A grant is one transaction within each resource's capacity, and
   a waiting landing holds the units it needs from lower classes; four classes, turns between
   modules and aging inside a class; pressure (stall times, or a memory-pressure level) and both
-  of an account's windows as gates, the five-hour one now read by `Usage`; a lease released
+  of an account's windows as gates, the five-hour one now read by `Usage`; a request pressure
+  bars waits in the queue and keeps its place, and none is granted once its caller is gone, by
+  its death or the deadline it carries (F-276); a lease released
   once, when the owner of the work's row says the work ended, after a restart too; leases and
   refusals on the `Tracker`, and each grant's wait and each refusal as telemetry;
 - interactive delegates (F-137): a delegate started `interactive: true` runs Claude Code's

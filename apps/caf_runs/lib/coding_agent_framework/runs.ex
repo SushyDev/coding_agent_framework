@@ -25,8 +25,9 @@ defmodule CodingAgentFramework.Runs do
   retry takes no second slot. While queued it prints one line, `caf-run: queued (position n)`.
   Granted, it `exec`s the command in `sh -c`: the process that asked becomes the command, so
   its output is the command's, its exit code is the command's, and the lease's holder is that
-  process, `{"run", "<pid> <start time>"}`. Refused, it prints one line with the reason and
-  the retry time and exits 75, and nothing ran. With no answer (the framework down) it asks
+  process, `{"run", "<pid> <start time>"}`. Refused, it prints one line with the whole reason
+  (for pressure its level and the reading that set it, F-276) and the retry time and exits 75,
+  and nothing ran. A request pressure bars waits in the queue, its queued line saying so. With no answer (the framework down) it asks
   again under the same id, once a second, until 30 s have passed by the clock since the first
   ask with none (`prepare/5`'s `:unanswered`), then runs the command without a lease and says
   so in one line: a lease is soft work, and fails open as the hooks do.
@@ -107,7 +108,10 @@ defmodule CodingAgentFramework.Runs do
       refused*)
         ! timer || kill "$d" 2>/dev/null
         set -- $last
-        printf 'caf-run: not run: the lease was refused (%s); try again after %s\n' "$2" "$3" >&2
+        why=$2 at=$3
+        shift 3
+        [ "$#" -eq 0 ] || why="$why $*"
+        printf 'caf-run: not run: the lease was refused (%s); try again after %s\n' "$why" "$at" >&2
         exit 75 ;;
       unknown*)
         printf 'caf-run: no lease (%s); the command runs without one\n' "${last#unknown }" >&2

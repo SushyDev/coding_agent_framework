@@ -41,8 +41,21 @@
 (* which is always admitted. A spent budget is refused at once, and a      *)
 (* queued request whose budget is spent is refused then. A refusal is      *)
 (* final for its id and holds nothing. Pressure that bars a request's     *)
-(* class refuses it at once as well; a queued one it bars waits for its    *)
-(* deadline. `high`'s bar on heavy runs is checked by `NoHeavyUnderHigh`. *)
+(* class does not refuse it (F-276): it queues like any other, keeps its   *)
+(* place, and is served in order once pressure eases, or refused at its    *)
+(* deadline (`KeepsPlace`). `high`'s bar on heavy runs is checked by       *)
+(* `NoHeavyUnderHigh`.                                                     *)
+(*                                                                         *)
+(* The caller (F-276, shape "Barred"). A request carries its caller's      *)
+(* deadline, the bound of the caller's own wait (Runs.Plug's `:wait`,      *)
+(* Jobs' `:lease_wait`). The caller goes at any                            *)
+(* step while it waits: its deadline passes, or its process dies (`caller` *)
+(* "gone"). The scheduler reads that at the grant, its clock against the   *)
+(* deadline the request carries and whether the process lives, so it never *)
+(* grants to a caller gone (`NoGrantToGone`); its timer and its monitor    *)
+(* tell it later, and it refuses the request then (`Expire`) and frees its *)
+(* place. Only shape "Barred" lets a caller go, so the other shapes keep   *)
+(* their state spaces; there `NoGrantToGone` holds as no caller goes.      *)
 (*                                                                         *)
 (* A lease names the row of the work it admits, which the requester's      *)
 (* owner writes `starting` before it asks. The owner starts the work only  *)
@@ -97,8 +110,9 @@
 (*                                                                         *)
 (* Fairness: the scheduler's steps (Insert, Tell, Expire, Tick, Release,   *)
 (* Reclaim) and a waiting requester's asking again after a restart. First  *)
-(* requests, the owner's settling of its row, pressure and budgets get     *)
-(* none. A restart is never fair, and MaxCrashes bounds it.                *)
+(* requests, the owner's settling of its row, a caller's going, pressure   *)
+(* and budgets get none. A restart is never fair, and MaxCrashes bounds    *)
+(* it.                                                                     *)
 (*                                                                         *)
 (* Break: "none" is the design. Every other value removes one guard and    *)
 (* has a Break_Schedule_<value>.cfg that TLC must fail.                    *)
@@ -118,12 +132,14 @@
 (* CapacityHolds with that assumption. The assumption is checked in        *)
 (* Dialog.tla for a start on a dialog, in Boxes.tla for its statuses, and  *)
 (* in Delegate.tla for every status Delegates.Work answers ended           *)
-(* (WorkEndedIsFree, F-163's new-1, F-164).                                *)
+(* (WorkEndedIsFree, F-163's new-1, F-164). F-276 adds a barred request's  *)
+(* place (KeepsPlace) and no grant to a caller gone (NoGrantToGone).       *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
 CONSTANTS
-    Shape,            \* the table of requests: "Safety", "Mains", "Liveness" or "Hold"
+    Shape,            \* the table of requests: "Safety", "Mains", "Liveness", "Hold", "Fence",
+                      \* "Native" or "Barred"
     QueueBound,       \* the most requests one class's queue holds
     MaxWait,          \* a queued request's deadline, in ticks
     MaxCrashes,       \* the most restarts of the scheduler in one behavior
@@ -148,11 +164,13 @@ Breaks == {
     "NoReask",            \* a requester waiting through a restart does not ask again
     "NoReclaim",          \* after a restart no row is read again
     "NoFence",            \* a wrapper runs without taking the fence; an owner settles without it
-    "EndByPost"           \* the native wrapper's end is read from its post, not its process
+    "EndByPost",          \* the native wrapper's end is read from its post, not its process
+    "GrantAfterCaller",   \* a grant does not look at whether the caller is gone
+    "BarredSkipsQueue"    \* pressure that bars a request refuses it at once, and its requester asks again
 }
 
 ASSUME Break \in Breaks
-ASSUME Shape \in {"Safety", "Mains", "Liveness", "Hold", "Fence", "Native"}
+ASSUME Shape \in {"Safety", "Mains", "Liveness", "Hold", "Fence", "Native", "Barred"}
 ASSUME QueueBound \in Nat \ {0} /\ MaxWait \in Nat \ {0} /\ MaxCrashes \in Nat
 
 Main == 1
@@ -184,6 +202,11 @@ Table ==
       [] Shape \in {"Fence", "Native"} ->
            << [class |-> Heavy,   module |-> 1, account |-> "a1", units |-> Need(0, 1, 0)],
               [class |-> Heavy,   module |-> 2, account |-> "a1", units |-> Need(0, 1, 0)] >>
+      \* Two heavy runs of one module on one slot: the second's place behind the
+      \* first, and each caller may go.
+      [] Shape = "Barred" ->
+           << [class |-> Heavy,   module |-> 1, account |-> "a1", units |-> Need(0, 1, 0)],
+              [class |-> Heavy,   module |-> 1, account |-> "a1", units |-> Need(0, 1, 0)] >>
 
 \* "Hold" has two slots: a landing holds the lock and a slot, a second landing
 \* waits for the lock, and a heavy run must not take the slot it needs.
@@ -195,6 +218,8 @@ Reqs == 1..Len(Table)
 Hosted == Shape = "Fence"
 \* Whether the requester is the native wrapper, its process the holder.
 Native == Shape = "Native"
+\* Whether a caller may go while it waits (shape "Barred").
+CallersGo == Shape = "Barred"
 Accounts == {Table[r].account : r \in Reqs}
 NModules == LET ms == {Table[r].module : r \in Reqs} IN CHOOSE m \in ms : \A k \in ms : k <= m
 
@@ -215,9 +240,12 @@ VARIABLES
     fence,      \* the host's: r's fence: "none", "set" (holds its lease id), "taken" or "revoked"
     pressure,   \* environment: "ok", "high" or "severe"
     budgetOk,   \* environment: account -> its budget has room
-    crashes     \* the restarts so far
+    crashes,    \* the restarts so far
+    caller,     \* the requester's: r -> "waits", or "gone" (its deadline passed, or it died)
+    before      \* ghost: r -> the requests whose requesters waited when r first asked
 
-vars == <<leases, queue, rot, wait, pending, monitored, ans, work, run, fence, pressure, budgetOk, crashes>>
+vars == <<leases, queue, rot, wait, pending, monitored, ans, work, run, fence, pressure, budgetOk,
+          crashes, caller, before>>
 
 -----------------------------------------------------------------------------
 (* Reading the state *)
@@ -312,47 +340,65 @@ Init ==
     /\ pressure = "ok"
     /\ budgetOk = [a \in Accounts |-> TRUE]
     /\ crashes = 0
+    /\ caller = [r \in Reqs |-> "waits"]
+    /\ before = [r \in Reqs |-> {}]
+
+\* r's requester still waits for a lease: it asked, holds none, was not
+\* refused, and has not gone.
+Waits(r) ==
+    /\ ans[r] \in {"asking", "queued"} /\ pending[r] # "refused"
+    /\ caller[r] = "waits" /\ ~HasLease(r)
 
 \* The scheduler takes r's request and decides its first answer at once: the
-\* lease r already has; refused for a spent budget, a bar of pressure or a
-\* full queue; or queued, with its deadline started. Under NotIdempotent the
-\* lease is not looked for; under RefuseBeforeLookup it is looked for last.
+\* lease r already has; refused for a spent budget or a full queue; or
+\* queued, with its deadline started, barred by pressure or not. Under
+\* NotIdempotent the lease is not looked for; under RefuseBeforeLookup it is
+\* looked for last. Under BarredSkipsQueue a request pressure bars is
+\* refused for it and holds no place: its requester asks again later, as an
+\* app's poll does (modeled as no answer owed, so it may Reask).
 Receive(r) ==
     LET c == Table[r].class
-        refused == ~budgetOk[Table[r].account] \/ SevereBars(r) \/ HighBars(r)
-                   \/ Len(queue[c]) >= QueueBound
+        refused == ~budgetOk[Table[r].account] \/ Len(queue[c]) >= QueueBound
+        barred == Break = "BarredSkipsQueue" /\ (SevereBars(r) \/ HighBars(r))
         found == HasLease(r) /\ Break # "NotIdempotent"
         answer(a) == pending' = [pending EXCEPT ![r] = a] /\ UNCHANGED <<queue, wait>>
     IN  IF found /\ Break # "RefuseBeforeLookup" THEN answer("granted")
         ELSE IF refused THEN answer("refused")
         ELSE IF found THEN answer("granted")
+        ELSE IF barred THEN UNCHANGED <<queue, wait, pending>>
         ELSE /\ queue' = [queue EXCEPT ![c] = Append(@, r)]
              /\ wait' = [wait EXCEPT ![r] = MaxWait]
              /\ pending' = [pending EXCEPT ![r] = "queued"]
 
 \* A requester asks for the first time, its owner's row written `starting`.
+\* The ghost `before` keeps who waited then, for KeepsPlace (shape "Barred").
 Ask(r) ==
     /\ ans[r] = "idle" /\ work[r] = "starting" /\ run[r] = "none"
     /\ ans' = [ans EXCEPT ![r] = "asking"]
     /\ Receive(r)
-    /\ UNCHANGED <<leases, rot, monitored, work, run, fence, pressure, budgetOk, crashes>>
+    /\ before' = IF CallersGo THEN [before EXCEPT ![r] = {q \in Reqs : Waits(q)}] ELSE before
+    /\ UNCHANGED <<leases, rot, monitored, work, run, fence, pressure, budgetOk, crashes, caller>>
 
 \* A requester still waiting after a restart asks again under the same id.
-\* Only a restart leaves a waiting requester that the scheduler does not hold.
+\* Only a restart leaves a waiting requester that the scheduler does not hold
+\* (and, under BarredSkipsQueue, a bar of pressure). A caller gone asks no more.
 Reask(r) ==
     /\ Break # "NoReask"
     /\ ans[r] \in {"asking", "queued"} /\ work[r] = "starting" /\ run[r] = "none"
-    /\ ~InQueue(r) /\ pending[r] = "none"
+    /\ ~InQueue(r) /\ pending[r] = "none" /\ caller[r] = "waits"
     /\ Receive(r)
-    /\ UNCHANGED <<leases, rot, monitored, ans, work, run, fence, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, rot, monitored, ans, work, run, fence, pressure, budgetOk, crashes, caller, before>>
 
 \* The grant: one transaction that checks capacity and inserts the row,
 \* with all of a landing's resources. Its id is the next, and its holder is
-\* monitored from now.
+\* monitored from now. It reads whether r's caller is gone (its deadline,
+\* carried in the request, against the clock; its process alive), and
+\* grants none to a caller gone. Under GrantAfterCaller it does not read it.
 Insert(r) ==
     LET c == Table[r].class
         id == Len(leases) + 1
     IN  /\ InQueue(r)
+        /\ caller[r] = "waits" \/ Break = "GrantAfterCaller"
         /\ CanInsert(r)
         /\ ~HigherWaits(r) \/ Break = "NoClassOrder"
         /\ NextInClass(r)
@@ -362,14 +408,14 @@ Insert(r) ==
         /\ pending' = [pending EXCEPT ![r] = "granted"]
         /\ monitored' = monitored \cup {id}
         /\ rot' = [rot EXCEPT ![c] = (Table[r].module % NModules) + 1]
-        /\ UNCHANGED <<ans, work, run, fence, pressure, budgetOk, crashes>>
+        /\ UNCHANGED <<ans, work, run, fence, pressure, budgetOk, crashes, caller, before>>
 
 \* The answer owed reaches the requester: one message.
 Tell(r) ==
     /\ pending[r] # "none"
     /\ ans' = [ans EXCEPT ![r] = pending[r]]
     /\ pending' = [pending EXCEPT ![r] = "none"]
-    /\ UNCHANGED <<leases, queue, rot, wait, monitored, work, run, fence, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, wait, monitored, work, run, fence, pressure, budgetOk, crashes, caller, before>>
 
 \* Time passes for every queued request. It cannot pass a deadline: a timer
 \* at 1 is answered first (Expire). Under NoDeadline it can.
@@ -377,17 +423,20 @@ Tick ==
     /\ Queued # {}
     /\ \A q \in Queued : wait[q] > (IF Break = "NoDeadline" THEN 0 ELSE 1)
     /\ wait' = [q \in Reqs |-> IF q \in Queued THEN wait[q] - 1 ELSE wait[q]]
-    /\ UNCHANGED <<leases, queue, rot, pending, monitored, ans, work, run, fence, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, pending, monitored, ans, work, run, fence, pressure, budgetOk, crashes, caller, before>>
 
-\* A queued request is refused at its deadline, or once its budget is spent.
+\* A queued request is refused at its deadline, once its budget is spent, or
+\* once its caller is gone (`caller_gone`, by its timer or its monitor), and
+\* its place is free.
 Expire(r) ==
     /\ InQueue(r)
     /\ \/ wait[r] = 1 /\ Break # "NoDeadline"
        \/ ~budgetOk[Table[r].account]
+       \/ caller[r] = "gone"
     /\ queue' = [queue EXCEPT ![Table[r].class] = Remove(@, r)]
     /\ wait' = [wait EXCEPT ![r] = 0]
     /\ pending' = [pending EXCEPT ![r] = "refused"]
-    /\ UNCHANGED <<leases, rot, monitored, ans, work, run, fence, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, rot, monitored, ans, work, run, fence, pressure, budgetOk, crashes, caller, before>>
 
 \* The compare-and-set on the lease id: it writes only an unreleased row.
 \* Under NoCompareAndSet it writes any.
@@ -400,7 +449,7 @@ Release(i) ==
     /\ work[leases[i].req] = "ended"
     /\ ReleaseRow(i)
     /\ monitored' = monitored \ {i}
-    /\ UNCHANGED <<queue, rot, wait, pending, ans, work, run, fence, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<queue, rot, wait, pending, ans, work, run, fence, pressure, budgetOk, crashes, caller, before>>
 
 \* After a restart, the reclaimer asks the owner about a row no monitor
 \* watches: released if its work ended, else monitored again; a row still
@@ -414,7 +463,7 @@ Reclaim(i) ==
     /\ IF w = "ended" \/ Break = "ReclaimByTime" \/ (w = "starting" /\ Break = "StartingIsEnded")
        THEN ReleaseRow(i) /\ UNCHANGED monitored
        ELSE monitored' = monitored \cup {i} /\ UNCHANGED leases
-    /\ UNCHANGED <<queue, rot, wait, pending, ans, work, run, fence, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<queue, rot, wait, pending, ans, work, run, fence, pressure, budgetOk, crashes, caller, before>>
 
 \* A restart: the queue, the timers, the answers owed and the monitors go;
 \* the leases, the requesters and the owners' rows stay.
@@ -426,7 +475,7 @@ Crash ==
     /\ wait' = [r \in Reqs |-> 0]
     /\ pending' = [r \in Reqs |-> "none"]
     /\ monitored' = {}
-    /\ UNCHANGED <<leases, ans, work, run, fence, pressure, budgetOk>>
+    /\ UNCHANGED <<leases, ans, work, run, fence, pressure, budgetOk, caller, before>>
 
 -----------------------------------------------------------------------------
 (* The environment *)
@@ -442,7 +491,7 @@ WorkStarts(r) ==
               run' = [run EXCEPT ![r] = "sent"] /\ fence' = [fence EXCEPT ![r] = "set"]
          [] Native -> run' = [run EXCEPT ![r] = "running"] /\ UNCHANGED fence
          [] OTHER -> UNCHANGED <<run, fence>>
-    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, pressure, budgetOk, crashes, caller, before>>
 
 \* The owner settles its row ended: live work's process ended, or a start that
 \* never ran (refused, failed, or cut), at any step after it asked. On a host,
@@ -461,7 +510,7 @@ WorkEnds(r) ==
                /\ fence' = [fence EXCEPT ![r] = "revoked"] /\ UNCHANGED run
             \/ Break = "NoFence" /\ run[r] = "sent" /\ UNCHANGED <<run, fence>>
        ELSE UNCHANGED <<run, fence>>
-    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, pressure, budgetOk, crashes, caller, before>>
 
 \* A sent start lands on the host, at any step, however late: its wrapper
 \* takes the fence and runs, or finds it taken and exits without running.
@@ -473,13 +522,13 @@ WrapperRuns(r) ==
        ELSE IF fence[r] = "set"
        THEN run' = [run EXCEPT ![r] = "running"] /\ fence' = [fence EXCEPT ![r] = "taken"]
        ELSE run' = [run EXCEPT ![r] = "fenced"] /\ UNCHANGED fence
-    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, pressure, budgetOk, crashes, caller, before>>
 
 \* The job exits, and its end is on the host for the owner to read.
 WrapperExits(r) ==
     /\ run[r] = "running"
     /\ run' = [run EXCEPT ![r] = "done"]
-    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, fence, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, fence, pressure, budgetOk, crashes, caller, before>>
 
 \* A native wrapper's process ends at any step once it asked: the command
 \* exits or crashes, the wrapper exits after a refusal, or a kill ends it
@@ -487,21 +536,29 @@ WrapperExits(r) ==
 WrapperEnds(r) ==
     /\ Native /\ ans[r] # "idle" /\ run[r] \in {"none", "running"}
     /\ \E how \in {"done", "killed"} : run' = [run EXCEPT ![r] = how]
-    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, fence, pressure, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, fence, pressure, budgetOk, crashes, caller, before>>
+
+\* A caller waiting for its answer goes, at any step (shape "Barred"): the
+\* deadline its request carries passes, or its process dies.
+CallerGone(r) ==
+    /\ CallersGo /\ caller[r] = "waits" /\ ans[r] \in {"asking", "queued"}
+    /\ caller' = [caller EXCEPT ![r] = "gone"]
+    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, run, fence, pressure,
+                   budgetOk, crashes, before>>
 
 Pressure(p) ==
     /\ p # pressure
     /\ pressure' = p
-    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, run, fence, budgetOk, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, run, fence, budgetOk, crashes, caller, before>>
 
 Budget(a) ==
     /\ budgetOk' = [budgetOk EXCEPT ![a] = ~@]
-    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, run, fence, pressure, crashes>>
+    /\ UNCHANGED <<leases, queue, rot, wait, pending, monitored, ans, work, run, fence, pressure, crashes, caller, before>>
 
 Next ==
     \/ \E r \in Reqs : Ask(r) \/ Reask(r) \/ Insert(r) \/ Tell(r) \/ Expire(r)
           \/ WorkStarts(r) \/ WorkEnds(r) \/ WrapperRuns(r) \/ WrapperExits(r)
-          \/ WrapperEnds(r)
+          \/ WrapperEnds(r) \/ CallerGone(r)
     \/ Tick
     \/ \E i \in Ids : Release(i) \/ Reclaim(i)
     \/ Crash
@@ -539,6 +596,8 @@ TypeOK ==
     /\ pressure \in {"ok", "high", "severe"}
     /\ budgetOk \in [Accounts -> BOOLEAN]
     /\ crashes \in 0..MaxCrashes
+    /\ caller \in [Reqs -> {"waits", "gone"}]
+    /\ before \in [Reqs -> SUBSET Reqs]
 
 \* For every resource, the units the unreleased rows hold never pass its capacity.
 CapacityHolds == \A x \in Resources : Held(x) <= Capacity[x]
@@ -585,11 +644,26 @@ NoStartUnderSevere ==
 \* No new lease on an account whose budget is spent.
 NoStartWithoutBudget == [][NewLease => budgetOk[Table[NewReq].account]]_vars
 
+\* No new lease to a request whose caller is gone (F-276).
+NoGrantToGone == [][NewLease => caller[NewReq] = "waits"]_vars
+
+\* A request pressure bars keeps its place (F-276): no grant goes to a
+\* request of the same class and module while one whose requester waited
+\* when it asked still waits. A restart loses the queue and so its order
+\* (decided), so this is read until the first.
+KeepsPlace ==
+    [][NewLease /\ crashes = 0 =>
+         \A r \in before[NewReq] :
+            ~(/\ Table[r].class = Table[NewReq].class
+              /\ Table[r].module = Table[NewReq].module
+              /\ Waits(r))]_vars
+
 \* Every waiting requester is answered, granted or refused, unless its
-\* owner settles its row ended first.
+\* owner settles its row ended first, or it has gone.
 QueuedIsAnswered ==
     \A r \in Reqs : ans[r] \in {"asking", "queued"}
-                      ~> (ans[r] \in {"granted", "refused"} \/ work[r] = "ended")
+                      ~> (ans[r] \in {"granted", "refused"} \/ work[r] = "ended"
+                          \/ caller[r] = "gone")
 
 \* Every lease whose work ended is released, by the monitor or the reclaimer.
 EndedIsReleased ==

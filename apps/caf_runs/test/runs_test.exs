@@ -167,15 +167,21 @@ defmodule CodingAgentFramework.RunsTest do
       assert {:ok, _} = await(fn -> released?(s, "toolu_b") end)
     end
 
-    test "refused: one line with the reason and its time, exit 75, nothing run", ctx do
-      serve(ctx, pressure: [source: {:level, fn -> {:ok, 4} end}, interval: 60_000])
+    # F-276: barred, the request waits in the queue and its line says why; at its deadline,
+    # still barred, the refusal carries the level and the reading that set it.
+    test "refused: one line with the whole reason and its time, exit 75, nothing run", ctx do
+      serve(ctx,
+        pressure: [source: {:level, fn -> {:ok, 4} end}, interval: 60_000],
+        max_wait: 200
+      )
+
       ran = Path.join(ctx.dir, "ran")
 
       assert {:ok, %{status: 75, output: out}} =
                wrapped(ctx.runs, "toolu_p", ~s(echo ran > '#{ran}'))
 
       assert out =~
-               ~r/\Acaf-run: not run: the lease was refused \(pressure\); try again after 20\d\d-/
+               ~r/\Acaf-run: queued \(position 1; pressure severe: level 4 at 4\)\ncaf-run: not run: the lease was refused \(pressure severe: level 4 at 4\); try again after 20\d\d-/
 
       refute File.exists?(ran)
     end
