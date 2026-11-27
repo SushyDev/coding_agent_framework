@@ -368,7 +368,9 @@ framework's hooks deciding:
   prints one `queued` line while it waits, then `exec`s the command, so its output and exit
   code are the command's and the lease's holder is that process (`{"run", "<pid> <start>"}`),
   released once on any end, a kill included, read by `ps` (`Schedule.tla`'s shape `Native`);
-  a refusal prints one line with its reason and retry time and exits 75; with no answer it
+  a refusal prints one line with its whole reason (a pressure refusal's level and reading,
+  F-276) and retry time and exits 75, and a queued line says when pressure bars it; the plug's
+  own wait is the request's `wait`; with no answer it
   asks again once a second until 30 s by the clock have passed since its first ask with none
   (F-217), then runs without a lease and says so, as a hook fails open; one ask is bound by
   curl's `--max-time`, the plug's `:wait` and 5 s, and an ask cut there is no answer (F-218).
@@ -1284,11 +1286,17 @@ any reply does (new-4).
   example's console says `lease 3: builder for app asked on work, …` (F-211).
   A request also names its holder: the row of the work the lease
   admits (an agent row, a job row), which its owner writes `starting` before it asks (F-134's
-  new-1). The answer comes at once: `{:ok, lease}`; `{:queued, %{id: request_id, position:
-  n}}`, its place when it was queued, after which exactly one more answer comes, the lease or a
-  refusal, as a message, and no position updates (each message to an idle session costs its
-  whole context); or `{:refused, {reason, retry_at}}`, `reason` one of `queue_full`,
-  `deadline`, `{:pressure, level, reading}`, `allowance`. A refusal is final for its request
+  new-1), and may carry its caller's `wait`, the bound of the caller's own wait for the answer
+  (F-276). The answer comes at once: `{:ok, lease}`; `{:queued, %{id: request_id, position: n,
+  barred: …}}`, its place when it was queued and the pressure that bars its class then (nil if
+  none, so a caller can show why it waits), after which exactly one more answer comes, the
+  lease or a refusal, as a message, and no position updates (each message to an idle session
+  costs its whole context); or `{:refused, {reason, retry_at}}`, `reason` one of `queue_full`,
+  `deadline`, `{:pressure, level, reading}` (its deadline came while pressure barred its
+  class), `allowance`, `caller_gone` (its caller died, or its `wait` passed). A queued request
+  is never granted once its caller is gone: the grant reads the deadline the request carries
+  against the clock and whether the caller's process lives, before its timer or its monitor is
+  read (`Schedule.tla`'s `NoGrantToGone`, F-276). A refusal is final for its request
   id, holds nothing, is a row the `Tracker` shows, and is never a failed run. Requests are
   idempotent by request id: the lease is looked up before any refusal is decided, so a second
   request answers the lease already granted.
@@ -1306,8 +1314,10 @@ any reply does (new-4).
     admitted (decided). Each account's budget is two fixed-reset windows, the five-hour and the
     weekly, from `Usage`'s readings; a request is admitted only while both have room. A spent
     budget is refused at once with `retry_at` the window's reset, never queued, and a queued
-    request whose budget runs out is refused then; pressure that bars a class refuses its
-    request at once too. An account with no reading, or a window its reading lacks, has room:
+    request whose budget runs out is refused then. Pressure that bars a class refuses nothing
+    at once (F-276): the request queues like any other, keeps its place, and is served in order
+    once the level falls, or refused at its deadline (`KeepsPlace`), so a waiter never polls and
+    a freed slot never goes to a later asker. An account with no reading, or a window its reading lacks, has room:
     an account has no reading until a session on it draws its status line. `severe` is taken at
     once; `high` only once each sample of a whole window asked for it (F-135); a lower state
     once no sample of a whole window asked for the current one or above, and then the highest

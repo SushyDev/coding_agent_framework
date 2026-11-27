@@ -535,7 +535,8 @@ defmodule CodingAgentFramework.JobsTest do
     assert {:ok, %{job: "jc2", end: {:refused, :interrupted}}} = late(c.jobs)
     File.write!(Path.join(c.dir, "fifo"), "0\n")
     assert {:ok, %{exit: 0}} = Task.await(first, 15_000)
-    assert lease_of(c, "jc2") == nil
+    # Its request was refused once its caller died, and never granted (F-276).
+    assert %{outcome: "refused", reason: "caller_gone"} = lease_of(c, "jc2")
   end
 
   defp write_whole_in(root, file) do

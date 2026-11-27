@@ -23,7 +23,8 @@ defmodule CodingAgentFramework.Jobs do
   unit the job needs, so a landing's slot and lock come in one gang lease or not at all. The
   holder is the job's row, written `asked` first; `Jobs.Work` answers for it, and the lease
   lasts until the row holds the job's end. Queued, the run waits in the caller's process for
-  the one more answer, at most `:lease_wait` ms. A refusal, by the `Scheduler` or the
+  the one more answer, at most `:lease_wait` ms, which the request carries, so no lease is
+  granted after it (F-276). A refusal, by the `Scheduler` or the
   framework (`scheduler_ended`, `unanswered`, `unknown`), is a row `refused` with its
   `reason` and `retry_at`, never a failed run: `{:refused, {:lease, {reason, retry_at}}}`.
 
@@ -282,7 +283,9 @@ defmodule CodingAgentFramework.Jobs do
            module: module,
            account: nil,
            units: units,
-           holder: {"job", id}
+           holder: {"job", id},
+           # The caller waits this long for a queued lease: none is granted after (F-276).
+           wait: Keyword.get(opts, :lease_wait, @lease_wait)
          }}
 
       _ ->

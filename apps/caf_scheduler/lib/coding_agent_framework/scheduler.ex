@@ -8,23 +8,31 @@ defmodule CodingAgentFramework.Scheduler do
   (`:main`, `:landing`, `:builder` or `:heavy`), its `module` (who asks, for the turns inside a
   class), its `account` (or nil), the `units` of each declared resource it needs, all taken in
   one lease, and its `holder`, `{kind, key}`: the row of the work the lease admits (an agent
-  row, a job row), whose owner says when that work ended. The answer comes at once:
+  row, a job row), whose owner says when that work ended, and optionally its caller's `wait`
+  (ms from now that the caller waits for its answer, its call's bound; F-276). The answer
+  comes at once:
 
     * `{:ok, lease}`: granted now, or granted before under this id (the lease is looked up
       before any refusal is decided);
-    * `{:queued, %{id: id, position: n}}`: exactly one more answer follows, as a message to the
-      requester's process, `{:lease, id, {:ok, lease}}` or `{:lease, id, {:refused, {reason,
-      retry_at}}}`, and no position updates;
+    * `{:queued, %{id: id, position: n, barred: barred}}`: exactly one more answer follows, as
+      a message to the requester's process, `{:lease, id, {:ok, lease}}` or `{:lease, id,
+      {:refused, {reason, retry_at}}}`, and no position updates. `barred` is nil, or
+      `{:pressure, level, reading}` when pressure bars the class now, so a caller can show why
+      it waits;
     * `{:refused, {reason, retry_at}}`, final for the request, holding nothing, never a failed
       run: `:allowance` (the account's five-hour or weekly window has no room; `retry_at` is its
-      reset), `{:pressure, level, reading}` (the host's pressure bars the class: the level and the
-      reading that set it, `Scheduler.Pressure`'s), `:queue_full`, or `:deadline` (a queued
-      request waited its class's `max_wait`). `retry_at` is wall-clock ms. The row's `reason` is
-      the atom's name, or the pressure refusal as JSON, `["pressure","severe",{"at":…}]`.
+      reset), `:queue_full`, `:deadline` (a queued request waited its class's `max_wait`),
+      `{:pressure, level, reading}` (it waited its class's `max_wait` and pressure bars the
+      class still: the level and the reading that set it, `Scheduler.Pressure`'s), or
+      `:caller_gone` (its caller died, or its `wait` passed). `retry_at` is wall-clock ms. The
+      row's `reason` is the atom's name, or the pressure refusal as JSON,
+      `["pressure","severe",{"at":…}]`.
 
-  A refused request is a row too, so a view shows it. A requester's process that ends while it
-  waits leaves the queue; the queue is in memory, so after a restart a requester still waiting
-  asks again under its id, and is handed the lease if the grant was written.
+  A refused request is a row too, so a view shows it. A queued request is never granted once
+  its caller is gone: the grant reads the deadline the request carries against the clock and
+  whether the caller's process lives, before its timer or monitor is read (`Schedule.tla`'s
+  `NoGrantToGone`). The queue is in memory, so after a restart a requester still waiting asks
+  again under its id, and is handed the lease if the grant was written.
 
   **The grant** (`Scheduler.Queue` picks the next request) is one immediate transaction that
   sums the units the unreleased rows hold and inserts only within each resource's capacity and
@@ -36,7 +44,8 @@ defmodule CodingAgentFramework.Scheduler do
   `%{topic: "scheduler:<host>", pressure: level}`, and `pressure/2` answers the level with the
   reading that set it, its source and its last sample's time; a sample that could not be read (an unknown value
   included) changes nothing and is named there, never read as `ok`. A request its class is barred
-  from is refused at once; a queued one waits for its deadline. The allowance, the function
+  from queues like any other and keeps its place (F-276, `KeepsPlace`): it is served in order
+  once the level falls, or refused at its deadline. The allowance, the function
   `allowance:`, answers `:room` or `{:spent, retry_at}` for an account: a spent one is refused at
   once, and a queued request whose account is spent is refused then. Gates stop new starts only:
   no lease is taken back.
@@ -66,7 +75,7 @@ defmodule CodingAgentFramework.Scheduler do
   alias CodingAgentFramework.Scheduler.{Pressure, Queue, Table}
 
   @call 5_000
-  @reasons [:queue_full, :deadline, :allowance]
+  @reasons [:queue_full, :deadline, :allowance, :caller_gone]
 
   @doc """
   Starts the `Scheduler`. Options: `db:` (its file), `host:` (for its topic), `resources:` (each
@@ -96,7 +105,7 @@ defmodule CodingAgentFramework.Scheduler do
   @doc "Asks for a lease (see the module's doc). Option `timeout:` (ms, default 5 000)."
   @spec request(GenServer.server(), map, keyword) ::
           {:ok, map}
-          | {:queued, %{id: String.t(), position: pos_integer}}
+          | {:queued, %{id: String.t(), position: pos_integer, barred: nil | tuple}}
           | {:refused, term}
           | {:unknown, term}
   def request(scheduler, request, opts \\ []),
@@ -247,14 +256,16 @@ defmodule CodingAgentFramework.Scheduler do
   def handle_info({:deadline, seq}, s) do
     case Enum.find(s.entries, &(&1.seq == seq)) do
       nil -> {:noreply, s}
-      e -> {:noreply, serve(refuse_queued(s, e, :deadline, now(s)))}
+      e -> {:noreply, serve(expire(s, e))}
     end
   end
 
+  # The caller died while it waited: its request is refused, so a row says so, and its place
+  # frees.
   def handle_info({:DOWN, ref, :process, _, _}, s) do
     case Enum.find(s.entries, &(&1.ref == ref)) do
       nil -> {:noreply, s}
-      e -> {:noreply, serve(drop(s, e))}
+      e -> {:noreply, serve(refuse_queued(s, e, :caller_gone, now(s)))}
     end
   end
 
@@ -271,7 +282,7 @@ defmodule CodingAgentFramework.Scheduler do
         Process.demonitor(queued.ref, [:flush])
         e = %{queued | pid: pid, ref: Process.monitor(pid)}
         s = %{s | entries: Enum.map(s.entries, &if(&1.seq == e.seq, do: e, else: &1))}
-        {:reply, {:queued, %{id: req.id, position: position(s, e)}}, s}
+        {:reply, {:queued, queued(s, e)}, s}
 
       refusal = refusal(s, req) ->
         {reason, retry_at} = refusal
@@ -280,17 +291,25 @@ defmodule CodingAgentFramework.Scheduler do
 
       true ->
         seq = s.seq + 1
-        wait = by_class(s.max_wait, req.class)
+        # The deadline is the class's, or the caller's own wait when that ends first.
+        class_wait = by_class(s.max_wait, req.class)
+
+        {wait, why} =
+          if is_integer(req.wait) and req.wait < class_wait,
+            do: {req.wait, :caller_gone},
+            else: {class_wait, :deadline}
+
         Process.send_after(self(), {:deadline, seq}, wait)
         # No requester yet: a grant in this step is this reply, not a message as well.
-        e = %{seq: seq, req: req, asked_at: req.asked_at, pid: nil, ref: nil}
+        e = %{seq: seq, req: req, asked_at: req.asked_at, due: mono() + wait, why: why}
+        e = Map.merge(e, %{pid: nil, ref: nil})
         s = serve(%{s | seq: seq, entries: s.entries ++ [e]})
 
         case Table.lease(s.db, req.id) do
           nil ->
             e = %{e | pid: pid, ref: Process.monitor(pid)}
             s = %{s | entries: Enum.map(s.entries, &if(&1.seq == seq, do: e, else: &1))}
-            {:reply, {:queued, %{id: req.id, position: position(s, e)}}, s}
+            {:reply, {:queued, queued(s, e)}, s}
 
           lease ->
             {:reply, {:ok, lease}, s}
@@ -298,21 +317,39 @@ defmodule CodingAgentFramework.Scheduler do
     end
   end
 
+  # A queued answer says why it waits when pressure bars its class, so a caller can show it.
+  defp queued(s, e) do
+    barred = if Pressure.bars?(s.pressure.level, e.req.class), do: barred(s)
+    %{id: e.req.id, position: position(s, e), barred: barred}
+  end
+
+  # Pressure refuses nothing here: a request it bars queues and keeps its place (F-276).
   defp refusal(s, req) do
     waiting = Enum.count(s.entries, &(&1.req.class == req.class))
 
     cond do
       spent = spent(s, req) -> {:allowance, spent}
-      Pressure.bars?(s.pressure.level, req.class) -> {barred(s), now(s) + window(s)}
       waiting >= by_class(s.bound, req.class) -> {:queue_full, now(s)}
       true -> nil
     end
   end
 
-  # Grants while the queue's next request fits; refuses a queued request whose account has no
-  # room left.
+  # A queued request at its deadline: the caller's is `caller_gone`; the class's names the
+  # pressure that bars it then, so the caller can say why it waited, or else `deadline`.
+  defp expire(s, %{why: :caller_gone} = e), do: refuse_queued(s, e, :caller_gone, now(s))
+
+  defp expire(s, e) do
+    if Pressure.bars?(s.pressure.level, e.req.class),
+      do: refuse_queued(s, e, barred(s), now(s) + window(s)),
+      else: refuse_queued(s, e, :deadline, now(s))
+  end
+
+  # Grants while the queue's next request fits; first refuses a queued request whose account
+  # has no room left, whose deadline has passed, or whose caller has died, though its timer or
+  # monitor has not been read yet: none of them is ever granted.
   defp serve(s) do
     s = Enum.reduce(s.entries, s, &expire_spent/2)
+    s = Enum.reduce(s.entries, s, &expire_gone/2)
     admitted? = fn e -> not Pressure.bars?(s.pressure.level, e.req.class) end
     held = Table.held(s.db)
     t = now(s)
@@ -333,6 +370,20 @@ defmodule CodingAgentFramework.Scheduler do
     case spent(s, e.req) do
       nil -> s
       retry_at -> refuse_queued(s, e, :allowance, retry_at)
+    end
+  end
+
+  # `Schedule.tla`'s Insert reads the caller before it grants: the deadline the request
+  # carries against the clock, and whether its process lives. The request being received has
+  # no requester yet: its caller is in this call, so neither has passed, though a slow step
+  # (a loaded host's SQLite) may have taken longer than its wait.
+  defp expire_gone(%{pid: nil}, s), do: s
+
+  defp expire_gone(e, s) do
+    cond do
+      mono() >= e.due -> expire(s, e)
+      gone?(e.pid) -> refuse_queued(s, e, :caller_gone, now(s))
+      true -> s
     end
   end
 
@@ -423,12 +474,19 @@ defmodule CodingAgentFramework.Scheduler do
       not Enum.all?(Map.values(units), &(is_integer(&1) and &1 > 0)) ->
         {:refused, {:bad, :units}}
 
+      not (req[:wait] == nil or (is_integer(req[:wait]) and req[:wait] > 0)) ->
+        {:refused, {:bad, :wait}}
+
       true ->
-        {:ok, Map.put_new(req, :account, nil)}
+        {:ok, req |> Map.put_new(:account, nil) |> Map.put_new(:wait, nil)}
     end
   end
 
   defp checked(_req, _s), do: {:refused, {:bad, :request}}
+
+  # A caller on this node that has died; the monitor tells of any other.
+  defp gone?(pid) when node(pid) == node(), do: not Process.alive?(pid)
+  defp gone?(_pid), do: false
 
   defp spent(_s, %{account: nil}), do: nil
 
@@ -458,4 +516,8 @@ defmodule CodingAgentFramework.Scheduler do
   defp announce(s, id), do: s.notify.(%{topic: "scheduler:#{s.host}", ids: [id]})
 
   defp now(s), do: s.clock.()
+
+  # A queued request's deadline lives only in this process, so a step of the OS clock does not
+  # move it; its timer is on the same time.
+  defp mono, do: System.monotonic_time(:millisecond)
 end

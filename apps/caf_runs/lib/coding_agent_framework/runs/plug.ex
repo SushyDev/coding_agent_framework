@@ -7,19 +7,23 @@ defmodule CodingAgentFramework.Runs.Plug do
   8 KiB. The embedding app serves it on the intake's port, beside `Intake.Plug`.
 
   The request's own process is the `Scheduler`'s requester, so a wrapper that goes away while
-  queued leaves the queue. The request is `%{id: "run:" <> tool_use_id, class: class, module:
-  agent, account: nil, units: units, holder: {"run", "<pid> <start>"}}`, the units from the
-  app's `units:` function of the class and the agent. The answer is one line of text, the last
+  queued leaves the queue, refused `caller_gone`. The request is `%{id: "run:" <> tool_use_id,
+  class: class, module: agent, account: nil, units: units, holder: {"run", "<pid> <start>"},
+  wait: wait}`, the units from the app's `units:` function of the class and the agent, and
+  `wait` the plug's own, so no grant comes after it stops waiting (F-276). The answer is one line of text, the last
   of a chunked response:
 
     * `granted <lease id>`: the lease is this wrapper's (its holder, not released);
     * `refused <reason> <retry time>`: the `Scheduler`'s refusal, the time in UTC (ISO 8601);
+      a pressure refusal goes on with its level and the reading that set it (F-276), `refused
+      pressure <time> severe: memory full 2.00% over 1.00%`;
       `used` when the id's lease is another process's or was released, `bad_<field>` for a
       request out of shape, a refusal of `units` by its first word, each with `-` for a time;
     * `unknown <reason>`: no answer from the `Scheduler` (gone, or past its deadline).
 
-  Queued, the response is chunked: `queued (position n)` first (unless the wrapper asks again
-  after a cut, `again=1`), then a newline every `beat:` ms (5 000 by default), whose failed
+  Queued, the response is chunked: `queued (position n)` first, `queued (position n; pressure
+  high: cpu some 31.00% over 25.00%)` when pressure bars the class (unless the wrapper asks
+  again after a cut, `again=1`), then a newline every `beat:` ms (5 000 by default), whose failed
   write is how a wrapper gone is found, then the answer. A wait longer than `wait:` ms
   (`Runs.wait/0`, 600 000 by default, past every class's `max_wait`) ends `unknown no_answer`.
   The wrapper's own bound for one ask is this `:wait` and 5 s (`Runs.prepare/5`'s `:wait`).
@@ -92,30 +96,33 @@ defmodule CodingAgentFramework.Runs.Plug do
   defp request(conn, opts, ask, units) do
     holder = {"run", ask.holder}
 
+    # The plug's own wait is the request's deadline: past it nobody reads a grant (F-276).
     req = %{
       id: "run:" <> ask.id,
       class: ask.class,
       module: ask.agent,
       account: nil,
       units: units,
-      holder: holder
+      holder: holder,
+      wait: opts.wait
     }
 
     case ask(opts.scheduler.(), req) do
       {:ok, lease} ->
         answer(conn, granted(lease, holder))
 
-      {:queued, %{position: n}} ->
+      {:queued, %{position: n} = queued} ->
         conn = conn |> put_resp_content_type("text/plain") |> send_chunked(200)
         until = System.monotonic_time(:millisecond) + opts.wait
+        line = "queued (position #{n}#{why_queued(queued[:barred])})\n"
 
-        case if(ask.again, do: {:ok, conn}, else: chunk(conn, "queued (position #{n})\n")) do
+        case if(ask.again, do: {:ok, conn}, else: chunk(conn, line)) do
           {:ok, conn} -> wait(conn, req.id, holder, opts.beat, until)
           {:error, _} -> conn
         end
 
       {:refused, {reason, retry_at}} when is_integer(retry_at) ->
-        answer(conn, "refused #{word(reason)} #{time(retry_at)}")
+        answer(conn, refused(reason, retry_at))
 
       {:refused, why} ->
         answer(conn, "refused #{word(why)} -")
@@ -143,7 +150,7 @@ defmodule CodingAgentFramework.Runs.Plug do
         last(conn, granted(lease, holder))
 
       {:lease, ^id, {:refused, {reason, retry_at}}} ->
-        last(conn, "refused #{word(reason)} #{time(retry_at)}")
+        last(conn, refused(reason, retry_at))
     after
       max(min(beat, left), 0) ->
         cond do
@@ -167,6 +174,32 @@ defmodule CodingAgentFramework.Runs.Plug do
   defp time(ms) do
     ms |> DateTime.from_unix!(:millisecond) |> DateTime.truncate(:second) |> DateTime.to_iso8601()
   end
+
+  # The whole reason (F-276): the word and the retry time, then, for pressure, the level and the
+  # reading that set it, as the wrapper prints them.
+  defp refused(reason, retry_at) do
+    case reason do
+      {:pressure, level, reading} ->
+        "refused pressure #{time(retry_at)} #{pressure(level, reading)}"
+
+      reason ->
+        "refused #{word(reason)} #{time(retry_at)}"
+    end
+  end
+
+  defp why_queued({:pressure, level, reading}), do: "; pressure #{pressure(level, reading)}"
+  defp why_queued(_not_barred), do: ""
+
+  # `severe: memory full 2.00% over 1.00%`, or for a level source `high: level 2 at 2`.
+  defp pressure(level, %{file: :level, share: n, threshold: t}),
+    do: "#{level}: level #{n} at #{t}"
+
+  defp pressure(level, %{file: file, line: line, share: share, threshold: t}),
+    do: "#{level}: #{file} #{line} #{percent(share)} over #{percent(t)}"
+
+  defp pressure(level, _reading), do: "#{level}"
+
+  defp percent(x) when is_number(x), do: :erlang.float_to_binary(x * 100.0, decimals: 2) <> "%"
 
   # One word for a line the wrapper splits on spaces.
   defp word(why) when is_atom(why), do: Atom.to_string(why)

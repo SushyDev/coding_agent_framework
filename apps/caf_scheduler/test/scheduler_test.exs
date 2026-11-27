@@ -196,7 +196,9 @@ defmodule CodingAgentFramework.SchedulerTest do
     assert_receive {:telemetry, [_, _, :grant], %{wait: _}, %{class: :heavy, module: "m"}}
   end
 
-  test "pressure: severe admits only a person's main session; high bars heavy runs", ctx do
+  # A Scheduler whose pressure is the level in `gates`, read every 5 ms and taken at once, and a
+  # function that sets the level and returns once it is folded.
+  defp leveled(ctx, more \\ []) do
     test = self()
 
     read = fn ->
@@ -208,8 +210,8 @@ defmodule CodingAgentFramework.SchedulerTest do
       end
     end
 
-    s =
-      start(ctx.opts, pressure: [source: {:level, read}, name: "kernel", interval: 5, window: 0])
+    pressure = [source: {:level, read}, name: "kernel", interval: 5, window: 0]
+    s = start(ctx.opts, [pressure: pressure] ++ more)
 
     set = fn level ->
       Agent.update(ctx.gates, &%{&1 | level: level})
@@ -219,19 +221,29 @@ defmodule CodingAgentFramework.SchedulerTest do
       assert_receive :read
     end
 
+    {s, set}
+  end
+
+  test "pressure: severe admits only a person's main session; high bars heavy runs", ctx do
+    {s, set} =
+      leveled(ctx, max_wait: %{main: 60_000, landing: 60_000, builder: 50, heavy: 60_000})
+
     set.(4)
     assert %{level: :severe, source: "kernel", at: at, unread: nil} = Scheduler.pressure(s)
     assert is_integer(at)
     # Each change of the level is cued once.
     assert_received {:cue, %{topic: "scheduler:ws", pressure: :severe}}
-    # The refusal names the reading that set the level, in the answer and in the row.
-    # Samples go on every 5 ms, so the reading is the latest that asked for `severe`.
+
     assert %{reading: %{file: :level, line: :level, share: 4, threshold: 4}} =
              Scheduler.pressure(s)
 
-    assert {:refused, {{:pressure, :severe, reading}, _}} =
+    # Barred, the request queues and says why (F-276).
+    assert {:queued, %{position: 1, barred: {:pressure, :severe, %{share: 4}}}} =
              Scheduler.request(s, req("b", :builder, %{"seat" => 1}))
 
+    # At its deadline, still barred, the refusal names the reading that set the level, in the
+    # answer and in the row. Samples go on every 5 ms, so the reading is the latest.
+    assert_receive {:lease, "b", {:refused, {{:pressure, :severe, reading}, _}}}
     assert %{file: :level, share: 4, threshold: 4, at: read_at} = reading
     assert read_at >= at
     assert [%{reason: row}] = for(%{request_id: "b"} = r <- Scheduler.leases(s), do: r)
@@ -246,7 +258,7 @@ defmodule CodingAgentFramework.SchedulerTest do
     assert_received {:cue, %{topic: "scheduler:ws", pressure: :high}}
     refute_received {:cue, %{pressure: _}}
 
-    assert {:refused, {{:pressure, :high, %{threshold: 2}}, _}} =
+    assert {:queued, %{barred: {:pressure, :high, %{threshold: 2}}}} =
              Scheduler.request(s, req("h", :heavy, %{"slot" => 1}))
 
     assert {:ok, _} = Scheduler.request(s, req("l", :landing, %{"slot" => 1, "lock" => 1}))
@@ -257,20 +269,82 @@ defmodule CodingAgentFramework.SchedulerTest do
     refute_received {:cue, %{pressure: _}}
   end
 
-  test "a requester that ends while it waits leaves the queue", ctx do
-    s = start(ctx.opts)
-    {:ok, _} = Scheduler.request(s, req("r1", :builder, %{"seat" => 1}))
+  test "a barred request waits, keeps its place against a later one, and is granted once pressure eases",
+       ctx do
+    {s, set} = leveled(ctx)
+    {:ok, _} = Scheduler.request(s, req("x", :heavy, %{"slot" => 2}))
+
+    set.(2)
+
+    assert {:queued, %{position: 1, barred: {:pressure, :high, _}}} =
+             Scheduler.request(s, req("h1", :heavy, %{"slot" => 2}))
+
+    # Pressure eases while the slots are still held; a later request queues behind h1.
+    set.(0)
+
+    assert {:queued, %{position: 2, barred: nil}} =
+             Scheduler.request(s, req("h2", :heavy, %{"slot" => 2}))
+
+    ended(ctx, s, "x")
+    assert_receive {:lease, "h1", {:ok, _}}
+    refute_received {:lease, "h2", _}
+
+    ended(ctx, s, "h1")
+    assert_receive {:lease, "h2", {:ok, _}}
+  end
+
+  test "a barred request whose caller dies is refused caller_gone, and its place frees", ctx do
+    {s, set} = leveled(ctx)
+    set.(2)
 
     {pid, ref} =
       spawn_monitor(fn ->
-        {:queued, _} = Scheduler.request(s, req("gone", :builder, %{"seat" => 1}))
+        {:queued, %{barred: {:pressure, :high, _}}} =
+          Scheduler.request(s, req("gone", :heavy, %{"slot" => 1}))
       end)
 
     assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
-    {:queued, %{position: 1}} = Scheduler.request(s, req("r3", :builder, %{"seat" => 1}))
-    ended(ctx, s, "r1")
-    assert_receive {:lease, "r3", {:ok, _}}
+    assert_receive {:cue, %{topic: "scheduler:ws", ids: [id]}}
+
+    assert %{request_id: "gone", outcome: "refused", reason: "caller_gone"} =
+             Enum.find(Scheduler.leases(s), &(&1.id == id))
+
+    assert {:queued, %{position: 1}} = Scheduler.request(s, req("next", :heavy, %{"slot" => 1}))
+    set.(0)
+    assert_receive {:lease, "next", {:ok, _}}
     assert Table.lease(elem(Table.open(ctx.opts[:db]), 1), "gone") == nil
+  end
+
+  test "a request past its deadline is never granted, though its timer has not fired", ctx do
+    s = start(ctx.opts, max_wait: 3_000)
+    {:ok, _} = Scheduler.request(s, req("x", :builder, %{"seat" => 1}))
+
+    # One carries its caller's wait, one only its class's.
+    {:queued, _} = Scheduler.request(s, req("late", :builder, %{"seat" => 1}, wait: 2_000))
+    {:queued, _} = Scheduler.request(s, req("slow", :builder, %{"seat" => 1}))
+
+    # The seat frees while the Scheduler is held; it reads that cue only once the timers are in
+    # its mailbox behind it, so the grant's own check is what refuses them. Every request has a
+    # timer, the granted "x"'s too: three, the last "slow"'s.
+    :sys.suspend(s)
+    ended(ctx, s, "x")
+
+    {:ok, _} =
+      await(
+        fn ->
+          {:messages, m} = Process.info(s, :messages)
+          if Enum.count(m, &match?({:deadline, _}, &1)) == 3, do: {:ok, m}, else: {:no, m}
+        end,
+        10_000
+      )
+
+    :sys.resume(s)
+    assert_receive {:lease, "late", {:refused, {:caller_gone, _}}}
+    assert_receive {:lease, "slow", {:refused, {:deadline, _}}}
+
+    db = elem(Table.open(ctx.opts[:db]), 1)
+    assert Table.lease(db, "late") == nil and Table.lease(db, "slow") == nil
+    assert {:ok, _} = Scheduler.request(s, req("fresh", :builder, %{"seat" => 1}))
   end
 
   test "a request names declared resources and a holder", ctx do
@@ -281,6 +355,9 @@ defmodule CodingAgentFramework.SchedulerTest do
 
     assert {:refused, {:bad, :class}} = Scheduler.request(s, req("x", :urgent, %{"seat" => 1}))
     assert {:refused, {:bad, :request}} = Scheduler.request(s, %{id: "x"})
+
+    assert {:refused, {:bad, :wait}} =
+             Scheduler.request(s, req("x", :heavy, %{"seat" => 1}, wait: 0))
   end
 
   test "pressure from stall times: deltas of total, severe at once, down after a quiet window" do
