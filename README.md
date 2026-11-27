@@ -558,7 +558,10 @@ Built, each from a checked model in `model/tla/`:
   settled, or refused because no turn runs, never refused as already claimed.
 - a prompt answered through the inbox reads `answering` until its answer's row settles, and
   its cue goes once it has (F-295, `Inbox.tla`), so an app that reads on the cue never finds it
-  only gone; its `closed` fact is written only once that row names who answered.
+  only gone; its `closed` fact is written only once that row names who answered. One whose
+  caller ended before the settle closes `unknown` by its answerer once the next start
+  interrupts the row, and a restarted inbox still lists an answering prompt and writes its fact
+  (F-297).
 - an interactive delegate's second interrupt is taken once the first settled, as a main
   session's is (F-294), or refused because no turn runs, never refused as already claimed.
 - every settings file the framework writes, a main's and a delegate's, allows the `Artifact`

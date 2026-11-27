@@ -931,8 +931,13 @@ ledger's query on the `opened` fact's target, and a bad key is refused `{:bad, k
 answer's row is open is listed `answering`, and a close whose answer row is open writes no
 `closed` fact: the read after the settle writes it, naming the answer's actor. Once the row
 settles, `answer/5` has the inbox read again and cues `prompts` with the prompt's id from the
-caller, so a restart of the inbox does not lose it. Past such a restart, `answered/3` shows a
-prompt whose row is still open as `answering`, and writes nothing for it. An ask's
+caller, so a restart of the inbox does not lose it. F-297: a caller that ends between the hand
+and the settle leaves its row claimed until the next start interrupts it; a prompt gone from
+its owner whose last answer row is interrupted is closed `unknown` by that row's actor, in
+`answered/3` and in its `closed` fact, never a guessed closer. The inbox's first read after a
+start knows again, by one query on `Acts`, each prompt of its host whose answer row is open, or
+taken or interrupted with no `closed` fact: an open one is listed `answering` again, and the
+others' facts are written then, `late`. So every prompt closed by an answer gets its fact. An ask's
 option needs its description, as `ask` says; the app checks an ask first with
 `CodingAgentFramework.check_ask/1`, the same function `Mailbox` refuses one by. Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
 `expired` prompts kept shown, and the kinds that need a reading first.

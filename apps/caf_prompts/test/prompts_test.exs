@@ -990,6 +990,84 @@ defmodule CodingAgentFramework.PromptsTest do
     by = Map.new(rows, &{JSON.decode!(&1.detail)["prompt"], JSON.decode!(&1.detail)["by"]})
     assert by == %{one => "sam", two => "sam"}
   end
+
+  # F-297: an ask answered slowly up to the hand: the Mailbox took the answer and cued, and the
+  # inbox read that cue, listing it `answering`, while its row is still claimed. The caller runs
+  # unlinked, so a test can end it there.
+  defp handed(ctx, header) do
+    quiet(ctx)
+    {:ok, {:asked, n}} = Mailbox.ask(ctx.mailbox, "d1", [question(header)])
+    id = "ask:#{n}"
+    assert cued(ctx) == [id]
+
+    caller = spawn(fn -> Prompts.answer(ctx.prompts, id, @rebase, "sam") end)
+    assert_receive {:settling, slow}, 5_000
+    assert cued(ctx) == [id]
+    assert {:ok, [%{id: ^id, status: "answering"}]} = Prompts.read(ctx.prompts)
+    quiet(ctx)
+    {id, caller, slow}
+  end
+
+  defp closed_facts(acts) do
+    {:ok, rows} = Acts.rows(acts, act: "closed")
+    Map.new(rows, &{JSON.decode!(&1.detail)["prompt"], JSON.decode!(&1.detail)})
+  end
+
+  test "a caller ended between the hand and the settle closes its ask unknown, by its answerer",
+       ctx do
+    ctx = slowly(ctx)
+    {id, caller, _slow} = handed(ctx, "Base")
+
+    # The caller ends with its row claimed; the next start interrupts the row, and the inbox
+    # starts again after it.
+    Process.exit(caller, :kill)
+    :ok = stop_supervised(Prompts)
+    :ok = stop_supervised(SlowSettle)
+    :ok = stop_supervised(Acts)
+    acts_opts = [db: Path.join(ctx.dir, "caf.db"), start_id: "s2", host: "test", instance: "t"]
+    acts = start_supervised!({Acts, acts_opts})
+    assert {:ok, [%{status: "interrupted"}]} = Acts.rows(acts, act: "answer")
+    prompts = start_supervised!({Prompts, Keyword.put(ctx.popts, :acts, acts)})
+
+    # Its first read lets it go, cues it, and writes its fact: the answerer, outcome unknown.
+    assert_receive {:prompts, %{topic: "prompts", ids: [^id]}}, 5_000
+    assert {:ok, []} = Prompts.read(prompts)
+
+    assert %{^id => %{"by" => "sam", "outcome" => "unknown", "late" => true}} =
+             closed_facts(acts)
+
+    assert {:ok, %{prompts: [%{id: ^id} = p]}} = Prompts.answered(prompts)
+    assert %{status: "unknown", by: "sam", reason: "interrupted", choice: choice} = p
+    assert choice == @rebase
+  end
+
+  test "an inbox restarted while an answer's row is open lists it answering, and writes its fact",
+       ctx do
+    ctx = slowly(ctx)
+    {id, caller, slow} = handed(ctx, "Base")
+    ref = Process.monitor(caller)
+
+    # The inbox starts again; its first read knows the prompt again from its open row.
+    :ok = stop_supervised(Prompts)
+    prompts = start_supervised!({Prompts, ctx.popts |> Keyword.put(:acts, slow)})
+    assert {:ok, [%{id: ^id, status: "answering"}]} = Prompts.read(prompts)
+    assert {:ok, %{prompts: []}} = Prompts.answered(prompts)
+
+    # The row settles. The caller's read went to the inbox before the start; the ledger's cue
+    # has the new one read, which lets it go and writes its fact.
+    SlowSettle.go(slow)
+    assert_receive {:DOWN, ^ref, :process, ^caller, :normal}, 5_000
+    assert_receive {:prompts, %{topic: "prompts", ids: [^id]}}
+    Prompts.cue(prompts, %{topic: "acts"})
+    assert_receive {:prompts, %{topic: "prompts", ids: [^id]}}, 5_000
+    assert {:ok, []} = Prompts.read(prompts)
+
+    assert %{^id => %{"by" => "sam"} = fact} = closed_facts(ctx.acts)
+    refute Map.has_key?(fact, "late")
+
+    assert {:ok, %{prompts: [%{id: ^id, status: "answered", by: "sam"}]}} =
+             Prompts.answered(prompts)
+  end
 end
 
 defmodule CodingAgentFramework.PromptsTest.SlowSettle do
