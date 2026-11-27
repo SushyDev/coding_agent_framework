@@ -765,15 +765,12 @@ defmodule CodingAgentFramework.Mains do
   defp interrupted(%{acts: nil}, _name), do: {:ok, nil}
 
   defp interrupted(s, name) do
-    filter = [actor: s.operator, target: name, act: "interrupt", status: "settled"]
+    filter = [actor: s.operator, target: name, act: "interrupt"]
 
     # Half the step, so the read ends within the call of `Mains` it is made in.
-    case Acts.rows(s.acts, filter, timeout: div(@step, 2)) do
-      {:ok, rows} ->
-        {:ok, rows |> Enum.filter(& &1.acted_at) |> Enum.map(& &1.id) |> Enum.max(fn -> nil end)}
-
-      {_, reason} ->
-        {:unknown, {:acts, reason}}
+    case Acts.newest_acted(s.acts, filter, timeout: div(@step, 2)) do
+      {:ok, last} -> {:ok, last}
+      {_, reason} -> {:unknown, {:acts, reason}}
     end
   end
 

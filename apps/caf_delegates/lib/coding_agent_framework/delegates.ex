@@ -264,12 +264,23 @@ defmodule CodingAgentFramework.Delegates do
   `{:refused, {:not_started, "refused"}}`, `{:unknown, :no_intake}` for an interactive one with
   no `intake:`, or `Stream`'s.
 
+  With `fix: :interrupt`, the state of a started delegate also names `interrupted`: the id of
+  the newest row in `Acts` of an interrupt of it, by its parent or the operator, whose act ran
+  and settled (nil for none; `Acts.newest_acted/3`, F-294, as `Mains.fix_state/3`'s). Without
+  `acts:` there is no claim to name, and the key is left out. Escape that reached a screen that went on running writes no hook
+  event, so without it the first interrupt's settled claim would refuse the next as claimed
+  until one came; with it, the next is a new state once the first settled. A claim still under
+  way, or one a restart cut, moves nothing. A read of `Acts` that did not answer is
+  `{:unknown, {:acts, reason}}`.
+
       Delegates.fix_state(delegates, "app-main", "app-unit-review")
       #=> {:ok, %{id: 1, status: "running", resumes: 0, report: "none", offset: 812,
       #=>   gone: false, ending: false, held: ["req-…"], ended: false}}
+      Delegates.fix_state(delegates, "app-main", "app-unit-review", fix: :interrupt)
+      #=> {:ok, %{id: 1, …, ended: false, interrupted: 31}}
   """
-  def fix_state(delegates, parent, name),
-    do: call(delegates, {:fix_state, parent, name}, [], 3 * @step)
+  def fix_state(delegates, parent, name, opts \\ []),
+    do: call(delegates, {:fix_state, parent, name, Keyword.get(opts, :fix)}, [], 3 * @step)
 
   @doc """
   Fixes `parent`'s delegate `name`, only while `state` (`fix_state/3`'s, which the caller
@@ -609,10 +620,10 @@ defmodule CodingAgentFramework.Delegates do
     end
   end
 
-  def handle_call({:fix_state, parent, name}, _from, s) do
+  def handle_call({:fix_state, parent, name, fix}, _from, s) do
     reply =
       case child(s, parent, name) do
-        {:ok, row, agent, fold} -> {:ok, claimed(row, agent, fold)}
+        {:ok, row, agent, fold} -> claimed(s, row, agent, fold, fix)
         {:starting, row} -> {:ok, starting(row)}
         refused -> refused
       end
@@ -626,12 +637,16 @@ defmodule CodingAgentFramework.Delegates do
   def handle_call({:fix, parent, name, fix, state}, from, s) do
     case child(s, parent, name) do
       {:ok, row, agent, fold} ->
-        now = claimed(row, agent, fold)
+        case claimed(s, row, agent, fold, fix) do
+          {:ok, ^state} ->
+            checked = fix_check(fix, state)
+            if checked == :ok, do: act(s, row, agent, fold, fix, from), else: {:reply, checked, s}
 
-        cond do
-          now != state -> moved(now, s)
-          (checked = fix_check(fix, now)) != :ok -> {:reply, checked, s}
-          true -> act(s, row, agent, fold, fix, from)
+          {:ok, now} ->
+            moved(now, s)
+
+          unknown ->
+            {:reply, unknown, s}
         end
 
       {:starting, row} ->
@@ -1798,12 +1813,30 @@ defmodule CodingAgentFramework.Delegates do
   defp pending_parent(s, row),
     do: Enum.find_value(Map.values(s.pending), &(&1.id == row.id && &1.parent))
 
-  defp claimed(row, agent, fold) do
+  # Only an interrupt's state names the newest interrupt that acted and settled (F-294), as a
+  # main session's does (F-270): Escape that reached a screen that went on running writes no
+  # hook event, and the next interrupt would be refused as claimed until one came.
+  defp claimed(s, row, agent, fold, fix) do
     held = Enum.sort(for {id, %{state: :held}} <- fold.requests, do: id)
     state = Map.take(row, [:id, :status, :resumes, :report])
 
-    Map.merge(state, %{offset: fold.offset, gone: fold.gone, ending: fold.ending, held: held})
-    |> Map.put(:ended, Agents.free?(agent))
+    state =
+      Map.merge(state, %{offset: fold.offset, gone: fold.gone, ending: fold.ending, held: held})
+      |> Map.put(:ended, Agents.free?(agent))
+
+    if fix == :interrupt, do: interrupted(s, state, row.name), else: {:ok, state}
+  end
+
+  # Any caller's: the parent's and the operator's claims of one state are one claim (`Acts`
+  # keys a claim by its target and state). Half the step, so the read ends within the call.
+  # With no `Acts` there is no claim to name, and the state is as it was before F-294.
+  defp interrupted(%{acts: nil}, state, _name), do: {:ok, state}
+
+  defp interrupted(s, state, name) do
+    case Acts.newest_acted(s.acts, [target: name, act: "interrupt"], timeout: div(@step, 2)) do
+      {:ok, last} -> {:ok, Map.put(state, :interrupted, last)}
+      {_, reason} -> {:unknown, {:acts, reason}}
+    end
   end
 
   # An interactive delegate has no Stream: Escape through the Inlet, checked on its screen.

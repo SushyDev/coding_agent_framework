@@ -559,6 +559,8 @@ Built, each from a checked model in `model/tla/`:
 - a prompt answered through the inbox reads `answering` until its answer's row settles, and
   its cue goes once it has (F-295, `Inbox.tla`), so an app that reads on the cue never finds it
   only gone; its `closed` fact is written only once that row names who answered.
+- an interactive delegate's second interrupt is taken once the first settled, as a main
+  session's is (F-294), or refused because no turn runs, never refused as already claimed.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
