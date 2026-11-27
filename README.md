@@ -556,6 +556,9 @@ Built, each from a checked model in `model/tla/`:
   `{:framework, :expired}` say, never nil; `answered/2` reads one agent's closed prompts
   (`agent:`) and names a bad key; and a main session's second interrupt is taken once the first
   settled, or refused because no turn runs, never refused as already claimed.
+- a prompt answered through the inbox reads `answering` until its answer's row settles, and
+  its cue goes once it has (F-295, `Inbox.tla`), so an app that reads on the cue never finds it
+  only gone; its `closed` fact is written only once that row names who answered.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

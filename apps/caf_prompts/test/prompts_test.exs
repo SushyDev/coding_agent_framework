@@ -13,6 +13,7 @@ defmodule CodingAgentFramework.PromptsTest do
   alias CodingAgentFramework.{Accounts, Acts, Grants, Inlet, Intake, Logins, Mailbox, Prompts}
   alias CodingAgentFramework.{Delegates, ScreenStandIn, Sessions, Tmux, Transcripts, Usage}
   alias CodingAgentFramework.{SessionsSetup, Stream, Watch}
+  alias CodingAgentFramework.PromptsTest.SlowSettle
 
   @trust "Yes, I trust this folder"
 
@@ -294,6 +295,8 @@ defmodule CodingAgentFramework.PromptsTest do
     assert {:refused, :settled} = Prompts.answer(ctx.prompts, id, "leave", "sam")
     assert {:ok, %{"lost_viewer" => %{allowed: true}}} = Watch.remedies(ctx.watch, :list)
     assert {:refused, :no_prompt} = Prompts.answer(ctx.prompts, "remedy:999", "leave", "sam")
+    # Its answer's cue, once its row settled (F-295), is read.
+    quiet(ctx)
 
     # Asked for its bound (F-189's new-7): the act once, or leave; approve widens nothing there.
     capped = %{sym | state: "k2"}
@@ -898,5 +901,123 @@ defmodule CodingAgentFramework.PromptsTest do
              Prompts.answered(ctx.prompts, limit: 2, before: last)
 
     assert {:ok, %{prompts: [_, _, _, _], next: nil}} = Prompts.answered(ctx.prompts)
+  end
+
+  # F-295: an answer's row in `Acts` settled late, as a loaded host settles it. `SlowSettle`
+  # holds the caller's settle until the test lets it go, so the owner's cue is read first.
+  defp slowly(ctx) do
+    :ok = stop_supervised(Prompts)
+    acts = start_supervised!({SlowSettle, {ctx.acts, self()}})
+    popts = Keyword.put(ctx.popts, :acts, acts)
+    %{ctx | prompts: start_supervised!({Prompts, popts})}
+  end
+
+  # The cues a step before left: the inbox's pending reads are done first, so none comes later.
+  defp quiet(ctx) do
+    {:ok, _} = Prompts.read(ctx.prompts)
+
+    receive do
+      {:prompts, _} -> quiet(ctx)
+      {:cue, _} -> quiet(ctx)
+    after
+      0 -> :ok
+    end
+  end
+
+  # An ask answered (or withdrawn) through the inbox whose answer row settles only once the
+  # inbox has read the Mailbox's cue: what a reader on each `prompts` cue finds, before and
+  # after the settle.
+  defp answered_slowly(ctx, header, choice) do
+    quiet(ctx)
+    {:ok, {:asked, n}} = Mailbox.ask(ctx.mailbox, "d1", [question(header)])
+    id = "ask:#{n}"
+    assert cued(ctx) == [id]
+
+    answer = Task.async(fn -> Prompts.answer(ctx.prompts, id, choice, "sam") end)
+    assert_receive {:settling, slow}, 5_000
+
+    # The Mailbox stored the answer and cued: the inbox reads that cue before the row settles.
+    assert cued(ctx) == [id]
+    before = {Prompts.read(ctx.prompts), Prompts.answered(ctx.prompts)}
+
+    SlowSettle.go(slow)
+    assert {:ok, _} = Task.await(answer)
+    # The next cue that names it, with nothing but the settle to make it.
+    assert cued(ctx) == [id]
+    {id, before, {Prompts.read(ctx.prompts), Prompts.answered(ctx.prompts)}}
+  end
+
+  test "a reader on each prompts cue finds an ask answering, then answered: never only gone",
+       ctx do
+    ctx = slowly(ctx)
+
+    for {header, choice, status} <- [
+          {"Base", @rebase, "answered"},
+          {"Again", {:withdraw, "Dismissed."}, "withdrawn"}
+        ] do
+      {id, before, later} = answered_slowly(ctx, header, choice)
+
+      assert {{:ok, [%{id: ^id, status: "answering"}]}, {:ok, %{prompts: shut}}} = before
+      refute Enum.any?(shut, &(&1.id == id))
+
+      assert {{:ok, []}, {:ok, %{prompts: [%{id: ^id} = p | _]}}} = later
+      assert %{status: ^status, by: "sam"} = p
+    end
+  end
+
+  test "the closed fact of an ask answered names its answerer, whenever its row settles", ctx do
+    ctx = slowly(ctx)
+
+    [one, two] =
+      for {header, choice} <- [{"Base", @rebase}, {"Again", {:withdraw, "Dismissed."}}] do
+        quiet(ctx)
+        {:ok, {:asked, n}} = Mailbox.ask(ctx.mailbox, "d1", [question(header)])
+        assert cued(ctx) == ["ask:#{n}"]
+        answer = Task.async(fn -> Prompts.answer(ctx.prompts, "ask:#{n}", choice, "sam") end)
+        assert_receive {:settling, slow}, 5_000
+        assert cued(ctx) == ["ask:#{n}"]
+        SlowSettle.go(slow)
+        assert {:ok, _} = Task.await(answer)
+        "ask:#{n}"
+      end
+
+    # A read after both settles, as the ledger's own cue would make: a close written before
+    # its row settled is not written again.
+    Prompts.cue(ctx.prompts, %{topic: "acts"})
+    assert {:ok, []} = Prompts.read(ctx.prompts)
+
+    {:ok, rows} = Acts.rows(ctx.acts, act: "closed")
+    by = Map.new(rows, &{JSON.decode!(&1.detail)["prompt"], JSON.decode!(&1.detail)["by"]})
+    assert by == %{one => "sam", two => "sam"}
+  end
+end
+
+defmodule CodingAgentFramework.PromptsTest.SlowSettle do
+  @moduledoc """
+  An `Acts` in front of the real one that holds each settle (`Acts.answered/4`) until the test
+  says `go/1`, and hands every other call straight on: a settle a loaded host makes late.
+  """
+  use GenServer
+
+  def start_link({acts, test}), do: GenServer.start_link(__MODULE__, {acts, test})
+
+  @doc "Lets the held settle go on to the real `Acts`."
+  def go(slow), do: GenServer.cast(slow, :go)
+
+  @impl true
+  def init({acts, test}), do: {:ok, %{acts: acts, test: test, held: nil}}
+
+  @impl true
+  def handle_call({:settle, _, _, _, _, _} = request, from, s) do
+    send(s.test, {:settling, self()})
+    {:noreply, %{s | held: {request, from}}}
+  end
+
+  def handle_call(request, _from, s), do: {:reply, GenServer.call(s.acts, request), s}
+
+  @impl true
+  def handle_cast(:go, %{held: {request, from}} = s) do
+    GenServer.reply(from, GenServer.call(s.acts, request))
+    {:noreply, %{s | held: nil}}
   end
 end

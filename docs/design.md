@@ -925,7 +925,14 @@ ours, `passed` when its owner's row moved on, `logged_in`, `unknown`). `Prompts`
 lists every place a prompt closes and its `by`. A close no read saw is named by the first
 `answered/3` page that holds it, from the owner's row as it is then, with no time. That page
 takes `agent:` too (the prompt's `agent`, the agent whose wait it was), a term of the
-ledger's query on the `opened` fact's target, and a bad key is refused `{:bad, key}`. An ask's
+ledger's query on the `opened` fact's target, and a bad key is refused `{:bad, key}`. F-295
+(`Inbox.tla`): an owner may take an answer and cue before `answer/5` settles the answer's row
+(the `Mailbox` since F-289), so a prompt the last read listed that has left its owner while its
+answer's row is open is listed `answering`, and a close whose answer row is open writes no
+`closed` fact: the read after the settle writes it, naming the answer's actor. Once the row
+settles, `answer/5` has the inbox read again and cues `prompts` with the prompt's id from the
+caller, so a restart of the inbox does not lose it. Past such a restart, `answered/3` shows a
+prompt whose row is still open as `answering`, and writes nothing for it. An ask's
 option needs its description, as `ask` says; the app checks an ask first with
 `CodingAgentFramework.check_ask/1`, the same function `Mailbox` refuses one by. Not yet: the parent's answer through `steer` (still `answer` under `Grants`' claim), the
 `expired` prompts kept shown, and the kinds that need a reading first.
