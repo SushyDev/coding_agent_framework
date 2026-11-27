@@ -8,7 +8,8 @@
 (* waits on a person; the start's deadline does not end it, and its lease  *)
 (* stays held. The answer comes from outside, by the option's label: a     *)
 (* person's (the app's view, the operator's MCP), or the app's callback    *)
-(* for a kind it chose to answer; nothing answers on its own. The answer   *)
+(* for a kind it chose to answer, or the operator's rule (below); nothing  *)
+(* else answers on its own. The answer                                     *)
 (* is marked on the row before its press goes, and the press is checked:   *)
 (* the pane must still show that dialog, or nothing goes. The press runs  *)
 (* in a task whose answer comes back as a message (F-144), so Sessions     *)
@@ -102,6 +103,18 @@
 (* restart cut the call, which a person may ask again. Models              *)
 (* `Sessions.end_main/3` and `stop/3` of a row on a dialog, and            *)
 (* `Mains.end_main/3`, which asks it of a start that waits on a dialog.    *)
+(*                                                                         *)
+(* The operator's rule (F-286; with Trusted): the folder trust dialog of a *)
+(* folder the rule names, a worktree the framework made or a main          *)
+(* session's checkout the app configured, is the framework's to answer,    *)
+(* "yes", with no person: its prompt's answer, claimed and checked as any  *)
+(* press (Rule). Any other folder's, and every other dialog, waits on a    *)
+(* person or the app's callback as before. In Prompt's terms the rule      *)
+(* answers as the app does, for the one kind it names; its row in Acts     *)
+(* names the framework. The code marks the rule's answer in the same write *)
+(* as the read's dialog, so no view sees it open; here they are two steps. *)
+(* Models `Sessions`' rule (`ruled?/2`, `decide_by_rule/3`), the row's     *)
+(* `trust`, and `Mains`' `trusted: :checkout`.                             *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -111,6 +124,7 @@ CONSTANTS
     Auto,         \* the kinds the app's callback answers ("yes"); {} by default: it asks
     MaxRestarts,  \* restarts of Sessions and of the agent's own process
     Ends,         \* whether an end may be asked of the row on a dialog (F-231)
+    Trusted,      \* whether the operator's rule names the start's folder (F-286)
     Break         \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -124,10 +138,15 @@ Breaks == {
     "ClearTwice",    \* a press a restart cut may be cleared again after its second try
     "PromptInMemory", \* an open prompt is kept in memory, so a whole restart loses it
     "ByKind",        \* answers are kept by kind (F-203): a read whose kind has a prompt opens none
-    "EndRefused"     \* an end asked while the start waits on a dialog is refused, as before F-231
+    "EndRefused",    \* an end asked while the start waits on a dialog is refused, as before F-231
+    "TrustAny"       \* the rule presses the trust dialog of a folder it does not name
 }
 
 ASSUME Break \in Breaks
+ASSUME Trusted \in BOOLEAN
+
+\* The kinds the operator's rule answers: the trust dialog, of a folder it names.
+RuleKinds == IF Trusted THEN {"trust"} ELSE {}
 
 \* The order 2.1.322 shows them in (F-140's captures), for the configurations.
 TrustThenImports == <<"trust", "imports">>
@@ -190,10 +209,12 @@ vars == <<at, live, status, shown, up, restarts, call, pRow, results, cleared, l
 \* Its owner is this spec: the press, and the evidence a restart settles it by.
 P == INSTANCE Prompt WITH
        Ps <- Reads, Agents <- {"agent"}, Parent <- [a \in {"agent"} |-> "none"],
-       Persons <- {"person"}, ParentKinds <- {}, AppKinds <- Auto, DefaultKinds <- {},
+       Persons <- {"person"}, ParentKinds <- {}, AppKinds <- Auto \cup RuleKinds,
+       DefaultKinds <- {},
        ExpireKinds <- {}, HeldPs <- {}, Cap <- 0, Budget <- 1, MaxRestarts <- MaxRestarts,
        MaxTools <- 0,
        Break <- CASE Break = "AutoAnswer" -> "AnyAnswerer"
+                  [] Break = "TrustAny" -> "AnyAnswerer"
                   [] Break = "RetryUnknown" -> "RetryUnknown"
                   [] Break = "PromptInMemory" -> "InMemory"
                   [] OTHER -> "none",
@@ -264,6 +285,17 @@ Callback ==
     /\ Dialogs[shown] \in Auto \/ (Break = "AutoAnswer" /\ Dialogs[shown] = "trust")
     /\ P!Answer(shown, IF Dialogs[shown] \in Auto THEN "app" ELSE "sessions", "yes")
     /\ asked' = IF Dialogs[shown] \in Auto THEN asked \cup {shown} ELSE asked
+    /\ UNCHANGED <<at, live, status, shown, up, restarts, call, results, cleared, lease, sent,
+                   wrong, unasked, killedOn>>
+
+\* The operator's rule, at a trust dialog it reads of a folder the rule names: "yes", claimed
+\* and marked first, as the app's callback is. Under TrustAny the rule presses the trust dialog
+\* of any folder.
+Rule ==
+    /\ up /\ status = "dialog" /\ shown # 0 /\ pst[shown] = "open" /\ shown \notin cleared
+    /\ Dialogs[shown] = "trust" /\ (Trusted \/ Break = "TrustAny")
+    /\ P!Answer(shown, "app", "yes")
+    /\ asked' = IF Trusted THEN asked \cup {shown} ELSE asked
     /\ UNCHANGED <<at, live, status, shown, up, restarts, call, results, cleared, lease, sent,
                    wrong, unasked, killedOn>>
 
@@ -520,7 +552,7 @@ Init ==
 
 \* The steps before F-231 leave the end as it is; a restart cuts it.
 Kept ==
-    \/ Draw \/ Read \/ Callback \/ Confirm \/ Deadline \/ Kill \/ Settle \/ Release
+    \/ Draw \/ Read \/ Callback \/ Rule \/ Confirm \/ Deadline \/ Kill \/ Settle \/ Release
     \/ Recover \/ Stop
     \/ \E l \in Labels : ViewerPress(l) \/ Answer(l)
     \/ \E p \in pending : Press(p)
@@ -537,7 +569,7 @@ Next ==
 K(A) == A /\ UNCHANGED endVars
 
 Fairness ==
-    /\ WF_vars(K(Draw)) /\ WF_vars(K(Read)) /\ WF_vars(K(Callback))
+    /\ WF_vars(K(Draw)) /\ WF_vars(K(Read)) /\ WF_vars(K(Callback)) /\ WF_vars(K(Rule))
     /\ WF_vars(K(\E c \in call : Take(c)))
     /\ WF_vars(K(Confirm)) /\ WF_vars(K(Kill)) /\ WF_vars(K(Settle)) /\ WF_vars(K(Release))
     /\ WF_vars(K(Recover))
@@ -561,7 +593,8 @@ TypeOK ==
     /\ lease \in {"held", "released"}
     /\ ending \in EndStates /\ endRead \in 0..N
 
-\* Nothing answers a dialog unless a person or the app's callback asked for that read.
+\* Nothing answers a dialog unless a person, the app's callback or the operator's rule asked
+\* for that read.
 OnlyAsked == unasked = {}
 
 \* ... and Prompt's: every answer's claim is a person's, or the app's for a kind it chose; a
@@ -593,6 +626,14 @@ DialogShown ==
 
 \* Past the dialogs, the start goes on: the row runs.
 GoesOn == (at = N + 1 /\ live) ~> (status = "running" \/ ~live)
+
+\* In a folder the rule names, the trust dialog passes with no person (F-286): it leaves the
+\* pane, the process ends, or its press is unknown or cut, for a person as any such press; a
+\* person who clears a cut press answers it then.
+RulePasses ==
+    \A i \in Reads :
+        (Trusted /\ Dialogs[i] = "trust" /\ Shows(i) /\ live)
+            ~> (~Shows(i) \/ ~live \/ pst[i] \in {"unknown", "cut"} \/ i \in cleared)
 
 \* A session asked to end runs no later turn: from the ask until it is answered, the row is
 \* never confirmed running, and once ended it never runs again (F-231).

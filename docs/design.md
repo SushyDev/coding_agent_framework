@@ -1670,9 +1670,11 @@ picks the account with the most allowance left, declares the agent row, writes i
 row as its holder (`Mains.Work`: live while the start is under way and while its agent row may
 hold a process or a move of it is under way), stores the brief from the caller, marks it by
 `launch` and starts the session interactively in the checkout with the app's MCP config. A new
-checkout is a folder Claude Code has not seen, so the trust dialog waits on a person ("Startup
-dialogs"): the start answers `{:unknown, {:dialog, kind}}`, and its row runs once the agent row
-does. A row a restart left `starting` is settled by the agent row of its call, or refused
+checkout is a folder Claude Code has not seen, so it shows the trust dialog; the checkout is
+the one the app configured, so the operator's rule has the framework press it (`trusted:
+:checkout`, "Startup dialogs", F-286). A startup dialog that still waits on a person (the
+imports dialog, or a trust press that was unknown) makes the start answer `{:unknown, {:dialog,
+kind}}`, and its row runs once the agent row does. A row a restart left `starting` is settled by the agent row of its call, or refused
 `interrupted` at its deadline. A start refused once its brief was stored settles that one row
 `ended` (`Mailbox.settle_row/3`, by its uuid), so it never goes in with a later start, while
 other rows to the name stay queued (F-141's new-4). The app names a main session's model (its
@@ -1931,9 +1933,9 @@ a cue: not started, not idle, and not free, so the `Scheduler` counts its lease 
 shows why (`Sessions.Agents.dialog/1`). The start's deadline does not end it, and a restart
 leaves it waiting.
 
-Nothing answers a startup dialog on its own. The app may give `Sessions` a callback, `fn kind,
-options -> {:answer, label} | :ask end`, asked once per kind; its default asks, and the example
-app asks. On `:ask` the start answers `{:unknown, {:dialog, kind}}` at once and the row waits.
+Nothing answers a startup dialog on its own but the operator's rule below. The app may give
+`Sessions` a callback, `fn kind, options -> {:answer, label} | :ask end`, asked once per kind;
+its default asks, and the example app asks. On `:ask` the start answers `{:unknown, {:dialog, kind}}` at once and the row waits.
 The answer comes from outside, by the option's label: `Sessions.answer_dialog/5`, which the app
 calls and the operator's tool `answer_startup` calls (the operator's alone). It is marked on
 the row before its press, and the `Inlet` presses it checked: the pane still shows that dialog,
@@ -1999,8 +2001,25 @@ write, under the lock `.claude.json.lock` (a directory made by mkdir), and write
 lock after about 1.4 s of waiting on it; a plain read-modify-write loses its keys or the mark
 (`Break_Trust_Plain`). So the mark takes the same lock, never waits on it, and holds it for one
 read and one write: `{:refused, :locked}` while it is held, and refused, writing nothing, when
-the file is not there or not JSON. A mark not written leaves the trust dialog to the press
-above.
+the file is not there or not JSON. A mark not written leaves the trust dialog to the
+operator's rule below.
+
+**The framework trusts the folders it starts sessions in** (F-286, `Dialog.tla`'s Rule). The
+operator's rule names two kinds of folder, and nothing else: a worktree the framework made for
+the start (a `worktree:` launch), and a main session's checkout the app configured (`Mains`
+names it by `trusted: :checkout`, which `Sessions` refuses on a delegate or a worktree's start).
+The row keeps which (`trust`: `worktree`, `checkout`), and a resume in the same folder keeps
+it, a move's among them. The trust dialog of such a folder is pressed by the framework itself,
+"Yes, I trust this folder", before the app's callback is asked: one act in `Acts`, actor
+`framework`, its detail the rule and the folder (`why: operator_rule`), marked on the row in the
+same write as the dialog, so no view shows it waiting, and checked as any press. The start then
+goes on to its confirm. A press unknown or cut is a person's, as any, and is never made again
+by the rule. Any other folder's trust dialog, and every other startup dialog, waits on the app
+or a person as before (`Break_Dialog_TrustAny`). The press itself trusts the whole repository:
+2.1.322 writes the dialog's answer under the git root's real path, the project's checkout for a
+worktree (F-255's measure), which the rule names too. The mark above stays first in a
+worktree, since a dialog that never shows needs no press; the rule is the press it was the
+fallback for. `.claude.json` is never written for a checkout: the press has no lost update.
 
 A numbered menu no rule names that a start meets before its session file (an onboarding menu
 on a new account, F-203) is a startup dialog too, kind `start_menu`, which no callback answers.
@@ -2297,9 +2316,10 @@ carries goes as a pointer to its file (F-155, "The launch").
 
 - Its brief is stored first, as any delegate's, then marked by `launch`, and the start carries
   it as its prompt. Its worktree is marked trusted on its account before the start, so no
-  trust dialog shows ("Startup dialogs", F-255). A startup dialog its start still meets (the
-  trust dialog when the mark was refused, the imports dialog) waits on a person, as any
-  interactive start's does, unless the app's callback chose to answer that kind. Its settings carry the waiter
+  trust dialog shows ("Startup dialogs", F-255); when the mark was refused, the operator's rule
+  presses the trust dialog (F-286). Another startup dialog its start meets (the imports
+  dialog) waits on a person, as any interactive start's does, unless the app's callback chose
+  to answer that kind. Its settings carry the waiter
   hook in its launch overlay.
 - Its report is the reply to the brief's uuid, read from its transcript: the last reply that
   ended a message of the turn whose user line holds the brief's mark (or, after a resume, the
@@ -3251,7 +3271,10 @@ trust dialog, a restart), `Dialog_EndsTerm` (both dialogs, none) and `slow/Dialo
 (both, a restart) add an end asked while the row waits (`Ends`): the exit press, or SIGTERM,
 then the row ended, with the
 invariant `NoTurnAfterEnd` and the liveness `EndEnds`, which `Break_Dialog_EndRefused` (the end
-refused, as before) breaks. `Claim.tla`'s `Free` lets a claim let go with no act free its state,
+refused, as before) breaks. F-286's `Dialog_Trusted` (the rule's folder: both dialogs, a
+restart; with an end too in `slow/Dialog_TrustedEnds`) adds the framework's press of the trust dialog (`Rule`, `Trusted`) and the
+liveness `RulePasses`; under `Break_Dialog_TrustAny` the rule presses another folder's, and
+`OnlyAsked` breaks. `Claim.tla`'s `Free` lets a claim let go with no act free its state,
 and `Break_Claim_FreeActed` (a row that acted freed too) breaks `OneActPerState`.
 
 `Menu.tla` (F-198) models a numbered menu no rule names on a running interactive session's
@@ -3855,7 +3878,7 @@ without it.
   files of its own that each launch names by flag, never a file Claude Code rewrites
   (`settings.json`, `.claude.json`, credentials), with one exception: the trust mark of a
   worktree it made ("Startup dialogs", F-255), one key of `.claude.json` written under Claude
-  Code's own lock. An agent's settings are one file: its launch
+  Code's own lock. A checkout's trust is the rule's press, never a write there (F-286). An agent's settings are one file: its launch
   options' overlay merged over its account's settings, since `--settings` takes one value
   (F-110).
 - Every settings file the framework writes, a main's and a delegate's, carries
@@ -3909,7 +3932,8 @@ without it.
   exists while one is shown, so a start that nothing answers sat on one for hours, holding its
   slot, with nothing to see it. `Sessions` reads the pane, the row says `dialog`, and a person
   answers it by label ("Startup dialogs"); nothing answers one on its own unless the app chose
-  to. The settings never set `disableAllHooks`. A headless delegate skips both.
+  to, but the trust dialog of a folder the operator's rule names, which the framework presses
+  (F-286). The settings never set `disableAllHooks`. A headless delegate skips both.
 - A headless session draws no status line; its event log's `rate_limit_event` stands in
   ("Headless delegates").
 - Every launch sets `DISABLE_AUTOUPDATER=1`, because devenv pins Claude Code and a session that

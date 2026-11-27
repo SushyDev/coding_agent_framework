@@ -57,8 +57,13 @@ defmodule CodingAgentFramework.Sessions do
   its own read, F-206); none sends a hook event, and no
   session file exists while one is shown. With `inlet:`, an interactive
   start reads its pane (`Inlet.look/4`) at each check while it has no session file. A startup
-  dialog makes the row `dialog`, with the dialog (`Sessions.Dialog`), and a cue. The app's
-  `dialog:` callback is asked once per kind: `{:answer, label}` presses that option, and
+  dialog makes the row `dialog`, with the dialog (`Sessions.Dialog`), and a cue. The trust
+  dialog of a folder the operator's rule names (F-286), a worktree the start made or a main
+  session's checkout the app configured (`trusted: :checkout`, the row's `trust`), is pressed
+  by the framework itself, "Yes, I trust this folder", before any callback: an act in `Acts`
+  by actor `framework`, with the rule and the folder in its detail, checked as any press, and
+  the start goes on to its confirm. Any other folder's trust dialog, and every other dialog,
+  is the app's or a person's. The app's `dialog:` callback is asked once per kind: `{:answer, label}` presses that option, and
   `:ask`, the default, leaves it to a person: the start answers `{:unknown, {:dialog, kind}}`
   at once, and the row waits, through the start's deadline and a restart, until
   `answer_dialog/5` presses an option. Each press is an act in `Acts` (F-144), marked on the
@@ -210,6 +215,9 @@ defmodule CodingAgentFramework.Sessions do
   @cd ~S(cd -- "$0" && exec "$@")
   # The actor of an answer the app's `dialog:` callback gives, in `Acts`.
   @app "app"
+  # The actor of the trust dialog's press the operator's rule makes (F-286), and the rules.
+  @framework "framework"
+  @rules ~w(worktree checkout)
   # What every delegate's settings say unless the account's file or its own options do (F-200).
   @delegate_settings %{"includeGitInstructions" => false}
 
@@ -309,7 +317,11 @@ defmodule CodingAgentFramework.Sessions do
   and on a delegate), its display title in `--name` and `--remote-control` in place of `name`,
   kept on the row, and which any start or resume that names none keeps from the row, as
   `meta:`. The name stays the agent's address, and the start is confirmed by the session file
-  that carries the title. Options:
+  that carries the title. A main session's `trusted: :checkout` says its `cwd:` is the checkout
+  the app configured for it (F-286, the module doc's "A startup dialog"), kept on the row as
+  `trust`, which a start or resume in the same folder that names none keeps; any other value,
+  or one on a delegate or a worktree's start, is refused `{:bad, :trusted}` before any row. A
+  start in a worktree is trusted by that rule with no word from its caller. Options:
   `:timeout`, to which a worktree's start adds its setup's deadline and its git commands'
   bounds; and `:caller_deadline`, wall-clock ms on this `Sessions`' `clock:`, the last moment
   the caller takes the start to be in time. A start `Sessions` takes from its mailbox at or
@@ -866,11 +878,13 @@ defmodule CodingAgentFramework.Sessions do
          {:ok, place} <- place(state, name, launch),
          {:ok, role} <- Keyword.fetch(launch, :role) |> required(:role),
          {:ok, agent} <- agent(state, name, role, launch, place, resume),
+         {:ok, trust} <- trust(state, name, launch, place, agent),
          {:ok, way} <- way(state, role, account, name, place.cwd, resume, launch),
          :ok <- memory(state, account, place.cwd),
          deadline = state.clock.() + timeout + budget(place.tree),
          row = new_row(state, name, account, role, place, resume, way, deadline, launch),
          row = Map.merge(row, agent),
+         row = Map.put(row, :trust, trust),
          row = Map.put(row, :release, release(state, role, launch)),
          {:ok, viewer} <- viewer_command(state, row),
          {:ok, act} <- claim(state, name, resume) do
@@ -1847,12 +1861,16 @@ defmodule CodingAgentFramework.Sessions do
          :ok <- before_file(state, row, screen) do
       now = Table.get(state.db, row.host, row.name) || row
       shown = Dialog.seen(now, screen, state.clock.())
+      fields = [status: "dialog", reason: nil, dialog: shown]
 
-      if now.status != "dialog" or Dialog.shown(now) != shown,
-        do: write(state, now, status: "dialog", reason: nil, dialog: shown)
-
-      now = Table.get(state.db, row.host, row.name)
-      decide(state, now, shown)
+      # The rule's press is marked with the dialog in one write, so no reader of the row sees
+      # that dialog wait on a person (F-286).
+      if ruled?(now, shown) do
+        decide_by_rule(state, Map.merge(now, Map.new(fields)), fields)
+      else
+        if now.status != "dialog" or Dialog.shown(now) != shown, do: write(state, now, fields)
+        decide(state, Table.get(state.db, row.host, row.name), shown)
+      end
     else
       _ -> :none
     end
@@ -1888,6 +1906,29 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
+  # The operator's rule (F-286): a trust dialog no answer has been marked for, on a row whose
+  # folder the rule names.
+  defp ruled?(row, %{kind: :trust}),
+    do: row.trust in @rules and Dialog.answers(row)[:trust] == nil
+
+  defp ruled?(_row, _shown), do: false
+
+  # The framework presses it, the act's detail the rule and the folder, marked with the
+  # dialog's own `fields`. A dialog with no trusting option, or a press refused before its
+  # mark, leaves it to a person: the dialog is written then, as any.
+  defp decide_by_rule(state, row, fields) do
+    rule = %{detail: %{why: "operator_rule", rule: row.trust, folder: row.cwd}, fields: fields}
+
+    with {:ok, label} <- Dialog.trust_option(row),
+         :ok <- press(state, row, :trust, label, @framework, nil, false, rule) do
+      :pressed
+    else
+      _ ->
+        write(state, row, fields)
+        decide(state, Table.get(state.db, row.host, row.name), row.dialog)
+    end
+  end
+
   defp decide_by_app(state, row, kind, options) do
     with {:answer, label} <- state.dialog.(kind, options),
          :ok <- Dialog.check(row, kind, label),
@@ -1898,23 +1939,27 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
-  # Dialog.tla's Take and Press: the answer's row in `Acts` (F-144: actor `by`, a person or the
-  # app; state the row's start, the dialog, a start's menu's read and the mark it is taken from,
-  # so each is answered once), then the answer marked pressing on the row, then the Inlet's checked press in a task
+  # Dialog.tla's Take and Press: the answer's row in `Acts` (F-144: actor `by`, a person, the
+  # app, or the framework by the operator's rule; state the row's start, the dialog, a start's
+  # menu's read and the mark it is taken from, so each is answered once; the rule's `detail` on
+  # it), then the answer marked pressing on the row, with the rule's `fields`, then the Inlet's
+  # checked press in a task
   # linked to this process, so other calls go on meanwhile (F-144) and a restart ends it. Its
   # answer comes back as a message (`pressed/3`). `from` is the caller to answer, or nil.
   # `ending` marks an end's exit press (F-231): its answer goes on with the end (`end_pressed/3`).
-  defp press(state, row, kind, label, by, from, ending \\ false)
+  defp press(state, row, kind, label, by, from, ending \\ false, rule \\ %{})
 
-  defp press(%{inlet: nil}, _row, _kind, _label, _by, _from, _ending), do: {:refused, :no_inlet}
+  defp press(%{inlet: nil}, _row, _kind, _label, _by, _from, _ending, _rule),
+    do: {:refused, :no_inlet}
 
-  defp press(state, row, kind, label, by, from, ending) do
+  defp press(state, row, kind, label, by, from, ending, rule) do
     taken = %{start: row.started_at, dialog: kind, mark: Dialog.from_mark(row, kind)}
     # Each menu of one start is its own read, and its own claim (F-206).
     taken = if kind == :start_menu, do: Map.put(taken, :read, Dialog.shown(row).at), else: taken
 
-    with {:ok, act} <- answer_act(state, by, row.name, taken) do
-      write(state, row, answers: Dialog.mark(row, kind, label, "pressing", act: act))
+    with {:ok, act} <- answer_act(state, by, row.name, taken, rule[:detail]) do
+      answers = Dialog.mark(row, kind, label, "pressing", act: act)
+      write(state, row, Map.get(rule, :fields, []) ++ [answers: answers])
       {inlet, press} = {state.inlet, state.press}
       {name, release, as} = {row.name, row.release, Dialog.press_kind(row, kind)}
 
@@ -1945,10 +1990,12 @@ defmodule CodingAgentFramework.Sessions do
     end
   end
 
-  defp answer_act(%{acts: nil}, _by, _name, _taken), do: {:ok, nil}
+  defp answer_act(%{acts: nil}, _by, _name, _taken, _detail), do: {:ok, nil}
 
-  defp answer_act(state, by, name, taken) do
-    case Acts.claim(state.acts, by, name, taken, :answer_startup) do
+  defp answer_act(state, by, name, taken, detail) do
+    opts = if detail, do: [detail: detail], else: []
+
+    case Acts.claim(state.acts, by, name, taken, :answer_startup, opts) do
       {:ok, id} -> {:ok, id}
       other -> {:refused, {:acts, other}}
     end
@@ -2464,6 +2511,31 @@ defmodule CodingAgentFramework.Sessions do
     with {:ok, meta} <- launched_meta(launch, row),
          {:ok, agent} <- tree_place(state, row, role, launch, place, resume),
          do: {:ok, Map.put(agent, :meta, meta)}
+  end
+
+  # The operator's rule for the start's folder (F-286): a worktree this start makes or reuses,
+  # or a main session's checkout its caller names as the app's configured one. A start that
+  # names none keeps the row's checkout only in the row's own folder.
+  defp trust(state, name, launch, place, agent) do
+    row = Table.get(state.db, state.host.name, name)
+
+    case {Keyword.fetch(launch, :trusted), place.tree, agent.kind} do
+      {:error, nil, "main"}
+      when row != nil and row.trust == "checkout" and row.cwd == place.cwd ->
+        {:ok, "checkout"}
+
+      {:error, nil, _} ->
+        {:ok, nil}
+
+      {:error, _tree, _} ->
+        {:ok, "worktree"}
+
+      {{:ok, :checkout}, nil, "main"} ->
+        {:ok, "checkout"}
+
+      _ ->
+        {:refused, {:bad, :trusted}}
+    end
   end
 
   defp launched_meta(launch, row) do

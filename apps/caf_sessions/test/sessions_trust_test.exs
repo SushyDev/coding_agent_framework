@@ -9,8 +9,9 @@ defmodule CodingAgentFramework.SessionsTrustTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Accounts, Inlet, Registry, ScreenStandIn, Sessions, SessionsSetup}
-  alias CodingAgentFramework.Sessions.{Agents, Table}
+  alias CodingAgentFramework.{Accounts, Acts, Inlet, Registry, ScreenStandIn, Sessions}
+  alias CodingAgentFramework.SessionsSetup
+  alias CodingAgentFramework.Sessions.{Agents, Dialog, Table}
 
   @trust "Yes, I trust this folder"
   # What Claude Code keeps in `.claude.json` after its first start, in short.
@@ -75,32 +76,66 @@ defmodule CodingAgentFramework.SessionsTrustTest do
   end
 
   # Only a tree the framework made: a start in another folder writes no mark and meets the
-  # dialog, as before.
+  # dialog, as before. The operator's rule names no other folder (F-286, `Dialog.tla`'s
+  # TrustAny): nothing presses it, and it waits on a person.
   test "a start outside the worktrees gets no mark and meets the trust dialog", ctx do
-    sessions = sessions(ctx)
+    acts = acts(ctx)
+    sessions = sessions(ctx, acts: acts)
     launch = SessionsSetup.launch(ctx, :at_start) |> Keyword.put(:claude, ctx.claude)
 
     assert {:unknown, {:dialog, :trust}} = Sessions.start(sessions, "t2", ctx.account, launch)
     assert read_state!(ctx.account) == @state
-    assert Agents.get(ctx.agents, "t2").status == "dialog"
+    assert %{status: "dialog", trust: nil} = Agents.get(ctx.agents, "t2")
+    assert ScreenStandIn.dialog_keys(ctx.dir) == []
+    assert {:ok, []} = Acts.rows(acts, act: "answer_startup")
   end
 
-  # RefusedWroteNothing, and the press as the fallback: a lock another writer holds refuses
-  # the mark at once, the row says so, and the dialog is answered by label as before.
-  test "a mark refused while the lock is held leaves the dialog to the press", ctx do
-    sessions = sessions(ctx)
+  # RefusedWroteNothing, and the operator's rule as the fallback (F-286, `Dialog.tla`'s Rule):
+  # a lock another writer holds refuses the mark at once, the row says so, and the trust dialog
+  # the start then meets is pressed by the framework, no person asked, an act in `Acts` naming
+  # the rule and the folder. The start goes on to run.
+  test "a mark refused while the lock is held leaves the dialog to the rule's press", ctx do
+    acts = acts(ctx)
+    sessions = sessions(ctx, acts: acts)
     File.mkdir!(lock(ctx.account))
+    path = Path.join([ctx.root, "app", "t3"])
 
-    assert {:unknown, {:dialog, :trust}} =
-             Sessions.start(sessions, "t3", ctx.account, tree_launch(ctx, "unit/t3"))
+    assert {:ok, _} = Sessions.start(sessions, "t3", ctx.account, tree_launch(ctx, "unit/t3"))
 
-    assert %{status: "dialog", worktree: "added; not trusted: locked"} = row(ctx, "t3")
+    assert %{status: "running", trust: "worktree", worktree: "added; not trusted: locked"} =
+             row(ctx, "t3")
+
     assert read_state!(ctx.account) == @state
     # The lock is the other writer's: it is left as it was.
     assert File.dir?(lock(ctx.account))
-
-    assert {:ok, :sent} = Sessions.answer_dialog(sessions, "t3", :trust, @trust)
     assert File.exists?(Path.join(ctx.dir, "trusted"))
+    assert_rule_act(acts, "t3", "worktree", path)
+    assert %{trust: %{label: @trust, mark: "sent"}} = Dialog.answers(row(ctx, "t3"))
+  end
+
+  # The rule's other folder (F-286): a main session's checkout the app configured, which its
+  # caller names (`Mains` does, `trusted: :checkout`). The framework presses the trust dialog
+  # there as in a worktree; the row keeps the rule. A delegate, or a worktree's start, may not
+  # name it.
+  test "a main session's start in its configured checkout passes the trust dialog", ctx do
+    acts = acts(ctx)
+    sessions = sessions(ctx, acts: acts)
+
+    launch =
+      SessionsSetup.launch(ctx, :at_start)
+      |> Keyword.merge(claude: ctx.claude, cwd: ctx.repo, trusted: :checkout)
+
+    assert {:ok, _} = Sessions.start(sessions, "t5", ctx.account, launch)
+    assert %{status: "running", trust: "checkout", cwd: cwd} = row(ctx, "t5")
+    assert ScreenStandIn.dialog_keys(ctx.dir) == ["down", "enter"]
+    assert_rule_act(acts, "t5", "checkout", cwd)
+
+    delegate = Keyword.merge(launch, role: :delegate, kind: :delegate, parent: "t5")
+    assert {:refused, {:bad, :trusted}} = Sessions.start(sessions, "t6", ctx.account, delegate)
+
+    tree = Keyword.put(tree_launch(ctx, "unit/t7"), :trusted, :checkout)
+    assert {:refused, {:bad, :trusted}} = Sessions.start(sessions, "t7", ctx.account, tree)
+    assert row(ctx, "t6") == nil and row(ctx, "t7") == nil
   end
 
   # A move resumes its session on the other account with the row's worktree, as
@@ -143,6 +178,26 @@ defmodule CodingAgentFramework.SessionsTrustTest do
       )
 
     start_supervised!(spec)
+  end
+
+  defp acts(ctx) do
+    spec = {Acts, db: Path.join(ctx.dir, "acts.db"), start_id: "t", host: "test", instance: "a"}
+    start_supervised!(spec)
+  end
+
+  # The rule's press is one act, by the framework, the rule and the folder in its detail,
+  # settled verified once the press's answer comes back, which may be after the start's.
+  defp assert_rule_act(acts, name, rule, folder) do
+    assert {:ok, [act]} =
+             await(fn ->
+               case Acts.rows(acts, act: "answer_startup", target: name) do
+                 {:ok, [%{status: "settled"}]} = settled -> settled
+                 _ -> nil
+               end
+             end)
+
+    assert %{actor: "framework", outcome: "verified", detail: detail} = act
+    assert detail =~ "operator_rule" and detail =~ rule and detail =~ folder
   end
 
   defp tree_launch(ctx, branch) do

@@ -37,7 +37,8 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
   An interactive delegate (`interactive: true`, F-137) over a real `Sessions`, `Inlet`,
   `Registry`, `Transcripts` and `Mailbox`, real dtach and tmux, a real git repository in this
   test's own directory, and the screen stand-in for Claude Code, which draws 2.1.322's trust
-  dialog first, which this test's app answers. The test writes the transcript lines Claude Code would. Each test names the
+  dialog first, which the operator's rule presses in the delegate's worktree (F-286). The test
+  writes the transcript lines Claude Code would. Each test names the
   `Delegate.tla` and `Delivery.tla` steps it checks.
   """
   use ExUnit.Case, async: true
@@ -48,7 +49,7 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
   alias CodingAgentFramework.ScreenStandIn
   alias CodingAgentFramework.{Sessions, SessionsSetup, Transcripts, Usage}
   alias CodingAgentFramework.Delegates.{Table, Turn}
-  alias CodingAgentFramework.Sessions.Agents
+  alias CodingAgentFramework.Sessions.{Agents, Dialog}
   alias CodingAgentFramework.Sessions.Turn, as: SessionsTurn
 
   setup {SessionsSetup, :sessions}
@@ -71,11 +72,10 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     transcripts =
       start_supervised!({Transcripts, programs: programs(), accounts: ["work"], db: db})
 
-    # A Sessions whose app chose to answer the trust dialog (F-140's `dialog:` callback); by
-    # default nothing answers it, and a person does.
+    # A Sessions whose app answers no dialog: the trust dialog of the delegate's worktree is the
+    # operator's rule's, which the framework presses (F-286).
     inlet = start_supervised!({Inlet, tmux: ctx.server})
-    trust = fn :trust, _ -> {:answer, "Yes, I trust this folder"} end
-    trusting = ctx.opts ++ [inlet: inlet, dialog: trust]
+    trusting = ctx.opts ++ [inlet: inlet]
     sessions = start_supervised!(Supervisor.child_spec({Sessions, trusting}, id: :trusting))
 
     project = %{
@@ -288,8 +288,9 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
   end
 
   # StartAsked with the brief marked by launch, the start carrying it as its prompt, the trust
-  # dialog answered by label; then ReportAnswersTheBrief: the report is the reply of the turn
-  # the brief began, not a later turn's, which a person's prompt gave.
+  # dialog of its worktree pressed by the operator's rule with no person (F-286); then
+  # ReportAnswersTheBrief: the report is the reply of the turn the brief began, not a later
+  # turn's, which a person's prompt gave.
   test "its brief is its start's prompt, and its report the reply to the brief", ctx do
     assert {:ok, %{id: id, name: name, brief_uuid: u, session_id: sid}} =
              Delegates.start_delegate(
@@ -307,6 +308,17 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
              Agents.get(ctx.agents, name)
 
     assert File.exists?(Path.join(ctx.dir, "trusted"))
+    assert %{trust: "worktree"} = Agents.get(ctx.agents, name)
+
+    # The press's answer may come back after the start's.
+    assert {:ok, _} =
+             await(fn ->
+               case Dialog.answers(Agents.get(ctx.agents, name)) do
+                 %{trust: %{mark: "sent"}} = sent -> {:ok, sent}
+                 _ -> nil
+               end
+             end)
+
     text = "Review it.\n\n[delivery #{u}]"
     assert {:ok, [^text]} = await(fn -> nonempty(ScreenStandIn.prompts(ctx.dir)) end)
     assert {:ok, %{kind: "brief", via: "launch"}} = brief(ctx, u)
@@ -617,12 +629,18 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
   # `Prompts`', F-179.)
   test "an interactive delegate on a dialog is `dialog`, never idle with no report", ctx do
     Process.exit(ctx.delegates, :kill)
-    # A Sessions whose app answers no dialog, so a person must.
+    # A Sessions whose app answers no dialog, so a person must: the imports dialog after the
+    # trust dialog, which the operator's rule presses in the worktree (F-286).
     asking =
       Supervisor.child_spec({Sessions, ctx.opts ++ [inlet: ctx.dopts[:inlet]]}, id: :asking)
 
     sessions = start_supervised!(asking)
-    opts = Keyword.merge(ctx.dopts, sessions: sessions, idle_bound: 60_000)
+
+    claude =
+      ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), dialogs: [:trust, :imports])
+
+    launch = Keyword.put(ctx.dopts[:launch], :claude, claude)
+    opts = Keyword.merge(ctx.dopts, sessions: sessions, idle_bound: 60_000, launch: launch)
     child = Supervisor.child_spec({Delegates, opts}, id: make_ref(), restart: :temporary)
     delegates = start_supervised!(child)
 
@@ -633,7 +651,7 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
 
     # The start answers unknown while the dialog waits, and the delegate row stays starting: its
     # turn has not begun, so nothing reads it idle.
-    assert started == {:unknown, {:dialog, :trust}}
+    assert started == {:unknown, {:dialog, :imports}}
 
     {:ok, %{name: name} = row} =
       await(fn ->
