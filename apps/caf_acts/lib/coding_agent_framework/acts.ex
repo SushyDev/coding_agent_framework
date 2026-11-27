@@ -257,6 +257,22 @@ defmodule CodingAgentFramework.Acts do
   def rows(acts, filter \\ [], opts \\ []), do: call(acts, {:rows, filter, false}, opts)
 
   @doc """
+  The id of the newest row within `filter` (as `rows/3`'s) that settled and whose act ran
+  (`acted_at` set), or nil for none. An interrupt's state names it (`Team.tla`'s FixActs): a
+  claim still under way is not one, nor one let go with no act, nor one a restart cut, since
+  its act may have gone (`Claim.tla`'s NoActOnCutOffClaim). Answers as `rows/3` otherwise.
+
+      Acts.newest_acted(acts, target: "app-epic", act: "interrupt")
+      #=> {:ok, 31}
+  """
+  @spec newest_acted(GenServer.server(), keyword, keyword) :: answer(id | nil)
+  def newest_acted(acts, filter, opts \\ []) do
+    with {:ok, rows} <- rows(acts, Keyword.put(filter, :status, "settled"), opts) do
+      {:ok, rows |> Enum.filter(& &1.acted_at) |> Enum.map(& &1.id) |> Enum.max(fn -> nil end)}
+    end
+  end
+
+  @doc """
   The fault ledger: the rows within `filter` that went wrong, each a fault (`fault?/1`), oldest
   first. A row a person cleared stays in it, with `cleared_at`.
   """

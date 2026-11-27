@@ -1745,6 +1745,12 @@ came. Now the next is claimed on a new state once the first settled; while the f
 way the state is the same and a second is refused as claimed; a claim a restart cut moves
 nothing, since its key may have gone. After an interrupt that ended the turn the next is
 claimed too, finds no turn running, and is refused `{:screen, reading}` with its claim let go.
+A delegate's interrupt reads its state the same way (F-294, `Delegates.fix_state/4` with `fix:
+:interrupt`): `interrupted` is the newest interrupt of it, by its parent or the operator acting
+as its parent, whose act ran and settled (`Acts.newest_acted/3`, which `Mains` reads too), so
+an interactive delegate's second interrupt is claimed once the first settled. `Team.tla`'s
+`Retried` and `InterruptRetryOpen` cover every agent, and `Break_Team_DelegateRetryBlocked`
+keeps a delegate's state and fails.
 
 **Its end** (F-143, `Team.tla`'s `MainEnds`) is the operator's act alone: `end_main(name)`, the
 operator's tool, `Mains.end_main/3`, which `Sessions.end_main/3` does. It is refused while a

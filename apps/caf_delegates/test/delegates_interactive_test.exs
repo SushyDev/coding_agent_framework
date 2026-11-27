@@ -199,6 +199,94 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
              Delegates.fix(ctx.delegates, "main", name, :interrupt, now)
   end
 
+  # F-294; Team.tla's FixActs and InterruptRetryOpen, as a main session's (F-270): an interrupt
+  # whose Escape reached a screen that went on running moves no hook event, yet once its claim
+  # settled the next one is a new state. The claims are taken and settled as `MCP`'s fix does.
+  test "an interactive delegate's second interrupt is claimed once the first settled", ctx do
+    alias CodingAgentFramework.Acts
+
+    Process.exit(ctx.delegates, :kill)
+    claude = ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle())
+    wrapper = Path.join(ctx.dir, "claude-stubborn")
+    run = "exec #{claude} --screen running --ignore-escapes 1 \"$@\"\n"
+    File.write!(wrapper, "#!#{program!(:bash)}\n" <> run)
+    File.chmod!(wrapper, 0o755)
+
+    acts =
+      start_supervised!(
+        {Acts, db: Path.join(ctx.dir, "acts.db"), start_id: "s1", host: "test", instance: "t"}
+      )
+
+    launch = Keyword.put(ctx.dopts[:launch], :claude, wrapper)
+    opts = Keyword.merge(ctx.dopts, launch: launch, acts: acts)
+    child = Supervisor.child_spec({Delegates, opts}, id: make_ref(), restart: :temporary)
+    delegates = start_supervised!(child)
+
+    # As `MCP`'s `act/5` settles a fix: acted unless refused, and a refused one's state let go.
+    settle = fn id, outcome ->
+      acted = not match?({:refused, _}, outcome)
+
+      {:ok, _} =
+        Acts.settle(acts, id, :not_verified, answer: outcome, acted: acted, free: not acted)
+    end
+
+    assert {:ok, %{name: name}} =
+             Delegates.start_delegate(delegates, "main", "app", "unit/two", "opus", "Review it.",
+               interactive: true
+             )
+
+    assert {:ok, %{interrupted: nil} = first} =
+             Delegates.fix_state(delegates, "main", name, fix: :interrupt)
+
+    # The first: the key goes, and the screen goes on running.
+    {:ok, one} = Acts.claim(acts, "main", name, first, :interrupt)
+
+    # While it is under way the state is the same, and a second claim of it is refused.
+    assert {:ok, ^first} = Delegates.fix_state(delegates, "main", name, fix: :interrupt)
+    assert {:refused, {:claimed, "main"}} = Acts.claim(acts, "main", name, first, :interrupt)
+
+    assert {:unknown, {:still_running, _}} =
+             Delegates.fix(delegates, "main", name, :interrupt, first)
+
+    assert File.read!(Path.join(ctx.dir, "escapes")) == "esc\n"
+    refute File.exists?(Path.join(ctx.dir, "interrupted"))
+    settle.(one, {:unknown, :still_running})
+
+    # Settled, it moved the state: no hook event came, and the retry is claimed and acts. The
+    # operator's claim of a state is the parent's: one claim per state, whoever takes it.
+    assert {:refused, {:already_claimed, "main"}} =
+             Acts.claim(acts, "operator", name, first, :interrupt)
+
+    assert {:ok, %{interrupted: ^one} = second} =
+             Delegates.fix_state(delegates, "main", name, fix: :interrupt)
+
+    assert second.offset == first.offset
+
+    assert {:refused, {:moved, ^second}} =
+             Delegates.fix(delegates, "main", name, :interrupt, first)
+
+    {:ok, two} = Acts.claim(acts, "operator", name, second, :interrupt)
+    assert {:ok, :sent} = Delegates.fix(delegates, "main", name, :interrupt, second)
+    assert File.exists?(Path.join(ctx.dir, "interrupted"))
+    settle.(two, {:ok, :sent})
+
+    # The turn ended: the next is claimed on a new state and finds no turn, its claim let go.
+    assert {:ok, %{interrupted: ^two} = third} =
+             Delegates.fix_state(delegates, "main", name, fix: :interrupt)
+
+    {:ok, three} = Acts.claim(acts, "main", name, third, :interrupt)
+
+    assert {:refused, {:screen, %{state: :idle}}} =
+             Delegates.fix(delegates, "main", name, :interrupt, third)
+
+    settle.(three, {:refused, :screen})
+    assert File.read!(Path.join(ctx.dir, "escapes")) == "esc\n"
+
+    # A claim let go moved nothing: the state is the same, and free for the next.
+    assert {:ok, ^third} = Delegates.fix_state(delegates, "main", name, fix: :interrupt)
+    assert {:ok, _} = Acts.claim(acts, "main", name, third, :interrupt)
+  end
+
   # StartAsked with the brief marked by launch, the start carrying it as its prompt, the trust
   # dialog answered by label; then ReportAnswersTheBrief: the report is the reply of the turn
   # the brief began, not a later turn's, which a person's prompt gave.

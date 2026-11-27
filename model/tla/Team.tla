@@ -63,7 +63,9 @@
 (*             and its end with its owner (durable);                       *)
 (*   Sessions  a main session's end (`end_main`): its check of the         *)
 (*             delegates and its stop, in one process;                     *)
-(*   Delegates a refused start's end, at its settle;                       *)
+(*   Delegates a refused start's end, at its settle; the state a parent's  *)
+(*             interrupt reads, which names the newest interrupt that     *)
+(*             acted and settled (`Delegates.fix_state/4`, F-294);        *)
 (*   MCP       the calls: message, interrupt, answer, resume, stop,        *)
 (*             service_start, service_restart, service_stop, service_hand  *)
 (*             and ask, each with its caller's fixed identity; the         *)
@@ -110,7 +112,7 @@
 (* state small). A fix either helps or not, in the step it acts. The       *)
 (* number of each agent's state (`epoch`) stands for what the framework    *)
 (* reads of it; it moves when the agent sticks, dies, is fixed or ends,    *)
-(* and when an interrupt of a main session that did not help settles.     *)
+(* and when an interrupt that did not help settles.                       *)
 (* `life` numbers an agent's processes: a resume starts a new one. An      *)
 (* interrupt takes a stuck delegate, a resume a dead one, a stop an idle   *)
 (* one.                                                                    *)
@@ -237,7 +239,7 @@ Breaks == {
     "ClaimBeforeCheck",      \* a fix is claimed before its check of the claimed state
     "RefusedKept",           \* a delegate whose start was refused is never ended (F-153)
     "ForceByAgent",          \* a main session may force another main session's end (F-170)
-    "RetryBlocked"           \* an interrupt that did not end the turn keeps its state (F-270)
+    "RetryBlocked"           \* an interrupt that did not end the turn keeps its state (F-270, F-294)
 }
 
 Agents == UNION Projects
@@ -656,21 +658,22 @@ CanAct(r) == /\ Cl(ClaimBreak(r.by))!Current(r)
 
 
 \* The fix acts on the state it claimed. An interrupt or a resume may not
-\* help. A resume or an answer that did not help, or a delegate's interrupt,
-\* leaves the state as it was, still claimed. A main session's interrupt that
-\* did not help (its key reached a screen that went on running, F-270) moves
-\* the state: the state its interrupt reads names the newest interrupt whose
-\* act ran and settled (`Mains.fix_state/3`'s `interrupted`), so a retry is
-\* claimed once the first one settled, with no wait for a hook event. The
-\* agent is still stuck. The faults bound counts it, as it counts a stick, so
-\* the states stay few; at the bound an interrupt helps. RetryBlocked keeps
-\* the state, as the code before F-270 did: the retry is refused as claimed
-\* until the agent moves by itself.
+\* help. A resume or an answer that did not help leaves the state as it was,
+\* still claimed. An interrupt that did not help (its key reached a screen
+\* that went on running, F-270) moves the state, a main session's and a
+\* delegate's alike (F-294): the state its interrupt reads names the newest
+\* interrupt whose act ran and settled (`Mains.fix_state/3`'s and
+\* `Delegates.fix_state/4`'s `interrupted`), so a retry is claimed once the
+\* first one settled, with no wait for a hook event. The agent is still
+\* stuck. The faults bound counts it, as it counts a stick, so the states
+\* stay few; at the bound an interrupt helps. RetryBlocked keeps the state,
+\* as the code before F-270 did for a main session and before F-294 for a
+\* delegate: the retry is refused as claimed until the agent moves by itself.
 \* An interrupt that helps ends the turn with a result
 \* (`error_during_execution`) that names its row; a
 \* resume starts a new process, whose turn names none; a stop takes an idle
 \* agent. An answer takes one request out of those held, and leaves the process as it is.
-Retried(r) == r.act = "interrupt" /\ r.t \in Mains /\ Break # "RetryBlocked"
+Retried(r) == r.act = "interrupt" /\ Break # "RetryBlocked"
 
 FixActs(r) ==
     /\ up /\ CanAct(r) /\ Cl(ClaimBreak(r.by))!Act(r)
@@ -882,12 +885,12 @@ MainFixedByOperatorOnly == \A r \in claims : r.t \in Mains => r.by \in Operators
 MainInterruptedByOperatorOnly ==
     \A r \in claims : r.t \in Mains /\ r.act = "interrupt" => r.by \in Operators
 
-\* A main session's interrupt whose act ran and ended leaves no claim on a state that still
-\* needs one (F-270): a main session still stuck after it is in a new state, so a retry is
-\* claimed once the first one settled, with no hook event first. RetryBlocked keeps the
-\* state, and the stuck session's next interrupt is refused as claimed.
+\* An interrupt whose act ran and ended leaves no claim on a state that still needs one
+\* (F-270 for a main session, F-294 for a delegate): an agent still stuck after it is in a new
+\* state, so a retry is claimed once the first one settled, with no hook event first.
+\* RetryBlocked keeps the state, and the stuck agent's next interrupt is refused as claimed.
 InterruptRetryOpen ==
-    \A r \in done : r.act = "interrupt" /\ r.t \in Mains /\ <<r.t, r.s>> \in fixed
+    \A r \in done : r.act = "interrupt" /\ <<r.t, r.s>> \in fixed
                     /\ epoch[r.t] = r.s
         => proc[r.t] # "stuck"
 

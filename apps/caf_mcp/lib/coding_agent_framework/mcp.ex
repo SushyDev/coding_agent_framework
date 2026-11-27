@@ -1228,12 +1228,18 @@ defmodule CodingAgentFramework.MCP do
   # a main session ends by `end_main`.
   defp fixer(ctx, caller, agent, tool) do
     case as_parent(ctx, caller, agent) do
+      # An interrupt's state names the newest interrupt that acted and settled (F-294).
       {:ok, parent} ->
         {mod, server} = ctx.delegates
 
+        state =
+          if tool == "interrupt",
+            do: fn -> mod.fix_state(server, parent, agent, fix: :interrupt) end,
+            else: fn -> mod.fix_state(server, parent, agent) end
+
         {:ok,
          %{
-           state: fn -> mod.fix_state(server, parent, agent) end,
+           state: state,
            check: &mod.fix_check/2,
            fix: fn fix, state -> mod.fix(server, parent, agent, fix, state) end
          }}
