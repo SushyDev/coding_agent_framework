@@ -33,4 +33,19 @@ defmodule CodingAgentFramework.ProgramsBuiltinTest do
 
     assert {:refused, {:not_found, [:kill]}} = Programs.find(host(), [:kill])
   end
+
+  test "with path:, a program is found on that PATH and not on the shell's own" do
+    base = Path.join(System.tmp_dir!(), "caf-path-#{System.unique_integer([:positive])}")
+    [empty, given] = for d <- ["empty", "given with space"], do: Path.join(base, d)
+    Enum.each([empty, given], &File.mkdir_p!/1)
+    on_exit(fn -> File.rm_rf!(base) end)
+    curl = Path.join(given, "curl")
+    File.write!(curl, "#!/bin/sh\n")
+    File.chmod!(curl, 0o755)
+    System.put_env("PATH", empty)
+
+    assert {:refused, {:not_found, [:curl]}} = Programs.find(host(), [:curl])
+    assert {:ok, programs} = Programs.find(host(), [:curl], timeout: 10_000, path: given)
+    assert {:ok, ^curl} = Programs.fetch(programs, :curl)
+  end
 end

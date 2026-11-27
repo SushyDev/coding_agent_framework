@@ -100,6 +100,15 @@ defmodule CodingAgentFramework.Hosts do
   @spec states(GenServer.server()) :: %{String.t() => map} | {:unknown, term}
   def states(hosts), do: call(hosts, :states)
 
+  # The programs are looked up on the PATH the entry's `env` gives them, when it names one, since
+  # that is the PATH they run with there (F-291); ssh's own PATH can lack it (a Mac's Homebrew).
+  defp find_opts(decl, timeout) do
+    case List.keyfind(Map.get(decl, :env, []), "PATH", 0) do
+      {"PATH", path} -> [timeout: timeout, path: path]
+      nil -> [timeout: timeout]
+    end
+  end
+
   defp from_kept(name, %{state: :away}), do: {:unknown, {:host_away, name}}
   defp from_kept(_name, %{answer: answer}), do: answer
 
@@ -107,7 +116,7 @@ defmodule CodingAgentFramework.Hosts do
     begun = mono()
 
     answer =
-      case Programs.find(decl.host, needs(decl.host), timeout: timeout) do
+      case Programs.find(decl.host, needs(decl.host), find_opts(decl, timeout)) do
         {:ok, programs} -> rsync(name, programs, decl, kept, timeout)
         {:refused, {:not_found, missing}} -> {:refused, {:no_program, name, missing}}
         _no_answer -> {:refused, {:host_away, name}}
