@@ -38,18 +38,24 @@ defmodule CodingAgentFramework.Runs do
   default), over which it is refused `long_wait` at once. Without one, the plug's `:wait`
   is the wait. One ask's bound is its wait and 5 s.
 
-  With no answer (the framework down) it asks
-  again under the same id, once a second, until 30 s have passed by the clock since the first
-  ask with none (`prepare/5`'s `:unanswered`), then runs the command without a lease and says
-  so in one line: a lease is soft work, and fails open as the hooks do.
+  With no answer (the framework down), or an `unknown` one (no `Scheduler`, as while the app
+  restarts, or one that did not answer the plug in time), it asks again under the same id, once
+  a second, until its no-answer bound has passed by the clock since the first such ask: its
+  wait when it has one, else 30 s (`prepare/5`'s `:unanswered`). Then it exits 75 and says why
+  in one line, and nothing ran (F-302, the operator's rule): a heavy command waits for its lease,
+  and never runs without one because the framework was slow. Before F-302 it ran the command
+  unleased, so every waiting wrapper on the host started at once when the `Scheduler` was slow
+  or restarting, and the load that made it slow rose further. `CAF_RUN_UNLEASED=1` in the
+  wrapper's environment keeps the old way for a caller that asks for it: the command then runs
+  without a lease at that bound, and the wrapper says so.
 
   **Each ask is bounded too** (F-218). A connection the intake accepts and then stalls without
   closing would hold the wrapper, and so the agent's command. The ask's `--max-time` is the
   plug's `:wait` plus 5 s (`prepare/5`'s `:wait`, `wait/0` by default, as the plug's): a queued
   ask is answered `unknown no_answer` at `:wait`, so only a stalled one passes it. An ask cut
   at its bound is no answer, the path above: it counts as the first with none, and the wrapper
-  asks while the no-answer bound lasts. So however the intake fails, the wrapper runs its
-  command within the first ask's bound, the no-answer bound, the bound of the last ask begun
+  asks while the no-answer bound lasts. So however the intake fails, the wrapper ends
+  within the first ask's bound, the no-answer bound, the bound of the last ask begun
   within it and a second's pause: 1 241 s with the defaults.
 
   **On another host** (F-296, `model/tla/RemoteRun.tla`). An entry of the list may name a
@@ -115,7 +121,7 @@ defmodule CodingAgentFramework.Runs do
   # path of an ask nobody answered.
   @wrapper ~S"""
   exec 3>&1
-  w=${CAF_RUN_WAIT-} host=
+  w=${CAF_RUN_WAIT-} host= unleased=${CAF_RUN_UNLEASED-}
   while [ "$#" -ge 2 ]; do
     case $1 in
       --wait) w=$2; shift 2 ;;
@@ -131,7 +137,7 @@ defmodule CodingAgentFramework.Runs do
     0*|*[!0-9]*|?????????*)
       echo 'caf-run: a wait (--wait or CAF_RUN_WAIT) is whole seconds, 1 to 99999999' >&2
       exit 64 ;;
-    *) asked=$((w + 5)) ;;
+    *) asked=$((w + 5)); [ "$w" -le "${unanswered%.*}" ] || unanswered=$w ;;
   esac
   class=$1 id=$2 agent=$3 cmd=$5
   if [ -n "$host" ]; then
@@ -144,6 +150,17 @@ defmodule CodingAgentFramework.Runs do
   again=0 d=
   timer() { [ -n "$d" ] && kill -0 "$d" 2>/dev/null; }
   run() { ! timer || kill "$d" 2>/dev/null; exec "$sh" -c "$cmd" 3>&-; }
+  # F-302: past the no-answer bound, nothing runs unless the caller asked for it.
+  closed() {
+    if [ "$unleased" = 1 ]; then
+      printf 'caf-run: no lease (%s); the command runs without one\n' "$1" >&2
+      run
+    fi
+    ! timer || kill "$d" 2>/dev/null
+    printf 'caf-run: not run: no lease (%s); try again\n' "$1" >&2
+    exit 75
+  }
+  why='the framework did not answer'
   while :; do
     last=$("$curl" -sN --max-time "$asked" -K "$cfg" --data-urlencode "class=$class" \
         --data-urlencode "id=$id" --data-urlencode "agent=$agent" --data-urlencode "pid=$$" \
@@ -184,15 +201,11 @@ defmodule CodingAgentFramework.Runs do
         [ "$#" -eq 0 ] || why="$why $*"
         printf 'caf-run: not run: the lease was refused (%s); try again after %s\n' "$why" "$at" >&2
         exit 75 ;;
-      unknown*)
-        printf 'caf-run: no lease (%s); the command runs without one\n' "${last#unknown }" >&2
-        run ;;
+      unknown*) why=${last#unknown } ;;
+      *) why='the framework did not answer' ;;
     esac
     [ -n "$d" ] || { "$sleep" "$unanswered" </dev/null >/dev/null 2>&1 & d=$!; }
-    if ! timer; then
-      echo 'caf-run: no lease (the framework did not answer); the command runs without one' >&2
-      run
-    fi
+    timer || closed "$why"
     again=1
     "$sleep" 1
   done
@@ -326,7 +339,8 @@ defmodule CodingAgentFramework.Runs do
   `ps` and `sleep` from `programs` and the intake's `port`, and the curl config that carries
   the secret, `<home>/runs.curl` (mode 0600), so no secret is in a command line. Option
   `:unanswered` (ms, default 30 s): how long, from its first ask with no answer, the wrapper
-  asks again before it runs the command without a lease. Option `:wait` (ms, `wait/0` by
+  asks again before it exits 75 (F-302), or runs the command unleased under `CAF_RUN_UNLEASED=1`;
+  a wrapper given a longer wait uses that. Option `:wait` (ms, `wait/0` by
   default): the `:wait` of the app's `Runs.Plug`, which one ask may run 5 s past (curl's
   `--max-time`); an ask cut there is no answer. An app that sets the plug's `:wait` sets it here
   too. Option `:remote_timeout` (ms, `remote_timeout/0` by default): the plug's, which bounds a

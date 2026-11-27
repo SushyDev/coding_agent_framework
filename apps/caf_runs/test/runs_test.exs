@@ -264,25 +264,48 @@ defmodule CodingAgentFramework.RunsTest do
       assert Runs.state(ctx.runs, key) == :ended
     end
 
-    test "with no Scheduler it says so in one line and runs without a lease", ctx do
+    # F-302: an unknown answer is no answer. The wrapper asks again until its bound, then
+    # exits 75 and nothing ran, unless its caller set CAF_RUN_UNLEASED=1.
+    test "with no Scheduler it asks again until its bound, then exits 75 and runs nothing", ctx do
+      test = self()
+
       plug =
         {Runs.Plug,
-         scheduler: fn -> nil end, units: fn _, _ -> {:ok, %{"slot" => 1}} end, secret: @secret}
+         scheduler: fn ->
+           send(test, :asked)
+           nil
+         end,
+         units: fn _, _ -> {:ok, %{"slot" => 1}} end,
+         secret: @secret}
 
       server =
         start_supervised!({Bandit, plug: plug, ip: {127, 0, 0, 1}, port: 0, startup_log: false})
 
       {:ok, {_, port}} = ThousandIsland.listener_info(server)
-      :ok = Runs.prepare(ctx.runs, programs(), port, @secret)
+      :ok = Runs.prepare(ctx.runs, programs(), port, @secret, unanswered: 2_000)
+      mark = Path.join(ctx.dir, "ran-n")
 
-      assert {:ok, %{status: 0, output: out}} = wrapped(ctx.runs, "toolu_n", "echo ran")
-      assert out == "caf-run: no lease (no_scheduler); the command runs without one\nran\n"
+      assert {:ok, %{status: 75, output: out}} =
+               wrapped(ctx.runs, "toolu_n", "touch '#{mark}'; echo ran")
+
+      assert out == "caf-run: not run: no lease (no_scheduler); try again\n"
+      refute File.exists?(mark)
+      # It asked more than once: a restart of the app's tree inside the bound is ridden out.
+      assert_received :asked
+      assert_received :asked
+
+      sh = fn cmd -> Shell.run(host(), program!(:sh), ["-c", cmd], timeout: 20_000) end
+      wrapper = Runs.wrapper(ctx.runs)
+
+      assert {:ok, %{status: 0, output: open}} =
+               sh.(~s(CAF_RUN_UNLEASED=1 '#{wrapper}' heavy toolu_u fix-1 -- 'echo ran'))
+
+      assert open == "caf-run: no lease (no_scheduler); the command runs without one\nran\n"
     end
 
     # The no-answer bound is by the clock (F-217): the wrapper asks once a second, so it sees
     # the bound pass at its next ask, one second and a late wake after it at most.
-    test "with no answer it asks again until its bound by the clock, then runs without a lease",
-         ctx do
+    test "with no answer it asks again until its bound by the clock, then exits 75", ctx do
       # A listener that hangs up on every ask: an answer never comes, and no other test's
       # server can take the port.
       {:ok, listener} =
@@ -293,19 +316,17 @@ defmodule CodingAgentFramework.RunsTest do
       :ok = Runs.prepare(ctx.runs, programs(), port, @secret, unanswered: 2_000)
 
       from = System.monotonic_time(:millisecond)
-      assert {:ok, %{status: 0, output: out}} = wrapped(ctx.runs, "toolu_d", "echo ran")
+      assert {:ok, %{status: 75, output: out}} = wrapped(ctx.runs, "toolu_d", "echo ran")
       waited = System.monotonic_time(:millisecond) - from
 
-      assert out ==
-               "caf-run: no lease (the framework did not answer); the command runs without one\n" <>
-                 "ran\n"
+      assert out == "caf-run: not run: no lease (the framework did not answer); try again\n"
 
       assert waited in 2_000..(2_000 + 1_500)
     end
 
     # One ask is bounded (F-218): curl's `--max-time` is the plug's `:wait` and 5 s. An intake
     # that accepts and never answers holds each ask to that bound, and the wrapper takes it as
-    # no answer: it asks again while its no-answer bound lasts, then runs without a lease.
+    # no answer: it asks again while its no-answer bound lasts, then exits 75 (F-302).
     test "an ask the intake never answers ends at its bound, and counts as no answer", ctx do
       {:ok, listener} =
         :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true])
@@ -317,12 +338,12 @@ defmodule CodingAgentFramework.RunsTest do
       :ok = Runs.prepare(ctx.runs, programs(), port, @secret, wait: 1_000, unanswered: 1_000)
 
       from = System.monotonic_time(:millisecond)
-      assert {:ok, %{status: 0, output: out}} = wrapped(ctx.runs, "toolu_s", "echo ran", 40_000)
-      waited = System.monotonic_time(:millisecond) - from
 
-      assert out ==
-               "caf-run: no lease (the framework did not answer); the command runs without one\n" <>
-                 "ran\n"
+      assert {:ok, %{status: 75, output: out}} =
+               wrapped(ctx.runs, "toolu_s", "echo ran", 40_000)
+
+      waited = System.monotonic_time(:millisecond) - from
+      assert out == "caf-run: not run: no lease (the framework did not answer); try again\n"
 
       # Two asks were accepted: the first was cut at its bound and, the no-answer bound being
       # 1 s, the wrapper asked once more after a second's pause. Each bound has 3 s of stated

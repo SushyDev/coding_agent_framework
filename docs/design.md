@@ -379,9 +379,13 @@ framework's hooks deciding:
   exits 75, never runs without a lease: the plug holds the ask 2 s past the wait, so the
   `Scheduler`'s refusal is what the wrapper reads, and the plug's own `unknown no_answer`
   only says the `Scheduler` did not answer by then (decided, F-292, F-276's new-3). With no
-  answer it
-  asks again once a second until 30 s by the clock have passed since its first ask with none
-  (F-217), then runs without a lease and says so, as a hook fails open; one ask is bound by
+  answer, or an `unknown` one (no `Scheduler`, as while the app restarts), it asks again once a
+  second until its no-answer bound has passed by the clock since its first such ask: 30 s, or
+  its wait when that is longer (F-217). Then it exits 75 with the reason, and nothing ran
+  (F-302, the operator's rule). It fails closed, not open as a hook does. A wrapper that ran
+  unleased whenever the `Scheduler` was slow or restarting let every waiting heavy command on
+  the host start at once, which raised the load that made it slow. `CAF_RUN_UNLEASED=1` in its
+  environment is the caller's explicit choice to run unleased at that bound. One ask is bound by
   curl's `--max-time`, its wait and 5 s, and an ask cut there is no answer (F-218). The plug
   answers 127.0.0.1 alone, so every wrapper runs on the plug's own host, the workstation, and
   its lease is that host's slot (`Runs.Plug`'s `host:`, the config's `workstation`; F-292).
