@@ -91,7 +91,9 @@ defmodule CodingAgentFramework.Config do
   - `interval`: ms between the reads of the readers that read on a timer.
   - `resources`: each resource the `Scheduler` leases, name to capacity; by default
     `%{"seat" => 4, "slot" => 2}`, an agent's seat and a heavy run's slot. Placeholders until
-    they are measured on the workstation;
+    they are measured on the workstation. Another host's is `{name, host}`, as
+    `{"slot", "mac"} => 2`; a job on a host with no slot declared is refused
+    `{:lease, {{:unknown_host, host}, _}}` (`Scheduler`, F-292);
   - `lease`: the units a delegate's start asks for; `%{"seat" => 1}` by default;
   - `job_lease`: the units a job asks for, by the class its caller names (`heavy`, `builder`,
     `landing`); a heavy slot each by default. A landing also takes its project's landing lock,

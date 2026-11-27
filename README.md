@@ -113,6 +113,7 @@ Built, each from a checked model in `model/tla/`:
 - `Copies`, `Jobs` and `Services` on any host, and `Hosts`, which finds another host's programs
   when work is placed there, refuses at once a host away or lacking a program, and takes the
   host back without a restart (F-280), finding them on the `PATH` its entry's `env` gives (F-291);
+  each host's heavy slots are its own, and `caf-run` waits as long as its `--wait` says (F-292);
 - launch options per agent (settings, environment, directories, appended prompt, tools);
 - `PreToolUse` held while the app decides, and `PostToolUse` handed on;
 - `Screen`, reading a main session's screen from a real release's fixtures;

@@ -9,9 +9,15 @@ defmodule CodingAgentFramework.Runs.Plug do
   The request's own process is the `Scheduler`'s requester, so a wrapper that goes away while
   queued leaves the queue, refused `caller_gone`. The request is `%{id: "run:" <> tool_use_id,
   class: class, module: agent, account: nil, units: units, holder: {"run", "<pid> <start>"},
-  wait: wait}`, the units from the app's `units:` function of the class and the agent, and
-  `wait` the plug's own, so no grant comes after it stops waiting (F-276). The answer is one line of text, the last
-  of a chunked response:
+  wait: wait, where: %{host: host}}`, the units from the app's `units:` function of the class
+  and the agent. `host` is the plug's `host:`, the host it runs on: it answers 127.0.0.1 alone,
+  so every wrapper it serves runs there, and the lease is that host's slot (F-292); without
+  `host:` the request names none, the `Scheduler`'s own. `wait` is the wrapper's own
+  (`caf-run --wait`, F-292), or else the plug's `wait:`; it is the request's caller deadline
+  (F-276), and the plug holds the ask 2 s past it, so the `Scheduler`'s `caller_gone` at the
+  wait is what the wrapper reads, never a race with the plug's own end. A wait over the plug's
+  `max_wait:` (ms, `Runs.max_wait/0`, 3 600 000 by default) is refused `long_wait` at once.
+  The answer is one line of text, the last of a chunked response:
 
     * `granted <lease id>`: the lease is this wrapper's (its holder, not released);
     * `refused <reason> <retry time>`: the `Scheduler`'s refusal, the time in UTC (ISO 8601);
@@ -24,9 +30,10 @@ defmodule CodingAgentFramework.Runs.Plug do
   Queued, the response is chunked: `queued (position n)` first, `queued (position n; pressure
   high: cpu some 31.00% over 25.00%)` when pressure bars the class (unless the wrapper asks
   again after a cut, `again=1`), then a newline every `beat:` ms (5 000 by default), whose failed
-  write is how a wrapper gone is found, then the answer. A wait longer than `wait:` ms
-  (`Runs.wait/0`, 600 000 by default, past every class's `max_wait`) ends `unknown no_answer`.
-  The wrapper's own bound for one ask is this `:wait` and 5 s (`Runs.prepare/5`'s `:wait`).
+  write is how a wrapper gone is found, then the answer. A hold that passes its wait and 2 s
+  with no answer (the `Scheduler` gone quiet) ends `unknown no_answer`. `wait:` is ms,
+  `Runs.wait/0` (600 000) by default. The wrapper's own bound for one ask is its wait and 5 s
+  (`Runs.prepare/5`'s `:wait` without `--wait`).
 
       iex> plug = CodingAgentFramework.Runs.Plug
       iex> opts = plug.init(scheduler: fn -> nil end, units: fn _, _ -> {:ok, %{}} end, secret: "s")
@@ -44,6 +51,9 @@ defmodule CodingAgentFramework.Runs.Plug do
   @header "x-caf-secret"
   @max_body 8_192
   @beat 5_000
+  # How long past the request's wait the plug holds the ask, for the `Scheduler`'s refusal at
+  # that wait to reach the wrapper first.
+  @slack 2_000
 
   @impl true
   def init(opts) do
@@ -55,7 +65,9 @@ defmodule CodingAgentFramework.Runs.Plug do
       # Kept behind a function, so a crash report or `inspect` of the options never shows it.
       secret: fn -> secret end,
       beat: Keyword.get(opts, :beat, @beat),
-      wait: Keyword.get(opts, :wait, Runs.wait())
+      wait: Keyword.get(opts, :wait, Runs.wait()),
+      max_wait: Keyword.get(opts, :max_wait, Runs.max_wait()),
+      host: Keyword.get(opts, :host)
     }
   end
 
@@ -87,8 +99,11 @@ defmodule CodingAgentFramework.Runs.Plug do
   defp secret?(_, _), do: false
 
   defp lease(conn, opts, ask) do
+    wait = ask.wait || opts.wait
+
     case opts.units.(ask.class, ask.agent) do
-      {:ok, units} -> request(conn, opts, ask, units)
+      _ when wait > opts.max_wait -> answer(conn, "refused long_wait -")
+      {:ok, units} -> request(conn, opts, %{ask | wait: wait}, units)
       {:refused, why} -> answer(conn, "refused #{word(why)} -")
     end
   end
@@ -96,7 +111,7 @@ defmodule CodingAgentFramework.Runs.Plug do
   defp request(conn, opts, ask, units) do
     holder = {"run", ask.holder}
 
-    # The plug's own wait is the request's deadline: past it nobody reads a grant (F-276).
+    # The wait is the request's deadline: past it nobody reads a grant (F-276).
     req = %{
       id: "run:" <> ask.id,
       class: ask.class,
@@ -104,8 +119,10 @@ defmodule CodingAgentFramework.Runs.Plug do
       account: nil,
       units: units,
       holder: holder,
-      wait: opts.wait
+      wait: ask.wait
     }
+
+    req = if opts.host, do: Map.put(req, :where, %{host: opts.host}), else: req
 
     case ask(opts.scheduler.(), req) do
       {:ok, lease} ->
@@ -113,7 +130,7 @@ defmodule CodingAgentFramework.Runs.Plug do
 
       {:queued, %{position: n} = queued} ->
         conn = conn |> put_resp_content_type("text/plain") |> send_chunked(200)
-        until = System.monotonic_time(:millisecond) + opts.wait
+        until = System.monotonic_time(:millisecond) + ask.wait + @slack
         line = "queued (position #{n}#{why_queued(queued[:barred])})\n"
 
         case if(ask.again, do: {:ok, conn}, else: chunk(conn, line)) do

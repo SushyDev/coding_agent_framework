@@ -12,6 +12,7 @@ defmodule CodingAgentFramework.SchedulerTest do
   alias CodingAgentFramework.Scheduler
   alias CodingAgentFramework.Scheduler.{Pressure, Queue, Table}
 
+  doctest Scheduler, only: [key: 1]
   doctest Table
   doctest Queue
   doctest Pressure
@@ -358,6 +359,72 @@ defmodule CodingAgentFramework.SchedulerTest do
 
     assert {:refused, {:bad, :wait}} =
              Scheduler.request(s, req("x", :heavy, %{"seat" => 1}, wait: 0))
+  end
+
+  # HostSlots.tla (F-292): the workstation's one slot and another host's two.
+  defp hosted(ctx, more \\ []) do
+    resources = %{"seat" => 1, "slot" => 1, {"slot", "mac"} => 2, "lock" => 1}
+    start(ctx.opts, [resources: resources] ++ more)
+  end
+
+  defp on(host, id, units \\ %{"slot" => 1}),
+    do: req(id, :heavy, units, where: %{host: host})
+
+  test "CapacityHolds, OwnHost: two heavy runs on a two-slot host run while a third queues, and the workstation's slot is its own",
+       ctx do
+    s = hosted(ctx)
+    assert {:ok, %{units: %{"slot@mac" => 1}}} = Scheduler.request(s, on("mac", "m1"))
+    assert {:ok, %{units: %{"slot@mac" => 1}}} = Scheduler.request(s, on("mac", "m2"))
+    assert {:queued, %{position: 1}} = Scheduler.request(s, on("mac", "m3"))
+
+    # HostUnaffected: the other host's runs hold none of the workstation's slot.
+    assert {:ok, %{units: %{"slot" => 1}}} =
+             Scheduler.request(s, req("w1", :heavy, %{"slot" => 1}))
+
+    assert {:queued, _} = Scheduler.request(s, on("ws", "w2"))
+
+    # A slot freed on the workstation goes to its own queue, not to the other host's.
+    ended(ctx, s, "w1")
+    assert_receive {:lease, "w2", {:ok, %{units: %{"slot" => 1}}}}
+    refute_received {:lease, "m3", _}
+
+    ended(ctx, s, "m1")
+    assert_receive {:lease, "m3", {:ok, %{units: %{"slot@mac" => 1}}}}
+    refute_received {:lease, "w2", _}
+
+    # A landing there takes that host's slot and the shared lock in one lease.
+    ended(ctx, s, "m2")
+    landing = req("l", :landing, %{"slot" => 1, "lock" => 1}, where: %{host: "mac"})
+    assert {:ok, %{units: %{"slot@mac" => 1, "lock" => 1}}} = Scheduler.request(s, landing)
+  end
+
+  test "a request on another host never falls back on the workstation's resources", ctx do
+    s = hosted(ctx)
+
+    assert {:refused, {:unknown_host, "pi"}} =
+             Scheduler.request(s, on("pi", "p1", %{"lock" => 1}))
+
+    assert {:refused, {:unknown_resource, {"slot", "pi"}}} =
+             Scheduler.request(s, on("pi", "p2"))
+
+    assert {:refused, {:bad, :where}} =
+             Scheduler.request(s, req("x", :heavy, %{"slot" => 1}, where: %{}))
+
+    assert {:refused, {:bad, :units}} = Scheduler.request(s, on("ws", "x", %{"slot@mac" => 1}))
+    assert Scheduler.leases(s) == []
+
+    Process.flag(:trap_exit, true)
+
+    assert {:error, {:bad, :resources}} =
+             Scheduler.start_link(Keyword.put(ctx.opts, :resources, %{"a@b" => 1}))
+  end
+
+  test "pressure is the workstation's: it bars no heavy run on another host", ctx do
+    {s, set} = leveled(ctx, resources: %{"slot" => 1, {"slot", "mac"} => 2})
+    set.(2)
+    assert %{level: :high} = Scheduler.pressure(s)
+    assert {:ok, _} = Scheduler.request(s, on("mac", "m1"))
+    assert {:queued, %{barred: {:pressure, :high, _}}} = Scheduler.request(s, on("ws", "w1"))
   end
 
   test "pressure from stall times: deltas of total, severe at once, down after a quiet window" do

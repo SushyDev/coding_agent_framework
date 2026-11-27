@@ -27,7 +27,18 @@ defmodule CodingAgentFramework.Runs do
   its output is the command's, its exit code is the command's, and the lease's holder is that
   process, `{"run", "<pid> <start time>"}`. Refused, it prints one line with the whole reason
   (for pressure its level and the reading that set it, F-276) and the retry time and exits 75,
-  and nothing ran. A request pressure bars waits in the queue, its queued line saying so. With no answer (the framework down) it asks
+  and nothing ran. A request pressure bars waits in the queue, its queued line saying so.
+
+  **Its wait** (F-292): `caf-run --wait <seconds> <class> …`, or `CAF_RUN_WAIT=<seconds>` in its
+  environment (the flag wins), whole seconds from 1 to 99 999 999; anything else exits 64. It
+  is the request's caller deadline: the lease is waited for until the class's `max_wait` or
+  this wait, whichever ends first, and at this wait it is refused `caller_gone` and exits 75.
+  So a class whose `max_wait` is longer than the plug's default wait keeps a wrapper's place
+  for as long as the wrapper says, and never past `Runs.Plug`'s `max_wait:` (an hour by
+  default), over which it is refused `long_wait` at once. Without one, the plug's `:wait`
+  is the wait. One ask's bound is its wait and 5 s.
+
+  With no answer (the framework down) it asks
   again under the same id, once a second, until 30 s have passed by the clock since the first
   ask with none (`prepare/5`'s `:unanswered`), then runs the command without a lease and says
   so in one line: a lease is soft work, and fails open as the hooks do.
@@ -71,6 +82,7 @@ defmodule CodingAgentFramework.Runs do
   # the plug's own end of a queued wait to reach the wrapper.
   @wait 600_000
   @ask_slack 5_000
+  @max_wait 3_600_000
 
   # $0 caf-run; the paths, the curl config, the URL, the no-answer bound and one ask's bound in
   # seconds are set above it by `prepare/5`. The body goes as form fields curl encodes. A queued
@@ -86,8 +98,18 @@ defmodule CodingAgentFramework.Runs do
   # One ask's bound is curl's `--max-time` (F-218). A cut ask prints no answer, so it takes the
   # path of an ask nobody answered.
   @wrapper ~S"""
+  w=${CAF_RUN_WAIT-}
+  if [ "$1" = --wait ] && [ "$#" -ge 2 ]; then w=$2; shift 2; fi
   [ "$#" -eq 5 ] && [ "$4" = -- ] || {
-    echo 'caf-run: usage: caf-run <class> <id> <agent> -- <command>' >&2; exit 64; }
+    echo 'caf-run: usage: caf-run [--wait <seconds>] <class> <id> <agent> -- <command>' >&2
+    exit 64; }
+  case $w in
+    '') ;;
+    0*|*[!0-9]*|?????????*)
+      echo 'caf-run: a wait (--wait or CAF_RUN_WAIT) is whole seconds, 1 to 99999999' >&2
+      exit 64 ;;
+    *) asked=$((w + 5)) ;;
+  esac
   class=$1 id=$2 agent=$3 cmd=$5
   start=$(LC_ALL=C TZ=UTC "$ps" -o lstart= -p $$) || start=
   again=0 d=
@@ -96,7 +118,7 @@ defmodule CodingAgentFramework.Runs do
   while :; do
     last=$("$curl" -sN --max-time "$asked" -K "$cfg" --data-urlencode "class=$class" \
         --data-urlencode "id=$id" --data-urlencode "agent=$agent" --data-urlencode "pid=$$" \
-        --data-urlencode "start=$start" --data-urlencode "again=$again" "$url" 2>/dev/null |
+        --data-urlencode "start=$start" --data-urlencode "again=$again" --data-urlencode "wait=$w" "$url" 2>/dev/null |
       while IFS= read -r line; do
         case $line in
           queued*) printf 'caf-run: %s\n' "$line" >&2 ;;
@@ -183,11 +205,18 @@ defmodule CodingAgentFramework.Runs do
   defp entry(_), do: :bad
 
   @doc """
-  How long, in ms, `Runs.Plug` holds a queued ask by default (`:wait`), and so the default of
-  `prepare/5`'s `:wait`: 600 000, past every class's `max_wait`.
+  The wait, in ms, of a wrapper that names none, `Runs.Plug`'s `:wait` by default, and so the
+  default of `prepare/5`'s `:wait`: 600 000, past every class's default `max_wait`.
   """
   @spec wait() :: pos_integer
   def wait, do: @wait
+
+  @doc """
+  The largest wait, in ms, `Runs.Plug` takes from a wrapper by default (`:max_wait`): 3 600 000,
+  an hour. A longer one is refused `long_wait` at once.
+  """
+  @spec max_wait() :: pos_integer
+  def max_wait, do: @max_wait
 
   @doc "The wrapper's path: `<home>/bin/caf-run`."
   @spec wrapper(t) :: String.t()
@@ -345,15 +374,16 @@ defmodule CodingAgentFramework.Runs do
   end
 
   @doc """
-  A wrapper's request, from its form fields: `{:ok, %{class, id, agent, holder, again}}`, or
-  `{:refused, {:bad, field}}`. The holder is `"<pid> <start time>"`, the start time with its
-  runs of spaces made one.
+  A wrapper's request, from its form fields: `{:ok, %{class, id, agent, holder, again, wait}}`,
+  or `{:refused, {:bad, field}}`. The holder is `"<pid> <start time>"`, the start time with its
+  runs of spaces made one. `wait` is the wrapper's own wait in ms (its field in whole seconds,
+  1 to 99 999 999), or nil when it names none.
 
       iex> CodingAgentFramework.Runs.ask(%{"class" => "heavy", "id" => "toolu_1",
       ...>   "agent" => "fix-1", "pid" => "42", "start" => "Thu Nov 19  01:00:00 2026",
       ...>   "again" => "0"})
       {:ok, %{class: :heavy, id: "toolu_1", agent: "fix-1",
-        holder: "42 Thu Nov 19 01:00:00 2026", again: false}}
+        holder: "42 Thu Nov 19 01:00:00 2026", again: false, wait: nil}}
   """
   @spec ask(map) :: {:ok, map} | {:refused, {:bad, atom}}
   def ask(fields) do
@@ -375,6 +405,9 @@ defmodule CodingAgentFramework.Runs do
       start == "" ->
         {:refused, {:bad, :start}}
 
+      not ((fields["wait"] || "") =~ ~r/\A([1-9][0-9]{0,7})?\z/) ->
+        {:refused, {:bad, :wait}}
+
       true ->
         {:ok, asked(fields, start)}
     end
@@ -386,7 +419,9 @@ defmodule CodingAgentFramework.Runs do
       id: fields["id"],
       agent: fields["agent"],
       holder: fields["pid"] <> " " <> start,
-      again: fields["again"] == "1"
+      again: fields["again"] == "1",
+      wait:
+        if(fields["wait"] in [nil, ""], do: nil, else: String.to_integer(fields["wait"]) * 1000)
     }
   end
 end

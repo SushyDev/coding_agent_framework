@@ -89,6 +89,8 @@ defmodule CodingAgentFramework.RunsTest do
 
     # A Scheduler on one slot, its owner of a run's lease the process itself, read every 50 ms.
     defp serve(%{dir: dir, runs: runs}, opts \\ []) do
+      {plug_opts, opts} = Keyword.pop(opts, :plug, [])
+
       {:ok, s} =
         Scheduler.start_link(
           [
@@ -102,7 +104,11 @@ defmodule CodingAgentFramework.RunsTest do
 
       plug =
         {Runs.Plug,
-         scheduler: fn -> s end, units: fn :heavy, _ -> {:ok, %{"slot" => 1}} end, secret: @secret}
+         [
+           scheduler: fn -> s end,
+           units: fn :heavy, _ -> {:ok, %{"slot" => 1}} end,
+           secret: @secret
+         ] ++ plug_opts}
 
       server =
         start_supervised!({Bandit, plug: plug, ip: {127, 0, 0, 1}, port: 0, startup_log: false})
@@ -165,6 +171,61 @@ defmodule CodingAgentFramework.RunsTest do
       assert {:ok, %{status: 0, output: "second\n"}} = Task.await(second, 20_000)
       assert File.read!(err) == "caf-run: queued (position 1)\n"
       assert {:ok, _} = await(fn -> released?(s, "toolu_b") end)
+    end
+
+    # F-292: the wrapper's own wait is its request's deadline. The class waits a minute, the
+    # plug's own wait is 300 ms: a wrapper with a longer wait keeps its place past the plug's,
+    # one with none is refused at the plug's, and each is refused `caller_gone` at its own.
+    test "a wrapper's own wait keeps its place past the plug's, and is refused caller_gone at it",
+         ctx do
+      serve(ctx, max_wait: 60_000, plug: [wait: 300, max_wait: 10_000])
+      gate = Path.join(ctx.dir, "gate")
+      {:ok, _} = Shell.run(host(), program!(:mkfifo), [gate], timeout: 5_000)
+      held = ~s(echo held > '#{gate}.ran'; exec cat '#{gate}')
+      first = Task.async(fn -> wrapped(ctx.runs, "toolu_a", held) end)
+      {:ok, _} = read_when(gate <> ".ran", "held")
+
+      wrapper = Runs.wrapper(ctx.runs)
+      sh = fn cmd -> Shell.run(host(), program!(:sh), ["-c", cmd], timeout: 20_000) end
+      err = Path.join(ctx.dir, "kept.err")
+
+      kept =
+        Task.async(fn ->
+          sh.(~s('#{wrapper}' --wait 8 heavy toolu_w fix-1 -- 'echo kept' 2> '#{err}'))
+        end)
+
+      assert {:ok, _} = read_when(err, "caf-run: queued")
+
+      # Behind it, one with no wait, then one whose wait comes from the environment.
+      assert {:ok, %{status: 75, output: plain}} =
+               sh.(~s('#{wrapper}' heavy toolu_p fix-1 -- 'echo plain'))
+
+      assert plain =~ "caf-run: not run: the lease was refused (caller_gone)"
+
+      from = System.monotonic_time(:millisecond)
+
+      assert {:ok, %{status: 75, output: env}} =
+               sh.(~s(CAF_RUN_WAIT=1 '#{wrapper}' heavy toolu_e fix-1 -- 'echo env'))
+
+      assert env =~ "caf-run: not run: the lease was refused (caller_gone)"
+      assert System.monotonic_time(:millisecond) - from >= 1_000
+
+      # The first's place was kept all along: the slot goes to it.
+      File.write!(gate, "go\n")
+      assert {:ok, %{status: 0, output: "go\n"}} = Task.await(first, 20_000)
+      assert {:ok, %{status: 0, output: out}} = Task.await(kept, 20_000)
+      assert out == "kept\n" and File.read!(err) == "caf-run: queued (position 1)\n"
+
+      # A wait over the plug's bound is refused at once, and one out of shape is a usage error.
+      assert {:ok, %{status: 75, output: long}} =
+               sh.(~s('#{wrapper}' --wait 11 heavy toolu_l fix-1 -- 'echo long'))
+
+      assert long =~ "caf-run: not run: the lease was refused (long_wait)"
+
+      for bad <- ["0", "1.5", "010", "abc"] do
+        assert {:ok, %{status: 64}} =
+                 sh.(~s(CAF_RUN_WAIT='#{bad}' '#{wrapper}' heavy toolu_b fix-1 -- 'echo bad'))
+      end
     end
 
     # F-276: barred, the request waits in the queue and its line says why; at its deadline,
