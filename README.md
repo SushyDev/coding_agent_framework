@@ -576,6 +576,9 @@ Built, each from a checked model in `model/tla/`:
   dialog of a delegate's worktree or a main session's configured checkout is pressed by the
   framework, an act in `Acts` naming the rule and the folder; any other folder's waits on a
   person.
+- a host declared in the tree's `hosts:` as an app declares it, its programs only on its
+  entry's `env` PATH, takes a job and a heavy run with the programs `Hosts` finds there (F-303):
+  the tree reads no programs from the entry.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

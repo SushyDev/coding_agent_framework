@@ -1489,7 +1489,11 @@ its host, as it has since the first part built, so the workstation is one host a
   for the version of an rsync not yet checked. A read of work
   already placed (a log, a settle, a service's end) takes the programs kept, and a host not
   ready is found again for such reads at most once each `retry` (30 s), since they run in a
-  part's own process on its interval;
+  part's own process on its interval. The app declares a host in the tree's `hosts:` as
+  `%{host: host, dir: dir}`, with `env` and `ssh_env` when it needs them, and no programs: the
+  tree hands each part `Hosts` for it, never the entry, so a `programs` beside it is not read
+  (F-303). Only a part an app starts outside the tree with an entry of its own programs runs
+  those programs as they are, and an empty set there is refused `{:no_program, names}`;
 - a job or service runs in a copy of the worktree it names. Before a job or a service starts,
   `Copies` brings the copy in step with the worktree by rsync, over every file git does not
   ignore, edits not yet committed included; it compares a file by its size and its modification
