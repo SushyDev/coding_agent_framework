@@ -205,6 +205,36 @@ defmodule CodingAgentFramework.RegistryTest do
       assert {:ok, %{rows: []}} = Registry.rows(reg, "a")
       assert {:ok, %{rows: [%{name: "alpha", account: "b"}]}} = Registry.rows(reg, "b")
     end
+
+    # F-281: a turn's end was read only at the interval, or at another part's read, so a tree
+    # whose interval was long showed a main `working` well after its file read idle.
+    test "a turn in flight is read again within follow, with no call, while each read is slow" do
+      dir = TestHost.test_dir()
+      me = String.to_integer(System.pid())
+      session = fn status -> %{pid: me, sessionId: "s", procStart: lstart(me), status: status} end
+      File.mkdir_p!(Path.join(dir, "sessions"))
+      put(dir, "1.json", JSON.encode!(session.("busy")))
+      # A loaded read: each file's bytes are taken at once, and the read ends 300 ms later.
+      slow = Path.join(dir, "slow-cat")
+      [sh, cat, sleep] = Enum.map([:sh, :cat, :sleep], &TestHost.program!/1)
+      File.write!(slow, "#!#{sh}\n#{cat} \"$@\"; s=$?; #{sleep} 0.3; exit $s\n")
+      File.chmod!(slow, 0o755)
+      programs = TestHost.programs(TestHost.host(), %{cat: slow})
+
+      reg = start(dir, programs: programs, interval: 60_000, follow: 200)
+      assert_receive {:cue, %{topic: "registry:test:a", ids: [id]}}
+      assert %{status: "busy", alive: :live} = by_file(reg)["1.json"]
+
+      # Written whole and renamed, as Claude Code writes it: no read sees half of it.
+      tmp = Path.join(dir, "sessions/1.json.tmp")
+      File.write!(tmp, JSON.encode!(session.("idle")))
+      File.rename!(tmp, Path.join(dir, "sessions/1.json"))
+
+      # Within `follow` and two slow reads (one may have begun just before the change), with
+      # room for a loaded host; the interval alone would take a minute.
+      assert_receive {:cue, %{topic: "registry:test:a", ids: [^id]}}, 10_000
+      assert %{status: "idle", alive: :live} = by_file(reg)["1.json"]
+    end
   end
 
   describe "state rules, over generated session files" do

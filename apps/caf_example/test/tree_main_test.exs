@@ -149,6 +149,43 @@ defmodule CodingAgentFramework.Example.TreeMainTest do
     assert {:ok, :ended} = await(fn -> ended(mains, "app-epic") end)
   end
 
+  # F-281: with a long interval, the tree read a main `working` until some part read the
+  # session files again; once a typed row settled by its line (F-277), none did after the
+  # brief's turn. `Registry` follows a turn in flight, so the row reads idle within `follow`
+  # (1 s) and a read's time of the file. `RegistryTest` slows each read.
+  test "a main's turn reads idle soon after its file does, with a long interval", ctx do
+    env = System.get_env()
+    instance = "t#{System.unique_integer([:positive])}"
+    data = ctx.path |> File.read!() |> JSON.decode!()
+    File.write!(ctx.path, JSON.encode!(%{data | "interval" => 60_000, "instance" => instance}))
+
+    {:ok, io} = StringIO.open("")
+    Process.group_leader(self(), io)
+    out = fn -> elem(StringIO.contents(io), 1) end
+    {:ok, caf} = Console.start(ctx.path, env)
+    on_exit(fn -> Console.stop(caf) end)
+
+    see = fn act, text, ms ->
+      case await(fn -> (act.() && out.() =~ text && {:ok, text}) || nil end, ms) do
+        {:ok, _} -> :ok
+        _ -> flunk("no #{inspect(text)} in:\n" <> out.())
+      end
+    end
+
+    see.(fn -> Console.checkout(caf) end, "app: ready, on main", 30_000)
+    mains = Run.parts(caf).mains
+
+    assert {:ok, %{name: "app-epic"}} =
+             Mains.start_main(mains, "app", "app-epic", "Plan the epic.")
+
+    sessions = Path.join(ctx.config.home, "accounts/one/claude/sessions")
+    assert [path] = Path.wildcard(Path.join(sessions, "*.json"))
+    assert {:ok, [_]} = await(fn -> nonempty(ScreenStandIn.prompts(ctx.dir)) end)
+    assert {:ok, "idle"} = await(fn -> status(sessions, Path.basename(path), "idle") end, 30_000)
+    # A loaded host's room past the bound; the interval alone would take a minute.
+    see.(fn -> Console.agents(caf) end, "app-epic: main of app, on one, idle", 10_000)
+  end
+
   defp ended(mains, name) do
     case Mains.end_main(mains, name) do
       {:ok, :ended} = ok -> ok

@@ -1225,7 +1225,10 @@ agent's tool runs a job since F-176: an agent's heavy command is its own `Bash` 
 and a landing is the app's `Jobs.run/6`); and when a delegate's end is seen, `Services.owner_ended/3` runs on the cue of
 the agent row's end. `Stream` and `Transcripts` are read on an interval, as `Registry` is, so a
 delegate's `result` is read without waiting for another cue; that interval is the `Reader`'s
-(R2). A delegate ended after its report (by `stop`) is `ended` on its agent row, so the cue
+(R2). `Registry` also follows a turn in flight (F-281): a read that leaves a live session file
+`busy`, `shell` or `waiting` reads again within `follow` (1 s, never later than the interval), so
+the tree shows a turn's end within that and one read's time of the file, whatever the interval
+and whichever part read last. A delegate ended after its report (by `stop`) is `ended` on its agent row, so the cue
 shows it and its services end (F-103's new-2). `on_late_end` answers `:ok` or `{:unknown,
 reason}`, and on the second the job stays owed for the next cue: keeping an end never needs a
 crash (new-1). A delegate's reply to a message from `framework` goes to its main session, as
