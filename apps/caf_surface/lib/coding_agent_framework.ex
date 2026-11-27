@@ -69,7 +69,18 @@ defmodule CodingAgentFramework do
   use Supervisor
 
   alias CodingAgentFramework.{AbsentMains, Accounts, Acts, ClaudeCLI, Copies, Delegates, Grants}
-  alias CodingAgentFramework.{Holder, HooksSilent, Home, Host, Inlet, Interventions, Limits}
+
+  alias CodingAgentFramework.{
+    Holder,
+    HooksSilent,
+    Home,
+    Host,
+    Hosts,
+    Inlet,
+    Interventions,
+    Limits
+  }
+
   alias CodingAgentFramework.Logins
 
   alias CodingAgentFramework.{
@@ -1101,7 +1112,11 @@ defmodule CodingAgentFramework do
     {host, every} = {c.workstation, c.interval}
     # A job or service on the workstation runs with the home's tool state and devenv's PATH.
     held_env = c.env.tools ++ [{"PATH", c.env.path}]
-    hosts = Map.put(c.hosts, host, %{programs: p, dir: Config.path(c, "ws"), env: held_env})
+    ws = %{programs: p, dir: Config.path(c, "ws"), env: held_env}
+    # Every other host is read from `Hosts`, which finds its programs when work goes there.
+    hosts = fn pid ->
+      Map.new(c.hosts, fn {name, _} -> {name, %{hosts: pid.(:hosts)}} end) |> Map.put(host, ws)
+    end
 
     notify_every = [notify: notify, interval: every]
     read = [programs: p, db: db] ++ notify_every
@@ -1503,6 +1518,7 @@ defmodule CodingAgentFramework do
             acts: pid.(:acts),
             host: host}
          end},
+        {:hosts, fn _ -> {Hosts, hosts: c.hosts} end},
         {:copies,
          fn _ -> {Copies, dir: Config.path(c, "parts/copies"), programs: p, notify: notify} end},
         {:jobs,
@@ -1511,7 +1527,7 @@ defmodule CodingAgentFramework do
             [
               dir: Config.path(c, "parts/jobs"),
               copies: pid.(:copies),
-              hosts: hosts,
+              hosts: hosts.(pid),
               # A late end is stored in its job's row, which `Jobs` marks told: the app's own
               # caller of the run reads it there, on the `jobs` cue.
               on_late_end: fn _late -> :ok end,
@@ -1526,7 +1542,7 @@ defmodule CodingAgentFramework do
               copies: pid.(:copies),
               grants: grants,
               ended: &Sessions.Agents.ended?(Sessions.Agents.get(w.agents, &1)),
-              hosts: hosts,
+              hosts: hosts.(pid),
               workstation: host,
               acts: pid.(:acts)
             ] ++ notify_every}

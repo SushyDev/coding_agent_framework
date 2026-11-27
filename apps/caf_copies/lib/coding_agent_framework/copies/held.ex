@@ -26,7 +26,7 @@ defmodule CodingAgentFramework.Copies.Held do
       Held.settle(ctx, reply, until, read, write)
   """
 
-  alias CodingAgentFramework.{Copies, Holder, Shell}
+  alias CodingAgentFramework.{Copies, Holder, Hosts, Shell}
 
   @call 5_000
   # $1 mkdir, $2 rm, $3 the directory; then files an earlier start of the name left.
@@ -56,13 +56,18 @@ defmodule CodingAgentFramework.Copies.Held do
   state, `CodingAgentFramework.ToolHome.env/2`, and the host's `PATH`, F-155), and `:copies`,
   the `Copies` server. `run` names the copy's turn; `name` the socket.
 
+  A host whose entry is `%{hosts: server}` is read from that `CodingAgentFramework.Hosts` in
+  `mode`: `:place` for new work, which finds the host's programs within `timeout` and answers
+  why the work cannot go there, and `:reach` (the default) for work already placed (`host/4`).
+
       iex> {:refused, {:no_host, "box"}} =
       ...>   CodingAgentFramework.Copies.Held.context(%{hosts: %{}, copies: nil},
       ...>     %{host: "box", project: "p", copy: "w", kind: "jobs", name: "j", run: "j"}, 1_000)
   """
-  @spec context(map, where, timeout :: pos_integer) :: {:ok, ctx} | {:refused, term}
-  def context(%{hosts: hosts, copies: copies}, where, timeout) do
-    with {:ok, %{programs: programs, dir: dir} = on} <- host(hosts, where.host),
+  @spec context(map, where, pos_integer, Hosts.mode()) ::
+          {:ok, ctx} | {:refused, term} | {:unknown, term}
+  def context(%{hosts: hosts, copies: copies}, where, timeout, mode \\ :reach) do
+    with {:ok, %{programs: programs, dir: dir} = on} <- host(hosts, where.host, mode, timeout),
          copy = %{programs: programs, dir: dir, project: where.project, name: where.copy},
          {:ok, {path, _lock}} <- Copies.place(copy),
          kind_dir = Path.join(dir, where.kind),
@@ -85,8 +90,15 @@ defmodule CodingAgentFramework.Copies.Held do
     end
   end
 
-  defp host(hosts, name) do
+  @doc """
+  The host `name` of `hosts` as `context/4` reads it: an entry of the map as it is, or, for an
+  entry `%{hosts: server}`, what `CodingAgentFramework.Hosts.reach/4` answers in `mode`.
+  """
+  @spec host(map, String.t(), Hosts.mode(), pos_integer) ::
+          {:ok, map} | {:refused, term} | {:unknown, term}
+  def host(hosts, name, mode, timeout) do
     case Map.fetch(hosts, name) do
+      {:ok, %{hosts: server}} -> Hosts.reach(server, name, mode, timeout)
       {:ok, host} -> {:ok, host}
       :error -> {:refused, {:no_host, name}}
     end

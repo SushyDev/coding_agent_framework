@@ -253,8 +253,13 @@ defmodule CodingAgentFramework.Services do
   defp forward_of(_config, _host, other), do: {:refused, {:bad_forward, other}}
 
   # A service whose port is forwarded: one asked for, on a host reached over ssh.
-  defp forwarded?(config, %{host: host, port: port}) when is_integer(port),
-    do: match?(%{programs: %{host: %{reach: {:ssh, _, _}}}}, config.hosts[host])
+  defp forwarded?(config, %{host: host, port: port}) when is_integer(port) do
+    case config.hosts[host] do
+      # `Hosts` keeps only hosts reached over ssh.
+      %{hosts: _} -> true
+      entry -> match?(%{programs: %{host: %{reach: {:ssh, _, _}}}}, entry)
+    end
+  end
 
   defp forwarded?(_config, _row), do: false
 
@@ -592,8 +597,9 @@ defmodule CodingAgentFramework.Services do
   # The copy's turn, the sync, then the hold; the turn goes back once the start is settled.
   defp launch(services, row, opts) do
     refused = fn _ -> put(services, row.name, %{state: "refused", owner: nil}) end
+    start = within(opts, :start_timeout, 5_000)
 
-    with {:ok, ctx} <- context(services, row, within(opts, :start_timeout, 5_000)),
+    with {:ok, ctx} <- placed(context(services, row, start, :place), refused),
          ready = [
            clear: [ctx.from],
            sync_timeout: within(opts, :sync_timeout, 60_000),
@@ -618,6 +624,14 @@ defmodule CodingAgentFramework.Services do
            do: forward(services, row, opts)
     end
   end
+
+  # A host that cannot take the work refuses the start: its row says so, and nothing ran.
+  defp placed({:refused, _} = refusal, refused) do
+    refused.(refusal)
+    refusal
+  end
+
+  defp placed(other, _refused), do: other
 
   # A start its owner's end took is ended here, in the start's own call.
   defp started(services, name, seen, opts) do
@@ -855,15 +869,16 @@ defmodule CodingAgentFramework.Services do
     end
   end
 
-  defp context(services, row, timeout) do
-    with {:ok, config} <- call(services, :config), do: context_of(config, row, timeout)
+  defp context(services, row, timeout, mode \\ :reach) do
+    with {:ok, config} <- call(services, :config), do: context_of(config, row, timeout, mode)
   end
 
   # An earlier start of this name may have left its offset file: `Held.ready/4` clears it, and
   # `Holder.Process.hold/4` its record. `Held` names the socket and the record by its `name`,
   # the service's key; the log and the offset file, which a person reads or this part alone
   # uses, stay named by the service.
-  defp context_of(config, row, timeout) do
+  # A start places new work on the host (`:place`); every later read reaches the work placed.
+  defp context_of(config, row, timeout, mode \\ :reach) do
     where = %{host: row.host, project: row.project, copy: row.copy, kind: "services"}
     key = socket_key(row.name)
 
@@ -871,7 +886,8 @@ defmodule CodingAgentFramework.Services do
            Held.context(
              config,
              Map.merge(where, %{name: key, run: "service:" <> row.name}),
-             timeout
+             timeout,
+             mode
            ),
          {:ok, ws} <- if(forwarded?(config, row), do: ws(config), else: {:ok, nil}),
          do:
@@ -909,16 +925,17 @@ defmodule CodingAgentFramework.Services do
     with {:ok, ws} <- ws(s.config),
          {:ok, _} <- put_row(s, name, %{}, expect),
          :ok <- if(dead_first, do: forward_dead(ws, name), else: :ok),
-         {:ok, row} <- put_row(s, name, fields, expect) do
+         {:ok, row} <- put_row(s, name, fields, expect),
+         {:ok, on} <- Held.host(s.config.hosts, row.host, :reach, @hold_read) do
       %{sh: sh, mkdir: mkdir} = ws.programs.paths
-      %{reach: {:ssh, ssh, destination}} = host = s.config.hosts[row.host].programs.host
+      %{reach: {:ssh, ssh, destination}} = host = on.programs.host
       spec = "127.0.0.1:#{row.local}:127.0.0.1:#{row.port}"
 
       options =
         Host.ssh_options(host) ++ ["-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes"]
 
       argv = [ssh, "-N" | options] ++ ["-L", spec, "--", destination]
-      env = Map.get(s.config.hosts[row.host], :ssh_env, [])
+      env = Map.get(on, :ssh_env, [])
 
       held =
         case Shell.run(ws.programs.host, sh, ["-c", @fwd_dir, "caf-forward", mkdir, ws.dir],

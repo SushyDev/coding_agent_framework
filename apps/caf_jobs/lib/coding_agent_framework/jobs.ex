@@ -171,7 +171,7 @@ defmodule CodingAgentFramework.Jobs do
     with :ok <- named(paths),
          {:ok, config} <- call(jobs, :config),
          {:ok, ask} <- lease_request(config, id, opts),
-         {:ok, ctx} <- context_of(config, id, where, start),
+         {:ok, ctx} <- context_of(config, id, where, start, :place),
          :ok <- call(jobs, {:ask, row(id, where, worktree, argv), self()}),
          {:ok, lease} <- lease(jobs, id, config.scheduler, ask, opts),
          refused = fn _ -> put(jobs, id, %{state: "refused"}) end,
@@ -257,14 +257,15 @@ defmodule CodingAgentFramework.Jobs do
   def rows(jobs), do: call(jobs, :rows)
 
   defp context(jobs, id, where, start) do
-    with {:ok, config} <- call(jobs, :config), do: context_of(config, id, where, start)
+    with {:ok, config} <- call(jobs, :config), do: context_of(config, id, where, start, :reach)
   end
 
-  defp context_of(config, id, where, start) do
+  # A run places new work on the host (`:place`); every later read reaches the work placed.
+  defp context_of(config, id, where, start, mode) do
     where = %{host: where.host, project: where.project, copy: where.name}
 
     with {:ok, %{base: b} = ctx} <-
-           Held.context(config, Map.merge(where, %{kind: "jobs", name: id, run: id}), start),
+           Held.context(config, Map.merge(where, %{kind: "jobs", name: id, run: id}), start, mode),
          do: {:ok, Map.merge(ctx, %{socket: b <> ".sock", log: b <> ".log", exit: b <> ".exit"})}
   end
 
@@ -743,7 +744,7 @@ defmodule CodingAgentFramework.Jobs do
     for %{late: "owed"} = row <- Table.all(s.db) do
       put = fn fields -> write(s, Map.merge(Table.get(s.db, row.id), fields)) end
 
-      with {:ok, ctx} <- context_of(s.config, row.id, row, @settle_read),
+      with {:ok, ctx} <- context_of(s.config, row.id, row, @settle_read, :reach),
            do: settle_row(ctx, row, @settle_read, put)
 
       # An end already written, whose hand-on a crash cut.

@@ -110,7 +110,9 @@ Built, each from a checked model in `model/tla/`:
 - the tree's tools: `Grants`, `Mailbox` and the MCP tools, and the operator (a person or the
   app acting as every main session's parent), who resumes, answers and interrupts a main
   session;
-- `Copies`, `Jobs` and `Services` on any host;
+- `Copies`, `Jobs` and `Services` on any host, and `Hosts`, which finds another host's programs
+  when work is placed there, refuses at once a host away or lacking a program, and takes the
+  host back without a restart (F-280);
 - launch options per agent (settings, environment, directories, appended prompt, tools);
 - `PreToolUse` held while the app decides, and `PostToolUse` handed on;
 - `Screen`, reading a main session's screen from a real release's fixtures;
