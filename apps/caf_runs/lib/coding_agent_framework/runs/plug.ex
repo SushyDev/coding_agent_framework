@@ -35,6 +35,12 @@ defmodule CodingAgentFramework.Runs.Plug do
   `Runs.wait/0` (600 000) by default. The wrapper's own bound for one ask is its wait and 5 s
   (`Runs.prepare/5`'s `:wait` without `--wait`).
 
+  A wrapper with a host (`--host`, F-296) is served by `CodingAgentFramework.Runs.Remote`, with
+  the options `policy:` (the app's `Runs`, whose list must place the command on that host, or
+  it is refused `bad_host`), `jobs:` (a function answering the `Jobs` server, or nil),
+  `where:` (a function of the agent answering `{:ok, %{project, name, worktree}}`, as
+  `Sessions.Agents.place/2` does), `remote_timeout:` (ms, the job's), `away:` and `poll:` (ms).
+
       iex> plug = CodingAgentFramework.Runs.Plug
       iex> opts = plug.init(scheduler: fn -> nil end, units: fn _, _ -> {:ok, %{}} end, secret: "s")
       iex> conn = Plug.Test.conn(:get, "/runs") |> plug.call(opts)
@@ -49,7 +55,9 @@ defmodule CodingAgentFramework.Runs.Plug do
   alias CodingAgentFramework.{Runs, Scheduler}
 
   @header "x-caf-secret"
-  @max_body 8_192
+  # A run on another host sends its command, which one argument of the wrapper bounds at 128 KiB
+  # (the kernel's), and its encoding at three bytes a byte.
+  @max_body 524_288
   @beat 5_000
   # How long past the request's wait the plug holds the ask, for the `Scheduler`'s refusal at
   # that wait to reach the wrapper first.
@@ -67,7 +75,14 @@ defmodule CodingAgentFramework.Runs.Plug do
       beat: Keyword.get(opts, :beat, @beat),
       wait: Keyword.get(opts, :wait, Runs.wait()),
       max_wait: Keyword.get(opts, :max_wait, Runs.max_wait()),
-      host: Keyword.get(opts, :host)
+      host: Keyword.get(opts, :host),
+      # A run on another host (F-296, `Runs.Remote`).
+      policy: Keyword.get(opts, :policy),
+      jobs: Keyword.get(opts, :jobs, fn -> nil end),
+      where: Keyword.get(opts, :where, fn _agent -> {:refused, :no_worktree} end),
+      remote_timeout: Keyword.get(opts, :remote_timeout, Runs.remote_timeout()),
+      away: Keyword.get(opts, :away, Runs.Remote.away()),
+      poll: Keyword.get(opts, :poll, Runs.Remote.poll())
     }
   end
 
@@ -103,8 +118,23 @@ defmodule CodingAgentFramework.Runs.Plug do
 
     case opts.units.(ask.class, ask.agent) do
       _ when wait > opts.max_wait -> answer(conn, "refused long_wait -")
+      {:ok, units} when ask.host != nil -> remote(conn, opts, %{ask | wait: wait}, units)
       {:ok, units} -> request(conn, opts, %{ask | wait: wait}, units)
       {:refused, why} -> answer(conn, "refused #{word(why)} -")
+    end
+  end
+
+  # The host is the app's, never the wrapper's word: the command must match an entry of the
+  # app's list that names that host, as a wrapper on this host cannot name another (F-292).
+  defp remote(conn, opts, ask, units) do
+    with %Runs{} = policy <- opts.policy,
+         {:ok, _class, host} when host == ask.host <- Runs.place(policy, ask.command) do
+      conn
+      |> put_resp_content_type("text/plain")
+      |> send_chunked(200)
+      |> Runs.Remote.run(opts, ask, units)
+    else
+      _ -> answer(conn, "refused bad_host -")
     end
   end
 
@@ -194,7 +224,8 @@ defmodule CodingAgentFramework.Runs.Plug do
 
   # The whole reason (F-276): the word and the retry time, then, for pressure, the level and the
   # reading that set it, as the wrapper prints them.
-  defp refused(reason, retry_at) do
+  @doc false
+  def refused(reason, retry_at) do
     case reason do
       {:pressure, level, reading} ->
         "refused pressure #{time(retry_at)} #{pressure(level, reading)}"
@@ -219,7 +250,8 @@ defmodule CodingAgentFramework.Runs.Plug do
   defp percent(x) when is_number(x), do: :erlang.float_to_binary(x * 100.0, decimals: 2) <> "%"
 
   # One word for a line the wrapper splits on spaces.
-  defp word(why) when is_atom(why), do: Atom.to_string(why)
-  defp word(why) when is_tuple(why), do: why |> elem(0) |> word()
-  defp word(_why), do: "other"
+  @doc false
+  def word(why) when is_atom(why), do: Atom.to_string(why)
+  def word(why) when is_tuple(why), do: why |> elem(0) |> word()
+  def word(_why), do: "other"
 end

@@ -1,7 +1,7 @@
 defmodule CodingAgentFramework.ConfigTest do
   use ExUnit.Case, async: true
 
-  alias CodingAgentFramework.Config
+  alias CodingAgentFramework.{Config, Host}
 
   @fields [
     home: "/srv/caf",
@@ -247,6 +247,17 @@ defmodule CodingAgentFramework.ConfigTest do
   test "an env without a path is refused for a tree that runs agents too" do
     for bad <- [%{}, %{path: nil}, %{home: "/srv/caf"}],
         do: assert(new(env: bad) == {:refused, {:bad, :env}})
+  end
+
+  test "heavy: an entry's host is the workstation or a declared host (F-296)" do
+    mac = Host.ssh("mac", "/usr/bin/ssh", "me@mac.local", "/bin/kill")
+    hosts = %{"mac" => %{host: mac, dir: "/Users/me/caf"}}
+    heavy = [%{match: "mix test", class: :heavy, host: "mac"}]
+
+    assert {:ok, %Config{}} = new(hosts: hosts, heavy: heavy)
+    assert {:ok, %Config{}} = new(heavy: [%{match: "make", class: :heavy, host: "ws"}])
+    assert new(heavy: heavy) == {:refused, {:bad, :heavy, {:no_host, "mac"}}}
+    assert new(heavy: [%{match: "make", class: :heavy, host: ""}]) == {:refused, {:bad, :heavy}}
   end
 
   test "agents and restart_wait: an agentless tree on request; a bounded wait" do

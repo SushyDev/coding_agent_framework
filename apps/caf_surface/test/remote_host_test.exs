@@ -8,7 +8,7 @@ defmodule CodingAgentFramework.RemoteHostTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Config, Host, Hosts, Jobs, Scheduler}
+  alias CodingAgentFramework.{Config, Host, Hosts, Jobs, Runs, Scheduler, Shell}
 
   setup do
     dir = test_dir()
@@ -132,5 +132,148 @@ defmodule CodingAgentFramework.RemoteHostTest do
     File.write!(gate, "go\n")
     for t <- runs, do: assert({:ok, %{exit: 0}} = Task.await(t, 20_000))
     assert_receive {:lease, "m3", {:ok, %{units: %{"slot@mac" => 1}}}}, 10_000
+  end
+
+  describe "an agent's heavy command on the other host (F-296, RemoteRun.tla)" do
+    @secret "s3cret"
+
+    # The wrapper and its plug as the tree serves them, on the tree's `Jobs` and `Scheduler`:
+    # `mix test` is placed on the other host, `make` stays on the workstation. The agent works
+    # in the test's repository.
+    setup c do
+      heavy = [
+        %{match: ~r/\bmix test\b/, class: :heavy, host: "mac"},
+        %{match: ~r/\bmake\b/, class: :heavy}
+      ]
+
+      {:ok, runs} = Runs.new(Path.join(c.dir, "runs"), programs(), heavy)
+
+      opts = [
+        scheduler: fn -> c.scheduler end,
+        units: fn class, _agent -> {:ok, Map.fetch!(%{heavy: %{"slot" => 1}}, class)} end,
+        secret: @secret,
+        host: "ws",
+        policy: runs,
+        jobs: fn -> c.jobs end,
+        where: fn "fix-1" -> {:ok, %{project: "app", name: "fix-1", worktree: c.repo}} end,
+        away: 1_000,
+        poll: 50,
+        beat: 200
+      ]
+
+      server =
+        start_supervised!(
+          {Bandit, plug: {Runs.Plug, opts}, ip: {127, 0, 0, 1}, port: 0, startup_log: false}
+        )
+
+      {:ok, {_, port}} = ThousandIsland.listener_info(server)
+      :ok = Runs.prepare(runs, programs(), port, @secret)
+      %{runs: runs}
+    end
+
+    # The call as Claude Code runs it once the policy rewrote it, in `cwd`, its output and its
+    # errors kept apart.
+    defp wrapped(c, id, command, cwd) do
+      pre = Runs.pre_tool_use(c.runs, nil)
+      event = %{agent: "fix-1", tool_name: "Bash", tool_use_id: id}
+
+      {:allow, updated_input: %{"command" => line}} =
+        pre.(Map.put(event, :tool_input, %{"command" => command}))
+
+      {out, err} = {Path.join(c.dir, id <> ".out"), Path.join(c.dir, id <> ".err")}
+      sh = "cd '#{cwd}' && #{line} > '#{out}' 2> '#{err}'"
+
+      run = fn ->
+        {:ok, %{status: status}} =
+          Shell.run(host(), program!(:sh), ["-c", sh], timeout: 40_000)
+
+        {status, File.read!(out), File.read!(err)}
+      end
+
+      %{line: line, out: out, err: err, run: run}
+    end
+
+    defp job_lease(c, id) do
+      Enum.find(Scheduler.leases(c.scheduler), &(&1.holder == {"job", id}))
+    end
+
+    test "its output and exit status come back, from its directory in the agent's copy", c do
+      sub = Path.join(c.repo, "sub")
+      File.mkdir_p!(sub)
+      File.write!(Path.join(sub, "b.txt"), "two\n")
+      cat = program!(:cat)
+
+      command =
+        "#{cat} b.txt; echo err >&2; #{cat} ../a.txt; printf tail; mix test >/dev/null; exit 3"
+
+      # The stand-in host has no `mix`: its complaint is the command's own.
+      w = wrapped(c, "toolu_r1", command, sub)
+      assert w.line =~ ~r/caf-run' --host 'mac' heavy 'toolu_r1' 'fix-1' -- /
+
+      assert {3, out, err} = w.run.()
+      assert out =~ ~r/\Atwo\nerr\none\ntail.*mix.*\n\z/s
+      assert err == "caf-run: started on mac (job run-toolu_r1)\n"
+
+      # The job held the other host's slot, its row the holder, and its end released it.
+      assert %{units: %{"slot@mac" => 1}} = job_lease(c, "run-toolu_r1")
+      assert {:ok, _} = await(fn -> released(c, "run-toolu_r1") end, 10_000)
+    end
+
+    test "a failing command's status comes back, after its last line", c do
+      w = wrapped(c, "toolu_r2", "mix test; echo failed; printf 'no newline'; exit 1", c.repo)
+      assert {1, out, _err} = w.run.()
+      assert out =~ ~r/\n?failed\nno newline\z/
+    end
+
+    test "the host away mid-run ends it 69 at once, and its slot is freed once its end is read",
+         c do
+      gate = Path.join(c.dir, "gate")
+      {_, 0} = System.cmd(program!(:mkfifo), [gate])
+
+      w =
+        wrapped(
+          c,
+          "toolu_r3",
+          "echo begun; mix test 2>/dev/null; #{program!(:cat)} '#{gate}'",
+          c.repo
+        )
+
+      task = Task.async(w.run)
+      assert {:ok, _} = read_when(w.out, "begun")
+
+      File.write!(Path.join(c.dir, "down"), "")
+      assert {69, "begun\n", err} = Task.await(task, 20_000)
+      assert err =~ "caf-run: the run on mac has no end (host_away); its job may still run there"
+
+      # The job may still run there: its slot is held until its end is read (NoRunUnleased).
+      assert %{released_at: nil} = job_lease(c, "run-toolu_r3")
+
+      File.rm!(Path.join(c.dir, "down"))
+      File.write!(gate, "go\n")
+
+      settled = fn ->
+        Jobs.cue(c.jobs, %{topic: "test"})
+        released(c, "run-toolu_r3")
+      end
+
+      assert {:ok, _} = await(settled, 15_000)
+      assert {:ok, %{state: "exited", code: 0}} = Jobs.row(c.jobs, "run-toolu_r3")
+    end
+
+    test "a command with no host runs on the workstation as before", c do
+      w = wrapped(c, "toolu_l1", "make --version >/dev/null 2>&1; echo here; exit 4", c.repo)
+      refute w.line =~ "--host"
+      assert {4, "here\n", ""} = w.run.()
+      # The workstation's slot, held by the wrapper's own process, and no job.
+      assert [%{units: %{"slot" => 1}, holder: {"run", _}}] = Scheduler.leases(c.scheduler)
+      assert Jobs.rows(c.jobs) == []
+    end
+  end
+
+  defp released(c, id) do
+    case job_lease(c, id) do
+      %{released_at: at} = lease when is_integer(at) -> {:ok, lease}
+      other -> {:held, other}
+    end
   end
 end

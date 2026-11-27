@@ -18,6 +18,7 @@ defmodule CafRuns.MixProject do
       {:caf_shell, in_umbrella: true},
       {:caf_holder, in_umbrella: true},
       {:caf_scheduler, in_umbrella: true},
+      {:caf_jobs, in_umbrella: true},
       {:plug, "~> 1.20"},
       {:caf_test, in_umbrella: true, only: :test},
       {:bandit, "~> 1.14", only: :test}

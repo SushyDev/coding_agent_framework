@@ -258,6 +258,13 @@ defmodule CodingAgentFramework.Jobs do
   @spec rows(GenServer.server()) :: [map] | {:unknown, term}
   def rows(jobs), do: call(jobs, :rows)
 
+  @doc """
+  Job `id`'s row: `{:ok, row}`, `{:refused, {:no_job, id}}`, or `{:unknown, reason}` when `Jobs`
+  does not answer. A caller that streams a job's log reads its `state` to know it started.
+  """
+  @spec row(GenServer.server(), String.t()) :: {:ok, map} | {:refused, term} | {:unknown, term}
+  def row(jobs, id), do: row_of(jobs, id)
+
   defp context(jobs, id, where, start) do
     with {:ok, config} <- call(jobs, :config), do: context_of(config, id, where, start, :reach)
   end
