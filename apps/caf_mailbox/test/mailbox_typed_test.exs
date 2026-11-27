@@ -89,18 +89,18 @@ defmodule CodingAgentFramework.MailboxTypedTest do
     assert String.ends_with?(rest, "[delivery #{u1}]")
   end
 
-  # NoLongTyped, Arrives (F-142): a row too long to type, or of several lines, is written whole
-  # to the session's due directory, which its start may read by `--add-dir`, and the line typed
-  # names that file; its user line settles it, and the file goes. Rows keep their order.
-  test "a row too long to type is written to a file the typed line names", ctx do
+  # NoLongTyped, Arrives (F-142, F-279): a row past the paste's bound is written whole to the
+  # session's due directory, which its start may read by `--add-dir`, and the line pasted names
+  # that file; its user line settles it. Rows keep their order.
+  test "a row past the paste's bound is written to a file the pasted line names", ctx do
     main = main(ctx)
     {args, 0} = System.cmd(program!(:ps), ["-ww", "-o", "args=", "-p", "#{main.pid}"])
     due = Sessions.due_dir(ctx.dir, "main")
     assert args =~ "--add-dir #{due}"
 
-    long = String.duplicate("x", 300)
+    long = String.duplicate("x", Transport.Typed.bound())
     {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "d1", "main", long)
-    {:ok, {:queued, two}} = Mailbox.message(ctx.mailbox, "d1", "main", "line one\nline two")
+    {:ok, {:queued, two}} = Mailbox.message(ctx.mailbox, "d1", "main", "#{long}\nline two")
 
     file = Path.join(due, "#{one}.md")
     %{uuid: u1} = Table.get(ctx.mtable, one)
@@ -121,7 +121,7 @@ defmodule CodingAgentFramework.MailboxTypedTest do
              submitted(ctx, 2)
 
     assert line2 =~ "[delivery #{u2}]"
-    assert File.read!(file2) == "From d1 (message):\n\nline one\nline two"
+    assert File.read!(file2) == "From d1 (message):\n\n#{long}\nline two"
   end
 
   # With no framework home there is nowhere to write the file: the row is not typed, and waits
@@ -131,7 +131,8 @@ defmodule CodingAgentFramework.MailboxTypedTest do
     stop_supervised!(Mailbox)
     spec = Supervisor.child_spec({Mailbox, Keyword.delete(ctx.mopts, :home)}, id: :no_home)
     mailbox = start_supervised!(spec)
-    {:ok, {:queued, long}} = Mailbox.message(mailbox, "d1", "main", String.duplicate("x", 300))
+    text = String.duplicate("x", Transport.Typed.bound())
+    {:ok, {:queued, long}} = Mailbox.message(mailbox, "d1", "main", text)
 
     assert {:ok, %{status: "queued", attempt: ~s(["too_long","no_home"])}} =
              await(fn ->
@@ -165,10 +166,8 @@ defmodule CodingAgentFramework.MailboxTypedTest do
     assert {:ok, %{status: "delivered"}} = until(ctx, two, &(&1.status == "delivered"))
   end
 
-  # F-277: the line's limit is the box at the pane's real width, read in the `Inlet`'s write
-  # step, not an 80-column pane's. The 200-column pane `Sessions` draws by default holds a
-  # short text with its 25 characters of frame and 48 of mark; a fixed 76 left room for 3.
-  test "a 4-character message is typed whole into a 200-column pane", ctx do
+  # F-277, F-279: a short text goes whole, with its 25 characters of frame and 48 of mark.
+  test "a 4-character message is pasted whole and settles by its line", ctx do
     main = main(ctx)
     {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "operator", "main", "test")
     %{uuid: u1} = Table.get(ctx.mtable, one)
@@ -181,37 +180,31 @@ defmodule CodingAgentFramework.MailboxTypedTest do
     refute File.exists?(Path.join(Sessions.due_dir(ctx.dir, "main"), "#{one}.md"))
   end
 
-  # F-277: an app that draws its panes 400 columns wide gets a 300-character message typed
-  # whole; one longer than that box holds goes as a due file, settled by its pointer's line.
-  test "a 300-character message is typed whole into a 400-column pane, a longer one by file",
-       ctx do
-    stop_supervised!(Sessions)
-    wide = Keyword.put(ctx.opts, :size, {400, 50})
-    spec = Supervisor.child_spec({Sessions, wide}, id: :wide, restart: :temporary)
-    main = main(%{ctx | sessions: start_supervised!(spec)})
-
-    text = String.duplicate("y", 300)
-    {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "operator", "main", text)
-    longer = String.duplicate("z", 400)
-    {:ok, {:queued, two}} = Mailbox.message(ctx.mailbox, "operator", "main", longer)
+  # F-279: a row of any length within the bound, and of any number of lines, is pasted whole
+  # into the default 200-column pane, not as a file. Its user line carries the whole text and
+  # its mark, and settles it.
+  test "a 300-character and a 5-line message each go pasted and settle by their line", ctx do
+    main = main(ctx)
+    wide = String.duplicate("y", 300)
+    lines = Enum.map_join(1..5, "\n", &"line #{&1}")
+    {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "operator", "main", wide)
+    {:ok, {:queued, two}} = Mailbox.message(ctx.mailbox, "operator", "main", lines)
 
     %{uuid: u1} = Table.get(ctx.mtable, one)
-    line1 = "From operator (message): #{text} [delivery #{u1}]"
-    assert {:ok, [^line1]} = submitted(ctx, 1)
-    user_line(main, line1)
+    text1 = "From operator (message): #{wide} [delivery #{u1}]"
+    assert {:ok, [^text1]} = submitted(ctx, 1)
+    user_line(main, text1)
     assert {:ok, %{status: "delivered"}} = until(ctx, one, &(&1.status == "delivered"))
-    refute File.exists?(Path.join(Sessions.due_dir(ctx.dir, "main"), "#{one}.md"))
 
-    file = Path.join(Sessions.due_dir(ctx.dir, "main"), "#{two}.md")
     %{uuid: u2} = Table.get(ctx.mtable, two)
-    pointer = "a message for you is in `#{file}`; read it. [delivery #{u2}]"
-    line2 = "From operator (message): " <> pointer
-    assert {:ok, [^line1, ^line2]} = submitted(ctx, 2)
-    assert File.read!(file) == "From operator (message): " <> longer
-    assert %{status: "sending", via: "typed"} = Table.get(ctx.mtable, two)
-
-    user_line(main, line2)
+    text2 = "From operator (message):\n\n#{lines} [delivery #{u2}]"
+    assert {:ok, [^text1, line2]} = submitted(ctx, 2)
+    assert line2 == String.replace(text2, "\n", "\\n")
+    user_line(main, text2)
     assert {:ok, %{status: "delivered"}} = until(ctx, two, &(&1.status == "delivered"))
+
+    due = Sessions.due_dir(ctx.dir, "main")
+    refute File.exists?(Path.join(due, "#{one}.md")) or File.exists?(Path.join(due, "#{two}.md"))
   end
 
   # SettleSeen, Break_Delivery_SettleAtIdle (F-277): a typed row's line delivers it while the
@@ -222,7 +215,7 @@ defmodule CodingAgentFramework.MailboxTypedTest do
   test "a typed pointer's line delivers its row while the turn runs", ctx do
     main = main(ctx)
     since = since(ctx, main)
-    long = String.duplicate("x", 300)
+    long = String.duplicate("x", Transport.Typed.bound())
     {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "d1", "main", long)
     {:ok, {:queued, two}} = Mailbox.message(ctx.mailbox, "d1", "main", "two")
 

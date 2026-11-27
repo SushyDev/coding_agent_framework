@@ -6,8 +6,13 @@ defmodule CodingAgentFramework.ScreenStandIn do
 
   - idle, it draws `text-typed`'s screen with the box holding what was typed since the last
     Enter (an empty box is `❯` and a no-break space);
-  - at Enter it appends the box's text, as one line, to `<dir>/submitted` (`submitted/2`), and
-    runs a turn that ends at once: its session file says `busy`, then `idle`;
+  - it asks for bracketed paste, as Claude Code does, so `tmux paste-buffer -p` brackets a
+    paste. A paste goes into the box whole, its newlines kept (F-279), and is drawn as
+    2.1.322 draws a paste (modeled, not captured): as its text when it is one line that fits,
+    else folded, `[Pasted text #<n> +<newlines> lines]`;
+  - at Enter it appends the box's text, as one line with each newline written `\n`, to
+    `<dir>/submitted` (`submitted/2`), and runs a turn that ends at once: its session file
+    says `busy`, then `idle`;
   - started with `--screen running`, it draws `turn-running`'s screen, its session file `busy`,
     until Escape, which ends the turn: it writes `<dir>/interrupted`, says `idle` and draws the
     idle screen;
@@ -418,7 +423,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
         #{program!(:cat)} "#{screens}/top"
         printf '%s' "$shown"
         rule
-        printf '❯ %s\\n' "$box"
+        printf '❯ %s\\n' "$view"
         #{program!(:cat)} "#{screens}/bottom"
       fi
     }
@@ -427,6 +432,8 @@ defmodule CodingAgentFramework.ScreenStandIn do
     # Keys are read one at a time with no echo, so text typed without an Enter is drawn by the
     # stand-in, in its box, as Claude Code draws it, and the terminal shows nothing else.
     #{program!(:stty)} -echo -icanon min 1
+    # Bracketed paste on, as Claude Code asks for it: tmux then brackets what it pastes.
+    printf '\\033[?2004h'
     # Claude Code draws again when its size changes, and only then (F-272). dtach keeps no
     # output, so a screen drawn before a viewer attached shows only once the viewer's grow
     # makes it draw again. Bash runs the trap while a read waits, and the read goes on.
@@ -451,7 +458,8 @@ defmodule CodingAgentFramework.ScreenStandIn do
       tx
       announce idle
     }
-    box=''
+    # `box` is the text the box holds, `view` how it is drawn, `pastes` the pastes in it.
+    box='' view='' pastes=0
     [ $screen = idle ] && first
     [ $screen = running ] && announce busy
     [ $screen = limit_wait ] && announce busy
@@ -540,16 +548,32 @@ defmodule CodingAgentFramework.ScreenStandIn do
         announce idle
       elif [ "$key" = $'\\n' ] || [ "$key" = $'\\r' ]; then
         [ $screen = running ] && continue
-        printf '%s\\n' "$box" >> "#{dir}/submitted"
+        printf '%s\\n' "${box//$'\\n'/\\\\n}" >> "#{dir}/submitted"
         if [ "$box" = /reload-plugins ]; then
           shown="$shown❯ /reload-plugins"$'\\n'
           [ -n "$reloaded" ] && shown="$shown  ⎿  Reloaded: 1 plugin · 0 skills · 0 agents · 0 hooks"$'\\n'
         fi
-        box=''
+        box='' view='' pastes=0
         announce busy
         announce idle
+      elif [ "$key" = $'\\e' ]; then
+        # A bracketed paste: its text, any newline in it, up to the closing bracket. Its text
+        # holds no escape: `Tmux.paste_text/1` refuses one.
+        seq=''; IFS= read -r -N5 -t 1 seq
+        if [ "$seq" = '[200~' ]; then
+          text=''; IFS= read -r -d $'\\e' text; IFS= read -r -N5 -t 1 seq
+          box="$box$text"; pastes=$((pastes + 1))
+          if [[ $text == *$'\\n'* ]] || [ ${#text} -gt $((#{width(screens)} - 4 - ${#view})) ]; then
+            nl=${text//[!$'\\n']/}
+            view="$view[Pasted text #$pastes +${#nl} lines]"
+          else
+            view="$view$text"
+          fi
+        else
+          box="$box$key$seq" view="$view$key$seq"
+        fi
       else
-        box="$box$key"
+        box="$box$key" view="$view$key"
       fi
       # Drawn once no more keys wait, so a burst of keys is one draw, as Claude Code draws it.
       read -t 0 || draw

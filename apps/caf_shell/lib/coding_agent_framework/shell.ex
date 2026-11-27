@@ -43,23 +43,43 @@ defmodule CodingAgentFramework.Shell do
   # How long a killed program's exit status is awaited before its port is closed.
   @close 1_000
 
+  # The smallest pipe buffer of the hosts the framework runs on: macOS starts a pipe at 16 KiB.
+  @input_max 16_384
+
   @type result :: %{status: non_neg_integer, output: binary}
   @type outcome :: {:ok, result} | {:refused, term} | {:unknown, term}
 
   @doc """
   Runs `path` with `args` on `host`. Options: `:timeout` (required), milliseconds before the
   program's group is ended; `:reaper`, a `CodingAgentFramework.Shell.Reaper` that ends the
-  group if the caller or the VM dies first.
+  group if the caller or the VM dies first; `:input`, bytes written to the program's stdin as
+  it starts (`Tmux.CLI` loads a paste's text this way, so no text is on a command line).
+
+  The stdin stays open until the program exits: a program that reads to its end must be told
+  the length, as `head -c <n>` is. Input is at most `input_max/0` bytes, which every pipe holds
+  whole, so the write never waits on the reader and never fails once the program has exited.
   """
   @spec run(Host.t(), String.t(), [String.t()], keyword) :: outcome
   def run(%Host{} = host, path, args, opts) do
     timeout = Keyword.fetch!(opts, :timeout)
+    input = Keyword.get(opts, :input)
 
     case command(host, path, args) do
-      {:ok, {exe, argv}} -> spawn_and_wait(host, exe, argv, timeout, opts[:reaper])
+      _ when is_binary(input) and byte_size(input) > @input_max -> {:refused, {:input, :too_long}}
+      {:ok, {exe, argv}} -> spawn_and_wait(host, exe, argv, timeout, {opts[:reaper], input})
       refused -> refused
     end
   end
+
+  @doc """
+  The most bytes `run/4` writes to a program's stdin (`:input`): 16 384, the smallest pipe
+  buffer of the hosts the framework runs on, so the write is whole before the program reads.
+
+      iex> CodingAgentFramework.Shell.input_max()
+      16384
+  """
+  @spec input_max() :: pos_integer
+  def input_max, do: @input_max
 
   @doc """
   The longest `run/4` with `timeout:` `timeout` takes, in ms (F-245): the timeout, then the
@@ -107,7 +127,7 @@ defmodule CodingAgentFramework.Shell do
   @spec shell_quote(String.t()) :: String.t()
   def shell_quote(word), do: "'" <> String.replace(word, "'", "'\\''") <> "'"
 
-  defp spawn_and_wait(host, exe, argv, timeout, reaper) do
+  defp spawn_and_wait(host, exe, argv, timeout, {reaper, input}) do
     port =
       Port.open({:spawn_executable, exe}, [
         :binary,
@@ -126,6 +146,7 @@ defmodule CodingAgentFramework.Shell do
       end
 
     if reaper && pgid, do: Reaper.hold(reaper, pgid)
+    if input, do: send_input(port, input)
     deadline = System.monotonic_time(:millisecond) + timeout
     outcome = collect(host, port, pgid, deadline, timeout, [])
     # Dropped only once the exit was taken or the KILL sent: the reaper never aims at an ended
@@ -134,6 +155,13 @@ defmodule CodingAgentFramework.Shell do
     outcome
   rescue
     e in ErlangError -> {:refused, {:cannot_start, exe, e.original}}
+  end
+
+  # A program that already exited has closed its port: what it would have read is moot.
+  defp send_input(port, input) do
+    Port.command(port, input)
+  rescue
+    ArgumentError -> :ok
   end
 
   defp collect(host, port, pgid, deadline, timeout, acc) do

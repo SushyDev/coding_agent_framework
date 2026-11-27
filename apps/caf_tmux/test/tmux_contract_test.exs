@@ -41,6 +41,41 @@ defmodule CodingAgentFramework.TmuxContractTest do
         assert {:ok, @text <> "\n"} == received(ctx, pane, "alpha", @text <> "\n")
       end
 
+      # F-279: the text goes to the load's stdin, never on a command line, and the paste keeps
+      # its newlines and drops its buffer.
+      test "a paste arrives whole, its newlines kept, and drops its buffer", ctx do
+        {:ok, pane} = Tmux.new_session(ctx.server, "alpha", stand_in(ctx, "alpha"))
+        text = @text <> "\nline two\n\tline three"
+        assert {:ok, :sent} = Tmux.write(ctx.server, pane, "alpha", {:paste, "caf-u1", text})
+        assert {:ok, :sent} = Tmux.write(ctx.server, pane, "alpha", {:keys, ["Enter"]})
+        assert {:ok, text <> "\n"} == received(ctx, pane, "alpha", text <> "\n")
+        assert buffers(ctx) == []
+      end
+
+      test "a paste to a pane tagged for another session pastes nothing, and drops its buffer",
+           ctx do
+        {:ok, a} = Tmux.new_session(ctx.server, "alpha", stand_in(ctx, "alpha"))
+        {:ok, _b} = Tmux.new_session(ctx.server, "beta", stand_in(ctx, "beta"))
+
+        assert {:refused, {:tagged_for, "alpha"}} =
+                 Tmux.write(ctx.server, a, "beta", {:paste, "caf-u2", "wrong"})
+
+        assert buffers(ctx) == []
+        assert_only_later_write_arrives(ctx, a, "alpha")
+      end
+
+      test "a paste of a text with an escape, or to a bad buffer name, is refused", ctx do
+        {:ok, pane} = Tmux.new_session(ctx.server, "alpha", stand_in(ctx, "alpha"))
+
+        assert {:refused, {:bad_text, :control}} =
+                 Tmux.write(ctx.server, pane, "alpha", {:paste, "caf-u3", "a\e[201~\rb"})
+
+        assert {:refused, {:bad_buffer, "a b"}} =
+                 Tmux.write(ctx.server, pane, "alpha", {:paste, "a b", "text"})
+
+        assert_only_later_write_arrives(ctx, pane, "alpha")
+      end
+
       test "a write to a pane tagged for another session sends nothing", ctx do
         {:ok, a} = Tmux.new_session(ctx.server, "alpha", stand_in(ctx, "alpha"))
         {:ok, _b} = Tmux.new_session(ctx.server, "beta", stand_in(ctx, "beta"))
@@ -222,6 +257,16 @@ defmodule CodingAgentFramework.TmuxContractTest do
   defp render({:text, text}), do: text
   defp render({:line, text}), do: text <> "\n"
   defp render({:keys, ["Enter"]}), do: "\n"
+  defp render({:paste, _buffer, text}), do: text
+
+  # The buffers the server holds: the fake keeps none.
+  defp buffers(%{impl: :fake}), do: []
+
+  defp buffers(%{impl: :cli, server: server, socket: socket}) do
+    args = ["-S", socket, "list-buffers", "-F", "\#{buffer_name}"]
+    {:ok, %{status: 0, output: out}} = Shell.run(server.host, server.tmux, args, timeout: 5_000)
+    String.split(out, "\n", trim: true)
+  end
 
   defp assert_only_later_write_arrives(ctx, pane, session) do
     assert {:ok, :sent} = Tmux.write(ctx.server, pane, session, {:text, "right"})

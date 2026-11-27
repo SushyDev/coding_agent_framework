@@ -243,10 +243,12 @@ defmodule CodingAgentFramework.Mailbox.Transport.Typed do
   @moduledoc """
   The `typed` transport: the `Inlet`'s checked write into an interactive session with no waiter
   (`docs/design.md`, "A session with no waiter"; `Delivery.tla`'s `typed`, `Unknown`,
-  `SettleSeen`). The text is typed into the session's input box and sent with Enter, so it is
-  one line: the row's uuid goes at its end (`text/2`), which the transcript's user line keeps.
+  `SettleSeen`). The text is pasted into the session's input box, any number of lines, and sent
+  with Enter (F-279); the row's uuid goes at its end (`text/2`), which the transcript's user line
+  keeps with the whole text. A row past `bound/0` goes as the line that names its due file
+  (`pointer/2`).
 
-  The `Inlet` types only when the turn function it is handed, read in its own step, says the
+  The `Inlet` pastes only when the turn function it is handed, read in its own step, says the
   turn ended (`turn/2`: the session file reads idle with no waiter held, for the process the row
   was marked for) and the screen shows an empty box. `{:ok, :sent}` says the keys went in, not
   that Claude Code took them, so the row stays `sending` until the transcript decides, as a
@@ -273,34 +275,26 @@ defmodule CodingAgentFramework.Mailbox.Transport.Typed do
 
   alias CodingAgentFramework.Mailbox.Transport.Waiter
 
-  @doc "The text typed: the row's text and, at the end of the same line, its uuid."
+  @doc "The text pasted: the row's text and, at the end of its last line, its uuid."
   @spec text(String.t(), String.t()) :: String.t()
   def text(text, uuid), do: text <> " [delivery " <> uuid <> "]"
 
   @doc """
-  Whether a row's text is typed as itself (`text/2`): one line of printable characters within
-  `limit`, the characters the pane's box holds on one line as the `Inlet` reads it in its write
-  step (`Inlet.type/4`). Any other row is written to a file and typed as `pointer/2` (F-142).
-  A 200-column pane holds 196, so a 4-character text and its 73 of frame and mark fit (F-277).
+  The most bytes of `text/2` a row is pasted as itself: 8 000, a few thousand characters
+  whatever their script (F-279). A longer row is written to a file, and its pointer line is
+  pasted (F-142). The bound is set low: the largest paste Claude Code 2.1.322 takes whole was
+  not measured (F-279's build note says how). The `Inlet` pastes up to `Tmux.paste_max/0`.
 
-      iex> alias CodingAgentFramework.Mailbox.Transport.Typed
-      iex> Typed.fits?("Done.", "u1", 196)
-      true
-      iex> Typed.fits?(String.duplicate("x", 300), "u1", 196)
-      false
-      iex> Typed.fits?("Done.\\nAll of it.", "u1", 196)
-      false
+      iex> CodingAgentFramework.Mailbox.Transport.Typed.bound()
+      8000
   """
-  @spec fits?(String.t(), String.t(), non_neg_integer) :: boolean
-  def fits?(text, uuid, limit) do
-    line = text(text, uuid)
-    String.length(line) <= limit and not Regex.match?(~r/[\x00-\x1f\x7f]/, line)
-  end
+  @spec bound() :: pos_integer
+  def bound, do: 8_000
 
   @doc """
-  The line typed for a row too long to type: `line`, the framed sentence that names the file
+  The line pasted for a row past `bound/0`: `line`, the framed sentence that names the file
   its whole text is in (`Transport.pointer_line/2`), which the session may read, with the uuid
-  at its end as `text/2` does. It is typed whatever its length: it is the short form.
+  at its end as `text/2` does.
 
       iex> alias CodingAgentFramework.Mailbox.Transport
       iex> line = "From d1 (message): " <> Transport.pointer_line("/h/due/main/7.md")
@@ -336,7 +330,7 @@ defmodule CodingAgentFramework.Mailbox.Transport.Typed do
 
   @doc """
   Whether a row's stored `attempt` says the `Inlet` refused its text itself (too long, or a
-  control character in it): such a row waits for a waiter, and is not typed again. `Mailbox`
+  character it does not paste): such a row waits for a waiter, and is not typed again. `Mailbox`
   types its wake line once in its place, and bounds the wait (`wait_bound:`, F-240): past it
   with no waiter, the row is `undelivered`.
 
