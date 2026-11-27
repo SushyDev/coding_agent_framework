@@ -538,6 +538,8 @@ Built, each from a checked model in `model/tla/`:
   mark it never heard of, a brief marked for a start that never wrote its agent row ends at that
   start's deadline, and a delegate's new start ends an earlier start's brief left queued, which
   the launch would have carried in its own brief's place.
+- a paste carries bracketed paste's markers in its own buffer (F-287), so a multi-line message
+  is one submit even in a pane that attached under dtach after its program asked for the mode.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

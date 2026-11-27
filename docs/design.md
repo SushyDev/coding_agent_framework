@@ -2424,16 +2424,19 @@ a waiter connects; a view shows a session idle with no waiter and something due,
 `Inlet`'s checked write reaches it, as one more transport of the same row. It **pastes** the
 row (F-279, decided), any number of lines, the row's uuid at its end, only when the session
 file reads idle with no waiter held and the screen shows an empty box, both read again in the
-write's own step. The text goes to a tmux buffer named for the row's uuid, from stdin, never
-on a command line (`load-buffer -b <name> -`); the buffer is pasted bracketed, its newlines
-kept, and dropped, under the pane's tag check in one command (`paste-buffer -p -r -d`); and
+write's own step. The text, inside bracketed paste's own markers (`ESC [200~` and `ESC [201~`,
+F-287), goes to a tmux buffer named for the row's uuid, from stdin, never on a command line
+(`load-buffer -b <name> -`); the buffer is pasted as it is, its escapes kept and its newlines
+kept, and dropped, under the pane's tag check in one command (`paste-buffer -S -r -d`); and
 Enter goes as its own command once the box no longer reads empty. A buffer named per write
 holds that write's text whatever another writer loads between the load and the paste
 (`Agent.tla`'s `PastesItsOwnText`, `Break_Agent_OneBuffer`). Claude Code draws a long paste
 folded, `[Pasted text #1 +N lines]`, and submits all of it; the screen is not read back as
 text, and the transcript's user line, which carries the whole text and its mark, settles the
 row. A text with a control character other than newline and tab is refused, since an escape
-could end the paste's bracket early. A row past the paste's bound
+could end the paste's bracket early. The framework brackets the text itself, not tmux
+(`paste-buffer -p`), since tmux brackets only for a pane that saw the program turn the mode on,
+and a pane that attaches under dtach after the program started never sees it. A row past the paste's bound
 (`Transport.Typed.bound/0`, 8 000 bytes, set low and not measured) goes as a pointer (F-142):
 `Mailbox` writes its whole text to `<home>/due/<agent>/<row id>.md` (`Sessions.due_dir/2`), and
 pastes one line, "A message for you is in <path>; read it.", with the row's uuid at its end.

@@ -23,6 +23,10 @@ defmodule CodingAgentFramework.Tmux do
   as its current pane, and the tag check alone would refuse that pane too.
   """
 
+  # Bracketed paste's markers, which a paste's buffer holds around its text (`bracketed/1`).
+  @paste_start "\e[200~"
+  @paste_end "\e[201~"
+
   @type server :: struct
   @type key :: {host :: String.t(), server :: String.t()}
   @type pane :: String.t()
@@ -73,9 +77,10 @@ defmodule CodingAgentFramework.Tmux do
   @doc """
   Sends `input` to `pane` only when the pane's tag names `session`, in one tmux command.
 
-  A paste, `{:paste, buffer, text}`, is two (F-279): `text` is loaded into the server's buffer
-  named `buffer` from stdin, never on a command line; then, under the tag check in one command,
-  the buffer is pasted into the pane bracketed, its newlines kept, and dropped. A buffer named
+  A paste, `{:paste, buffer, text}`, is two (F-279): `text`, inside bracketed paste's markers
+  (`bracketed/1`, F-287), is loaded into the server's buffer named `buffer` from stdin, never
+  on a command line; then, under the tag check in one command, the buffer is pasted into the
+  pane as it is, its newlines kept, and dropped. A buffer named
   for one write alone holds that write's text when it is pasted, whatever another writer loads
   meanwhile (`model/tla/Agent.tla`, `PastesItsOwnText`). A paste refused by the check drops
   the buffer too. A load that fails pastes nothing: it is refused `{:load, reason}`.
@@ -191,8 +196,8 @@ defmodule CodingAgentFramework.Tmux do
       :ok
       iex> CodingAgentFramework.Tmux.paste_text("a\\e[201~b")
       {:refused, {:bad_text, :control}}
-      iex> CodingAgentFramework.Tmux.paste_text(String.duplicate("x", 16_385))
-      {:refused, {:too_long, 16384}}
+      iex> CodingAgentFramework.Tmux.paste_text(String.duplicate("x", 16_373))
+      {:refused, {:too_long, 16372}}
   """
   @spec paste_text(term) :: :ok | {:refused, term}
   def paste_text(text) do
@@ -206,14 +211,29 @@ defmodule CodingAgentFramework.Tmux do
   end
 
   @doc """
-  The most bytes one paste holds: `Shell.input_max/0`, since its text goes to the load's stdin
-  whole.
+  The most bytes one paste's text holds: `Shell.input_max/0` less the markers around it
+  (`bracketed/1`), since the bracketed text goes to the load's stdin whole.
 
       iex> CodingAgentFramework.Tmux.paste_max()
-      16384
+      16372
   """
   @spec paste_max() :: pos_integer
-  def paste_max, do: CodingAgentFramework.Shell.input_max()
+  def paste_max,
+    do: CodingAgentFramework.Shell.input_max() - byte_size(@paste_start <> @paste_end)
+
+  @doc """
+  `text` inside bracketed paste's markers, `ESC [200~` and `ESC [201~`, as a paste's buffer
+  holds it (F-287). A program in bracketed mode takes all between them as typed text, so a
+  newline in it does not submit. The framework brackets the text itself, since tmux brackets a
+  paste (`paste-buffer -p`) only when its pane saw the program turn the mode on, and a pane
+  that attached under dtach after the program started never did. `paste_text/1` refuses a
+  text with an escape, so none can end the bracket early.
+
+      iex> CodingAgentFramework.Tmux.bracketed("one\\ntwo")
+      "\\e[200~one\\ntwo\\e[201~"
+  """
+  @spec bracketed(String.t()) :: String.t()
+  def bracketed(text), do: @paste_start <> text <> @paste_end
 
   @doc "See the `c:capture/3` callback."
   @spec capture(server, pane, session) ::
