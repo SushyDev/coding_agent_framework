@@ -239,10 +239,12 @@ defmodule CodingAgentFramework.Transcripts.Fold do
   @doc """
   The reply of the turn that the first prompt holding `mark` began, in `bytes` (whole lines of
   a transcript): an interactive delegate's report, the reply to its brief (F-137). Answers
-  `:absent` while no prompt holds `mark`, else `{:ok, %{reply: text | nil, closed: closed}}`:
-  the last reply that ended a message of that turn (`stop_reason` `end_turn`), and whether a
-  later user entry began another turn, which closes it: a prompt, or a notification that starts
-  a turn (a waiter's text). A text queued into the running turn (a waiter's `queued_command`
+  `:absent` while no prompt holds `mark`, else `{:ok, %{reply: text | nil, closed: closed,
+  ended: ended}}`: the last reply that ended a message of that turn (`stop_reason` `end_turn`);
+  whether a later user entry began another turn, which closes it: a prompt, or a notification
+  that starts a turn (a waiter's text); and whether Claude Code's turn-end line
+  (`turn_duration`) follows that reply, which ends the turn whatever still runs in the
+  background (F-269). A text queued into the running turn (a waiter's `queued_command`
   attachment) joins it, as Claude Code takes it there.
 
       iex> alias CodingAgentFramework.Transcripts.Fold
@@ -250,15 +252,18 @@ defmodule CodingAgentFramework.Transcripts.Fold do
       iex> reply = ~s({"type":"assistant","message":{"id":"m1","stop_reason":"end_turn",) <>
       ...>   ~s("content":[{"type":"text","text":"Done."}]}}\\n)
       iex> Fold.reply_to(brief <> reply, "[delivery b-1]")
-      {:ok, %{reply: "Done.", closed: false}}
+      {:ok, %{reply: "Done.", closed: false, ended: false}}
+      iex> done = ~s({"type":"system","subtype":"turn_duration","durationMs":900}\\n)
+      iex> Fold.reply_to(brief <> reply <> done, "[delivery b-1]")
+      {:ok, %{reply: "Done.", closed: false, ended: true}}
       iex> later = ~s({"type":"user","message":{"content":"And now?"}}\\n)
       iex> Fold.reply_to(brief <> reply <> later, "[delivery b-1]")
-      {:ok, %{reply: "Done.", closed: true}}
+      {:ok, %{reply: "Done.", closed: true, ended: false}}
       iex> Fold.reply_to(reply, "[delivery b-1]")
       :absent
   """
   @spec reply_to(binary, String.t()) ::
-          :absent | {:ok, %{reply: String.t() | nil, closed: boolean}}
+          :absent | {:ok, %{reply: String.t() | nil, closed: boolean, ended: boolean}}
   def reply_to(bytes, mark) do
     lines = bytes |> String.split("\n") |> Enum.drop(-1)
 
@@ -267,12 +272,27 @@ defmodule CodingAgentFramework.Transcripts.Fold do
         :absent
 
       {_, [first | rest]} ->
-        {fold, closed} =
-          Enum.reduce_while(rest, {line(new(), first), false}, fn l, {f, _} ->
-            if opens?(l), do: {:halt, {f, true}}, else: {:cont, {line(f, l), false}}
+        {fold, closed, ended} =
+          Enum.reduce_while(rest, {line(new(), first), false, false}, fn l, {f, _, ended} ->
+            if opens?(l),
+              do: {:halt, {f, true, ended}},
+              else: {:cont, {line(f, l), false, turn_end(l, ended)}}
           end)
 
-        {:ok, %{reply: fold.last_reply && fold.last_reply.text, closed: closed}}
+        reply = fold.last_reply && fold.last_reply.text
+        {:ok, %{reply: reply, closed: closed, ended: ended and reply != nil}}
+    end
+  end
+
+  # Claude Code ends a turn's lines with its own `system` line `turn_duration`, after the reply
+  # and the Stop hooks' `stop_hook_summary` (2.1.322, F-269). A later assistant line of the same
+  # turn means it went on, so only a turn-end line after the last one counts.
+  defp turn_end(line, ended) do
+    case JSON.decode(line) do
+      {:ok, %{"isSidechain" => true}} -> ended
+      {:ok, %{"type" => "system", "subtype" => "turn_duration"}} -> true
+      {:ok, %{"type" => "assistant"}} -> false
+      _ -> ended
     end
   end
 

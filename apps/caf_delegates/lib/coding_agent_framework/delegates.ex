@@ -1397,9 +1397,10 @@ defmodule CodingAgentFramework.Delegates do
 
   # An interactive delegate's report (F-137, `Delegate.tla`'s ReportAnswersTheBrief): the reply
   # of the turn its brief, or its word to go on, began, read from its transcript, once that
-  # turn has ended: a later turn closed it, or its session reads its turn ended. Never the
-  # transcript's last reply, which a person's later turn gives. Its process gone with no such
-  # reply, it is resumed once, as a headless one is. A read that fails decides nothing.
+  # turn has ended: a later turn closed it, its turn-end line follows the reply (F-269), or its
+  # session reads its turn ended (`Delegate.tla`'s ReportTurnEnded). Never the transcript's
+  # last reply, which a person's later turn gives. Its process gone with no such reply, it is
+  # resumed once, as a headless one is. A read that fails decides nothing.
   defp settle_interactive(s, row, agent) do
     {brief, s} = turn_of(s, agent, row.brief_uuid)
 
@@ -1429,7 +1430,7 @@ defmodule CodingAgentFramework.Delegates do
         Agents.free?(agent) ->
           resume(s, row, agent, brief != :absent)
 
-        reply && (match?({:ok, %{closed: true}}, turn) or turn_ended?(s, agent)) ->
+        reply && (turn_closed?(turn) or turn_ended?(s, agent)) ->
           finish(s, row, "finished", {:reply, reply, %{}}, "turn_end")
 
         true ->
@@ -1439,6 +1440,13 @@ defmodule CodingAgentFramework.Delegates do
       _unread -> s
     end
   end
+
+  # The transcript shows the turn ended: a later turn closed it, or Claude Code's turn-end line
+  # follows its reply (F-269). Only then is the session file read, which says `shell` while a
+  # background command the turn started runs on, and so never holds the report behind it.
+  defp turn_closed?({:ok, %{closed: true}}), do: true
+  defp turn_closed?({:ok, %{ended: true}}), do: true
+  defp turn_closed?(_turn), do: false
 
   # Whether settle_interactive would act on the turn now: its process gone, or a reply.
   defp acts?(agent, turn),

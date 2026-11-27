@@ -2199,8 +2199,15 @@ carries goes as a pointer to its file (F-155, "The launch").
   hook in its launch overlay.
 - Its report is the reply to the brief's uuid, read from its transcript: the last reply that
   ended a message of the turn whose user line holds the brief's mark (or, after a resume, the
-  word to go on's), once that turn has ended: a later user entry began another turn, or its
-  session file reads its turn ended. Never the transcript's last reply: a person may have
+  word to go on's), once that turn has ended: a later user entry began another turn, Claude
+  Code's turn-end line (`system` `turn_duration`, written after the reply and the Stop hooks'
+  `stop_hook_summary`; checked against each pinned release) follows the reply, or its session
+  file reads its turn ended. A background command the turn started may run on after the turn,
+  and the session file then reads `shell`, which `Sessions.Turn` reads as running; the turn-end
+  line ends the report's turn whatever runs, so a report is never held behind a hung command,
+  as a headless one's is not ("A background command outlives its report"; `Delegate.tla`'s
+  `ReportTurnEnded`, `Break_Delegate_BackgroundHolds`, F-269). A message due to the delegate
+  still goes by its transports' own rules. Never the transcript's last reply: a person may have
   typed a turn of their own since (`Delegate.tla`'s `ReportAnswersTheBrief`,
   `Break_Delegate_LastReply`). Once its marked line is found, `Delegates` keeps that line's
   byte offset in memory and reads the transcript from it (F-137's new-4, F-142); a restart reads
@@ -2539,7 +2546,11 @@ framework's tools, which are strict in how they act and narrow in whom they reac
   a process that is gone. A fix refused that way takes no claim, so the next fix of that state is
   taken. A fix refused by what it meets only when it acts (a stop whose report is handed but not
   delivered, or with a row to it still open; an interactive delegate's interrupt with no turn on
-  its screen) still settles its claim and keeps the state.
+  its screen) still settles its claim and keeps the state. A state read that answers unknown
+  (the part that acts did not answer within its bound) takes no claim, since there is no state
+  to claim; the call is recorded as an act of its own, the tool's name with outcome `unknown`
+  and the read's reason, and the caller gets that unknown whole, so a fix that could not read
+  its state is in the ledger (F-269's new-2).
 - No agent fixes or moves a main session; only a person does, a move with one press.
 - An agent may not fix itself. A stuck agent cannot be relied on to see that it is stuck.
 - Jobs and services: a main session and its delegates may run jobs and start services on any

@@ -952,7 +952,7 @@ defmodule CodingAgentFramework.MCP do
          :ok <- forced_by(ctx, caller, fix),
          :ok <- Grants.may_fix?(ctx.grants, caller, agent),
          {:ok, by} <- fixer(ctx, caller, agent, tool),
-         {:ok, state} <- by.state.(),
+         {:ok, state} <- fix_state(ctx, caller, agent, tool, by),
          :ok <- held(fix, state),
          :ok <- by.check.(fix, state),
          {:ok, claim} <- Acts.claim(ctx.acts, caller, agent, state, tool, forced_detail(fix)) do
@@ -997,6 +997,24 @@ defmodule CodingAgentFramework.MCP do
     if Enum.any?(@tools, &(&1.name == tool)),
       do: {:refused, {:bad, :args}},
       else: {:refused, {:unknown_tool, tool}}
+  end
+
+  # The claim holds the state its fix was decided on, so a read with no answer claims nothing
+  # (F-269's new-2): it is an act of its own, outcome unknown with the read's reason, so the
+  # ledger shows the call was made. The caller gets the unknown whole.
+  defp fix_state(ctx, caller, agent, tool, by) do
+    case by.state.() do
+      {:unknown, why} = unknown ->
+        Acts.record(ctx.acts, caller, agent, tool, :unknown,
+          reason: why,
+          detail: %{step: "state"}
+        )
+
+        unknown
+
+      read ->
+        read
+    end
   end
 
   # A label is checked before the claim: a bad one never takes the state.
