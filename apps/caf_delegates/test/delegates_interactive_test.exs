@@ -720,9 +720,16 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     old = CodingAgentFramework.Stream.uuid()
     {:ok, {:queued, id}} = Mailbox.brief(ctx.mailbox, "main", name, "Stale.", old)
     Mailbox.cue(ctx.mailbox, %{topic: "sessions", ids: []})
-    Mailbox.status(ctx.mailbox, id)
     {:ok, mtable} = Mailbox.Table.open(Path.join(ctx.dir, "caf.db"))
-    assert %{status: "queued", attempt: "no_delivery"} = Mailbox.Table.get(mtable, id)
+
+    # The cue's pass reads in a task, so its mark comes after the cast, not with the next call.
+    assert {:ok, %{status: "queued"}} =
+             await(fn ->
+               case Mailbox.Table.get(mtable, id) do
+                 %{attempt: "no_delivery"} = row -> {:ok, row}
+                 _ -> nil
+               end
+             end)
 
     assert {:ok, %{name: ^name, brief_uuid: u}} =
              Delegates.start_delegate(ctx.delegates, "main", "app", "unit/one", "opus", "Go.",
@@ -826,7 +833,12 @@ defmodule CodingAgentFramework.DelegatesInteractiveTest do
     {:ok, _} =
       await(fn ->
         Mailbox.cue(w.mailbox, %{topic: "transcripts:test:work", ids: []})
-        with {:ok, %{status: "delivered"}} = ok <- Mailbox.status(w.mailbox, id), do: ok
+
+        # The cue's pass reads in a task (F-289): the status call may answer before it settles.
+        case Mailbox.status(w.mailbox, id) do
+          {:ok, %{status: "delivered"}} = ok -> ok
+          _ -> nil
+        end
       end)
 
     id

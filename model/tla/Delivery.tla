@@ -174,6 +174,20 @@
 (* "Processes and restarts"): its own restart is the whole one. Boxes.tla's *)
 (* CutCalls and its Break UnknownUndoes are this step at the contract       *)
 (* level; AgentCutUndoes here breaks it against the transports.            *)
+(*                                                                         *)
+(* The settle pass (F-289). Mailbox's evidence for a row is read by a task *)
+(* of its own (Read): Stream's fold, the transcript, the process. Mailbox  *)
+(* applies it later, in a step of its own (Apply), and only to the row as  *)
+(* it was read and with no hand of it under way; a row written since is    *)
+(* read again. So the read is no step of Mailbox, and a call waits on none *)
+(* (CallInBound): a call is answered in Mailbox's next step, which writes  *)
+(* only its own table. ReadInMailbox reads in Mailbox's own step, as the   *)
+(* code did before: a call waits through every read, and a read takes as   *)
+(* long as the host makes it, past any bound. StaleEvidence applies the    *)
+(* read to a row written since, here by a forced end, which it undoes.     *)
+(* Delivery alone checks the pass; an instancing spec settles in one step  *)
+(* (SettleReplay, SettleExit, SettleSeen), a refinement of Read then Apply *)
+(* with nothing between them.                                              *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -229,7 +243,9 @@ Breaks == {
     "WaitForever",           \* a row too wide to type waits for a waiter with no bound (F-240)
     "WakeInMemory",          \* the wake line's mark is memory: a restart types it again (F-240)
     "SettleAtIdle",          \* a typed row's line delivers it only while its turn reads ended (F-277)
-    "LostMark"               \* a start that lost its mark's answer tells Mailbox nothing (F-284)
+    "LostMark",              \* a start that lost its mark's answer tells Mailbox nothing (F-284)
+    "ReadInMailbox",         \* a settle's read is a step of Mailbox: a call waits through it (F-289)
+    "StaleEvidence"          \* a read is applied to a row written since it was read (F-289)
 }
 
 ASSUME Break \in Breaks
@@ -276,12 +292,17 @@ VARIABLES
     \* alone only: the sessions, Sessions' stop, and restarts
     restarts, lives, ends, prompts, stops, readAt,
     forced,    \* alone: the sessions whose end the operator forced (F-170), kept in Acts
-    fcall      \* alone, memory: the forced ends whose operator's call still runs (SettleInCall)
+    fcall,     \* alone, memory: the forced ends whose operator's call still runs (SettleInCall)
+    \* alone: the settle pass (F-289)
+    ev,        \* memory: i -> the evidence the pass's reader read for i, not yet applied
+    asks,      \* a call waits for Mailbox's answer
+    late       \* ghost: a call waited through a read
 
 dvars == <<row, hand, claimed, wire, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
 avars == <<up, pr, idle, stopping, over, turned>>
 alone == <<restarts, lives, ends, prompts, stops, readAt, forced, fcall>>
-vars == <<avars, dvars, alone>>
+pvars == <<ev, asks, late>>
+vars == <<avars, dvars, alone, pvars>>
 
 -----------------------------------------------------------------------------
 (* Reading the table *)
@@ -763,6 +784,79 @@ ForceSettled(i) ==
     /\ UNCHANGED <<claimed, wire, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
 
 -----------------------------------------------------------------------------
+(* Alone: the settle pass (F-289) *)
+
+NoEv == [read |-> FALSE, r |-> NoRow, has |-> FALSE, gone |-> FALSE, quiet |-> FALSE,
+         ended |-> FALSE]
+
+\* The pass's reader reads i's evidence: whether its line is in the
+\* transcript, whether the process it went to is gone, whether nothing of
+\* it is on its way to a turn (the take bound passed), and whether its
+\* addressee's end was forced and is over (Acts, Sessions). Under
+\* ReadInMailbox the read is Mailbox's own step, so a call waiting then
+\* waits through it.
+Read(i) ==
+    LET a == row[i].to IN
+    /\ up /\ row[i].st = "sending" /\ row[i].via \in {"stream", "waiter", "typed", "launch"}
+    /\ i \notin hand /\ ~ev[i].read
+    /\ ev' = [ev EXCEPT ![i] = [read |-> TRUE, r |-> row[i], has |-> InTx(i),
+                                gone |-> pr[a] # row[i].at, quiet |-> wire[i] = 0,
+                                ended |-> a \in forced /\ over[a]]]
+    /\ late' = (late \/ (asks /\ Break = "ReadInMailbox"))
+    /\ UNCHANGED <<avars, dvars, alone, asks>>
+
+\* What evidence e decides for the row it was read of: SettleReplay's,
+\* SettleExit's and SettleSeen's rules on the values read, and `ended`,
+\* whether its addressee's end was forced and is over.
+Decision(i, e, ended) ==
+    LET a == e.r.to
+        blind == Break = "OldWindow" /\ e.r.via = "launch"
+        has == e.has /\ ~blind
+    IN
+    IF e.r.via = "stream"
+      THEN IF ~e.gone THEN IF e.has THEN "delivered" ELSE "keep"
+           ELSE IF e.has /\ Break # "LogOnlyAtExit" THEN "delivered" ELSE "again"
+    ELSE IF ended THEN "keep"
+    ELSE IF has /\ (Break # "SettleAtIdle" \/ idle[a] \/ e.gone \/ e.r.via # "typed")
+      THEN "delivered"
+    ELSE IF ~has /\ ((e.quiet /\ ~blind) \/ e.gone \/ Break = "SettleEarly"
+                     \/ (Break = "LaunchBound" /\ e.r.via = "launch"))
+      THEN "again"
+    ELSE "keep"
+
+\* Mailbox applies the read, in a step of its own, to the row as it was
+\* read with no hand of it under way, its addressee's forced end read again
+\* (Mailbox's own ForceSettled goes first); else it decides nothing, and the
+\* next pass reads the row again. StaleEvidence applies what was read alone
+\* to the row as it is now.
+Apply(i) ==
+    LET e == ev[i]
+        d == CASE Break = "StaleEvidence"           -> Decision(i, e, e.ended)
+               [] e.r = row[i] /\ i \notin hand      -> Decision(i, e, e.r.to \in forced
+                                                                       /\ over[e.r.to])
+               [] OTHER                              -> "keep"
+    IN
+    /\ up /\ e.read
+    /\ ev' = [ev EXCEPT ![i] = NoEv]
+    /\ row' = CASE d = "delivered" -> [row EXCEPT ![i] = Delivered(i)]
+                [] d = "again"     -> [row EXCEPT ![i] = DueAgain(i)]
+                [] OTHER           -> row
+    /\ claimed' = IF d # "keep" /\ e.r.via = "stream" THEN claimed \ {i} ELSE claimed
+    /\ wire' = IF d # "keep" /\ e.gone THEN [wire EXCEPT ![i] = 0] ELSE wire
+    /\ UNCHANGED <<hand, waiter, call, tx, fold, rmem, last, unsure, lost, wrong>>
+    /\ UNCHANGED <<avars, alone, asks, late>>
+
+\* A call to Mailbox (a message, a launch, an end): Mailbox answers it in a
+\* step of its own, which writes only its table.
+CallIn ==
+    /\ up /\ ~asks /\ asks' = TRUE
+    /\ UNCHANGED <<avars, dvars, alone, ev, late>>
+
+CallOut ==
+    /\ asks /\ asks' = FALSE
+    /\ UNCHANGED <<avars, dvars, alone, ev, late>>
+
+-----------------------------------------------------------------------------
 (* Replies and notices, one per key; a resumed process's row to go on *)
 
 \* The result Mailbox takes as row i's reply: the one the fold keeps on i.
@@ -830,6 +924,7 @@ Init ==
     /\ tx = [a \in Addrs |-> <<>>] /\ fold = [i \in Ids |-> "none"]
     /\ rmem = {} /\ last = [a \in Addrs |-> NoResult]
     /\ unsure = {} /\ lost = {} /\ wrong = {}
+    /\ ev = [i \in Ids |-> NoEv] /\ asks = FALSE /\ late = FALSE
 
 Mailbox(A) == A /\ UNCHANGED <<avars, alone>>
 
@@ -959,11 +1054,14 @@ CallMade(i) ==
     /\ pr[row[i].to] # 0 /\ ~idle[row[i].to]
     /\ Mailbox(CallWaits(i))
 
-Settle(i) ==
-    \/ SettleReplay(i) \/ SettleExit(i, InTx(i)) \/ SettleSeen(i, InTx(i))
+\* The pass's reader and its calls end with the node.
+Dies == FrameworkDies /\ ev' = [i \in Ids |-> NoEv] /\ asks' = FALSE /\ UNCHANGED late
 
-Next ==
-    \/ FrameworkDies \/ FrameworkStarts
+\* Every step but the pass's, which leave the pass's variables as they are.
+Kept(A) == A /\ UNCHANGED pvars
+
+Steps ==
+    \/ FrameworkStarts
     \/ \E a \in Addrs : \/ Prompted(a) \/ SelfStarts(a) \/ TurnEnds(a) \/ Ends(a)
                         \/ Resumed(a) \/ StopAsked(a) \/ IdleRead(a) \/ Term(a) \/ Over(a)
                         \/ ForcedEnd(a) \/ Continued(a)
@@ -974,7 +1072,7 @@ Next ==
                       \/ Mailbox(Handed(i) \/ Refused(i) \/ Unknown(i) \/ Reclaim(i))
                       \/ Mailbox(MarkLost(i) \/ NoStart(i))
                       \/ Launches(i)
-                      \/ Takes(i) \/ Mailbox(Settle(i))
+                      \/ Takes(i)
                       \/ CallMade(i)
                       \/ Mailbox(Deadline(i) \/ Written(i) \/ Told(i) \/ CallerEnds(i)
                                  \/ CallerSeen(i) \/ SettleCut(i))
@@ -982,23 +1080,30 @@ Next ==
                       \/ Mailbox(ReplyStored(i) \/ NoticeStored(i) \/ GoOn(i))
                       \/ Mailbox(WaitBound(i)) \/ \E took \in BOOLEAN : Woken(i, took)
 
+Next ==
+    \/ Kept(Steps) \/ Dies \/ CallIn \/ CallOut
+    \/ \E i \in Ids : Read(i) \/ Apply(i)
+
 \* One row's steps after its mark and hand-on, but the take: each is the
 \* next one the row can take, so one fairness for them all is enough, and
 \* keeps TLC fast. The take is strongly fair: a prompt may take the turn
-\* each time an answer waits for it.
+\* each time an answer waits for it. The pass's Read and Apply are fair
+\* each on their own: they are possible at every step a row is sending,
+\* so in that one fairness they would stand for the step the row needs.
 RowSteps(i) ==
-    Mailbox(\/ Refused(i) \/ Reclaim(i) \/ Settle(i) \/ Deadline(i) \/ Written(i) \/ Told(i)
-               \/ CallerSeen(i) \/ SettleCut(i) \/ EndedFirst(i) \/ ReplyStored(i)
-               \/ NoticeStored(i) \/ GoOn(i) \/ ForceSettled(i) \/ WaitBound(i))
+    \/ Kept(Mailbox(\/ Refused(i) \/ Reclaim(i) \/ Deadline(i) \/ Written(i) \/ Told(i)
+                    \/ CallerSeen(i) \/ SettleCut(i) \/ EndedFirst(i) \/ ReplyStored(i)
+                    \/ NoticeStored(i) \/ GoOn(i) \/ ForceSettled(i) \/ WaitBound(i)))
 
 Fairness ==
-    /\ WF_vars(FrameworkStarts)
-    /\ \A a \in Addrs : /\ WF_vars(TurnEnds(a) \/ Resumed(a) \/ IdleRead(a) \/ Term(a))
-                        /\ WF_vars(Mailbox(Connects(a)))
-    /\ \A i \in Ids : /\ SF_vars(\E t \in Transports : Mailbox(Mark(i, t)))
-                     /\ SF_vars(Mailbox(Handed(i))) /\ SF_vars(Takes(i))
-                     /\ SF_vars(Launches(i))
+    /\ WF_vars(Kept(FrameworkStarts))
+    /\ \A a \in Addrs : /\ WF_vars(Kept(TurnEnds(a) \/ Resumed(a) \/ IdleRead(a) \/ Term(a)))
+                        /\ WF_vars(Kept(Mailbox(Connects(a))))
+    /\ \A i \in Ids : /\ SF_vars(Kept(\E t \in Transports : Mailbox(Mark(i, t))))
+                     /\ SF_vars(Kept(Mailbox(Handed(i)))) /\ SF_vars(Kept(Takes(i)))
+                     /\ SF_vars(Kept(Launches(i)))
                      /\ WF_vars(RowSteps(i))
+                     /\ WF_vars(Read(i)) /\ WF_vars(Apply(i))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -1074,6 +1179,10 @@ UnknownStays ==
 ForcedSettles ==
     \A i \in Ids : (row[i].st = "sending" /\ row[i].to \in forced /\ over[row[i].to])
                      ~> row[i].st # "sending"
+
+\* No call waits through a settle's read (F-289): the read is the pass's
+\* reader's step, never Mailbox's. ReadInMailbox breaks it.
+CallInBound == ~late
 
 \* A row in flight settles.
 SendingSettles == \A i \in Ids : row[i].st = "sending" ~> row[i].st # "sending"

@@ -547,6 +547,9 @@ Built, each from a checked model in `model/tla/`:
   is one submit even in a pane that attached under dtach after its program asked for the mode.
 - `bin/check-model` runs TLC on every core only while the load is under half the cores, and on 2
   workers otherwise (F-290), so a model check on a busy shared host leaves its cores to others.
+- a `Mailbox` call answers within its 5 s on a loaded host (F-289): a settle pass reads the
+  transcripts and the other parts in a task, and applies what it read to each row as it is
+  then, so a slow read no longer holds `message`, `launch/4` or `ended/3`.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

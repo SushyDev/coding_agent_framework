@@ -201,9 +201,11 @@ defmodule CodingAgentFramework.MoverTest do
     WaiterStandIn.take(main.transcript, main.sid, String.trim_trailing(text), :idle)
     assert {:ok, %{status: 0}} = kill(main.pid, "-KILL")
 
-    # Copied, and the resume waits while the row is sending.
+    # Copied, and the resume waits while the row is sending. The reader's own transcript cue
+    # may settle the row by now: a pass no longer holds the call that showed the row sending.
     assert {:ok, _} = row_when(ctx, "main", &(&1.move == "resuming"))
-    assert %{status: "sending", via: "waiter"} = mrow(ctx, one)
+    assert %{status: status, via: "waiter"} = mrow(ctx, one)
+    assert status in ["sending", "delivered"]
     assert %{account: "work", status: "stopped"} = row(ctx, "main")
 
     assert {:ok, %{again: 0}} =
