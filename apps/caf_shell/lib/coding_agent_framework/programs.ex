@@ -181,13 +181,24 @@ defmodule CodingAgentFramework.Programs do
   executable file, in the same shell run. A relative `PATH` entry gives a relative path, which
   is not absolute and so counts as not found.
 
+  With `path:` the lookup runs with that `PATH` instead of the one the host's shell starts with:
+  a remote host's programs are found on the `PATH` they will run with, not the one ssh gives.
+
   Returns `{:refused, {:not_found, names}}` naming each one that did not.
   """
   @spec find(Host.t(), [name], keyword) :: {:ok, t} | {:refused, term} | {:unknown, term}
   def find(%Host{} = host, names, opts \\ [timeout: 10_000]) do
+    {path, opts} = Keyword.pop(opts, :path)
+    commands = Enum.map(names, &command/1)
+
+    # The PATH goes as an argument, never inside the script, so no text of it is ever run.
+    args =
+      if path,
+        do: ["-c", ~S(PATH=$1; export PATH; shift; ) <> @find, "sh", path | commands],
+        else: ["-c", @find, "sh" | commands]
+
     with [] <- names -- @names,
-         {:ok, %{status: 0, output: out}} <-
-           Shell.run(host, @sh, ["-c", @find, "sh" | Enum.map(names, &command/1)], opts) do
+         {:ok, %{status: 0, output: out}} <- Shell.run(host, @sh, args, opts) do
       lines = for l <- String.split(out, "\n", trim: true), do: String.split(l, "\t", parts: 2)
       os = Enum.find_value(lines, :unknown, fn l -> with ["os", os] <- l, do: os_named(os) end)
 

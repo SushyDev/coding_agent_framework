@@ -85,6 +85,27 @@ defmodule CodingAgentFramework.HostsTest do
     assert {:ok, _} = Hosts.reach(c.hosts, "mac", :place, 5_000)
   end
 
+  test "a host's programs are found on its entry's env PATH, not only on ssh's own", c do
+    brew = Path.join(c.dir, "brew bin")
+    File.mkdir_p!(brew)
+
+    for name <- ["dtach", "flock"] do
+      File.rm!(Path.join(c.bin, name))
+      link(brew, name, program!(String.to_atom(name)))
+    end
+
+    mac = Host.ssh("mac", Path.join(c.dir, "ssh"), "mac", program!(:kill))
+    path = "#{brew}:#{c.bin}"
+    decl = %{host: mac, dir: "/caf", env: [{"PATH", path}]}
+    brewed = start_supervised!({Hosts, hosts: %{"mac" => decl}, retry: 60_000}, id: :brewed)
+
+    assert {:refused, {:no_program, "mac", missing}} = Hosts.reach(c.hosts, "mac", :place, 5_000)
+    assert Enum.sort(missing) == [:dtach, :flock]
+    assert {:ok, %{programs: programs}} = Hosts.reach(brewed, "mac", :place, 5_000)
+    assert {:ok, dtach} = CodingAgentFramework.Programs.fetch(programs, :dtach)
+    assert String.starts_with?(dtach, brew)
+  end
+
   test "an rsync too old for the copy is refused with what it says it is", c do
     File.rm!(Path.join(c.bin, "rsync"))
     old = Path.join(c.dir, "openrsync")

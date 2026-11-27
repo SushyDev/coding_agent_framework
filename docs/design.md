@@ -1398,10 +1398,11 @@ its host, as it has since the first part built, so the workstation is one host a
   it;
 - another host may be away (asleep, off the network) and may lack programs, so nothing of it is
   read at the tree's start (F-280, `Host.tla`). Each placement of new work there finds its
-  programs over ssh with `Programs.find/3`, bounded by the placement's start timeout, and
-  answers at once: placed; `{:refused, {:no_program, host, names}}`, naming every program
-  missing; `{:refused, {:old_rsync, host, line}}`, an rsync older than 3.1.3 (`line` its
-  `--version`'s first); or `{:refused, {:host_away, host}}`, no answer within the bound. A
+  programs over ssh with `Programs.find/3`, on the `PATH` the entry's `env` names when it names
+  one (F-291), bounded by the placement's start timeout, and answers at once: placed;
+  `{:refused, {:no_program, host, names}}`, naming every program missing;
+  `{:refused, {:old_rsync, host, line}}`, an rsync older than 3.1.3 (`line` its `--version`'s
+  first); or `{:refused, {:host_away, host}}`, no answer within the bound. A
   refused placement writes no job row and marks a service's row `refused`. The next placement
   finds the host again, so it joins without a restart. A placement finds a ready host again
   too, since only a find shows that it still answers: one ssh per placement, and one more
