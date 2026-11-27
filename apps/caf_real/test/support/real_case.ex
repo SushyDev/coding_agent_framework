@@ -71,7 +71,7 @@ defmodule CodingAgentFramework.RealCase do
       "home" => home,
       "instance" => name,
       "accounts" => ["one", "two"],
-      "ports" => %{"intake" => free_port(), "mcp" => free_port()},
+      "ports" => %{"intake" => TestHost.free_port(), "mcp" => TestHost.free_port()},
       "projects" => %{
         project => %{
           "origin" => origin,
@@ -149,13 +149,6 @@ defmodule CodingAgentFramework.RealCase do
     run.(["-c", "commit.gpgsign=false", "commit", "-qm", "Seed the demo project"])
     run.(["clone", "-q", "--bare", ".", bare])
     bare
-  end
-
-  defp free_port do
-    {:ok, s} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
-    {:ok, port} = :inet.port(s)
-    :gen_tcp.close(s)
-    port
   end
 
   @doc "Calls `check` until it answers `{:ok, value}`, or fails at `ms`, naming the screen."

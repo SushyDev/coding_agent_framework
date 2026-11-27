@@ -570,6 +570,8 @@ Built, each from a checked model in `model/tla/`:
   tool (F-298), so a publish asked for in a message is not refused by auto mode's check.
 - caf-run fails closed: with no answer or an `unknown` one past its bound, it exits 75 and
   runs nothing (F-302); `CAF_RUN_UNLEASED=1` is the explicit way to run without a lease.
+- the tests hold on a loaded host (F-293): a test's port is picked below the kernel's ephemeral
+  range, and a test that cues `Mailbox` waits for the cue's pass to end before it reads.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

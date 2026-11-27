@@ -60,13 +60,6 @@ defmodule CodingAgentFramework.SurfaceTest do
     %{config: config, i: instance, fields: fields, sessions: sessions, dir: dir, home: home}
   end
 
-  defp free_port do
-    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
-    {:ok, port} = :inet.port(socket)
-    :gen_tcp.close(socket)
-    port
-  end
-
   defp start(config) do
     parts = CodingAgentFramework.parts(start_supervised!({CodingAgentFramework, config}))
     keys = ~w(home reaper names cues inlet usage stream intake intake_http sampler sessions acts)a

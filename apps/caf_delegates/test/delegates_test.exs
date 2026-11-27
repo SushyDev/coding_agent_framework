@@ -1355,8 +1355,7 @@ defmodule CodingAgentFramework.DelegatesTest do
   # after each cast answers once it is handled.
   defp cue(ctx, delegates) do
     {:ok, _} = Stream.read(ctx.stream)
-    Mailbox.cue(mailbox(ctx), %{topic: "stream:test", ids: []})
-    Mailbox.status(mailbox(ctx), 0)
+    cued(mailbox(ctx), %{topic: "stream:test", ids: []})
     Delegates.cue(delegates, %{topic: "stream:test", ids: []})
     :sys.get_state(delegates)
   end
@@ -1391,8 +1390,7 @@ defmodule CodingAgentFramework.DelegatesTest do
         fn ->
           # Mailbox is cued too: the brief and the word to go on are its rows.
           {:ok, _} = Stream.read(ctx.stream)
-          Mailbox.cue(mailbox(ctx), %{topic: "stream:test", ids: []})
-          Mailbox.status(mailbox(ctx), 0)
+          cued(mailbox(ctx), %{topic: "stream:test", ids: []})
           {:ok, %{rows: rows}} = Stream.rows(ctx.stream)
           row = Enum.find(rows, &(&1.session == sid))
           if row && safe(ok?, row), do: {:ok, row}, else: row
@@ -1417,5 +1415,21 @@ defmodule CodingAgentFramework.DelegatesTest do
 
     if status != 0, do: raise("git #{inspect(args)}: #{out}")
     out
+  end
+
+  # A cue's pass reads in a task and applies its answer after later calls have answered
+  # (F-289), so no call after the cue shows its effect. The cue is handled once the Mailbox
+  # runs no pass: a cue that came during one starts the next before this one ends.
+  defp cued(mailbox, cue) do
+    Mailbox.cue(mailbox, cue)
+    {:ok, _} = await(fn -> if passed?(mailbox), do: {:ok, :passed} end, 10_000)
+  end
+
+  # A Mailbox the test stopped or restarted runs no pass of this cue: its successor settles on
+  # its own start.
+  defp passed?(mailbox) do
+    :sys.get_state(mailbox).pass == nil
+  catch
+    :exit, {:noproc, _} -> true
   end
 end

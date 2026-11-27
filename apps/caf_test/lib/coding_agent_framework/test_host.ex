@@ -25,6 +25,47 @@ defmodule CodingAgentFramework.TestHost do
   """
   def instance_name(label), do: "#{label}-#{System.unique_integer([:positive])}"
 
+  # Below every kernel's ephemeral range (Linux 32768-60999, macOS 49152-65535), where the host
+  # picks the local port of each outgoing connection and of each listen on port 0.
+  @ports 20_000..32_767
+
+  @doc """
+  A port on 127.0.0.1 for a tree to bind, free when this answers. A tree takes its ports from
+  its config, so the test picks one before the tree binds it. A port the host hands out (a
+  listen on port 0) is in the ephemeral range, where any client connection on the host may
+  take it before the tree binds it: this picks below that range instead. Each call in this VM
+  takes a later port than the last, so two tests here never get one port, and a port another
+  program holds is skipped.
+
+      free_port() #=> 24117
+  """
+  def free_port, do: free_port(Range.size(@ports))
+
+  defp free_port(0), do: raise("no free port in #{inspect(@ports)}")
+
+  defp free_port(left) do
+    port = next_port()
+
+    # Bandit listens with `reuseaddr`, so a port whose old connections wait out TIME_WAIT is
+    # free to it, and to this check.
+    case :gen_tcp.listen(port, ip: {127, 0, 0, 1}, reuseaddr: true) do
+      {:ok, socket} ->
+        :gen_tcp.close(socket)
+        port
+
+      {:error, :eaddrinuse} ->
+        free_port(left - 1)
+    end
+  end
+
+  # A monotonic integer grows with each call in this VM, so the ports it gives repeat only
+  # after the whole range. The start is the OS pid's, so test VMs side by side start apart.
+  defp next_port do
+    size = Range.size(@ports)
+    start = :erlang.phash2(System.pid(), size)
+    @ports.first + rem(start + System.unique_integer([:positive, :monotonic]), size)
+  end
+
   @doc "The local host tests run on, with devenv's kill."
   def host, do: Host.local("test", program!(:kill))
 

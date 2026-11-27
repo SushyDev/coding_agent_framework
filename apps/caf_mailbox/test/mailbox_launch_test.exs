@@ -114,8 +114,7 @@ defmodule CodingAgentFramework.MailboxLaunchTest do
     {:ok, %{uuid: ^uuid}} = Mailbox.launch(m, "main", soon)
     GenServer.stop(m)
     Process.put(:mailbox, restart(ctx.mopts))
-    Mailbox.cue(mailbox(ctx), %{topic: "sessions", ids: []})
-    Mailbox.status(mailbox(ctx), 0)
+    cued(mailbox(ctx), %{topic: "sessions", ids: []})
     row = Table.get(ctx.mtable, one)
     # A loaded host may have passed the deadline already; before it, the row waits.
     assert row.status == "sending" or System.os_time(:millisecond) >= soon
@@ -327,12 +326,27 @@ defmodule CodingAgentFramework.MailboxLaunchTest do
   defp until(ctx, id, ready?) do
     await(
       fn ->
-        Mailbox.cue(mailbox(ctx), %{topic: "transcripts:test:work", ids: []})
-        Mailbox.status(mailbox(ctx), 0)
+        cued(mailbox(ctx), %{topic: "transcripts:test:work", ids: []})
         row = Table.get(ctx.mtable, id)
         if ready?.(row), do: {:ok, row}, else: row
       end,
       10_000
     )
+  end
+
+  # A cue's pass reads in a task and applies its answer after later calls have answered
+  # (F-289), so no call after the cue shows its effect. The cue is handled once the Mailbox
+  # runs no pass: a cue that came during one starts the next before this one ends.
+  defp cued(mailbox, cue) do
+    Mailbox.cue(mailbox, cue)
+    {:ok, _} = await(fn -> if passed?(mailbox), do: {:ok, :passed} end, 10_000)
+  end
+
+  # A Mailbox the test stopped or restarted runs no pass of this cue: its successor settles on
+  # its own start.
+  defp passed?(mailbox) do
+    :sys.get_state(mailbox).pass == nil
+  catch
+    :exit, {:noproc, _} -> true
   end
 end

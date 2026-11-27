@@ -62,13 +62,6 @@ defmodule CodingAgentFramework.HomeTest do
   # The instance names are this test's own, so another test's trees in this VM never meet them.
   defp name(label), do: "home-#{label}-#{System.unique_integer([:positive])}"
 
-  defp free_port do
-    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
-    {:ok, port} = :inet.port(socket)
-    :gen_tcp.close(socket)
-    port
-  end
-
   defp start(c), do: start_supervised!({CodingAgentFramework, c})
   defp stop(c), do: stop_supervised!({CodingAgentFramework, c.instance})
 

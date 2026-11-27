@@ -44,13 +44,6 @@ defmodule CodingAgentFramework.Example.ConsoleTest do
     %{dir: dir, data: data, env: System.get_env()}
   end
 
-  defp free_port do
-    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
-    {:ok, port} = :inet.port(socket)
-    :gen_tcp.close(socket)
-    port
-  end
-
   defp write!(ctx, data) do
     path = Path.join(ctx.dir, "caf-#{System.unique_integer([:positive])}.json")
     File.write!(path, JSON.encode!(data))

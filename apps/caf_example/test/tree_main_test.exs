@@ -49,13 +49,6 @@ defmodule CodingAgentFramework.Example.TreeMainTest do
     %{dir: dir, path: path, config: config}
   end
 
-  defp free_port do
-    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
-    {:ok, port} = :inet.port(socket)
-    :gen_tcp.close(socket)
-    port
-  end
-
   test "a main session started through Mains on the whole tree reaches idle, then ends", ctx do
     {:ok, io} = StringIO.open("")
     Process.group_leader(self(), io)

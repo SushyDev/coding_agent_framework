@@ -37,13 +37,6 @@ defmodule CodingAgentFramework.SubscribeTest do
     c
   end
 
-  defp free_port do
-    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
-    {:ok, port} = :inet.port(socket)
-    :gen_tcp.close(socket)
-    port
-  end
-
   defp start(c), do: CodingAgentFramework.parts(start_supervised!({CodingAgentFramework, c}))
 
   # An app's process: it subscribes to `topics` of `instance`, and hands the test each cue it

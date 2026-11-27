@@ -402,14 +402,6 @@ defmodule CodingAgentFramework.ServicesTest do
     assert {:ok, ^db} = {Services.Table.open(path) |> elem(0), db}
   end
 
-  # A port free a moment ago.
-  defp free_port do
-    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
-    {:ok, port} = :inet.port(socket)
-    :gen_tcp.close(socket)
-    port
-  end
-
   defp listens?(port) do
     case :gen_tcp.connect({127, 0, 0, 1}, port, [], 1_000) do
       {:ok, socket} -> :gen_tcp.close(socket) || true
