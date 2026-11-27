@@ -27,7 +27,11 @@ defmodule CodingAgentFramework.Tmux do
   @type key :: {host :: String.t(), server :: String.t()}
   @type pane :: String.t()
   @type session :: String.t()
-  @type input :: {:text, String.t()} | {:line, String.t()} | {:keys, [String.t()]}
+  @type input ::
+          {:text, String.t()}
+          | {:line, String.t()}
+          | {:keys, [String.t()]}
+          | {:paste, buffer :: String.t(), String.t()}
   @type pane_info ::
           %{pane: pane, session: session, tag: session | nil, start: String.t()}
           | {:malformed, String.t()}
@@ -69,7 +73,15 @@ defmodule CodingAgentFramework.Tmux do
   @doc """
   Sends `input` to `pane` only when the pane's tag names `session`, in one tmux command.
 
-  Refusals: `:no_server`, `:no_pane`, `:untagged`, `{:tagged_for, other}`.
+  A paste, `{:paste, buffer, text}`, is two (F-279): `text` is loaded into the server's buffer
+  named `buffer` from stdin, never on a command line; then, under the tag check in one command,
+  the buffer is pasted into the pane bracketed, its newlines kept, and dropped. A buffer named
+  for one write alone holds that write's text when it is pasted, whatever another writer loads
+  meanwhile (`model/tla/Agent.tla`, `PastesItsOwnText`). A paste refused by the check drops
+  the buffer too. A load that fails pastes nothing: it is refused `{:load, reason}`.
+
+  Refusals: `:no_server`, `:no_pane`, `:untagged`, `{:tagged_for, other}`, and for a paste
+  `{:load, reason}`.
   """
   @callback write(server, pane, session, input) ::
               {:ok, :sent} | {:refused, term} | {:unknown, term}
@@ -112,6 +124,7 @@ defmodule CodingAgentFramework.Tmux do
   @callback kill_server(server) :: {:ok, :killed} | {:refused, term} | {:unknown, term}
 
   @pane ~r/\A%[0-9]+\z/
+  @buffer ~r/\A[A-Za-z0-9_-]{1,64}\z/
   @session ~r/\A[A-Za-z0-9_-]{1,64}\z/
   @key ~r/\A[A-Za-z0-9-]{1,32}\z/
 
@@ -151,12 +164,56 @@ defmodule CodingAgentFramework.Tmux do
           {:ok, :sent} | {:refused, term} | {:unknown, term}
   def write(%mod{} = server, pane, session, input) do
     cond do
-      not pane?(pane) -> {:refused, {:bad_target, pane}}
-      not session?(session) -> {:refused, {:bad_session, session}}
-      not input?(input) -> {:refused, {:bad_input, input}}
-      true -> mod.write(server, pane, session, input)
+      not pane?(pane) ->
+        {:refused, {:bad_target, pane}}
+
+      not session?(session) ->
+        {:refused, {:bad_session, session}}
+
+      match?({:paste, _, _}, input) ->
+        with(:ok <- paste?(input), do: mod.write(server, pane, session, input))
+
+      not input?(input) ->
+        {:refused, {:bad_input, input}}
+
+      true ->
+        mod.write(server, pane, session, input)
     end
   end
+
+  @doc """
+  Whether `text` may be pasted (`c:write/4`'s `{:paste, buffer, text}`): `:ok`, or the
+  refusal. It is valid UTF-8 and not empty, at most `paste_max/0` bytes, and holds no control
+  character but newline and tab. An escape inside a bracketed paste could end the bracket
+  early, and what follows would be read as keys, an Enter among them.
+
+      iex> CodingAgentFramework.Tmux.paste_text("line one\\nline two")
+      :ok
+      iex> CodingAgentFramework.Tmux.paste_text("a\\e[201~b")
+      {:refused, {:bad_text, :control}}
+      iex> CodingAgentFramework.Tmux.paste_text(String.duplicate("x", 16_385))
+      {:refused, {:too_long, 16384}}
+  """
+  @spec paste_text(term) :: :ok | {:refused, term}
+  def paste_text(text) do
+    cond do
+      not is_binary(text) or text == "" -> {:refused, {:bad_text, :empty}}
+      not String.valid?(text) -> {:refused, {:bad_text, :invalid}}
+      byte_size(text) > paste_max() -> {:refused, {:too_long, paste_max()}}
+      Regex.match?(~r/[\x00-\x08\x0b-\x1f\x7f]/, text) -> {:refused, {:bad_text, :control}}
+      true -> :ok
+    end
+  end
+
+  @doc """
+  The most bytes one paste holds: `Shell.input_max/0`, since its text goes to the load's stdin
+  whole.
+
+      iex> CodingAgentFramework.Tmux.paste_max()
+      16384
+  """
+  @spec paste_max() :: pos_integer
+  def paste_max, do: CodingAgentFramework.Shell.input_max()
 
   @doc "See the `c:capture/3` callback."
   @spec capture(server, pane, session) ::
@@ -228,4 +285,10 @@ defmodule CodingAgentFramework.Tmux do
     do: Enum.all?(keys, &(is_binary(&1) and &1 =~ @key))
 
   defp input?(_), do: false
+
+  defp paste?({:paste, buffer, text}) do
+    if is_binary(buffer) and buffer =~ @buffer,
+      do: paste_text(text),
+      else: {:refused, {:bad_buffer, buffer}}
+  end
 end

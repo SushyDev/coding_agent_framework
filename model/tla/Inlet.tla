@@ -5,7 +5,7 @@
 (* on the instance's clock, and each kind of call has its own bound: the   *)
 (* longest it runs once started. A call starts only while its bound still  *)
 (* fits before its deadline. A call still queued when that last start      *)
-(* time comes is answered busy at once, while another call runs, and      *)
+(* time comes is answered busy at once, while another call runs, and       *)
 (* never starts later. A call that has started runs to its own bound, so   *)
 (* it ends by its deadline. Either way the caller has its answer by its    *)
 (* deadline, and it waits that long and a margin, so it never gives up     *)
@@ -22,6 +22,13 @@
 (* clock that ticks while nothing in the Inlet is due. A call's run ends   *)
 (* at any time up to its bound, as a press ends as soon as each read sees  *)
 (* its keys.                                                               *)
+(*                                                                         *)
+(* A write's run is three tmux commands (F-279): the load of its text      *)
+(* into a buffer named for its row, the paste of that buffer, which drops  *)
+(* it, and the Enter. One Inlet runs them in one call, with no call of     *)
+(* its own between; another writer on the server may still load between    *)
+(* them, which the buffer's own name makes harmless (Agent.tla's           *)
+(* PastesItsOwnText).                                                      *)
 (*                                                                         *)
 (* Left abstract: what a call does to the screen (Dialog.tla's Press,      *)
 (* Delivery.tla's typed), and its outcome other than busy. A caller that   *)
@@ -139,7 +146,7 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 -----------------------------------------------------------------------------
-(* What must hold *)
+(* What must hold                                                          *)
 
 TypeOK ==
     /\ now \in 0..MaxTime

@@ -8,7 +8,7 @@ defmodule CodingAgentFramework.Tmux.CLI do
   default: it is the framework's own, and a user's config could change its indexes or options.
 
       iex> host = CodingAgentFramework.Host.local("laptop", "/run/bin/kill")
-      iex> paths = %{tmux: "/run/bin/tmux", rm: "/run/bin/rm"}
+      iex> paths = %{tmux: "/run/bin/tmux", rm: "/run/bin/rm", sh: "/run/bin/sh", head: "/run/bin/head"}
       iex> {:ok, programs} = CodingAgentFramework.Programs.new(host, paths)
       iex> {:ok, server} = CodingAgentFramework.Tmux.CLI.new(programs, {:name, "agents"})
       iex> CodingAgentFramework.Tmux.key(server)
@@ -38,12 +38,14 @@ defmodule CodingAgentFramework.Tmux.CLI do
 
   alias CodingAgentFramework.{Host, Programs, Shell, Tmux}
 
-  @enforce_keys [:host, :server, :tmux, :rm]
+  @enforce_keys [:host, :server, :tmux, :rm, :sh, :head]
   defstruct [
     :host,
     :server,
     :tmux,
     :rm,
+    :sh,
+    :head,
     systemd_run: nil,
     tag: "@caf_session",
     config: "/dev/null",
@@ -55,6 +57,8 @@ defmodule CodingAgentFramework.Tmux.CLI do
           server: {:name, String.t()} | {:socket, String.t()},
           tmux: String.t(),
           rm: String.t(),
+          sh: String.t(),
+          head: String.t(),
           systemd_run: String.t() | nil,
           tag: String.t(),
           config: String.t(),
@@ -63,14 +67,14 @@ defmodule CodingAgentFramework.Tmux.CLI do
 
   @doc """
   A server handle on the host of `programs`, which must name its tmux and rm (`kill_server/1`
-  removes the socket file with it), and its systemd_run on a host whose `scope` is
+  removes the socket file with it), sh and head (a paste's load reads its text from stdin), and its systemd_run on a host whose `scope` is
   `:systemd_user`. Nothing runs until a call. Options: `:tag`, `:config`,
   `:timeout`.
   """
   @spec new(Programs.t(), {:name, String.t()} | {:socket, String.t()}, keyword) ::
           {:ok, t} | {:refused, {:no_program, list}}
   def new(%Programs{host: host} = programs, server, opts \\ []) do
-    with {:ok, paths} <- Programs.take(programs, [:tmux, :rm | scoped(host)]),
+    with {:ok, paths} <- Programs.take(programs, [:tmux, :rm, :sh, :head | scoped(host)]),
          do:
            {:ok, struct!(__MODULE__, [host: host, server: server] ++ Map.to_list(paths) ++ opts)}
   end
@@ -181,6 +185,36 @@ defmodule CodingAgentFramework.Tmux.CLI do
   def write(%__MODULE__{} = s, pane, session, {:keys, keys}),
     do: guarded(s, pane, session, "send-keys -t #{pane} #{Enum.join(keys, " ")}", :sent)
 
+  # The load reads exactly the text's bytes, so it ends though the stdin stays open. Then the
+  # paste: bracketed (`-p`), its newlines kept (`-r`), the buffer dropped (`-d`).
+  def write(%__MODULE__{} = s, pane, session, {:paste, buffer, text}) do
+    with :ok <- load(s, buffer, text) do
+      paste = "paste-buffer -p -r -d -b #{buffer} -t #{pane}"
+
+      case guarded(s, pane, session, paste, :sent, "delete-buffer -b #{buffer} ; ") do
+        {:unknown, {:tmux, 1, "no buffer" <> _}} -> {:refused, :no_buffer}
+        other -> other
+      end
+    end
+  end
+
+  defp load(%__MODULE__{} = s, buffer, text) do
+    script = ~S(head=$1 n=$2; shift 2; "$head" -c "$n" | "$@")
+    load = tmux_argv(s, ["load-buffer", "-b", buffer, "-"])
+    args = ["-c", script, "sh", s.head, "#{byte_size(text)}" | load]
+
+    case Shell.run(s.host, s.sh, args, timeout: s.timeout, input: text) do
+      {:ok, %{status: 0}} ->
+        :ok
+
+      {:ok, %{status: 1, output: out}} = other ->
+        if no_server?(out), do: {:refused, :no_server}, else: {:refused, {:load, other}}
+
+      other ->
+        {:refused, {:load, other}}
+    end
+  end
+
   # The width comes first, on a line of its own, so the screen after it is read whole.
   @impl true
   def capture(%__MODULE__{} = s, pane, session) do
@@ -219,19 +253,25 @@ defmodule CodingAgentFramework.Tmux.CLI do
 
   # Runs `command` only when the pane at `pane` has that id and its tag names `session`, in one
   # tmux command, and prints `done` after it.
-  defp guarded(s, pane, session, command, done) when is_atom(done) do
+  defp guarded(s, pane, session, command, done, cleanup \\ "")
+
+  defp guarded(s, pane, session, command, done, cleanup) when is_atom(done) do
     expected = "#{done}\n"
 
-    guarded(s, pane, session, "#{command} ; display-message -p #{done}", fn
+    parse = fn
       ^expected -> {:ok, done}
       _ -> :other
-    end)
+    end
+
+    guarded(s, pane, session, "#{command} ; display-message -p #{done}", parse, cleanup)
   end
 
   # As above, with `parse` reading what `command` printed: `{:ok, value}`, or `:other`.
-  defp guarded(%__MODULE__{tag: tag} = s, pane, session, command, parse) do
+  # `cleanup` runs before the refusal's message when the check fails.
+  defp guarded(%__MODULE__{tag: tag} = s, pane, session, command, parse, cleanup)
+       when is_function(parse) do
     check = "\#{&&:\#{==:\#{pane_id},#{pane}},\#{==:\#{#{tag}},#{session}}}"
-    refuse = "display-message -p -t #{pane} 'refused\t\#{pane_id}\t\#{#{tag}}'"
+    refuse = cleanup <> "display-message -p -t #{pane} 'refused\t\#{pane_id}\t\#{#{tag}}'"
 
     case run(s, ["if-shell", "-F", "-t", pane, check, command, refuse]) do
       {:ok, %{status: 0, output: "refused\t" <> rest}} ->
@@ -311,15 +351,20 @@ defmodule CodingAgentFramework.Tmux.CLI do
     end
   end
 
-  defp run(%__MODULE__{server: server} = s, args, scope \\ []) do
+  defp run(%__MODULE__{} = s, args, scope \\ []) do
+    [program | words] = scope ++ tmux_argv(s, args)
+    Shell.run(s.host, program, words, timeout: s.timeout)
+  end
+
+  # tmux on this server, with its config, and `args`.
+  defp tmux_argv(%__MODULE__{server: server} = s, args) do
     socket =
       case server do
         {:name, name} -> ["-L", name]
         {:socket, path} -> ["-S", path]
       end
 
-    [program | words] = scope ++ [s.tmux | socket] ++ ["-f", s.config | args]
-    Shell.run(s.host, program, words, timeout: s.timeout)
+    [s.tmux | socket] ++ ["-f", s.config | args]
   end
 
   # The client that may start the server runs in a scope of its own, named anew each time.

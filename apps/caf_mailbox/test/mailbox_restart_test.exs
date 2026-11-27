@@ -4,9 +4,9 @@ defmodule CodingAgentFramework.MailboxRestartTest do
   `Sessions`, `Registry`, `Transcripts`, `Inlet` and `Stream`, real dtach and tmux in this test's
   own directory, and `ScreenStandIn` in place of Claude Code, its pane 200 columns wide as the
   live one was. A restart cut the waiter's connection, and an idle session starts no other until
-  a turn of it ends. The framework home is long, so the typed pointer line of a long row is
-  wider than the box (`Delivery.tla`'s `Wide`). Where a waiter comes, `Intake` runs behind
-  Bandit and `WaiterStandIn` plays Claude Code's side of it.
+  a turn of it ends. The `Mailbox` has no framework home, so a row past the paste's bound has
+  no file to write and no pointer line to paste (`Delivery.tla`'s `Wide`). Where a waiter
+  comes, `Intake` runs behind Bandit and `WaiterStandIn` plays Claude Code's side of it.
   """
   use ExUnit.Case, async: true
 
@@ -14,7 +14,7 @@ defmodule CodingAgentFramework.MailboxRestartTest do
 
   alias CodingAgentFramework.{Accounts, Grants, Inlet, Intake, Mailbox, ScreenStandIn, Sessions}
   alias CodingAgentFramework.{SessionsSetup, Stream, Transcripts, WaiterStandIn}
-  alias CodingAgentFramework.Mailbox.Table
+  alias CodingAgentFramework.Mailbox.{Table, Transport}
 
   @wake "[framework] a message is waiting for you."
 
@@ -32,9 +32,6 @@ defmodule CodingAgentFramework.MailboxRestartTest do
     transcripts =
       start_supervised!({Transcripts, programs: programs(), accounts: ["work"], db: db})
 
-    # A home as long as a live one under an application-support directory.
-    home = Path.join(ctx.dir, String.duplicate("h", 100))
-
     mopts = [
       db: db,
       grants: Grants.new(fn -> tree end),
@@ -45,16 +42,15 @@ defmodule CodingAgentFramework.MailboxRestartTest do
       transcripts: transcripts,
       accounts: accounts,
       take_bound: 1_000,
-      wait_bound: 1_500,
-      home: home
+      wait_bound: 1_500
     ]
 
     {:ok, mtable} = Table.open(db)
     {:ok, mtable: mtable, mopts: mopts, db: db}
   end
 
-  # Arrives, InOrder, Wake, WaitBound, UndeliveredTold: the long row's pointer line is refused as
-  # wider than the box; the wake line goes once in its place; the session ignores it, so no turn
+  # Arrives, InOrder, Wake, WaitBound, UndeliveredTold: the long row has no pointer line to
+  # paste; the wake line goes once in its place; the session ignores it, so no turn
   # ends and no waiter comes. At the bound the row is undelivered, its sender gets a notice, and
   # the row behind it, from the same sender and short enough to type, goes in.
   test "after a restart, a wake line no turn answers: undelivered at the bound, sender told",
@@ -74,21 +70,24 @@ defmodule CodingAgentFramework.MailboxRestartTest do
     assert {:refused, :not_followed} = Stream.log(ctx.stream, d1.sid, {:last, 10})
     refute Process.alive?(first)
 
-    {:ok, {:queued, one}} = Mailbox.message(mailbox, "main", "d1", String.duplicate("x", 860))
+    {:ok, {:queued, one}} =
+      Mailbox.message(mailbox, "main", "d1", String.duplicate("x", Transport.Typed.bound()))
+
     {:ok, {:queued, two}} = Mailbox.message(mailbox, "main", "d1", "hi")
 
-    # Refused by the Inlet: its pointer line is wider than the 196 columns the box holds. The
-    # wake line goes in its place, and the row stays due, the one behind it too.
+    # Refused: no home to write its file in. The wake line goes in its place, and the row stays
+    # due, the one behind it too.
     assert {:ok, [@wake]} = submitted(ctx, 1)
 
-    assert %{status: "queued", attempt: ~s(["too_long",196]), woke_at: at} =
+    assert %{status: "queued", attempt: ~s(["too_long","no_home"]), woke_at: at} =
              Table.get(ctx.mtable, one)
 
     assert is_integer(at)
     assert %{status: "queued"} = Table.get(ctx.mtable, two)
 
     # The bound: no waiter came, so the long row is undelivered, never typed.
-    assert {:ok, %{status: "undelivered", attempt: ~s(["wait_bound",["too_long",196]])} = row} =
+    assert {:ok,
+            %{status: "undelivered", attempt: ~s(["wait_bound",["too_long","no_home"]])} = row} =
              until(ctx, mailbox, one, &(&1.status == "undelivered"))
 
     assert [notice] = for(r <- Table.rows(ctx.mtable), r.kind == "notice", do: r)
@@ -111,7 +110,10 @@ defmodule CodingAgentFramework.MailboxRestartTest do
   test "a restart between the wake line and the waiter types no second wake line", ctx do
     d1(ctx, ctx.sessions)
     mailbox = start_mailbox(ctx, :before, wait_bound: 3_000)
-    {:ok, {:queued, one}} = Mailbox.message(mailbox, "main", "d1", String.duplicate("x", 860))
+
+    {:ok, {:queued, one}} =
+      Mailbox.message(mailbox, "main", "d1", String.duplicate("x", Transport.Typed.bound()))
+
     assert {:ok, [@wake]} = submitted(ctx, 1)
     %{woke_at: at} = Table.get(ctx.mtable, one)
     stop_supervised!(:before)
@@ -135,7 +137,7 @@ defmodule CodingAgentFramework.MailboxRestartTest do
 
     mailbox = start_mailbox(ctx, :after, intake: intake)
     Agent.update(route, fn _ -> mailbox end)
-    long = String.duplicate("x", 860)
+    long = String.duplicate("x", Transport.Typed.bound())
     {:ok, {:queued, one}} = Mailbox.message(mailbox, "main", "d1", long)
     {:ok, {:queued, two}} = Mailbox.message(mailbox, "main", "d1", "hi")
     assert {:ok, [@wake]} = submitted(ctx, 1)

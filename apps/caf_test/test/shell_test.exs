@@ -17,6 +17,23 @@ defmodule CodingAgentFramework.ShellTest do
              Shell.run(host(), program!(:sh), ["-c", "echo err >&2; exit 3"], timeout: 5_000)
   end
 
+  # F-279: a paste's text reaches tmux by stdin. The stdin stays open, so the reader is told
+  # the length; past the bound nothing runs.
+  test "input goes to the program's stdin, and input past the bound runs nothing" do
+    text = "it's\nline two\n" <> String.duplicate("é", 4_000)
+
+    assert {:ok, %{status: 0, output: ^text}} =
+             Shell.run(host(), program!(:head), ["-c", "#{byte_size(text)}"],
+               timeout: 5_000,
+               input: text
+             )
+
+    long = String.duplicate("x", Shell.input_max() + 1)
+
+    assert {:refused, {:input, :too_long}} =
+             Shell.run(host(), program!(:head), ["-c", "1"], timeout: 5_000, input: long)
+  end
+
   test "nothing runs from a relative path or a missing one" do
     assert {:refused, {:not_absolute, "echo"}} = Shell.run(host(), "echo", [], timeout: 5_000)
 

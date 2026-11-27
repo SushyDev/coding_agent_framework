@@ -71,9 +71,10 @@ defmodule CodingAgentFramework.InletTest do
     {:ok, dir: dir, server: server, inlet: start_supervised!({Inlet, tmux: probe})}
   end
 
-  # Typed only into an ended turn (OnlyIntoEndedTurn): the turn and the box are read again in
-  # the write's own step, then the text, then Enter as its own command.
-  test "types into an ended turn with an empty box, then Enter on its own", ctx do
+  # Pasted only into an ended turn (OnlyIntoEndedTurn): the turn and the box are read again in
+  # the write's own step, then the paste, into a buffer of its own, then Enter as its own
+  # command (F-279).
+  test "pastes into an ended turn with an empty box, then Enter on its own", ctx do
     open(ctx, "alpha")
     me = self()
 
@@ -82,12 +83,12 @@ defmodule CodingAgentFramework.InletTest do
       :ok
     end
 
-    assert {:ok, :sent} =
-             Inlet.type(ctx.inlet, "alpha", "hello there", release: @release, turn: turn)
+    opts = [release: @release, buffer: "caf-u1", turn: turn]
+    assert {:ok, :sent} = Inlet.type(ctx.inlet, "alpha", "hello there", opts)
 
     inlet = ctx.inlet
     assert_received {:turn, ^inlet}
-    assert_received {:write, ^inlet, {:text, "hello there"}}
+    assert_received {:write, ^inlet, {:paste, "caf-u1", "hello there"}}
     assert_received {:write, ^inlet, {:keys, ["Enter"]}}
     assert {:ok, ["hello there"]} = submitted(ctx, 1)
   end
@@ -99,13 +100,21 @@ defmodule CodingAgentFramework.InletTest do
     refused = fn -> {:refused, :running} end
 
     assert {:refused, {:turn, :running}} =
-             Inlet.type(ctx.inlet, "alpha", "one", release: @release, turn: refused)
+             Inlet.type(ctx.inlet, "alpha", "one",
+               release: @release,
+               buffer: "caf-t",
+               turn: refused
+             )
 
     # The file says idle, but the screen shows a turn running: the second reading refuses.
     open(ctx, "busy", ["--screen", "running"])
 
     assert {:refused, {:screen, %{state: :running}}} =
-             Inlet.type(ctx.inlet, "busy", "two", release: @release, turn: fn -> :ok end)
+             Inlet.type(ctx.inlet, "busy", "two",
+               release: @release,
+               buffer: "caf-t",
+               turn: fn -> :ok end
+             )
 
     # A draft a person left in the box is not touched.
     {:ok, pane} = pane(ctx, "alpha")
@@ -113,35 +122,79 @@ defmodule CodingAgentFramework.InletTest do
     {:ok, _} = screen(ctx, "alpha", &match?(%{box: {:text, "draft"}}, &1))
 
     assert {:refused, {:screen, %{state: :idle, box: {:text, "draft"}}}} =
-             Inlet.type(ctx.inlet, "alpha", "three", release: @release, turn: fn -> :ok end)
+             Inlet.type(ctx.inlet, "alpha", "three",
+               release: @release,
+               buffer: "caf-t",
+               turn: fn -> :ok end
+             )
 
     refute_received {:write, _, _}
     assert ScreenStandIn.submitted(ctx.dir) == []
   end
 
-  test "refuses a text it cannot check, and a release it cannot read", ctx do
+  test "refuses a text it cannot paste, and a release it cannot read", ctx do
     open(ctx, "alpha")
     ok = fn -> :ok end
-    # The pane is 120 columns wide: the prompt, its space and two to spare leave 116.
-    long = String.duplicate("a", 117)
+    opts = [release: @release, buffer: "caf-t", turn: ok]
+    long = String.duplicate("a", Tmux.paste_max() + 1)
 
-    assert {:refused, {:too_long, 116}} =
-             Inlet.type(ctx.inlet, "alpha", long, release: @release, turn: ok)
+    assert {:refused, {:too_long, 16_384}} = Inlet.type(ctx.inlet, "alpha", long, opts)
 
+    # An escape could end the paste's bracket early, and the rest would go in as keys.
     assert {:refused, {:bad_text, :control}} =
-             Inlet.type(ctx.inlet, "alpha", "a\nb", release: @release, turn: ok)
+             Inlet.type(ctx.inlet, "alpha", "a\e[201~\rb", opts)
 
-    assert {:refused, :no_release} = Inlet.type(ctx.inlet, "alpha", "hi", release: nil, turn: ok)
+    assert {:refused, :no_release} =
+             Inlet.type(ctx.inlet, "alpha", "hi", Keyword.put(opts, :release, nil))
 
     assert {:refused, {:unknown_release, "0.0.1"}} =
-             Inlet.type(ctx.inlet, "alpha", "hi", release: "0.0.1", turn: ok)
+             Inlet.type(ctx.inlet, "alpha", "hi", Keyword.put(opts, :release, "0.0.1"))
 
     refute_received {:write, _, _}
 
-    # The longest text it takes goes in whole, on one line.
-    fits = String.duplicate("b", 116)
-    assert {:ok, :sent} = Inlet.type(ctx.inlet, "alpha", fits, release: @release, turn: ok)
-    assert {:ok, [^fits]} = submitted(ctx, 1)
+    # A text far wider than the 120-column pane goes in whole, folded in the box.
+    wide = String.duplicate("b", 3_000)
+    assert {:ok, :sent} = Inlet.type(ctx.inlet, "alpha", wide, opts)
+    assert {:ok, [^wide]} = submitted(ctx, 1)
+  end
+
+  # F-279: a paste keeps its newlines as newlines, so none of them submits the box; the one
+  # Enter after it does, once.
+  test "a newline inside a text does not submit it early", ctx do
+    open(ctx, "alpha")
+    opts = [release: @release, buffer: "caf-t", turn: fn -> :ok end]
+    text = "one\ntwo\n\n\tthree"
+    assert {:ok, :sent} = Inlet.type(ctx.inlet, "alpha", text, opts)
+    assert {:ok, ["one\\ntwo\\n\\n\tthree"]} = submitted(ctx, 1)
+
+    # The box is empty again once the stand-in has drawn the turn's end.
+    {:ok, _} = screen(ctx, "alpha", &match?(%{state: :idle, box: :empty}, &1))
+    assert {:ok, :sent} = Inlet.type(ctx.inlet, "alpha", "four", opts)
+    assert {:ok, [_, "four"]} = submitted(ctx, 2)
+  end
+
+  # PastesItsOwnText (Agent.tla): two Inlets on one server paste at once, each into a buffer
+  # named for its own write, and each pane gets its own text whole.
+  test "two pastes to two sessions at once each land whole in their own pane", ctx do
+    open(ctx, "alpha")
+    open(ctx, "beta")
+    other = start_supervised!({Inlet, tmux: ctx.server}, id: :other)
+    a = Enum.map_join(1..40, "\n", &"alpha line #{&1}")
+    b = Enum.map_join(1..40, "\n", &"beta line #{&1}")
+    ok = fn -> :ok end
+
+    [one, two] =
+      [{ctx.inlet, "alpha", a, "caf-a"}, {other, "beta", b, "caf-b"}]
+      |> Enum.map(fn {inlet, session, text, buffer} ->
+        opts = [release: @release, buffer: buffer, turn: ok]
+        Task.async(fn -> Inlet.type(inlet, session, text, opts) end)
+      end)
+      |> Task.await_many(30_000)
+
+    assert {:ok, :sent} = one
+    assert {:ok, :sent} = two
+    {:ok, lines} = submitted(ctx, 2)
+    assert Enum.sort(lines) == Enum.sort([escaped(a), escaped(b)])
   end
 
   test "a session with no tagged pane, or a server gone, takes nothing" do
@@ -151,9 +204,15 @@ defmodule CodingAgentFramework.InletTest do
     ok = fn -> :ok end
     {:ok, pane} = Tmux.new_session(server, "alpha", [program!(:cat)])
     Fake.set_tag(server, pane, "beta")
-    assert {:refused, :no_pane} = Inlet.type(inlet, "alpha", "hi", release: @release, turn: ok)
+
+    assert {:refused, :no_pane} =
+             Inlet.type(inlet, "alpha", "hi", release: @release, buffer: "caf-t", turn: ok)
+
     {:ok, :killed} = Tmux.kill_server(server)
-    assert {:refused, :no_server} = Inlet.type(inlet, "alpha", "hi", release: @release, turn: ok)
+
+    assert {:refused, :no_server} =
+             Inlet.type(inlet, "alpha", "hi", release: @release, buffer: "caf-t", turn: ok)
+
     assert Fake.received(server, pane) == []
   end
 
@@ -479,7 +538,11 @@ defmodule CodingAgentFramework.InletTest do
     assert_receive {:write, _, {:keys, _}}, 10_000
 
     assert {:ok, :sent} =
-             Inlet.type(inlet, "alpha", "after", release: @release, turn: fn -> :ok end)
+             Inlet.type(inlet, "alpha", "after",
+               release: @release,
+               buffer: "caf-t",
+               turn: fn -> :ok end
+             )
 
     assert_receive {:press, {:ok, :sent}}, 10_000
     assert {:ok, ["after"]} = submitted(ctx, 1)
@@ -614,4 +677,7 @@ defmodule CodingAgentFramework.InletTest do
       if length(lines) >= n, do: {:ok, lines}, else: lines
     end)
   end
+
+  # A text as the stand-in writes it to `submitted`: each newline as `\n`.
+  defp escaped(text), do: String.replace(text, "\n", "\\n")
 end

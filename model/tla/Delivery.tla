@@ -27,16 +27,17 @@
 (*           and no answer still on its way to a turn, due again. A        *)
 (*           restart settles it the same way.                              *)
 (*   typed   the Inlet's checked write, for an interactive session with no *)
-(*           waiter, into an ended turn only. A row in Long (more than one *)
-(*           line, or wider than the box) is written to a file the session *)
-(*           may read, and the line typed names it (F-142); which line is  *)
-(*           typed is left abstract. Refused when the check fails; unknown *)
-(*           keeps the mark, and is never typed again; settled as waiter:  *)
-(*           its line delivers it, its turn ended or not (F-277), since    *)
-(*           Mailbox may read no ended turn before the next one starts     *)
-(*           (SettleAtIdle). A row in Wide has a                            *)
-(*           pointer line the box still cannot hold (a long home, F-240):  *)
-(*           it is never typed. An idle session with no waiter starts none *)
+(*           waiter, into an ended turn only: its text pasted, any number  *)
+(*           of lines, then Enter (F-279). A row in Long (past the paste's *)
+(*           bound, `Transport.Typed.bound/0`) is written to a file the    *)
+(*           session may read, and the line pasted names it (F-142);       *)
+(*           which is pasted is left abstract. Refused when the check      *)
+(*           fails; unknown keeps the mark, and is never typed again;      *)
+(*           settled as waiter: its line delivers it, its turn ended or    *)
+(*           not (F-277), since Mailbox may read no ended turn before the  *)
+(*           next one starts (SettleAtIdle). A row in Wide has no pointer  *)
+(*           line to paste (no home to write its file in, F-240): it is    *)
+(*           never typed. An idle session with no waiter starts none       *)
 (*           until a turn of it ends, and a restart cuts the one it had,   *)
 (*           so the wake line, a short fixed line, is typed once in its    *)
 (*           place (Wake): its turn's end brings a waiter, which carries   *)
@@ -187,8 +188,8 @@ CONSTANTS
     MaxEnds,       \* alone: processes that end by themselves (a crash, a kill)
     MaxPrompts,    \* alone: a person's prompts
     MaxStops,      \* alone: stops by SIGTERM
-    Long,          \* rows too long for the typed write
-    Wide,          \* the Long rows whose pointer line is wider than the box (F-240)
+    Long,          \* rows past the bound of the typed write's paste (F-279)
+    Wide,          \* the Long rows with no pointer line to paste (F-240)
     Launched,      \* alone: sessions with no process at first, started with their first row
     Break          \* "none", or the guard removed (see Breaks)
 

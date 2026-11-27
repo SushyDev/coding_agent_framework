@@ -512,9 +512,6 @@ Built, each from a checked model in `model/tla/`:
 - a typed row is delivered by its line in the transcript, its turn ended or not (F-277): one
   that waited for an ended turn stayed `sending` when the app's answer to the Stop hook went on
   with the turn, and every row behind it waited.
-- a typed row goes whole when it fits the pane's real width, read in the `Inlet`'s write step
-  (F-277): a 200-column pane holds 123 characters of text past a 25-character frame, where a
-  fixed 80-column limit left 3 and sent short messages as due files.
 - Remote Control follows the kind (F-275): only a main session has it, never a delegate, even an
   interactive one; a main takes a `title:` at its start and resume, which its launch gives
   `--name` and `--remote-control` while its agent name stays its address.
@@ -527,6 +524,9 @@ Built, each from a checked model in `model/tla/`:
 - a turn's end shows in the tree within a second of its session file (F-281): `Registry` reads
   again `follow` ms (1 s) after a read that saw a turn in flight, so a tree with a long
   `interval` no longer shows a main `working` until some other part happens to read the files.
+- a typed row is pasted whole, any number of lines up to 8 000 bytes, into a tmux buffer named
+  for its row, and settled by its transcript line (F-279): a message arrives as a message, not
+  as a due file, which serves only the rows past that bound.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

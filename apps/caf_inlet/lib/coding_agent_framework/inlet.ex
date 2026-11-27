@@ -16,17 +16,23 @@ defmodule CodingAgentFramework.Inlet do
   2. the screen, captured and read by `Screen` as the session's recorded release draws it: the
      turn ended and the input box empty. A release with no reading refuses the write, and so
      does a session with no recorded release;
-  3. the text, typed with no Enter; then the screen again, until the box shows exactly that
-     text (`see:` ms, 2 000 by default, or the instance's own `see:`);
-  4. Enter, as its own tmux command: text and Enter in one burst read as a paste, and the Enter
-     as a newline in the box.
+  3. the text, pasted bracketed with its newlines kept and no Enter (F-279): loaded into a
+     tmux buffer named for this write alone (`buffer:`) from stdin, then pasted under the tag
+     check, which drops the buffer (`Tmux.write/4`'s `{:paste, buffer, text}`); then the
+     screen again, until the box is no longer empty (`see:` ms, 2 000 by default, or the
+     instance's own `see:`);
+  4. Enter, as its own tmux command, once the paste is drawn: Claude Code takes the paste
+     first, so the Enter submits it whole.
 
-  **The limit.** `Screen` reads a box of more than one line as unrecognized (F-113's new-1),
-  since no fixture shows how a release draws a wrapped text. So a text is refused, not typed,
-  when it holds a control character (a newline among them) or is longer than the pane's width
-  less four columns (the prompt, its space and two to spare). A character drawn two columns
-  wide may still wrap a text under the limit; then the box never shows it, and the write is
-  unknown with the text in the box, for a person.
+  **What the box shows.** Claude Code 2.1.322 draws a long or many-line paste folded, as
+  `[Pasted text #1 +N lines]`, and a short one as its text. No fixture of the fold was
+  captured, and `Screen` reads a box of more than one line as unrecognized (F-113's new-1). So
+  the check after the paste is that the box no longer reads empty: its text, or a screen
+  `Screen` cannot read. The box was empty before the paste, so what it holds is the paste.
+  The text is confirmed by the transcript's user line, which carries it whole with its mark
+  (`Mailbox`'s settle), never by the screen. A text is refused, not pasted, as
+  `Tmux.paste_text/1` refuses it: empty, over `Tmux.paste_max/0` bytes, or with a control
+  character but newline and tab.
 
   Answers `{:ok, :sent}`; `{:refused, reason}` when nothing was typed; `{:unknown, reason}`
   when something may have been typed: an unknown write is never typed again here.
@@ -43,9 +49,10 @@ defmodule CodingAgentFramework.Inlet do
       iex> {:ok, fake} = CodingAgentFramework.Tmux.Fake.start_link(key: {"laptop", "fake"})
       iex> server = CodingAgentFramework.Tmux.Fake.new(fake, {"laptop", "fake"})
       iex> {:ok, inlet} = CodingAgentFramework.Inlet.start_link(tmux: server)
-      iex> CodingAgentFramework.Inlet.type(inlet, "alpha", "hi", release: "2.1.322", turn: fn -> :ok end)
+      iex> opts = [release: "2.1.322", turn: fn -> :ok end, buffer: "caf-u1"]
+      iex> CodingAgentFramework.Inlet.type(inlet, "alpha", "a\\nb", opts)
       {:refused, :no_server}
-      iex> CodingAgentFramework.Inlet.type(inlet, "alpha", "a\\nb", release: "2.1.322", turn: fn -> :ok end)
+      iex> CodingAgentFramework.Inlet.type(inlet, "alpha", "a\\e[201~b", opts)
       {:refused, {:bad_text, :control}}
   """
 
@@ -169,29 +176,24 @@ defmodule CodingAgentFramework.Inlet do
   def press_timeout(press) when is_integer(press) and press > 0, do: press + @queue + @answer
 
   @doc """
-  Types `text` into `session` and then Enter, checked as the module doc says. `text` may be a
-  function of the limit, the pane's width less four columns as this step reads it: it answers
-  `{:ok, line}`, the line to type, or `{:refused, reason}`, the call's refusal, and nothing is
-  typed. `Mailbox` types a row whole by it whenever the pane holds it (F-277). Options:
-  `release:` (required: the Claude Code release the session runs, or nil when none was
-  recorded), `turn:` (required: a function read in the write's step, `:ok` when the turn has
-  ended), `see:` and `timeout:` (ms).
+  Pastes `text` into `session` and then Enter, checked as the module doc says: any number of
+  lines, up to `Tmux.paste_max/0` bytes. Options: `release:` (required: the Claude Code release
+  the session runs, or nil when none was recorded), `turn:` (required: a function read in the
+  write's step, `:ok` when the turn has ended), `buffer:` (required: the tmux buffer's name,
+  this write's alone; `Mailbox` names it for the row's uuid), `see:` and `timeout:` (ms).
 
-  Refusals: `{:bad_text, :empty | :control}`, `{:too_long, limit}`, the function's own or
-  `{:line, answer}` for an answer of another shape, `:no_release`,
-  `{:unknown_release, release}`, `{:turn, reason}`, `{:screen, reading}` (the screen read but not
-  idle with an empty box, or `:unrecognized`), and `Tmux`'s (`:no_pane`, `{:tagged_for, other}`,
-  `:no_server`). Unknown: `{:not_seen, reading}` (typed, and the box never showed it; no Enter
-  went), `{:enter, reason}` (typed and seen, the Enter's outcome not known), or `Tmux`'s.
+  Refusals: `Tmux.paste_text/1`'s (`{:bad_text, :empty | :invalid | :control}`, `{:too_long,
+  max}`), `{:bad_buffer, name}`, `:no_release`, `{:unknown_release, release}`, `{:turn,
+  reason}`, `{:screen, reading}` (the screen read but not idle with an empty box, or
+  `:unrecognized`), and `Tmux`'s (`:no_pane`, `{:tagged_for, other}`, `:no_server`, `{:load,
+  reason}`, `:no_buffer`). Unknown: `{:not_seen, reading}` (pasted, and the box never showed
+  it; no Enter went), `{:enter, reason}` (pasted and seen, the Enter's outcome not known), or
+  `Tmux`'s.
   """
-  @spec type(
-          GenServer.server(),
-          String.t(),
-          String.t() | (pos_integer -> {:ok, String.t()} | {:refused, term}),
-          keyword
-        ) :: outcome
+  @spec type(GenServer.server(), String.t(), String.t(), keyword) :: outcome
   def type(inlet, session, text, opts) do
-    request = {:type, session, text, Keyword.fetch!(opts, :release), Keyword.fetch!(opts, :turn)}
+    checks = {Keyword.fetch!(opts, :release), Keyword.fetch!(opts, :turn)}
+    request = {:type, session, text, checks, Keyword.fetch!(opts, :buffer)}
     call(inlet, request, Keyword.get(opts, :see), opts)
   end
 
@@ -417,20 +419,14 @@ defmodule CodingAgentFramework.Inlet do
 
   defp bound(_request, _state), do: 0
 
-  defp act({:type, session, line, release, turn}, see, tmux) do
-    with :ok <- if(is_binary(line), do: text?(line), else: :ok),
+  defp act({:type, session, text, {release, turn}, buffer}, see, tmux) do
+    with :ok <- Tmux.paste_text(text),
          :ok <- if(is_binary(release), do: :ok, else: {:refused, :no_release}),
          {:ok, pane} <- pane(tmux, session),
          :ok <- turn(turn),
-         {:ok, width} <- empty_box(tmux, pane, session, release),
-         {:ok, text} <- line(line, width - @margin),
-         :ok <- text?(text),
-         :ok <- fits(text, width),
-         {:ok, :sent} <- Tmux.write(tmux, pane, session, {:text, text}) do
-      expected = String.trim_trailing(text, " ")
-      deadline = now() + see
-
-      case seen(tmux, pane, session, release, expected, deadline) do
+         {:ok, _width} <- empty_box(tmux, pane, session, release),
+         {:ok, :sent} <- Tmux.write(tmux, pane, session, {:paste, buffer, text}) do
+      case pasted(tmux, pane, session, release, now() + see) do
         :seen -> enter(tmux, pane, session)
         {:not_seen, reading} -> {:unknown, {:not_seen, reading}}
       end
@@ -673,14 +669,6 @@ defmodule CodingAgentFramework.Inlet do
     end
   end
 
-  defp text?(text) when not is_binary(text) or text == "", do: {:refused, {:bad_text, :empty}}
-
-  defp text?(text) do
-    if String.valid?(text) and not Regex.match?(~r/[\x00-\x1f\x7f]/, text),
-      do: :ok,
-      else: {:refused, {:bad_text, :control}}
-  end
-
   # The session's pane is the one its tag names; the writes check that tag again themselves.
   defp pane(tmux, session) do
     with {:ok, panes} <- Tmux.list_panes(tmux) do
@@ -710,20 +698,6 @@ defmodule CodingAgentFramework.Inlet do
     end
   end
 
-  # The line typed: the caller's, or the one its function answers for the limit read in this
-  # step, so a row is typed whole whenever the pane's real width holds it.
-  defp line(text, _limit) when is_binary(text), do: {:ok, text}
-
-  defp line(line, limit) do
-    case line.(limit) do
-      {:ok, text} when is_binary(text) -> {:ok, text}
-      {:refused, _} = refused -> refused
-      other -> {:refused, {:line, other}}
-    end
-  rescue
-    e -> {:refused, {:line, {:raised, e.__struct__}}}
-  end
-
   defp fits(text, width) do
     limit = width - @margin
     if String.length(text) <= limit, do: :ok, else: {:refused, {:too_long, limit}}
@@ -747,6 +721,32 @@ defmodule CodingAgentFramework.Inlet do
         receive do
         after
           @look -> seen(tmux, pane, session, release, expected, deadline)
+        end
+    end
+  end
+
+  # After the paste, the box no longer reads empty: its text, or a fold or many lines `Screen`
+  # cannot read. A turn started, a dialog or an empty box is not the paste drawn.
+  defp pasted(tmux, pane, session, release, deadline) do
+    reading =
+      with {:ok, %{text: screen}} <- Tmux.capture(tmux, pane, session),
+           do: Screen.read(screen, release)
+
+    drawn? =
+      match?({:ok, %{state: :idle, box: {:text, _}}}, reading) or
+        match?({:unknown, {:unrecognized, _}}, reading)
+
+    cond do
+      drawn? ->
+        :seen
+
+      now() >= deadline ->
+        {:not_seen, reading}
+
+      true ->
+        receive do
+        after
+          @look -> pasted(tmux, pane, session, release, deadline)
         end
     end
   end

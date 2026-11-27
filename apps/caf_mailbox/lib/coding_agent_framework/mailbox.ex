@@ -44,21 +44,20 @@ defmodule CodingAgentFramework.Mailbox do
     `Intake`'s waiter cue;
   - `typed`, for an interactive session with no waiter held, when `Mailbox` was given `inlet:`
     (with `registry:`, `transcripts:` and `accounts:`): only while its row is `running` and its
-    session file reads idle, handed to `Inlet.type/4` as one line with the row's uuid at its end
-    (`Transport.Typed`). The `Inlet` reads the turn again in its own step, with the screen as
-    the session's recorded release draws it, and types only into an ended turn with an empty
-    box. The transcript settles it, as a waiter's row. A row too long to type (more than one
-    line, a control character, or longer than the box holds at the pane's width as the `Inlet`
-    reads it in its write step, `Transport.Typed.fits?/3`) is written whole to
-    `<home>/due/<agent>/<id>.md` (`Sessions.due_dir/2`, which each interactive start of the agent
-    may read by `--add-dir`), and the line typed names that file in backticks, framed with the
-    row's sender (`Transport.pointer_line/2`, `Transport.Typed.pointer/2`, F-172);
-    the file goes once the row is delivered. A row whose line the `Inlet` refused anyway (the
-    box narrower than the line), or one too long with no `home:`, is not typed again: it waits
-    for a waiter (F-240, `Delivery.tla`'s `Wake` and `WaitBound`). With the session idle and no
-    waiter held, the wake line, `[framework] a message is waiting for you.`, is typed once in
-    its place, its mark (`woke_at`) written before its keys: that turn's end brings a waiter,
-    which carries the row whole. `wait_bound:` ms (10 minutes by default) from the wake line's
+    session file reads idle, handed to `Inlet.type/4` with the row's uuid at its end
+    (`Transport.Typed`), which pastes it, any number of lines, into a tmux buffer named for the
+    row's uuid (F-279). The `Inlet` reads the turn again in its own step, with the screen as
+    the session's recorded release draws it, and pastes only into an ended turn with an empty
+    box. The transcript settles it, as a waiter's row. A row past the paste's bound
+    (`Transport.Typed.bound/0`) is written whole to `<home>/due/<agent>/<id>.md`
+    (`Sessions.due_dir/2`, which each interactive start of the agent may read by `--add-dir`),
+    and the line pasted names that file in backticks, framed with the row's sender
+    (`Transport.pointer_line/2`, `Transport.Typed.pointer/2`, F-172). A row whose text the
+    `Inlet` refused (a control character other than newline and tab), or one too long with no
+    `home:`, is not typed again: it waits for a waiter (F-240, `Delivery.tla`'s `Wake` and
+    `WaitBound`). With the session idle and no waiter held, the wake line, `[framework] a
+    message is waiting for you.`, is typed once in its place, its mark (`woke_at`) written
+    before its keys: that turn's end brings a waiter, which carries the row whole. `wait_bound:` ms (10 minutes by default) from the wake line's
     mark with no waiter, the row is `undelivered`, `attempt` `["wait_bound", refusal]`, never
     sent, and its sender gets a notice, ``undelivered: message <id> to <agent>, after <n> s``.
     Rows go in order per addressee, one in flight, so the rows behind it wait as long and no
@@ -1468,7 +1467,7 @@ defmodule CodingAgentFramework.Mailbox do
     reads = Map.take(s, [:agents, :typed, :waiter])
     turn = fn -> turn_now(reads, srow.name, srow.pid) end
     inlet = s.typed.inlet
-    opts = [release: srow.release, turn: turn, timeout: @inlet]
+    opts = [release: srow.release, turn: turn, buffer: "caf-wake-#{m.uuid}", timeout: @inlet]
     # Its answer writes nothing: the row stays queued, and the waiter or the bound settles it.
     hand_on(s, m, fn -> Inlet.type(inlet, srow.name, @wake, opts) end, fn _s, _m, _ -> :ok end)
   end
@@ -1558,39 +1557,25 @@ defmodule CodingAgentFramework.Mailbox do
     end
   end
 
-  # The line typed, chosen by the `Inlet` for the limit it reads in its write step: the row's
-  # own when the pane's real width holds it, or else one that names the file its text is
-  # written to in the agent's due directory, which its start may read (F-142). A fixed limit
-  # of an 80-column pane left 3 characters of text past the frame and the mark (F-277).
+  # The text pasted: the row's own within the paste's bound (F-279), any number of lines, or
+  # else one line that names the file its text is written to in the agent's due directory,
+  # which its start may read (F-142). Nothing is pasted yet, so a file that could not be
+  # written refuses the write.
   defp line(s, m, srow) do
-    with {:ok, text} <- framed(s, m),
-         {:ok, pointer} <- pointer_for(s, m, srow.name) do
-      uuid = m.uuid
+    with {:ok, text} <- framed(s, m) do
+      pasted = Transport.Typed.text(text, m.uuid)
 
-      {:ok,
-       fn limit ->
-         cond do
-           Transport.Typed.fits?(text, uuid, limit) -> {:ok, Transport.Typed.text(text, uuid)}
-           pointer == nil -> {:refused, {:too_long, :no_home}}
-           true -> typed_pointer(pointer, text, uuid)
-         end
-       end}
-    end
-  end
-
-  # The pointer line and its file's path, framed here; nil with no home to write the file in.
-  defp pointer_for(%{home: nil}, _m, _name), do: {:ok, nil}
-
-  defp pointer_for(s, m, name) do
-    path = due_path(s, name, m)
-    with {:ok, line} <- pointer(s, m, path), do: {:ok, {path, line}}
-  end
-
-  # Nothing is typed yet, so a file that could not be written refuses the write.
-  defp typed_pointer({path, line}, text, uuid) do
-    case write_due(path, text) do
-      {:ok, _path} -> {:ok, Transport.Typed.pointer(line, uuid)}
-      {:unknown, why} -> {:refused, why}
+      if byte_size(pasted) <= Transport.Typed.bound() do
+        {:ok, pasted}
+      else
+        with {:ok, path} <- due_file(s, srow.name, m, text),
+             {:ok, line} <- pointer(s, m, path) do
+          {:ok, Transport.Typed.pointer(line, m.uuid)}
+        else
+          {:unknown, why} -> {:refused, why}
+          refused -> refused
+        end
+      end
     end
   end
 
@@ -1697,7 +1682,8 @@ defmodule CodingAgentFramework.Mailbox do
       s,
       m,
       fn ->
-        Inlet.type(inlet, srow.name, text, release: srow.release, turn: turn, timeout: @inlet)
+        opts = [release: srow.release, turn: turn, buffer: "caf-#{m.uuid}", timeout: @inlet]
+        Inlet.type(inlet, srow.name, text, opts)
       end,
       &sent/3
     )

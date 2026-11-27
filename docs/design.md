@@ -1145,7 +1145,7 @@ on the Elixir and OTP versions it declares and tests; a version it needs is name
 | `Registry` | one per host, over every account the framework holds: reads Claude Code's `<config>/sessions/*.json`, and so each held agent's pid and its session file's `status`, each file live by its pid and its `procStart`, written as `ps -o lstart=` in UTC (macOS) or as a bare integer, the start in clock ticks (Linux, F-246); a start in ticks is turned into the `ps` form as it is read, the `ps` text taken between two reads of `/proc/<pid>/stat` that both hold those ticks, else the file is `replaced` and its row has no start (F-252), so every row's start is in the one form every check and signal compares; a `Reader` | `registry_sessions` |
 | `Transcripts` | one per host, over every account: a session's transcript tail, its chats, its subagents and its tool calls (a sidechain's under its agent id, F-235; on 2.1.322 read from each subagent's own file in `<session id>/subagents/`, found by listing it on each read; a file never read whose meta says the subagent finished is not read, and a running one's first read takes at most its last 1 MB, F-237; a main transcript with no stored fold is read the first time from its last 1 MB too, its fold `partial`, F-244), and whether a transcript holds a delivery's line; a `Reader` | `transcripts_sessions` |
 | `Screen` | a pure reading of a main session's screen and dialogs, per Claude Code release, from real fixtures captured with a script: the startup dialogs (trust, and external imports with the paths it lists), any numbered menu by its shape (F-198), typed commands and their result lines, the box before a typed write, a dim prompt suggestion in it read as no text | — |
-| `Inlet` | the checked typed write into an interactive session with no waiter: `Screen`'s box check, then `Tmux`'s one-command check, one per host; and the typed commands a session's start or a tool needs (a startup dialog's checked press, `/mcp reconnect`, the interrupt key, and the operator's `/reload-plugins`, whose result line it reads outside its write's step, F-233), and a read of a pane for `Sessions`. It is one transport of `Mailbox` | no table |
+| `Inlet` | the checked typed write into an interactive session with no waiter: `Screen`'s box check, then a paste into a buffer named for the write, under `Tmux`'s one-command check (F-279), one per host; and the typed commands a session's start or a tool needs (a startup dialog's checked press, `/mcp reconnect`, the interrupt key, and the operator's `/reload-plugins`, whose result line it reads outside its write's step, F-233), and a read of a pane for `Sessions`. It is one transport of `Mailbox` | no table |
 | `Stream` | a headless session's transport: a FIFO per process, a spool removed as the line's claim, the event log read from an offset, and its `can_use_tool` requests. Its fold of the log (each message's replay, each result) is evidence `Mailbox` and `Sessions` read; it keeps no delivery state of its own | `stream_delegates` |
 | `Intake` | hook events in; one hold, of six kinds: `permission` (a person's or an agent's `answer`), `tool` (`PreToolUse`, the app's callback), `post_tool` (`PostToolUse`, the app's callback), `start` (`SessionStart`, the app's callback, from a command hook), `stop` (`Stop` held for the app's callback) and `waiter` (a main session's waiting Stop hook, answered with `Mailbox`'s due text) | `intake_events` |
 | `Sessions` | the agent row: one row per agent, main session or delegate, with its kind, parent, project, account, launch options and model, held process and status; start, resume, and stop by SIGTERM once idle; the tree as one function of its rows; each session's turn state as one function per kind of session, from its evidence. Other parts read its rows only through `Sessions.Agents`, a pure module over a reader's own connection, which answers what each status means | `agents` |
@@ -2407,24 +2407,28 @@ restart cut the waiter's connection) gets nothing that way, and `Intake` knows i
 (`Intake.waiter?`), once a heartbeat has found a connection that died. A start that carries
 the first row as its prompt (`launch`, "Delivery") needs none. What is due is held until
 a waiter connects; a view shows a session idle with no waiter and something due, and the
-`Inlet`'s checked write reaches it, as one more transport of the same row. It types one line, the row's
-uuid at its end, only when the session file reads idle with no waiter held and the screen shows
-an empty box, both read again in the write's own step, and sends Enter as its own command once
-the box shows the text. The limit (F-132): the `Inlet` refuses a text of more than one line, or
-longer than the pane's width less four columns, since no fixture shows how a release draws a
-wrapped box (F-113's new-1). The line is chosen in the `Inlet`'s write step, for the width it
-reads there (F-277): a row is typed whole when its framed text and mark fit the pane's real
-width less four. A 200-column pane, the `viewer` default, holds 123 characters of text from a
-sender whose frame is 25 characters; a 400-column pane holds 323. A fixed limit of an
-80-column pane left 3. So a row too long to type (more than one line, a control character, or
-a line wider than that) is typed as a pointer (F-142, decided): `Mailbox` writes its whole text to
-`<home>/due/<agent>/<row id>.md` (`Sessions.due_dir/2`), and types one line, "A message for
-you is in <path>; read it.", with the row's uuid at its end. Each interactive start of the
-agent passes that directory by `--add-dir`, so reading the file never asks permission, and it
-holds only the agent's due texts. The file stays after its row is delivered: the line is taken before the agent reads the file, in the turn it starts, and the framework keeps its data. The transcript's
-user line settles it as any typed row, and its turn's end brings the next waiter, so no row
-waits for a person's prompt. A pointer line the box still cannot hold (a long home: the line
-names the whole path) is refused, and its row waits for a waiter (F-240, `Delivery.tla`'s
+`Inlet`'s checked write reaches it, as one more transport of the same row. It **pastes** the
+row (F-279, decided), any number of lines, the row's uuid at its end, only when the session
+file reads idle with no waiter held and the screen shows an empty box, both read again in the
+write's own step. The text goes to a tmux buffer named for the row's uuid, from stdin, never
+on a command line (`load-buffer -b <name> -`); the buffer is pasted bracketed, its newlines
+kept, and dropped, under the pane's tag check in one command (`paste-buffer -p -r -d`); and
+Enter goes as its own command once the box no longer reads empty. A buffer named per write
+holds that write's text whatever another writer loads between the load and the paste
+(`Agent.tla`'s `PastesItsOwnText`, `Break_Agent_OneBuffer`). Claude Code draws a long paste
+folded, `[Pasted text #1 +N lines]`, and submits all of it; the screen is not read back as
+text, and the transcript's user line, which carries the whole text and its mark, settles the
+row. A text with a control character other than newline and tab is refused, since an escape
+could end the paste's bracket early. A row past the paste's bound
+(`Transport.Typed.bound/0`, 8 000 bytes, set low and not measured) goes as a pointer (F-142):
+`Mailbox` writes its whole text to `<home>/due/<agent>/<row id>.md` (`Sessions.due_dir/2`), and
+pastes one line, "A message for you is in <path>; read it.", with the row's uuid at its end.
+Each interactive start of the agent passes that directory by `--add-dir`, so reading the file
+never asks permission, and it holds only the agent's due texts. The file stays after its row
+is delivered: the line is taken before the agent reads the file, in the turn it starts, and
+the framework keeps its data. The transcript's user line settles it as any typed row, and its
+turn's end brings the next waiter, so no row waits for a person's prompt. A row past the bound
+with no home to write its file in is refused, and waits for a waiter (F-240, `Delivery.tla`'s
 `Wake` and `WaitBound`). An idle session with no waiter starts none until a turn of it ends,
 and a restart cuts the one it had, so the `Inlet` types **the wake line** once in the row's
 place, with the session idle and no waiter held: `[framework] a message is waiting for you.`
@@ -2714,8 +2718,8 @@ delegate's brief, or its word to go on, or the brief again, at a resume; the fir
 move's resume, F-142) is marked `sending`
 by `launch` before the start (`Mailbox.launch/4`, by the part that starts it, by the start's
 deadline), and the start's answer is told to `Mailbox` (`launched/3`). Every later row goes by
-the waiter, or by `typed` when no waiter is connected: a short row as its own line, a long one
-or one of several lines as a pointer to the file that holds it ("A session with no waiter",
+the waiter, or by `typed` when no waiter is connected: a row within the paste's bound pasted
+whole, a longer one as a pointer to the file that holds it ("A session with no waiter",
 F-142), so no row waits for a person's prompt after a bare resume, a restart that cut the
 waiter, or the waiter's deadline (`Delivery.tla`'s `NoPointer`). An argument of about 900 000 bytes passed and one of 1
 100 000 did not on macOS (`getconf ARG_MAX` 1 048 576 for arguments and environment together),
@@ -2730,7 +2734,7 @@ with the row's uuid on its last line, settled as any launch by the transcript's 
 line names the path in backticks, so a home with a space reads as one path, and carries the
 sender as the text does: ``From <name> (<kind>): a message for you is in `<path>`; read it.``,
 or for a brief or a word to go on, which are not framed, ``A message for you is in `<path>`;
-read it.`` (F-172; the typed pointer is the same line). The typed short limit stays. With no home it is refused, and nothing is marked. So neither
+read it.`` (F-172; the typed pointer is the same line). With no home it is refused, and nothing is marked. So neither
 `Delegates` nor `Mains` refuses a long brief.
 
 **The take bound** (F-122's new-2): the time after a waiter's answer, or a typed write, by which
