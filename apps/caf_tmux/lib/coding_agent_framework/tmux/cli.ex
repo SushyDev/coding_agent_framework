@@ -185,11 +185,15 @@ defmodule CodingAgentFramework.Tmux.CLI do
   def write(%__MODULE__{} = s, pane, session, {:keys, keys}),
     do: guarded(s, pane, session, "send-keys -t #{pane} #{Enum.join(keys, " ")}", :sent)
 
-  # The load reads exactly the text's bytes, so it ends though the stdin stays open. Then the
-  # paste: bracketed (`-p`), its newlines kept (`-r`), the buffer dropped (`-d`).
+  # The buffer holds the text in bracketed paste's own markers (F-287), so its newlines never
+  # submit, whether or not tmux saw the program turn the mode on: under dtach, a pane that
+  # attaches after the program started never does. So no `-p`, which would bracket only then.
+  # The load reads exactly the buffer's bytes, so it ends though the stdin stays open. Then
+  # the paste: its escapes kept as bytes (`-S`, else tmux writes the markers out as text), its
+  # newlines kept (`-r`), the buffer dropped (`-d`).
   def write(%__MODULE__{} = s, pane, session, {:paste, buffer, text}) do
-    with :ok <- load(s, buffer, text) do
-      paste = "paste-buffer -p -r -d -b #{buffer} -t #{pane}"
+    with :ok <- load(s, buffer, Tmux.bracketed(text)) do
+      paste = "paste-buffer -S -r -d -b #{buffer} -t #{pane}"
 
       case guarded(s, pane, session, paste, :sent, "delete-buffer -b #{buffer} ; ") do
         {:unknown, {:tmux, 1, "no buffer" <> _}} -> {:refused, :no_buffer}

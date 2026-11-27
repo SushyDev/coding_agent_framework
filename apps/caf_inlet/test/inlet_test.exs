@@ -138,7 +138,7 @@ defmodule CodingAgentFramework.InletTest do
     opts = [release: @release, buffer: "caf-t", turn: ok]
     long = String.duplicate("a", Tmux.paste_max() + 1)
 
-    assert {:refused, {:too_long, 16_384}} = Inlet.type(ctx.inlet, "alpha", long, opts)
+    assert {:refused, {:too_long, 16_372}} = Inlet.type(ctx.inlet, "alpha", long, opts)
 
     # An escape could end the paste's bracket early, and the rest would go in as keys.
     assert {:refused, {:bad_text, :control}} =
@@ -171,6 +171,26 @@ defmodule CodingAgentFramework.InletTest do
     {:ok, _} = screen(ctx, "alpha", &match?(%{state: :idle, box: :empty}, &1))
     assert {:ok, :sent} = Inlet.type(ctx.inlet, "alpha", "four", opts)
     assert {:ok, [_, "four"]} = submitted(ctx, 2)
+  end
+
+  # F-287: the framework brackets the paste itself, so its newlines never submit, whether or not
+  # the pane saw the program turn bracketed paste on. A pane that runs the program sees it; one
+  # that attaches under dtach later, as to a session `Sessions` started, sees it only if the
+  # program asks again at the resize, and with `paste_mode: :once` it never does.
+  test "a 5-line text arrives as one submit, whether or not the pane saw bracketed paste on",
+       ctx do
+    text = Enum.map_join(1..5, "\n", &"line #{&1}")
+    opts = [release: @release, buffer: "caf-t", turn: fn -> :ok end]
+    open(ctx, "saw")
+    attached_late(ctx, "resized", [])
+    attached_late(ctx, "never", paste_mode: :once)
+
+    for {name, n} <- [{"saw", 1}, {"resized", 2}, {"never", 3}] do
+      assert {:ok, :sent} = Inlet.type(ctx.inlet, name, text, opts)
+      assert {:ok, lines} = submitted(ctx, n)
+      assert lines == List.duplicate(escaped(text), n)
+      assert {:ok, _} = screen(ctx, name, &match?(%{state: :idle, box: :empty}, &1))
+    end
   end
 
   # PastesItsOwnText (Agent.tla): two Inlets on one server paste at once, each into a buffer
@@ -638,6 +658,23 @@ defmodule CodingAgentFramework.InletTest do
     script = if config = opts[:config], do: with_config(script, config), else: script
     {:ok, _} = Tmux.new_session(ctx.server, name, [script | args], size: {120, 40})
     {:ok, _} = screen(ctx, name, &(&1.state in if(state, do: [state], else: [:idle, :running])))
+  end
+
+  # The stand-in started under dtach, as `Sessions` starts a session, and a pane that attaches
+  # to it only once it runs: the pane never sees the `ESC [?2004h` the program prints at start.
+  defp attached_late(ctx, name, opts) do
+    script = ScreenStandIn.write!(ctx.dir, @release, stand_in_idle(), opts)
+    socket = Path.join(ctx.dir, "#{name}.dtach")
+    pids = File.ls!(Path.join(ctx.dir, "pids"))
+    dtach = program!(:dtach)
+    {_, 0} = System.cmd(dtach, ["-n", socket, "-E", "-z", "-r", "winch", script])
+
+    {:ok, _} =
+      await(fn -> if File.ls!(Path.join(ctx.dir, "pids")) -- pids != [], do: {:ok, 1} end)
+
+    argv = [dtach, "-a", socket, "-E", "-z", "-r", "winch"]
+    {:ok, _} = Tmux.new_session(ctx.server, name, argv, size: {120, 40})
+    {:ok, _} = screen(ctx, name, &(&1.state == :idle))
   end
 
   # The stand-in run with `CLAUDE_CONFIG_DIR` set, as `Sessions` starts it.

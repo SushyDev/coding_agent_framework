@@ -182,9 +182,11 @@ defmodule CodingAgentFramework.MailboxTypedTest do
 
   # F-279: a row of any length within the bound, and of any number of lines, is pasted whole
   # into the default 200-column pane, not as a file. Its user line carries the whole text and
-  # its mark, and settles it.
+  # its mark, and settles it. F-287: this stand-in asks for bracketed paste only at its start,
+  # before its pane attaches under dtach, so the pane never sees it; the paste's own markers
+  # keep its newlines from submitting.
   test "a 300-character and a 5-line message each go pasted and settle by their line", ctx do
-    main = main(ctx)
+    main = main(ctx, paste_mode: :once)
     wide = String.duplicate("y", 300)
     lines = Enum.map_join(1..5, "\n", &"line #{&1}")
     {:ok, {:queued, one}} = Mailbox.message(ctx.mailbox, "operator", "main", wide)
@@ -278,9 +280,9 @@ defmodule CodingAgentFramework.MailboxTypedTest do
     assert ScreenStandIn.submitted(ctx.dir) == ["/reload-plugins"]
   end
 
-  defp main(ctx) do
-    launch =
-      Keyword.put(SessionsSetup.launch(ctx, :at_start), :claude, ScreenStandIn.write!(ctx.dir))
+  defp main(ctx, stand_in \\ []) do
+    claude = ScreenStandIn.write!(ctx.dir, "2.1.322", stand_in_idle(), stand_in)
+    launch = Keyword.put(SessionsSetup.launch(ctx, :at_start), :claude, claude)
 
     {:ok, %{pid: pid, session_id: sid}} =
       Sessions.start(ctx.sessions, "main", ctx.account, launch)

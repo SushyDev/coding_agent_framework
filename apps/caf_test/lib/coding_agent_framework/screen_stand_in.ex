@@ -6,8 +6,12 @@ defmodule CodingAgentFramework.ScreenStandIn do
 
   - idle, it draws `text-typed`'s screen with the box holding what was typed since the last
     Enter (an empty box is `❯` and a no-break space);
-  - it asks for bracketed paste, as Claude Code does, so `tmux paste-buffer -p` brackets a
-    paste. A paste goes into the box whole, its newlines kept (F-279), and is drawn as
+  - it asks for bracketed paste (`ESC [?2004h`) at its start and again at each draw a resize
+    makes, as Claude Code 2.1.322 appears to (F-287: multi-line pastes into real sessions a
+    pane attached to under dtach long after their start arrived whole). Written with
+    `paste_mode: :once`, it asks only at its start, so a pane that attaches under dtach later
+    never sees it. It reads a paste by its markers (`ESC [200~` to `ESC [201~`) either way,
+    as the framework brackets its paste itself. A paste goes into the box whole, its newlines kept (F-279), and is drawn as
     2.1.322 draws a paste (modeled, not captured): as its text when it is one line that fits,
     else folded, `[Pasted text #<n> +<newlines> lines]`;
   - at Enter it appends the box's text, as one line with each newline written `\n`, to
@@ -191,12 +195,14 @@ defmodule CodingAgentFramework.ScreenStandIn do
     suffix = suffix <> if(proc_start <> stat_dir != "", do: "-ticks", else: "")
     marks = if opts[:marks], do: "1", else: ""
     suffix = suffix <> if(marks != "", do: "-marks", else: "")
+    once = if opts[:paste_mode] == :once, do: "1", else: ""
+    suffix = suffix <> if(once != "", do: "-once", else: "")
     path = Path.join(dir, "claude-screen#{suffix}-#{release}")
     tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
 
     flags =
       {release, idle, dialogs, transcript, first, session_file, reloaded,
-       {redraw, every, proc_start, stat_dir, marks}}
+       {redraw, every, proc_start, stat_dir, marks, once}}
 
     File.write!(tmp, script(dir, screens, flags))
 
@@ -313,7 +319,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
 
   defp script(dir, screens, flags) do
     {release, idle, dialogs, transcript, first, session_file, reloaded,
-     {redraw, every, proc_start, stat_dir, marks}} = flags
+     {redraw, every, proc_start, stat_dir, marks, once}} = flags
 
     ~s"""
     #!#{program!(:bash)}
@@ -432,7 +438,9 @@ defmodule CodingAgentFramework.ScreenStandIn do
     # Keys are read one at a time with no echo, so text typed without an Enter is drawn by the
     # stand-in, in its box, as Claude Code draws it, and the terminal shows nothing else.
     #{program!(:stty)} -echo -icanon min 1
-    # Bracketed paste on, as Claude Code asks for it: tmux then brackets what it pastes.
+    # Bracketed paste on, as Claude Code asks for it. dtach keeps no output, so a pane that
+    # attaches later sees it only when a resize asks again (`resized`); with `paste_mode: :once`
+    # none does.
     printf '\\033[?2004h'
     # Claude Code draws again when its size changes, and only then (F-272). dtach keeps no
     # output, so a screen drawn before a viewer attached shows only once the viewer's grow
@@ -443,6 +451,7 @@ defmodule CodingAgentFramework.ScreenStandIn do
       local now; now=$(#{program!(:stty)} size 2>/dev/null)
       [ "$now" = "$size" ] && return 0
       size=$now
+      [ -n "#{once}" ] || printf '\\033[?2004h'
       draw
     }
     winched='' drawing='' size=$(#{program!(:stty)} size 2>/dev/null)
@@ -557,8 +566,8 @@ defmodule CodingAgentFramework.ScreenStandIn do
         announce busy
         announce idle
       elif [ "$key" = $'\\e' ]; then
-        # A bracketed paste: its text, any newline in it, up to the closing bracket. Its text
-        # holds no escape: `Tmux.paste_text/1` refuses one.
+        # A bracketed paste: its text, any newline in it, up to the closing marker, read so
+        # whatever the pane saw. Its text holds no escape: `Tmux.paste_text/1` refuses one.
         seq=''; IFS= read -r -N5 -t 1 seq
         if [ "$seq" = '[200~' ]; then
           text=''; IFS= read -r -d $'\\e' text; IFS= read -r -N5 -t 1 seq

@@ -42,13 +42,15 @@ defmodule CodingAgentFramework.TmuxContractTest do
       end
 
       # F-279: the text goes to the load's stdin, never on a command line, and the paste keeps
-      # its newlines and drops its buffer.
+      # its newlines and drops its buffer. F-287: it arrives inside bracketed paste's markers,
+      # one pair, though the pane's program never asked for the mode.
       test "a paste arrives whole, its newlines kept, and drops its buffer", ctx do
         {:ok, pane} = Tmux.new_session(ctx.server, "alpha", stand_in(ctx, "alpha"))
         text = @text <> "\nline two\n\tline three"
         assert {:ok, :sent} = Tmux.write(ctx.server, pane, "alpha", {:paste, "caf-u1", text})
         assert {:ok, :sent} = Tmux.write(ctx.server, pane, "alpha", {:keys, ["Enter"]})
-        assert {:ok, text <> "\n"} == received(ctx, pane, "alpha", text <> "\n")
+        expected = "\e[200~" <> text <> "\e[201~\n"
+        assert {:ok, expected} == received(ctx, pane, "alpha", expected)
         assert buffers(ctx) == []
       end
 
@@ -260,7 +262,7 @@ defmodule CodingAgentFramework.TmuxContractTest do
   defp render({:text, text}), do: text
   defp render({:line, text}), do: text <> "\n"
   defp render({:keys, ["Enter"]}), do: "\n"
-  defp render({:paste, _buffer, text}), do: text
+  defp render({:paste, _buffer, text}), do: Tmux.bracketed(text)
 
   # The buffers the server holds: the fake keeps none.
   defp buffers(%{impl: :fake}), do: []
