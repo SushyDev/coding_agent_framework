@@ -295,4 +295,94 @@ defmodule CodingAgentFramework.TrackerTest do
     :atomics.put(ref, 1, 2_500)
     assert {:ok, [{"registry:h:a", 2_500}, {"registry:h:x", :unread}]} = Tracker.behind(t, 1_000)
   end
+
+  # F-299's stand-in for a large writer's table: its rows in memory, read by id or whole.
+  defmodule Memory do
+    @moduledoc false
+    @behaviour CodingAgentFramework.Tracker.Source
+
+    @impl true
+    def open(opts), do: {:ok, Map.new(Keyword.fetch!(opts, :rows), &{&1.id, &1})}
+
+    @impl true
+    def describe(opts), do: %{topic: opts[:topic], scope: {"h", "agents"}, kind: opts[:kind]}
+
+    @impl true
+    def read(rows, :all), do: {:ok, %{read_at: 1, rows: Map.values(rows)}}
+    def read(rows, ids), do: {:ok, %{read_at: 1, rows: Enum.flat_map(ids, &List.wrap(rows[&1]))}}
+  end
+
+  @events 5_000
+
+  defp large do
+    pad = String.duplicate("x", 100)
+    agent = %{id: 1, host: "h", name: "main", kind: "main", parent: nil, project: "app"}
+    agent = Map.merge(agent, %{account: "a", status: "running", session_id: "s1"})
+
+    events =
+      for i <- 1..@events,
+          do: %{id: i, session_id: "s1", account: "a", event: "Stop", written_at: i, pad: pad}
+
+    {:ok, t} =
+      Tracker.start_link(
+        timer: false,
+        clock: fn -> 10 end,
+        sources: [
+          {Memory, topic: "sessions:h", kind: :agents, rows: [agent]},
+          {Memory, topic: "intake:h:a", kind: :events, rows: events}
+        ]
+      )
+
+    t
+  end
+
+  defp reductions, do: elem(Process.info(self(), :reductions), 1)
+
+  test "a cue of one row of a large source compares that row, not all of them (F-299)" do
+    rows = for i <- 1..@events, do: %{id: i, v: i}
+    fold = Fold.new() |> Fold.source("t:h", {"h", "a"}, :events)
+    {fold, _} = Fold.read(fold, "t:h", :all, {:ok, %{read_at: 1, rows: rows}})
+
+    before = reductions()
+    {_, changed} = Fold.read(fold, "t:h", [7], {:ok, %{read_at: 2, rows: [%{id: 7, v: 0}]}})
+    # Comparing every row costs some reductions per row; one row costs a few hundred in all.
+    assert reductions() - before < @events
+    assert changed == [{"t:h", 7}]
+  end
+
+  test "a view of some parts builds and copies only those kinds, each as the whole view has it" do
+    t = large()
+    {:ok, whole} = Tracker.view(t)
+    {:ok, part} = Tracker.view(t, parts: [:agents])
+
+    assert Enum.sort(Map.keys(part[{"h", "agents"}])) == [:age, :agents, :sources]
+    assert part[{"h", "agents"}].agents == whole[{"h", "agents"}].agents
+    assert part[{"h", "agents"}].sources == whole[{"h", "agents"}].sources
+    assert length(whole[{"h", "agents"}].events) == @events
+  end
+
+  test "the tree is folded in the Tracker: its answer reaches the caller, never the view" do
+    t = large()
+    {:ok, whole} = Tracker.view(t)
+    :erlang.trace(t, true, [:send])
+    assert {:ok, tree} = Tracker.agents(t, all: true)
+    :erlang.trace(t, false, [:send])
+    ref = :erlang.trace_delivered(t)
+    assert_receive {:trace_delivered, ^t, ^ref}
+    assert tree == CodingAgentFramework.Tracker.Tree.agents(whole, all: true)
+
+    # All the Tracker sent during the call: its reply (to the call's alias, not this pid), a
+    # fraction of the events' rows.
+    sent =
+      Stream.repeatedly(fn ->
+        receive do
+          {:trace, ^t, :send, msg, _to} -> :erts_debug.flat_size(msg)
+        after
+          0 -> nil
+        end
+      end)
+      |> Enum.take_while(& &1)
+
+    assert sent != [] and Enum.sum(sent) < :erts_debug.flat_size(whole) / 10
+  end
 end

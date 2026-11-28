@@ -519,6 +519,74 @@ defmodule CodingAgentFramework.SchedulerTest do
     assert %{level: :high, reading: %{file: :cpu, line: :some, threshold: 0.25}} = p
   end
 
+  # An owner that counts its asks, and holds the `Scheduler` in the first ask after `block/1`
+  # until the test sends `:go` to the pid it is told of.
+  defp counting_owner(test) do
+    asks = :counters.new(1, [])
+    {:ok, gate} = Agent.start_link(fn -> :open end)
+
+    owner = fn _key ->
+      :counters.add(asks, 1, 1)
+
+      if Agent.get_and_update(gate, &{&1, :open}) == :block do
+        send(test, {:held, self()})
+        receive do: (:go -> :ok)
+      end
+
+      :live
+    end
+
+    {owner, asks, fn -> Agent.update(gate, fn _ -> :block end) end}
+  end
+
+  test "cues queued while a check runs are answered by one more check, not one each (F-299)",
+       ctx do
+    {owner, asks, block} = counting_owner(self())
+    s = start(ctx.opts, holders: %{"work" => owner}, resources: %{"seat" => 3})
+    for id <- ~w(a b c), do: {:ok, _} = Scheduler.request(s, req(id, :builder, %{"seat" => 1}))
+    Scheduler.leases(s)
+    before = :counters.get(asks, 1)
+
+    block.()
+    Scheduler.cue(s, %{topic: "sessions:ws"})
+    assert_receive {:held, scheduler}
+    for _ <- 1..20, do: Scheduler.cue(s, %{topic: "sessions:ws"})
+    send(scheduler, :go)
+    Scheduler.leases(s)
+
+    # The held check asks the three owners, and the twenty cues behind it one check more.
+    assert :counters.get(asks, 1) - before == 2 * 3
+  end
+
+  test "a request read after its caller timed out is granted, and released at the next check",
+       ctx do
+    # F-289's hazard (F-299): a call waits in the mailbox past its caller's bound. Its caller
+    # was answered unknown and settles its row ended; the grant is still written, so the lease
+    # holds its seat until the next check asks the owner, never longer.
+    {owner, _asks, block} = counting_owner(self())
+    holders = %{"work" => owner, "late" => &owner(ctx.work, &1)}
+    s = start(ctx.opts, holders: holders, resources: %{"seat" => 2})
+    {:ok, %{id: a}} = Scheduler.request(s, req("a", :builder, %{"seat" => 1}))
+    assert_receive {:cue, %{topic: "scheduler:ws", ids: [^a]}}
+
+    block.()
+    Scheduler.cue(s, %{topic: "sessions:ws"})
+    assert_receive {:held, scheduler}
+    late = req("late", :builder, %{"seat" => 1}, holder: {"late", "late"})
+    assert {:unknown, {:timeout, 50}} = Scheduler.request(s, late, timeout: 50)
+    Agent.update(ctx.work, &Map.put(&1, "late", :ended))
+    send(scheduler, :go)
+
+    assert_receive {:cue, %{topic: "scheduler:ws", ids: [id]}}
+    assert %{request_id: "late", outcome: "granted", released_at: nil} = row(s, id)
+
+    Scheduler.cue(s, %{topic: "delegates:ws"})
+    assert_receive {:cue, %{topic: "scheduler:ws", ids: [^id]}}
+    assert %{released_by: "monitor"} = row(s, id)
+  end
+
+  defp row(s, id), do: Enum.find(Scheduler.leases(s), &(&1.id == id))
+
   @doc false
   def handle_event(event, measurements, meta, test),
     do: send(test, {:telemetry, event, measurements, meta})

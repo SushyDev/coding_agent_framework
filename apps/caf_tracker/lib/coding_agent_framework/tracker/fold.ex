@@ -87,7 +87,7 @@ defmodule CodingAgentFramework.Tracker.Fold do
     new = if rows, do: merge(old, ids, rows), else: old
 
     changed =
-      for id <- Enum.uniq(Map.keys(old) ++ Map.keys(new)), old[id] != new[id], do: {topic, id}
+      for id <- touched(old, new, ids, rows), old[id] != new[id], do: {topic, id}
 
     changed =
       if Map.take(source, [:status, :problem]) == Map.take(new_source, [:status, :problem]),
@@ -100,6 +100,16 @@ defmodule CodingAgentFramework.Tracker.Fold do
          rows: Map.put(fold.rows, topic, new)
      }, changed}
   end
+
+  # The keys a read may have changed. A read of some ids drops only those and puts only the rows
+  # it answered, so no other key can change: a cue of one row of a large source compares one
+  # row, not all of them (F-299). A read of `:all` replaces the topic's rows.
+  defp touched(_old, _new, _ids, nil), do: []
+
+  defp touched(_old, _new, ids, rows) when is_list(ids),
+    do: Enum.uniq(ids ++ Enum.map(rows, &key/1))
+
+  defp touched(old, new, _all, _rows), do: Enum.uniq(Map.keys(old) ++ Map.keys(new))
 
   defp problem({:unknown, reason}), do: reason
   defp problem(other), do: {:unexpected, other}
@@ -118,13 +128,20 @@ defmodule CodingAgentFramework.Tracker.Fold do
   @doc """
   The state per scope at time `now` (ms): its sessions, its sources with their status and age,
   and `age`, the age of its newest read, or `:unread` when no source of it has been read.
-  """
-  @spec view(t, integer) :: %{scope => map}
-  def view(fold, now) do
-    Enum.reduce(fold.sources, %{}, fn {topic, source}, acc ->
-      entries =
-        fold.rows[topic] |> Enum.map(fn {id, row} -> entry(source.kind, {topic, id}, row) end)
+  With `kinds`, a list of row kinds, only those kinds' rows are built, each as the whole view
+  has it; `sources` and `age` are every source's still (F-299).
 
+      iex> alias CodingAgentFramework.Tracker.Fold
+      iex> fold = Fold.new() |> Fold.source("t:h", {"h", "a"}, :leases)
+      iex> {fold, _} = Fold.read(fold, "t:h", :all, {:ok, %{read_at: 1, rows: [%{id: 1}]}})
+      iex> Fold.view(fold, 1)[{"h", "a"}] |> Map.take([:leases, :sessions])
+      %{leases: [%{key: {"t:h", 1}, row: %{id: 1}}], sessions: []}
+      iex> Fold.view(fold, 1, [:agents])[{"h", "a"}] |> Map.keys() |> Enum.sort()
+      [:age, :sources]
+  """
+  @spec view(t, integer, :all | [atom]) :: %{scope => map}
+  def view(fold, now, kinds \\ :all) do
+    Enum.reduce(fold.sources, %{}, fn {topic, source}, acc ->
       shown = %{
         status: source.status,
         read_at: source.read_at,
@@ -132,15 +149,27 @@ defmodule CodingAgentFramework.Tracker.Fold do
         problem: source.problem
       }
 
-      Map.update(acc, source.scope, part(source.kind, entries, topic, shown), fn part ->
-        part
-        |> Map.update(source.kind, entries, &(&1 ++ entries))
+      # A kind not asked for is not built: its rows stay in the fold (F-299).
+      rows =
+        if kinds == :all or source.kind in kinds,
+          do: [{source.kind, entries(fold, topic, source.kind)}],
+          else: []
+
+      Map.update(acc, source.scope, part(kinds, rows, topic, shown), fn part ->
+        rows
+        |> Enum.reduce(part, fn {kind, e}, part -> Map.update(part, kind, e, &(&1 ++ e)) end)
         |> Map.update!(:sources, &Map.put(&1, topic, shown))
         |> Map.update!(:age, &newest(&1, shown.age))
       end)
     end)
-    |> Map.new(fn {scope, part} -> {scope, Map.update!(part, :sessions, &sort/1)} end)
+    |> Map.new(fn {scope, part} -> {scope, sorted(part)} end)
   end
+
+  defp entries(fold, topic, kind),
+    do: Enum.map(fold.rows[topic], fn {id, row} -> entry(kind, {topic, id}, row) end)
+
+  defp sorted(%{sessions: s} = part), do: %{part | sessions: sort(s)}
+  defp sorted(part), do: part
 
   @doc "The sources that are `:unread`, or whose newest read is older than `bound` ms at `now`."
   @spec behind(t, integer, non_neg_integer) :: [{topic, non_neg_integer | :unread}]
@@ -151,8 +180,12 @@ defmodule CodingAgentFramework.Tracker.Fold do
     |> Enum.filter(fn {_, age} -> age == :unread or age > bound end)
   end
 
-  defp part(kind, entries, topic, shown),
-    do: Map.merge(%{sessions: []}, %{kind => entries, sources: %{topic => shown}, age: shown.age})
+  # A scope's part always has its sessions, empty when none, unless the caller asked for kinds
+  # without them.
+  defp part(kinds, rows, topic, shown) do
+    base = if kinds == :all or :sessions in kinds, do: %{sessions: []}, else: %{}
+    Map.merge(base, Map.new(rows) |> Map.merge(%{sources: %{topic => shown}, age: shown.age}))
+  end
 
   defp age(%{status: :unread}, _now), do: :unread
   defp age(%{read_at: at}, now) when is_integer(at), do: max(now - at, 0)

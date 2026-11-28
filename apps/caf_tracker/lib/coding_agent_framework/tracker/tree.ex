@@ -68,6 +68,16 @@ defmodule CodingAgentFramework.Tracker.Tree do
   @subagent [:agent_id, :type, :description, :state, :status, :tokens]
 
   @doc """
+  The row kinds of a view that `agents/2`, `records/1` and `tool_calls/3` read: a view of
+  these alone (`Tracker.view/2`'s `parts:`) gives each the answer the whole view gives (F-299).
+
+      iex> CodingAgentFramework.Tracker.Tree.kinds()
+      [:agents, :sessions, :stream, :transcripts, :events]
+  """
+  @spec kinds() :: [atom]
+  def kinds, do: [:agents, :sessions, :stream, :transcripts, :events]
+
+  @doc """
   The tree in `view`: `%{agents: rows, sources: ages, problems: problems}`. Options: `all:`
   (false by default) keeps the delegates that ended, and `groups:`, a map of `{host, name}` to
   that agent's read of its process groups (`StuckBackgrounds.Groups.read/3`'s answer), for
