@@ -238,6 +238,14 @@ defmodule CodingAgentFramework.SchedulerTest do
     assert %{reading: %{file: :level, line: :level, share: 4, threshold: 4}} =
              Scheduler.pressure(s)
 
+    # The kernel's level alone, held to each threshold (F-300).
+    assert %{
+             shares: [
+               %{file: :level, share: 4, threshold: 4, asks: :severe},
+               %{file: :level, share: 4, threshold: 2, asks: :high}
+             ]
+           } = Scheduler.pressure(s)
+
     # Barred, the request queues and says why (F-276).
     assert {:queued, %{position: 1, barred: {:pressure, :severe, %{share: 4}}}} =
              Scheduler.request(s, req("b", :builder, %{"seat" => 1}))
@@ -425,6 +433,70 @@ defmodule CodingAgentFramework.SchedulerTest do
     assert %{level: :high} = Scheduler.pressure(s)
     assert {:ok, _} = Scheduler.request(s, on("mac", "m1"))
     assert {:queued, %{barred: {:pressure, :high, _}}} = Scheduler.request(s, on("ws", "w1"))
+  end
+
+  # F-300: the numbers behind the level, at ok too, from the sample it already took.
+  test "pressure at ok answers each line's share and threshold, and another host's as unread",
+       ctx do
+    dir = test_dir()
+    line = "some avg10=0.00 avg60=0.00 avg300=0.00 total=100\n"
+    full = "full avg10=0.00 avg60=0.00 avg300=0.00 total=7\n"
+    File.write!(Path.join(dir, "cpu"), line)
+    File.write!(Path.join(dir, "memory"), line <> full)
+    File.write!(Path.join(dir, "io"), line <> full)
+
+    s =
+      start(ctx.opts,
+        pressure: [source: :psi, dir: dir, interval: 5],
+        resources: %{"seat" => 1, {"slot", "mac"} => 2}
+      )
+
+    # The first sample only starts a span; the answer has shares once a second one was read.
+    {:ok, p} =
+      await(
+        fn ->
+          case Scheduler.pressure(s) do
+            %{shares: [_ | _]} = p -> {:ok, p}
+            p -> {:no, p}
+          end
+        end,
+        20_000
+      )
+
+    assert %{level: :ok, reading: nil, source: :psi, unread: nil, at: at} = p
+    assert is_integer(at)
+
+    assert [
+             %{file: :memory, line: :full, share: +0.0, threshold: 0.01, asks: :severe},
+             %{file: :cpu, line: :some, share: +0.0, threshold: 0.25, asks: :high},
+             %{file: :memory, line: :some, share: +0.0, threshold: 0.10, asks: :high},
+             %{file: :io, line: :some, share: +0.0, threshold: 0.20, asks: :high}
+           ] = p.shares
+
+    assert p.hosts == %{
+             "mac" => %{
+               level: :ok,
+               reading: nil,
+               source: :none,
+               at: nil,
+               unread: :not_sampled,
+               shares: nil
+             }
+           }
+  end
+
+  test "each queue's length: a full resource with two waiting reads 2, the others 0", ctx do
+    s = start(ctx.opts)
+    assert Scheduler.waiting(s) == %{"seat" => 0, "slot" => 0, "lock" => 0}
+
+    {:ok, _} = Scheduler.request(s, req("x", :builder, %{"seat" => 1}))
+    {:queued, _} = Scheduler.request(s, req("w1", :builder, %{"seat" => 1}))
+    {:queued, _} = Scheduler.request(s, req("w2", :builder, %{"seat" => 1}))
+    assert Scheduler.waiting(s) == %{"seat" => 2, "slot" => 0, "lock" => 0}
+
+    ended(ctx, s, "x")
+    assert_receive {:lease, "w1", {:ok, _}}
+    assert %{"seat" => 1} = Scheduler.waiting(s)
   end
 
   test "pressure from stall times: deltas of total, severe at once, down after a quiet window" do

@@ -446,8 +446,12 @@ defmodule CodingAgentFramework do
       `exited` with `code`, `timedout` or `lost`.
     * `copies`: the first 200 copies by host, project and name, `%{host, project, name, path,
       state, holder}`; `holder` is the run that holds its turn.
-    * `resources`: each resource's `%{capacity: n, held: n}`, as the unreleased leases hold it.
-    * `pressure`: `Scheduler.pressure/2`'s `%{level, source, at, unread}`.
+    * `resources`: each resource's `%{capacity: n, held: n, waiting: n}`, keyed as the config
+      declares it (`"seat"`, `{"slot", "mac"}`): `held` as the unreleased leases hold it, and
+      `waiting` the requests queued for it now, `Scheduler.waiting/2`'s (F-300).
+    * `pressure`: `Scheduler.pressure/2`'s `%{level, reading, source, at, unread, shares,
+      hosts}`: the shares and thresholds of the last span at every level, and an entry per
+      other host, `unread: :not_sampled` (F-300).
 
   The three files are read one after another, the leases first, so a job may show its end
   before its lease's release, never the other way round. Option `ended:`, 0 to 200, default 20.
@@ -456,7 +460,9 @@ defmodule CodingAgentFramework do
   reason}}`; or the `Scheduler`'s `{:unknown, reason}`.
 
       {:ok, %{leases: [%{class: "landing", job: %{log: log, state: "running"}} | _],
-              pressure: %{level: :ok}}} = CodingAgentFramework.holds("a", ended: 5)
+              resources: %{"slot" => %{capacity: 2, held: 2, waiting: 1}},
+              pressure: %{level: :ok, shares: [%{file: :memory, line: :full} | _]}}} =
+        CodingAgentFramework.holds("a", ended: 5)
   """
   @spec holds(String.t(), keyword) :: {:ok, map} | {:refused, term} | {:unknown, term}
   def holds(instance, opts \\ []) do
@@ -468,7 +474,8 @@ defmodule CodingAgentFramework do
          {:ok, leases} <- lease_rows(c, ended),
          {:ok, jobs} <- job_rows(c, leases),
          {:ok, copies} <- copy_rows(c),
-         %{level: _} = pressure <- Scheduler.pressure(scheduler) do
+         %{level: _} = pressure <- Scheduler.pressure(scheduler),
+         %{} = waiting <- Scheduler.waiting(scheduler) do
       held =
         for %{released_at: nil, units: units} <- leases, {r, n} <- units, reduce: %{} do
           acc -> Map.update(acc, r, n, &(&1 + n))
@@ -480,7 +487,8 @@ defmodule CodingAgentFramework do
          copies: copies,
          resources:
            Map.new(resources(c), fn {r, n} ->
-             {r, %{capacity: n, held: held[Scheduler.key(r)] || 0}}
+             k = Scheduler.key(r)
+             {r, %{capacity: n, held: held[k] || 0, waiting: waiting[k] || 0}}
            end),
          pressure: pressure
        }}
