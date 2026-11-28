@@ -70,6 +70,12 @@ defmodule CodingAgentFramework.Runs do
   got its `started` line never runs the command itself. One ask's bound is its wait, the
   job's timeout and 300 s.
 
+  **Results back** (F-304). `caf-run --fetch <path>`, repeated, names paths relative to the
+  worktree that come back from the copy once the job's end is read (`Jobs.run/6`'s `fetch:`);
+  an absolute path or one with `.` or `..` is refused `bad_fetch` before anything runs. The
+  wrapper then prints `caf-run: fetch done`, `none`, or `not_fetched <why>`. A run on the
+  workstation ignores them.
+
   **Hosts in order** (F-304, `model/tla/RemotePlace.tla`). An entry may name several hosts,
   `host: ["mac", "ws"]`, the workstation by its config name; the rewrite names the first. The
   plug takes the first of them that `Hosts` does not hold away or lacking, from what it keeps,
@@ -129,16 +135,18 @@ defmodule CodingAgentFramework.Runs do
   # path of an ask nobody answered.
   @wrapper ~S"""
   exec 3>&1
-  w=${CAF_RUN_WAIT-} host= unleased=${CAF_RUN_UNLEASED-}
+  w=${CAF_RUN_WAIT-} host= fetch= unleased=${CAF_RUN_UNLEASED-}
   while [ "$#" -ge 2 ]; do
     case $1 in
       --wait) w=$2; shift 2 ;;
       --host) host=$2; shift 2 ;;
+      --fetch) fetch="$fetch$2
+  "; shift 2 ;;
       *) break ;;
     esac
   done
   [ "$#" -eq 5 ] && [ "$4" = -- ] || {
-    echo 'caf-run: usage: caf-run [--wait <seconds>] [--host <host>] <class> <id> <agent> -- <command>' >&2
+    echo 'caf-run: usage: caf-run [--wait <seconds>] [--host <host>] [--fetch <path>]... <class> <id> <agent> -- <command>' >&2
     exit 64; }
   case $w in
     '') ;;
@@ -150,10 +158,13 @@ defmodule CodingAgentFramework.Runs do
   class=$1 id=$2 agent=$3 cmd=$5
   if [ -n "$host" ]; then
     asked=$((${w:-$waits} + 5 + remote))
-    set -- --data-urlencode "host=$host" --data-urlencode "cmd=$cmd" --data-urlencode "cwd=$PWD"
+    set -- --data-urlencode "host=$host" --data-urlencode "cmd=$cmd" --data-urlencode "cwd=$PWD" \
+      --data-urlencode "fetch=$fetch"
   else
     set --
   fi
+  # F-304: whether the paths `--fetch` named came back, once the end is read.
+  fetched() { [ -z "$fetch" ] || printf 'caf-run: fetch %s\n' "$1" >&2; }
   start=$(LC_ALL=C TZ=UTC "$ps" -o lstart= -p $$) || start=
   again=0 d=
   timer() { [ -n "$d" ] && kill -0 "$d" 2>/dev/null; }
@@ -191,16 +202,19 @@ defmodule CodingAgentFramework.Runs do
       ended*)
         set -- $last
         case $2 in
-          exit) exit "$3" ;;
+          exit) fetched "${last#* fetch }"; exit "$3" ;;
           timeout)
             printf 'caf-run: the job on %s passed its timeout, and the host ended it\n' "$host" >&2
+            fetched "${last#* fetch }"
             exit 124 ;;
         esac
         printf 'caf-run: the run on %s has no end (%s); its job may still run there\n' \
           "$host" "${last#ended unknown }" >&2
+        fetched not_fetched
         exit 69 ;;
       cut)
         printf 'caf-run: the run on %s was cut off; its job may still run there\n' "$host" >&2
+        fetched not_fetched
         exit 69 ;;
       refused*)
         ! timer || kill "$d" 2>/dev/null
@@ -587,18 +601,20 @@ defmodule CodingAgentFramework.Runs do
 
   @doc """
   A wrapper's request, from its form fields: `{:ok, %{class, id, agent, holder, again, wait,
-  host, command, cwd}}`, or `{:refused, {:bad, field}}`. The holder is `"<pid> <start time>"`,
-  the start time with its runs of spaces made one. `wait` is the wrapper's own wait in ms (its
-  field in whole seconds, 1 to 99 999 999), or nil when it names none. `host` is the one its
-  `--host` names (F-296), with the command (`cmd`) and the wrapper's absolute directory (`cwd`);
-  each nil for a run on the plug's own host.
+  host, command, cwd, fetch}}`, or `{:refused, {:bad, field}}`. The holder is `"<pid> <start
+  time>"`, the start time with its runs of spaces made one. `wait` is the wrapper's own wait in
+  ms (its field in whole seconds, 1 to 99 999 999), or nil when it names none. `host` is the one
+  its `--host` names (F-296), with the command (`cmd`), the wrapper's absolute directory
+  (`cwd`) and the paths its `--fetch` names, one a line (`fetch`, F-304), relative to the
+  worktree: an absolute one or one with `..` is `{:bad, :fetch}`. Each is nil for a run on the
+  plug's own host, which fetches nothing, since its files are already there.
 
       iex> CodingAgentFramework.Runs.ask(%{"class" => "heavy", "id" => "toolu_1",
       ...>   "agent" => "fix-1", "pid" => "42", "start" => "Thu Nov 19  01:00:00 2026",
       ...>   "again" => "0"})
       {:ok, %{class: :heavy, id: "toolu_1", agent: "fix-1",
         holder: "42 Thu Nov 19 01:00:00 2026", again: false, wait: nil, host: nil,
-        command: nil, cwd: nil}}
+        command: nil, cwd: nil, fetch: nil}}
   """
   @spec ask(map) :: {:ok, map} | {:refused, {:bad, atom}}
   def ask(fields) do
@@ -624,7 +640,7 @@ defmodule CodingAgentFramework.Runs do
         {:refused, {:bad, :wait}}
 
       fields["host"] in [nil, ""] ->
-        {:ok, Map.merge(asked(fields, start), %{host: nil, command: nil, cwd: nil})}
+        {:ok, Map.merge(asked(fields, start), %{host: nil, command: nil, cwd: nil, fetch: nil})}
 
       not (is_binary(fields["cmd"]) and fields["cmd"] != "") ->
         {:refused, {:bad, :cmd}}
@@ -632,10 +648,27 @@ defmodule CodingAgentFramework.Runs do
       not (is_binary(fields["cwd"]) and Path.type(fields["cwd"]) == :absolute) ->
         {:refused, {:bad, :cwd}}
 
+      fetch(fields["fetch"]) == :bad ->
+        {:refused, {:bad, :fetch}}
+
       true ->
         remote = %{host: fields["host"], command: fields["cmd"], cwd: fields["cwd"]}
-        {:ok, Map.merge(asked(fields, start), remote)}
+        {:ok, Map.merge(asked(fields, start), Map.put(remote, :fetch, fetch(fields["fetch"])))}
     end
+  end
+
+  # The paths `--fetch` names, one a line, relative to the worktree (F-304): none absolute, none
+  # that leaves it, so a bad one refuses the run before anything runs.
+  defp fetch(field) do
+    paths = String.split(field || "", "\n", trim: true)
+
+    # `Jobs.run/6`'s own rule: no `.` or `..` part.
+    inside? =
+      &(Path.type(&1) == :relative and Enum.all?(Path.split(&1), fn p -> p not in [".", ".."] end))
+
+    if Enum.all?(paths, inside?),
+      do: paths,
+      else: :bad
   end
 
   defp asked(fields, start) do

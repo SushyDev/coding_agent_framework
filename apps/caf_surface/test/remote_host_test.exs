@@ -358,8 +358,9 @@ defmodule CodingAgentFramework.RemoteHostTest do
 
     # The wrapper as the app's lander calls it, with no agent: under the name `run-app`, on the
     # host its entry names first, in `cwd`.
-    defp own(c, id, command, cwd) do
-      line = "'#{Runs.wrapper(c.runs)}' --host 'mac' heavy '#{id}' 'run-app' -- '#{command}'"
+    defp own(c, id, command, cwd, flags \\ "") do
+      wrapper = "'#{Runs.wrapper(c.runs)}' --host 'mac' #{flags}"
+      line = "#{wrapper} heavy '#{id}' 'run-app' -- '#{command}'"
       {out, err} = {Path.join(c.dir, id <> ".out"), Path.join(c.dir, id <> ".err")}
       sh = "cd '#{cwd}' && #{line} > '#{out}' 2> '#{err}'"
       {:ok, %{status: status}} = Shell.run(host(), program!(:sh), ["-c", sh], timeout: 40_000)
@@ -435,6 +436,25 @@ defmodule CodingAgentFramework.RemoteHostTest do
       assert Jobs.rows(c.jobs) == []
       assert [_one] = local_leases(c)
       assert length(Scheduler.leases(c.scheduler)) == 1
+    end
+
+    test "a path --fetch names comes back from the copy once the run ends", c do
+      command = "make -v >/dev/null 2>&1; #{program!(:mkdir)} -p out; echo done > out/events.json"
+      flags = "--fetch out/events.json"
+
+      assert {0, "", "caf-run: started on mac (job run-f1)\ncaf-run: fetch done\n"} =
+               own(c, "f1", command, c.repo, flags)
+
+      assert File.read!(Path.join(c.repo, "out/events.json")) == "done\n"
+    end
+
+    test "a path to fetch that leaves the worktree is refused before anything runs", c do
+      for {id, path} <- [{"f2", "../x"}, {"f3", "/etc/passwd"}] do
+        assert {75, "", err} = own(c, id, "make; echo ran", c.repo, "--fetch '#{path}'")
+        assert err =~ "(bad_fetch)"
+      end
+
+      assert Jobs.rows(c.jobs) == []
     end
 
     test "a host found away with no host after it is refused, and nothing ran", c do

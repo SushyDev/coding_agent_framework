@@ -21,6 +21,8 @@
 (* a host and keeps the answer at any time. RemoteRun.tla checks the       *)
 (* stream and the slot once a job runs; HostSlots.tla the slots per host;  *)
 (* Host.tla the placement's find. Here the lease is granted or expires.    *)
+(* The workstation is last, so one host is always eligible; an entry of    *)
+(* other hosts alone, all held, places its first, as F-296 does.           *)
 (*                                                                         *)
 (* Fairness: a find answers, a sent start lands or is fenced, a job ends,  *)
 (* a host comes back, a lease is granted or expires. Going away gets none. *)

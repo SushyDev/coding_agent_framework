@@ -413,8 +413,12 @@ framework's hooks deciding:
     but only a process that reads the secret asks, and the plug syncs the known folder, never
     the one named, so a caller cannot make it copy any other. The command runs
     as `sh -c` at the wrapper's directory relative to the worktree, with the host's
-    environment; nothing is fetched back. The job's lease is that host's slot, its row the
-    holder;
+    environment. Nothing is fetched back but the paths the wrapper names, `caf-run --fetch
+    out/events.json …` (repeated, F-304), relative to the worktree, an absolute one or one with
+    `..` refused `bad_fetch` before anything runs; `Jobs.run/6` brings them back once the end
+    is read (`fetch:`), and the wrapper prints `caf-run: fetch done`, `none` or `not_fetched
+    <why>` (a conflict, a cut, an end unknown). A run on the workstation fetches nothing: its
+    files are already there. The job's lease is that host's slot, its row the holder;
   - **the stream**: the plug reads the job's log from an offset every second (one ssh
     connection each) and sends it line by line, and the wrapper prints it on its output (the
     job's output and errors as one).
