@@ -148,7 +148,9 @@ defmodule CodingAgentFramework.Config do
     with `host: name`, a host of `hosts`, runs its match there as a job in the agent's copy,
     under that host's slot (`{"slot", name}` in `resources`), its output streamed back and its
     exit code the wrapper's (F-296); a host not declared is `{:bad, :heavy, {:no_host,
-    name}}`. None by default;
+    name}}`. `host: ["mac", "ws"]` names hosts in order of preference, the workstation by its
+    `workstation` name: the run goes to the first that `Hosts` does not hold away or lacking,
+    and to the next once when its placement finds the host away (F-304). None by default;
   - `extensions`: the app's bundles as data, each `{module, opts}` (F-188): the tree calls the
     module's `bundle(opts, part)` (`CodingAgentFramework.Extension`'s callback) and serves the
     bundle, `%{name, scope, tools}`, on the agents' MCP endpoint beside the framework's tools.
@@ -814,7 +816,7 @@ defmodule CodingAgentFramework.Config do
   defp heavy_host(fields) do
     known = [Map.get(fields, :workstation, "ws") | Map.keys(Map.get(fields, :hosts, %{}))]
     {:ok, heavy} = Runs.heavy(Map.get(fields, :heavy, []))
-    Enum.find_value(heavy, fn {_, _, host} -> if host && host not in known, do: host end)
+    Enum.find_value(heavy, fn {_, _, hosts} -> Enum.find(hosts || [], &(&1 not in known)) end)
   end
 
   # A name with no control character; on macOS a tree that runs agents must have it (see `user`

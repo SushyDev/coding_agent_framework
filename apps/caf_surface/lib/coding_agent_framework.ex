@@ -1242,7 +1242,8 @@ defmodule CodingAgentFramework do
            host: host,
            policy: w.runs,
            jobs: fn -> pid.(:jobs) end,
-           where: &Sessions.Agents.place(w.agents, &1)
+           where: &run_place(c, w, &1, &2),
+           held: &Hosts.held(pid.(:hosts), &1)
          ]
 
          opts = [intake: pid.(:intake), secret: w.secret, runs: runs]
@@ -1738,6 +1739,31 @@ defmodule CodingAgentFramework do
   defp run_units(c, w, class, agent) do
     project = Map.get(Sessions.Agents.get(w.agents, agent) || %{}, :project)
     job_units(c, class, project)
+  end
+
+  # Where a heavy run on another host works: an agent's place, or, for a run no agent asks for
+  # (the app's own, F-304), the wrapper's folder when it is one the framework knows, the ones
+  # the trust rule names (F-286): a configured project's checkout or a worktree under the home.
+  defp run_place(c, w, agent, cwd) do
+    case Sessions.Agents.get(w.agents, agent) do
+      nil ->
+        checkouts =
+          for {name, data} <- c.projects,
+              repo = Mains.project(c.home, name, data).repo,
+              into: %{},
+              do: {repo, name}
+
+        known = %{
+          checkouts: checkouts,
+          worktrees: Path.join(c.home, "worktrees"),
+          projects: Map.keys(c.projects)
+        }
+
+        Runs.folder(known, cwd)
+
+      _agent ->
+        Sessions.Agents.place(w.agents, agent)
+    end
   end
 
   # Stall times where the host has them, the kernel's memory-pressure level on macOS; elsewhere

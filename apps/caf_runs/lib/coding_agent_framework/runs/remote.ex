@@ -7,7 +7,12 @@ defmodule CodingAgentFramework.Runs.Remote do
   host's slot, its row the holder, and its copy the agent's own on that host (`where`'s
   project, and the agent's name as the copy's), synced from the agent's worktree before each
   run. It runs in the copy at the wrapper's directory relative to the worktree, as `sh -c
-  <command>` there, with the host's environment; nothing is fetched back.
+  <command>` there, with the host's environment. Nothing is fetched back but the paths the
+  wrapper's `--fetch` names (F-304), relative to the worktree, which `Jobs.run/6` brings back
+  once the end is read (its `fetch:`); the end line says how, `fetch done`, `fetch none` or
+  `fetch not_fetched <why>`, and `ended unknown` means nothing came back. A run no agent asks
+  for (the app's own, F-304) is placed by the wrapper's directory instead, when that is a
+  folder the framework knows (`Runs.folder/2`), and refused `no_worktree` elsewhere.
 
   The answer is chunked, one line each:
 
@@ -54,18 +59,23 @@ defmodule CodingAgentFramework.Runs.Remote do
 
   @doc """
   Runs `ask` (`Runs.ask/1`'s, with a host) on its host under `units`, streaming on `conn`, a
-  chunked response. `opts` are `Runs.Plug`'s. Answers the conn.
+  chunked response. `opts` are `Runs.Plug`'s. Answers the conn. `fallback`, a function of the
+  conn or nil, takes the run on when its placement is refused `host_away` and `Jobs` has no
+  row for it, so nothing was sent (F-304, `RemotePlace.tla`): never once the job may have
+  started.
   """
-  @spec run(Plug.Conn.t(), map, map, map) :: Plug.Conn.t()
-  def run(conn, opts, ask, units) do
+  @spec run(Plug.Conn.t(), map, map, map, (Plug.Conn.t() -> Plug.Conn.t()) | nil) ::
+          Plug.Conn.t()
+  def run(conn, opts, ask, units, fallback \\ nil) do
     with {:jobs, jobs} when jobs != nil <- {:jobs, opts.jobs.()},
-         {:ok, place} <- opts.where.(ask.agent),
+         {:ok, place} <- opts.where.(ask.agent, ask.cwd),
          {:ok, dir} <- inside(place.worktree, ask.cwd) do
       id = "run-" <> ask.id
       where = %{host: ask.host, project: place.project, name: place.name}
       argv = ["/bin/sh", "-c", @in_dir, "caf-run", dir, ask.command]
       lease = %{class: ask.class, module: ask.agent, units: units}
       run_opts = [timeout: opts.remote_timeout, lease: lease, lease_wait: ask.wait]
+      run_opts = run_opts ++ [fetch: Map.get(ask, :fetch) || []]
       me = self()
 
       # Linked, so a crash of either ends both; every other end of this request ends it too.
@@ -76,6 +86,7 @@ defmodule CodingAgentFramework.Runs.Remote do
 
       st = %{conn: conn, jobs: jobs, id: id, pid: pid, host: ask.host, offset: 0, rest: ""}
       st = Map.merge(st, %{started: false, failing: nil, beat: now() + opts.beat})
+      st = Map.put(st, :fallback, fallback)
       loop(st, opts)
     else
       {:jobs, nil} -> last(conn, "unknown no_jobs")
@@ -180,13 +191,31 @@ defmodule CodingAgentFramework.Runs.Remote do
     Process.unlink(st.pid)
 
     case answer do
-      {:ok, %{exit: code}} -> drained(st, opts, "ended exit #{code}")
-      {:unknown, {:timeout, _}} -> drained(st, opts, "ended timeout")
+      {:ok, %{exit: code} = e} -> drained(st, opts, "ended exit #{code}#{fetched(e)}")
+      {:unknown, {:timeout, e}} -> drained(st, opts, "ended timeout#{fetched(e)}")
       {:unknown, :dropped} -> last(st.conn, "ended unknown dropped")
       {:unknown, why} -> drained(st, opts, "ended unknown #{Runs.Plug.word(why)}")
       {:refused, {:lease, {reason, at}}} -> last(st.conn, Runs.Plug.refused(reason, at))
       {:refused, {:job_exists, _}} -> last(st.conn, "ended unknown job_exists")
+      {:refused, {:host_away, _} = why} -> away(st, why)
       {:refused, why} -> last(st.conn, "refused #{Runs.Plug.word(why)} -")
+    end
+  end
+
+  # What `Jobs` brought back of the paths named (F-304): `done`, `none` (none named), or
+  # `not_fetched` with why (a conflict, or a fetch cut).
+  defp fetched(%{fetch: :done}), do: " fetch done"
+  defp fetched(%{fetch: :none}), do: " fetch none"
+  defp fetched(%{fetch: {:conflict, _}}), do: " fetch not_fetched conflict"
+  defp fetched(_), do: " fetch not_fetched unknown"
+
+  # The placement found the host away: `Jobs` refuses it before the job's row and its lease, so
+  # no row means nothing was sent, and only then does the run go on elsewhere. A row, or a read
+  # that cannot say, keeps it here: refused, never moved.
+  defp away(st, why) do
+    case {st.fallback, st.started, Jobs.row(st.jobs, st.id)} do
+      {next, false, {:refused, {:no_job, _}}} when next != nil -> next.(st.conn)
+      _ -> last(st.conn, "refused #{Runs.Plug.word(why)} -")
     end
   end
 

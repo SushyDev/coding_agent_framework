@@ -579,6 +579,12 @@ Built, each from a checked model in `model/tla/`:
 - a host declared in the tree's `hosts:` as an app declares it, its programs only on its
   entry's `env` PATH, takes a job and a heavy run with the programs `Hosts` finds there (F-303):
   the tree reads no programs from the entry.
+- a heavy run the app starts itself, with no agent, runs on another host from a project's
+  checkout or a worktree under the home, and is refused `no_worktree` from any other folder;
+  an entry names hosts in order, `host: ["mac", "ws"]`, and a run goes to the first `Hosts`
+  does not hold away, or to the next once when its placement finds the host away; and
+  `caf-run --fetch <path>` brings a result back from the copy once the run ends (F-304,
+  `RemotePlace.tla`).
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

@@ -94,6 +94,26 @@ defmodule CodingAgentFramework.Hosts do
   end
 
   @doc """
+  Whether new work may be sent to host `name`, from what is kept alone, with no ssh (F-304):
+  `{:ok, state}` (`:unknown` or `:ready`) when a placement there is worth a find, or the kept
+  refusal (`{:refused, {:host_away, name}}`, `{:refused, {:no_program, name, names}}`, …) while
+  the host is held away or lacking. A held host whose `:retry` is due reads `{:ok, :unknown}`,
+  so the next placement finds it again and it joins. `{:refused, {:no_host, name}}` for a host
+  not declared; `{:unknown, reason}` when the part does not answer.
+  """
+  @spec held(GenServer.server(), String.t()) ::
+          {:ok, :unknown | :ready} | {:refused, term} | {:unknown, term}
+  def held(hosts, name) do
+    with {:ok, %{kept: kept}} <- call(hosts, {:get, name}) do
+      case kept do
+        %{state: :ready} -> {:ok, :ready}
+        %{due: false, answer: {:refused, _} = refused} -> refused
+        _ -> {:ok, :unknown}
+      end
+    end
+  end
+
+  @doc """
   What is kept of each host: its state (`:unknown`, `:ready`, `:away` or `:lacking`), the
   answer a placement gave, and when, for a view or a test.
   """

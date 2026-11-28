@@ -38,8 +38,17 @@ defmodule CodingAgentFramework.Runs.Plug do
   A wrapper with a host (`--host`, F-296) is served by `CodingAgentFramework.Runs.Remote`, with
   the options `policy:` (the app's `Runs`, whose list must place the command on that host, or
   it is refused `bad_host`), `jobs:` (a function answering the `Jobs` server, or nil),
-  `where:` (a function of the agent answering `{:ok, %{project, name, worktree}}`, as
-  `Sessions.Agents.place/2` does), `remote_timeout:` (ms, the job's), `away:` and `poll:` (ms).
+  `where:` (a function of the wrapper's agent and its directory answering `{:ok, %{project,
+  name, worktree}}`, as `Sessions.Agents.place/2` does for an agent and `Runs.folder/2` for a
+  run no agent asks for, F-304), `held:` (a function of a host answering what `Hosts` keeps of
+  it, `Hosts.held/2`), `remote_timeout:` (ms, the job's), `away:` and `poll:` (ms).
+
+  **Hosts in order** (F-304, `model/tla/RemotePlace.tla`). The wrapper's host must be one the
+  command's entry names; the run goes to the first host from it on that `held:` does not
+  refuse (the workstation is never held), or to the first when every one is held. A placement
+  there refused `host_away`, with no job row, goes to the next such host once. Each move is
+  one line before the run's own, `note mac away; running on ws`; on the workstation the run
+  is then a local one, `granted <lease id>` or queued under the workstation's slot.
 
       iex> plug = CodingAgentFramework.Runs.Plug
       iex> opts = plug.init(scheduler: fn -> nil end, units: fn _, _ -> {:ok, %{}} end, secret: "s")
@@ -79,7 +88,9 @@ defmodule CodingAgentFramework.Runs.Plug do
       # A run on another host (F-296, `Runs.Remote`).
       policy: Keyword.get(opts, :policy),
       jobs: Keyword.get(opts, :jobs, fn -> nil end),
-      where: Keyword.get(opts, :where, fn _agent -> {:refused, :no_worktree} end),
+      where: Keyword.get(opts, :where, fn _agent, _cwd -> {:refused, :no_worktree} end),
+      # What `Hosts` keeps of a host, with no ssh (F-304, `Hosts.held/2`).
+      held: Keyword.get(opts, :held, fn _host -> {:ok, :unknown} end),
       remote_timeout: Keyword.get(opts, :remote_timeout, Runs.remote_timeout()),
       away: Keyword.get(opts, :away, Runs.Remote.away()),
       poll: Keyword.get(opts, :poll, Runs.Remote.poll())
@@ -125,18 +136,66 @@ defmodule CodingAgentFramework.Runs.Plug do
   end
 
   # The host is the app's, never the wrapper's word: the command must match an entry of the
-  # app's list that names that host, as a wrapper on this host cannot name another (F-292).
+  # app's list that names that host, as a wrapper on this host cannot name another (F-292). The
+  # run goes on from it through the entry's later hosts (F-304, `RemotePlace.tla`).
   defp remote(conn, opts, ask, units) do
     with %Runs{} = policy <- opts.policy,
-         {:ok, _class, host} when host == ask.host <- Runs.place(policy, ask.command) do
-      conn
-      |> put_resp_content_type("text/plain")
-      |> send_chunked(200)
-      |> Runs.Remote.run(opts, ask, units)
+         {:ok, _class, [_ | _] = hosts} <- Runs.hosts(policy, ask.command),
+         [_ | _] = order <- Enum.drop_while(hosts, &(&1 != ask.host)) do
+      # The workstation by its config name, the plug's own host, as the entry names it.
+      own = opts.host || policy.host.name
+
+      {:ok, host, skipped, rest} = choose(opts, own, order)
+      conn |> chunked() |> note(skipped, host) |> go(opts, own, ask, units, host, rest)
     else
       _ -> answer(conn, "refused bad_host -")
     end
   end
+
+  # The first host of `order` that `Hosts` does not hold away or lacking, read from what it
+  # keeps: no ssh here, so a host held away costs the run nothing. The workstation is never
+  # away. Answers the host, the first skipped one and why, and the hosts after it. When every
+  # host is held, the first is placed as before F-304: its placement finds it again, so a host
+  # that came back joins at once.
+  defp choose(opts, own, order), do: choose(opts, own, order, order, nil)
+
+  defp choose(_opts, _own, [first | rest], [], _skipped), do: {:ok, first, nil, rest}
+  defp choose(_opts, own, _order, [own | rest], skipped), do: {:ok, own, skipped, rest}
+
+  defp choose(opts, own, order, [host | rest], skipped) do
+    case opts.held.(host) do
+      {:refused, why} -> choose(opts, own, order, rest, skipped || {host, why})
+      _ready_or_unknown -> {:ok, host, skipped, rest}
+    end
+  end
+
+  defp go(conn, opts, own, ask, units, own, _rest),
+    do: request(conn, opts, %{ask | host: nil}, units)
+
+  defp go(conn, opts, own, ask, units, host, rest) do
+    # A placement refused `host_away` with nothing sent: the next host, once.
+    fallback = fn conn ->
+      {:ok, next, _skipped, _rest} = choose(opts, own, rest)
+      conn |> note({host, {:host_away, host}}, next) |> go(opts, own, ask, units, next, [])
+    end
+
+    fallback = if rest == [], do: nil, else: fallback
+    Runs.Remote.run(conn, opts, %{ask | host: host}, units, fallback)
+  end
+
+  defp note(conn, nil, _host), do: conn
+
+  defp note(conn, {skipped, why}, host) do
+    state = if match?({:host_away, _}, why), do: "away", else: "lacking"
+
+    case chunk(conn, "note #{skipped} #{state}; running on #{host}\n") do
+      {:ok, conn} -> conn
+      {:error, _} -> conn
+    end
+  end
+
+  defp chunked(%Plug.Conn{state: :chunked} = conn), do: conn
+  defp chunked(conn), do: conn |> put_resp_content_type("text/plain") |> send_chunked(200)
 
   defp request(conn, opts, ask, units) do
     holder = {"run", ask.holder}
@@ -159,7 +218,7 @@ defmodule CodingAgentFramework.Runs.Plug do
         answer(conn, granted(lease, holder))
 
       {:queued, %{position: n} = queued} ->
-        conn = conn |> put_resp_content_type("text/plain") |> send_chunked(200)
+        conn = chunked(conn)
         until = System.monotonic_time(:millisecond) + ask.wait + @slack
         line = "queued (position #{n}#{why_queued(queued[:barred])})\n"
 
@@ -214,6 +273,9 @@ defmodule CodingAgentFramework.Runs.Plug do
       {:error, _} -> conn
     end
   end
+
+  # A local run after a note (F-304) answers on the chunked response the note began.
+  defp answer(%Plug.Conn{state: :chunked} = conn, line), do: last(conn, line)
 
   defp answer(conn, line),
     do: conn |> put_resp_content_type("text/plain") |> send_resp(200, line <> "\n")

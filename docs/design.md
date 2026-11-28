@@ -394,11 +394,31 @@ framework's hooks deciding:
     host of the config's `hosts` (else `{:bad, :heavy, {:no_host, name}}`); the rewrite adds
     `--host 'mac'`, and the plug runs it there only when its own match of the command names
     that host, else refuses it `bad_host`, so a wrapper never names a host the app did not;
+  - **hosts in order** (F-304, `RemotePlace.tla`): an entry may name a list, `host: ["mac",
+    "ws"]`, the workstation by its `workstation` name, and the rewrite names the first. The run
+    goes to the first host from the wrapper's on that `Hosts` does not hold away or lacking
+    (`Hosts.held/2`, from what it keeps, no ssh; a host whose `retry` is due is not held), or
+    to the first when every one is held, as before. A placement there refused `host_away`
+    with no job row, so nothing was sent, goes to the next such host once, and the wrapper
+    prints `caf-run: mac away; running on ws`; on the workstation it then runs as any local
+    heavy command, under that slot. A job that was sent is never moved, and a run holds one
+    host's slot at a time, since a placement comes before its lease;
   - **the tree** is the agent's copy on that host (its project, the agent's name as the copy's),
-    synced from its worktree by `Jobs.run/6` before each run, as a job's is. The command runs
+    synced from its worktree by `Jobs.run/6` before each run, as a job's is. A run no agent
+    asks for (the app's own lander or script, F-304) is placed by the wrapper's directory
+    (`Runs.folder/2`): at or under a configured project's checkout, the copy `+checkout` of that
+    project, a name no agent can have; at or under `<home>/worktrees/<project>/<name>`, that
+    worktree's copy, the one an agent working there has. Any other folder is refused
+    `no_worktree`. The directory is the wrapper's `$PWD`, a form field the plug cannot check,
+    but only a process that reads the secret asks, and the plug syncs the known folder, never
+    the one named, so a caller cannot make it copy any other. The command runs
     as `sh -c` at the wrapper's directory relative to the worktree, with the host's
-    environment; nothing is fetched back. The job's lease is that host's slot, its row the
-    holder;
+    environment. Nothing is fetched back but the paths the wrapper names, `caf-run --fetch
+    out/events.json …` (repeated, F-304), relative to the worktree, an absolute one or one with
+    `..` refused `bad_fetch` before anything runs; `Jobs.run/6` brings them back once the end
+    is read (`fetch:`), and the wrapper prints `caf-run: fetch done`, `none` or `not_fetched
+    <why>` (a conflict, a cut, an end unknown). A run on the workstation fetches nothing: its
+    files are already there. The job's lease is that host's slot, its row the holder;
   - **the stream**: the plug reads the job's log from an offset every second (one ssh
     connection each) and sends it line by line, and the wrapper prints it on its output (the
     job's output and errors as one).
@@ -3346,6 +3366,16 @@ lease), `TrueCode` (a wrapper exits with a code only when the job exited with it
 slot is freed once the job's end is read). Breaks: `FreeOnAway` (the give-up frees the slot
 while the job may run), `KeepSlot` (the give-up leaves the row to nobody), `ReportSuccess` (the
 give-up exits 0) and `CodeBeforeLog`.
+
+`RemotePlace.tla` (F-304) models where a run goes when its entry names two other hosts and then
+the workstation: the choice from what `Hosts` keeps, the placement's find, the one fallback on a
+placement found away, the lease, the start settled by its reply or the fence, the host away
+mid-run, and other work finding a host at any time. Invariants `OneHost` (a run is at one host
+at a time), `NeverTwice` (the command starts at most once), `OneSlot` and `NeverMoved` (a job
+sent stays its host's); liveness `RunEnds` and `SlotFreed`. Breaks: `AskNextEarly` (the next
+host asked while a slow find runs on), `LeaseFirst` (the slot asked before the placement and
+kept on the fallback), `CutAsAway` (a cut start taken as not sent) and `MoveOnAway` (a job
+whose host went away started again on the next).
 
 `Boxes.tla` (F-163) composes the seven boxes by their contracts ("Contracts and one composed
 spec"). Each box is only what it promises and what it assumes: `Sessions`' agent row, its
