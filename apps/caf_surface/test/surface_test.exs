@@ -282,6 +282,20 @@ defmodule CodingAgentFramework.SurfaceTest do
     assert %{source: :psi, psi: ^dir, pressure: %{opts: opts}} = :sys.get_state(parts.scheduler)
     assert opts[:full] == 0.05
     assert %{level: :ok, source: :psi} = Scheduler.pressure(parts.scheduler)
+
+    # The panel's pressure carries the threshold the app set, once a span was read (F-300).
+    {:ok, shares} =
+      await(
+        fn ->
+          case CodingAgentFramework.holds(ctx.i) do
+            {:ok, %{pressure: %{shares: [_ | _] = shares}}} -> {:ok, shares}
+            other -> {:no, other}
+          end
+        end,
+        20_000
+      )
+
+    assert [%{file: :memory, line: :full, threshold: 0.05, asks: :severe} | _] = shares
   end
 
   # F-266: an app's panel of what holds the machine, read through the facade.
@@ -329,8 +343,10 @@ defmodule CodingAgentFramework.SurfaceTest do
       assert %{host: "ws", worktree: ^repo} = job
     end
 
-    assert holds.resources["slot"] == %{capacity: 2, held: 2}
-    assert %{level: _, source: _, unread: _} = holds.pressure
+    # Both slots are held and nothing waits (F-300); each resource has its queue's length.
+    assert holds.resources["slot"] == %{capacity: 2, held: 2, waiting: 0}
+    assert Enum.all?(holds.resources, &match?({_, %{waiting: 0}}, &1))
+    assert %{level: _, source: _, unread: _, shares: _, hosts: %{}} = holds.pressure
 
     assert [%{host: "ws", project: "app", name: "app-one", path: path}, %{name: "app-two"}] =
              holds.copies

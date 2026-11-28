@@ -597,6 +597,10 @@ Built, each from a checked model in `model/tla/`:
 - a message's key is per sender and recipient (F-305): one key on messages to three agents
   stores three rows and delivers each, and only a send again to the same agent answers the
   first id.
+- an app's panel reads the numbers behind the pressure level at every level (F-300): each line's
+  share of the last span and its threshold, from the sample the `Scheduler` already took, with
+  another host's entry `unread: :not_sampled`; and each resource's queue length beside what is
+  held and its capacity.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,

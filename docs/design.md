@@ -1110,8 +1110,9 @@ today, so a session on another host answers `{:unknown, {:host, {:no_reader, hos
 added `holds/2`, an app's panel of what holds the machine: every unreleased lease and the last
 `ended:` released ones (at most 200), each with its class, module, holder, units, grant and
 release times, and for a job's lease the job's command, copy, log path (both on its host),
-state and exit code; the first 200 copies with their paths and turns; each resource's capacity
-and held units; and `Scheduler.pressure/2`. The leases, the jobs and the copies are read once
+state and exit code; the first 200 copies with their paths and turns; each resource's capacity,
+held units and waiting requests, `%{capacity, held, waiting}` (`Scheduler.waiting/2`, F-300);
+and `Scheduler.pressure/2`. The leases, the jobs and the copies are read once
 each, read-only, from their parts' files, leases first, and the pressure from the running
 `Scheduler`. A job's row keeps its command (`argv`) from its ask. A heavy command's lease
 (`caf-run`) shows its agent, its tool call's id, its process and its release; its command and
@@ -1419,6 +1420,15 @@ any reply does (new-4).
     (warn) `high`, 4 (critical) `severe`, and any other value unknown, never `ok`: a sample
     that cannot be read changes nothing and is named in `Scheduler.pressure/2`, beside the
     level's source and its last sample's time; each change of the level is cued (F-171).
+    `Scheduler.pressure/2` answers `%{level, reading, source, at, unread, shares, hosts}`
+    (F-300). `shares` are the numbers behind the level at every level, `ok` included, from the
+    last span the `Scheduler` already sampled (no read of its own, nil before a span): each line
+    the gate checks, `%{file, line, share, threshold, asks, at}`, memory `full` (`asks:
+    :severe`) then cpu, memory and io `some` (`asks: :high`). A share is the span's growth of
+    `total`, the number its threshold is held to, not the kernel's `avg10`. On macOS they are
+    the kernel's level alone, held to the `severe` and the `high` threshold. `hosts` has each
+    other host's entry in the same shape, `level: :ok` as the gates take it and `unread:
+    :not_sampled`, since its pressure is not read (below).
     Gates stop new starts only: an admitted session is never shed. Thresholds, reserves and
     the windows' figures are measured on the workstation, not modeled: each is an option with a
     default, a placeholder until it is measured (memory `full`'s is, F-273).

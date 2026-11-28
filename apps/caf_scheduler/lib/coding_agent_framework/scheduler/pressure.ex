@@ -29,6 +29,18 @@ defmodule CodingAgentFramework.Scheduler.Pressure do
   `%{file: :memory, line: :full, share: 0.02, threshold: 0.01, at: ms}`. A `pressure` refusal
   carries it. At `ok` it is nil.
 
+  **The shares** (F-300). `shares` holds every line the last span read, at every level, `ok`
+  included: each is a reading with the level it `asks` for once its share passes its
+  threshold, in the order they are checked: memory `full` (`severe`), then the `some` lines of
+  cpu, memory and io (`high`). On Linux a share is the growth of the line's `total` over the
+  span, the number its threshold is held to, not the kernel's own `avg10`. On macOS there are
+  no shares, only the kernel's level, held to `level_severe:` and to `level_high:`: two entries
+  of `file: :level`. It is nil until a span has been read, since a first sample only starts
+  one.
+
+      [%{file: :memory, line: :full, share: 0.0, threshold: 0.01, asks: :severe, at: ms},
+       %{file: :cpu, line: :some, share: 0.03, threshold: 0.25, asks: :high, at: ms}, ...]
+
   Each threshold is an option with a default. Memory `full`'s, 1% of the span, is measured
   (`docs/build-notes/F-273.md`): on the Linux workstation it grew by under 0.001% of any 2 s
   span at rest and under the test suite, so 1% reads only a real stall. The others are
@@ -40,6 +52,8 @@ defmodule CodingAgentFramework.Scheduler.Pressure do
       iex> p = Pressure.step(p, {:psi, %{cpu: %{some: 900_000}, memory: %{some: 0, full: 0}, io: %{some: 0, full: 0}}}, 1_000)
       iex> p.level
       :ok
+      iex> for s <- p.shares, do: {s.file, s.line, s.share, s.threshold}
+      [{:memory, :full, 0.0, 0.01}, {:cpu, :some, 0.9, 0.25}, {:memory, :some, 0.0, 0.1}, {:io, :some, 0.0, 0.2}]
       iex> p = Pressure.step(p, {:psi, %{cpu: %{some: 1_800_000}, memory: %{some: 0, full: 0}, io: %{some: 0, full: 0}}}, 2_000)
       iex> p.level
       :high
@@ -62,9 +76,18 @@ defmodule CodingAgentFramework.Scheduler.Pressure do
   @type level :: :ok | :high | :severe
   @type sample :: {:psi, map} | {:level, integer}
   @type reading :: %{file: atom, line: atom, share: number, threshold: number, at: integer}
+  @type share :: %{
+          file: atom,
+          line: atom,
+          share: number,
+          threshold: number,
+          asks: :high | :severe,
+          at: integer
+        }
   @type t :: %{
           level: level,
           reading: reading | nil,
+          shares: [share] | nil,
           at: integer | nil,
           last: map | nil,
           toward: {level, integer, reading | nil} | nil,
@@ -81,6 +104,7 @@ defmodule CodingAgentFramework.Scheduler.Pressure do
     %{
       level: :ok,
       reading: nil,
+      shares: nil,
       last: nil,
       at: nil,
       toward: nil,
@@ -126,7 +150,7 @@ defmodule CodingAgentFramework.Scheduler.Pressure do
     {asked, reading} =
       Enum.find(checks, {:ok, nil}, fn {_, r} -> r.share > r.threshold end)
 
-    judge(%{p | last: sample, at: now}, asked, reading, now)
+    judge(%{p | last: sample, at: now, shares: shares(checks)}, asked, reading, now)
   end
 
   def step(p, {:psi, sample}, now), do: %{p | last: sample, at: now}
@@ -134,19 +158,19 @@ defmodule CodingAgentFramework.Scheduler.Pressure do
   def step(p, {:level, n}, now) when is_integer(n) do
     o = p.opts
 
-    reading = fn threshold ->
+    held_to = fn threshold ->
       %{file: :level, line: :level, share: n, threshold: o[threshold], at: now}
     end
 
-    {asked, reading} =
-      cond do
-        n >= o[:level_severe] -> {:severe, reading.(:level_severe)}
-        n >= o[:level_high] -> {:high, reading.(:level_high)}
-        true -> {:ok, nil}
-      end
+    checks = [severe: held_to.(:level_severe), high: held_to.(:level_high)]
 
-    judge(p, asked, reading, now)
+    {asked, reading} =
+      Enum.find(checks, {:ok, nil}, fn {_, r} -> r.share >= r.threshold end)
+
+    judge(%{p | shares: shares(checks)}, asked, reading, now)
   end
+
+  defp shares(checks), do: for({asks, r} <- checks, do: Map.put(r, :asks, asks))
 
   # Severe at once. Up to `high` once each sample of a whole window asked for it. Down once no
   # sample of a whole window asked for the level or above, to the highest any of them asked:

@@ -135,9 +135,22 @@ defmodule CodingAgentFramework.Scheduler do
   the last sample read, nil before any) and `unread` (nil, or why the last sample could not be
   read: it changed nothing).
 
+  `shares` (F-300) are the numbers behind the level at every level, `ok` included: each line
+  the last span read with its `share`, its `threshold` and the level it `asks` for
+  (`Scheduler.Pressure`'s module doc), from the sample the `Scheduler` already took, so no read
+  is added; nil before a span was read. On macOS they are the kernel's level alone, held to
+  each threshold. `hosts` has an entry for each other host the `Scheduler` leases for, in the
+  same shape: its pressure is never sampled (F-292), so its `level` is `:ok`, as the gates take
+  it, and `unread` is `:not_sampled`.
+
       Scheduler.pressure(s)
-      #=> %{level: :high, reading: %{file: :level, line: :level, share: 2, threshold: 2, at: 1_763_500_000_000},
-      #=>   source: "sysctl", at: 1_763_500_000_000, unread: nil}
+      #=> %{level: :ok, reading: nil, source: :psi, at: 1_763_500_000_000, unread: nil,
+      #=>   shares: [%{file: :memory, line: :full, share: 0.0, threshold: 0.01, asks: :severe,
+      #=>              at: 1_763_500_000_000},
+      #=>            %{file: :cpu, line: :some, share: 0.04, threshold: 0.25, asks: :high,
+      #=>              at: 1_763_500_000_000}, ...],
+      #=>   hosts: %{"mac" => %{level: :ok, reading: nil, source: :none, at: nil,
+      #=>                       unread: :not_sampled, shares: nil}}}
   """
   @spec pressure(GenServer.server(), keyword) ::
           %{
@@ -145,10 +158,24 @@ defmodule CodingAgentFramework.Scheduler do
             reading: Pressure.reading() | nil,
             source: atom | String.t(),
             at: integer | nil,
-            unread: term
+            unread: term,
+            shares: [Pressure.share()] | nil,
+            hosts: %{String.t() => map}
           }
           | {:unknown, term}
   def pressure(scheduler, opts \\ []), do: call(scheduler, :pressure, opts)
+
+  @doc """
+  Each queue's length (F-300): for every resource it leases, by its key (`key/1`: `"seat"`,
+  `"slot@mac"`, `"land:app"`), the number of requests waiting that need some of it; 0 when
+  none does. A request waiting for two resources counts in each.
+
+      Scheduler.waiting(s)
+      #=> %{"seat" => 0, "slot" => 2, "slot@mac" => 0, "land:app" => 0}
+  """
+  @spec waiting(GenServer.server(), keyword) ::
+          %{String.t() => non_neg_integer} | {:refused, term} | {:unknown, term}
+  def waiting(scheduler, opts \\ []), do: call(scheduler, :waiting, opts)
 
   @doc """
   Hands it a cue: each lease it monitors is asked about again, and the queue served. Answers
@@ -187,6 +214,7 @@ defmodule CodingAgentFramework.Scheduler do
         host: host,
         capacity: capacity,
         per_host: per_host,
+        hosts: hosts(Keyword.fetch!(opts, :resources), host),
         holders: Keyword.get(opts, :holders, %{}),
         allowance: Keyword.get(opts, :allowance, fn _ -> :room end),
         bound: Keyword.get(opts, :queue_bound, 4),
@@ -233,7 +261,27 @@ defmodule CodingAgentFramework.Scheduler do
   def handle_call(:pressure, _from, s) do
     source = with {:level, _} <- s.source, do: s.source_name
     reply = %{level: s.pressure.level, reading: s.pressure.reading, source: source}
-    {:reply, Map.merge(reply, %{at: s.sampled_at, unread: s.unread}), s}
+
+    # Another host's pressure is not sampled (F-292): its entry says so, never a level read.
+    other = %{level: :ok, reading: nil, source: :none, at: nil, unread: :not_sampled, shares: nil}
+    hosts = Map.new(s.hosts, &{&1, other})
+
+    {:reply,
+     Map.merge(reply, %{
+       at: s.sampled_at,
+       unread: s.unread,
+       shares: s.pressure.shares,
+       hosts: hosts
+     }), s}
+  end
+
+  def handle_call(:waiting, _from, s) do
+    waiting =
+      for e <- s.entries, {r, _} <- e.req.units, reduce: Map.new(s.capacity, &{elem(&1, 0), 0}) do
+        acc -> Map.update(acc, r, 1, &(&1 + 1))
+      end
+
+    {:reply, waiting, s}
   end
 
   @impl true
@@ -588,6 +636,10 @@ defmodule CodingAgentFramework.Scheduler do
   end
 
   defp capacity(_resources, _host), do: {:stop, {:bad, :resources}}
+
+  # The other hosts it leases for: those of a `{name, host}` resource, checked by `capacity/2`.
+  defp hosts(resources, host),
+    do: Enum.uniq(for {{_, h}, _} <- resources, h != host, do: h)
 
   defp key?({r, h}), do: key?(r) and key?(h)
   defp key?(name), do: is_binary(name) and name != "" and not (name =~ "@")
