@@ -259,16 +259,12 @@ defmodule CodingAgentFramework.MCPTest do
     assert [%{agent: "app-fix", tool: "message", state: "answered"}] = MCP.calls(mcp)
   end
 
-  test "a message's key is scoped to its sender and passed on", %{mcp: mcp, tokens: t} do
+  # Mailbox scopes the key to the sender and recipient (F-305), so it goes on as given.
+  test "a message's key is passed on as the agent gave it", %{mcp: mcp, tokens: t} do
     args = %{"to" => "app-main", "text" => "done", "key" => "k1"}
     assert tool(mcp, t["app-fix"], "message", args) == %{"ok" => ["queued", 7]}
     assert_received {:message_opts, "app-fix", opts}
-    assert opts[:key] == "msg:app-fix:k1"
-
-    # The same key from another sender is that sender's own.
-    tool(mcp, t["app-main"], "message", %{args | "to" => "app-fix"})
-    assert_received {:message_opts, "app-main", opts}
-    assert opts[:key] == "msg:app-main:k1"
+    assert opts[:key] == "k1"
 
     # With no key nothing is passed, and the bound is the instance's step.
     tool(mcp, t["app-fix"], "message", Map.delete(args, "key"))
