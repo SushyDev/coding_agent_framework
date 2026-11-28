@@ -215,6 +215,8 @@ defmodule CodingAgentFramework do
            Holder.new(programs, Config.path(c, "d"), Config.options(c, :holder, [])),
          {:ok, agents} <- Sessions.Agents.open(db, c.workstation),
          {:ok, work} <- Delegates.Work.open(db, db, c.workstation),
+         # Mailbox's own, read in its process: a finished delegate's seat (F-301).
+         {:ok, seats} <- Delegates.Work.open(db, db, c.workstation),
          {:ok, allowance} <- Usage.Allowance.open(db),
          {:ok, mains_allowance} <- Usage.Allowance.open(db),
          {:ok, mains_work} <- Mains.Work.open(db, db, c.workstation),
@@ -223,7 +225,8 @@ defmodule CodingAgentFramework do
          {:ok, runs} <- Runs.new(c.home, programs, c.heavy),
          :ok <- Runs.prepare(runs, programs, c.ports.intake, secret) do
       w = %{tmux: tmux, accounts: accounts, holder: holder, agents: agents, secret: secret}
-      w = Map.merge(w, %{work: work, allowance: allowance, mains_allowance: mains_allowance})
+      w = Map.merge(w, %{work: work, seats: seats, allowance: allowance})
+      w = Map.put(w, :mains_allowance, mains_allowance)
       {:ok, Map.merge(w, %{mains_work: mains_work, runs: runs})}
     end
   end
@@ -1355,6 +1358,7 @@ defmodule CodingAgentFramework do
             home: c.home,
             os: Programs.os(p),
             acts: pid.(:acts),
+            seated: &Delegates.Work.seated?(w.seats, &1),
             notify: notify}
          end},
         {:delegates,

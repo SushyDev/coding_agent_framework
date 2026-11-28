@@ -183,6 +183,34 @@
 (* a caller that waits for a queued lease (the code's default for the      *)
 (* operator), whose answer is the outcome itself; the queue's position;    *)
 (* a start again (StartAgain), whose lease is granted at once here.        *)
+(*                                                                         *)
+(* A finished delegate frees its seat (F-301). For a delegate in Seats,    *)
+(* its lease ends when its turn ends with the report delivered, not when   *)
+(* its agent row is free: Delegates.Work answers a finished row whose      *)
+(* seat is free ended while its process idles. The seat, durable on the    *)
+(* row, is held, closing, free or asking. Once the report is delivered and *)
+(* its process idles with no row to it, Delegates writes closing, which    *)
+(* Mailbox reads as a closed gate (Mailbox's mark of a row reads the seat  *)
+(* in its own step), then reads again: still idle with no row, free; else  *)
+(* held. A row to it (a message: Team.tla's) stored while the seat is free *)
+(* waits in Mailbox; Delegates writes asking, then asks the Scheduler for  *)
+(* a lease under an id of that ask, queued or granted like a start's;      *)
+(* granted, held, and the row goes in; refused, free again, and only a row *)
+(* stored after that ask asks again (askedFor). A restart loses the wait   *)
+(* for the answer, not the asking: Delegates asks again under the same id, *)
+(* which answers the lease if it was granted. The Scheduler is another     *)
+(* process: Release is its release of every lease of a row whose work the *)
+(* owner says ended (Schedule.tla's compare-and-set: once). A delegate not *)
+(* in Seats holds its seat until it ends, as before. NoTurnWithoutGrant,   *)
+(* FreeIsReleased and FreesOnceIdle. NoGate marks a row while the seat is  *)
+(* free; NoClosing frees on one read with the gate open; AskWhileFree asks *)
+(* with the seat still free, so the grant is released at once;            *)
+(* RefusedOpens opens the gate on a refusal; SeatInMemory keeps the seat   *)
+(* in memory. Left open: a turn of the delegate's own (OwnWakes) and a     *)
+(* person's turn (PersonTypes) may run while its seat is free, since       *)
+(* nothing the framework writes starts them; the stale start lease may be  *)
+(* unreleased for a step when a new ask is granted (two held at once).     *)
+(* Left abstract: the parent's notice of a refused ask.                    *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -200,6 +228,8 @@ CONSTANTS
     MaxAgain,        \* starts of a branch again, its row with no report and its process gone
     MaxWakes,        \* turns of a delegate's own, a background command's wake (F-155)
     Queued,          \* the delegates whose start's lease is queued, the caller not waiting (F-170)
+    Seats,           \* the delegates whose seat frees once finished (F-301)
+    MaxMsgs,         \* rows stored to a finished delegate in Seats
     Break            \* "none", or the guard removed (see Breaks)
 
 Breaks == {
@@ -224,7 +254,12 @@ Breaks == {
     "TakeStale",             \* Sessions takes a request whose caller's deadline passed
     "StartOwedInMemory",     \* the parent owed a queued start's outcome is kept in memory only
     "StartNoKey",            \* a queued start's outcome is told under no key Mailbox checks
-    "BackgroundHolds"        \* an interactive report's turn ends by its session file (F-269)
+    "BackgroundHolds",       \* an interactive report's turn ends by its session file (F-269)
+    "NoGate",                \* Mailbox marks a row to a delegate whose seat is free (F-301)
+    "NoClosing",             \* the seat frees on one read, the gate open in between
+    "AskWhileFree",          \* a seat is asked for with the row still free
+    "RefusedOpens",          \* a refused ask leaves the seat held, the gate open
+    "SeatInMemory"           \* the seat is kept in memory: a restart reads it held
 }
 
 ASSUME Break \in Breaks
@@ -233,6 +268,7 @@ ASSUME Cap \in Nat /\ MaxRestarts \in Nat /\ MaxKills \in Nat /\ MaxParentStops 
 ASSUME Awaited \subseteq Delegates /\ ClientLeaves \in BOOLEAN
 ASSUME Stalls \subseteq Delegates /\ MaxAgain \in Nat /\ MaxWakes \in Nat
 ASSUME Queued \subseteq Delegates
+ASSUME Seats \subseteq Delegates /\ MaxMsgs \in Nat
 
 Parent == "parent"
 
@@ -286,6 +322,17 @@ VARIABLES
     owed,         \* table: d -> the parent is owed the queued start's outcome
     atOnce,       \* ghost: d -> the start answered queued at once
     startTold,    \* ghost: d -> notices told of the queued start's outcome
+    \* A finished delegate's seat (F-301)
+    seat,         \* table: d -> "held", "closing", "free", "asking"
+    inbox,        \* Mailbox: d -> rows to d stored, not yet marked
+    mpipe,        \* d -> such rows written into its current process, not yet taken
+    stored,       \* d -> rows stored to d so far (a row's id, in order)
+    askedFor,     \* table: d -> stored[d] when the last seat ask was made
+    ask,          \* the Scheduler: d -> "none", or "queued" (the seat ask waits in its queue)
+    waitAsk,      \* in memory: d -> Delegates waits for the seat ask's answer
+    askGrant,     \* the Scheduler's table: d -> the current seat ask's lease was granted
+    startRel,     \* the Scheduler's table: d -> the start's lease is released
+    turnHeld,     \* the Scheduler's table: d -> seat asks' leases granted, not released
     \* Delivery's, for the reports: row d is d's report
     row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, lost, wrong
 
@@ -298,7 +345,8 @@ policyVars == <<idles, overdue, told, keys, againStarts, woken, ownDone, ownTold
                 sched, owed, atOnce, startTold>>
 leaseVars == <<sched, owed, atOnce, startTold>>
 dvars == <<row, hand, claimed, wire, waiter, dcall, tx, fold, rmem, last, unsure, lost, wrong>>
-vars == <<up, restarts, parentVars, delegateVars, stops, callVars, policyVars, dvars>>
+seatVars == <<seat, inbox, mpipe, stored, askedFor, ask, waitAsk, askGrant, startRel, turnHeld>>
+vars == <<up, restarts, parentVars, delegateVars, stops, callVars, policyVars, dvars, seatVars>>
 
 \* The parent's process Mailbox sees: one number per process.
 ParentProc == IF parentRuns THEN parentStops + 1 ELSE 0
@@ -349,6 +397,22 @@ SessionsFree(d) == sess[d] \in {"none", "refused"}
 WorkEnded(d) ==
     \/ status[d] \in {"none", "ended"}
     \/ status[d] \in {"refused", "finished", "failed"} /\ (SessionsFree(d) \/ Break = "StatusEndsWork")
+    \* F-301: a finished delegate whose seat is free.
+    \/ status[d] = "finished" /\ seat[d] = "free"
+
+\* The leases the Scheduler holds for d's row: its start's, from its call to
+\* its release, and its seat asks' granted since.
+StartHeld(d) == status[d] \notin {"none", "refused"} /\ ~startRel[d]
+Held(d) == (IF StartHeld(d) THEN 1 ELSE 0) + turnHeld[d]
+
+\* Mailbox's gate: a row to d is marked only while its seat is held (or
+\* closing's check, checked, under NoClosing).
+Gated(d) == seat[d] \in {"held", "checked"} \/ Break = "NoGate"
+
+\* Finished, its report delivered, its process idle with nothing due to it.
+Quiet(d) ==
+    /\ status[d] = "finished" /\ row[d].st = "delivered"
+    /\ proc[d] = "idle" /\ inbox[d] = 0 /\ mpipe[d] = 0 /\ pipe[d] = 0
 
 \* The key an own turn's notice is stored under: its result's uuid.
 TurnKey(d, n) == <<"turn", d, n>>
@@ -392,6 +456,11 @@ Init ==
     /\ tx = [a \in {Parent} |-> <<>>] /\ fold = [d \in Delegates |-> "none"]
     /\ rmem = {} /\ last = [a \in {Parent} |-> D!NoResult]
     /\ unsure = {} /\ lost = {} /\ wrong = {}
+    /\ seat = [d \in Delegates |-> "held"] /\ inbox = [d \in Delegates |-> 0]
+    /\ mpipe = [d \in Delegates |-> 0] /\ stored = [d \in Delegates |-> 0]
+    /\ askedFor = [d \in Delegates |-> 0] /\ ask = [d \in Delegates |-> "none"]
+    /\ waitAsk = [d \in Delegates |-> FALSE] /\ askGrant = [d \in Delegates |-> FALSE]
+    /\ startRel = [d \in Delegates |-> FALSE] /\ turnHeld = [d \in Delegates |-> 0]
 
 -----------------------------------------------------------------------------
 (* The framework: its tables survive a restart; what it holds in memory does not *)
@@ -783,7 +852,8 @@ OwnTurnEnds(d) ==
                    dvars>>
 
 DelegateKilled(d) ==
-    /\ proc[d] \in {"waiting", "working", "person", "idle", "stalled", "own"} /\ kills < MaxKills
+    /\ proc[d] \in {"waiting", "working", "person", "idle", "stalled", "own", "msg"}
+    /\ kills < MaxKills
     /\ proc' = [proc EXCEPT ![d] = "dead"]
     /\ kills' = kills + 1
     /\ shell' = shell \ {d}
@@ -905,6 +975,135 @@ DelegateEnds(d) ==
     /\ UNCHANGED <<others, held, resumes, reply, kills, persons, rsrc, callVars>>
 
 -----------------------------------------------------------------------------
+(* A finished delegate's seat (F-301) *)
+
+oldVars == <<up, restarts, parentVars, delegateVars, stops, callVars, policyVars, dvars>>
+
+\* Delegates' memory goes with a restart: its wait for a seat ask's answer.
+\* Under SeatInMemory the seat goes too, and reads held after.
+SeatRestart ==
+    /\ waitAsk' = [d \in Delegates |-> FALSE]
+    /\ seat' = IF Break = "SeatInMemory" THEN [d \in Delegates |-> "held"] ELSE seat
+    /\ UNCHANGED <<inbox, mpipe, stored, askedFor, ask, askGrant, startRel, turnHeld>>
+
+\* A row to a finished delegate is stored in Mailbox (a message, Team.tla's).
+MessageStored(d) ==
+    /\ d \in Seats /\ status[d] = "finished" /\ stored[d] < MaxMsgs
+    /\ inbox' = [inbox EXCEPT ![d] = @ + 1]
+    /\ stored' = [stored EXCEPT ![d] = @ + 1]
+    /\ UNCHANGED <<oldVars, seat, mpipe, askedFor, ask, waitAsk, askGrant, startRel, turnHeld>>
+
+\* Mailbox marks it and writes it into an ended turn of the live process, in
+\* one step of its own that reads the seat: only while the seat is held.
+MessageMarked(d) ==
+    /\ inbox[d] > 0 /\ proc[d] = "idle" /\ mpipe[d] = 0 /\ pipe[d] = 0
+    /\ status[d] = "finished" /\ Gated(d)
+    /\ inbox' = [inbox EXCEPT ![d] = @ - 1]
+    /\ mpipe' = [mpipe EXCEPT ![d] = 1]
+    /\ UNCHANGED <<oldVars, seat, stored, askedFor, ask, waitAsk, askGrant, startRel, turnHeld>>
+
+\* The delegate takes it: a turn starts, and ends.
+MessageTaken(d) ==
+    /\ proc[d] = "idle" /\ mpipe[d] > 0
+    /\ mpipe' = [mpipe EXCEPT ![d] = @ - 1]
+    /\ proc' = [proc EXCEPT ![d] = "msg"]
+    /\ UNCHANGED <<up, restarts, parentVars, status, held, resumes, reply, kills, shell, persons,
+                   rsrc, stops, callVars, policyVars, dvars, seat, inbox, stored, askedFor, ask,
+                   waitAsk, askGrant, startRel, turnHeld>>
+
+MessageTurnEnds(d) ==
+    /\ proc[d] = "msg"
+    /\ proc' = [proc EXCEPT ![d] = "idle"]
+    /\ UNCHANGED <<up, restarts, parentVars, status, held, resumes, reply, kills, shell, persons,
+                   rsrc, stops, callVars, policyVars, dvars, seatVars>>
+
+\* Delegates closes the gate first: closing, durable, which Mailbox reads as
+\* not held and the Scheduler's owner as live. Under NoClosing the check is
+\* made with the gate open (checked) and the write after trusts it.
+SeatCloses(d) ==
+    /\ up /\ d \in Seats /\ seat[d] = "held" /\ Quiet(d)
+    /\ seat' = [seat EXCEPT ![d] = IF Break = "NoClosing" THEN "checked" ELSE "closing"]
+    /\ UNCHANGED <<oldVars, inbox, mpipe, stored, askedFor, ask, waitAsk, askGrant, startRel,
+                   turnHeld>>
+
+\* ... then reads again: still idle with nothing due, free; else held, and
+\* the rows go in.
+SeatFrees(d) ==
+    /\ up /\ seat[d] \in {"closing", "checked"}
+    /\ seat' = [seat EXCEPT ![d] = IF Quiet(d) \/ Break = "NoClosing" THEN "free" ELSE "held"]
+    /\ UNCHANGED <<oldVars, inbox, mpipe, stored, askedFor, ask, waitAsk, askGrant, startRel,
+                   turnHeld>>
+
+\* A row waits for a free seat, stored after the last ask: Delegates writes
+\* asking, then asks the Scheduler under this ask's id. AskWhileFree asks
+\* with the row still free.
+SeatAsked(d) ==
+    /\ up /\ seat[d] = "free" /\ status[d] = "finished" /\ inbox[d] > 0
+    /\ stored[d] > askedFor[d] /\ ~waitAsk[d]
+    /\ seat' = [seat EXCEPT ![d] = IF Break = "AskWhileFree" THEN "free" ELSE "asking"]
+    /\ askedFor' = [askedFor EXCEPT ![d] = stored[d]]
+    /\ ask' = [ask EXCEPT ![d] = "queued"]
+    /\ waitAsk' = [waitAsk EXCEPT ![d] = TRUE]
+    /\ askGrant' = [askGrant EXCEPT ![d] = FALSE]
+    /\ UNCHANGED <<oldVars, inbox, mpipe, stored, startRel, turnHeld>>
+
+\* After a restart, a row still asking asks again under the same id: the
+\* lease is looked up first, so a grant written before answers at once; a
+\* request still queued is the same one, its answer now to this process.
+SeatAskedAgain(d) ==
+    /\ up /\ seat[d] = "asking" /\ ~waitAsk[d] /\ ask[d] \in {"none", "queued"}
+    /\ IF askGrant[d]
+         THEN seat' = [seat EXCEPT ![d] = "held"] /\ UNCHANGED <<ask, waitAsk>>
+         ELSE /\ ask' = [ask EXCEPT ![d] = "queued"]
+              /\ waitAsk' = [waitAsk EXCEPT ![d] = TRUE]
+              /\ UNCHANGED seat
+    /\ UNCHANGED <<oldVars, inbox, mpipe, stored, askedFor, askGrant, startRel, turnHeld>>
+
+\* The Scheduler's one more answer: granted, its row written first, or
+\* refused (its deadline, a full queue, the allowance), holding nothing.
+\* The message to Delegates is in flight after (ask "granted", "refused").
+SeatGranted(d) ==
+    /\ ask[d] = "queued"
+    /\ ask' = [ask EXCEPT ![d] = "granted"]
+    /\ askGrant' = [askGrant EXCEPT ![d] = TRUE]
+    /\ turnHeld' = [turnHeld EXCEPT ![d] = @ + 1]
+    /\ UNCHANGED <<oldVars, seat, inbox, mpipe, stored, askedFor, waitAsk, startRel>>
+
+SeatRefused(d) ==
+    /\ ask[d] = "queued"
+    /\ ask' = [ask EXCEPT ![d] = "refused"]
+    /\ UNCHANGED <<oldVars, seat, inbox, mpipe, stored, askedFor, waitAsk, askGrant, startRel,
+                   turnHeld>>
+
+\* Delegates takes the answer while it waits for it: granted, held, and the
+\* rows go in; refused, free again, and the rows wait for one stored after
+\* this ask (RefusedOpens leaves the gate open). With no wait in memory (a
+\* restart) the answer reaches no one, and the row stays asking.
+SeatTold(d) ==
+    /\ ask[d] \in {"granted", "refused"}
+    /\ ask' = [ask EXCEPT ![d] = "none"]
+    /\ IF waitAsk[d] /\ up /\ status[d] = "finished"
+         THEN /\ seat' = [seat EXCEPT ![d] = IF ask[d] = "granted" \/ Break = "RefusedOpens"
+                                             THEN "held" ELSE "free"]
+              /\ waitAsk' = [waitAsk EXCEPT ![d] = FALSE]
+         ELSE /\ waitAsk' = [waitAsk EXCEPT ![d] = IF up THEN FALSE ELSE @]
+              /\ UNCHANGED seat
+    /\ UNCHANGED <<oldVars, inbox, mpipe, stored, askedFor, askGrant, startRel, turnHeld>>
+
+\* The Scheduler asks the row's owner about each lease it holds, and
+\* releases every one whose work ended, each once (Schedule.tla).
+Release(d) ==
+    /\ d \in Seats /\ Held(d) > 0 /\ WorkEnded(d)
+    /\ startRel' = [startRel EXCEPT ![d] = StartHeld(d) \/ @]
+    /\ turnHeld' = [turnHeld EXCEPT ![d] = 0]
+    /\ UNCHANGED <<oldVars, seat, inbox, mpipe, stored, askedFor, ask, waitAsk, askGrant>>
+
+Seat(d) ==
+    \/ MessageStored(d) \/ MessageMarked(d) \/ MessageTaken(d) \/ MessageTurnEnds(d)
+    \/ SeatCloses(d) \/ SeatFrees(d) \/ SeatAsked(d) \/ SeatAskedAgain(d)
+    \/ SeatGranted(d) \/ SeatRefused(d) \/ SeatTold(d) \/ Release(d)
+
+-----------------------------------------------------------------------------
 (* Mailbox: the report into the parent (Delivery.tla) *)
 
 Mailbox(A) == A /\ UNCHANGED <<up, restarts, parentVars, delegateVars, stops, callVars, policyVars>>
@@ -943,8 +1142,8 @@ Framework(d) ==
     \/ \E n \in 1..MaxWakes : TurnTold(d, n)
     \/ StartTold(d) \/ StartCleared(d)
 
-Next ==
-    \/ FrameworkDies \/ FrameworkStarts \/ RestartParent
+Steps ==
+    \/ FrameworkStarts \/ RestartParent
     \/ PromptSent \/ TurnEnds \/ ParentStops \/ ParentRuns
     \/ Mailbox(D!Connects(Parent))
     \/ \E d \in Delegates : StartAsked(d) \/ StartAgain(d) \/ Called(d) \/ CallerLate(d)
@@ -957,25 +1156,42 @@ Next ==
                             \/ Framework(d)
                             \/ Mailboxes(d)
 
+\* The steps before F-301 leave the seat's state as it is; a restart of the
+\* framework takes Delegates' memory of it too.
+Next ==
+    \/ FrameworkDies /\ SeatRestart
+    \/ Steps /\ UNCHANGED seatVars
+    \/ \E d \in Delegates : Seat(d)
+
 \* Sessions decides a call it took, and a delegate reads its stdin. A call
 \* that waits is taken or reaches its deadline. The agent's call and the
-\* handler's end need not happen.
+\* handler's end need not happen. K is a step from before F-301, which leaves
+\* the seat's state as it is.
+K(A) == A /\ UNCHANGED seatVars
+
 Fairness ==
-    /\ WF_vars(FrameworkStarts) /\ WF_vars(ParentRuns) /\ WF_vars(TurnEnds)
-    /\ SF_vars(Mailbox(D!Connects(Parent)))
+    /\ WF_vars(K(FrameworkStarts)) /\ WF_vars(K(ParentRuns)) /\ WF_vars(K(TurnEnds))
+    /\ SF_vars(K(Mailbox(D!Connects(Parent))))
     /\ \A d \in Delegates :
-         /\ WF_vars(Called(d)) /\ WF_vars(SessionsDecides(d)) /\ WF_vars(Confirmed(d))
-         /\ WF_vars(OrphanEnded(d))
-         /\ WF_vars(CallAnswered(d))
-         /\ WF_vars(Settled(d)) /\ WF_vars(InputWritten(d)) /\ WF_vars(InputTaken(d))
-         /\ WF_vars(StopHandled(d)) /\ WF_vars(TranscriptRead(d)) /\ WF_vars(HeldStored(d))
-         /\ WF_vars(KillSeen(d)) /\ WF_vars(DelegateEnds(d))
-         /\ WF_vars(BoundPasses(d)) /\ WF_vars(IdleTold(d))
-         /\ \A n \in 1..MaxWakes : WF_vars(TurnTold(d, n))
-         /\ WF_vars(LeaseAnswered(d)) /\ WF_vars(StartTold(d)) /\ WF_vars(StartCleared(d))
-         /\ SF_vars(\E t \in {"waiter", "typed", "call"} : Mailbox(D!Mark(d, t)))
-         /\ SF_vars(Mailbox(D!Handed(d))) /\ SF_vars(Takes(d))
-         /\ SF_vars(RowSteps(d))
+         /\ WF_vars(K(Called(d))) /\ WF_vars(K(SessionsDecides(d))) /\ WF_vars(K(Confirmed(d)))
+         /\ WF_vars(K(OrphanEnded(d)))
+         /\ WF_vars(K(CallAnswered(d)))
+         /\ WF_vars(K(Settled(d))) /\ WF_vars(K(InputWritten(d))) /\ WF_vars(K(InputTaken(d)))
+         /\ WF_vars(K(StopHandled(d))) /\ WF_vars(K(TranscriptRead(d)))
+         /\ WF_vars(K(HeldStored(d)))
+         /\ WF_vars(K(KillSeen(d))) /\ WF_vars(K(DelegateEnds(d)))
+         /\ WF_vars(K(BoundPasses(d))) /\ WF_vars(K(IdleTold(d)))
+         /\ \A n \in 1..MaxWakes : WF_vars(K(TurnTold(d, n)))
+         /\ WF_vars(K(LeaseAnswered(d))) /\ WF_vars(K(StartTold(d)))
+         /\ WF_vars(K(StartCleared(d)))
+         /\ SF_vars(K(\E t \in {"waiter", "typed", "call"} : Mailbox(D!Mark(d, t))))
+         /\ SF_vars(K(Mailbox(D!Handed(d)))) /\ SF_vars(K(Takes(d)))
+         /\ SF_vars(K(RowSteps(d)))
+         \* F-301: the seat's steps, Mailbox's marks and the Scheduler's answer and release.
+         /\ WF_vars(SeatCloses(d)) /\ WF_vars(SeatFrees(d)) /\ WF_vars(SeatAsked(d))
+         /\ WF_vars(SeatAskedAgain(d)) /\ WF_vars(SeatGranted(d) \/ SeatRefused(d))
+         /\ WF_vars(SeatTold(d)) /\ WF_vars(Release(d))
+         /\ WF_vars(MessageMarked(d)) /\ WF_vars(MessageTaken(d)) /\ WF_vars(MessageTurnEnds(d))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -989,7 +1205,14 @@ TypeOK ==
     /\ held \subseteq Delegates
     /\ shell \subseteq Interactive
     /\ proc \in [Delegates -> {"none", "waiting", "working", "person", "idle", "stalled", "own",
-                               "dead"}]
+                               "msg", "dead"}]
+    /\ seat \in [Delegates -> {"held", "closing", "checked", "free", "asking"}]
+    /\ \A d \in Delegates \ Seats : seat[d] = "held" /\ inbox[d] = 0 /\ Held(d) <= 1
+    /\ inbox \in [Delegates -> Nat] /\ mpipe \in [Delegates -> 0..1]
+    /\ stored \in [Delegates -> 0..MaxMsgs] /\ askedFor \in [Delegates -> 0..MaxMsgs]
+    /\ ask \in [Delegates -> {"none", "queued", "granted", "refused"}]
+    /\ waitAsk \in [Delegates -> BOOLEAN] /\ askGrant \in [Delegates -> BOOLEAN]
+    /\ startRel \in [Delegates -> BOOLEAN] /\ turnHeld \in [Delegates -> Nat]
     /\ reply \in [Delegates -> {"none", "brief", "person", "own"}]
     /\ rsrc \in [Delegates -> {"none", "brief", "person", "own"}]
     /\ call \in [Delegates -> {"none", "start", "resume", "lease"}]
@@ -1043,7 +1266,33 @@ RefusedHoldsNothing ==
 \* The owner's promise the Scheduler's release rests on (Schedule.tla's
 \* `work`, Boxes.tla's SeatsHold): work it says ended has no process. A
 \* finished delegate's process lives until it ends, so StatusEndsWork fails.
-WorkEndedIsFree == \A d \in Delegates : WorkEnded(d) => proc[d] \in {"none", "dead"}
+\* F-301: one whose seat is free has a process that idles, or runs a turn
+\* nothing the framework wrote started (its own, a person's).
+WorkEndedIsFree ==
+    \A d \in Delegates :
+        WorkEnded(d) => \/ proc[d] \in {"none", "dead"}
+                        \/ seat[d] = "free" /\ proc[d] \in {"idle", "own", "person"}
+
+\* F-301: a turn a row to a finished delegate started runs only under a lease
+\* granted for it, which the owner says is live, so none is released under it.
+\* A stop ends its process, and what was written into it with it.
+NoTurnWithoutGrant ==
+    \A d \in Seats : status[d] = "finished" /\ (proc[d] = "msg" \/ mpipe[d] > 0)
+                       => Held(d) >= 1 /\ ~WorkEnded(d)
+
+\* A seat free is released: no lease of the row's stays held.
+FreeIsReleased == \A d \in Seats : seat[d] = "free" ~> (Held(d) = 0 \/ seat[d] # "free")
+
+\* A finished delegate, its report delivered and nothing due to it, frees its
+\* seat while that lasts, whatever restarts come.
+FreesOnceIdle ==
+    \A d \in Seats : (Quiet(d) /\ seat[d] = "held") ~> (seat[d] = "free" \/ ~Quiet(d))
+
+\* A row stored to it while its seat is free goes in, or waits only after an
+\* ask for it was refused, or the delegate ends.
+RowGoes ==
+    \A d \in Seats : inbox[d] > 0 ~> (\/ inbox[d] = 0 \/ status[d] = "ended"
+                                      \/ seat[d] = "free" /\ askedFor[d] = stored[d])
 
 \* Each process takes one turn's message: the brief, or a resumed one's.
 OneMessagePerProcess == \A d \in Delegates : taken[d] <= resumed[d] + 1

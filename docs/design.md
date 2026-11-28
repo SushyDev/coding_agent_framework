@@ -1441,7 +1441,19 @@ any reply does (new-4).
     start, run or be resumed; ended once refused or done and its agent row free, which the
     row's status alone does not say; `Delegate.tla`'s `WorkEndedIsFree`, F-164; a start that
     reaches `Sessions` after its caller's deadline makes nothing, F-166); a row still starting
-    is live until its owner settles it. While it runs it monitors each lease it holds
+    is live until its owner settles it. **A finished delegate frees its seat** (decided,
+    F-301; `Delegate.tla`'s `seat`): its lease ends when its turn ends with its report
+    delivered, not when its agent row is free. Once its process idles in an ended turn, waiting
+    on no person, with no row to it in `Mailbox`, `Delegates` writes its row's seat `closing`
+    (a closed gate: `Mailbox` marks no row to a delegate whose seat is not held, read in the
+    step that marks), reads again, and writes `free`, which `Delegates.Work` answers ended; else
+    held again. A row to it stored after its last ask writes `asking`, then asks for a lease
+    under a request id of that ask, queued or granted like a start's; granted, the seat is held
+    and the row goes in; refused, the seat stays free, the row waits for a later one, and the
+    parent is told once. A running, starting or waiting delegate holds its seat, and a main
+    session is never finished, so its lease is as before. Not gated: a turn the delegate's own
+    background command starts, and a person's turn in an interactive one
+    (`NoTurnWithoutGrant` covers the turns a row starts). While it runs it monitors each lease it holds
     and asks at each cue of the owner's rows; after a restart it asks about every unreleased
     row, releases it if the work ended and monitors it again if not. Both release by
     `UPDATE … WHERE id = ? AND
@@ -3406,7 +3418,10 @@ boxes and the other agents run on; its init re-adopts by the steps the whole res
 parent by it. In `Delegate.tla` a delegate's restart also cuts `Sessions`' start under way,
 whose row is adopted, an orphan for `Recoveries` when the crash fell between the hold and the
 line. There too the owner's promise behind every lease is a property, `WorkEndedIsFree`:
-work `Delegates.Work` says ended has no process (Break `StatusEndsWork`). `Boxes.tla`'s
+work `Delegates.Work` says ended has no process (Break `StatusEndsWork`), or, for a finished
+delegate whose seat is free (F-301), one that idles; `NoTurnWithoutGrant` says a turn a row
+starts in it runs only under a lease granted for it (Breaks `NoGate`, `NoClosing`,
+`AskWhileFree`, `RefusedOpens`, `SeatInMemory`; `Delegate_Seats`). `Boxes.tla`'s
 header maps each effect of its `RestartAgent` to the step that checks it. With one agent,
 `Start.tla` and `Dialog.tla` reach the same states as before; the build note has the counts.
 

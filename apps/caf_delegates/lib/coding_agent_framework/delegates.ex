@@ -172,7 +172,15 @@ defmodule CodingAgentFramework.Delegates do
   `killed:<host>:<row id>:<resumes>`, written before the row decides between a resume and a
   failure, so the metrics count a kill whatever followed it.
   With `scheduler:` (the instance's `Scheduler`), each start asks it for a lease first, of the
-  units `lease:` names (default `%{"seat" => 1}`); a resume runs under the start's lease.
+  units `lease:` names (default `%{"seat" => 1}`); a resume runs under the start's lease. A
+  finished delegate frees its seat (F-301, `Delegate.tla`'s `seat`): once its report is
+  delivered and its process idles in an ended turn, waiting on no person, with no row to it in
+  `Mailbox`, its row's seat is `closing`, read again, then `free`, and `Delegates.Work` answers
+  its lease ended. `Mailbox` (given `Delegates.Work.seated?/2`) puts nothing in while the seat is
+  not held. A row to it stored after its last ask asks for a lease again, under a request id of
+  that ask: granted at once or later, the seat is held and the row goes in; refused, the seat
+  stays free, the row waits, and its parent is told once. The ask waits in the queue like a
+  start's, with no caller to answer.
   With `registry:` (the host's `Registry`), it starts interactive delegates, whose turn's end
   it reads from their session files. With `inlet:` (the host's `Inlet`), `intake:` (the host's
   `Intake`) and `intake_db:` (its file), a parent's fixes reach an interactive delegate as they
@@ -685,6 +693,11 @@ defmodule CodingAgentFramework.Delegates do
   # The one more answer to a queued lease: the start goes on, or is refused.
   def handle_info({:lease, request, answer}, s) do
     case Map.pop(s.pending, request) do
+      # A finished delegate's ask for its next turn's seat (F-301).
+      {%{seat: _, id: id}, pending} ->
+        s = %{s | pending: pending}
+        {:noreply, seated(s, Table.get(s.db, id), answer)}
+
       {%{start: start, from: from, id: id}, pending} ->
         s = %{s | pending: pending}
         row = Table.get(s.db, id)
@@ -707,7 +720,7 @@ defmodule CodingAgentFramework.Delegates do
   end
 
   def handle_info({:DOWN, ref, :process, _, _}, %{scheduler_ref: ref} = s) do
-    waiting = for {request, %{start: _}} <- s.pending, do: request
+    waiting = for {request, %{id: _} = w} <- s.pending, w[:start] || w[:seat], do: request
 
     s =
       Enum.reduce(waiting, s, fn request, s ->
@@ -986,6 +999,8 @@ defmodule CodingAgentFramework.Delegates do
   defp settle(s) do
     s = waits(s)
     s = Enum.reduce(movable(s), s, &settle_row(&2, &1, agent(&2, &1)))
+    # The rows read for the own turns are this settle's alone.
+    s = Map.delete(s, :rows)
     s = idle(s, Enum.filter(movable(s), &(&1.status == "running")))
     tell_starts(s)
   end
@@ -1218,7 +1233,8 @@ defmodule CodingAgentFramework.Delegates do
     s = later_turns(s, row, agent)
 
     cond do
-      Agents.ended?(agent) or not Agents.free?(agent) or Agents.moving?(agent) -> s
+      Agents.ended?(agent) or Agents.moving?(agent) -> s
+      not Agents.free?(agent) -> seat(s, row, agent)
       status == "failed" or delivered?(s, row) -> ended(s, row)
       true -> s
     end
@@ -1274,9 +1290,22 @@ defmodule CodingAgentFramework.Delegates do
     end
   end
 
-  defp own_turns(s, %{status: "finished", report: "taken"} = row, agent) do
-    case followed(s, agent) do
-      {:ok, fold} -> tell_turns(s, row, agent, Map.get(fold, :own, []))
+  # F-301's new-3: every finished delegate's own turns were read by a `Stream.rows/2` of its own,
+  # each a copy of every row, at every settle, while a fix's call waited behind the settle. They
+  # are read from one read of the rows per settle: a notice only, so a turn read at the next
+  # settle is told then. Nothing that decides a row's status or seat reads that one.
+  defp own_turns(s, %{status: "finished", report: "taken"} = row, %{session_id: sid} = agent)
+       when is_binary(sid) do
+    s =
+      if Map.has_key?(s, :rows),
+        do: s,
+        else: Map.put(s, :rows, Stream.rows(s.stream, timeout: @step))
+
+    with true <- Agents.headless?(agent),
+         {:ok, %{rows: rows}} <- s.rows,
+         %{} = fold <- Enum.find(rows, &(&1.session == sid)) do
+      tell_turns(s, row, agent, Map.get(fold, :own, []))
+    else
       _unread -> s
     end
   end
@@ -1520,6 +1549,119 @@ defmodule CodingAgentFramework.Delegates do
   defp ended(s, row) do
     Sessions.ended(s.sessions, row.name)
     s
+  end
+
+  # F-301, `Delegate.tla`'s seat: a finished delegate's lease ends with its turn once its
+  # report is delivered, not when its agent row is free. Only under a Scheduler, and only of a
+  # process that runs: one gone ends, as before.
+  defp seat(%{scheduler: nil} = s, _row, _agent), do: s
+
+  defp seat(s, %{status: "finished"} = row, agent) do
+    if Agents.running?(agent), do: seat_step(s, row, agent, row.seat), else: s
+  end
+
+  defp seat(s, _row, _agent), do: s
+
+  # SeatCloses: the gate closed first, durable, so Mailbox marks nothing while it is read
+  # again; SeatFrees: still quiet, free (Delegates.Work answers it ended, and the Scheduler
+  # releases its leases at its cue of this row); else held again, and the rows go in.
+  defp seat_step(s, %{report: "taken"} = row, agent, nil) do
+    if quiet?(s, row, agent) do
+      write(s, row, seat: "closing")
+      seat_step(s, Table.get(s.db, row.id), agent, "closing")
+    else
+      s
+    end
+  end
+
+  defp seat_step(s, row, agent, "closing") do
+    write(s, row, seat: if(quiet?(s, row, agent), do: "free", else: nil))
+    s
+  end
+
+  # SeatAsked: a row stored after the last ask waits. The row says asking first, so the
+  # Scheduler's owner reads it live from its grant on; then it asks under this ask's id.
+  defp seat_step(s, row, agent, "free") do
+    with {:ok, [_ | _] = ids} <- Mailbox.open_to(s.mailbox, row.name),
+         newest = Enum.max(ids),
+         true <- newest > (row.asked_for || 0) do
+      n = (row.seats || 0) + 1
+      write(s, row, seat: "asking", seats: n, asked_for: newest)
+      seat_ask(s, Table.get(s.db, row.id), agent)
+    else
+      _ -> s
+    end
+  end
+
+  # SeatAskedAgain: a row left asking by a restart asks again under the same id; the lease is
+  # looked up first, so a grant written before answers it at once.
+  defp seat_step(s, row, agent, "asking"), do: seat_ask(s, row, agent)
+  defp seat_step(s, _row, _agent, _seat), do: s
+
+  defp seat_ask(s, row, agent) do
+    key = Work.key(s.host, row.id)
+
+    request = %{
+      id: "delegate:#{key}:#{row.created_at}:#{row.seats}",
+      class: :builder,
+      module: agent.project,
+      account: agent.account,
+      units: s.lease,
+      holder: {"delegate", key}
+    }
+
+    case Scheduler.request(s.scheduler, request) do
+      {:queued, %{id: id}} ->
+        put_in(s.pending[id], %{id: row.id, seat: row.seats, parent: nil, name: row.name})
+
+      answer ->
+        seated(s, row, answer)
+    end
+  end
+
+  # SeatTold: granted, held again, and the rows go in at Mailbox's next mark; refused (or not
+  # answered), free again, and its parent told once, under the ask's key: only a row stored
+  # after this ask asks again. The rows wait meanwhile, and a stop or its end settles them.
+  defp seated(s, %{status: "finished", seat: "asking"} = row, {:ok, _lease}) do
+    write(s, row, seat: nil)
+    s
+  end
+
+  defp seated(s, %{status: "finished", seat: "asking"} = row, {_, why}) do
+    write(s, row, seat: "free")
+    key = "seat:#{s.host}:#{row.id}:#{row.seats}"
+
+    text =
+      "Your delegate #{row.name} is finished and its seat was freed; a message to it waits, " <>
+        "and its lease for the next turn was not granted (#{seat_refusal(why)}). " <>
+        "A later message asks again."
+
+    parent = agent(s, row).parent
+    Mailbox.notify(s.mailbox, parent, text, key: key, kind: :notice)
+    s
+  end
+
+  defp seated(s, _row, _answer), do: s
+
+  defp seat_refusal({why, at}) when is_integer(at),
+    do: "#{seat_refusal(why)}; ask again after #{iso(at)}"
+
+  defp seat_refusal(why) when is_atom(why), do: Atom.to_string(why)
+  defp seat_refusal(why), do: inspect(why)
+
+  # Its report delivered, its process idle in an ended turn, waiting on no person, and nothing
+  # due to it in Mailbox. A read that fails is not quiet.
+  defp quiet?(s, row, agent) do
+    with true <- delivered?(s, row),
+         false <- Agents.moving?(agent),
+         {:ok, fold} <- followed(s, agent),
+         true <- ended_turn?(s, agent, fold),
+         false <- Enum.any?(fold.requests, fn {_, r} -> r.state == :held end),
+         {:ok, []} <- Mailbox.open_to(s.mailbox, row.name) do
+      true
+    else
+      _ -> false
+    end
   end
 
   defp delivered?(s, row),

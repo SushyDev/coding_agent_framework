@@ -15,6 +15,12 @@ defmodule CodingAgentFramework.Delegates.Work do
   process then lives under that row (`Delegate.tla`'s WorkEndedIsFree; F-163's new-1). A row
   that does not exist never runs anything: ended.
 
+  A finished row whose seat is `free` has ended too, though its process idles (F-301,
+  `Delegate.tla`'s `seat`): its report is delivered and nothing is due to it, and no row goes in
+  to it until a lease is granted again for its next turn (`seated?/2`, which `Mailbox` reads).
+  Every lease of the row is then released; one asked for its next turn is live while the seat
+  is `asking`, and after.
+
       {:ok, work} = Delegates.Work.open(path, path, "ws")
       Delegates.Work.state(work, "ws:12")
       #=> :live
@@ -27,6 +33,9 @@ defmodule CodingAgentFramework.Delegates.Work do
   defstruct [:db, :agents, :host]
 
   @type t :: %__MODULE__{}
+
+  # The seats `Mailbox` puts nothing in through: closed for its check, free, or asked for.
+  @unseated ~w(closing free asking)
 
   @doc "Opens its own connections: `Delegates`' file and `Sessions`' file, for `host`."
   @spec open(String.t(), String.t(), String.t()) :: {:ok, t} | {:refused, term}
@@ -51,8 +60,27 @@ defmodule CodingAgentFramework.Delegates.Work do
     end
   end
 
+  @doc """
+  Whether a row to agent `name` may go in now (F-301, `Delegate.tla`'s `Gated`): false while its
+  delegate is finished and its seat is not held (`closing`, `free` or `asking`), true for any
+  other row and for a name that is no delegate here. `Mailbox` reads it in the step that marks
+  a row, given as its `seated:` function.
+
+      Delegates.Work.seated?(work, "app-unit-review")
+      #=> false
+  """
+  @spec seated?(t, String.t()) :: boolean
+  def seated?(%__MODULE__{} = work, name) do
+    case Table.latest_of(work.db, work.host, name) do
+      %{status: "finished", seat: seat} when seat in @unseated -> false
+      _ -> true
+    end
+  end
+
   defp of(_work, %{status: status}) when status in ~w(starting resuming going_on running),
     do: :live
+
+  defp of(_work, %{status: "finished", seat: "free"}), do: :ended
 
   # Refused, finished, failed or ended: no process of it may live once its agent row is free.
   defp of(work, row) do

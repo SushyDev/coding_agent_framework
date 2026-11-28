@@ -87,7 +87,7 @@ defmodule CodingAgentFramework.DelegatesTest do
     tree = fn -> [%{name: "main", project: "app", parent: nil} | Agents.read_tree(agents)] end
 
     mopts = [db: db, grants: Grants.new(tree), stream: ctx.stream, sessions_db: db, host: "test"]
-    mailbox = start_supervised!(Supervisor.child_spec({Mailbox, mopts}, id: make_ref()))
+    mailbox = start_supervised!(Supervisor.child_spec({Mailbox, mopts}, id: :mailbox))
     opts = [{:mailbox, mailbox} | opts]
     delegates = start_supervised!(Supervisor.child_spec({Delegates, opts}, restart: :temporary))
 
@@ -491,6 +491,223 @@ defmodule CodingAgentFramework.DelegatesTest do
       assert Work.state(work, "test:#{id}") == :ended
     end
   end
+
+  # Delegate.tla's seat (F-301): SeatCloses, SeatFrees, Release, SeatAsked, SeatGranted,
+  # SeatTold and Gated, over a real Scheduler and a Mailbox that reads the seat.
+  describe "a finished delegate's seat (F-301)" do
+    test "2 seats, 2 delegates finish, and a third starts at once without a person", ctx do
+      %{scheduler: scheduler} = ctx = with_seats(ctx, 2)
+      one = finished(ctx, "unit/one")
+      two = finished(ctx, "unit/two")
+
+      # Both leases are released, and the rows stay finished, their processes idle.
+      assert [%{released_at: r1}, %{released_at: r2}] = granted(scheduler)
+      assert is_integer(r1) and is_integer(r2)
+      assert %{status: "running"} = session_row(ctx, Table.get(ctx.dtable, one).name)
+      assert %{status: "finished", seat: "free"} = Table.get(ctx.dtable, two)
+
+      # The third is granted at once: not queued, its session started.
+      assert {:ok, %{session_id: sid} = third} = begin(ctx, "unit/three")
+      assert is_binary(sid) and not Map.has_key?(third, :queued)
+      assert [_, _, %{released_at: nil}] = granted(scheduler)
+    end
+
+    test "a finished delegate's message with the class full queues, and goes once a seat frees",
+         ctx do
+      %{scheduler: scheduler} = ctx = with_seats(ctx, 1)
+      one = finished(ctx, "unit/one")
+      name = Table.get(ctx.dtable, one).name
+
+      # The second takes the seat and holds it: its turn waits on a permission.
+      hold(ctx)
+      {:ok, %{id: two, brief_uuid: u2}} = begin(ctx, "unit/two")
+      stream_row(ctx, two, &(&1.requests["req-" <> u2] != nil))
+
+      # A message to the first: its seat is asked for and queued; the row is not marked.
+      {:ok, {:queued, mid}} = Mailbox.message(mailbox(ctx), "main", name, "Again.")
+      {:ok, _} = cue_until(ctx, one, &(&1.seat == "asking"))
+      assert [_] = :sys.get_state(scheduler).entries
+      cue(ctx, current(ctx))
+      assert %{status: "queued"} = Mailbox.Table.get(ctx.mtable, mid)
+
+      # The second finishes and frees its seat: the first is granted it, and the row goes in.
+      File.rm!(Path.join(ctx.dir, "hold"))
+      allow(ctx, two, u2)
+      reported(ctx, two)
+      {:ok, _} = freed(ctx, scheduler, two)
+
+      {:ok, %{uuid: m}} = mailbox_until(ctx, mid, &(&1.status == "delivered"))
+      assert %{request_id: request} = List.last(granted(scheduler))
+      assert String.ends_with?(request, ":1")
+
+      # Its turn answers the message, and once it idles again its seat is freed again.
+      {:ok, _} = await(fn -> ok(Enum.find(rows(ctx), &(&1.reply_to == m))) end)
+      {:ok, _} = freed(ctx, scheduler, one)
+      assert %{seats: 1} = Table.get(ctx.dtable, one)
+      assert length(granted(scheduler)) == 3
+    end
+
+    # SeatTold of a refusal: the delegate stays finished and its seat free, the row waits, its
+    # parent is told once, and only a row stored after that ask asks again.
+    test "a finished delegate's ask refused at its deadline leaves its seat free", ctx do
+      %{scheduler: scheduler} = ctx = with_seats(ctx, 1, max_wait: 300)
+      one = finished(ctx, "unit/one")
+      name = Table.get(ctx.dtable, one).name
+      hold(ctx)
+      {:ok, %{id: two, brief_uuid: u2}} = begin(ctx, "unit/two")
+      stream_row(ctx, two, &(&1.requests["req-" <> u2] != nil))
+
+      {:ok, {:queued, mid}} = Mailbox.message(mailbox(ctx), "main", name, "Again.")
+      {:ok, _} = cue_until(ctx, one, &(&1.seats == 1 and &1.seat == "free"))
+      {:ok, told} = await(fn -> ok(Enum.find(rows(ctx), &(&1.text =~ "was not granted"))) end)
+      assert told.to_agent == "main" and told.text =~ "deadline"
+      assert %{status: "queued"} = Mailbox.Table.get(ctx.mtable, mid)
+      assert %{status: "finished"} = Table.get(ctx.dtable, one)
+      assert [%{outcome: "refused", request_id: request}] = refused(scheduler)
+      assert String.ends_with?(request, ":1")
+
+      # A later cue asks nothing again; a row stored after the ask does.
+      cue(ctx, current(ctx))
+      assert %{seats: 1} = Table.get(ctx.dtable, one)
+      {:ok, {:queued, _}} = Mailbox.message(mailbox(ctx), "main", name, "Later.")
+      {:ok, _} = cue_until(ctx, one, &(&1.seats == 2))
+    end
+
+    # A full class answers by the Scheduler's queue, never unknown while the Scheduler answers:
+    # queued at once for a start that does not wait, the lease for one that waits.
+    test "a full class answers queued, and a waiting start gets the seat a finish frees", ctx do
+      %{scheduler: scheduler} = ctx = with_seats(ctx, 1)
+      hold(ctx)
+      {:ok, %{id: one, brief_uuid: u}} = begin(ctx, "unit/one")
+      stream_row(ctx, one, &(&1.requests["req-" <> u] != nil))
+
+      assert {:ok, %{queued: 1, session_id: nil}} = begin(ctx, "unit/two", wait: false)
+      delegates = current(ctx)
+
+      waits =
+        Task.async(fn ->
+          Delegates.start_delegate(delegates, "main", "app", "unit/three", "opus", "Go.")
+        end)
+
+      {:ok, _} = await(fn -> if length(:sys.get_state(scheduler).entries) == 2, do: {:ok, 2} end)
+
+      # The first finishes and frees its seat: the start queued first is granted it.
+      File.rm!(Path.join(ctx.dir, "hold"))
+      allow(ctx, one, u)
+      reported(ctx, one)
+      {:ok, _} = freed(ctx, scheduler, one)
+      {:ok, two} = await(fn -> ok(latest(ctx, "app-unit-two", "running")) end)
+
+      # It finishes in turn, and the waiting start is answered its lease.
+      reported(ctx, two.id)
+      {:ok, _} = freed(ctx, scheduler, two.id)
+      assert {:ok, %{name: "app-unit-three", session_id: sid}} = Task.await(waits, 10_000)
+      assert is_binary(sid)
+      assert length(granted(scheduler)) == 3
+    end
+
+    test "a stop of a finished, idle delegate answers within its bound, and its seat is free",
+         ctx do
+      %{scheduler: scheduler} = ctx = with_seats(ctx, 1)
+      one = finished(ctx, "unit/one")
+      name = Table.get(ctx.dtable, one).name
+
+      {:ok, state} = Delegates.fix_state(current(ctx), "main", name)
+      assert {:ok, :stopped} = Delegates.fix(current(ctx), "main", name, :stop, state)
+      {:ok, _} = await(fn -> ok(match?(%{status: "ended"}, session_row(ctx, name)) || nil) end)
+
+      Scheduler.cue(scheduler, %{topic: "delegates:test"})
+      assert [%{released_at: at}] = granted(scheduler)
+      assert is_integer(at)
+      assert {:ok, %{session_id: sid}} = begin(ctx, "unit/two")
+      assert is_binary(sid)
+    end
+  end
+
+  # F-301's new-3: a fix's call waits behind a settle, which read Stream's rows once for each
+  # finished delegate's own turns. Three finished delegates: one read of the rows per settle.
+  test "a settle reads Stream's rows once for every finished delegate's own turns", ctx do
+    projects = Map.update!(ctx.dopts[:projects], "app", &%{&1 | cap: 3})
+    ctx = %{ctx | dopts: Keyword.put(ctx.dopts, :projects, projects)}
+    restart(ctx)
+
+    for b <- ~w(unit/a unit/b unit/c) do
+      {:ok, %{id: id}} = begin(ctx, b)
+      reported(ctx, id)
+    end
+
+    delegates = current(ctx)
+    :erlang.trace(ctx.stream, true, [:receive, {:tracer, self()}])
+    Delegates.cue(delegates, %{topic: "stream:test", ids: []})
+    :sys.get_state(delegates)
+    :erlang.trace(ctx.stream, false, [:receive])
+    ref = :erlang.trace_delivered(ctx.stream)
+    assert_receive {:trace_delivered, _, ^ref}
+    assert calls_from(delegates, []) == [:rows]
+  end
+
+  # The calls the traced process took from `pid`, in order.
+  defp calls_from(pid, acc) do
+    receive do
+      {:trace, _, :receive, {:"$gen_call", {^pid, _}, req}} -> calls_from(pid, [req | acc])
+      {:trace, _, :receive, _} -> calls_from(pid, acc)
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  # A Mailbox that reads the seat and a Scheduler of `n` seats, with a parent's cap of 3.
+  defp with_seats(ctx, n, more \\ []) do
+    {:ok, work} = Work.open(ctx.dopts[:db], ctx.dopts[:db], "test")
+    :ok = stop_supervised(:mailbox)
+    mopts = [{:seated, &Work.seated?(work, &1)} | ctx.mopts]
+    Process.put(:mailbox, start_supervised!(Supervisor.child_spec({Mailbox, mopts}, id: :seats)))
+    projects = Map.update!(ctx.dopts[:projects], "app", &%{&1 | cap: 3})
+    ctx = %{ctx | dopts: Keyword.put(ctx.dopts, :projects, projects)}
+    Map.merge(ctx, with_scheduler(ctx, [resources: %{"seat" => n}] ++ more))
+  end
+
+  # A delegate of `branch` started, finished, its report delivered by a waiting call, and its
+  # seat freed and released. Answers its row's id.
+  defp finished(ctx, branch) do
+    {:ok, %{id: id}} = begin(ctx, branch)
+    reported(ctx, id)
+    {:ok, _} = freed(ctx, ctx.scheduler, id)
+    id
+  end
+
+  # Its report taken once its turn ended, then delivered to a call that waits on it.
+  defp reported(ctx, id) do
+    {:ok, %{brief_uuid: u}} = cue_until(ctx, id, &(&1.report == "taken"))
+    wait = caller(ctx, u, 10_000)
+    assert_receive {:took, {:ok, _}}, 10_000
+    assert {:ok, :delivered} = settle(wait, :written)
+  end
+
+  # Cues until row `id`'s seat is free, then cues the Scheduler, as the app's wiring would at
+  # that row's write, until it released every lease of the row.
+  defp freed(ctx, scheduler, id) do
+    {:ok, _} = cue_until(ctx, id, &(&1.seat == "free"))
+    key = {"delegate", "test:#{id}"}
+
+    await(fn ->
+      Scheduler.cue(scheduler, %{topic: "delegates:test"})
+      held = for %{holder: ^key, released_at: nil} = l <- granted(scheduler), do: l
+      if held == [], do: {:ok, id}
+    end)
+  end
+
+  defp granted(scheduler),
+    do: for(%{outcome: "granted"} = l <- Scheduler.leases(scheduler), do: l)
+
+  defp refused(scheduler),
+    do: for(%{outcome: "refused"} = l <- Scheduler.leases(scheduler), do: l)
+
+  defp begin(ctx, branch, opts \\ []),
+    do: Delegates.start_delegate(current(ctx), "main", "app", branch, "opus", "Go.", opts)
+
+  defp latest(ctx, name, status),
+    do: Enum.find(Table.latest(ctx.dtable, "test"), &(&1.name == name and &1.status == status))
 
   # A Scheduler over a seat, and a Delegates that asks it, in place of the setup's.
   defp with_scheduler(ctx, more) do
