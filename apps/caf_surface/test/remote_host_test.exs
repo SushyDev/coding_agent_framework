@@ -8,9 +8,12 @@ defmodule CodingAgentFramework.RemoteHostTest do
 
   import CodingAgentFramework.TestHost
 
-  alias CodingAgentFramework.{Config, Host, Hosts, Jobs, Runs, Scheduler, Shell}
+  alias CodingAgentFramework.{Config, Copies, Host, Hosts, Jobs, Programs, Runs, Scheduler, Shell}
 
-  setup do
+  # A test tagged `:app_shape` declares the host as an embedding app does (F-303): its programs
+  # only on the PATH its `env` names, none on the PATH ssh gives, and an empty `Programs` beside
+  # it, which the tree does not read: `Hosts` finds the programs at each placement.
+  setup c do
     dir = test_dir()
     on_exit(fn -> end_recorded(dir) end)
     repo = Path.join(dir, "repo")
@@ -28,17 +31,31 @@ defmodule CodingAgentFramework.RemoteHostTest do
     # `Programs.find/3` names the kernel with `uname -s`, which coreutils has beside kill.
     link(bin, "uname", Path.join(Path.dirname(program!(:kill)), "uname"))
 
+    # The app's commands name `cat` bare: it is found on the entry's PATH, as `mix` is there.
+    if c[:app_shape], do: link(bin, "cat", program!(:cat))
+    ssh_path = if c[:app_shape], do: Path.join(dir, "empty"), else: bin
+    File.mkdir_p!(ssh_path)
+
     File.write!(Path.join(dir, "ssh"), """
     #!#{program!(:bash)}
     [ -e "#{dir}/down" ] && exit 255
     while :; do case $1 in -o|-l) shift 2 ;; --) shift; break ;; -*) shift ;; *) break ;; esac; done
     shift
-    PATH="#{bin}" exec #{program!(:sh)} -c "$*"
+    PATH="#{ssh_path}" exec #{program!(:sh)} -c "$*"
     """)
 
     File.chmod!(Path.join(dir, "ssh"), 0o755)
     mac = Host.ssh("mac", Path.join(dir, "ssh"), "mac", program!(:kill))
     programs = Map.drop(programs().paths, [:gh, :ssh, :ssh_keygen])
+    entry = %{host: mac, dir: Path.join(dir, "mac")}
+
+    entry =
+      if c[:app_shape] do
+        {:ok, empty} = Programs.new(mac, %{})
+        Map.merge(entry, %{env: [{"PATH", bin}], programs: empty})
+      else
+        entry
+      end
 
     {:ok, config} =
       Config.new(
@@ -47,7 +64,7 @@ defmodule CodingAgentFramework.RemoteHostTest do
         programs: programs,
         env: %{path: "/nonexistent"},
         agents: false,
-        hosts: %{"mac" => %{host: mac, dir: Path.join(dir, "mac")}},
+        hosts: %{"mac" => entry},
         # The workstation's one heavy slot, and two on the other host (F-292).
         resources: %{"seat" => 4, "slot" => 1, {"slot", "mac"} => 2}
       )
@@ -56,7 +73,9 @@ defmodule CodingAgentFramework.RemoteHostTest do
     parts = CodingAgentFramework.parts(start_supervised!({CodingAgentFramework, config}))
     {:ok, units} = CodingAgentFramework.job_units(config, :heavy, "app")
     lease = %{class: :heavy, module: "app", units: units}
+
     %{dir: dir, bin: bin, repo: repo, jobs: parts.jobs, scheduler: parts.scheduler, lease: lease}
+    |> Map.put(:hosts, parts.hosts)
   end
 
   defp link(bin, name, target), do: File.ln_s!(target, Path.join(bin, name))
@@ -70,6 +89,24 @@ defmodule CodingAgentFramework.RemoteHostTest do
 
   test "a job runs on a host whose programs are found when it is placed", c do
     assert {:ok, %{exit: 0, log: "one\n"}} = run(c, "j1")
+  end
+
+  @tag :app_shape
+  test "a job on a host declared as an app declares it runs with the programs found there", c do
+    # The stand-in's ssh PATH has no program: each is found on the entry's `env` PATH.
+    assert {:ok, %{exit: 0, log: "one\n"}} = run(c, "j1", "mac", ["cat", "a.txt"])
+    assert %{"mac" => %{state: :ready}} = Hosts.states(c.hosts)
+  end
+
+  test "an entry of empty programs, read as it is outside the tree, refuses with 2 elements" do
+    # The refusal the tree never gives for a host of its `hosts:` (F-303): only a part started
+    # outside the tree with such an entry reads it.
+    {:ok, empty} = Programs.new(Host.ssh("mac", "/bin/ssh", "mac", "/bin/kill"), %{})
+    config = %{hosts: %{"mac" => %{programs: empty, dir: "/caf"}}, copies: nil}
+    where = %{host: "mac", project: "app", copy: "w", kind: "jobs", name: "j", run: "j"}
+
+    assert {:refused, {:no_program, [:dtach, :sh, :env, :rm]}} =
+             Copies.Held.context(config, where, 1_000, :place)
   end
 
   test "MissingOnlyLacking: a host missing a program refuses the job at once, naming it", c do
@@ -217,6 +254,14 @@ defmodule CodingAgentFramework.RemoteHostTest do
       # The job held the other host's slot, its row the holder, and its end released it.
       assert %{units: %{"slot@mac" => 1}} = job_lease(c, "run-toolu_r1")
       assert {:ok, _} = await(fn -> released(c, "run-toolu_r1") end, 10_000)
+    end
+
+    @tag :app_shape
+    test "on a host declared as an app declares it, it runs with the programs found there", c do
+      w = wrapped(c, "toolu_a1", "cat a.txt; mix test >/dev/null 2>&1; exit 5", c.repo)
+      assert w.line =~ "--host 'mac'"
+      assert {5, "one\n", "caf-run: started on mac (job run-toolu_a1)\n"} = w.run.()
+      assert {:ok, %{state: "exited", code: 5}} = Jobs.row(c.jobs, "run-toolu_a1")
     end
 
     test "a failing command's status comes back, after its last line", c do
