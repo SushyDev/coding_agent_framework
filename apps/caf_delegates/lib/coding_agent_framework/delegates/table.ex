@@ -28,6 +28,10 @@ defmodule CodingAgentFramework.Delegates.Table do
   once the process was gone with no `result` or no turn's end: a recovery's path), or
   `turn_end` (an interactive delegate's turn read ended). It is NULL for a failure's notice,
   which is the framework's, and for a row written before F-202.
+  `seat` is a finished row's seat (F-301, `Delegate.tla`'s `seat`): NULL while it holds its
+  lease, then `closing`, `free`, `asking`, and NULL again once a lease is granted for its next
+  turn. `seats` counts its asks for a seat (each asks under a request id of its number), and
+  `asked_for` is the id of the newest `Mailbox` row to it when it last asked.
 
   **Migration** (F-129): a file an earlier build made also has `parent`, `project`, `account`,
   `brief`, `session_id`, `mark` and `options`, and the status `ended`. `old_tree/1` reads what
@@ -43,7 +47,8 @@ defmodule CodingAgentFramework.Delegates.Table do
   alias CodingAgentFramework.Store
 
   @columns ~w(id host name branch model brief_uuid resume_uuid status reason resumes report
-              text called_at deadline created_at updated_at tell effort until waited start taken_by)a
+              text called_at deadline created_at updated_at tell effort until waited start taken_by
+              seat seats asked_for)a
 
   @create """
   (id INTEGER PRIMARY KEY, host TEXT NOT NULL, name TEXT NOT NULL, branch TEXT NOT NULL,
@@ -51,11 +56,11 @@ defmodule CodingAgentFramework.Delegates.Table do
     reason TEXT, resumes INTEGER NOT NULL, report TEXT NOT NULL, text TEXT,
     called_at INTEGER NOT NULL, deadline INTEGER NOT NULL, created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL, tell TEXT, effort TEXT, until INTEGER, waited TEXT, start BLOB,
-    taken_by TEXT)
+    taken_by TEXT, seat TEXT, seats INTEGER, asked_for INTEGER)
   """
   @schema "CREATE TABLE IF NOT EXISTS delegates #{@create};"
   # Added after a file's table may have been made (`tell`, F-170; `effort`, F-200; the wait at
-  # a limit, F-196; `taken_by`, F-202).
+  # a limit, F-196; `taken_by`, F-202; the seat, F-301).
   @added [
     delegates: [
       "tell TEXT",
@@ -63,7 +68,10 @@ defmodule CodingAgentFramework.Delegates.Table do
       "until INTEGER",
       "waited TEXT",
       "start BLOB",
-      "taken_by TEXT"
+      "taken_by TEXT",
+      "seat TEXT",
+      "seats INTEGER",
+      "asked_for INTEGER"
     ]
   ]
 
@@ -235,6 +243,11 @@ defmodule CodingAgentFramework.Delegates.Table do
   @spec latest(db, String.t()) :: [map]
   def latest(db, host),
     do: select(db, "id IN (SELECT max(id) FROM delegates WHERE host = ?1 GROUP BY name)", [host])
+
+  @doc "The latest row of `name` on the host, or nil."
+  @spec latest_of(db, String.t(), String.t()) :: map | nil
+  def latest_of(db, host, name),
+    do: db |> select("host = ?1 AND name = ?2", [host, name]) |> List.last()
 
   @doc "The host's rows whose parent is owed a queued start's outcome (`tell` names it)."
   @spec owed(db, String.t()) :: [map]

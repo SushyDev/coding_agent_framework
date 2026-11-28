@@ -89,6 +89,11 @@ defmodule CodingAgentFramework.Mailbox do
   handed in would start a turn into the limit. Once the reset passed, its turn is read as any
   row's, and its rows go into its ended turn.
 
+  While a finished delegate's seat is not held (F-301, `seated:`, `Delegate.tla`'s `Gated`), no
+  row to it is marked either: its lease was released, and a row handed in would start a turn
+  with none. The seat is read in the step that marks. Its rows stay `queued` until `Delegates`
+  is granted a lease for its next turn.
+
   **Answers.** A delivered message's turn ends with a `result` that names its uuid; that
   result's text is stored as a reply from the delegate to the message's sender (to its parent,
   the sender of its brief, for a message from `framework`), `reply_to` the message's uuid, with
@@ -172,7 +177,9 @@ defmodule CodingAgentFramework.Mailbox do
   limit (`ClaudeCLI.prompt_max/1`) bounds a launch's prompt; `frame:`, a function that frames a
   row's text with its sender (`frame/1` by default, F-170); `acts:`, the instance's `Acts`,
   whose forced end of an agent settles its rows left `sending` at `Mailbox`'s own settle
-  (F-172; without it only `ended_while_sending/3` settles them).
+  (F-172; without it only `ended_while_sending/3` settles them); `seated:`, a function of an
+  agent's name that answers whether a row may go in to it now (`Delegates.Work.seated?/2`,
+  F-301; every row may by default).
   """
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -633,6 +640,7 @@ defmodule CodingAgentFramework.Mailbox do
       s = Map.merge(s, %{pass: nil, again: nil, first: true})
       s = Map.put(s, :frame, Keyword.get(opts, :frame, &frame/1))
       s = Map.put(s, :acts, opts[:acts])
+      s = Map.put(s, :seated, Keyword.get(opts, :seated, fn _ -> true end))
       {:ok, Map.merge(s, %{waiter: waiter, typed: typed}), {:continue, :read}}
     else
       {:refused, reason} -> {:stop, reason}
@@ -1533,6 +1541,11 @@ defmodule CodingAgentFramework.Mailbox do
       Agents.limit(srow) != nil ->
         :limited
 
+      # A finished delegate whose seat is not held (F-301, `Delegate.tla`'s Gated): a row handed
+      # in would start a turn with no lease. Read in this step, the one that marks.
+      not seated?(s, to) ->
+        :unseated
+
       Agents.headless?(srow) and is_binary(srow.session_id) ->
         {:stream, srow, folds[srow.session_id]}
 
@@ -1547,6 +1560,10 @@ defmodule CodingAgentFramework.Mailbox do
     end
   end
 
+  # The look a pass makes in its task has no gate: the step that marks reads it.
+  defp seated?(%{seated: seated}, to), do: seated.(to)
+  defp seated?(_r, _to), do: true
+
   defp deliver(s, rows, :none) do
     for %{status: "queued"} = m <- rows,
         m.attempt != "no_delivery",
@@ -1558,6 +1575,7 @@ defmodule CodingAgentFramework.Mailbox do
   defp deliver(s, _rows, :not_started), do: s
   defp deliver(s, _rows, :moving), do: s
   defp deliver(s, _rows, :limited), do: s
+  defp deliver(s, _rows, :unseated), do: s
 
   # An agent that ended takes nothing: no process of it runs again (EndedNotDelivered). A brief
   # stored since its end is a later start's, stored before `Sessions` writes that start, and

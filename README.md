@@ -585,6 +585,9 @@ Built, each from a checked model in `model/tla/`:
   does not hold away, or to the next once when its placement finds the host away; and
   `caf-run --fetch <path>` brings a result back from the copy once the run ends (F-304,
   `RemotePlace.tla`).
+- a finished delegate frees its seat (F-301): its lease ends once its report is delivered and
+  its process idles; a message to it asks for a lease again first, and waits or queues like a
+  start.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
