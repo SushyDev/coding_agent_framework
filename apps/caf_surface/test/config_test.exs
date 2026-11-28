@@ -258,6 +258,13 @@ defmodule CodingAgentFramework.ConfigTest do
     assert {:ok, %Config{}} = new(heavy: [%{match: "make", class: :heavy, host: "ws"}])
     assert new(heavy: heavy) == {:refused, {:bad, :heavy, {:no_host, "mac"}}}
     assert new(heavy: [%{match: "make", class: :heavy, host: ""}]) == {:refused, {:bad, :heavy}}
+
+    # Hosts in order (F-304): each declared, each named once.
+    listed = [%{match: "mix test", class: :heavy, host: ["mac", "ws"]}]
+    assert {:ok, %Config{}} = new(hosts: hosts, heavy: listed)
+    assert new(heavy: listed) == {:refused, {:bad, :heavy, {:no_host, "mac"}}}
+    twice = [%{match: "make", class: :heavy, host: ["ws", "ws"]}]
+    assert new(heavy: twice) == {:refused, {:bad, :heavy}}
   end
 
   test "agents and restart_wait: an agentless tree on request; a bounded wait" do

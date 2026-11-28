@@ -70,6 +70,14 @@ defmodule CodingAgentFramework.Runs do
   got its `started` line never runs the command itself. One ask's bound is its wait, the
   job's timeout and 300 s.
 
+  **Hosts in order** (F-304, `model/tla/RemotePlace.tla`). An entry may name several hosts,
+  `host: ["mac", "ws"]`, the workstation by its config name; the rewrite names the first. The
+  plug takes the first of them that `Hosts` does not hold away or lacking, from what it keeps,
+  and when that host's placement is refused `host_away` before anything was sent, the next
+  one, once. Either way the wrapper prints `caf-run: mac away; running on ws` on its errors;
+  on the workstation it then runs the command itself under that host's slot, as any local
+  heavy command. A job that was sent is never moved.
+
   **The end.** The lease's owner is the process itself (`state/2`, for the `Scheduler`'s
   `holders:`): live while that pid runs with that start time, ended once it does not, read by
   `ps` (`Holder.Process.liveness/3`) on the `Scheduler`'s interval and after its restart. So
@@ -170,6 +178,7 @@ defmodule CodingAgentFramework.Runs do
         while IFS= read -r line; do
           case $line in
             queued*) printf 'caf-run: %s\n' "$line" >&2 ;;
+            'note '*) printf 'caf-run: %s\n' "${line#note }" >&2 ;;
             'o '*) printf '%s\n' "${line#o }" >&3 ;;
             'p '*) printf '%s' "${line#p }" >&3 ;;
             started*) s=1; printf 'caf-run: %s\n' "$line" >&2 ;;
@@ -235,18 +244,23 @@ defmodule CodingAgentFramework.Runs do
 
   @doc """
   Checks the app's list of heavy commands, each `%{match: regex_or_string, class: class}` and
-  optionally `host: name`, the host a match runs on (F-296): `{:ok, [{regex, class, host}]}`,
-  `host` nil for none, or `{:refused, {:bad, :heavy}}` for an entry out of shape or a string that
-  is not a regular expression. `new/3` runs it; a config checks it, and each host's name, before
-  start.
+  optionally `host: name`, the host a match runs on (F-296), or `host: [name, …]`, hosts in
+  order of preference, each named once (F-304): `{:ok, [{regex, class, hosts}]}`, `hosts` a
+  list, or nil for none, or `{:refused, {:bad, :heavy}}` for an entry out of shape or a string
+  that is not a regular expression. `new/3` runs it; a config checks it, and each host's name,
+  before start.
 
-      iex> {:ok, [{r, :landing, nil}, {_, :heavy, "mac"}]} =
+      iex> {:ok, [{r, :landing, nil}, {_, :heavy, ["mac"]}, {_, :heavy, ["mac", "ws"]}]} =
       ...>   CodingAgentFramework.Runs.heavy([%{match: "^make", class: :landing},
-      ...>     %{match: "mix test", class: :heavy, host: "mac"}])
+      ...>     %{match: "mix test", class: :heavy, host: "mac"},
+      ...>     %{match: "mix dialyzer", class: :heavy, host: ["mac", "ws"]}])
       iex> Regex.match?(r, "make all")
       true
+      iex> CodingAgentFramework.Runs.heavy([%{match: "x", class: :heavy, host: ["mac", "mac"]}])
+      {:refused, {:bad, :heavy}}
   """
-  @spec heavy(term) :: {:ok, [{Regex.t(), class, String.t() | nil}]} | {:refused, {:bad, :heavy}}
+  @spec heavy(term) ::
+          {:ok, [{Regex.t(), class, [String.t()] | nil}]} | {:refused, {:bad, :heavy}}
   def heavy(list) when is_list(list) do
     Enum.reduce_while(list, {:ok, []}, fn entry, {:ok, acc} ->
       case entry(entry) do
@@ -259,16 +273,26 @@ defmodule CodingAgentFramework.Runs do
   def heavy(_), do: {:refused, {:bad, :heavy}}
 
   defp entry(%{match: match, class: class} = e) when class in @classes do
-    host = Map.get(e, :host)
-
-    case {regex(match), host} do
+    case {regex(match), hosts(Map.get(e, :host))} do
       {:bad, _} -> :bad
-      {r, h} when is_nil(h) or (is_binary(h) and h != "") -> {:ok, {r, class, h}}
-      _ -> :bad
+      {_, :bad} -> :bad
+      {r, hosts} -> {:ok, {r, class, hosts}}
     end
   end
 
   defp entry(_), do: :bad
+
+  # One host, or several in order of preference, each named once (F-304).
+  defp hosts(nil), do: nil
+  defp hosts(host) when is_binary(host) and host != "", do: [host]
+
+  defp hosts([_ | _] = hosts) do
+    if Enum.all?(hosts, &(is_binary(&1) and &1 != "")) and Enum.uniq(hosts) == hosts,
+      do: hosts,
+      else: :bad
+  end
+
+  defp hosts(_), do: :bad
 
   defp regex(%Regex{} = r), do: r
 
@@ -310,20 +334,95 @@ defmodule CodingAgentFramework.Runs do
 
   @doc """
   The class and the host of the first heavy command `command` matches: `{:ok, class, host}`,
-  `host` nil when the entry names none or names the workstation (`programs`' host), or `:none`.
+  `host` the entry's first, nil when the entry names none or its first is the workstation
+  (`programs`' host), or `:none`. The rewrite names this host; the plug goes on from it to the
+  entry's later hosts (`hosts/2`).
 
       iex> {:ok, runs} = CodingAgentFramework.Runs.new("/srv/caf",
       ...>   CodingAgentFramework.TestHost.programs(),
-      ...>   [%{match: "mix test", class: :heavy, host: "mac"}])
+      ...>   [%{match: "mix test", class: :heavy, host: ["mac", "ws"]}])
       iex> CodingAgentFramework.Runs.place(runs, "mix test --seed 0")
       {:ok, :heavy, "mac"}
   """
   @spec place(t, String.t()) :: {:ok, class, String.t() | nil} | :none
-  def place(%__MODULE__{heavy: heavy, host: own}, command) do
+  def place(%__MODULE__{host: own} = runs, command) do
+    case hosts(runs, command) do
+      {:ok, class, [host | _]} when host == own.name -> {:ok, class, nil}
+      {:ok, class, [host | _]} -> {:ok, class, host}
+      {:ok, class, nil} -> {:ok, class, nil}
+      :none -> :none
+    end
+  end
+
+  @doc """
+  The class and every host, in order, of the first heavy command `command` matches: `{:ok,
+  class, hosts}`, `hosts` the entry's list as the app wrote it (the workstation's name
+  included) or nil, or `:none`. `Runs.Plug` reads it to choose where a run goes (F-304).
+
+      iex> {:ok, runs} = CodingAgentFramework.Runs.new("/srv/caf",
+      ...>   CodingAgentFramework.TestHost.programs(),
+      ...>   [%{match: "mix test", class: :heavy, host: ["mac", "ws"]}])
+      iex> CodingAgentFramework.Runs.hosts(runs, "mix test")
+      {:ok, :heavy, ["mac", "ws"]}
+  """
+  @spec hosts(t, String.t()) :: {:ok, class, [String.t()] | nil} | :none
+  def hosts(%__MODULE__{heavy: heavy}, command) do
     case Enum.find(heavy, fn {r, _, _} -> Regex.match?(r, command) end) do
-      {_, class, host} when host == own.name -> {:ok, class, nil}
-      {_, class, host} -> {:ok, class, host}
+      {_, class, hosts} -> {:ok, class, hosts}
       nil -> :none
+    end
+  end
+
+  @doc """
+  Where a run that no agent asks for works (F-304): the app's own heavy run, from its lander or
+  a script, placed by the wrapper's directory `cwd`. `known` names the folders the framework
+  knows, the ones its trust rule names (F-286): `checkouts`, each configured project's checkout
+  path to its project, and `worktrees`, the framework's worktrees directory with `projects`,
+  the configured projects' names. A `cwd` at or under a checkout answers `{:ok, %{project,
+  name: "+checkout", worktree: checkout}}`, the copy's name one no agent can have; at or under
+  `<worktrees>/<project>/<name>`, a directory there, `{:ok, %{project, name, worktree}}`, the
+  copy an agent working there has. Any other folder is `{:refused, :no_worktree}`. The path is
+  read as written, `..` taken out: a symlink is not followed.
+
+      iex> known = %{checkouts: %{"/srv/caf/checkouts/app" => "app"},
+      ...>   worktrees: "/srv/caf/worktrees", projects: ["app"]}
+      iex> CodingAgentFramework.Runs.folder(known, "/srv/caf/checkouts/app/lib")
+      {:ok, %{project: "app", name: "+checkout", worktree: "/srv/caf/checkouts/app"}}
+      iex> CodingAgentFramework.Runs.folder(known, "/srv/caf/checkouts/app/../../etc")
+      {:refused, :no_worktree}
+  """
+  @spec folder(map, String.t()) :: {:ok, map} | {:refused, :no_worktree}
+  def folder(%{checkouts: checkouts, worktrees: root, projects: projects}, cwd)
+      when is_binary(cwd) do
+    cwd = Path.expand(cwd)
+
+    checkout =
+      Enum.find_value(checkouts, fn {path, project} ->
+        path = Path.expand(path)
+        if within?(cwd, path), do: %{project: project, name: "+checkout", worktree: path}
+      end)
+
+    cond do
+      checkout -> {:ok, checkout}
+      root != nil and within?(cwd, Path.expand(root)) -> worktree(root, cwd, projects)
+      true -> {:refused, :no_worktree}
+    end
+  end
+
+  def folder(_known, _cwd), do: {:refused, :no_worktree}
+
+  defp within?(path, dir), do: path == dir or String.starts_with?(path, dir <> "/")
+
+  defp worktree(root, cwd, projects) do
+    root = Path.expand(root)
+
+    with [project, name | _] <- Path.split(Path.relative_to(cwd, root)),
+         true <- project in projects and name =~ @agent,
+         path = Path.join([root, project, name]),
+         true <- File.dir?(path) do
+      {:ok, %{project: project, name: name, worktree: path}}
+    else
+      _ -> {:refused, :no_worktree}
     end
   end
 

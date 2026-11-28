@@ -192,7 +192,7 @@ defmodule CodingAgentFramework.RemoteHostTest do
         host: "ws",
         policy: runs,
         jobs: fn -> c.jobs end,
-        where: fn "fix-1" -> {:ok, %{project: "app", name: "fix-1", worktree: c.repo}} end,
+        where: fn "fix-1", _cwd -> {:ok, %{project: "app", name: "fix-1", worktree: c.repo}} end,
         away: 1_000,
         poll: 50,
         beat: 200
@@ -312,6 +312,137 @@ defmodule CodingAgentFramework.RemoteHostTest do
       # The workstation's slot, held by the wrapper's own process, and no job.
       assert [%{units: %{"slot" => 1}, holder: {"run", _}}] = Scheduler.leases(c.scheduler)
       assert Jobs.rows(c.jobs) == []
+    end
+  end
+
+  describe "the app's own heavy run, and hosts in order (F-304, RemotePlace.tla)" do
+    @secret "s3cret"
+
+    # The plug as the tree serves it: no agent asks here, so a run is placed by its folder
+    # (`Runs.folder/2`), the test's repository standing as project `app`'s checkout; and what
+    # `Hosts` keeps of a host is read with no ssh (`Hosts.held/2`). `make` runs on the other
+    # host alone; `mix test` there, else on the workstation.
+    setup c do
+      heavy = [
+        %{match: ~r/\bmix test\b/, class: :heavy, host: ["mac", "ws"]},
+        %{match: ~r/\bmake\b/, class: :heavy, host: "mac"}
+      ]
+
+      {:ok, runs} = Runs.new(Path.join(c.dir, "runs"), programs(), heavy)
+      root = Path.join(c.dir, "worktrees")
+      known = %{checkouts: %{c.repo => "app"}, worktrees: root, projects: ["app"]}
+
+      opts = [
+        scheduler: fn -> c.scheduler end,
+        units: fn class, _agent -> {:ok, Map.fetch!(%{heavy: %{"slot" => 1}}, class)} end,
+        secret: @secret,
+        host: "ws",
+        policy: runs,
+        jobs: fn -> c.jobs end,
+        where: fn _agent, cwd -> Runs.folder(known, cwd) end,
+        held: &Hosts.held(c.hosts, &1),
+        away: 1_000,
+        poll: 50,
+        beat: 200
+      ]
+
+      server =
+        start_supervised!(
+          {Bandit, plug: {Runs.Plug, opts}, ip: {127, 0, 0, 1}, port: 0, startup_log: false}
+        )
+
+      {:ok, {_, port}} = ThousandIsland.listener_info(server)
+      :ok = Runs.prepare(runs, programs(), port, @secret)
+      %{runs: runs, root: root}
+    end
+
+    # The wrapper as the app's lander calls it, with no agent: under the name `run-app`, on the
+    # host its entry names first, in `cwd`.
+    defp own(c, id, command, cwd) do
+      line = "'#{Runs.wrapper(c.runs)}' --host 'mac' heavy '#{id}' 'run-app' -- '#{command}'"
+      {out, err} = {Path.join(c.dir, id <> ".out"), Path.join(c.dir, id <> ".err")}
+      sh = "cd '#{cwd}' && #{line} > '#{out}' 2> '#{err}'"
+      {:ok, %{status: status}} = Shell.run(host(), program!(:sh), ["-c", sh], timeout: 40_000)
+      {status, File.read!(out), File.read!(err)}
+    end
+
+    defp local_leases(c) do
+      for %{units: %{"slot" => 1}, holder: {"run", _}} = l <- Scheduler.leases(c.scheduler),
+          do: l
+    end
+
+    test "a run no agent asks for, from a project's checkout, runs on the other host", c do
+      command = "make --version >/dev/null 2>&1; #{program!(:cat)} a.txt; exit 6"
+
+      assert {6, "one\n", "caf-run: started on mac (job run-o1)\n"} =
+               own(c, "o1", command, c.repo)
+
+      assert [%{id: "run-o1", state: "exited", code: 6}] = Jobs.rows(c.jobs)
+      assert local_leases(c) == []
+    end
+
+    test "from a worktree under the home it runs in that worktree's copy", c do
+      tree = Path.join([c.root, "app", "fix-2"])
+      File.mkdir_p!(tree)
+      git = [{"GIT_CONFIG_GLOBAL", "/dev/null"}, {"GIT_CONFIG_NOSYSTEM", "1"}]
+      {_, 0} = System.cmd(program!(:git), ["-C", tree, "init", "-q"], env: git)
+      File.write!(Path.join(tree, "b.txt"), "two\n")
+
+      assert {0, "two\n", _} =
+               own(c, "o2", "make -v >/dev/null 2>&1; #{program!(:cat)} b.txt", tree)
+
+      assert [%{id: "run-o2", state: "exited", code: 0}] = Jobs.rows(c.jobs)
+    end
+
+    test "from a folder the framework does not know it is refused no_worktree, and nothing ran",
+         c do
+      for {id, cwd} <- [{"o3", c.dir}, {"o4", Path.join(c.root, "other")}] do
+        File.mkdir_p!(cwd)
+        assert {75, "", err} = own(c, id, "make; echo ran", cwd)
+        assert err =~ "caf-run: not run: the lease was refused (no_worktree)"
+      end
+
+      assert Jobs.rows(c.jobs) == []
+      assert Scheduler.leases(c.scheduler) == []
+    end
+
+    test "an entry [mac, ws] with mac held away runs on the workstation, with no find of mac",
+         c do
+      File.write!(Path.join(c.dir, "down"), "")
+      assert {:refused, {:host_away, "mac"}} = Hosts.reach(c.hosts, "mac", :place, 2_000)
+      %{"mac" => %{state: :away, at: at}} = Hosts.states(c.hosts)
+
+      assert {4, "here\n", "caf-run: mac away; running on ws\n"} =
+               own(c, "o5", "mix test >/dev/null 2>&1; echo here; exit 4", c.repo)
+
+      # Chosen from what `Hosts` keeps: mac was not found again, no job was placed, and the run
+      # held the workstation's slot alone.
+      assert %{"mac" => %{state: :away, at: ^at}} = Hosts.states(c.hosts)
+      assert Jobs.rows(c.jobs) == []
+      assert [_one] = local_leases(c)
+      assert length(Scheduler.leases(c.scheduler)) == 1
+    end
+
+    test "mac found away at its placement runs on the workstation once, with the line", c do
+      # Nothing is kept of mac: it is chosen, and its placement finds it away.
+      assert Hosts.states(c.hosts) == %{}
+      File.write!(Path.join(c.dir, "down"), "")
+
+      assert {4, "here\n", "caf-run: mac away; running on ws\n"} =
+               own(c, "o6", "mix test >/dev/null 2>&1; echo here; exit 4", c.repo)
+
+      assert %{"mac" => %{state: :away}} = Hosts.states(c.hosts)
+      assert Jobs.rows(c.jobs) == []
+      assert [_one] = local_leases(c)
+      assert length(Scheduler.leases(c.scheduler)) == 1
+    end
+
+    test "a host found away with no host after it is refused, and nothing ran", c do
+      File.write!(Path.join(c.dir, "down"), "")
+      assert {75, "", err} = own(c, "o7", "make; echo ran", c.repo)
+      assert err =~ "(host_away)"
+      assert Jobs.rows(c.jobs) == []
+      assert Scheduler.leases(c.scheduler) == []
     end
   end
 
