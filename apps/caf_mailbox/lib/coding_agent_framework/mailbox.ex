@@ -226,11 +226,13 @@ defmodule CodingAgentFramework.Mailbox do
   @doc """
   Sends `text` from agent `from` to agent `to`: `{:ok, {:queued, id}}` once its row is stored,
   or `{:refused, reason}` with no row (`Grants`' reason, or `{:bad, :message}`). Option `:key`: a
-  string the sender chose; a message sent again under the same key stores no second row and
-  answers `{:ok, {:queued, id}}` with the first row's id, so a sender that got `{:unknown, _}`
-  can send again safely. Keys are shared with `notify/4`: the caller scopes a key to its sender.
+  string the sender chose; a message sent again from the same sender to the same recipient
+  under the same key stores no second row and answers `{:ok, {:queued, id}}` with the first
+  row's id, so a sender that got `{:unknown, _}` can send again safely. A key is per sender and
+  recipient: the same key to another agent, or from another sender, is another message, and it
+  never meets a `notify/4` key.
 
-      Mailbox.message(mailbox, "app-fix", "app-main", "Done.", key: "app-fix:done")
+      Mailbox.message(mailbox, "app-fix", "app-main", "Done.", key: "done")
       #=> {:ok, {:queued, 6}}
   """
   def message(mailbox, from, to, text, opts \\ []),
@@ -496,8 +498,8 @@ defmodule CodingAgentFramework.Mailbox do
   What became of row `id`: `{:ok, %{id, from, to, kind, status, via, attempt, reply_to, subtype,
   is_error}}`, `status` being `queued`, `sending`, `delivered`, `ended`, `kept` (a row to the operator, never
   delivered) or `unknown` (in flight at a forced end, never resent, F-170), `reply_to` the uuid
-  of the row an answer answers (`key:<key>` for a `notify/4` stored under a key, nil for any
-  other), and `subtype` and `is_error` a reply's result's; or `{:refused, :no_message}`.
+  of the row an answer answers (`key:<key>` for a `notify/4` stored under a key, `msg:<n>:<from><m>:<to><key>`
+  (`n` and `m` the names' byte lengths) for a `message/5` stored under one, nil for any other), and `subtype` and `is_error` a reply's result's; or `{:refused, :no_message}`.
   """
   def status(mailbox, id, opts \\ []), do: call(mailbox, {:status, id}, opts)
 
@@ -685,12 +687,12 @@ defmodule CodingAgentFramework.Mailbox do
               (is_nil(key) or is_binary(key))) or {:refused, {:bad, :message}},
          :ok <- Grants.may_message?(s.grants, from, to) do
       row = %{from: from, to: to, text: text, uuid: Stream.uuid(), kind: "msg"}
-      row = if key, do: Map.put(row, :reply_to, "key:" <> key), else: row
+      row = if key, do: Map.put(row, :reply_to, message_key(from, to, key)), else: row
 
       case put(s, row) do
         # A repeat answers as the first send did, so the sender need not tell the two apart.
         nil when is_binary(key) ->
-          {:reply, {:ok, {:queued, Table.answer(s.db, "key:" <> key).id}}, s}
+          {:reply, {:ok, {:queued, Table.answer(s.db, message_key(from, to, key)).id}}, s}
 
         id ->
           stored(s, id)
@@ -701,7 +703,7 @@ defmodule CodingAgentFramework.Mailbox do
   end
 
   # The key goes in `reply_to`, whose unique index takes one row per key; a key is never a
-  # row's uuid, since it carries its own prefix.
+  # row's uuid, since it carries its own prefix, nor a message's key, whose prefix is `msg:`.
   def handle_call({:notify, to, text, key, kind, from}, _from, s) do
     with true <- kind in [:msg, :notice, :prompt] or {:refused, {:bad, :kind}},
          true <-
@@ -2168,4 +2170,10 @@ defmodule CodingAgentFramework.Mailbox do
   end
 
   defp announce(s, id), do: s.notify.(%{topic: "mailbox", ids: [id]})
+
+  # A message's key in `reply_to`: one row per sender, recipient and key (F-305). Each name is
+  # led by its byte length, so no two triples spell one string, and `msg:` keeps it apart from
+  # a notice's `key:` and from a uuid.
+  defp message_key(from, to, key),
+    do: "msg:#{byte_size(from)}:#{from}#{byte_size(to)}:#{to}#{key}"
 end

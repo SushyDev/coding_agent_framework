@@ -202,8 +202,9 @@ defmodule CodingAgentFramework.MCP do
       name: "message",
       description:
         "Sends a message to an agent along an edge of the tree. Set `key` (at most 128 bytes) " <>
-          "whenever you might send again after an `unknown` answer: a message sent again with " <>
-          "the same key is stored once and answers the first one's id.",
+          "whenever you might send again after an `unknown` answer: a message sent again to " <>
+          "the same agent with the same key is stored once and answers the first one's id. " <>
+          "A key is yours and per recipient: the same key to another agent is another message.",
       inputSchema: %{
         type: "object",
         properties: %{to: %{type: "string"}, text: %{type: "string"}, key: %{type: "string"}},
@@ -696,8 +697,8 @@ defmodule CodingAgentFramework.MCP do
 
     with {:ok, key} <- message_key(args),
          :ok <- Grants.may_message?(ctx.grants, caller, to) do
-      # Scoped to the sender, and prefixed so it never meets a framework key such as `job:<id>`.
-      opts = [timeout: ctx.step] ++ if(key, do: [key: "msg:#{caller}:#{key}"], else: [])
+      # Mailbox scopes the key to the sender and recipient, apart from the framework's keys.
+      opts = [timeout: ctx.step] ++ if(key, do: [key: key], else: [])
 
       case mod.message(server, caller, to, text, opts) do
         # Naming the key tells the agent that sending again with it stores no second copy.

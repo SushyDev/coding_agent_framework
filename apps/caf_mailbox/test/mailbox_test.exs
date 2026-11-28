@@ -21,7 +21,8 @@ defmodule CodingAgentFramework.MailboxTest do
   setup ctx do
     tree = [
       %{name: "main", project: "app", parent: nil},
-      %{name: "d1", project: "app", parent: "main"}
+      %{name: "d1", project: "app", parent: "main"},
+      %{name: "d2", project: "app", parent: "main"}
     ]
 
     grants = Grants.new(fn -> tree end)
@@ -46,23 +47,48 @@ defmodule CodingAgentFramework.MailboxTest do
 
   test "a message sent again under its key stores no second row and answers the first id", ctx do
     m = ctx.mailbox
-    assert {:ok, {:queued, id}} = Mailbox.message(m, "d1", "main", "report", key: "msg:d1:done")
-    assert {:ok, {:queued, ^id}} = Mailbox.message(m, "d1", "main", "report", key: "msg:d1:done")
+    assert {:ok, {:queued, id}} = Mailbox.message(m, "d1", "main", "report", key: "done")
+    assert {:ok, {:queued, ^id}} = Mailbox.message(m, "d1", "main", "report", key: "done")
+    assert [%{id: ^id}] = Enum.filter(Table.open_rows(ctx.mtable), &(&1.text == "report"))
 
-    # Another sender's key is its own, and a send with no key is always stored.
-    assert {:ok, {:queued, other}} = Mailbox.message(m, "main", "d1", "go", key: "msg:main:done")
+    # A send with no key is always stored.
     assert {:ok, {:queued, plain}} = Mailbox.message(m, "d1", "main", "report")
     assert {:ok, {:queued, again}} = Mailbox.message(m, "d1", "main", "report")
-    assert length(Enum.uniq([id, other, plain, again])) == 4
+    assert length(Enum.uniq([id, plain, again])) == 3
     assert {:refused, {:bad, :message}} = Mailbox.message(m, "d1", "main", "x", key: 5)
   end
 
-  # An agent's key is `msg:<from>:<key>`, so an agent named `job` with key `x` never meets a
-  # notice keyed `job:x`.
+  # F-305: the key is per sender and recipient. One key from two senders to one recipient is
+  # two messages.
+  test "the same key from two senders to one recipient stores two rows", ctx do
+    m = ctx.mailbox
+    assert {:ok, {:queued, one}} = Mailbox.message(m, "d1", "main", "from d1", key: "done")
+    assert {:ok, {:queued, two}} = Mailbox.message(m, "d2", "main", "from d2", key: "done")
+    assert one != two
+    assert [%{from_agent: "d1"}, %{from_agent: "d2"}] = open_to(ctx, "main")
+  end
+
+  # F-305: one key to two recipients is two messages, and each is delivered.
+  test "the same key to two recipients stores two rows and delivers both", ctx do
+    started(ctx, "d1")
+    started(ctx, "d2")
+    m = mailbox(ctx)
+    assert {:ok, {:queued, one}} = Mailbox.message(m, "main", "d1", "go", key: "k")
+    assert {:ok, {:queued, two}} = Mailbox.message(m, "main", "d2", "go", key: "k")
+    assert one != two
+    assert {:ok, {:queued, ^two}} = Mailbox.message(m, "main", "d2", "go", key: "k")
+
+    assert {:ok, %{to_agent: "d1"}} = until(ctx, one, &(&1.status == "delivered"))
+    assert {:ok, %{to_agent: "d2"}} = until(ctx, two, &(&1.status == "delivered"))
+    assert [_, _] = Enum.filter(all(ctx), &(&1.kind == "msg" and &1.text == "go"))
+  end
+
+  # A message's key is `msg:`-led and spelled from its sender and recipient, so it never meets
+  # a notice keyed alike.
   test "an agent's key and a framework notice's key of like spelling each store a row", ctx do
     m = ctx.mailbox
     assert {:ok, {:queued, notice}} = Mailbox.notify(m, "main", "Job ended.", key: "job:x")
-    assert {:ok, {:queued, sent}} = Mailbox.message(m, "d1", "main", "hi", key: "msg:job:x")
+    assert {:ok, {:queued, sent}} = Mailbox.message(m, "d1", "main", "hi", key: "job:x")
     assert notice != sent
     assert {:ok, :stored_before} = Mailbox.notify(m, "main", "Job ended.", key: "job:x")
   end

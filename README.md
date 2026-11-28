@@ -594,6 +594,9 @@ Built, each from a checked model in `model/tla/`:
   only the `parts:` asked for, and the tree and the tool calls are folded in the `Tracker`, so
   only they are copied to the caller; `HooksSilent` reads a transcript's tail again only once
   `Transcripts` has read past it.
+- a message's key is per sender and recipient (F-305): one key on messages to three agents
+  stores three rows and delivers each, and only a send again to the same agent answers the
+  first id.
 
 The remodel (F-115, taken in F-116) is done. F-162 designed the outside: the eight rules, the
 seven boxes, the agents' seven verbs, one process per agent under OTP, one inbox of prompts,
